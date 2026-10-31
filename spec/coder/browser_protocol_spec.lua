@@ -65,6 +65,42 @@ function driver.compile_browser_image(contents, entrypoint, executable, objects,
     end
     return image(contents, entrypoint, executable, objects, archives, extra, verbose, options)
 end
+local publish = driver.publish_provider_bundle
+function driver.publish_provider_bundle(dso, archive, destination, options)
+    local mode = os.getenv("TITAN_PROTOCOL_PUBLICATION_FAULT")
+    if mode and mode ~= "" then
+        local before = options.before_commit
+        if mode ~= "rename" then
+            options.before_commit = function()
+                if before then
+                    local ok, why = before()
+                    if not ok then return nil, why end
+                end
+                if mode == "before-commit" then return nil, "injected browser pre-commit failure" end
+                assert(mode == "late-companion")
+                local file = assert(io.open((destination:gsub("[.]a$", ".so")), "wb"))
+                assert(file:write("preserve late companion")); assert(file:close())
+                return true
+            end
+        end
+        local io_module = require "titan-compiler.io"
+        local original = io_module.new_sync
+        local restore <close> = setmetatable({}, { __close = function() io_module.new_sync = original end })
+        if mode == "rename" then
+            function io_module.new_sync(...)
+                local strategy = original(...)
+                local rename = strategy.rename
+                function strategy:rename(from, to)
+                    if from == archive and to == destination then return nil, "injected browser archive rename failure" end
+                    return rename(self, from, to)
+                end
+                return strategy
+            end
+        end
+        return publish(dso, archive, destination, options)
+    end
+    return publish(dso, archive, destination, options)
+end
 ]]
 
 local function prepare(info)
@@ -90,6 +126,8 @@ local function cli(info, mode, ...)
         repository .. "/?.lua;" .. repository .. "/?/init.lua;", workspace .. "/hook.lua")
     local argv = { "env", "TITAN_ROOT=" .. effective_root, "TITAN_TARGET=", "TITAN_PATH_0_6=" .. workspace .. "/providers",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+        "TITAN_NODE=" .. (info.node_override or info.node.path),
+        "TITAN_PROTOCOL_PUBLICATION_FAULT=" .. (info.publication_fault or ""),
         "TITAN_PROTOCOL_CORRUPTION=" .. (mode or ""), "TITAN_PROTOCOL_LOG=" .. workspace .. "/executions",
         "TITAN_PROTOCOL_IMAGES=" .. workspace .. "/probe-images",
         info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc", "-q", "--target", "browser",
@@ -99,7 +137,7 @@ local function cli(info, mode, ...)
 end
 
 local function no_staged_images(directory)
-    if directory == workspace .. "/out" then
+    if directory == workspace .. "/out" and lfs.attributes(workspace .. "/probe-images", "mode") == "file" then
         for filename in files.read(workspace .. "/probe-images"):gmatch("[^\n]+") do
             assert.is_nil(lfs.symlinkattributes(filename), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]c$", ".o"))), filename)
@@ -133,6 +171,53 @@ describe("browser executing provider protocol", function()
                 "(browser runner exit " .. case[2] .. ")", 1, true), result.output)
             assert.is_nil(lfs.attributes(workspace .. "/out/pkg/left.a"))
             assert.equal("execute\n", files.read(workspace .. "/executions"))
+            no_staged_images(workspace .. "/out")
+        end)
+    end
+
+    it("diagnoses missing Node before cold publication and before warm archive reuse", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        prepare(info)
+        local missing = workspace .. "/missing Node"
+        local unavailable = { prefix = info.prefix, node = info.node, node_override = missing }
+        local expected = "browser provider validation requires Node 24: node not executable at " ..
+            string.format("%q", missing) .. "; set TITAN_NODE to a Node 24 executable"
+        local result = cli(unavailable, nil, "--incremental", "pkg.left")
+        assert.is_false(result.ok)
+        assert.truthy(result.output:find(expected, 1, true), result.output)
+        local archive = workspace .. "/out/pkg/left.a"
+        assert.is_nil(lfs.attributes(archive))
+        no_staged_images(workspace .. "/out")
+        result = cli(info, nil, "--incremental", "pkg.left")
+        assert.is_true(result.ok, result.output)
+        local predecessor = files.read(archive)
+        result = cli(unavailable, nil, "--incremental", "pkg.left")
+        assert.is_false(result.ok)
+        assert.truthy(result.output:find(expected, 1, true), result.output)
+        assert.equal(predecessor, files.read(archive))
+        no_staged_images(workspace .. "/out")
+    end)
+
+    for _, mode in ipairs({ "before-commit", "rename", "late-companion" }) do
+        it("preserves a predecessor after executing validation on " .. mode .. " publication failure", function()
+            local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+            prepare(info)
+            local result = cli(info, nil, "--incremental", "pkg.left")
+            assert.is_true(result.ok, result.output)
+            local archive = workspace .. "/out/pkg/left.a"
+            local predecessor = files.read(archive)
+            files.write(workspace .. "/src/pkg/left.titan", "function answer(): integer return 43 end\n")
+            local fault = { prefix = info.prefix, node = info.node, publication_fault = mode }
+            result = cli(fault, nil, "--incremental", "pkg.left")
+            assert.is_false(result.ok)
+            local expected = mode == "before-commit" and "injected browser pre-commit failure" or
+                mode == "rename" and "injected browser archive rename failure" or workspace .. "/out/pkg/left.so"
+            assert.truthy(result.output:find(expected, 1, true), result.output)
+            assert.equal(predecessor, files.read(archive))
+            assert.equal("execute\nexecute\n", files.read(workspace .. "/executions"))
+            if mode == "late-companion" then
+                assert.equal("preserve late companion", files.read(workspace .. "/out/pkg/left.so"))
+            end
             no_staged_images(workspace .. "/out")
         end)
     end

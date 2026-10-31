@@ -27,8 +27,8 @@ trim() {
 prefix=${PREFIX:-}
 lua_dir=${LUA_DIR:-lua-5.5.1}
 make_cmd=${MAKE:-make}
-mycflags=${LUA_BROWSER_MYCFLAGS:-${MYCFLAGS:-}}
-myldflags=${LUA_BROWSER_MYLDFLAGS:-${MYLDFLAGS:-}}
+mycflags=${LUA_BROWSER_MYCFLAGS-${MYCFLAGS-}}
+myldflags=${LUA_BROWSER_MYLDFLAGS-${MYLDFLAGS-}}
 
 [ -n "$prefix" ] || fail "PREFIX is required"
 [ -f "$lua_dir/src/lua.h" ] || {
@@ -38,9 +38,9 @@ myldflags=${LUA_BROWSER_MYLDFLAGS:-${MYLDFLAGS:-}}
 }
 
 # Select emsdk sibling tools when EMSDK is set or emcc is on PATH.
-browser_cc=${LUA_BROWSER_CC:-}
-browser_ar=${LUA_BROWSER_AR:-}
-browser_ranlib=${LUA_BROWSER_RANLIB:-}
+browser_cc=${LUA_BROWSER_CC-}
+browser_ar=${LUA_BROWSER_AR-}
+browser_ranlib=${LUA_BROWSER_RANLIB-}
 
 resolved_cc=
 if [ -n "$browser_cc" ]; then
@@ -90,21 +90,46 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/titan-lua-browser.XXXXXX") ||
 trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' HUP INT TERM
 
+verify_wasm_archive() {
+	ar_file=$1
+	[ -f "$ar_file" ] || return 1
+	[ "$(head -c 8 "$ar_file" 2>/dev/null || true)" = "!<arch>" ] || return 1
+	ar_tmp="$tmp/verify_ar"
+	rm -rf "$ar_tmp"
+	mkdir -p "$ar_tmp"
+	(cd "$ar_tmp" && "${effective_ar%% *}" x "$ar_file") >/dev/null 2>&1 || return 1
+	[ -f "$ar_tmp/lapi.o" ] && [ -f "$ar_tmp/linit.o" ] || return 1
+	member_count=0
+	for obj in "$ar_tmp"/*.o; do
+		[ -f "$obj" ] || return 1
+		magic=$(od -An -tx1 -N4 "$obj" 2>/dev/null | tr -d ' \t\n')
+		[ "$magic" = "0061736d" ] || return 1
+		member_count=$((member_count + 1))
+	done
+	[ "$member_count" -ge 32 ] || return 1
+	return 0
+}
+
 build_and_install() {
-	# If the build-tree archive exists but was corrupted, remove it so the
-	# fork's browser target recreates it from objects.
-	if [ -f "$lua_dir/src/browser/liblua.a" ]; then
-		if [ "$(head -c 8 "$lua_dir/src/browser/liblua.a" 2>/dev/null || true)" != "!<arch>" ]; then
-			rm -f "$lua_dir/src/browser/liblua.a"
+	# Force reconstruction of the archive on fallback rather than trusting ar
+	# magic on an existing build-tree liblua.a, and purge any corrupt object.
+	rm -f "$lua_dir/src/browser/liblua.a"
+	for obj in "$lua_dir/src/browser/obj"/*.o; do
+		[ -e "$obj" ] || break
+		magic=$(od -An -tx1 -N4 "$obj" 2>/dev/null | tr -d ' \t\n')
+		if [ "$magic" != "0061736d" ]; then
+			rm -f "$obj"
 		fi
-	fi
+	done
 	"$make_cmd" -C "$lua_dir" install-browser PREFIX="$prefix" \
-		FORK_REVISION="${FORK_REVISION:-}" \
+		FORK_REVISION="${FORK_REVISION-}" \
 		BROWSER_CC="$effective_cc" \
 		BROWSER_AR="$effective_ar" \
 		BROWSER_RANLIB="$effective_ranlib" \
 		MYCFLAGS="$mycflags" \
 		MYLDFLAGS="$myldflags"
+	verify_wasm_archive "$prefix/lib/browser/liblua.a" ||
+		fail "installed browser Lua archive failed post-install Wasm verification"
 }
 
 check_reuse() {
@@ -218,13 +243,49 @@ EOF
 	[ -n "$int_type" ] && [ -n "$num_type" ] || return 1
 	numeric="integer=$int_type,float=$num_type"
 
-	# Parse and validate the installed record.
-	if LC_ALL=C grep -q "$(printf '\r')" "$record_file" 2>/dev/null; then
-		return 1
-	fi
+	# Parse and validate the installed record with the exact grammar of
+	# browsertarget.parse_record: non-empty, valid UTF-8, no NUL or CR bytes,
+	# LF-terminated, exact banner on line 1, and only the 10 key=value lines
+	# thereafter (no extra comments, blank lines, duplicates, or empty values).
+	od -An -v -tu1 "$record_file" 2>/dev/null | awk '
+	BEGIN { need = 0; last = -1; count = 0; lead = 0; first_cont = 0 }
+	{
+		for (i = 1; i <= NF; i++) {
+			b = $i + 0
+			count++
+			last = b
+			if (b == 0 || b == 13) exit 1
+			if (need > 0) {
+				if (b < 128 || b > 191) exit 1
+				if (first_cont == 1) {
+					if (lead == 224 && b < 160) exit 1
+					if (lead == 237 && b > 159) exit 1
+					if (lead == 240 && b < 144) exit 1
+					if (lead == 244 && b > 143) exit 1
+					first_cont = 0
+				}
+				need--
+			} else if (b < 128) {
+				continue
+			} else if (b >= 194 && b <= 223) {
+				need = 1; first_cont = 0
+			} else if (b >= 224 && b <= 239) {
+				need = 2; lead = b; first_cont = 1
+			} else if (b >= 240 && b <= 244) {
+				need = 3; lead = b; first_cont = 1
+			} else {
+				exit 1
+			}
+		}
+	}
+	END {
+		if (count == 0 || need != 0 || last != 10) exit 1
+	}' || return 1
+
 	first_line=$(head -n 1 "$record_file" 2>/dev/null || true)
 	[ "$first_line" = "# Lua 5.5.1 browser build record v1" ] || return 1
 
+	tail -n +2 "$record_file" >"$tmp/record_body" || return 1
 	rec_fork_revision=
 	rec_archive_sha256=
 	rec_headers_sha256=
@@ -236,16 +297,18 @@ EOF
 	rec_numeric=
 	rec_cflags=
 	rec_seen=
-	while IFS= read -r line || [ -n "$line" ]; do
+	rec_count=0
+	while IFS= read -r line; do
 		case $line in
-		"#"*) continue ;;
 		*=*)
 			key=${line%%=*}
 			val=${line#*=}
+			[ -n "$val" ] || return 1
 			case " $rec_seen " in
 			*" $key "*) return 1 ;;
 			esac
 			rec_seen="$rec_seen $key"
+			rec_count=$((rec_count + 1))
 			case $key in
 			fork_revision) rec_fork_revision=$val ;;
 			archive_sha256) rec_archive_sha256=$val ;;
@@ -262,7 +325,8 @@ EOF
 			;;
 		*) return 1 ;;
 		esac
-	done <"$record_file"
+	done <"$tmp/record_body"
+	[ "$rec_count" -eq 10 ] || return 1
 
 	expected_features="+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
 	[ "$rec_fork_revision" = "$revision" ] || return 1
@@ -300,20 +364,9 @@ EOF
 	[ "$inst_headers_sha256" = "$src_headers_sha256" ] || return 1
 
 	# Verify the installed archive magic, SHA-256, and Wasm member integrity.
-	[ "$(head -c 8 "$installed_archive" 2>/dev/null || true)" = "!<arch>" ] || return 1
 	inst_archive_sha256=$(sha256_file "$installed_archive")
 	[ "$inst_archive_sha256" = "$rec_archive_sha256" ] || return 1
-
-	mkdir -p "$tmp/members"
-	(cd "$tmp/members" && "${effective_ar%% *}" x "$installed_archive") >/dev/null 2>&1 || return 1
-	member_count=0
-	for obj in "$tmp/members"/*.o; do
-		[ -f "$obj" ] || return 1
-		magic=$(od -An -tx1 -N4 "$obj" 2>/dev/null | tr -d ' \t\n')
-		[ "$magic" = "0061736d" ] || return 1
-		member_count=$((member_count + 1))
-	done
-	[ "$member_count" -gt 0 ] || return 1
+	verify_wasm_archive "$installed_archive" || return 1
 
 	# If the fork's browser build directory exists, verify it is up to date and agrees.
 	build_archive="$src_abs/$cfg_archive"

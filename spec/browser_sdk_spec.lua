@@ -232,6 +232,8 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             assert(strategy:write_file(filename, "payload-" .. tostring(index)))
         end
 
+        local graphcodec = require "titan-compiler.graphcodec"
+        local sha256 = require "titan-compiler.sha256"
         local support = require "titan"
         local ctx = {
             io = strategy,
@@ -243,6 +245,14 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert(incremental.write_sdk_digests(ctx, assets.sdk_digests, inputs))
         assert.equal("file", strategy:stat(assets.sdk_digests).kind)
 
+        local raw_manifest = assert(strategy:read_file(assets.sdk_digests))
+        local decoded = assert(graphcodec.decode(raw_manifest))
+        assert.equal(version.SDK_DIGEST_SCHEMA, decoded.schema)
+        assert.equal("1", decoded.schema)
+        assert.equal(version.CERTIFICATE_DIGEST, decoded.digest)
+        assert.equal(version.CERTIFICATE_CANONICALIZATION, decoded.canonicalization)
+        assert.equal(version.TITAN_ABI_VERSION, decoded.abi)
+
         local reader_ctx = {
             io = strategy,
             cache_adapter = ctx.cache_adapter,
@@ -251,14 +261,91 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local sdk_state = reader_ctx.incremental and reader_ctx.incremental.sdk
         assert.is_table(sdk_state)
         assert.is_nil(sdk_state.files[assert(strategy:realpath(assets.sdk_digests))])
-        local sha256 = require "titan-compiler.sha256"
         for _, filename in ipairs(inputs) do
             local real = assert(strategy:realpath(filename))
             assert.is_table(sdk_state.files[real], "missing sdk-digests entry for " .. filename)
-            assert.equal(
-                sha256.hex_via(support._sha256_binary, assert(strategy:read_file(filename))),
-                sdk_state.files[real].digest)
+            local expected_hex = sha256.hex_via(support._sha256_binary, assert(strategy:read_file(filename)))
+            assert.equal(expected_hex, sdk_state.files[real].digest)
+            assert.equal(expected_hex, incremental.file_digest(reader_ctx, filename))
         end
+        assert.equal(#inputs, incremental.counters(reader_ctx).sdk_reuses)
+        assert.equal(0, incremental.counters(reader_ctx).file_reads)
+
+        -- Modifying an entry invalidates its recorded observation and re-hashes from disk.
+        assert(strategy:write_file(assets.loader, "modified-loader-payload-after-digest"))
+        local modified_ctx = {
+            io = strategy,
+            cache_adapter = ctx.cache_adapter,
+        }
+        assert(incremental.load_sdk_digests(modified_ctx, assets.sdk_digests))
+        local new_digest = incremental.file_digest(modified_ctx, assets.loader)
+        assert.equal(
+            sha256.hex_via(support._sha256_binary, "modified-loader-payload-after-digest"),
+            new_digest)
+        assert.equal(0, incremental.counters(modified_ctx).sdk_reuses)
+        assert.equal(1, incremental.counters(modified_ctx).file_reads)
+    end)
+
+    it("bootstraps lfs and compiler modules from TITAN_INSTALL_TREE before PREFIX and rejects incomplete PREFIX browser Lua", function()
+        if platform.windows then
+            pending("POSIX browser_sdk.lua bootstrap test")
+            return
+        end
+        local active_prefix = installed_prefix.active()
+        local root = new_workspace("-sdk-bootstrap-order")
+        local bare_prefix = paths.join(root, "bare-prefix")
+        local rocks_tree = paths.join(root, "rocks-tree")
+        local fake_em = paths.join(root, "emscripten")
+        files.mkdir(paths.join(bare_prefix, "bin"))
+        files.mkdir(fake_em)
+
+        -- Populate rocks_tree with lfs.so, titan.so, and titan-compiler Lua modules,
+        -- while leaving bare_prefix without lfs.so or titan.so.
+        copy_tree(strategy, paths.join(active_prefix, "lib/lua/5.5"), paths.join(rocks_tree, "lib/lua/5.5"))
+        copy_tree(strategy, paths.join(active_prefix, "share/lua/5.5"), paths.join(rocks_tree, "share/lua/5.5"))
+        copy_tree(strategy, paths.join(active_prefix, "include"), paths.join(rocks_tree, "include"))
+
+        -- Put a shadowed poisoned module in bare_prefix to prove TITAN_INSTALL_TREE wins over PREFIX.
+        files.mkdir(paths.join(bare_prefix, "share/lua/5.5/titan-compiler"))
+        assert(strategy:write_file(
+            paths.join(bare_prefix, "share/lua/5.5/titan-compiler/browserlink.lua"),
+            'error("WRONG_ROOT_PRECEDENCE: PREFIX loaded before TITAN_INSTALL_TREE", 0)\n'))
+
+        -- Put a stale browser Lua installation in rocks_tree, while bare_prefix has no lib/browser.
+        local sentinel = paths.join(rocks_tree, "lib/browser/stale_sentinel.txt")
+        files.mkdir(paths.join(rocks_tree, "lib/browser/include"))
+        assert(strategy:write_file(sentinel, "keep-existing-tree"))
+        local _, rec_text, ar_bytes, hdrs = fixtures.record()
+        assert(strategy:write_file(paths.join(rocks_tree, "lib/browser/liblua-config.txt"), rec_text))
+        assert(strategy:write_file(paths.join(rocks_tree, "lib/browser/liblua.a"), ar_bytes))
+        for name, content in pairs(hdrs) do
+            assert(strategy:write_file(paths.join(rocks_tree, "lib/browser/include/" .. name), content))
+        end
+
+        for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do
+            local p = paths.join(fake_em, tool)
+            assert(strategy:write_file(p, "#!/bin/sh\necho 'emcc (Emscripten) 6.0.13'\n"))
+            assert(strategy:run({ "chmod", "0755", p }, { stderr_to_stdout = true }).ok)
+        end
+
+        local res = run_with_env(strategy, {
+            PATH = fake_em .. ":/usr/bin:/bin",
+            EMSDK = "",
+            PREFIX = bare_prefix,
+            TITAN_INSTALL_TREE = rocks_tree,
+            ROCKS_TREE = rocks_tree,
+        }, {
+            paths.join(active_prefix, "bin/lua"), "-E",
+            paths.join(repository, "scripts/browser_sdk.lua"),
+            "prepare", paths.join(root, "build"),
+        })
+        assert.is_false(res.ok)
+        assert.is_nil(res.output:find("WRONG_ROOT_PRECEDENCE", 1, true), res.output)
+        assert.is_nil(res.output:find("LuaFileSystem", 1, true), res.output)
+        contains(res.output, bare_prefix .. "/lib/browser/liblua-config.txt")
+        contains(res.output, "make install-browser PREFIX=" .. bare_prefix)
+        -- Existing destination files were not deleted or consumed.
+        assert.equal("keep-existing-tree", strategy:read_file(sentinel))
     end)
 
     it("reuses a warm matching lua-browser installation and rebuilds on config, archive, or header changes", function()
@@ -308,27 +395,47 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local clean_record_bytes = assert(strategy:read_file(record))
         local clean_luah_bytes = assert(strategy:read_file(lua_h))
 
-        -- 2. Warm matching configuration is reused without touching installed or object files.
-        local warm = run_lua_browser()
+        -- 2. Warm matching configuration is reused without touching installed or object files,
+        -- and explicit empty LUA_BROWSER_MYCFLAGS= overrides ambient MYCFLAGS.
+        local warm = run_lua_browser({ "MYCFLAGS=-fPIC", "LUA_BROWSER_MYCFLAGS=" })
         assert.is_true(warm.ok, warm.output)
         assert.same(stat_liblua_1, assert(strategy:stat(liblua)))
         assert.same(stat_record_1, assert(strategy:stat(record)))
         assert.same(stat_luah_1, assert(strategy:stat(lua_h)))
         assert.same(stat_lapio_1, assert(strategy:stat(lapi_o)))
 
-        -- 3. Corrupted installed archive (even if record archive_sha256 is forged to match) is rebuilt/reinstalled.
+        -- 3. Corrupted installed archive AND truncated/corrupted build-tree archive (preserving !<arch>\n)
+        -- are both reconstructed from objects rather than blessing corrupt bytes.
         local sha256 = require "titan-compiler.sha256"
         local support = require "titan"
         local corrupt_archive = "!<arch>\ncorrupted-wasm-archive-bytes"
         local forged_sha = sha256.hex_via(support._sha256_binary, corrupt_archive)
+        local build_liblua = paths.join(temp_lua, "src/browser/liblua.a")
+        assert(strategy:write_file(build_liblua, corrupt_archive))
         assert(strategy:write_file(liblua, corrupt_archive))
         assert(strategy:write_file(record, (clean_record_bytes:gsub("archive_sha256=[0-9a-f]+", "archive_sha256=" .. forged_sha))))
         local after_archive_corrupt = run_lua_browser()
         assert.is_true(after_archive_corrupt.ok, after_archive_corrupt.output)
+        assert.equal(clean_liblua_bytes, assert(strategy:read_file(build_liblua)))
         assert.equal(clean_liblua_bytes, assert(strategy:read_file(liblua)))
         assert.equal(clean_record_bytes, assert(strategy:read_file(record)))
 
-        -- 4. Corrupted installed header and extra header file are repaired from source.
+        -- 4. Malformed records (missing final LF, extra comment, CR, NUL, invalid UTF-8) are rejected
+        -- by the reuse check and regenerated cleanly.
+        for _, bad_record in ipairs({
+            clean_record_bytes:sub(1, -2),
+            clean_record_bytes .. "# trailing comment not allowed\n",
+            (clean_record_bytes:gsub("\n", "\r\n", 1)),
+            clean_record_bytes:sub(1, -2) .. "\0\n",
+            clean_record_bytes:sub(1, -2) .. "\255\n",
+        }) do
+            assert(strategy:write_file(record, bad_record))
+            local repaired = run_lua_browser()
+            assert.is_true(repaired.ok, repaired.output)
+            assert.equal(clean_record_bytes, assert(strategy:read_file(record)))
+        end
+
+        -- 5. Corrupted installed header and extra header file are repaired from source.
         local stale_h = paths.join(temp_prefix, "lib/browser/include/stale_extra.h")
         assert(strategy:write_file(lua_h, clean_luah_bytes .. "\n/* corrupted header */\n"))
         assert(strategy:write_file(stale_h, "/* should be removed */\n"))
@@ -338,7 +445,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.is_nil(strategy:stat(stale_h))
         assert.equal(clean_record_bytes, assert(strategy:read_file(record)))
 
-        -- 5. Same fork revision with changed configuration rebuilds objects and updates record.
+        -- 6. Same fork revision with changed configuration rebuilds objects and updates record.
         local changed_cfg = run_lua_browser({ "LUA_BROWSER_MYCFLAGS=-DLUA_USER_DEFAULT=1" })
         assert.is_true(changed_cfg.ok, changed_cfg.output)
         local updated_record = assert(strategy:read_file(record))
@@ -496,7 +603,8 @@ end
         assert.is_nil(strategy:stat(browser_paths.titan_bin .. "/titan.so"))
         assert.is_nil(strategy:stat(browser_paths.titan_bin .. "/titan.dll"))
 
-        -- Verify sdk-digests was written last and matches every final installed file's observation and hash.
+        -- Verify sdk-digests was written last and covers the exact full installed file set
+        -- (Lua archive/record/27 headers + 4 common Titan headers + 9 browser SDK assets).
         local sha256 = require "titan-compiler.sha256"
         local support = require "titan"
         local digest_ctx = {
@@ -509,19 +617,43 @@ end
         assert(incremental.load_sdk_digests(digest_ctx, assets.sdk_digests))
         local recorded = assert(digest_ctx.incremental and digest_ctx.incremental.sdk)
         assert.is_nil(recorded.files[assert(strategy:realpath(assets.sdk_digests))])
+
+        local expected_digest_files = {
+            browser_paths.liblua,
+            browser_paths.lua_record,
+        }
+        local staged_lua_headers = assert(strategy:list(browser_paths.lua_source))
+        table.sort(staged_lua_headers)
+        assert.equal(27, #staged_lua_headers)
+        for _, name in ipairs(staged_lua_headers) do
+            expected_digest_files[#expected_digest_files + 1] = paths.join(browser_paths.lua_source, name)
+        end
+        for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h" }) do
+            expected_digest_files[#expected_digest_files + 1] = paths.join(browser_paths.include, rel)
+        end
         for _, key in ipairs({
             "runtime", "js_library", "loader", "runner",
             "runner_module", "node_worker", "page", "lpeglabel", "provider",
         }) do
-            local real = assert(strategy:realpath(assets[key]))
-            local entry = assert(recorded.files[real], "missing digest entry for " .. key)
+            expected_digest_files[#expected_digest_files + 1] = assets[key]
+        end
+        local expected_real_set = {}
+        for _, filepath in ipairs(expected_digest_files) do
+            local real = assert(strategy:realpath(filepath))
+            expected_real_set[real] = true
+            local entry = assert(recorded.files[real], "missing digest entry for " .. filepath)
             assert.equal(sha256.hex_via(support._sha256_binary, assert(strategy:read_file(real))), entry.digest)
             local live_obs = assert(incremental.observation(digest_ctx, real, false))
             assert.equal(live_obs.size, entry.observation.size)
             assert.equal(live_obs.mtime_ns, entry.observation.mtime_ns)
             assert.equal(live_obs.ino, entry.observation.ino)
         end
-
+        local recorded_count = 0
+        for real_key in pairs(recorded.files) do
+            assert.is_true(expected_real_set[real_key], "unexpected sdk-digests key: " .. real_key)
+            recorded_count = recorded_count + 1
+        end
+        assert.equal(#expected_digest_files, recorded_count)
         -- 3. Link and execute the test image against the newly staged ROCKS_TREE SDK.
         local test_exe = paths.join(app_out, "stack_test.mjs")
         local build_test = run_with_env(strategy, {
@@ -543,6 +675,102 @@ end
         assert.is_true(run_test.ok, run_test.output)
         contains(run_test.output, "[       OK ] main_app.test_browser_coroutine_stack")
         contains(run_test.output, "[  PASSED  ] 1 test.")
+
+        -- 3b. Publish a browser library from a catch-bearing Titan module plus a setjmp C helper
+        -- alongside non-setjmp counterparts, verifying raw per-object -shared-mem retention and archive compatibility.
+        local sjlj_src = paths.join(root, "sjlj-src")
+        local sjlj_out = paths.join(root, "sjlj-out")
+        files.mkdir(paths.join(sjlj_src, "sjlj_pkg"))
+        files.mkdir(sjlj_out)
+        assert(strategy:write_file(paths.join(sjlj_src, "sjlj_helper.c"), [[
+#include <setjmp.h>
+int sjlj_c_helper(int x) {
+    jmp_buf buf;
+    if (setjmp(buf) == 0) {
+        if (x < 0) longjmp(buf, 1);
+        return x + 10;
+    }
+    return -1;
+}
+]]))
+        assert(strategy:write_file(paths.join(sjlj_src, "plain_helper.c"), [[
+int plain_c_helper(int x) {
+    return x * 2;
+}
+]]))
+        assert(strategy:write_file(paths.join(sjlj_src, "sjlj_pkg/catcher.titan"), [[
+function safe_add(a: integer, b: integer): integer
+    local sum = a + b
+    do
+        if sum < 0 then raise "negative" end
+    catch
+        return 0
+    end
+    return sum
+end
+]]))
+        assert(strategy:write_file(paths.join(sjlj_src, "sjlj_pkg/plain.titan"), [[
+function double_val(a: integer): integer
+    return a * 2
+end
+]]))
+        local c_objs_res = run_with_env(strategy, {
+            PATH = sdk_env.PATH,
+            TITAN_NODE = info.node.path,
+            PREFIX = info.prefix,
+            ROCKS_TREE = rocks_tree,
+            TITAN_ROOT = rocks_tree,
+            TITAN_PROBE_CACHE_DISABLE = "1",
+        }, {
+            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            "--output", sjlj_out, "-c", "--incremental", "--print-c-objects",
+            "--c-source", paths.join(sjlj_src, "sjlj_helper.c"),
+            "--c-source", paths.join(sjlj_src, "plain_helper.c"),
+        })
+        assert.is_true(c_objs_res.ok, c_objs_res.output)
+        local sjlj_c_obj, plain_c_obj = c_objs_res.output:match("^([^\r\n]+)\r?\n([^\r\n]+)")
+        assert.is_string(sjlj_c_obj)
+        assert.is_string(plain_c_obj)
+
+        local pub_lib_res = run_with_env(strategy, {
+            PATH = sdk_env.PATH,
+            TITAN_NODE = info.node.path,
+            PREFIX = info.prefix,
+            ROCKS_TREE = rocks_tree,
+            TITAN_ROOT = rocks_tree,
+            TITAN_PROBE_CACHE_DISABLE = "1",
+        }, {
+            info.prefix .. "/bin/titanc", "--target", "browser", "-q",
+            "--tree", sjlj_src, "--output", sjlj_out, "--incremental",
+            "--c-source", paths.join(sjlj_src, "sjlj_helper.c"),
+            "--c-source", paths.join(sjlj_src, "plain_helper.c"),
+            "sjlj_pkg.catcher", "sjlj_pkg.plain",
+        })
+        assert.is_true(pub_lib_res.ok, pub_lib_res.output)
+
+        local catcher_obj = assert(staticmetadata.classify_object(
+            assert(strategy:read_file(paths.join(sjlj_out, "sjlj_pkg/catcher.o"))), "catcher.o", expected_fp))
+        local plain_mod_obj = assert(staticmetadata.classify_object(
+            assert(strategy:read_file(paths.join(sjlj_out, "sjlj_pkg/plain.o"))), "plain.o", expected_fp))
+        local sjlj_helper_obj = assert(staticmetadata.classify_object(
+            assert(strategy:read_file(sjlj_c_obj)), "sjlj_helper.o", expected_fp))
+        local plain_helper_obj = assert(staticmetadata.classify_object(
+            assert(strategy:read_file(plain_c_obj)), "plain_helper.o", expected_fp))
+
+        assert.equal(fixtures.features .. " -shared-mem", catcher_obj.fingerprint.features)
+        assert.equal(fixtures.features, plain_mod_obj.fingerprint.features)
+        assert.equal(fixtures.features .. " -shared-mem", sjlj_helper_obj.fingerprint.features)
+        assert.equal(fixtures.features, plain_helper_obj.fingerprint.features)
+
+        local sjlj_archive_path = paths.join(sjlj_out, "sjlj_pkg.a")
+        local scanned_untargeted = assert(staticmetadata.scan_archive(sjlj_archive_path))
+        local scanned_targeted = assert(staticmetadata.scan_archive(sjlj_archive_path, {
+            expected_abi = version.TITAN_ABI_VERSION,
+            target = expected_fp,
+        }))
+        assert(driver.validate_browser_provider(scanned_targeted))
+        assert.same({ "sjlj_pkg.catcher", "sjlj_pkg.plain" }, scanned_untargeted.key_order)
+        assert.equal(4, #scanned_targeted.members)
 
         -- 4. Native compiler-SDK installation (used by luarocks make) succeeds without emsdk on PATH or EMSDK.
         local native_tree = paths.join(root, "native-compiler-sdk")
