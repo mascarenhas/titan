@@ -17,6 +17,13 @@ void browser_loader_wait(int kind) {
     else browser_loader_async_wait();
 }
 
+extern void titan_browser_complete(int kind, int status,
+    const unsigned char *bytes, size_t length);
+
+void browser_loader_completion(int kind) {
+    titan_browser_complete(kind, 99, NULL, 0);
+}
+
 int browser_loader_pattern(const unsigned char *bytes, size_t length) {
     if (length != 20 * 1024 * 1024) return 0;
     for (size_t index = 0; index < length; ++index) {

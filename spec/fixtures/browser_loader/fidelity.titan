@@ -32,6 +32,9 @@ function main(args: {string}): integer
   end, "close")
   retained = owner
   if owner:resume(nil) ~= "parked" then raise "cleanup owner did not park" end
+  if mode == "duplicate" then ffi.browser_loader_completion(0)
+  elseif mode == "invalid" then ffi.browser_loader_completion(9)
+  end
   local status = 23
   if mode == "status0" then status = 0
   elseif mode == "status1" then status = 1
