@@ -281,7 +281,7 @@ strings without NUL, CR, or LF; paths are normalized absolute paths):
   label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
   tools = { cc = argv, ar = argv, ranlib = argv, version = "6.0.13",
     source = "EMSDK" | "PATH", location = string, version_output = string },
-  compile_flags = argv,          -- complete effective flags, no -I paths
+  compile_flags = argv,          -- complete effective flags; include_dirs appended separately
   include_dirs = { string, ... },
   target_defines = { "-DTITAN_TARGET_BROWSER=1" },
   paths = <installed_paths(root, "browser")>,
