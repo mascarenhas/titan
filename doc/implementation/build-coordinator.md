@@ -1234,17 +1234,18 @@ discovery](test-runner.md#automatic-test-root-discovery).
   each directory with `context.io:list`, sorts entry names with
   `util.bytewise_less`, calls `context.io:yield(directory)` between entries,
   and inspects each entry with `context.io:lstat`:
-  * entries starting with `"."` (hidden files and directories), names that are
-    not valid module components, and entries of another kind (`other`: FIFOs,
-    sockets, and devices) are skipped;
-  * a symbolic link is classified by name once, before any target access, and
+  * entries starting with `"."` (hidden files and directories), directory
+    names that are not valid module components, and entries of another kind
+    (`other`: FIFOs, sockets, and devices) are skipped;
+  * a non-hidden `*.titan` symbolic link is classified by name once, before
+    any target access. A reserved spelling is `stat`ed only to decide whether
+    to diagnose it: it fails discovery when the link resolves to a regular
+    file, and is otherwise ignored, including when the link is broken. A link
     is followed with `context.io:stat`, which reports an explicit error on a
-    broken link, only in three cases: its whole name is a root name
-    (`is_root_name`), its name is a root candidate for the selected target, or
-    it carries a reserved spelling, which is diagnosed only if the target
-    resolves to a regular file; a link that classification excludes, such as an
-    inactive variant or a non-label dotted stem, is never followed, so its
-    broken target is never reported;
+    broken link, only when its whole name is a root name (`is_root_name`) or
+    its name is a root candidate for the selected target. Any other link, such
+    as an inactive variant, a non-root stem, or a non-label dotted stem, is
+    never followed, so its broken target is never reported;
   * a directory entry is considered as a folder-module candidate, and if it is
     **not** a symbolic link (`not linked`), `walk` recurses into it; directory
     symlinks are never descended recursively (preventing symlink cycles),
@@ -1315,7 +1316,7 @@ actual `test_*` case discovery still runs in `test_runner.discover` from
 certified `record.object_metadata.test_functions` (or freshly checked ASTs on
 misses). Selected modules with zero `test_*` functions are valid. While
 `testroots.discover` reports errors from its own `--test-dir` `stat`/`realpath`,
-`list`, entry `lstat`, and link `stat` calls (and reports vanished
+`list`, entry `lstat`, and the `stat` of each followed link (and reports vanished
 selected files), candidate lookup itself uses the shared `driver.resolve_source`
 helper, whose POSIX `regular_file` probe ignores `stat` errors on non-matching
 candidate paths.
