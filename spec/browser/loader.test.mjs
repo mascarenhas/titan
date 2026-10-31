@@ -38,6 +38,10 @@ export async function run(context) {
       await rejected(context, instance.run(), 'TITAN_BROWSER_REENTRY',
         'browser instance is suspended; reentry is not allowed');
       const disposing = disposeWhileRunning ? instance.dispose() : undefined;
+      if (disposing) {
+        await rejected(context, instance.run(), 'TITAN_BROWSER_STATE',
+          'browser instance has already run or is disposed');
+      }
       const result = await running;
       context.assert(result?.kind === 'returned' && result.status === 23,
         'completion did not preserve the status after a final coroutine resume');

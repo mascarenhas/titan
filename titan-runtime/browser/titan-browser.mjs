@@ -254,8 +254,9 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
   }
 
   function run(args = []) {
+    if (closed) return Promise.reject(failure('STATE', stateMessage));
     if (active) return Promise.reject(failure('REENTRY', reentryMessage));
-    if (closed || admitted) return Promise.reject(failure('STATE', stateMessage));
+    if (admitted) return Promise.reject(failure('STATE', stateMessage));
     admitted = active = true;
     const result = new Promise((resolve, reject) => {
       resolveRun = resolve;
