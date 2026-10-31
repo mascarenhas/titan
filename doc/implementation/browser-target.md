@@ -1239,16 +1239,51 @@ identity:
 | Fiber Asyncify data | `-DMCO_ASYNCFY_STACK_SIZE=65536` (target define) | 16384 B | Added to every coroutine's allocation and to one static main-context buffer. |
 | Linear memory | `-sINITIAL_MEMORY=16777216`, growth on, `-sMAXIMUM_MEMORY=2147483648` | growth off; 2 GiB maximum | The heap never shrinks after coroutines are destroyed, although freed blocks are reused. |
 
-Overflowing an Asyncify data buffer is a bare `unreachable` trap whose message
+`spec/coder/browser_budgets_spec.lua` measures each budget just below and just
+above its delivered limit with one-case Titan test images
+(`spec/fixtures/browser_runtime/budget_probe.titan`, with the C helpers
+`budget.c`, `budget_pad.c`, and `budget.h`) linked through the `budget`
+profile, in all four cells (Node 24.19.0 and Chrome for Testing
+156.0.8078.80, each with assertions 2 and 0). Every boundary is identical
+across the four cells:
+
+| Probe | Budget | Largest safe | First failing | Failure above the limit |
+| --- | --- | ---: | ---: | --- |
+| Titan recursion, 304 B frames | main C stack | 3424 frames | 3425 | abort (70): `Aborted(stack overflow (Attempt to set SP to ..., with stack limits [...]) ...)` |
+| Fixed 256 B and 16 B C frames | main C stack | 1041632 B | 1041648 B | abort (70), `stack overflow`; 6944 B are used by entry and runner frames |
+| Titan recursion in a coroutine | coroutine C stack | 855 frames | 856 | abort (70), `stack overflow` |
+| Fixed C frames in a coroutine, without yielding | coroutine C stack | 260704 B | 260720 B | abort (70), `stack overflow`; 1440 B are used by the coroutine entry |
+| 4 Titan + 5 Lua + n 32-register C frames across `emscripten_sleep(1)` | outer Asyncify data | 407 | 408 | trap (71), `unreachable`; the same depth plus 8 without waiting passes |
+| The same mix across a coroutine yield | fiber Asyncify data | 409 | 410 | trap (71), `unreachable`; the same depth plus 8 without yielding passes |
+| The same mix switching from the main context into a coroutine | minicoro's static `main_asyncify_stack` | 405 | 406 | trap (71), `unreachable` |
+| The outer mix with `ASYNCIFY_STACK_SIZE=32768` (a reduced supplement) | outer Asyncify data | 196 | 197 | trap (71), `unreachable` |
+
+The C stacks are checked: `-sSTACK_OVERFLOW_CHECK=2` bounds-checks every
+function prologue, so an overrun aborts before it writes outside the stack
+(the probes use fixed-size frames because a dynamic `alloca` bypasses that
+check). An Asyncify data overflow is a bare `unreachable` trap whose message
 blames `ASYNCIFY_STACK_SIZE` even when the cause is corruption, so a generic
-`unreachable` is not by itself attribution. Deep Lua recursion stops at Lua's
-own C-stack limit with an ordinary error; an overrun of a C stack is detected
-by the engine or by `-sSTACK_OVERFLOW_CHECK=2`, never written silently.
+`unreachable` is not attribution by itself; the paired no-wait controls are.
+
+The recoverable limits are ordinary errors in every cell:
+
+* recursion through nested `pcall` in loaded Lua reaches Lua's own limit and
+  raises the catchable `C stack overflow` long before the 1 MiB stack is
+  exhausted;
+* a forced `mco_create` failure raises exactly `could not create coroutine:
+  Out of memory`, and a fresh coroutine can then be created and resumed; and
+* creating coroutines while a canary coroutine is parked grows memory through
+  35 heap resizes from 16 MiB to the 2 GiB maximum, where the 5455th creation
+  fails in `mco_create` with that same catchable error after 5454 succeeded.
+  The parked canary still resumes while every owner is live; after the owners
+  are released and collected, memory stays at 2 GiB but a fresh coroutine is
+  created and resumed in the reclaimed space.
+
 Because `-sABORTING_MALLOC=0` makes allocation failure return NULL, running out
-of linear memory is an ordinary Lua or coroutine-creation error and the
-instance stays usable. A coroutine's stack size changes only through the
-target define; the native default stays 2 MiB, and changing the literal into
-a macro rebuilt native objects once without a version change.
+of linear memory never aborts the instance. A coroutine's stack size changes
+only through the target define, which is part of the compile prefix and the
+descriptor identity; the native default stays 2 MiB. At 2 MiB, about 992
+coroutines would fit in 2 GiB; 256 KiB admits 5454.
 
 ## Completion and output channels
 

@@ -573,15 +573,14 @@ A browser program runs with these fixed sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
-| Main C stack | 1 MiB | Deep Lua recursion raises Lua's ordinary C-stack overflow error. A deeper overrun in compiled code stops the program with an engine trap or abort, never a silent overwrite. |
-| Coroutine C stack | 256 KiB per coroutine (2 MiB natively) | As for the main stack, inside the coroutine. |
-| Asynchronous-wait state | 64 KiB, for the main context and for each coroutine | A wait or coroutine switch from a deeper call stack stops the program with an engine trap or abort. |
-| Linear memory | 16 MiB initially, growing to at most 2 GiB | Allocation fails with Lua's ordinary out-of-memory error; creating a coroutine fails with an ordinary Titan error. The instance stays usable. |
+| Main C stack | 1 MiB | Lua recursion through C calls, such as nested `pcall`, stops first at Lua's own limit with the ordinary catchable `C stack overflow` error. Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
+| Coroutine C stack | 256 KiB per coroutine (2 MiB natively) | The same inside a coroutine, at about a quarter of that depth. |
+| Saved call stack for a coroutine switch or a wait | 64 KiB, for the main context and for each coroutine | A switch or wait whose call stack does not fit traps with `unreachable` (runner exit 71). About 400 small C frames fit. |
+| Linear memory | 16 MiB initially, growing to at most 2 GiB | An allocation failure is Lua's ordinary out-of-memory error, and creating a coroutine fails with `could not create coroutine: Out of memory`. Both can be caught, and the instance stays usable. |
 
 Coroutine stacks are allocated in full when a coroutine is created, and memory
 that the program has grown never shrinks, although freed blocks are reused.
-At 256 KiB per coroutine, the 2 GiB limit holds several thousand live
-coroutines.
+About 5,400 live coroutines fit in 2 GiB.
 
 ## Current limits
 
