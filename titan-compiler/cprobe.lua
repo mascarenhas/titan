@@ -24,8 +24,8 @@ local MAX_PERSISTENT_RECORD_BYTES = cprobe_cache.MAX_RECORD_BYTES
 local MAX_SELECTION_OBJECT_BYTES = 16 * 1024 * 1024
 local ENUM_PAYLOAD_PREFIX = "TITENUM\0\1\12"
 local ENUM_PAYLOAD_BYTES = 12
-local ENUM_SECTION = { elf = ".titan.cprobe", coff = ".titan.cprobe", macho_segment = "__DATA",
-    macho_section = "__titancprobe" }
+local ENUM_SECTION = { elf = ".titan.cprobe", coff = ".titan.cprobe", wasm = ".titan.cprobe",
+    macho_segment = "__DATA", macho_section = "__titancprobe" }
 
 -- IDs are a persistent query protocol, not positions in an eligibility list.
 cprobe.enum_carrier_names = {
