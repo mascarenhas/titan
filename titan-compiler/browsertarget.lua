@@ -235,6 +235,26 @@ local function absolute(strategy, filename)
     return compiler_paths.to_slash(compiler_paths.normalize(compiler_paths.join(cwd, filename)))
 end
 
+local function include_root(strategy, directory)
+    if platform.windows then return absolute(strategy, directory) end
+    if not platform.is_absolute(directory) then
+        local cwd, err = strategy:cwd()
+        if not cwd then return nil, err end
+        -- Unlike lexical path.join, this preserves symlink/.. traversal.
+        directory = cwd .. "/" .. directory
+    end
+    if ("/" .. directory .. "/"):find("/../", 1, true) then
+        -- Match driver.normalize_root: resolve existing POSIX roots before
+        -- normalization, retain its absent-root fallback, and surface errors.
+        local resolved, resolve_error = strategy:realpath(directory)
+        if resolved then return compiler_paths.to_slash(compiler_paths.normalize(resolved)) end
+        local info, stat_error = strategy:stat(directory)
+        if stat_error then return nil, stat_error end
+        if info then return nil, resolve_error end
+    end
+    return compiler_paths.to_slash(compiler_paths.normalize(directory))
+end
+
 local function executable(strategy, filename)
     local info = strategy:stat(filename)
     return info and info.kind == "file" and type(strategy.executable) == "function" and
@@ -454,7 +474,7 @@ function M.build(context, inputs)
         table.insert(includes, 1, paths.lua_source)
         for index, directory in ipairs(includes) do
             if not text(directory) or directory == "" then return nil, "invalid browser include path" end
-            local resolved, resolve_error = absolute(context.io, directory)
+            local resolved, resolve_error = include_root(context.io, directory)
             if not resolved then return nil, resolve_error end
             includes[index] = resolved
         end
