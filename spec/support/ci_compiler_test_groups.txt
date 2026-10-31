@@ -21,8 +21,10 @@
 # from the timing runs above.
 # Issue 328 browser rows use the same unmeasured 1.000 local weight. Their
 # real-toolchain cases are pending unless the emsdk gate in ci.yml provides the
-# toolchain, so they stay in this partition without a covered duration. Issue 329
-# browser rows are unmeasured for the same reason.
+# toolchain, so they stay in this partition without a covered duration.
+# Issue 329 browser image/runner rows use the same unmeasured 1.000 weight: their
+# real cases need emsdk plus the browser SDK, Chrome and Node, so they pend in
+# the default lane and stay in the ordinary compiler partitions.
 compiler spec/abi_spec.lua 0.201 2.926
 retained spec/asan_generated_c_context_spec.lua 0.587 -
 compiler spec/binary_compatibility_spec.lua 0.017 0.107
