@@ -215,6 +215,26 @@ both normalized and physical-parent form. It rejects aliases,
 ancestor/descendant conflicts, symlink leaves, and leaves of the wrong kind.
 Generated-parent creation never replaces an occupied path.
 
+### Browser test images
+
+`titanc --test --target browser -o out --exe out/tests.mjs <roots>` discovers
+and checks the same test owners, renders the same synthetic runner with its
+public `titan.test` import, and links it through the [browser
+entrypoint](browser-target.md#the-browser-entrypoint) into `out/tests.mjs`
+and `out/tests.wasm`. Without `--exe` the image takes the first root's
+`program_output` path with `.mjs` appended; an explicit `--exe` must end in
+`.mjs`. `titan.test` comes from the browser standard provider `titan.a` in the
+SDK, so the link first runs the [executing protocol
+check](browser-target.md#the-executing-protocol-runner) under Node. `titanc`
+builds the image and never runs it, exactly as for native tests. The SDK's
+`titan-browser-run` runs it under Node or headless Chromium, forwards the
+arguments after `--` unchanged to `test.run`, writes the runner's output
+bytes exactly, and exits with the completion status masked to its low byte,
+so the runner's 0, 1, and 2 keep their meaning and never coincide with the
+[runner's infrastructure statuses](browser-target.md#the-runner). A run that
+selects no case exits 0, so browser acceptance checks count the selected
+cases rather than trusting the exit status.
+
 ## `titan.test` execution API and private state
 
 The public module serializes `testing`, `verbose`, `location`, `skip`, `assert`,
@@ -363,6 +383,9 @@ spec. All commands run from the repository root; the shared harness is
 | Public standard-library API/runtime behavior, including fresh-process host behavior | Module-owned Titan sources in `spec/stdlib/titan/`, through the aggregate executable; no Busted wrappers or Lua library suites. |
 | Native dependency builds and canonical standard-provider ownership | `spec/libuv_build_spec.lua` and `spec/rockspec_spec.lua`. |
 | Production bundled/system OpenSSL static consumers | `spec/support/ci_dependency_mode_smoke.sh`. |
+| Browser target mechanics: SDK build, images, protocol check, entry gate, budgets, runtime fixtures, minicoro on Emscripten | Busted files `spec/browser_sdk_spec.lua`, `spec/coder/browser_{images,protocol,entry_gate,fixtures,budgets}_spec.lua`, and `spec/minicoro_spec.lua`, run with the real toolchain in the [`browser-toolchain` job](continuous-integration.md#browser-toolchain-job); Titan and C fixtures under `spec/fixtures/browser_runtime/`. |
+| Browser loader and runner behavior | The portable `spec/browser/loader.test.mjs` (fixtures in `spec/fixtures/browser_loader/`) through the installed runner's `--js-test` on both engines, and the Node `node:test` supervisor suite `spec/browser/runner.test.mjs` with `spec/browser/runner-fixtures.mjs`; no npm dependency. |
+| Public `coroutine`/`gc` behavior on the browser target | The owning module tests in `spec/stdlib/titan/`, split into common, `.native.titan`, and `.browser.titan` contributors where a case needs host-only or browser-only facilities; `spec/coder/browser_fixtures_spec.lua` builds them with `--test --target browser` and checks the selected case counts. |
 
 Keep library behavior outside LuaCov. Compilation alone does not make a
 library integration a compiler test; add a small independent compiler case

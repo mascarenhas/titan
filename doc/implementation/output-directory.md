@@ -46,8 +46,10 @@ neither serialized interfaces nor the generated-code ABI.
 Final providers keep common-prefix naming below the output root; library mode
 writes no Lua loader files, and a [browser](browser-target.md) library writes
 only `<provider>.a`. Without `--exe`, Unix programs
-and test runners use mapped `program_output` stems below the output root, and
-Windows programs use `<output>/bin/<logical>.exe` and
+and test runners use mapped `program_output` stems below the output root,
+browser programs and tests write `<stem>.mjs` and `<stem>.wasm` from the same
+stems (an explicit browser `--exe` must end in `.mjs` and names the `.wasm`
+beside it), and Windows programs use `<output>/bin/<logical>.exe` and
 `<output>/lib/titan/0.6/<logical/module>.dll` (`driver.windows_program_paths`).
 With `--exe PATH`, `PATH` is resolved relative to the invocation working
 directory rather than `--output`: on Unix the executable (and Darwin `.dSYM`

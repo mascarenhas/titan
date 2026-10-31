@@ -57,7 +57,9 @@ The library columns apply when no requested root defines the program's exact
 their longest common dotted prefix: `titanc -o out app.left app.right` emits
 `out/app.so` and `out/app.a`. Library builds write no Lua files. A [browser
 target](browser-target.md) library build writes only the archive, such as
-`out-browser/app/main.a`, and a browser build always requires `--output`.
+`out-browser/app/main.a`; a browser program or test writes the program path
+with `.mjs` added and its sibling `.wasm`, such as `out-browser/app/main.mjs`
+and `out-browser/app/main.wasm`. A browser build always requires `--output`.
 
 A large module may be split into several C translation units
 ([split modules](build-profiles.md#split-modules)). Its first unit keeps the

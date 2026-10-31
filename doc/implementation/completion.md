@@ -92,6 +92,10 @@ and semantic generation coherently during normal saved publication. Decode only
 the selected dependency closure in a private compiler instance. Install its own
 `driver.imported` and `types.registry` under the shared compiler permit, restoring
 the caller's state afterward. Never restore or await the saved workspace graph.
+The first activation in a process adopts a host-installed pair; only a later
+target-identity change replaces it. Install or restore a pair only for the
+selected current owner, never across a target change
+([Semantic-cache ownership](browser-target.md#semantic-cache-ownership)).
 
 Use these resolver options together:
 

@@ -801,6 +801,40 @@ name, and `codeforeignvar` emits that spelling rather than copying the expanded
 tokens. The generated compiler therefore performs the authoritative expansion
 under the translation unit's real header state.
 
+An object-like macro whose fully expanded replacement is a bare identifier
+aliases the parsed declaration it names. Parentheses are removed by the C
+expression grammar, so `name`, `(name)`, and `((name))` take the same path in
+`cdefines.register_define`, after the cast and dotted-path forms:
+
+* **Self-reference.** When the identifier is the macro's own name, as in
+  Emscripten's `extern FILE *const stdout; #define stdout (stdout)` or glibc's
+  bare `#define stdout stdout`, the existing declaration is kept as it is,
+  with no copy and no second ordered `TypeList` entry.
+* **Alias.** Otherwise the macro gets a shallow copy of the target
+  declaration with only its public name changed, the convention already used
+  for ordinary function aliases. Token types, pointer qualifiers, declarator
+  base and operators, array bounds, callback signatures, parameter names, and
+  declaration provenance are preserved, and nested declaration data stays
+  shared read-only. Ordinary objects (table-valued types), functions, and
+  callback objects (`functionptr`) all qualify; there is no stream-name
+  special case.
+* **Expression leaves.** In the best-effort expression typer, an identifier
+  that names a declared object supplies that declaration's type; an unknown
+  identifier supplies no type rather than a fictitious `int`, so an
+  unsupported expression cannot overwrite a known pointer declaration. A
+  derived pointee type is a fresh array; shared declaration tokens are never
+  mutated.
+
+A bare identifier with no visible declaration publishes nothing, so a
+renaming macro visible while unrelated headers are processed waits for the
+import that declares its target. The existing typedef-shadowing and
+macro-only-type-alias rules and the provisional enum-alias handling are
+unchanged, and arbitrary expressions and function-like macros remain
+unsupported. `c-parser/cdefines.lua` belongs to the compiler inventory, so the
+change of inference invalidates compiler and worker certificates through the
+existing inventory rule; C-probe results stay keyed by their exact source, and
+generated FFI headers and nominal C identities are unaffected.
+
 A separate object-macro form contains only a dotted identifier replacement,
 such as `implementation.member`. `cdefines.classify_expanded_field_macro`
 classifies every final object macro after the combined module header has been
@@ -827,7 +861,8 @@ That does not categorically reject every call-containing value macro: the
 existing typed dereferenced-accessor form remains supported. Function-like
 macros remain unavailable, while other object-like forms beyond recognized
 existing integer/accessor expressions, fully expanded outer casts to supported
-scalar types, and pure dotted projections are not generally supported. Macro
+scalar types, bare declared identifiers, and pure dotted projections are not
+generally supported. Macro
 classification uses the same final macro environment as combined declaration
 extraction. A header may establish macro state used by a later directive, and a
 later definition, redefinition, or undefinition controls the final supported
@@ -868,7 +903,7 @@ range validation remains unchanged; `__int128` is not a candidate.
 | `c-parser/cpp.lua` | preprocessing, raw/prescanned macro forms, captured compiler execution |
 | `c-parser/c99.lua` | preprocessing-token and C99 declaration grammar |
 | `c-parser/ctypes.lua` | `TypeList`, file/prototype tag metadata and scopes |
-| `c-parser/cdefines.lua` | target-neutral object-macro expression/cast metadata and extracted classification of final field macros |
+| `c-parser/cdefines.lua` | target-neutral object-macro expression/cast metadata, identifier-macro declaration aliases, and extracted classification of final field macros |
 | `titan-compiler/cdefinitioncache.lua` | closed header/FFI declaration projection and reconstruction without parser/CPP state |
 | `titan-compiler/foreigntypes.lua` | ordered canonical C-type conversion, tag binding, target-profile macro-expression finalization, and macro cast-target conversion |
 | `titan-compiler/cdeclarator.lua` | exact C declarations/type names/parameter adjustment |
@@ -892,3 +927,13 @@ typed object macros, macro-projected field lvalues, and C operator results.
 Real-header/tag and libuv-shaped conversions remain compiler tests rather than
 stdlib integration tests. Libuv/process/DNS behavior stays under
 `spec/stdlib/` without LuaCov.
+
+Identifier-macro aliases are covered at each layer: `spec/cdefines_spec.lua`
+checks exact declaration identity and metadata for pointer, array, callback,
+and function aliases in bare and parenthesized forms; `spec/cdriver_spec.lua`
+preprocesses a real `FILE *const` self-reference and transitive aliases and
+restores them from a persisted extracted graph; `spec/coder/c_ffi_spec.lua`
+compiles and runs modules that read stream, array, function, and callback
+aliases and calls `fwrite` with the host's `stdout` and `stderr`; and
+`spec/coder/browser_toolchain_spec.lua` compiles `fwrite` to `ffi.stdout` and
+`ffi.stderr` with the real Emscripten headers.

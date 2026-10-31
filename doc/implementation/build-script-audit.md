@@ -46,6 +46,18 @@ its own Lua DLL. A stock Lua tree that a checkout compiler links through
 `--lua` has no such default
 ([A stock Lua tree](../language/installation.md#a-stock-lua-tree)).
 
+`make lua-browser PREFIX=<prefix>` installs the fork's WebAssembly Lua
+(`lib/browser/liblua.a`, its headers, and its build record) through
+`scripts/lua_browser.sh`, which delegates to the fork's `install-browser` with
+the emsdk sibling tools and `LUA_BROWSER_CC`, `LUA_BROWSER_AR`,
+`LUA_BROWSER_RANLIB`, `LUA_BROWSER_MYCFLAGS`, and `LUA_BROWSER_MYLDFLAGS`.
+Unlike `make lua`, it reuses an installation only when the effective browser
+configuration and the installed archive and header digests match the record,
+and otherwise rebuilds in the fork's separate browser object directory
+([`make lua-browser`](browser-target.md#make-lua-browser)). Neither
+`luarocks make` nor `make browser-sdk` runs it, and `Makefile.win` has no such
+target.
+
 Ordinary native archives use source/header prerequisites and `ar`/`ranlib`.
 Failed output recipes remove unfinished artifacts before an ordinary retry.
 CMake owns libuv incrementality; upstream configure/make owns libbacktrace and
@@ -341,6 +353,7 @@ with `+` and `RECURSIVE_WRAPPER_GUARD`, and delegates native parallelism to
 | `install` (no `INST_PREFIX`) | `install-compiler`, `publish-titan-sdk`, `publish-stdlib`. |
 | `install` (LuaRocks pass) | `install-compiler`, `install-rock-tools`, `stage-rock-payload`. |
 | `binary-rock` | `luarocks pack titan`, renaming the `.all.rock` result to the suffix from `luarocks config arch`. |
+| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, publish the browser standard provider `titan.a` (`titan.test`, `titan.coroutine`, `titan.gc`) through ordinary library mode, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; the only Titan target that needs emsdk. |
 
 Standard-library installation copies the built provider pair, licenses, and
 optional symbols. SDK installation also publishes Titan's own `LICENSE` at
