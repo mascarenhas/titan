@@ -415,6 +415,15 @@ jobs:
           log="$RUNNER_TEMP/browser-chrome-sandbox.log"
           key=kernel.apparmor_restrict_unprivileged_userns
           : > "$log"
+          # Small /dev/shm is the other known Chrome-startup failure on hosted
+          # VMs; record both host facts so a failure names the cause.
+          { df -h /dev/shm || true; } | tee -a "$log"
+          clone=/proc/sys/kernel/unprivileged_userns_clone
+          if [ -r "$clone" ]; then
+            echo "unprivileged_userns_clone: $(cat "$clone")" | tee -a "$log"
+          else
+            echo "unprivileged_userns_clone: absent" | tee -a "$log"
+          fi
           state=$(sysctl -n "$key" 2>/dev/null || true)
           if [ -z "$state" ]; then
             echo "$key: absent (host does not restrict unprivileged user namespaces)" | tee -a "$log"

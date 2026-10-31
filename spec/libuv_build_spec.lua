@@ -5979,6 +5979,7 @@ printf '%s\n' "${schedule[@]}"
                 "sha256sum -c --strict -",
                 "python3 scripts/browser_extract_zip.py",
                 "browser-chrome-sandbox.log",
+                "df -h /dev/shm",
                 'sudo sysctl -w "$key=0"',
                 'rm -f "$PREFIX/bin/titanc"',
                 'rm -rf "$PREFIX/share/lua/5.5/titan-compiler"',
@@ -6092,6 +6093,11 @@ printf '%s\n' "${schedule[@]}"
                 "Allow Chrome's user-namespace sandbox on the CI host")
             assert.truthy(browser_sandbox:find(
                 "key=kernel.apparmor_restrict_unprivileged_userns", 1, true),
+                browser_sandbox)
+            assert.truthy(browser_sandbox:find(
+                "clone=/proc/sys/kernel/unprivileged_userns_clone", 1, true),
+                browser_sandbox)
+            assert.truthy(browser_sandbox:find("df -h /dev/shm", 1, true),
                 browser_sandbox)
             assert.truthy(browser_sandbox:find(
                 'sysctl -n "$key" 2>/dev/null', 1, true), browser_sandbox)
