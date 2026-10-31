@@ -449,7 +449,8 @@ for (const cdp of ["pipe", "port"]) {
     test(`launch/connect failure retires only its own process and profile (${cdp})`, { skip: !supported }, async t => {
         const directory = await mkdtemp(join(tmpdir(), "titan-chrome-launch-"));
         const chrome = join(directory, "chrome");
-        const banner = "if [ \"$1\" = --version ]; then printf 'Chromium 156.0.8078.80\\n'; exit 0; fi\n";
+        const banner = "if [ \"$1\" = --version ]; then printf 'Chromium 156.0.8078.80\\n'; exit 0; fi\n" +
+            "printf '%s\\n' \"$@\" > \"$TITAN_BROWSER_TEST_ARGV\"\n";
         try {
             const scripts = [
                 ["exit", banner + "printf 'fake Chromium stderr before exit\\n' >&2\nexit 9\n",
@@ -465,12 +466,24 @@ for (const cdp of ["pipe", "port"]) {
             ];
             for (const [name, script, status, exitCode, exitSignal, stderrTail] of scripts) await t.test(name, async () => {
                 await writeFile(chrome, "#!/bin/sh\n" + script, { mode: 0o755 });
+                const argumentsFile = join(directory, name + ".args");
                 const before = performance.now();
                 const result = await run(["--engine", "chromium", "--chrome", chrome, "--cdp", cdp,
-                    "--timeout", "700", "--grace", "0", "--root", root, "--js-test", fixture]);
+                    "--timeout", "700", "--grace", "0", "--root", root, "--js-test", fixture],
+                    { TITAN_BROWSER_TEST_ARGV: argumentsFile, TITAN_BROWSER_ROOT_NO_SANDBOX: "" });
                 assert.equal(result.status, status, result.stderr.toString());
                 assert.equal(result.stdout.length, 0);
                 assert.ok(performance.now() - before < 10000, "launch/connect cleanup was not bounded");
+                if (name !== "spawn") {
+                    const args = (await readFile(argumentsFile, "utf8")).trimEnd().split("\n");
+                    for (const flag of ["--headless=new", "--disable-gpu", "--disable-dev-shm-usage"]) {
+                        assert.equal(args.filter(arg => arg === flag).length, 1, `launch must pass ${flag} once`);
+                    }
+                    assert.equal(args.includes("--no-zygote"), false, "launch must retain the zygote");
+                    assert.equal(args.includes("--no-sandbox"), false, "default launch must retain the sandbox");
+                    assert.equal(args.includes("--remote-debugging-pipe"), cdp === "pipe");
+                    assert.equal(args.includes("--remote-debugging-port=0"), cdp === "port");
+                }
                 if (stderrTail) {
                     assert.ok(result.stderr.includes(Buffer.from(`Chromium child status: exit code=${JSON.stringify(exitCode)}, signal=${JSON.stringify(exitSignal)}`)),
                         result.stderr.toString());

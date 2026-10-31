@@ -335,7 +335,9 @@ class ChromiumEngine {
         const profile = await mkdtemp(join(tmpdir(), "titan-browser-"));
         if (this.closing) { await rm(profile, { recursive: true, force: true }); return; }
         this.profile = profile;
-        const args = ["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+        // Keep shared-memory backing files off size-limited /dev/shm mounts.
+        const args = ["--headless=new", "--disable-gpu", "--disable-dev-shm-usage",
+            "--no-first-run", "--no-default-browser-check",
             "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows",
             `--user-data-dir=${this.profile}`];
         if (this.options.cdp === "pipe") args.push("--remote-debugging-pipe");
