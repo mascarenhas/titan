@@ -4,10 +4,12 @@ local objectmetadata = require "titan-compiler.objectmetadata"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local fixtures = require "spec.fixtures.target_selection.support"
 local toolchain = require "spec.support.browser_toolchain"
+local types = require "titan-compiler.types"
 
 local repository = assert(lfs.currentdir())
 local modules = { "bundle.first", "bundle.second" }
 local fixture, native_root, browser_root
+local semantic_driver, semantic_contexts, saved_registry
 
 local function arguments(target, compile_only)
     local argv = { "--target", target, "--incremental", "--source-first",
@@ -87,6 +89,11 @@ describe("browser incremental compilation", function()
         native_root, browser_root = fixture.root .. "/native-out", fixture.root .. "/browser-out"
     end
     after_each(function()
+        for _, context in ipairs(semantic_contexts or {}) do
+            assert(semantic_driver.close_resolver_context(context))
+        end
+        semantic_contexts, semantic_driver = nil, nil
+        if saved_registry then types.registry, saved_registry = saved_registry, nil end
         if fixture then fixture:close(); fixture = nil end
     end)
 
@@ -181,5 +188,65 @@ describe("browser incremental compilation", function()
         local adjacent = fixture:compile({ "--target", fixture.host, "-c", "bundle.first" }, nil, true)
         assert.is_false(adjacent.ok)
         assert.matches('belongs to target "browser", not "' .. fixture.host .. '"', adjacent.output, 1, true)
+    end)
+
+    it("switches native to a genuine browser descriptor and back without sharing source or warm native-provider state", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        prepare_fixture()
+        fixtures.write(fixture.source .. "/sequence.native.titan",
+            "record Item\n native_value: integer\nend\n")
+        fixtures.write(fixture.source .. "/sequence.browser.titan",
+            "record Item\n browser_value: string\nend\n")
+        fixtures.write(fixture.source .. "/titan/math.browser.titan",
+            "function browser_only(): string return 'browser' end\n")
+        local saved = package.loaded["titan-compiler.driver"]
+        package.loaded["titan-compiler.driver"] = nil
+        local ok, subject = pcall(require, "titan-compiler.driver")
+        package.loaded["titan-compiler.driver"] = saved
+        assert.is_true(ok, subject)
+        semantic_driver, semantic_contexts, saved_registry = subject, {}, types.registry
+        subject.TITAN_SOURCE_PATH = fixture.source
+        local function context(target)
+            local value = subject.new_resolver_context({ target = target, analysis_only = true })
+            semantic_contexts[#semantic_contexts + 1] = value
+            return value
+        end
+        local function load(loader, name)
+            local loaded, modtype, errors = loader(name)
+            assert.is_true(loaded, modtype)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            return modtype
+        end
+        local native = context()
+        local native_loader = subject.defaultloader({}, { context = native, source_roots = { sequence = true } })
+        load(native_loader, "sequence")
+        local owner = types.registry["sequence.Item"]
+        assert.is_table(owner)
+        local provider = load(native_loader, "titan.math")
+        local native_provider = subject.imported["titan.math"]
+        assert.is_true(native_provider.kind == "dynamic" or native_provider.kind == "static")
+        assert.equal(provider, load(native_loader, "titan.math"))
+        local browser = context("browser")
+        assert.is_string(browser.target_descriptor.identity)
+        assert.equal("6.0.13", browser.target_descriptor.tools.version)
+        local native_path = subject.TITAN_BIN_PATH
+        subject.TITAN_BIN_PATH = fixture.source
+        local browser_loader = subject.defaultloader({}, { context = browser, source_roots = { sequence = true } })
+        load(browser_loader, "sequence")
+        assert.equal(fixture.source .. "/sequence.browser.titan", subject.imported.sequence.filename)
+        assert.not_equal(owner, types.registry["sequence.Item"])
+        load(browser_loader, "titan.math")
+        assert.equal("source", subject.imported["titan.math"].kind)
+        assert.has_error(function() native_loader("titan.math") end,
+            "compiler caches now belong to target " .. browser.target_descriptor.identity .. "; create a new context")
+        subject.TITAN_BIN_PATH = native_path
+        local final = context()
+        local final_loader = subject.defaultloader({}, { context = final, source_roots = { sequence = true } })
+        load(final_loader, "sequence")
+        assert.equal(fixture.source .. "/sequence.native.titan", subject.imported.sequence.filename)
+        load(final_loader, "titan.math")
+        assert.equal(native_provider.kind, subject.imported["titan.math"].kind)
+        assert.equal(native_provider.filename, subject.imported["titan.math"].filename)
+        assert.not_equal(native_provider, subject.imported["titan.math"])
     end)
 end)

@@ -3,6 +3,7 @@ local compiler_io = require "titan-compiler.io"
 local incremental = require "titan-compiler.incremental"
 local certificate = require "titan-compiler.linkcertificate"
 local types = require "titan-compiler.types"
+local browser_target = require "titan-compiler.browsertarget"
 local fixtures = require "spec.support.browser_fixtures"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
@@ -19,12 +20,13 @@ local function fresh_driver()
     return subject
 end
 
-local function descriptor(root, changes)
-    local data = fixtures.descriptor(root, changes)
-    if package.searchpath("titan-compiler.browsertarget", package.path) then
-        return assert(require("titan-compiler.browsertarget").import(data))
+local function descriptor(root, changed)
+    local data = fixtures.descriptor(root)
+    if changed then
+        data.compile_flags[2] = "-O0"
+        fixtures.identify(data)
     end
-    return data
+    return assert(browser_target.import(data))
 end
 
 local function loaded(loader, name)
@@ -34,21 +36,18 @@ local function loaded(loader, name)
     return modtype
 end
 
--- Fake descriptor accessors are local to this compiler instance, never an
--- unchecked production initialization option. The same graph is validated by
--- browsertarget.import once that owner is present in the integrated checkout.
+-- Isolate descriptor verification (covered by its own specs) with a validated,
+-- frozen fixture. Constructors, accessors and cache activation remain real.
 describe("browser semantic cache isolation", function()
-    local subject, root, contexts, saved_registry
+    local subject, root, contexts, saved_registry, saved_browser, saved_initialize_platform
     local function context(target, data)
-        local ctx = subject.new_resolver_context({ analysis_only = true,
+        subject._browser_target = setmetatable({
+            build = function() return data or descriptor(root) end,
+        }, { __index = browser_target })
+        local ctx = subject.new_resolver_context({ analysis_only = true, target = target,
             embedded_interface_provider = { provider_file = root .. "/semantic-host",
                 entries = {}, target_profile = fixtures.profile_data() } })
         contexts[#contexts + 1] = ctx
-        assert(subject.activate_target_caches(ctx, subject.context_target(ctx)))
-        if target == "browser" then
-            ctx.target, ctx.target_descriptor = target, data or descriptor(root)
-            assert(subject.activate_target_caches(ctx, ctx.target_descriptor.identity))
-        end
         return ctx
     end
     before_each(function()
@@ -56,15 +55,28 @@ describe("browser semantic cache isolation", function()
         saved_registry, contexts = types.registry, {}
         subject = fresh_driver()
         subject.TITAN_SOURCE_PATH = root
-        subject.context_target_descriptor = function(ctx) return ctx.target_descriptor end
-        subject.context_target_identity = function(ctx)
-            return ctx.target_descriptor and ctx.target_descriptor.identity or subject.context_target(ctx)
+        saved_browser = subject._browser_target
+        saved_initialize_platform = subject.initialize_platform
+        subject.initialize_platform = function(ctx)
+            if platform.windows and ctx.target == "browser" and not ctx._platform_initialized then
+                -- Model the supported host observation, not Windows browser
+                -- support. Keep native Windows provider lookup genuine.
+                ctx.uname, ctx.is_darwin, ctx._platform_initialized = "Linux", false, true
+            end
+            return saved_initialize_platform(ctx)
         end
     end)
     after_each(function()
         for _, ctx in ipairs(contexts) do assert(subject.close_resolver_context(ctx)) end
+        subject._browser_target = saved_browser
+        subject.initialize_platform = saved_initialize_platform
         types.registry = saved_registry
         files.remove(root)
+    end)
+
+    it("rejects a context that has never activated semantic caches", function()
+        assert.has_error(function() subject.assert_target_context({ io = compiler_io.new_sync() }) end,
+            "compiler target context is not initialized")
     end)
 
     it("rebinds the whole nominal closure, preserves same-target sharing, and never reactivates a stale context", function()
@@ -163,12 +175,12 @@ describe("browser semantic cache isolation", function()
         local first = context("browser")
         subject.imported.owner = { kind = "source" }
         types.registry["owner.Record"] = {}
-        -- Construct a new context at the current generation, without briefly
-        -- activating a host target, to isolate the descriptor-identity switch.
-        local next_context = { io = compiler_io.new_sync(), target = "browser" }
-        local changed = descriptor(root, { compile_flags = { "--std=c99", "-O0" } })
+        -- A changed descriptor is a different target identity, even though the
+        -- selected source label stays browser.
+        local changed = descriptor(root, true)
         assert.not_equal(first.target_descriptor.identity, changed.identity)
-        assert(subject.activate_target_caches(next_context, changed.identity))
+        local next_context = context("browser", changed)
+        assert(subject.assert_target_context(next_context))
         assert.is_nil(subject.imported.owner)
         assert.is_nil(types.registry["owner.Record"])
         assert.has_error(function() subject.activate_target_caches(first, first.target_descriptor.identity) end,
@@ -185,16 +197,22 @@ describe("browser semantic cache isolation", function()
 end)
 
 describe("browser output-root ownership", function()
-    local subject, root, strategy, locks
+    local subject, root, strategy, locks, saved_registry
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
+        saved_registry = types.registry
         subject, strategy = fresh_driver(), compiler_io.new_sync()
     end)
     after_each(function()
         if locks then assert(locks:release()); locks = nil end
+        types.registry = saved_registry
         files.remove(root)
     end)
-    local function ctx(target) return { io = strategy, target = target } end
+    local function ctx(target)
+        local value = { io = strategy, target = target }
+        assert(subject.activate_target_caches(value, target))
+        return value
+    end
     local function claim(target, directory, create)
         return subject.validate_output_target(ctx(target), directory or root, create ~= false)
     end
@@ -236,7 +254,7 @@ describe("browser output-root ownership", function()
         assert.equal("linux\n", files.read(root .. "/.titan-target"))
     end)
     it("rejects malformed, unreadable, and non-file markers without relabeling", function()
-        for _, content in ipairs({ "", "browser", "Browser\n", "browser\nlinux\n", "unknown\n", "browser\r\n" }) do
+        for _, content in ipairs({ "", "browser", "Browser\n", "browser\nlinux\n", "unknown\n", "browser\r\n", string.rep("x", 17) }) do
             files.write(root .. "/.titan-target", content)
             local ok, message = claim("browser")
             assert.is_nil(ok)
@@ -320,7 +338,7 @@ describe("browser object and link certificate identity", function()
         assert.is_true(browser.cacheable)
         assert(certificate.commit(ctx, browser))
         assert.is_true(certificate.check(ctx, certificate.prepare(ctx, spec)))
-        ctx.target_descriptor = descriptor(root, { compile_flags = { "--std=c99", "-O0" } })
+        ctx.target_descriptor = descriptor(root, true)
         local changed = certificate.prepare(ctx, spec)
         assert.equal(browser.key, changed.key)
         assert.not_equal(browser.input, changed.input)

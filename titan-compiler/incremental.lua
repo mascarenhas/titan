@@ -781,7 +781,7 @@ local function valid_wasm_features(features)
     while true do
         local space = features:find(" ", position, true)
         local token = features:sub(position, space and space - 1 or #features)
-        local name = token:match("^[+%-=]([^%s%z]+)$")
+        local name = token:match("^[+%-=]([!-\126]+)$")
         if not name or seen[name] or (previous and not bytewise_less(previous, token)) then
             return false
         end

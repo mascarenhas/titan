@@ -23,7 +23,7 @@ end
 
 local function fake_context(options)
     options = options or {}
-    local paths = fixtures.paths()
+    local paths = fixtures.paths(options.root)
     local record, record_text, archive, headers = fixtures.record(options.record)
     local files = { [paths.lua_record] = options.record_text or record_text,
         [paths.liblua] = options.archive or archive }
@@ -280,7 +280,9 @@ describe("browser target descriptor", function()
         assert.same(fixtures.paths(root), subject.installed_paths(root, "browser"))
         assert.is_nil(subject.installed_paths(root, "browser").libbacktrace)
         assert.is_nil(subject.context_target_descriptor(nil))
-        assert.is_nil(subject.context_target_descriptor({ target = "linux" }))
+        local context = subject.new_resolver_context({ target = "linux" })
+        assert.is_nil(subject.context_target_descriptor(context))
+        assert(subject.close_resolver_context(context))
     end)
 
     it("rejects Windows and other unsupported hosts before tool discovery", function()
@@ -301,12 +303,15 @@ describe("browser target descriptor", function()
         end
         local subject = fresh_driver()
         subject.EXTRA_CPPFLAGS, subject.EXTRA_CFLAGS, subject.EXTRA_LDFLAGS = {}, {}, {}
-        local context, inputs, calls = fake_context()
-        subject.TITAN_ROOT = inputs.paths.root
+        local template, inputs, calls = fake_context({ root = subject.TITAN_ROOT })
         local native_cache, cc, flags, ar, ranlib, profile = subject.PROBE_CACHE_DIRECTORY,
             subject.CC, subject.CFLAGS, subject.AR, subject.RANLIB, subject.TARGET_PROFILE
-        context.target, context._platform_initialized, context.uname, context.is_darwin =
-            "browser", true, "Linux", false
+        local initialize = subject.initialize_platform
+        subject.initialize_platform = function(ctx)
+            ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            return initialize(ctx)
+        end
+        local context = subject.new_resolver_context({ io = template.io, target = "browser" })
         local descriptor = assert(subject.context_target_descriptor(context))
         assert.equal(descriptor, subject.context_target_descriptor(context))
         assert.equal(2, #calls)
@@ -335,17 +340,20 @@ describe("browser target descriptor", function()
             assert.is_nil(filename:find("/lib/browser/", 1, true), "worker must not reread verified Lua inputs")
             return strategy:read_file(filename)
         end
-        local context = subject.new_resolver_context({ io = guarded, target = "browser" })
-        context.target_descriptor = assert(browser.import(fixtures.descriptor(subject.TITAN_ROOT)))
-        context.incremental_configuration = {
-            compiler = assert(incremental.compiler_component(context)),
-            digest = string.rep("1", 64), toolchain = string.rep("2", 64),
-            preamble = string.rep("3", 64), options = string.rep("4", 64),
-        }
+        subject._browser_target = setmetatable({ build = function(_, inputs)
+            return assert(browser.import(fixtures.descriptor(inputs.paths.root)))
+        end }, { __index = browser })
         subject.initialize_platform = function(ctx)
             ctx.host_target, ctx.uname, ctx.is_darwin = "linux", "Linux", false
             return subject._finish_target_initialization(ctx)
         end
+        local context = subject.new_resolver_context({ io = guarded, target = "browser" })
+        context.incremental_configuration = {
+            compiler = assert(incremental.compiler_component(context, {
+                compiler_root = assert(strategy:cwd()), frontend = "api" })),
+            digest = string.rep("1", 64), toolchain = string.rep("2", 64),
+            preamble = string.rep("3", 64), options = string.rep("4", 64),
+        }
         local wire = assert(subject.worker_configuration(context))
         assert.is_nil(getmetatable(wire.target_descriptor))
         local worker = assert(subject.new_worker_context(wire, guarded))
@@ -383,6 +391,44 @@ describe("browser target descriptor", function()
         assert.is_string(contents[native_path .. "/" .. key .. ".result"])
         assert.is_string(contents[browser_path .. "/" .. key .. ".result"])
         assert(native:close()); assert(browser_service:close())
+    end)
+    it("raises a constructor's descriptor diagnostic without activating a failed target", function()
+        local subject = fresh_driver()
+        local native = subject.new_resolver_context({ target = "linux" })
+        local retained = {}
+        subject.imported.retained = retained
+        subject._browser_target = setmetatable({ build = function()
+            return nil, "browser Lua record fixture: sjlj mismatch"
+        end }, { __index = browser })
+        local initialize = subject.initialize_platform
+        subject.initialize_platform = function(ctx)
+            ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            return initialize(ctx)
+        end
+        local template = fake_context({ root = subject.TITAN_ROOT })
+        assert.has_error(function()
+            subject.new_resolver_context({ io = template.io, target = "browser" })
+        end, "browser Lua record fixture: sjlj mismatch")
+        assert(subject.assert_target_context(native))
+        assert.equal(retained, subject.imported.retained)
+        assert(subject.close_resolver_context(native))
+    end)
+
+    it("reports constructor raises through the normal CLI diagnostic without a traceback", function()
+        local strategy = compiler_io.new_sync()
+        local root = assert(strategy:cwd())
+        local prefix = require("spec.support.installed_prefix").active()
+        local code = string.format("package.path=%q..package.path; ", root .. "/?.lua;" .. root .. "/?/init.lua;") ..
+            "require('titan-compiler.driver').new_resolver_context=function() error('browser descriptor fixture failure',0) end"
+        local result = strategy:run({ prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""),
+            "-E", "-e", code, root .. "/titanc", "-q", "-c", "never_compiled" },
+            { env = { TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_EXTRA_CPPFLAGS = "",
+                TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" }, stderr_to_stdout = true })
+        assert.is_true(result.started)
+        assert.is_false(result.ok)
+        assert.equal(1, result.status)
+        contains(result.output, "browser descriptor fixture failure")
+        assert.is_nil(result.output:find("stack traceback", 1, true))
     end)
 end)
 
