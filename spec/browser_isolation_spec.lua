@@ -40,6 +40,7 @@ end
 -- frozen fixture. Constructors, accessors and cache activation remain real.
 describe("browser semantic cache isolation", function()
     local subject, root, contexts, saved_registry, saved_browser, saved_initialize_platform
+    local provider_fixture
     local function context(target, data, analysis_only)
         subject._browser_target = setmetatable({
             build = function() return data or descriptor(root) end,
@@ -71,6 +72,7 @@ describe("browser semantic cache isolation", function()
         subject._browser_target = saved_browser
         subject.initialize_platform = saved_initialize_platform
         types.registry = saved_registry
+        if provider_fixture then provider_fixture:close(); provider_fixture = nil end
         files.remove(root)
     end)
 
@@ -218,20 +220,25 @@ describe("browser semantic cache isolation", function()
     end)
 
     it("selects native, browser, then native source interfaces and a warm compiled native provider without manual clearing", function()
+        provider_fixture = files.new()
+        files.write(provider_fixture.source .. "/warm/provider.titan",
+            "function answer(): integer return 42 end\n")
+        provider_fixture:compiled({ "--jobs", "1", "--c-parts", "1", "warm.provider" })
         files.write(root .. "/choice.native.titan", "record Item\n native_value: integer\nend\n")
         files.write(root .. "/choice.browser.titan", "record Item\n browser_value: string\nend\n")
-        files.write(root .. "/titan/math.browser.titan", "function browser_only(): string return 'browser' end\n")
-        local native_path = subject.TITAN_BIN_PATH
+        files.write(root .. "/warm/provider.browser.titan", "function browser_only(): string return 'browser' end\n")
+        local native_path = provider_fixture.output
+        subject.TITAN_BIN_PATH = native_path
         local first = context()
         local native_loader = subject.defaultloader({}, { context = first, source_roots = { choice = true } })
         local native_type = loaded(native_loader, "choice")
         assert.equal(root .. "/choice.native.titan", subject.imported.choice.filename)
         local native_owner = types.registry["choice.Item"]
         assert.is_table(native_owner)
-        local provider = loaded(native_loader, "titan.math")
-        local native_provider = subject.imported["titan.math"]
+        local provider = loaded(native_loader, "warm.provider")
+        local native_provider = subject.imported["warm.provider"]
         assert.is_true(native_provider.kind == "dynamic" or native_provider.kind == "static")
-        assert.equal(provider, loaded(native_loader, "titan.math"))
+        assert.equal(provider, loaded(native_loader, "warm.provider"))
         local browser = context("browser")
         subject.TITAN_BIN_PATH = root
         local browser_loader = subject.defaultloader({}, { context = browser, source_roots = { choice = true } })
@@ -239,10 +246,10 @@ describe("browser semantic cache isolation", function()
         assert.not_equal(native_type, browser_type)
         assert.not_equal(native_owner, types.registry["choice.Item"])
         assert.equal(root .. "/choice.browser.titan", subject.imported.choice.filename)
-        loaded(browser_loader, "titan.math")
-        assert.equal("source", subject.imported["titan.math"].kind)
-        assert.equal(root .. "/titan/math.browser.titan", subject.imported["titan.math"].filename)
-        assert.has_error(function() native_loader("titan.math") end,
+        loaded(browser_loader, "warm.provider")
+        assert.equal("source", subject.imported["warm.provider"].kind)
+        assert.equal(root .. "/warm/provider.browser.titan", subject.imported["warm.provider"].filename)
+        assert.has_error(function() native_loader("warm.provider") end,
             "compiler caches now belong to target " .. browser.target_descriptor.identity .. "; create a new context")
         subject.TITAN_BIN_PATH = native_path
         local third = context()
@@ -250,10 +257,10 @@ describe("browser semantic cache isolation", function()
         loaded(third_loader, "choice")
         assert.equal(root .. "/choice.native.titan", subject.imported.choice.filename)
         assert.not_equal(native_owner, types.registry["choice.Item"])
-        loaded(third_loader, "titan.math")
-        assert.equal(native_provider.kind, subject.imported["titan.math"].kind)
-        assert.equal(native_provider.filename, subject.imported["titan.math"].filename)
-        assert.not_equal(native_provider, subject.imported["titan.math"])
+        loaded(third_loader, "warm.provider")
+        assert.equal(native_provider.kind, subject.imported["warm.provider"].kind)
+        assert.equal(native_provider.filename, subject.imported["warm.provider"].filename)
+        assert.not_equal(native_provider, subject.imported["warm.provider"])
     end)
 
     it("guards table-loader warm entries and semantic entry points before touching stale state", function()
