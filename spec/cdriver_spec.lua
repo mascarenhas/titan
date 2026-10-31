@@ -997,6 +997,50 @@ describe("completed C header payload transport", function()
         assert.equal(restored, clean)
     end)
 
+    it("restores exact self-referential and transitive object macro declarations",
+    function()
+        local path = header([[
+            typedef struct ffi_stream FILE;
+            extern FILE *const s;
+            #define s (s)
+            #define stream_alias (s)
+            #define stream_chain stream_alias
+            extern int values[3];
+            #define values_alias (values)
+            extern int (*const callback)(int value);
+            #define callback_alias (callback)
+        ]])
+        local options = { cache_adapter = adapter, compiler_include_dirs = {} }
+        local first, include = assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.same({ "FILE", "*", "const" }, first.s.type)
+        for _, name in ipairs({ "stream_alias", "stream_chain" }) do
+            assert.equal(name, first[name].name)
+            assert.equal(first.s.type, first[name].type)
+            assert.equal(first.s._declarator_ops, first[name]._declarator_ops)
+            assert.is_nil(first[name].macro_expression)
+        end
+        assert.equal(first.values.idxs, first.values_alias.idxs)
+        assert.equal(first.callback.params, first.callback_alias.params)
+
+        cdriver.clear_process_cache()
+        local restored, restored_include = assert_process_file(path, options)
+        assert.equal(1, matches)
+        assert.equal(1, cdriver.process_cache_stats().hits)
+        assert.equal(include.c_header_graph_key, restored_include.c_header_graph_key)
+        assert.same(semantic_inputs(include.c_header_dependencies),
+            semantic_inputs(restored_include.c_header_dependencies))
+        for _, name in ipairs({
+            "s", "stream_alias", "stream_chain", "values", "values_alias",
+            "callback", "callback_alias",
+        }) do
+            assert.same(first[name], restored[name], name)
+        end
+        assert.equal(restored.s.type, restored.stream_chain.type)
+        assert.equal(restored.values.idxs, restored.values_alias.idxs)
+        assert.equal(restored.callback.params, restored.callback_alias.params)
+    end)
+
     it("keeps cached macro types unchanged when another header dereferences a literal", function()
         local first_path = header('#define TEXT "text"\n')
         local second_path = header('#define FIRST *"text"\n')

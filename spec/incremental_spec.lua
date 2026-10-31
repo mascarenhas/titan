@@ -903,6 +903,7 @@ describe("incremental configuration", function()
             [fixture_path("/compiler/titan-compiler/checker/entry.lua")] = "checker",
             [fixture_path("/compiler/titan-compiler/coder/generate.lua")] = "coder",
             [fixture_path("/compiler/c-parser/cpp.lua")] = "parser", [fixture_path("/real/titanc")] = "real frontend",
+            [fixture_path("/compiler/c-parser/cdefines.lua")] = "macro registrar",
             [fixture_path("/bin/titanc")] = "wrapper", [fixture_path("/sdk/common.h")] = "header", [native_tool("cc")] = "tool" })
         ctx.incremental_options = { compiler_root = fixture_path("/compiler"), frontend = fixture_path("/real/titanc"),
             preamble_path = fixture_path("/out/.titan/preamble.c"), compile_prefix = { native_tool("cc"), "-O2" },
@@ -953,6 +954,19 @@ describe("incremental configuration", function()
         assert.same({}, ctx.io.commands)
         assert.equal(compiler, incremental.configuration(ctx).compiler)
         assert.equal(1, #ctx.io.commands)
+    end)
+
+    it("invalidates compiler certificates after macro inference changes",
+    function()
+        local first = configured()
+        local second, files = configured()
+        files[fixture_path("/compiler/c-parser/cdefines.lua")] =
+            "corrected macro registrar"
+        local before, after = incremental.configuration(first),
+            incremental.configuration(second)
+        assert.not_equal(before.compiler, after.compiler)
+        assert.not_equal(before.digest, after.digest)
+        assert.equal(before.options, after.options)
     end)
 
     it("separates compile policy from resolution and link-only settings", function()
@@ -1108,8 +1122,8 @@ describe("incremental configuration", function()
         assert.equal(expected_status, config_status)
         assert.is_nil(configured_ctx.incremental_configuration)
         assert.same({}, configured_ctx.io.commands)
-        assert.equal(5, incremental.counters(configured_ctx).file_reads)
-        assert.equal(5, incremental.counters(configured_ctx).file_hashes)
+        assert.equal(6, incremental.counters(configured_ctx).file_reads)
+        assert.equal(6, incremental.counters(configured_ctx).file_hashes)
     end)
 
     it("admits explicit POSIX paths without consulting an unset PATH", function()

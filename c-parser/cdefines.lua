@@ -317,7 +317,13 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
         elseif floating_literal_type(val) then
             return floating_literal_type(val)
         else
-            return base_c_types.INT
+            local declaration = lst[val]
+            if declaration and type(declaration.type) == "table" then
+                return declaration.type
+            elseif declaration and declaration.type == "enum" then
+                return base_c_types.INT
+            end
+            return nil
         end
     end
 
@@ -462,19 +468,21 @@ function cdefines.classify_field_macro(name, define_set)
     return cdefines.classify_expanded_field_macro(name, text)
 end
 
-local function function_alias_declaration(lst, name, exp)
+local function identifier_alias_declaration(lst, name, exp)
     local target_name = bare_identifier(exp)
     if not target_name then return nil end
     local target = lst[target_name]
-    if not target or target.type ~= "function" then
+    if not target or (target.type ~= "function"
+       and target.type ~= "functionptr"
+       and type(target.type) ~= "table") then
         return nil
     end
 
-    -- The preprocessor has already renamed the declaration itself, so the
-    -- replacement identifier owns the authoritative parsed signature. Publish
-    -- an ordinary function declaration under the macro spelling used by
-    -- generated C. Keep the nested declaration objects shared: registration is
-    -- complete before this pass and no consumer mutates the signature.
+    -- The replacement declaration is authoritative for objects as well as
+    -- functions: copying only its token type loses qualifiers, array bounds,
+    -- callback signatures and declaration origins. Keep nested declaration
+    -- objects shared read-only.
+    -- Self-referential macros must not replace or duplicate the declaration.
     if target_name == name then
         return target
     end
@@ -526,11 +534,11 @@ function cdefines.register_define(lst, name, text, _)
         return
     end
 
-    local function_alias =
-        function_alias_declaration(lst, name, exp)
-    if function_alias then
-        if lst[name] ~= function_alias then
-            add_type(lst, name, function_alias)
+    local identifier_alias =
+        identifier_alias_declaration(lst, name, exp)
+    if identifier_alias then
+        if lst[name] ~= identifier_alias then
+            add_type(lst, name, identifier_alias)
         end
         return
     end

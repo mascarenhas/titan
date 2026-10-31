@@ -511,6 +511,90 @@ describe("C object-like macro metadata", function()
         assert.equal(2, #types)
     end)
 
+    it("preserves object and callable identifier aliases and self references",
+    function()
+        for _, target in ipairs({
+            {
+                name = "ffi_stream",
+                type = { "FILE", "*" },
+                _declarator_base = { "FILE" },
+                _declarator_ops = {
+                    { pointer = true, qualifiers = { "const" } },
+                },
+                _declaration_provenance = { header = "stream.h" },
+            },
+            {
+                name = "ffi_values",
+                type = { "int" },
+                idxs = { 3 },
+            },
+            {
+                name = "ffi_callback",
+                type = "functionptr",
+                ret = { type = { "int" } },
+                params = { { name = "value", type = { "int" } } },
+                vararg = false,
+            },
+            {
+                name = "ffi_function",
+                type = "function",
+                ret = { type = { "void", "*" } },
+                params = {},
+                vararg = false,
+            },
+        }) do
+            local types = {
+                [target.name] = target,
+                { name = target.name, type = target },
+            }
+            for index, replacement in ipairs({
+                target.name, "( " .. target.name .. " )",
+                "( ( " .. target.name .. " ) )",
+            }) do
+                local count = #types
+                cdefines.register_define(
+                    types, target.name, replacement, {})
+                assert.equal(target, types[target.name])
+                assert.equal(count, #types)
+
+                local name = "ffi_alias_" .. index
+                cdefines.register_define(types, name, replacement, {})
+                local alias = assert(types[name])
+                assert.not_equal(target, alias)
+                assert.equal(name, alias.name)
+                for key, value in pairs(target) do
+                    if key ~= "name" then
+                        assert.equal(value, alias[key], key)
+                    end
+                end
+                assert.equal(alias, types[#types].type)
+                assert.is_nil(alias.macro_expression)
+            end
+        end
+    end)
+
+    it("uses declared expression leaves and never invents an unknown int",
+    function()
+        local pointer = { name = "ffi_pointer", type = { "const", "char", "*" } }
+        local types = {
+            ffi_pointer = pointer,
+            { name = "ffi_pointer", type = pointer },
+        }
+        for _, replacement in ipairs({
+            "ffi_missing", "( ffi_missing )", "ffi_missing + 1",
+            "ffi_missing * 2",
+        }) do
+            cdefines.register_define(
+                types, "ffi_pointer", replacement, {})
+            assert.equal(pointer, types.ffi_pointer, replacement)
+            assert.equal(1, #types, replacement)
+        end
+        cdefines.register_define(
+            types, "ffi_pointee", "* ffi_pointer", {})
+        assert.same({ "const", "char" }, types.ffi_pointee.type)
+        assert.same({ "const", "char", "*" }, pointer.type)
+    end)
+
     it("replaces shadowed typedefs but suppresses macro-only type aliases",
     function()
         local target = {

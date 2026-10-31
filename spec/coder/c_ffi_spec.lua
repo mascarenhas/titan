@@ -333,6 +333,57 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("executes self-referential and non-self object and callable aliases",
+    function()
+        with_header([[
+            #include <stdio.h>
+            extern FILE *const s;
+            FILE *const s = NULL;
+            #define s (s)
+            #define stream_alias (s)
+            #define stream_chain stream_alias
+            static int values[3] = { 7, 11, 13 };
+            #define values_alias (values)
+            static int add_one(int value) { return value + 1; }
+            #define function_alias (add_one)
+            static int (*const callback)(int) = add_one;
+            #define callback (callback)
+            #define callback_alias callback
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                function streams_are_null(): boolean
+                    local original: foreign *FILE = ffi.s
+                    local alias: foreign *FILE = ffi.stream_alias
+                    local chain: foreign *FILE = ffi.stream_chain
+                    return original == nil and alias == original
+                        and chain == original
+                end
+
+                function read_aliases(): integer
+                    return ffi.function_alias(ffi.values_alias[0])
+                        + ffi.callback(ffi.values_alias[1])
+                        + ffi.callback_alias(ffi.values_alias[2])
+                end
+            ]], [[
+                assert(test.streams_are_null())
+                assert(test.read_aliases() == 34)
+            ]])
+        end)
+    end)
+
+    it("passes real standard stream macro values to fwrite", function()
+        h.run_coder([[
+            foreign import "stdio.h"
+
+            function write_empty(): boolean
+                return ffi.fwrite("", 1, 0, ffi.stdout) == 0
+                    and ffi.fwrite("", 1, 0, ffi.stderr) == 0
+            end
+        ]], [[ assert(test.write_empty()) ]])
+    end)
+
     it("preserves Udata pointers as full-userdata TValues", function()
         with_header([[
             typedef struct Udata Udata;
