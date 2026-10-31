@@ -452,12 +452,18 @@ for (const cdp of ["pipe", "port"]) {
         const banner = "if [ \"$1\" = --version ]; then printf 'Chromium 156.0.8078.80\\n'; exit 0; fi\n";
         try {
             const scripts = [
-                ["exit", banner + "exit 9\n", 75],
+                ["exit", banner + "printf 'fake Chromium stderr before exit\\n' >&2\nexit 9\n",
+                    75, 9, null, "fake Chromium stderr before exit"],
+                ["pipe-close", banner + "exec 4>&-\nprintf '%s\\n' 'discarded-stderr-prefix-" + "x".repeat(10000) +
+                    "final-stderr-tail-after-pipe-close' >&2\nexit 17\n",
+                    75, 17, null, "final-stderr-tail-after-pipe-close"],
+                ["signal", banner + "printf 'fake Chromium stderr before signal\\n' >&2\nkill -TERM \"$$\"\n",
+                    75, null, "SIGTERM", "fake Chromium stderr before signal"],
                 ["connect", banner + "for arg in \"$@\"; do case \"$arg\" in --user-data-dir=*) profile=${arg#--user-data-dir=} ;; esac; done\n" +
                     "printf '1\\n/devtools/browser/missing\\n' > \"$profile/DevToolsActivePort\"\nexec /bin/sleep 60\n", cdp === "port" ? 75 : 72],
                 ["spawn", "if [ \"$1\" = --version ]; then printf 'Chromium 156.0.8078.80\\n'; rm -- \"$0\"; exit 0; fi\nexit 9\n", 75],
             ];
-            for (const [name, script, status] of scripts) await t.test(name, async () => {
+            for (const [name, script, status, exitCode, exitSignal, stderrTail] of scripts) await t.test(name, async () => {
                 await writeFile(chrome, "#!/bin/sh\n" + script, { mode: 0o755 });
                 const before = performance.now();
                 const result = await run(["--engine", "chromium", "--chrome", chrome, "--cdp", cdp,
@@ -465,6 +471,13 @@ for (const cdp of ["pipe", "port"]) {
                 assert.equal(result.status, status, result.stderr.toString());
                 assert.equal(result.stdout.length, 0);
                 assert.ok(performance.now() - before < 10000, "launch/connect cleanup was not bounded");
+                if (stderrTail) {
+                    assert.ok(result.stderr.includes(Buffer.from(`Chromium child status: exit code=${JSON.stringify(exitCode)}, signal=${JSON.stringify(exitSignal)}`)),
+                        result.stderr.toString());
+                    assert.ok(result.stderr.includes(Buffer.from("Chromium stderr tail:\n")), result.stderr.toString());
+                    assert.ok(result.stderr.includes(Buffer.from(stderrTail)), result.stderr.toString());
+                    if (name === "pipe-close") assert.doesNotMatch(result.stderr.toString(), /discarded-stderr-prefix-/);
+                }
                 await cleanChromium(result);
             });
         } finally { await rm(directory, { recursive: true, force: true }); }
