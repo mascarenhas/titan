@@ -378,7 +378,12 @@ jobs:
             echo "$TITAN_CHROME_SHA256  $archive" | sha256sum -c --strict -
             rm -rf "$TITAN_CHROME_ROOT"
             mkdir -p "$TITAN_CHROME_ROOT"
-            unzip -q "$archive" -d "$TITAN_CHROME_ROOT"
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -q "$archive" -d "$TITAN_CHROME_ROOT"
+            else
+              python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
+                "$archive" "$TITAN_CHROME_ROOT"
+            fi
             rm -f "$archive"
           fi
           test -x "$chrome"
@@ -506,6 +511,18 @@ jobs:
               test -f "$output/$image.wasm"
             done
           done
+          # One image at the allowed measurement profile proves the guard
+          # survives export minification: baseline purpose, O2, assertions off.
+          optimized="$root/optimized"
+          mkdir -p "$optimized"
+          TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e \
+            "package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='baseline',optimization='O2',assertions=0}" \
+            "$GITHUB_WORKSPACE/titanc" -q --target browser --no-uv-bootstrap \
+            --tree spec/fixtures/browser_loader -o "$optimized" \
+            --exe "$optimized/fidelity.mjs" \
+            --c-source spec/fixtures/browser_loader/loader.c fidelity
+          test -f "$optimized/fidelity.mjs"
+          test -f "$optimized/fidelity.wasm"
 
       - name: Run the portable loader suite under Node and Chromium
         run: |
@@ -527,6 +544,17 @@ jobs:
             echo "loader suite: $engine"
             "$runner" --engine "$engine" --root "$GITHUB_WORKSPACE" \
               --js-test spec/browser/loader.test.mjs -- "${images[@]}"
+          done
+
+      - name: Run the optimized guard suite under Node and Chromium
+        run: |
+          set -euo pipefail
+          runner="$PREFIX/lib/titan-browser/0.6/titan-browser-run"
+          for engine in node chromium; do
+            echo "optimized guard: $engine"
+            "$runner" --engine "$engine" --root "$GITHUB_WORKSPACE" \
+              --js-test spec/fixtures/browser_loader/optimized-guard.mjs -- \
+              out/browser/loader/optimized/fidelity.mjs
           done
 
       - name: Run the browser runner supervisor suite
