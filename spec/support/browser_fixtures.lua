@@ -13,6 +13,11 @@ M.features = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue 
 M.record_keys = { "fork_revision", "archive_sha256", "headers_sha256",
     "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
 M.banner = "# Lua 5.5.1 browser build record v1\n"
+M.target_defines = {
+    "-DTITAN_TARGET_BROWSER=1",
+    "-DTITAN_COROUTINE_STACK_SIZE=262144",
+    "-DMCO_ASYNCFY_STACK_SIZE=65536",
+}
 
 function M.fingerprint()
     return { format = "wasm", word_size = 32, linking_version = 2, features = M.features }
@@ -89,13 +94,13 @@ function M.descriptor(root, overrides)
     local tools = (platform.windows and "C:" or "") .. "/emsdk/upstream/emscripten/"
     local flags = { "--std=c99", "-O2", "-Wall", "-Wno-unused-but-set-variable",
         "-Wno-unused-function", "-gline-tables-only", "-sSUPPORT_LONGJMP=emscripten",
-        "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", "-DTITAN_TARGET_BROWSER=1" }
+        "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(M.target_defines) }
     local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
         tools = { cc = { tools .. "emcc" }, ar = { tools .. "emar" },
             ranlib = { tools .. "emranlib" }, version = "6.0.13", source = "EMSDK",
             location = tools:sub(1, -2), version_output = "emcc (Emscripten) 6.0.13\n" },
         compile_flags = flags, include_dirs = { paths.lua_source, paths.include },
-        target_defines = { "-DTITAN_TARGET_BROWSER=1" }, paths = paths,
+        target_defines = { table.unpack(M.target_defines) }, paths = paths,
         lua = { path = paths.lua_record, record = record, record_sha256 = sha256.hex(record_text) },
         profile_data = profile, profile_identity = profile.identity, fingerprint = M.fingerprint(),
         probe_cache_directory = paths.root .. "/var/cache/titan-probes/browser-6.0.13/" .. cprobe_cache.VERSION,

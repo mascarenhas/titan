@@ -168,6 +168,9 @@ describe("browser target descriptor", function()
         contains(flags, "-c")
         contains(flags, "-sSUPPORT_LONGJMP=emscripten")
         contains(flags, "-DTITAN_TARGET_BROWSER=1")
+        contains(flags, "-DTITAN_COROUTINE_STACK_SIZE=262144")
+        contains(flags, "-DMCO_ASYNCFY_STACK_SIZE=65536")
+        assert.same(fixtures.target_defines, browser.export(descriptor.target_defines))
         assert.is_nil(flags:find("-fPIC", 1, true))
         assert.is_nil(flags:find("-flto", 1, true))
     end)
@@ -214,6 +217,9 @@ describe("browser target descriptor", function()
         { "missing browser flags", function(data) data.compile_flags = { "--std=c99" } end },
         { "missing C99 flag", function(data) remove_flag(data, "--std=c99") end },
         { "missing target define", function(data) remove_flag(data, "-DTITAN_TARGET_BROWSER=1") end },
+        { "missing coroutine stack define", function(data) remove_flag(data, "-DTITAN_COROUTINE_STACK_SIZE=262144") end },
+        { "missing fiber Asyncify stack define", function(data) remove_flag(data, "-DMCO_ASYNCFY_STACK_SIZE=65536") end },
+        { "inconsistent target defines", function(data) data.target_defines = { "-DTITAN_TARGET_BROWSER=1" } end },
         { "missing Lua define", function(data) remove_flag(data, "-DLUA_USE_BROWSER") end },
         { "missing longjmp mode", function(data) remove_flag(data, "-sSUPPORT_LONGJMP=emscripten") end },
         { "LTO flag", function(data) data.compile_flags[#data.compile_flags + 1] = "-flto" end },
@@ -767,6 +773,47 @@ describe("browser target descriptor", function()
         assert.equal(1, result.status)
         contains(result.output, "browser descriptor fixture failure")
         assert.is_nil(result.output:find("stack traceback", 1, true))
+    end)
+
+    it("exposes 2 MiB TITAN_COROUTINE_STACK_SIZE by default in titan.h and 256 KiB / 64 KiB under browser target defines", function()
+        local strategy = compiler_io.new_sync()
+        local root = assert(strategy:cwd())
+        local prefix = require("spec.support.installed_prefix").active()
+        local runtime_dir = root .. "/titan-runtime"
+        local lua_dir = prefix .. "/src/lua-5.5.1"
+        if not strategy:stat(lua_dir .. "/lua.h") then lua_dir = root .. "/lua-5.5.1/src" end
+        local profile = fixtures.profile()
+        local native_types, native_err = cdriver.process_file("titan.h", {
+            compiler_include_dirs = { lua_dir, runtime_dir },
+            cppflags = {},
+        })
+        assert.truthy(native_types, native_err)
+        local native_stack = assert(csemantics.evaluate_macro_expression(
+            profile, native_types.TITAN_COROUTINE_STACK_SIZE.macro_expression))
+        assert.equal(2 * 1024 * 1024, tonumber(native_stack.value))
+
+        local browser_types, browser_err = cdriver.process_file("titan.h", {
+            compiler_include_dirs = { lua_dir, runtime_dir },
+            cppflags = { table.unpack(fixtures.target_defines) },
+        })
+        assert.truthy(browser_types, browser_err)
+        local browser_stack = assert(csemantics.evaluate_macro_expression(
+            profile, browser_types.TITAN_COROUTINE_STACK_SIZE.macro_expression))
+        assert.equal(262144, tonumber(browser_stack.value))
+
+        local asyncfy_stack = assert(csemantics.evaluate_macro_expression(
+            profile, browser_types.MCO_ASYNCFY_STACK_SIZE.macro_expression))
+        assert.equal(65536, tonumber(asyncfy_stack.value))
+        assert.is_nil(browser_types.MCO_DEFAULT_STACK_SIZE)
+        assert.is_nil(browser_types.MCO_MIN_STACK_SIZE)
+        local mco_source = assert(strategy:read_file(runtime_dir .. "/minicoro.h"))
+        contains(mco_source, "#ifndef MCO_MIN_STACK_SIZE\n#define MCO_MIN_STACK_SIZE 32768")
+        contains(mco_source, "#ifndef MCO_ASYNCFY_STACK_SIZE\n#define MCO_ASYNCFY_STACK_SIZE 16384")
+
+        local coro_source = assert(strategy:read_file(root .. "/titan/coroutine.titan"))
+        contains(coro_source, 'foreign import "titan.h"')
+        contains(coro_source, "ffi.TITAN_COROUTINE_STACK_SIZE")
+        assert.is_nil(coro_source:find("local STACK_SIZE =", 1, true))
     end)
 end)
 
