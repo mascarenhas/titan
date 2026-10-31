@@ -21,11 +21,12 @@ local function run(argv)
 end
 
 local function cli(info, ...)
+    local setup = string.format("package.path=%q..package.path;",
+        repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. (info.compiler_setup or "")
     local argv = { "env", "TITAN_ROOT=" .. (info.sdk_prefix or info.prefix), "TITAN_TARGET=", "TITAN_PATH_0_6=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-        info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
-            repository .. "/?.lua;" .. repository .. "/?/init.lua;"), repository .. "/titanc",
-        "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", workspace .. "/out" }
+        info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
+        "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", info.output or workspace .. "/out" }
     for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
     return run(argv)
 end
@@ -160,6 +161,49 @@ describe("real browser test image", function()
             "; run 'make browser-sdk PREFIX=" .. prefix .. "'", 1, true), result.output)
         assert.is_nil(lfs.attributes(workspace .. "/out/image_main.mjs"))
         assert.is_nil(lfs.attributes(workspace .. "/out/image_main.wasm"))
+    end)
+
+    it("certifies optimization for FFI, generated workers and authored C together", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/optimized.h", [[
+#ifndef TITAN_IMAGE_OPTIMIZED_H
+#define TITAN_IMAGE_OPTIMIZED_H
+#if !defined(__OPTIMIZE__) || !__OPTIMIZE__
+#error optimization did not reach this compilation
+#endif
+#define TITAN_IMAGE_OPTIMIZED 42
+#endif
+]])
+        for _, module in ipairs({ "opt_left", "opt_right" }) do
+            files.write(workspace .. "/src/" .. module .. ".titan", [[
+foreign import "optimized.h"
+function answer(): integer
+    return ffi.TITAN_IMAGE_OPTIMIZED
+end
+]])
+        end
+        files.write(workspace .. "/src/helper.c",
+            '#include "optimized.h"\nint titan_image_optimized(void) { return TITAN_IMAGE_OPTIMIZED; }\n')
+        local identities = {}
+        for _, optimization in ipairs({ "O1", "O2" }) do
+            local variant = { prefix = info.prefix, output = workspace .. "/" .. optimization,
+                compiler_setup = "require('titan-compiler.driver').browser_link_options=" ..
+                    "{purpose='baseline',assertions=2,optimization='" .. optimization .. "'};" }
+            local result = cli(variant, "-c", "--incremental", "--jobs", "2", "--c-source",
+                workspace .. "/src/helper.c", "opt_left", "opt_right")
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            local metadata = require "titan-compiler.objectmetadata"
+            local original = read(variant.output .. "/opt_left.o")
+            local record = assert(metadata.read(original, variant.output .. "/opt_left.o"))
+            identities[optimization] = record.object_metadata.certificate.configuration.toolchain
+            result = cli(variant, "-c", "--incremental", "--jobs", "2", "--c-source",
+                workspace .. "/src/helper.c", "opt_left", "opt_right")
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            assert.equal(original, read(variant.output .. "/opt_left.o"))
+        end
+        assert.not_equal(identities.O1, identities.O2)
     end)
 
     it("links the normal CLI test runner and executes one selected case through the installed loader", function()
