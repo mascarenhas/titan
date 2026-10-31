@@ -1,0 +1,105 @@
+local test = import "test"
+local coroutine = import "coroutine"
+foreign import "trace.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
+
+local type Action = function(): ()
+local type Shape = function(Action): ()
+local type Pin = function(Action, function(value): ()): ()
+
+local function load(which: integer): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 2) ~= 0)
+  local status = ffi.LUA_OK
+  if which == 0 then status = ffi.browser_trace_load_shape(L)
+  elseif which == 1 then status = ffi.browser_trace_load_pin(L)
+  else status = ffi.browser_trace_load_resume(L) end
+  test.assert(status == ffi.LUA_OK)
+  test.assert(ffi.lua_pcallk(L, 0, 1, 0, 0, nil) == ffi.LUA_OK)
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function fail()
+  raise "trace-original"
+end
+
+local function reraiser(payload: value)
+  raise payload
+end
+
+local function shape(trace: string)
+  test.assert(ffi.strstr(trace, "browser-trace.lua:2: in") ~= nil,
+              "null backend omitted named Lua source/line: " .. trace)
+  test.assert(ffi.strstr(trace, "[C]: in") ~= nil,
+              "null backend hid C/Titan wrapper frames: " .. trace)
+  test.assert(ffi.strstr(trace, "(...tail calls...)") ~= nil,
+              "null backend omitted Lua tail-call marker: " .. trace)
+  test.assert(ffi.strstr(trace, "0x") == nil and ffi.strstr(trace, "wasm-function") == nil,
+              "null backend exposed native/engine addresses: " .. trace)
+end
+
+function test_null_trace_shape(context: test.Context)
+  local invoke: Shape = load(0)
+  local caught = false
+  do
+    invoke(fail)
+  catch
+    caught = true
+    test.assert(error == "trace-original")
+    shape(traceback)
+    context:log("TRACE shape=" .. traceback)
+  end
+  test.assert(caught)
+end
+
+local saved_trace = ""
+local function bare_rethrow()
+  local invoke: Shape = load(0)
+  invoke(fail)
+catch
+  saved_trace = traceback
+  raise
+end
+
+function test_null_bare_rethrow_preserves_trace(_context: test.Context)
+  local caught = false
+  do
+    bare_rethrow()
+  catch
+    caught = true
+    test.assert(error == "trace-original" and traceback == saved_trace,
+                "bare rethrow replaced original null trace")
+    shape(traceback)
+  end
+  test.assert(caught)
+end
+
+function test_null_pin_clear_and_fresh_raise(_context: test.Context)
+  local invoke: Pin = load(1)
+  invoke(fail, reraiser)
+end
+
+function test_null_coroutine_trace_appends(context: test.Context)
+  local invoke: Shape = load(0)
+  local resume: Shape = load(2)
+  local co = coroutine.create(function(_: value): value
+    invoke(fail)
+    return nil
+  end, "trace")
+  local caught = false
+  do
+    resume(function() co:resume(nil) end)
+  catch
+    caught = true
+    test.assert(error == "trace-original")
+    shape(traceback)
+    test.assert(ffi.strstr(traceback, "browser-resume.lua:2: in") ~= nil,
+                "coroutine propagation omitted caller Lua frames: " .. traceback)
+    test.assert(co:status() == "dead")
+    context:log("TRACE coroutine_append=" .. traceback)
+  end
+  test.assert(caught)
+end

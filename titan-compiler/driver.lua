@@ -702,11 +702,19 @@ function driver._finish_target_initialization(context)
             end
             local runtime_include = driver.SOURCE_CHECKOUT_ROOT and
                 root_join(driver.SOURCE_CHECKOUT_ROOT, "titan-runtime") or paths.include
-            local extras = driver.NATIVE_COMPILE_FLAGS
-            if not extras then
-                extras = {}
+            local extras = {}
+            if driver.NATIVE_COMPILE_FLAGS then
+                for _, flag in ipairs(driver.NATIVE_COMPILE_FLAGS) do extras[#extras + 1] = flag end
+            else
                 for _, flag in ipairs(driver.EXTRA_CPPFLAGS or {}) do extras[#extras + 1] = flag end
                 for _, flag in ipairs(driver.EXTRA_CFLAGS or {}) do extras[#extras + 1] = flag end
+            end
+            -- Measurement optimization is part of the descriptor, not a
+            -- coordinator-only argv suffix: probes and imported workers must
+            -- compile and certify exactly the same configuration.
+            local optimization = driver.browser_link_options and driver.browser_link_options.optimization
+            if optimization == "O1" or optimization == "O2" then
+                extras[#extras + 1] = "-" .. optimization
             end
             local descriptor, err = driver._browser_target.build(context, {
                 paths = paths, runtime_include = runtime_include, compile_flags = extras,
@@ -714,6 +722,10 @@ function driver._finish_target_initialization(context)
                 probe_cache_directory = probe_cache_directory,
             })
             if not descriptor then return nil, err end
+            if driver.browser_link_options then
+                local plan, profile_error = driver.browserlink.profile(descriptor, driver.browser_link_options)
+                if not plan then return nil, profile_error end
+            end
             context.target_descriptor = descriptor
         end
         if not context.target_profile then
@@ -1666,11 +1678,6 @@ local function compiler_argv(include_extra_compile_flags, context, user_c_helper
         if not descriptor then return nil, err end
         local args = { table.unpack(descriptor.tools.cc) }
         append_argv(args, descriptor.compile_flags)
-        if driver.browser_link_options then
-            local plan, plan_error = driver.browser_link_plan(context)
-            if not plan then return nil, plan_error end
-            append_argv(args, plan.compile_flags)
-        end
         return args
     end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end

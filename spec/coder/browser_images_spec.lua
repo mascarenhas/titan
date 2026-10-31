@@ -21,13 +21,36 @@ local function run(argv)
 end
 
 local function cli(info, ...)
+    local setup = string.format("package.path=%q..package.path;",
+        repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. (info.compiler_setup or "")
     local argv = { "env", "TITAN_ROOT=" .. (info.sdk_prefix or info.prefix), "TITAN_TARGET=", "TITAN_PATH_0_6=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-        info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
-            repository .. "/?.lua;" .. repository .. "/?/init.lua;"), repository .. "/titanc",
-        "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", workspace .. "/out" }
+        info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
+        "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", info.output or workspace .. "/out" }
     for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
     return run(argv)
+end
+
+local function c_image(info, name, worker)
+    local output = workspace .. "/out"
+    files.mkdir(output)
+    local script = string.format([[
+local driver = require "titan-compiler.driver"
+driver.TITAN_SOURCE_PATH = %q
+local output, name, worker = %q, %q, %q
+local context = driver.new_resolver_context({ target = "browser", output_root = output })
+local ok, why, code = driver.compile_browser_image(driver.browser_c_image_contents(worker),
+    output .. "/" .. name .. ".c", output .. "/" .. name .. ".mjs", {}, {}, {}, false,
+    { context = context, profile = { purpose = "protocol", assertions = 2 } })
+assert(ok, tostring(why) .. (code and (", exit " .. code) or ""))
+assert(driver.close_resolver_context(context))
+]], workspace .. "/src", output, name, worker)
+    local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
+        "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+        info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
+            repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script })
+    assert.is_true(result.ok, result.output or result.diagnostic)
+    return output .. "/" .. name .. ".mjs"
 end
 
 describe("browser image profile and SDK readiness", function()
@@ -107,6 +130,17 @@ describe("browser image profile and SDK readiness", function()
         assert.truthy(flags:find('-sEXPORTED_FUNCTIONS=["_main","_malloc","_free"]', 1, true))
     end)
 
+    it("preserves byte-oriented FS and TTY for every purpose including the interpreter baseline", function()
+        for _, purpose in ipairs({ "program", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+            for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
+                local plan = assert(browserlink.profile(fixtures.descriptor(),
+                    { purpose = purpose, assertions = 2, entry = entry }))
+                assert.truthy(table.concat(plan.link_flags, " "):find("-sFORCE_FILESYSTEM=1", 1, true))
+                assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+            end
+        end
+    end)
+
     it("uses Wasm's supported input trace instead of an ELF-only dependency flag", function()
         local context = { target_descriptor = fixtures.descriptor(), link_kind = "test" }
         local backend = linkcertificate.linker_backend(context)
@@ -122,6 +156,7 @@ describe("browser image profile and SDK readiness", function()
     it("rejects trailing attempts to override profile-owned settings", function()
         for _, flags in ipairs({ { "-sASYNCIFY=0" }, { "-s", "ASYNCIFY_IGNORE_INDIRECT=1" },
             { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "-UTITAN_TARGET_BROWSER" }, { "-sNO_ASYNCIFY=1" },
+            { "-sFORCE_FILESYSTEM=0" }, { "-sFILESYSTEM=0" }, { "-sMINIMAL_RUNTIME=1" },
             { "--js-library=x.js" }, { "--no-entry" } }) do
             assert.is_nil(browserlink.validate_extras(flags))
         end
@@ -137,6 +172,31 @@ describe("real browser test image", function()
     after_each(function()
         if workspace then files.remove(workspace); workspace = nil end
     end)
+    it("delivers pure-C stdio-only binary tails to Chromium byte sinks", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        c_image(info, "stdio-image", [[
+static int titan_browser_worker(lua_State *L) {
+    static const unsigned char out[] = {65, 0, 255, 195, 40};
+    static const unsigned char err[] = {66, 0, 254, 226, 40};
+    if (setvbuf(stdout, NULL, _IOFBF, BUFSIZ) != 0 ||
+        setvbuf(stderr, NULL, _IOFBF, BUFSIZ) != 0)
+        return luaL_error(L, "cannot buffer stdio fixture");
+    if (fwrite(out, 1, sizeof out, stdout) != sizeof out ||
+        fwrite(err, 1, sizeof err, stderr) != sizeof err)
+        return luaL_error(L, "cannot write stdio fixture");
+    lua_pushinteger(L, 0);
+    return 1;
+}
+]])
+        local fixture = workspace .. "/out/stdio-only.mjs"
+        files.write(fixture, read(repository .. "/spec/fixtures/browser_images/stdio-only.mjs"))
+        local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", "chromium",
+            "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--", "stdio-image.mjs" })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+    end)
+
     it("permits objects without the SDK and diagnoses image readiness and suffixes precisely", function()
         local info, why = toolchain.require(); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
@@ -160,6 +220,49 @@ describe("real browser test image", function()
             "; run 'make browser-sdk PREFIX=" .. prefix .. "'", 1, true), result.output)
         assert.is_nil(lfs.attributes(workspace .. "/out/image_main.mjs"))
         assert.is_nil(lfs.attributes(workspace .. "/out/image_main.wasm"))
+    end)
+
+    it("certifies optimization for FFI, generated workers and authored C together", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/optimized.h", [[
+#ifndef TITAN_IMAGE_OPTIMIZED_H
+#define TITAN_IMAGE_OPTIMIZED_H
+#if !defined(__OPTIMIZE__) || !__OPTIMIZE__
+#error optimization did not reach this compilation
+#endif
+#define TITAN_IMAGE_OPTIMIZED 42
+#endif
+]])
+        for _, module in ipairs({ "opt_left", "opt_right" }) do
+            files.write(workspace .. "/src/" .. module .. ".titan", [[
+foreign import "optimized.h"
+function answer(): integer
+    return ffi.TITAN_IMAGE_OPTIMIZED
+end
+]])
+        end
+        files.write(workspace .. "/src/helper.c",
+            '#include "optimized.h"\nint titan_image_optimized(void) { return TITAN_IMAGE_OPTIMIZED; }\n')
+        local identities = {}
+        for _, optimization in ipairs({ "O1", "O2" }) do
+            local variant = { prefix = info.prefix, output = workspace .. "/" .. optimization,
+                compiler_setup = "require('titan-compiler.driver').browser_link_options=" ..
+                    "{purpose='baseline',assertions=2,optimization='" .. optimization .. "'};" }
+            local result = cli(variant, "-c", "--incremental", "--jobs", "2", "--c-source",
+                workspace .. "/src/helper.c", "opt_left", "opt_right")
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            local metadata = require "titan-compiler.objectmetadata"
+            local original = read(variant.output .. "/opt_left.o")
+            local record = assert(metadata.read(original, variant.output .. "/opt_left.o"))
+            identities[optimization] = record.object_metadata.certificate.configuration.toolchain
+            result = cli(variant, "-c", "--incremental", "--jobs", "2", "--c-source",
+                workspace .. "/src/helper.c", "opt_left", "opt_right")
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            assert.equal(original, read(variant.output .. "/opt_left.o"))
+        end
+        assert.not_equal(identities.O1, identities.O2)
     end)
 
     it("links the normal CLI test runner and executes one selected case through the installed loader", function()

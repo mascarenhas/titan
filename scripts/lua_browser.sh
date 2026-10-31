@@ -99,6 +99,7 @@ build_and_install() {
 		fi
 	fi
 	"$make_cmd" -C "$lua_dir" install-browser PREFIX="$prefix" \
+		FORK_REVISION="${FORK_REVISION:-}" \
 		BROWSER_CC="$effective_cc" \
 		BROWSER_AR="$effective_ar" \
 		BROWSER_RANLIB="$effective_ranlib" \

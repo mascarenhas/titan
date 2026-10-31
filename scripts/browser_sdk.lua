@@ -83,6 +83,11 @@ local function check_no_forbidden_symbols(archive_path, archive)
     for _, member in ipairs(archive.members or {}) do
         local object = member.object
         for _, import in ipairs(object and object.imports or {}) do
+            if import.module == "GOT.mem" or import.module == "GOT.func" then
+                fail(string.format("%s(%s): browser archive contains PIC import %s.%s",
+                    archive_path, tostring(member.display_name or member.origin),
+                    tostring(import.module), tostring(import.name)))
+            end
             if forbidden(import.name) then
                 fail(string.format("%s(%s): browser archive imports forbidden symbol %q",
                     archive_path, tostring(member.display_name or member.origin), import.name))
@@ -219,13 +224,22 @@ if action == "prepare" then
 elseif action == "stage-runtime" then
     local build_dir = assert(select(2, ...), "build_dir is required")
     local repo_root = assert(select(3, ...), "repo_root is required")
-    local object_paths = {}
-    for i = 4, select("#", ...) do
-        object_paths[#object_paths + 1] = select(i, ...)
-    end
-    local context, descriptor, assets = new_browser_context(build_dir)
     local runtime_members = { "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }
-    archive_certified_objects(context, descriptor, assets.runtime, runtime_members, object_paths)
+    local lpeg_members = { "lplcap.o", "lplcode.o", "lplprint.o", "lpltree.o", "lplvm.o" }
+    local total_expected = #runtime_members + #lpeg_members
+    local all_paths = {}
+    for i = 4, select("#", ...) do
+        all_paths[#all_paths + 1] = select(i, ...)
+    end
+    if #all_paths ~= total_expected then
+        fail(string.format("expected %d certified C objects, got %d", total_expected, #all_paths))
+    end
+    local runtime_paths, lpeg_paths = {}, {}
+    for i = 1, #runtime_members do runtime_paths[i] = all_paths[i] end
+    for i = 1, #lpeg_members do lpeg_paths[i] = all_paths[#runtime_members + i] end
+    local context, descriptor, assets = new_browser_context(build_dir)
+    archive_certified_objects(context, descriptor, assets.runtime, runtime_members, runtime_paths)
+    archive_certified_objects(context, descriptor, assets.lpeglabel, lpeg_members, lpeg_paths)
 
     local browser_src = repo_root .. "/titan-runtime/browser"
     copy_file_atomic(browser_src .. "/titan-browser-library.js", assets.js_library, false)
@@ -297,9 +311,10 @@ elseif action == "finalize" then
         "runner_module", "node_worker", "page", "lpeglabel", "provider",
     }) do
         local asset_path = assets[key]
-        if key ~= "lpeglabel" or lfs.attributes(asset_path, "mode") == "file" then
-            digest_inputs[#digest_inputs + 1] = asset_path
+        if lfs.attributes(asset_path, "mode") ~= "file" then
+            fail("missing staged browser SDK asset '" .. asset_path .. "'")
         end
+        digest_inputs[#digest_inputs + 1] = asset_path
     end
 
     local digest_ctx = {

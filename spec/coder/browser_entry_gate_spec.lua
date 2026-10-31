@@ -58,6 +58,8 @@ describe("browser real runtime entry gate", function()
                 info.node.version, info.chrome.version))
             workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
             files.write(workspace .. "/entry-gate.mjs", read(fixture .. "/entry-gate.mjs"))
+            files.write(workspace .. "/guard-regression.mjs",
+                read(repository .. "/spec/fixtures/browser_loader/guard-regression.mjs"))
             build(info, assertions, "entry_gate", "gate", true)
             build(info, assertions, "final_fiber", "final-fiber", false)
             receipt(info.sdk_root .. "/sdk-digests", "sdk-digests")
@@ -82,6 +84,13 @@ describe("browser real runtime entry gate", function()
                 assert.truthy(log:find('"verdict":"PASS"', 1, true), log)
                 assert.truthy(log:find('"items":9', 1, true), log)
                 assert.truthy(log:find('"waits":', 1, true), log)
+                local guard_ok, guard_log = run({ runner, "--engine", engine, "--timeout", "30000",
+                    "--grace", "1500", "--root", workspace, "--js-test", workspace .. "/guard-regression.mjs", "--",
+                    "assertions-" .. assertions .. "/gate.mjs" })
+                io.stdout:write(string.format("\nGUARD regression assertions=%d engine=%s\n%s\n",
+                    assertions, engine, guard_log))
+                io.stdout:flush()
+                assert.is_true(guard_ok, guard_log)
             end
         end)
     end

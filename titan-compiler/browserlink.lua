@@ -107,6 +107,7 @@ function M.profile(descriptor, options)
     add("-sMODULARIZE=1")
     add("-sEXPORT_ES6=1")
     add("-sENVIRONMENT=web,node")
+    add("-sFORCE_FILESYSTEM=1")
     local exports = entry == "titan" and '"_titan_browser_entry","_malloc","_free"' or
         '"_main","_malloc","_free"'
     if purpose == "gate" then
@@ -133,6 +134,7 @@ local owned = { SUPPORT_LONGJMP = true, ASYNCIFY = true, STACK_SIZE = true,
     INITIAL_MEMORY = true, ALLOW_MEMORY_GROWTH = true, MAXIMUM_MEMORY = true,
     ABORTING_MALLOC = true, EXIT_RUNTIME = true, INVOKE_RUN = true,
     MODULARIZE = true, EXPORT_ES6 = true, ENVIRONMENT = true,
+    FORCE_FILESYSTEM = true, FILESYSTEM = true, MINIMAL_RUNTIME = true,
     EXPORTED_FUNCTIONS = true, EXPORTED_RUNTIME_METHODS = true,
     INCOMING_MODULE_JS_API = true, ASSERTIONS = true, STACK_OVERFLOW_CHECK = true,
     TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
