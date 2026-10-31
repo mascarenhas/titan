@@ -39,7 +39,7 @@ end
 -- Isolate descriptor verification (covered by its own specs) with a validated,
 -- frozen fixture. Constructors, accessors and cache activation remain real.
 describe("browser semantic cache isolation", function()
-    local subject, root, contexts, saved_registry, saved_browser
+    local subject, root, contexts, saved_registry, saved_browser, saved_initialize_platform
     local function context(target, data)
         subject._browser_target = setmetatable({
             build = function() return data or descriptor(root) end,
@@ -56,10 +56,20 @@ describe("browser semantic cache isolation", function()
         subject = fresh_driver()
         subject.TITAN_SOURCE_PATH = root
         saved_browser = subject._browser_target
+        saved_initialize_platform = subject.initialize_platform
+        subject.initialize_platform = function(ctx)
+            if platform.windows and ctx.target == "browser" and not ctx._platform_initialized then
+                -- Model the supported host observation, not Windows browser
+                -- support. Keep native Windows provider lookup genuine.
+                ctx.uname, ctx.is_darwin, ctx._platform_initialized = "Linux", false, true
+            end
+            return saved_initialize_platform(ctx)
+        end
     end)
     after_each(function()
         for _, ctx in ipairs(contexts) do assert(subject.close_resolver_context(ctx)) end
         subject._browser_target = saved_browser
+        subject.initialize_platform = saved_initialize_platform
         types.registry = saved_registry
         files.remove(root)
     end)
@@ -70,7 +80,6 @@ describe("browser semantic cache isolation", function()
     end)
 
     it("rebinds the whole nominal closure, preserves same-target sharing, and never reactivates a stale context", function()
-        if platform.windows then pending("browser contexts require a Linux or macOS host") return end
         local first = context()
         subject.imported.owner = { kind = "source" }
         types.registry["owner.Record"] = { native = true }
@@ -93,7 +102,6 @@ describe("browser semantic cache isolation", function()
     end)
 
     it("selects native, browser, then native source interfaces and a warm compiled native provider without manual clearing", function()
-        if platform.windows then pending("browser contexts require a Linux or macOS host") return end
         files.write(root .. "/choice.native.titan", "record Item\n native_value: integer\nend\n")
         files.write(root .. "/choice.browser.titan", "record Item\n browser_value: string\nend\n")
         files.write(root .. "/titan/math.browser.titan", "function browser_only(): string return 'browser' end\n")
@@ -133,7 +141,6 @@ describe("browser semantic cache isolation", function()
     end)
 
     it("guards table-loader warm entries and semantic entry points before touching stale state", function()
-        if platform.windows then pending("browser contexts require a Linux or macOS host") return end
         local first = context()
         local imported = {}
         local loader = subject.tableloader({ cached = "record Item\n value: integer\nend\n" }, imported, {}, { context = first })
@@ -165,7 +172,6 @@ describe("browser semantic cache isolation", function()
     end)
 
     it("invalidates browser semantic caches when descriptor identity changes", function()
-        if platform.windows then pending("browser contexts require a Linux or macOS host") return end
         local first = context("browser")
         subject.imported.owner = { kind = "source" }
         types.registry["owner.Record"] = {}
@@ -191,13 +197,15 @@ describe("browser semantic cache isolation", function()
 end)
 
 describe("browser output-root ownership", function()
-    local subject, root, strategy, locks
+    local subject, root, strategy, locks, saved_registry
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
+        saved_registry = types.registry
         subject, strategy = fresh_driver(), compiler_io.new_sync()
     end)
     after_each(function()
         if locks then assert(locks:release()); locks = nil end
+        types.registry = saved_registry
         files.remove(root)
     end)
     local function ctx(target)
