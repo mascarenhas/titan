@@ -563,8 +563,8 @@ end
 driver.TITAN_SOURCE_PATH = "."
 driver.EMIT_LINE_DIRECTIVES = platform.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 -- Set by the titanc CLI when its live progress renderer owns terminal stderr:
--- a child that would write into the region is captured and replayed above it
--- instead. Every other caller leaves it nil and children inherit stderr.
+-- build children are captured and replayed above that region. Otherwise build
+-- commands inherit stderr; capability probes capture and discard independently.
 driver.LIVE_PROGRESS = nil
 
 -- A native batch waits in the private `_jobserver_wait` helper, which blocks
@@ -1399,14 +1399,14 @@ local function rename_output(from, to)
     return compiler_io.new_sync():rename(from, to)
 end
 
-local function run_argv(argv, verbose)
+local function run_argv(argv, verbose, discard_output)
     local cmd, err = command_argv(argv)
     if not cmd then return nil, err end
     if verbose then io.stderr:write(cmd, "\n") end
-    if driver.LIVE_PROGRESS then
-        -- A live region owns terminal stderr: run the child (and its shell
-        -- wrapper) with captured output and replay it above the region. The
-        -- exit status and the diagnostic text stay exactly as inherited.
+    if discard_output or driver.LIVE_PROGRESS then
+        -- Capability checks discard expected tool rejections even without a
+        -- progress renderer. Other children replay captured output above the
+        -- live region. Both paths preserve the command's exit status.
         local captured
         if platform.windows then
             captured = require("titan-compiler.process").capture(argv)
@@ -1417,11 +1417,11 @@ local function run_argv(argv, verbose)
                         driver.OUTPUT_LOCKS:descriptors() or nil,
                 })
         end
-        if captured.output and captured.output ~= "" then
+        if not discard_output and captured.output and captured.output ~= "" then
             driver.LIVE_PROGRESS:write(captured.output)
         end
         if not captured.started then
-            if captured.diagnostic then
+            if not discard_output and captured.diagnostic then
                 driver.LIVE_PROGRESS:write(captured.diagnostic .. "\n")
             end
             return nil, "exit", 127
@@ -11181,22 +11181,22 @@ local function copy_argv(argv)
     return copy
 end
 
-local function run_archive_tool(base, arguments, verbose)
+local function run_archive_tool(base, arguments, verbose, discard_output)
     local argv = copy_argv(base)
     append_argv(argv, arguments)
-    return run_argv(argv, verbose)
+    return run_argv(argv, verbose, discard_output)
 end
 
 local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
     os.remove(probe)
     local ar_args = { "qDc", probe }
     if object then ar_args[#ar_args + 1] = object end
-    local ar_d = run_archive_tool(ar, ar_args, verbose)
+    local ar_d = run_archive_tool(ar, ar_args, verbose, true)
     if not ar_d then
         os.remove(probe)
         ar_args[1] = "qc"
         local ar_ok, ar_term, ar_code =
-            run_archive_tool(ar, ar_args, verbose)
+            run_archive_tool(ar, ar_args, verbose, true)
         if not ar_ok then
             os.remove(probe)
             return nil, "configured AR supports neither qDc nor qc (" ..
@@ -11204,10 +11204,10 @@ local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
         end
     end
 
-    local ranlib_d = run_archive_tool(ranlib, { "-D", probe }, verbose)
+    local ranlib_d = run_archive_tool(ranlib, { "-D", probe }, verbose, true)
     if not ranlib_d then
         local ranlib_ok, ranlib_term, ranlib_code =
-            run_archive_tool(ranlib, { probe }, verbose)
+            run_archive_tool(ranlib, { probe }, verbose, true)
         if not ranlib_ok then
             os.remove(probe)
             return nil, "configured RANLIB supports neither -D nor ordinary " ..
