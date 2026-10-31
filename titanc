@@ -739,12 +739,12 @@ if not args.compile_only and not args.print_ast then
     end
     local runtime, runtime_flags = {}, {}
     if driver.context_target(resolver_context) ~= "browser" then
-    for _, input in ipairs(driver.INSTALLED and
-            driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN) or
-            driver.source_link_inputs()) do
-        if input:find("[/\\]") then runtime[#runtime + 1] = input
-        else runtime_flags[#runtime_flags + 1] = input end
-    end
+        for _, input in ipairs(driver.INSTALLED and
+                driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN) or
+                driver.source_link_inputs()) do
+            if input:find("[/\\]") then runtime[#runtime + 1] = input
+            else runtime_flags[#runtime_flags + 1] = input end
+        end
     end
     if coverage_build and builds_program then
         local inventory_error
@@ -1347,7 +1347,16 @@ else
         if driver.context_target(resolver_context) == "browser" then
             expected_entries = {}
             for name, entry in pairs(physical_entries) do expected_entries[name] = entry end
-            for name, entry in pairs(generated_entries) do expected_entries[name] = entry end
+            for _, name in ipairs(linked_names) do
+                local mod = driver.imported[name]
+                local native = assert(mod.object_metadata,
+                    "browser source module has no coordinator object record")
+                expected_entries[name] = {
+                    abi = driver.TITAN_ABI_VERSION,
+                    types = require("titan-compiler.types").serialize(mod.type),
+                    layouts = native.layouts,
+                }
+            end
         end
         local pair, pair_err, pair_signal = driver.link_provider_pair({
             context = resolver_context,

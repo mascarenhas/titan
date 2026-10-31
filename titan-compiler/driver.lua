@@ -4051,6 +4051,9 @@ end
 -- a membership absence; an open failure is terminal. Callers decide whether a
 -- clean nonclaim is skippable (ancestor) or an error (exact candidate).
 local function probe_compiled_interface(modname, binf, options)
+    if options and options.target == "browser" then
+        return "error", "browser providers require static archives"
+    end
     local decoded = perf.provider_decoding_cache(options, binf)
     local prefix = driver.mangle_module_name(modname)
     local support = require("titan")
@@ -4180,7 +4183,7 @@ end
 function driver.find_dynamic_interface(paths, modname, context)
     if context then
         driver.assert_target_context(context)
-        if driver.context_target(context) == "browser" then return nil end
+        if context.target == "browser" then return nil end
     end
     local candidates = driver.module_binary_candidates(modname)
     if #candidates == 0 then return nil end
@@ -4318,12 +4321,14 @@ function driver.find_static_interface(paths, modname, context)
     if #candidates == 0 then return nil end
     local occupied = {}
 
-    local roots, roots_error = driver.titan_bin_path_entries(paths)
+    local roots, roots_error
     if driver.context_target(context) == "browser" then
         local descriptor, descriptor_error = driver.context_target_descriptor(context)
         if not descriptor then return nil, descriptor_error end
         roots, roots_error = driver.titan_bin_path_entries(paths, ".")
         if roots then table.insert(roots, 1, descriptor.paths.titan_bin) end
+    else
+        roots, roots_error = driver.titan_bin_path_entries(paths)
     end
     if not roots then return nil, roots_error end
     for _, root in ipairs(roots) do
@@ -4436,9 +4441,10 @@ end
 function driver.find_dependency_interface(paths, modname, context)
     context = context or driver.new_resolver_context()
     driver.assert_target_context(context)
-    local embedded = find_embedded_interface(modname, context)
+    local browser = driver.context_target(context) == "browser"
+    local embedded = not browser and find_embedded_interface(modname, context) or nil
     if embedded then return embedded end
-    local formats = driver.context_target(context) == "browser" and { "static" } or
+    local formats = browser and { "static" } or
         (context.prefer_static and { "static", "dynamic" } or { "dynamic", "static" })
 
     for _, format in ipairs(formats) do
@@ -10568,7 +10574,7 @@ function driver.validate_generated_objects(objects, target, entries, context)
         local part_objects = type(input) == "table" and input.objects or nil
         for part_idx = 2, #(part_objects or {}) do
             local part_file = part_objects[part_idx]
-            if driver.context_target(context) == "browser" and
+            if context.target == "browser" and
                not context.io:stat(part_file) then
                 return nil, string.format(
                     "browser provider module %q is missing split part %d",
@@ -10609,6 +10615,7 @@ function driver.prepare_static_providers_for_target(providers, target)
                 if not equal then return nil, equality_error end
                 provider.members, provider.records, provider.bytes =
                     scanned.members, scanned.records, scanned.bytes
+                provider.kind, provider.format = "archive", "archive"
                 active = provider
             end
             local valid, err = driver.validate_browser_provider(active)
@@ -11058,6 +11065,14 @@ function driver.build_static_archive(
     if type(target) ~= "table" then
         return nil, "static archive construction requires a target fingerprint"
     end
+    local descriptor, descriptor_error = driver.context_target_descriptor(context)
+    if descriptor_error then return nil, descriptor_error end
+    if descriptor then
+        local matches, mismatch = staticmetadata.fingerprint_matches(
+            target, descriptor.fingerprint)
+        if not matches then return nil, "browser archive target mismatch: " .. mismatch end
+        target = descriptor.fingerprint
+    end
     local output_ok, output_err = ensure_output_parent(output)
     if not output_ok then return nil, output_err end
     local stage, make_err = sibling_temporary_directory(output .. ".archive-stage")
@@ -11157,8 +11172,6 @@ function driver.build_static_archive(
         end
     end
 
-    local descriptor, descriptor_error = driver.context_target_descriptor(context)
-    if descriptor_error then return abort(descriptor_error) end
     local ar, ar_err = descriptor and copy_argv(descriptor.tools.ar) or nil
     if not ar then ar, ar_err = perf.tool_command(driver.AR, "AR") end
     if not ar then return abort(ar_err) end
@@ -12673,6 +12686,9 @@ function driver.preflight_build_outputs(context, plan, options)
         return nil, "--coverage requires a test or standalone executable; use -c for coverage objects"
     end
     if builds_program then
+        if driver.context_target(context) == "browser" then
+            return nil, "browser program linking is not available yet"
+        end
         local root = options.test and options.roots[1] or main
         if platform.windows then
             local paths, err = driver.windows_program_paths(
@@ -12693,10 +12709,11 @@ function driver.preflight_build_outputs(context, plan, options)
                 tostring(left) .. "' and '" .. tostring(right) .. "' have no common module prefix"
         end
         local library, library_err =
-            driver.provider_output_path(provider, options.output_root)
+            driver.provider_output_path(provider, options.output_root, context)
         if not library then return nil, library_err end
-        output(library, "provider DSO")
-        if not platform.windows then
+        local browser = driver.context_target(context) == "browser"
+        output(library, browser and "provider archive" or "provider DSO")
+        if not browser and not platform.windows then
             output((library:gsub("[.]so$", ".a")), "provider archive")
             if driver.IS_DARWIN then output(library .. ".dSYM", "provider dSYM", "directory") end
         end

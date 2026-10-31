@@ -7,6 +7,7 @@ local lfs = require "lfs"
 local layouts = require "titan-compiler.nominallayout"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local temporary = require "spec.support.temporary"
+local toolchain = require "spec.support.browser_toolchain"
 local types = require "titan-compiler.types"
 
 local function mkdir(directory)
@@ -70,6 +71,9 @@ local function wasm(module, options)
         local flags = 64 | (options.weak == symbol and 1 or 0) |
             (options.local_symbol == symbol and 2 or 0)
         records[index] = "\0" .. u32(flags) .. u32(index - 1 + function_imports) .. name(symbol)
+        if options.data_symbol == symbol then
+            records[index] = "\1\0" .. name(symbol) .. "\0\0\0"
+        end
     end
     if options.undefined then
         -- Undefined data symbols carry their name but no segment coordinates.
@@ -151,7 +155,7 @@ describe("browser providers", function()
         assert.matches(string.format("%q", protocol("pkg.mod")[3]), err, 1, true)
     end)
 
-    for _, binding in ipairs({ "weak", "local_symbol" }) do
+    for _, binding in ipairs({ "weak", "local_symbol", "data_symbol" }) do
         it("rejects " .. binding .. " protocol definitions", function()
             local options = { [binding] = protocol("pkg.mod")[1] }
             local ok, err = driver.validate_browser_provider(scan(archive({ wasm("pkg.mod", options) })))
@@ -190,6 +194,18 @@ describe("browser providers", function()
         local ok, err = driver.validate_browser_provider(scan(archive({ primary })), nil, generated)
         assert.is_nil(ok); assert.equal('browser provider module "pkg.mod" is missing split part 1', err)
     end)
+    it("rescans metadata-only plans before trusting browser structure", function()
+        local valid = scan(archive({ wasm("pkg.mod") }))
+        local filename = root .. "/planned.a"
+        local symbols = protocol("pkg.mod"); table.remove(symbols, 4)
+        write(filename, archive({ wasm("pkg.mod", { symbols = symbols }) }))
+        local summary = assert(staticmetadata.metadata_view(
+            filename, staticmetadata.container_metadata(valid), { require_layouts = true }))
+        summary.archive = filename
+        local ok, err = driver.prepare_static_providers_for_target({ summary }, fixtures.fingerprint())
+        assert.is_nil(ok)
+        assert.matches("requires global non-weak function", err, 1, true)
+    end)
     it("uses the SDK archive first and never has a DSO pass", function()
         local context = browser_context(root)
         local sdk = context.target_descriptor.paths.titan_bin
@@ -199,11 +215,30 @@ describe("browser providers", function()
         local found = assert(driver.find_dependency_interface(root .. "/path", "pkg.mod", context))
         assert.equal("static", found.kind); assert.equal(sdk .. "/pkg.a", found.filename)
         assert.is_nil(driver.find_dynamic_interface(root .. "/path", "pkg.mod", context))
+        assert.equal("error", driver.probe_compiled_interface(
+            "pkg.mod", root .. "/path/pkg.so", context))
         driver.TITAN_BIN_PATH = root .. "/path"
         local loader = driver.defaultloader({}, { context = context })
         assert.is_true(loader("pkg.mod"))
         assert(driver.finalize_resolver_context(context))
         assert.equal("direct", context.native_bindings["pkg.mod"])
+    end)
+    it("ignores a native embedded inventory in a browser context", function()
+        local context = browser_context(root, {
+            analysis_only = true,
+            embedded_interface_provider = {
+                provider_file = root .. "/native-host.so",
+                entries = { ["pkg.mod"] = {
+                    abi = driver.TITAN_ABI_VERSION,
+                    types = 'Module("pkg.mod",{}, {})',
+                } },
+            },
+        })
+        local sdk = context.target_descriptor.paths.titan_bin
+        write(sdk .. "/pkg.a", archive({ wasm("pkg.mod") }))
+        local found = assert(driver.find_dependency_interface("", "pkg.mod", context))
+        assert.equal("static", found.kind)
+        assert.equal(sdk .. "/pkg.a", found.filename)
     end)
     it("ignores native DSOs and falls back to browser source", function()
         local context = browser_context(root)
@@ -391,9 +426,8 @@ describe("browser providers real toolchain", function()
         for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
         return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
     end
-    before_each(function()
-        info = require("spec.support.browser_toolchain").require()
-        if not info then return end
+    local function prepare(real_info)
+        info = real_info
         root = temporary.name("-browser-real-provider"); mkdir(root)
         repo = assert(lfs.currentdir()); prefix = root .. "/prefix"
         mkdir(prefix .. "/lib")
@@ -404,12 +438,14 @@ describe("browser providers real toolchain", function()
         write(root .. "/hook.lua", PROVIDER_HOOK)
         write(root .. "/src/pkg/left.titan", "function answer(): integer return 42 end\n")
         write(root .. "/src/pkg/right.titan", "function twice(n: integer): integer return n * 2 end\n")
-    end)
+    end
     after_each(function()
         if root then remove(root) end
         root = nil
     end)
     it("publishes an archive-only multi-module provider with an empty SDK", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        prepare(info)
         local entries = {}; for entry in lfs.dir(sdk) do entries[#entries + 1] = entry end
         table.sort(entries); assert.same({ ".", ".." }, entries)
         local result = run_cli(nil, "--c-parts", "3", "pkg.left", "pkg.right")
@@ -425,6 +461,14 @@ describe("browser providers real toolchain", function()
         assert.matches("emcc", commands, 1, true)
         assert.matches("emar", commands, 1, true)
         assert.matches("emranlib", commands, 1, true)
+        write(root .. "/providers/pkg.a", read(output))
+        write(root .. "/src/consumer.titan",
+            'local left = import "pkg.left"\nfunction answer(): integer return left.answer() end\n')
+        result = run_cli(nil, "-c", "consumer")
+        assert.is_true(result.ok, result.output)
+        local source_record = assert(require("titan-compiler.objectmetadata").read(
+            read(root .. "/out/consumer.o"), root .. "/out/consumer.o"))
+        assert.equal("direct", source_record.object_metadata.bindings["pkg.left"])
     end)
     for _, case in ipairs({
         { mode = "corrupt", message = "unsupported native object format" },
@@ -432,6 +476,8 @@ describe("browser providers real toolchain", function()
         { mode = "lto", message = "LLVM bitcode (LTO) object is not supported" },
     }) do
         it("rejects " .. case.mode .. " and publishes nothing", function()
+            local info, why = toolchain.require(); if not info then pending(why) return end
+            prepare(info)
             local result = run_cli(case.mode, "pkg.left")
             assert.is_false(result.ok)
             assert.matches(case.message, result.output, 1, true)
@@ -444,7 +490,10 @@ describe("browser providers real toolchain", function()
     end
     for _, mode in ipairs({ "program", "test" }) do
         it("stops " .. mode .. " linking before executable synthesis", function()
-            write(root .. "/src/pkg/program.titan", "function main(): integer return 0 end\n")
+            local info, why = toolchain.require(); if not info then pending(why) return end
+            prepare(info)
+            write(root .. "/src/pkg/program.titan",
+                "function main(args: {string}): integer return 0 end\n")
             local result = mode == "test" and run_cli(nil, "--test", "pkg.left") or
                 run_cli(nil, "pkg.program")
             assert.is_false(result.ok)
