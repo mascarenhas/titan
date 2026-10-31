@@ -12296,6 +12296,12 @@ function driver.preflight_build_outputs(context, plan, options)
     -- hierarchy aliases before a worker invalidates any existing object.
     for _, entry in ipairs(options.locks and options.locks.entries or {}) do
         input(entry.path)
+        if entry.directory then
+            local valid, target_error = driver.validate_output_target(
+                context, entry.directory, false)
+            if not valid then return nil, target_error end
+            input(path.join(entry.directory, ".titan-target"))
+        end
     end
     if options.metadata_root then
         for _, name in ipairs({ ".titan", ".titan-links", ".native", ".titan-target" }) do
