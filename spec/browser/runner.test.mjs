@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { classify, knownTrap, observeFactory, relativePath } from "../../titan-runtime/browser/titan-browser-page.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const runner = join(root, "titan-runtime/browser/titan-browser-run");
+const runner = process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run");
 const fixture = join(root, "spec/browser/runner-fixtures.mjs");
 const supported = process.platform !== "win32";
 const strict = process.env.TITAN_REQUIRE_BROWSER_TOOLCHAIN === "1";
@@ -139,6 +139,37 @@ for (const engine of ["node", "chromium"]) {
             assert.equal(forwarded.status, 0, forwarded.stderr.toString());
             assert.deepEqual(forwarded.stdout, Buffer.from(JSON.stringify(args)));
             if (engine === "chromium") await absent(cleanProfile(forwarded));
+        });
+        test(`real CLI test image preserves bytes and 0/1/2 status (${engine}/${cdp})`, { skip: !supported }, async t => {
+            const image = process.env.TITAN_BROWSER_RUNNER_IMAGE;
+            if (!image) {
+                if (strict) assert.fail("TITAN_BROWSER_RUNNER_IMAGE must name the compiled runner_image fixture");
+                t.skip("TITAN_BROWSER_RUNNER_IMAGE is unset");
+                return;
+            }
+            if (engine === "chromium" && !await chromium(t)) return;
+            const passed = await run(["--engine", engine, "--cdp", cdp, "--grace", "20", image,
+                "--", "--filter=^runner_image[.]test_bytes$"]);
+            assert.equal(passed.status, 0, passed.stderr.toString());
+            const expected = Buffer.concat([
+                Buffer.from("[==========] Running Titan tests.\n[ RUN      ] runner_image.test_bytes\n"),
+                Buffer.from([0, 255, 195, 40, 116, 97, 105, 108]),
+                Buffer.from("[       OK ] runner_image.test_bytes\n[==========] 1 test ran.\n[  PASSED  ] 1 test.\n"),
+            ]);
+            assert.deepEqual(passed.stdout, expected);
+            const rawStderr = engine === "node" ? passed.stderr : Buffer.from(passed.stderr.toString("latin1")
+                .replace(/titan-browser-run: (?:Chromium|cleanup:)[^\n]*\n/g, ""), "latin1");
+            assert.deepEqual(rawStderr, Buffer.from([0, 254, 226, 40, 116, 97, 105, 108]));
+            const failed = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", image,
+                "--", "--filter=^runner_image[.]test_failure$"]);
+            assert.equal(failed.status, 1, failed.stderr.toString());
+            assert.ok(failed.stdout.includes(Buffer.from("[==========] 1 test ran.\n")));
+            assert.ok(failed.stdout.includes(Buffer.from("[  FAILED  ] 1 test.\n")));
+            const invalid = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", image, "--", "--unknown"]);
+            assert.equal(invalid.status, 2, invalid.stderr.toString());
+            assert.equal(invalid.stdout.toString(), "error: unknown option '--unknown'\n" +
+                "Usage: <test-executable> [-h|--help] [-v|--verbose] [-f PATTERN|--filter=PATTERN]...\n");
+            if (engine === "chromium") for (const result of [passed, failed, invalid]) await absent(cleanProfile(result));
         });
     }
 }
