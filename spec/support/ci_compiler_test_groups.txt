@@ -19,9 +19,14 @@
 # Issue 303 additions use an unmeasured 1.000 local weight; except for the
 # stdlib rows above, they have no covered timing. Neither is an observation
 # from the timing runs above.
+# Issue 328 browser rows use the same unmeasured 1.000 local weight. Their
+# real-toolchain cases are pending unless the emsdk gate in ci.yml provides the
+# toolchain, so they stay in this partition without a covered duration.
 compiler spec/abi_spec.lua 0.201 2.926
 retained spec/asan_generated_c_context_spec.lua 0.587 -
 compiler spec/binary_compatibility_spec.lua 0.017 0.107
+compiler spec/browser_isolation_spec.lua 1.000 -
+compiler spec/browser_target_spec.lua 1.000 -
 compiler spec/cdeclarator_spec.lua 0.017 0.058
 compiler spec/cdefines_spec.lua 0.050 0.054
 compiler spec/cdriver_spec.lua 9.809 171.200
@@ -77,6 +82,9 @@ compiler spec/coder/adapter_registry_elimination_spec.lua 2.278 7.976
 compiler spec/coder/backtrace_spec.lua 2.580 6.038
 compiler spec/coder/binary_compatibility_spec.lua 28.429 39.979
 compiler spec/coder/bound_methods_spec.lua 2.440 6.427
+compiler spec/coder/browser_incremental_spec.lua 1.000 -
+compiler spec/coder/browser_providers_spec.lua 1.000 -
+compiler spec/coder/browser_toolchain_spec.lua 1.000 -
 stdlib spec/coder/build_coordination_spec.lua 1.000 34.874
 compiler spec/coder/build_scheduler_spec.lua 1.000 -
 compiler spec/coder/c_ffi_allocation_constructors_spec.lua 5.677 9.360
@@ -203,4 +211,5 @@ compiler spec/typedecl_spec.lua 0.001 0.005
 compiler spec/types_spec.lua 0.051 0.185
 compiler spec/union_interface_spec.lua 0.108 0.590
 compiler spec/util_spec.lua 0.002 0.010
+compiler spec/wasm_toolchain_spec.lua 1.000 -
 compiler spec/windows_publication_spec.lua 0.045 0.194
