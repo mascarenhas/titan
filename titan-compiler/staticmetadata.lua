@@ -1162,16 +1162,17 @@ local function wasm_s64_leb(reader, offset, limit, origin)
     end
 end
 
-local function wasm_name(reader, offset, limit, origin, what, outside_message)
+local function wasm_quote(name)
+    return (format("%q", name):gsub("\\\n", "\\n"))
+end
+
+local function wasm_name(reader, offset, limit, origin, outside_message)
     local length, next_offset = wasm_u32_leb(reader, offset, limit, origin)
     if length > limit - next_offset then
-        fail(origin, outside_message or (what .. " is outside its section"))
+        fail(origin, outside_message)
     end
-    local name = sub(reader.bytes, next_offset + 1, next_offset + length)
-    if name == "" or name:find("[%z%c%s]") then
-        fail(origin, "invalid " .. what)
-    end
-    return name, next_offset + length
+    return sub(reader.bytes, next_offset + 1, next_offset + length),
+        next_offset + length
 end
 
 local function check_wasm_memory_limits(reader, offset, limit, origin)
@@ -1195,19 +1196,19 @@ end
 
 local function check_wasm_payload_segment(segment, origin)
     if not segment.active then
-        fail(origin, "Wasm payload segment " .. format("%q", segment.name) ..
+        fail(origin, "Wasm payload segment " .. wasm_quote(segment.name) ..
             " is not active")
     end
     if segment.tls then
-        fail(origin, "Wasm payload segment " .. format("%q", segment.name) ..
+        fail(origin, "Wasm payload segment " .. wasm_quote(segment.name) ..
             " is TLS")
     end
     if segment.alignment ~= 1 then
-        fail(origin, "Wasm payload segment " .. format("%q", segment.name) ..
+        fail(origin, "Wasm payload segment " .. wasm_quote(segment.name) ..
             " alignment is not 1")
     end
     if segment.relocated then
-        fail(origin, "Wasm payload segment " .. format("%q", segment.name) ..
+        fail(origin, "Wasm payload segment " .. wasm_quote(segment.name) ..
             " is targeted by a DATA relocation")
     end
 end
@@ -1280,11 +1281,9 @@ local function parse_wasm(bytes, origin, target, options)
                     local mod_name, field_name, ignored
                     mod_name, pos = wasm_name(
                         reader, pos, section_end, origin,
-                        "Wasm import module name",
                         "Wasm import module name is outside its section")
                     field_name, pos = wasm_name(
                         reader, pos, section_end, origin,
-                        "Wasm import name",
                         "Wasm import name is outside its section")
                     if mod_name == "GOT.mem" or mod_name == "GOT.func" then
                         fail(origin, "Wasm GOT import is not supported")
@@ -1425,7 +1424,6 @@ local function parse_wasm(bytes, origin, target, options)
             end
             local custom_name, content_offset = wasm_name(
                 reader, payload_offset, section_end, origin,
-                "Wasm custom section name",
                 "Wasm custom section name is outside its section")
             local content_size = section_end - content_offset
             raw_sections[section_index + 1] = {
@@ -1475,7 +1473,6 @@ local function parse_wasm(bytes, origin, target, options)
                             local sname
                             sname, sp = wasm_name(
                                 reader, sp, sub_end, origin,
-                                "Wasm segment name",
                                 "Wasm segment name is outside its subsection")
                             local align_exp, sflags
                             align_exp, sp = wasm_u32_leb(reader, sp, sub_end, origin)
@@ -1488,7 +1485,7 @@ local function parse_wasm(bytes, origin, target, options)
                             segment.alignment = 1 << align_exp
                             segment.tls = (sflags & 0x02) ~= 0
                             segment.origin = origin .. ": Wasm segment #" ..
-                                tostring(seg_idx - 1) .. " " .. format("%q", sname)
+                                tostring(seg_idx - 1) .. " " .. wasm_quote(sname)
                         end
                         if sp ~= sub_end then
                             fail(origin, "malformed Wasm segment-info subsection")
@@ -1511,7 +1508,6 @@ local function parse_wasm(bytes, origin, target, options)
                             local ignored
                             ignored, sp = wasm_name(
                                 reader, sp, sub_end, origin,
-                                "Wasm COMDAT name",
                                 "Wasm COMDAT name is outside its subsection")
                             ignored, sp = wasm_u32_leb(reader, sp, sub_end, origin)
                             local entry_count
@@ -1566,7 +1562,6 @@ local function parse_wasm(bytes, origin, target, options)
                                 if defined or explicit_name then
                                     sname, sp = wasm_name(
                                         reader, sp, sub_end, origin,
-                                        "Wasm symbol name",
                                         "Wasm symbol name is outside its subsection")
                                 else
                                     local imp = imported_by_kind[skind][sym_index + 1]
@@ -1581,7 +1576,6 @@ local function parse_wasm(bytes, origin, target, options)
                                 local ignored
                                 sname, sp = wasm_name(
                                     reader, sp, sub_end, origin,
-                                    "Wasm symbol name",
                                     "Wasm symbol name is outside its subsection")
                                 if defined then
                                     if (sflags & 0x200) == 0 then
@@ -1635,18 +1629,17 @@ local function parse_wasm(bytes, origin, target, options)
                     local fname
                     fname, pos = wasm_name(
                         reader, pos, section_end, origin,
-                        "Wasm target feature name",
                         "Wasm target feature name is outside its section")
-                    if fname:find("[^!-\126]") then
+                    if fname == "" or fname:find("[^!-\126]") then
                         fail(origin, "invalid Wasm target feature name")
                     end
                     local previous = seen_features[fname]
                     if previous == prefix then
                         fail(origin, "duplicate Wasm target feature " ..
-                            format("%q", fname))
+                            wasm_quote(fname))
                     elseif previous ~= nil then
                         fail(origin, "conflicting Wasm target feature " ..
-                            format("%q", fname))
+                            wasm_quote(fname))
                     end
                     seen_features[fname] = prefix
                     tokens[#tokens + 1] = prefix .. fname
@@ -1724,7 +1717,7 @@ local function parse_wasm(bytes, origin, target, options)
         if WASM_PAYLOAD_NAMES[segment.name] then
             if seen_payloads[segment.name] then
                 fail(origin, "duplicate Wasm payload segment " ..
-                    format("%q", segment.name))
+                    wasm_quote(segment.name))
             end
             seen_payloads[segment.name] = segment
             check_wasm_payload_segment(segment, origin)
@@ -1846,7 +1839,7 @@ function staticmetadata.read_object_section(bytes, origin, names, max_bytes)
                 if selected then
                     if object.format == "wasm" then
                         fail(origin, "duplicate Wasm payload segment " ..
-                            format("%q", section.name))
+                            wasm_quote(section.name))
                     end
                     fail(origin, "duplicate requested object section")
                 end

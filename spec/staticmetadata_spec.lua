@@ -1664,30 +1664,6 @@ return {
                 { wasm_object(PAYLOAD, {
                     features = { { "+", "a\127b" } },
                 }), '"fixture with spaces": invalid Wasm target feature name' },
-                { wasm_object(PAYLOAD, {
-                    extra_sections_after_linking = { wasm_custom("bad name", "") },
-                }), '"fixture with spaces": invalid Wasm custom section name' },
-                { wasm_object(PAYLOAD, {
-                    extra_sections_after_linking = { wasm_custom("bad\0name", "") },
-                }), '"fixture with spaces": invalid Wasm custom section name' },
-                { wasm_object(PAYLOAD, {
-                    imports = { { module = "env space", name = "__linear_memory", kind = 2, flags = 0, initial = 1 } },
-                }), '"fixture with spaces": invalid Wasm import module name' },
-                { wasm_object(PAYLOAD, {
-                    imports = { { module = "env", name = "bad\0import", kind = 2, flags = 0, initial = 1 } },
-                }), '"fixture with spaces": invalid Wasm import name' },
-                { wasm_object(PAYLOAD, {
-                    section_name = ".titan meta",
-                }), '"fixture with spaces": invalid Wasm segment name' },
-                { wasm_object(PAYLOAD, {
-                    comdats = { { name = "bad comdat", flags = 0, entries = {} } },
-                }), '"fixture with spaces": invalid Wasm COMDAT name' },
-                { wasm_object(PAYLOAD, {
-                    symbols = { { kind = 0, flags = 0, index = 0, name = "bad sym" } },
-                }), '"fixture with spaces": invalid Wasm symbol name' },
-                { wasm_object(PAYLOAD, {
-                    symbols = { { kind = 1, flags = 0x10, name = "bad\0data" } },
-                }), '"fixture with spaces": invalid Wasm symbol name' },
                 { wasm_object(PAYLOAD, { segment_offset = -1 }),
                     '"fixture with spaces": malformed Wasm DATA offset expression' },
                 { wasm_object(PAYLOAD, { segment_offset = -1, pad = true }),
@@ -1733,8 +1709,50 @@ return {
             assert.equal("pkg.mod", max_i32_min.metadata.module)
             assert.equal("pkg.mod", max_i32_pad.metadata.module)
 
+            -- Ordinary Wasm names (imports, custom sections, segments, COMDATs,
+            -- and symbols) accept spaces and empty strings as legal length-prefixed
+            -- names, while quoting any control bytes safely in diagnostics.
+            local spaced = assert(scan(wasm_object(nil, {
+                imports = {
+                    { module = "env", name = "__linear_memory", kind = 2, flags = 0, initial = 1 },
+                    { module = "env space", name = "foo bar", kind = 0, type_index = 0 },
+                },
+                segments = {
+                    { name = ".data with space", payload = "ok", mode = 0, align_exp = 0, flags = 0 },
+                    { name = ".titan.meta", payload = PAYLOAD, mode = 0, align_exp = 0, flags = 0 },
+                },
+                comdats = { { name = "comdat group", flags = 0, entries = {} } },
+                symbols = {
+                    { kind = 0, flags = 0x10, index = 0 },
+                    { kind = 0, flags = 0x02, index = 1, name = "" },
+                    { kind = 1, flags = 0x00, index = 0, name = "spaced data", offset = 0, size = 2 },
+                },
+                extra_sections_after_linking = { wasm_custom("custom section", "payload") },
+            })))
+            assert.equal("pkg.mod", spaced.metadata.module)
+            assert.equal("foo bar", spaced.symbols[1].name)
+            assert.equal("", spaced.symbols[2].name)
+            assert.equal("spaced data", spaced.symbols[3].name)
+
+            local ctrl_seg, ctrl_seg_err = staticmetadata.read_object_section(
+                wasm_object("1234", {
+                    segments = {
+                        { name = "bad\n\0seg", payload = "1234", mode = 1, align_exp = 0, flags = 0 },
+                    },
+                }),
+                "ctrl.wasm.o",
+                {
+                    elf = ".unused", macho_segment = "__DATA",
+                    macho_section = "__unused", coff = ".unused",
+                    wasm = "bad\n\0seg",
+                }, 4)
+            assert.is_nil(ctrl_seg)
+            assert.is_nil(ctrl_seg_err:find("[\0\n]"))
+            assert.matches('Wasm payload segment "bad\\n\\0seg" is not active', ctrl_seg_err, 1, true)
+
+            local executed_32 = 0
             for _, addend_32 in ipairs({ 0, -1, -2147483648, 2147483647 }) do
-                for _, width in ipairs({ nil, 5 }) do
+                for _, width in ipairs({ false, 5 }) do
                     local obj32 = assert(scan(wasm_object(nil, {
                         segments = {
                             { name = ".data.x", payload = string.rep("\0", 16), mode = 0, align_exp = 0, flags = 0 },
@@ -1745,21 +1763,24 @@ return {
                                 name = "reloc.DATA",
                                 target = 1,
                                 entries = {
-                                    { type = 5, offset = 6, symbol = 0, addend = addend_32, addend_width = width },
+                                    { type = 5, offset = 6, symbol = 0, addend = addend_32, addend_width = width or nil },
                                 },
                             },
                         },
                     })))
                     assert.equal("pkg.mod", obj32.metadata.module)
+                    executed_32 = executed_32 + 1
                 end
             end
+            assert.equal(8, executed_32)
 
+            local executed_64 = 0
             for _, rtype_64 in ipairs({ 14, 15, 16, 17, 22, 25 }) do
                 for _, addend_64 in ipairs({
                     0, -1, 4294967296, -4294967296,
                     math.maxinteger, math.mininteger,
                 }) do
-                    for _, width in ipairs({ nil, 10 }) do
+                    for _, width in ipairs({ false, 10 }) do
                         local obj64 = assert(scan(wasm_object(nil, {
                             segments = {
                                 { name = ".data.x", payload = string.rep("\0", 16), mode = 0, align_exp = 0, flags = 0 },
@@ -1770,15 +1791,17 @@ return {
                                     name = "reloc.DATA",
                                     target = 1,
                                     entries = {
-                                        { type = rtype_64, offset = 6, symbol = 0, addend = addend_64, addend_width = width },
+                                        { type = rtype_64, offset = 6, symbol = 0, addend = addend_64, addend_width = width or nil },
                                     },
                                 },
                             },
                         })))
                         assert.equal("pkg.mod", obj64.metadata.module)
+                        executed_64 = executed_64 + 1
                     end
                 end
             end
+            assert.equal(72, executed_64)
 
             local sleb_error_cases = {
                 { 5, "\x80\x80\x80\x80\x08", '"fixture with spaces": Wasm i32 LEB128 overflows' },

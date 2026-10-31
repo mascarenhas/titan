@@ -255,6 +255,28 @@ x:
         }, parsed_asm.fingerprint)
         assert.equal(".data.x", parsed_asm.sections[1].name)
         assert.equal(16, parsed_asm.sections[1].size)
+
+        local spaced_c = track_file(root .. "/spaced_sym.c")
+        local spaced_obj = track_file(root .. "/spaced_sym.o")
+        assert(util.set_file_contents(spaced_c, [[
+extern int foo __asm__("foo bar");
+int *p = &foo;
+]]))
+        run_tool(strategy, info.tools.clang, {
+            "--target=wasm32-unknown-emscripten", "-x", "c",
+            "-c", spaced_c, "-o", spaced_obj,
+        })
+        local spaced_bytes = assert(util.get_file_contents(spaced_obj, "rb"))
+        local parsed_spaced = assert(staticmetadata.classify_object(
+            spaced_bytes, spaced_obj, expected_fp))
+        assert.equal("wasm", parsed_spaced.format)
+        local saw_foo_bar = false
+        for _, sym in ipairs(parsed_spaced.symbols) do
+            if sym.name == "foo bar" and not sym.defined then
+                saw_foo_bar = true
+            end
+        end
+        assert.is_true(saw_foo_bar)
     end)
 
     it("scans emar archives, verifies manifests, and rejects bitcode and mixed archives", function()
