@@ -81,6 +81,12 @@ local function contains(message, fragment)
     assert.truthy(message:find(fragment, 1, true), message)
 end
 
+local function remove_flag(data, flag)
+    for index = #data.compile_flags, 1, -1 do
+        if data.compile_flags[index] == flag then table.remove(data.compile_flags, index) end
+    end
+end
+
 describe("browser target descriptor", function()
     local saved_getenv, saved_profile, saved_classify, saved_registry
     before_each(function()
@@ -155,6 +161,105 @@ describe("browser target descriptor", function()
         end
     end)
 
+    for _, case in ipairs({
+        { "empty include roots", function(data) data.include_dirs = {} end },
+        { "missing runtime root", function(data) data.include_dirs = { data.paths.lua_source } end },
+        { "relative Lua root", function(data) data.include_dirs[1] = "relative/include" end },
+        { "relative runtime root", function(data) data.include_dirs[2] = "relative/runtime" end },
+        { "relative extra root", function(data) data.include_dirs[3] = "./extra-ffi" end },
+        { "unnormalized include root", function(data) data.include_dirs[2] = data.paths.include .. "/./runtime" end },
+        { "reversed include roots", function(data)
+            data.include_dirs[1], data.include_dirs[2] = data.include_dirs[2], data.include_dirs[1]
+        end },
+        { "duplicate Lua instead of runtime", function(data) data.include_dirs[2] = data.paths.lua_source end },
+        { "sparse include roots", function(data) data.include_dirs[3], data.include_dirs[2] = data.include_dirs[2], nil end },
+        { "missing browser flags", function(data) data.compile_flags = { "--std=c99" } end },
+        { "missing C99 flag", function(data) remove_flag(data, "--std=c99") end },
+        { "missing target define", function(data) remove_flag(data, "-DTITAN_TARGET_BROWSER=1") end },
+        { "missing Lua define", function(data) remove_flag(data, "-DLUA_USE_BROWSER") end },
+        { "missing longjmp mode", function(data) remove_flag(data, "-sSUPPORT_LONGJMP=emscripten") end },
+        { "LTO flag", function(data) data.compile_flags[#data.compile_flags + 1] = "-flto" end },
+        { "PIC flag", function(data) data.compile_flags[#data.compile_flags + 1] = "-fPIC" end },
+        { "split conflicting longjmp flag", function(data)
+            data.compile_flags[#data.compile_flags + 1] = "-s"
+            data.compile_flags[#data.compile_flags + 1] = "SUPPORT_LONGJMP=wasm"
+        end },
+        { "sparse flags", function(data) data.compile_flags[2] = nil end },
+        { "relative tool location", function(data) data.tools.location = "./emscripten" end },
+        { "unnormalized tool location", function(data) data.tools.location = data.tools.location .. "/." end },
+        { "unnormalized tool argv", function(data)
+            data.tools.cc[1] = data.tools.location .. "/./emcc"
+        end },
+        { "tool outside its installation", function(data)
+            data.tools.ar[1] = data.tools.location .. "/other/emar"
+        end },
+        { "unnormalized probe root", function(data) data.probe_cache_directory = data.probe_cache_directory .. "/." end },
+        { "invalid cflags syntax", function(data) data.lua.record.cflags = "'" end },
+        { "inconsistent Lua defines", function(data) data.lua.record.lua_defines = "-DINVALID" end },
+    }) do
+        it("rejects re-identified transport with " .. case[1], function()
+            local data = fixtures.descriptor()
+            case[2](data)
+            fixtures.identify(data)
+            local descriptor, err = browser.import(data)
+            assert.is_nil(descriptor, case[1])
+            assert.is_string(err)
+        end)
+    end
+
+    for _, key in ipairs(fixtures.record_keys) do
+        it("rejects empty and invalid UTF-8 transported record field " .. key, function()
+            for _, value in ipairs({ "", "\255" }) do
+                local data = fixtures.descriptor()
+                data.lua.record[key] = value
+                fixtures.identify(data)
+                local descriptor, err = browser.import(data)
+                assert.is_nil(descriptor)
+                contains(err, 'invalid field "' .. key .. '"')
+            end
+        end)
+    end
+
+    it("requires every transported installation path to be normalized and absolute", function()
+        for key, value in pairs(fixtures.paths()) do
+            for _, replacement in ipairs({ "relative/path", value .. "/." }) do
+                local data = fixtures.descriptor()
+                data.paths[key] = replacement
+                fixtures.identify(data)
+                local descriptor, err = browser.import(data)
+                assert.is_nil(descriptor, key)
+                contains(err, "invalid browser path")
+            end
+        end
+    end)
+
+    it("normalizes relative API runtime and extra FFI roots before build and transport", function()
+        local context, inputs = fake_context()
+        inputs.runtime_include = "./checkout/titan-runtime"
+        context.extra_ffi_include_dirs = { "./nested/../extra-ffi", "headers/../other-ffi" }
+        inputs.compile_flags = { "-fno-lto" }
+        local descriptor = assert(browser.build(context, inputs))
+        assert.same({ inputs.paths.lua_source, FAKE_ROOT .. "/checkout/titan-runtime",
+            FAKE_ROOT .. "/extra-ffi", FAKE_ROOT .. "/other-ffi" }, browser.export(descriptor.include_dirs))
+        local data = browser.export(descriptor)
+        assert.same(data, browser.export(assert(browser.import(data))))
+        assert.same({ "./nested/../extra-ffi", "headers/../other-ffi" }, context.extra_ffi_include_dirs)
+    end)
+
+    it("validates direct build compile extras before tool discovery", function()
+        for _, flags in ipairs({
+            { "-fPIC" }, { "-flto" }, { "-s", "SUPPORT_LONGJMP=wasm" },
+            "not an array", { [1] = "-O0", [3] = "-g" }, { debug = "-O0" }, { true },
+        }) do
+            local context, inputs, calls = fake_context()
+            inputs.compile_flags = flags
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, "compile_flags")
+            assert.equal(0, #calls)
+        end
+    end)
+
     it("changes identity for record revision, effective flags, paths and profile facts", function()
         local baseline = fixtures.descriptor()
         for _, change in ipairs({
@@ -222,6 +327,32 @@ describe("browser target descriptor", function()
         end)
     end
 
+    for _, key in ipairs({ "cflags", "lua_defines", "wasm_features" }) do
+        for _, case in ipairs({
+            { "leading space", function(value) return " " .. value end },
+            { "trailing space", function(value) return value .. " " end },
+            { "repeated spaces", function(value) return value:gsub(" ", "  ", 1) end },
+            { "tab separator", function(value) return value:gsub(" ", "\t", 1) end },
+            { "shell quoting", function(value) return "'" .. value .. "'" end },
+        }) do
+            it("rejects noncanonical " .. key .. " " .. case[1] .. " in records and transport", function()
+                local record = fixtures.record()
+                local changed = case[2](record[key])
+                local context, inputs = fake_context({ record = { [key] = changed } })
+                local descriptor, err = browser.build(context, inputs)
+                assert.is_nil(descriptor)
+                contains(err, 'invalid field "' .. key .. '": noncanonical list')
+                contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+                local data = fixtures.descriptor()
+                data.lua.record[key] = changed
+                fixtures.identify(data)
+                descriptor, err = browser.import(data)
+                assert.is_nil(descriptor)
+                contains(err, 'invalid field "' .. key .. '": noncanonical list')
+            end)
+        end
+    end
+
     for _, case in ipairs({
         { "emscripten_version", "6.0.12" }, { "target", "wasm64-unknown-emscripten" },
         { "sjlj", "wasm" }, { "wasm_features", "+sign-ext" },
@@ -235,6 +366,31 @@ describe("browser target descriptor", function()
             assert.is_nil(descriptor); contains(err, "field " .. case[1] .. " mismatch")
             contains(err, "recorded"); contains(err, "expected"); contains(err, "fork_revision=")
             contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+        end)
+    end
+
+    for _, case in ipairs({ { "sjlj", "wasm" }, { "target", "wasm64-unknown-emscripten" },
+            { "emscripten_version", "6.0.12" } }) do
+        it("prioritizes fixed field " .. case[1] .. " over conflicting cflags", function()
+            local record = fixtures.record()
+            local context, inputs = fake_context({ record = {
+                [case[1]] = case[2],
+                cflags = record.cflags:gsub("SUPPORT_LONGJMP=emscripten", "SUPPORT_LONGJMP=wasm"),
+            } })
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, "field " .. case[1] .. " mismatch")
+            contains(err, 'recorded "' .. case[2] .. '"')
+            contains(err, "expected"); contains(err, "fork_revision=" .. record.fork_revision)
+            local data = fixtures.descriptor()
+            data.lua.record = fixtures.record({
+                [case[1]] = case[2],
+                cflags = record.cflags:gsub("SUPPORT_LONGJMP=emscripten", "SUPPORT_LONGJMP=wasm"),
+            })
+            fixtures.identify(data)
+            descriptor, err = browser.import(data)
+            assert.is_nil(descriptor)
+            contains(err, "field " .. case[1] .. " mismatch")
         end)
     end
 
@@ -268,6 +424,18 @@ describe("browser target descriptor", function()
         local context = { target = "browser", host_target = "linux" }
         local ok, err = subject._finish_target_initialization(context)
         assert.is_nil(ok); contains(err, 'TITAN_EXTRA_CFLAGS flag "-flto"')
+    end)
+
+    it("names split conflicting longjmp settings and preserves equivalent forms", function()
+        for _, origin in ipairs({ "TITAN_EXTRA_CPPFLAGS", "TITAN_EXTRA_CFLAGS", "TITAN_EXTRA_LDFLAGS",
+                "--cflag", "--ldflag", "cflags" }) do
+            local ok, err = browser.validate_flags({ "-s", "SUPPORT_LONGJMP=wasm" }, origin)
+            assert.is_nil(ok)
+            assert.equal("browser target does not support " .. origin ..
+                ' flag "-s SUPPORT_LONGJMP=wasm"', err)
+        end
+        assert(browser.validate_flags({ "-sSUPPORT_LONGJMP", "-s", "SUPPORT_LONGJMP",
+            "-sSUPPORT_LONGJMP=1", "-s", "SUPPORT_LONGJMP=1" }, "--cflag"))
     end)
 
     it("preserves native installed paths and exposes only browser sibling SDK paths", function()
@@ -327,6 +495,24 @@ describe("browser target descriptor", function()
         assert.not_equal(native_cache .. "/" .. key .. ".result", location)
         assert.same({ inputs.paths.lua_source, inputs.paths.include },
             service:cdriver_process_options().compiler_include_dirs)
+        assert(subject.close_resolver_context(context))
+    end)
+
+    it("ignores an unresolvable cache prefix while browser probe caching is disabled", function()
+        local getenv = platform.getenv
+        platform.getenv = function(name)
+            if name == "TITAN_PROBE_CACHE_DISABLE" then return "1" end
+            if name == "TITAN_PREFIX" then return "./disabled-cache-root" end
+            return getenv(name)
+        end
+        local subject = fresh_driver()
+        subject.EXTRA_CPPFLAGS, subject.EXTRA_CFLAGS, subject.EXTRA_LDFLAGS = {}, {}, {}
+        local context = fake_context({ root = subject.TITAN_ROOT })
+        context.target, context.host_target = "browser", "linux"
+        function context.io:cwd() return nil, "disabled cache prefix must not request cwd" end
+        assert(subject._finish_target_initialization(context))
+        assert.is_nil(subject.context_target_descriptor(context).probe_cache_directory)
+        assert.is_nil(subject.PROBE_CACHE_DIRECTORY)
         assert(subject.close_resolver_context(context))
     end)
 

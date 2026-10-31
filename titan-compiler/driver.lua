@@ -685,8 +685,13 @@ function driver._finish_target_initialization(context)
             if not paths then
                 return nil, "cannot locate the Titan installation root; set TITAN_ROOT to the installation prefix"
             end
-            local cache_root, cache_error = normalize_root(probe_prefix or driver.TITAN_ROOT, context.io)
-            if not cache_root then return nil, cache_error end
+            local probe_cache_directory
+            if not probe_cache_disabled then
+                local cache_root, cache_error = normalize_root(probe_prefix or driver.TITAN_ROOT, context.io)
+                if not cache_root then return nil, cache_error end
+                probe_cache_directory = root_join(cache_root, "var/cache/titan-probes/browser-" ..
+                    driver._browser_target.EMSCRIPTEN_VERSION .. "/" .. cprobe_cache.VERSION)
+            end
             local runtime_include = driver.SOURCE_CHECKOUT_ROOT and
                 root_join(driver.SOURCE_CHECKOUT_ROOT, "titan-runtime") or paths.include
             local extras = driver.NATIVE_COMPILE_FLAGS
@@ -698,8 +703,7 @@ function driver._finish_target_initialization(context)
             local descriptor, err = driver._browser_target.build(context, {
                 paths = paths, runtime_include = runtime_include, compile_flags = extras,
                 build_profile = driver.BUILD_PROFILE,
-                probe_cache_directory = not probe_cache_disabled and root_join(cache_root,
-                    "var/cache/titan-probes/browser-6.0.13/" .. cprobe_cache.VERSION) or nil,
+                probe_cache_directory = probe_cache_directory,
             })
             if not descriptor then return nil, err end
             context.target_descriptor = descriptor
