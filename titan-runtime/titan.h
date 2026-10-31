@@ -71,6 +71,10 @@ typedef struct lua_longjmp {
 ** The same selection (_setjmp on POSIX, setjmp otherwise) keeps the buffer
 ** read/written by the same routine the linked liblua.a uses for LUAI_THROW.
 */
+#if defined(__wasm__) && defined(LUA_USE_POSIX)
+int _setjmp(jmp_buf) __attribute__((__returns_twice__));
+_Noreturn void _longjmp(jmp_buf, int);
+#endif
 #if defined(LUA_USE_POSIX)
 #define TITAN_SETJMP(buf) _setjmp(buf)
 #else
@@ -102,6 +106,10 @@ typedef struct lua_longjmp {
 #define TITAN_LONGJMP(buf) _longjmp(buf, 1)
 #else
 #define TITAN_LONGJMP(buf) longjmp(buf, 1)
+#endif
+
+#ifndef TITAN_COROUTINE_STACK_SIZE
+#define TITAN_COROUTINE_STACK_SIZE (2 * 1024 * 1024)
 #endif
 
 /* The bottom boundary of a Titan coroutine's Lua thread. `lj` is the first

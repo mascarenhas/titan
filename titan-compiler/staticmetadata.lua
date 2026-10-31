@@ -544,12 +544,24 @@ function staticmetadata.fingerprint_matches(actual, expected)
             end
         end
     elseif actual.format == "wasm" then
-        for _, field in ipairs({ "word_size", "linking_version", "features" }) do
+        for _, field in ipairs({ "word_size", "linking_version" }) do
             if actual[field] ~= expected[field] then
                 return false, "Wasm " .. field .. " " ..
                     tostring(actual[field]) .. " does not match target " ..
                     tostring(expected[field])
             end
+        end
+        local function wasm_toolchain_features(features)
+            if type(features) ~= "string" then return features end
+            return (features:gsub(" %-shared%-mem$", "")
+                :gsub("^%-shared%-mem ?", "")
+                :gsub(" %-shared%-mem ", " "))
+        end
+        if wasm_toolchain_features(actual.features) ~=
+           wasm_toolchain_features(expected.features) then
+            return false, "Wasm features " ..
+                tostring(actual.features) .. " does not match target " ..
+                tostring(expected.features)
         end
     else
         return false, "unsupported target fingerprint format " ..

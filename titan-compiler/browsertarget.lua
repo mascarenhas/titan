@@ -14,6 +14,11 @@ local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +multiva
 local BANNER = "# Lua 5.5.1 browser build record v1\n"
 local RECORD_KEYS = { "fork_revision", "archive_sha256", "headers_sha256",
     "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
+local TARGET_DEFINES = {
+    "-DTITAN_TARGET_BROWSER=1",
+    "-DTITAN_COROUTINE_STACK_SIZE=262144",
+    "-DMCO_ASYNCFY_STACK_SIZE=65536",
+}
 local proxy_data = setmetatable({}, { __mode = "k" })
 
 local function hex(value, length)
@@ -137,8 +142,13 @@ local function validate(data, context)
         not fields(data.lua.record, RECORD_KEYS) then return nil, "invalid browser Lua descriptor" end
     local record, defines = validate_record(data.lua.record, data.paths)
     if not record then return nil, defines end
-    if #data.target_defines ~= 1 or data.target_defines[1] ~= "-DTITAN_TARGET_BROWSER=1" then
+    if #data.target_defines ~= #TARGET_DEFINES then
         return nil, "inconsistent browser target defines"
+    end
+    for index, expected_define in ipairs(TARGET_DEFINES) do
+        if data.target_defines[index] ~= expected_define then
+            return nil, "inconsistent browser target defines"
+        end
     end
     local supported, flag_error = M.validate_flags(data.compile_flags, "compile_flags")
     if not supported then return nil, flag_error end
@@ -147,7 +157,8 @@ local function validate(data, context)
         seen[flag] = true
         if longjmp_mode(data.compile_flags, index) == "emscripten" then longjmp = true end
     end
-    local required = { "--std=c99", "-DTITAN_TARGET_BROWSER=1", table.unpack(defines) }
+    local required = { "--std=c99", table.unpack(TARGET_DEFINES) }
+    for _, flag in ipairs(defines) do required[#required + 1] = flag end
     for _, flag in ipairs(required) do
         if not seen[flag] then
             return nil, "browser target descriptor is missing required compile flag " .. string.format("%q", flag)
@@ -465,7 +476,7 @@ function M.build(context, inputs)
             "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function", "-gline-tables-only",
             "-sSUPPORT_LONGJMP=emscripten" }
         for _, define in ipairs(defines) do flags[#flags + 1] = define end
-        local target_defines = { "-DTITAN_TARGET_BROWSER=1" }
+        local target_defines = { table.unpack(TARGET_DEFINES) }
         for _, define in ipairs(target_defines) do flags[#flags + 1] = define end
         for _, flag in ipairs(inputs.compile_flags or {}) do flags[#flags + 1] = flag end
         local includes, include_error = cdriver.resolve_compiler_include_dirs(context.extra_ffi_include_dirs or {})
