@@ -132,8 +132,10 @@ end
 
 local function browser_context(root, options)
     local context = driver.new_resolver_context(options)
-    assert(driver.initialize_platform(context))
     context.target = "browser"
+    -- Synthetic policy fixtures model a supported host, not Windows browser
+    -- compilation. Keep these observations coherent across target reentry.
+    context.uname, context.is_darwin = "Linux", false
     context.target_descriptor = assert(require("titan-compiler.browsertarget").import(fixtures.descriptor(root)))
     assert(driver.initialize_platform(context))
     return context
@@ -141,24 +143,58 @@ end
 
 describe("browser providers", function()
     local root, original_loadlib, original_execute, original_popen, original_source, original_bin
-    local audit_guard, original_new_sync
+    local audit_guard, original_new_sync, original_new_resolver
+    local original_process_run, original_process_capture
     before_each(function()
         root = temporary.name("-browser-providers"); mkdir(root)
         original_loadlib = require("titan")._loadlib
         require("titan")._loadlib = function() error("browser called _loadlib") end
         original_execute, original_popen = os.execute, io.popen
         original_new_sync = compiler_io.new_sync
+        original_new_resolver = driver.new_resolver_context
+        local process = require("titan-compiler.process")
+        original_process_run, original_process_capture = process.run, process.capture
         original_source, original_bin = driver.TITAN_SOURCE_PATH, driver.TITAN_BIN_PATH
         driver.imported, types.registry = {}, {}
     end)
     after_each(function()
         if audit_guard then audit_guard.restore(); audit_guard = nil end
         compiler_io.new_sync = original_new_sync
+        driver.new_resolver_context = original_new_resolver
+        local process = require("titan-compiler.process")
+        process.run, process.capture = original_process_run, original_process_capture
         require("titan")._loadlib = original_loadlib
         os.execute, io.popen = original_execute, original_popen
         driver.TITAN_SOURCE_PATH, driver.TITAN_BIN_PATH = original_source, original_bin
         driver.imported, types.registry = {}, {}
         remove(root)
+    end)
+
+    it("models supported browser fixtures even from a Windows host observation", function()
+        driver.new_resolver_context = function(options)
+            local context = original_new_resolver(options)
+            context.uname, context.is_darwin = "Windows", false
+            return context
+        end
+        local context = browser_context(root)
+        driver.new_resolver_context = original_new_resolver
+        assert.equal("Linux", context.uname)
+        assert.is_false(context.is_darwin)
+        assert.equal("linux", context.host_target)
+        local descriptor = context.target_descriptor
+        assert.equal(descriptor, driver.context_target_descriptor(context))
+        assert.equal("linux", context.host_target)
+        assert(driver.close_resolver_context(context))
+    end)
+    it("retains production rejection of real Windows browser host observations", function()
+        local context = driver.new_resolver_context()
+        context.target = "browser"
+        context.uname, context.is_darwin = "Windows", false
+        local ok, err = driver.initialize_platform(context)
+        assert.is_nil(ok)
+        assert.equal("browser builds are supported from Linux and macOS hosts (host is windows)", err)
+        assert.is_nil(context.target_descriptor)
+        assert(driver.close_resolver_context(context))
     end)
 
     it("accepts the primary protocol and rejects sibling substitutes", function()
@@ -430,11 +466,13 @@ describe("browser providers", function()
         local primary, part = wasm("pkg.mod"), wasm(nil)
         write(root .. "/primary.o", primary); write(root .. "/part.o", part)
         local built, commands = {}, {}
-        os.execute = function(command)
-            local argv = assert(cdriver.split_shell_words(command))
+        local function archive_tool(argv)
+            if argv[1] == "/bin/sh" and argv[2] == "-c" then
+                argv = assert(cdriver.split_shell_words(argv[3]))
+            end
             commands[#commands + 1] = argv
             assert.is_true(argv[1] == context.target_descriptor.tools.ar[1] or
-                argv[1] == context.target_descriptor.tools.ranlib[1], command)
+                argv[1] == context.target_descriptor.tools.ranlib[1], table.concat(argv, " "))
             if argv[1] == context.target_descriptor.tools.ar[1] then
                 assert.equal("qDc", argv[2])
                 local output, members, names = argv[3], {}, {}
@@ -446,7 +484,7 @@ describe("browser providers", function()
                 end
                 for index = 4, #argv do
                     members[#members + 1], names[#names + 1] =
-                        read(argv[index]), argv[index]:match("([^/]+)$")
+                        read(argv[index]), argv[index]:match("([^/\\]+)$")
                 end
                 built[output] = { members = members, names = names }
                 write(output, archive(members, names))
@@ -454,6 +492,17 @@ describe("browser providers", function()
                 assert.equal("-D", argv[2])
             end
             return true, "exit", 0
+        end
+        -- POSIX uses the shell path; Windows uses process.run directly. Keep
+        -- every native transport synthetic while the shared audit checks it.
+        os.execute = function(command)
+            return archive_tool(assert(cdriver.split_shell_words(command)))
+        end
+        local process = require("titan-compiler.process")
+        process.run = archive_tool
+        process.capture = function(argv)
+            archive_tool(argv)
+            return { started = true, ok = true, why = "exit", status = 0, output = "" }
         end
         io.popen = function() error("unexpected browser executing probe") end
         audit_guard = process_audit.install({ tools = context.target_descriptor.tools })
