@@ -22,6 +22,19 @@ local function joined(root, name)
     return root .. "/" .. name
 end
 
+-- The host's own source-selection target, resolved once. Discovery specs pass
+-- it explicitly so an inventory never has to run `uname`; a case that needs
+-- another target sets its own.
+local HOST_TARGET = (function()
+    local context = driver.new_resolver_context({})
+    local target = assert(driver.context_target(context))
+    assert(driver.close_resolver_context(context))
+    return target
+end)()
+
+-- A label that does not apply to this host, for inactive-variant cases.
+local INACTIVE_LABEL = HOST_TARGET == "windows" and "linux" or "windows"
+
 local function slashed(value)
     return path.to_slash(value)
 end
@@ -100,10 +113,17 @@ local function require_symlink_capability()
     return true
 end
 
-local function discovery_context(io_strategy)
-    return driver.new_resolver_context({
-        io = io_strategy or compiler_io.new_sync(),
-    })
+-- Discovery contexts are platform-initialized, as `titanc` provides them, so
+-- an inventory never runs `uname`. The observed strategy is attached after
+-- initialization so a no-process inventory case measures discovery alone.
+local function discovery_context(io_strategy, options)
+    local base = compiler_io.new_sync()
+    local settings = { io = base }
+    for name, value in pairs(options or {}) do settings[name] = value end
+    local context = driver.new_resolver_context(settings)
+    assert(driver.initialize_platform(context))
+    context.io = io_strategy or base
+    return context
 end
 
 -- Observe the compiler I/O strategy handed to discovery. Discovery may list,
@@ -576,6 +596,142 @@ describe("automatic test-root discovery", function()
             assert.same({ "pkg.tests" }, roots)
             assert.same({ "tests.titan", "second.titan" },
                 basenames(sources["pkg.tests"].files))
+        end)
+    end)
+
+    describe("target variants", function()
+        -- Expected roots are computed from the host's row, so the same
+        -- expectations hold on Linux, macOS and Windows.
+
+        it("discovers a root whose only files are variants", function()
+            local root = make({
+                ["alpha_test.native.titan"] = "",
+                ["nested/beta_spec.native.titan"] = "",
+                ["gamma_tests.titan"] = "",
+            })
+
+            local roots, sources = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test", "gamma_tests", "nested.beta_spec" },
+                roots)
+            assert.equal(slashed(joined(root, "alpha_test.native.titan")),
+                slashed(sources["alpha_test"].main))
+            assert.equal("flat", sources["alpha_test"].kind)
+        end)
+
+        it("skips another target's variant without an error", function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["beta_test." .. INACTIVE_LABEL .. ".titan"] = "",
+                ["nested/gamma_spec." .. INACTIVE_LABEL .. ".titan"] = "",
+            })
+
+            local roots = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+        end)
+
+        it("deduplicates the variants of one root through its selection",
+           function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["alpha_test.native.titan"] = "",
+                ["alpha_test.browser.titan"] = "",
+            })
+
+            local roots, sources = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+            -- The resolver's row, not enumeration order, selects the file.
+            assert.equal(slashed(joined(root, "alpha_test.native.titan")),
+                slashed(sources["alpha_test"].main))
+        end)
+
+        it("selects the exact OS label over native over the default",
+           function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["alpha_test.native.titan"] = "",
+                ["alpha_test." .. HOST_TARGET .. ".titan"] = "",
+            })
+
+            local roots, sources = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+            local expected = HOST_TARGET == "native" and "alpha_test.native.titan"
+                or ("alpha_test." .. HOST_TARGET .. ".titan")
+            assert.equal(slashed(joined(root, expected)),
+                slashed(sources["alpha_test"].main))
+        end)
+
+        it("skips a folder root with no main for the target", function()
+            local root = make({
+                ["pkg/tests/tests." .. INACTIVE_LABEL .. ".titan"] = "",
+                ["pkg/tests/extra_test.titan"] = "",
+                ["plain_test.titan"] = "",
+            })
+
+            local roots = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "plain_test" }, roots)
+        end)
+
+        it("composes a folder root from the host's selected contributors",
+           function()
+            local root = make({
+                ["pkg/tests/tests.native.titan"] = "",
+                ["pkg/tests/alpha.titan"] = "",
+                ["pkg/tests/alpha.native.titan"] = "",
+                ["pkg/tests/alpha." .. INACTIVE_LABEL .. ".titan"] = "",
+            })
+
+            local roots, sources = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "pkg.tests" }, roots)
+            local folder = sources["pkg.tests"]
+            assert.equal("folder", folder.kind)
+            assert.equal(slashed(joined(root, "pkg/tests/tests.native.titan")),
+                slashed(folder.main))
+            assert.same({
+                "alpha.native.titan",
+                "tests.native.titan",
+            }, basenames(folder.files))
+        end)
+
+        it("keeps other dotted stems skipped", function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["alpha_test.helper.titan"] = "",
+                ["beta_test.notes.titan"] = "",
+                ["gamma_test.helper.native.titan"] = "",
+            })
+
+            local roots = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+        end)
+
+        it("diagnoses reserved variant spellings", function()
+            for _, case in ipairs({
+                { "alpha_test.linux.native.titan", "stacked target labels" },
+                { "beta_test.Linux.titan", "mis-cased target label" },
+            }) do
+                local root = make({ [case[1]] = "", ["gamma_test.titan"] = "" })
+
+                local missing, message = testroots.discover(discovery_context(),
+                    { root }, {}, {}, root)
+
+                assert.is_nil(missing)
+                assert.truthy(message:find(case[2], 1, true), message)
+                assert.truthy(message:find(case[1], 1, true), message)
+            end
         end)
     end)
 

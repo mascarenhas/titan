@@ -6,6 +6,12 @@
 -- descriptors. It never reads source bytes, checks, generates, or publishes
 -- anything, so a warm build pays only for listings and resolution.
 --
+-- Target variants (`foo_test.<label>.titan`) name the root `foo_test` when the
+-- label applies to the selected target; the resolver, not the spelling that
+-- found it, decides which file runs. A variant for another target is skipped
+-- silently, and a reserved variant spelling is diagnosed like the folder sweep
+-- diagnoses it.
+--
 -- Implementation notes: doc/implementation/test-runner.md#automatic-test-root-discovery
 
 local path = require "titan-compiler.path"
@@ -25,6 +31,32 @@ end
 local function is_component(name)
     return type(name) == "string" and not name:find(".", 1, true) and
         staticmetadata.valid_module_name(name)
+end
+
+-- The logical component an immediate `*.titan` entry contributes, or nil when
+-- the entry is not a root candidate. A variant contributes its base name only
+-- when its label applies to the target; a reserved spelling is a diagnostic.
+-- Other dotted stems keep no meaning here.
+local function source_candidate(driver, target, name)
+    local logical, label, err = driver.classify_source_filename(name)
+    if err then return nil, err end
+    if not logical then return nil end
+    local stem = logical:sub(1, -7)
+    if logical ~= name then
+        if not is_component(stem) then return nil end
+        if not driver.target_label_applies(target, label) then return nil end
+        return stem
+    end
+    if is_component(stem) then return stem end
+    return nil
+end
+
+-- The spelling before one trailing `.<word>` label. Discovery uses it only to
+-- decide whether a symbolic link could name a root without following every
+-- unrelated link; the driver owns the actual grammar.
+local function spelled_stem(name)
+    local stem = name:sub(1, -7)
+    return stem:match("^(.*)%.%a+$") or stem
 end
 
 local function append_path(directory, name)
@@ -109,7 +141,8 @@ end
 
 -- The ordinary tagged resolver and its configured source root list. The driver
 -- owns both; loading it lazily keeps `require "titan-compiler.testroots"`
--- usable from driver.lua itself.
+-- usable from driver.lua itself. The variant helpers belong to the same
+-- owner, so discovery never keeps a second copy of the spelling rule.
 local function resolver_access(source_path)
     local loaded, driver = pcall(require, "titan-compiler.driver")
     if not loaded or type(driver) ~= "table" then
@@ -121,15 +154,22 @@ local function resolver_access(source_path)
         error("test-root discovery requires " ..
             "driver.resolve_source(context, modname, source_path?)", 3)
     end
+    for _, name in ipairs({ "classify_source_filename", "context_target",
+            "target_label_applies" }) do
+        if type(driver[name]) ~= "function" then
+            error("test-root discovery requires driver." .. name, 3)
+        end
+    end
     local roots_text = source_path
     if roots_text == nil then roots_text = driver.TITAN_SOURCE_PATH end
     if type(roots_text) ~= "string" then roots_text = nil end
-    return resolve, roots_text
+    return driver, resolve, roots_text
 end
 
 -- Discover automatic test roots.
 --
--- `context` supplies `io` (list/stat/lstat/realpath/yield). `dirs` is the
+-- `context` supplies `io` (list/stat/lstat/realpath/yield) and the selected
+-- source target; a bare context detects the host once. `dirs` is the
 -- ordered `--test-dir` list; each directory must lie inside a configured
 -- `--tree` source root. `excludes` holds exact logical module names that are
 -- removed from the automatic selection only. `explicit_roots` keeps positional
@@ -149,7 +189,14 @@ function testroots.discover(context, dirs, excludes, explicit_roots,
             "--test-dir directory"
     end
 
-    local resolve, roots_text = resolver_access(source_path)
+    local driver, resolve, roots_text = resolver_access(source_path)
+    -- The caller's platform initialization has already selected the target;
+    -- the accessor returns it without repeating host detection.
+    local target, target_err = driver.context_target(context)
+    if not target then
+        return nil, "cannot determine the source selection target: " ..
+            tostring(target_err)
+    end
     local configured = {}
     if roots_text then
         for root in roots_text:gmatch("[^;]+") do
@@ -329,15 +376,31 @@ function testroots.discover(context, dirs, excludes, explicit_roots,
             end
             local kind = attributes.kind
             local linked = kind == "symlink"
+            local candidate, shaped
+            if kind ~= "directory" and name:sub(1, 1) ~= "." and
+               name:sub(-6) == ".titan" then
+                shaped = is_root_name(name) or is_root_name(spelled_stem(name))
+                -- A regular file is always classified: an unreadable reserved
+                -- spelling is diagnosed wherever the inventory sees it, while a
+                -- link is followed only when it could name a root.
+                if kind == "file" or shaped then
+                    local candidate_err
+                    candidate, candidate_err = source_candidate(
+                        driver, target, name)
+                    if candidate_err then
+                        return nil, "invalid test source '" .. physical ..
+                            "': " .. candidate_err
+                    end
+                end
+            end
             if linked and name:sub(1, 1) ~= "." and
-               (is_root_name(name) or name:sub(-6) == ".titan" and
-                is_root_name(name:sub(1, -7))) then
-                local target, target_err = context.io:stat(physical)
-                if not target then
+               (is_root_name(name) or shaped or candidate) then
+                local target_attributes, target_err = context.io:stat(physical)
+                if not target_attributes then
                     return nil, "cannot inspect symbolic link '" .. physical ..
                         "': " .. describe_error(target_err)
                 end
-                kind = target.kind
+                kind = target_attributes.kind
             end
             if kind == "directory" then
                 if name:sub(1, 1) ~= "." and is_component(name) then
@@ -352,13 +415,10 @@ function testroots.discover(context, dirs, excludes, explicit_roots,
                         if not ok then return nil, err end
                     end
                 end
-            elseif kind == "file" and name:sub(-6) == ".titan" then
-                local stem = name:sub(1, -7)
-                if name:sub(1, 1) ~= "." and is_component(stem) then
-                    local ok, err = consider(
-                        join_components(components, stem), physical, "file", source_root)
-                    if not ok then return nil, err end
-                end
+            elseif kind == "file" and candidate then
+                local ok, err = consider(
+                    join_components(components, candidate), physical, "file", source_root)
+                if not ok then return nil, err end
             end
         end
         context.io:yield(directory)
