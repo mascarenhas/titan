@@ -16,7 +16,9 @@
 #include "titan.h"
 #include "titan_winloader.h"
 #else
+#if !defined(TITAN_TARGET_BROWSER)
 #include <dlfcn.h>
+#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -92,7 +94,10 @@ static int push_symbol(lua_State *L, void *lib, const char *symbol,
   void *raw;
   const char *error;
 
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+  (void)lib; (void)symbol; (void)requested_filename;
+  return luaL_error(L, "browser target does not support dynamic provider loading");
+#elif defined(_WIN32)
   raw = titan_cast_func(void *, GetProcAddress((HMODULE)lib, symbol));
   if (raw == NULL) {
     DWORD code = GetLastError();
@@ -168,7 +173,9 @@ static int abivalue(lua_State *L) {
 ** The registry remembers handles for reuse; no finalizer calls dlclose, so
 ** mapped Titan interfaces remain available for the process lifetime. */
 static int lazyload(lua_State *L) {
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+  return luaL_error(L, "browser target does not support dynamic provider loading");
+#elif defined(_WIN32)
   const char *filename = titan_win_loader_string(L, 1);
   const char *symbol = titan_win_loader_string(L, 2);
   HMODULE lib = titan_win_load_library(L, filename, TITAN_LAZY_LIBS_KEY);
@@ -212,7 +219,9 @@ static int lazyload(lua_State *L) {
 ** Handles are stored as light userdata and are deliberately never closed. */
 /* Implementation notes: doc/implementation/lua-interop-internals.md#4-the-titan-package-searcher */
 static int lazyglobalload(lua_State *L) {
-#if defined(_WIN32)
+#if defined(TITAN_TARGET_BROWSER)
+  return luaL_error(L, "browser target does not support dynamic provider loading");
+#elif defined(_WIN32)
   const char *symbol = titan_win_loader_string(L, 2);
   const char *module = titan_win_loader_string(L, 3);
   const char *filename;
@@ -641,7 +650,7 @@ static const luaL_Reg sha256_stream_methods[] = {
   { NULL, NULL },
 };
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 /* Private compiler helpers: GNU Make jobserver participation for native job
 ** batches. A client owns private open-file descriptions of the parent's
 ** token channel (the FIFO path, or a Linux /proc reopen of an inherited
@@ -1702,7 +1711,7 @@ static const luaL_Reg titanlib[] = {
   { "_abivalue", abivalue },
   { "_native_process_tree_guard", native_process_tree_guard },
   { "_executable_search_cwd", executable_search_cwd },
-#else
+#elif !defined(TITAN_TARGET_BROWSER)
   { "_executable_access", executable_access },
   { "_jobserver_open", jobserver_open },
   { "_jobserver_wait", jobserver_wait },
@@ -1733,7 +1742,7 @@ TITAN_SUPPORT_API int luaopen_titan(lua_State *L) {
     lua_setfield(L, -2, "__index");
   }
   lua_pop(L, 1);
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
   if (luaL_newmetatable(L, TITAN_JOBSERVER_TYPE)) {
     luaL_newlib(L, jobserver_methods);
     lua_setfield(L, -2, "__index");
