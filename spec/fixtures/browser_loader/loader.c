@@ -5,6 +5,13 @@ EM_ASYNC_JS(void, browser_loader_async_wait, (), {
     await new Promise(resolve => setTimeout(resolve, 15));
 });
 
+/* Abort after a real outer unwind without ever waking its Asyncify ccall.
+ * Fatal disposal must not wait for that permanently pending Promise. */
+EM_ASYNC_JS(void, browser_loader_abort_wait, (), {
+    setTimeout(() => abort('loader abort while suspended'), 10);
+    await new Promise(() => {});
+});
+
 void browser_loader_wait(int kind) {
     if (kind == 0) emscripten_sleep(15);
     else browser_loader_async_wait();
