@@ -199,19 +199,24 @@ every `EMSDK_*` variable it does not set itself, and the job sets
    `TITAN_NODE` and on `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
    only action runtimes, so it does not select this Node.
 3. **Chrome for Testing.** `ubicloud/cache@v4` restores the headless shell
-   under `ubuntu-24.04-<arch>-chrome-headless-shell-156.0.8078.80-v1`. A miss
-   downloads the pinned linux64 `chrome-headless-shell` ZIP, verifies its
-   SHA-256 (Chrome for Testing publishes no digest file), and extracts it. The
-   step installs the Ubuntu runtime libraries only when `ldd` reports a missing
-   one, fails if any is still missing, and exports `TITAN_CHROME`. Local `act`
-   runs have no browser, so provisioning belongs inside the job; there is no
-   npm, Playwright, or Chromedriver.
+   under `ubuntu-24.04-<arch>-chrome-headless-shell-156.0.8078.80-<sha256>-v1`
+   (the ZIP digest is part of the cache key so re-pinning cannot restore an
+   old binary). A miss downloads the pinned linux64 `chrome-headless-shell`
+   ZIP, verifies its SHA-256 (Chrome for Testing publishes no digest file),
+   and extracts it with `scripts/browser_extract_zip.py` so recorded Unix file
+   modes (including `+x`) are preserved regardless of umask. The step installs
+   the Ubuntu runtime libraries only when `ldd` reports a missing one, fails
+   if any is still missing, and exports `TITAN_CHROME`. Local `act` runs have
+   no browser, so provisioning belongs inside the job; there is no npm,
+   Playwright, or Chromedriver.
 4. **Browser Lua.** `make lua-browser PREFIX="$PREFIX"` installs the archive,
    record, and headers; the step asserts `liblua.a`, `liblua-config.txt`, and
    core headers.
-5. **Native install without Emscripten.** `"$PREFIX/bin/luarocks" make` runs
-   with `EMSDK` unset and no `emcc` on `PATH`, proving that the native build
-   never needs the browser toolchain.
+5. **Native install without Emscripten.** After removing the prepared tree's
+   unregistered `bin/titanc`, `share/lua/5.5/titan-compiler`, and
+   `share/lua/5.5/c-parser` copies (as `native-coverage` does),
+   `"$PREFIX/bin/luarocks" make` runs with `EMSDK` unset and no `emcc` on
+   `PATH`, proving that the native build never needs the browser toolchain.
 6. **Browser SDK.** With emsdk sourced, the step asserts that
    `lib/titan-browser` is absent or empty, runs `make browser-sdk
    PREFIX="$PREFIX"`, and asserts the nine installed SDK files listed in the
@@ -250,11 +255,13 @@ every `EMSDK_*` variable it does not set itself, and the job sets
     assertions off, plus the harness-only `--cflag=-g2 --ldflag=-g2
     --ldflag=-Os`, because Emscripten 6.0.13 minifies export names only at
     `-O3` or a shrink level.
-11. **Loader suite.** The installed `titan-browser-run --js-test
-    spec/browser/loader.test.mjs`, rooted at the workspace with relative image
-    paths, runs under Node and then Chromium.
+11. **Loader suite.** The installed `titan-browser-run --timeout 300000
+    --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
+    workspace with relative image paths, runs under Node and then Chromium,
+    with output copied to `$RUNNER_TEMP/browser-loader.log`.
 12. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
-    runs against the minified image under both engines.
+    runs against the minified image under both engines with the same timeout
+    and grace and output copied to `$RUNNER_TEMP/browser-guard.log`.
 13. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
     `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
     `TITAN_BROWSER_RUNNER` (the installed launcher), and
