@@ -1301,6 +1301,7 @@ if main_module then
                 pretty_print = args.pretty_print,
                 exe = args.exe,
                 final_link_flags = link_ticket and link_ticket.dependency_argv,
+                dependency_output = link_ticket and link_ticket.dependency_output,
                 dsymutil = dsymutil,
                 before_commit = link_ticket and function()
                     return linkcertificate.invalidate(resolver_context, link_ticket)

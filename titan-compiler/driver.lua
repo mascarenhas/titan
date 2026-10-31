@@ -13728,9 +13728,18 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     append_argv(command, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
     append_argv(command, driver.link_extra_flags())
     append_argv(command, options.final_link_flags)
-    local linked
-    linked, term, code = driver.run_link_command(command, verbose, staged)
-    if not linked then return nil, term, code end
+    local linked, term, code
+    if options.dependency_output then
+        if verbose then io.stderr:write(assert(command_argv(command)), "\n") end
+        local result = context.io:run(command, { stderr_to_stdout = false })
+        if not result.started then return nil, result.diagnostic end
+        if not result.ok then return nil, result.why, result.status end
+        linked, err = context.io:write_file(options.dependency_output, result.output or "")
+        if not linked then return nil, err end
+    else
+        linked, term, code = driver.run_link_command(command, verbose, staged)
+        if not linked then return nil, term, code end
+    end
     for _, filename in ipairs({ staged, staged_wasm }) do
         if lfs.symlinkattributes(filename, "mode") ~= "file" then
             return nil, "staged browser image '" .. filename .. "' is not a regular file"

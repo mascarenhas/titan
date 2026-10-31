@@ -714,7 +714,12 @@ function certificate.native_library_policy(context, request)
     if browser_descriptor(context) and backend == "archive" then
         return { cacheable = true, backend = "archive", files = {}, argv = {} }
     end
-    if backend == "gnu" or backend == "lld" or backend == "wasm" then
+    if backend == "wasm" then
+        need(type(filename) == "string", "link dependency output path is required")
+        return { cacheable = true, backend = backend, dependency_file = filename,
+            capture_trace = true, argv = { "-Wl,--trace" } }
+    end
+    if backend == "gnu" or backend == "lld" then
         need(type(filename) == "string", "link dependency output path is required")
         return { cacheable = true, backend = backend, dependency_file = filename,
             argv = { "-Wl,--dependency-file=" .. filename } }
@@ -775,6 +780,20 @@ local function native_dependencies(context, policy)
         end
     elseif policy.backend == "gnu" then
         files = gnu_link_dependencies(bytes)
+    elseif policy.backend == "wasm" then
+        files = {}
+        need(not bytes:find("\0", 1, true), "NUL in Wasm linker input trace")
+        for line in (bytes .. "\n"):gmatch("([^\r\n]+)[\r\n]+") do
+            local filename = line
+            local stat = context.io:stat(filename)
+            if not stat then
+                filename = line:match("^(.*)%(.+%)$")
+                stat = filename and context.io:stat(filename)
+            end
+            need(stat and stat.kind == "file", "invalid Wasm linker input trace: " .. line)
+            files[#files + 1] = filename
+        end
+        need(#files > 0, "empty Wasm linker input trace")
     else
         files = need(depfile.parse(bytes))
     end
@@ -840,7 +859,8 @@ function certificate.prepare(context, spec)
     return { key = key, directory = directory, synthetic_directory = paths.join(directory, "synthetic"),
         record = paths.join(directory, "record"), input = incremental.digest(context, "final-link", input),
         recipe = input, outputs = outputs, native_policy = policy, cacheable = policy.cacheable,
-        dependency_argv = policy.argv }
+        dependency_argv = policy.argv,
+        dependency_output = policy.capture_trace and policy.dependency_file or nil }
 end
 
 function certificate.check(context, ticket)
