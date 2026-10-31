@@ -650,6 +650,14 @@ static const luaL_Reg sha256_stream_methods[] = {
   { NULL, NULL },
 };
 
+#if !defined(_WIN32)
+static int push_errno(lua_State *L, const char *what, int error_number) {
+  lua_pushnil(L);
+  lua_pushfstring(L, "%s: %s", what, strerror(error_number));
+  return 2;
+}
+#endif
+
 #if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 /* Private compiler helpers: GNU Make jobserver participation for native job
 ** batches. A client owns private open-file descriptions of the parent's
@@ -668,12 +676,6 @@ typedef struct TitanJobserver {
   size_t capacity;
   unsigned char *bytes;
 } TitanJobserver;
-
-static int push_errno(lua_State *L, const char *what, int error_number) {
-  lua_pushnil(L);
-  lua_pushfstring(L, "%s: %s", what, strerror(error_number));
-  return 2;
-}
 
 /* Effective execution permission is independent of file readability and of
 ** execute bits granted to some other credential class. */
