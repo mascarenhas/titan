@@ -379,7 +379,7 @@ honors only for the root user.
 | 73 | A trap or abort happened during the grace period after completion; it overrides the earlier result. |
 | 74 | An unhandled Promise rejection, before completion or during the grace period. |
 | 75 | The tool itself failed: Node or Chrome missing, an unreadable or invalid image, an engine that exited early, or a failed cleanup. |
-| 76 | A loader output sink failed (only with `--js-test`). |
+| 76 | A loader output sink failed. The runner's own sinks do not fail, so in practice this comes from the sinks of a `--js-test` module. |
 
 A program's own status can coincide with 70 to 76. The stderr message tells
 the cases apart: an infrastructure failure always prints one, such as
