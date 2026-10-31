@@ -835,6 +835,14 @@ change of inference invalidates compiler and worker certificates through the
 existing inventory rule; C-probe results stay keyed by their exact source, and
 generated FFI headers and nominal C identities are unaffected.
 
+Identifier aliases do not extend call-expression macro support. UCRT's
+`stdout (__acrt_iob_func(1))` has a pointer return type at raw extraction, but
+its call expression is not an integer constant and is not published as a
+foreign value. An indexed-call replacement such as `(&__iob_func()[1])` is
+already outside the best-effort expression typer. The declared accessor
+functions remain ordinary callable foreign members; direct calls do not pass
+through macro constant evaluation.
+
 A separate object-macro form contains only a dotted identifier replacement,
 such as `implementation.member`. `cdefines.classify_expanded_field_macro`
 classifies every final object macro after the combined module header has been

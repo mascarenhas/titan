@@ -1004,6 +1004,48 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("keeps CRT call and indexed-call macros outside identifier alias support",
+    function()
+        with_header([[
+            typedef struct ffi_crt_stream { int marker; } ffi_crt_stream;
+            static ffi_crt_stream ffi_crt_streams[3] = { { 0 }, { 17 }, { 29 } };
+            static ffi_crt_stream *ffi_crt_iob_func(unsigned index) {
+                return &ffi_crt_streams[index];
+            }
+            static ffi_crt_stream *ffi_crt_iob(void) {
+                return ffi_crt_streams;
+            }
+            #define ffi_crt_stdout (ffi_crt_iob_func(1))
+            #define ffi_crt_stderr (ffi_crt_iob_func(2))
+            #define ffi_crt_indexed (&ffi_crt_iob()[1])
+            #define ffi_crt_base (ffi_crt_iob())
+        ]], function(header)
+            local prefix = 'foreign import "' .. header .. '"\n'
+            local ok, err, ast = run_checker(prefix .. [[
+                function read_streams(): integer
+                    return ffi.ffi_crt_iob_func(1).marker
+                        + ffi.ffi_crt_iob_func(2).marker
+                        + ffi.ffi_crt_base[0].marker
+                end
+            ]])
+            assert.truthy(ok, err)
+            local members = ast._ffi_namespace._type.members
+            assert.is_not_nil(members.ffi_crt_iob_func)
+            assert.is_not_nil(members.ffi_crt_iob)
+            assert.is_not_nil(members.ffi_crt_base)
+            for _, name in ipairs({
+                "ffi_crt_stdout", "ffi_crt_stderr", "ffi_crt_indexed",
+            }) do
+                assert.is_nil(members[name], name)
+                local accepted, errors = run_checker(prefix ..
+                    "local function read(): value\nreturn ffi." .. name .. "\nend\n")
+                assert.falsy(accepted)
+                assert.match("member '" .. name .. "' not found inside module 'ffi'",
+                    errors, 1, true)
+            end
+        end)
+    end)
+
     it("imports floating constants with their C ranks including math sentinels",
     function()
         with_header([[

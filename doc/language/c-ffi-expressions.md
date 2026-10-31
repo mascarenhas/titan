@@ -601,6 +601,12 @@ local function write_line(line: string)
 end
 ```
 
+Standard-stream replacements depend on the host header. Windows UCRT definitions
+such as `stdout (__acrt_iob_func(1))`, and indexed-call forms such as
+`(&__iob_func()[1])`, are not imported macro values. The declared accessor is
+still callable directly: on UCRT, `ffi.__acrt_iob_func(1)` supplies the stdout
+pointer and `ffi.__acrt_iob_func(2)` supplies stderr.
+
 Some system headers expose a public field name as an object-like macro whose
 replacement is only a dotted identifier path, for example:
 
