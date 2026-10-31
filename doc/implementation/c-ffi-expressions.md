@@ -836,12 +836,15 @@ existing inventory rule; C-probe results stay keyed by their exact source, and
 generated FFI headers and nominal C identities are unaffected.
 
 Identifier aliases do not extend call-expression macro support. UCRT's
-`stdout (__acrt_iob_func(1))` has a pointer return type at raw extraction, but
-its call expression is not an integer constant and is not published as a
-foreign value. An indexed-call replacement such as `(&__iob_func()[1])` is
-already outside the best-effort expression typer. The declared accessor
-functions remain ordinary callable foreign members; direct calls do not pass
-through macro constant evaluation.
+`#define stdout (__acrt_iob_func(1))` gets the accessor's pointer return type at
+raw extraction, but its replacement contains an integer literal, so finalization
+sends it through the target integer-constant evaluator. The evaluator rejects
+the call, and no foreign member is published. A supported call replacement
+without integer literals keeps its best-effort return type. An indexed-call
+replacement such as `(&__iob_func()[1])` is outside the best-effort expression
+typer and publishes nothing. The declared accessor functions remain ordinary
+callable foreign members; direct calls do not pass through macro constant
+evaluation.
 
 A separate object-macro form contains only a dotted identifier replacement,
 such as `implementation.member`. `cdefines.classify_expanded_field_macro`
