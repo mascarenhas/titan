@@ -2614,7 +2614,8 @@ printf '%s\n' "$2"
 set -eu
 printf '%s\0' "$0" "$@" > "$PROBE_ARGV"
 printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
-  "${TITAN_COMPILER_BOOTSTRAP-}" "$MSYS2_ARG_CONV_EXCL" > "$PROBE_ENV"
+  "${TITAN_COMPILER_BOOTSTRAP-}" "$MSYS2_ARG_CONV_EXCL" \
+  "${TITAN_TARGET-<unset>}" > "$PROBE_ENV"
 ]]
         local lua = tools .. "/fake lua.exe"
         local selected_compiler = workspace .. "/selected compiler/titanc.exe"
@@ -2628,7 +2629,7 @@ printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
         for _, installed_runtime in ipairs({ "0", "1" }) do
             ok, output = run({
                 "env", "-u", "TITAN_COMPILER_BOOTSTRAP",
-                "MSYSTEM=CLANG64", "TITAN_JOBS=3",
+                "MSYSTEM=CLANG64", "TITAN_JOBS=3", "TITAN_TARGET=bogus",
                 "PATH=" .. tools .. ":" .. (os.getenv("PATH") or "/usr/bin:/bin"),
                 "ROCK_LUA=" .. lua, "ROCK_TITANC=" .. selected_compiler,
                 "STDLIB_USE_INSTALLED_RUNTIME=" .. installed_runtime,
@@ -2662,8 +2663,11 @@ printf '%s\n' "$TITAN_ROOT" "$TITAN_RUNTIME_PREBUILT" \
                 assert.equal(selected_compiler, table.remove(arguments, 1))
             end
             assert.same(expected, { table.unpack(arguments, 1, #expected) })
-            assert.equal(table.concat({ prefix, "1", bootstrap, "*", "" }, "\n"),
-                read_file(environment_log))
+            -- The compiler child never inherits an ambient target selection,
+            -- whether the script bootstraps the source compiler or runs the
+            -- installed one.
+            assert.equal(table.concat({ prefix, "1", bootstrap, "*", "<unset>", "" },
+                "\n"), read_file(environment_log))
         end
     end)
 
@@ -2736,6 +2740,7 @@ set -euo pipefail
         local titanc = fixture(prefix, "bin/titanc.exe", [=[#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$WINDOWS_TITANC_LOG"
+printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> "$WINDOWS_CHILD_ENV_LOG"
 output= exe= c_source= compile_only=0 coverage=0 print_objects=0
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -2822,6 +2827,7 @@ printf '%s\n' "$1"
         local powershell = fixture(tools, "powershell.exe", [=[#!/usr/bin/env bash
 set -euo pipefail
 if [[ $TITAN_BEHAVIOR_MODE == run && -n ${TITAN_BEHAVIOR_EXE:-} ]]; then
+  printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> "$WINDOWS_CHILD_ENV_LOG"
   [[ ! -e $TITAN_TEST_ROOT/stale ]]
   : > "$TITAN_BEHAVIOR_WORK/stdout.log"
   : > "$TITAN_BEHAVIOR_WORK/stderr.log"
@@ -2833,12 +2839,15 @@ fi
         local compiler_log = workspace .. "/titanc.log"
         local c_compile_log = workspace .. "/c-compile.log"
         local link_log = workspace .. "/link.log"
+        local child_environment_log = workspace .. "/child-environment.log"
+        write_file(child_environment_log, "")
         local function harness(mode, coverage, profile)
             local command = {
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
                 "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
                 "-u", "LUA_PATH", "-u", "LUA_CPATH",
-                "MSYSTEM=CLANG64", "TITAN_BUILD_PROFILE=" .. (profile or "validation"),
+                "MSYSTEM=CLANG64", "TITAN_TARGET=bogus",
+                "TITAN_BUILD_PROFILE=" .. (profile or "validation"),
                 "TITAN_TEST_COVERAGE=" .. (coverage and "1" or "0"),
                 "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
                 "TEST_CPPFLAGS=", "TEST_CFLAGS=-O0 -fno-lto", "TEST_LDFLAGS=",
@@ -2846,13 +2855,27 @@ fi
                 "PATH=" .. tools .. ":" .. (os.getenv("PATH") or "/usr/bin:/bin"),
                 "WINDOWS_NATIVE_LOG=" .. native_log, "WINDOWS_TITANC_LOG=" .. compiler_log,
                 "WINDOWS_C_COMPILE_LOG=" .. c_compile_log, "WINDOWS_LINK_LOG=" .. link_log,
+                "WINDOWS_CHILD_ENV_LOG=" .. child_environment_log,
                 "bash", source .. "/spec/support/windows_stdlib_tests.sh", mode, work,
             }
             if mode == "build" then command[#command + 1] = prefix end
             return run(command, source)
         end
+        -- The script's compiler and suite children never inherit an ambient
+        -- target selection: build mode records through the installed compiler,
+        -- run mode through the executed suite child.
+        local function assert_target_cleared(required)
+            local recorded = read_file(child_environment_log)
+            if required then
+                assert.truthy(recorded:find("target=[<unset>]", 1, true),
+                    "no child environment recorded: " .. recorded)
+            end
+            assert.falsy(recorded:find("bogus", 1, true), recorded)
+            write_file(child_environment_log, "")
+        end
         ok, output = harness("build")
         assert.truthy(ok, output)
+        assert_target_cleared(true)
         local raw_commands = read_file(native_log)
         assert.truthy(raw_commands:find(work .. "/sdk/bin/process child ação 東京.exe", 1, true), raw_commands)
         assert_file(work .. "/sdk/bin/process child ação 東京.exe")
@@ -2897,6 +2920,7 @@ fi
         fixture(source, "spec/fixtures/shape.txt/new.txt", "new directory shape\n")
         ok, output = harness("build")
         assert.truthy(ok, output)
+        assert_target_cleared(true)
         assert.equal(raw_commands, read_file(native_log))
         assert.equal(native_compiles, read_file(c_compile_log))
         assert.equal(links, read_file(link_log))
@@ -2915,6 +2939,7 @@ fi
         assert_file(work .. "/scratch/stale")
         ok, output = harness("run")
         assert.truthy(ok, output)
+        assert_target_cleared(true)
         assert_absent(work .. "/scratch/stale")
         fixture(work, "scratch/stale", "must survive rejected runs\n")
         ok, output = harness("run", false, "production")
@@ -2938,6 +2963,7 @@ fi
         end
         ok, output = harness("build", true)
         assert.truthy(ok, output)
+        assert_target_cleared(true)
         assert.equal("function value(): integer return 3 end\n", read_file(source_input))
         assert.equal("changed SDK input\n", read_file(work .. "/sdk" .. edited_sdk))
         for _, name in ipairs(fixed_helpers) do
@@ -2950,6 +2976,7 @@ fi
         assert.truthy(lfs.touch(notes, 1000, 1000))
         ok, output = harness("build", true)
         assert.truthy(ok, output)
+        assert_target_cleared(false)
         assert.equal(1000, lfs.attributes(notes, "modification"))
         assert.equal(raw_commands, read_file(native_log))
         assert.equal(native_compiles, read_file(c_compile_log))
