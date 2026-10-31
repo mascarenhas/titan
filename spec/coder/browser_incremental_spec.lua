@@ -148,25 +148,25 @@ describe("browser incremental compilation", function()
         local browser = remember(browser_root)
         local native_record = record_path(native_root)
         local browser_record = record_path(browser_root)
-        fixtures.write(object_path(browser_root, "bundle.first"),
-            fixtures.read(object_path(native_root, "bundle.first")))
+        fixtures.write(object_path(browser_root, "bundle.second"),
+            fixtures.read(object_path(native_root, "bundle.second")))
         fixtures.write(browser_record, fixtures.read(native_record))
         local rebuilt = compiled("browser", browser_root)
-        decisions(rebuilt, browser, "bundle.first")
+        decisions(rebuilt, browser, "bundle.second")
         assert.matches("Titan link miss", rebuilt, 1, true)
         assert.not_equal(fixtures.read(native_record), fixtures.read(browser_record))
         local object = assert(staticmetadata.classify_object(
-            fixtures.read(object_path(browser_root, "bundle.first")), "bundle.first"))
+            fixtures.read(object_path(browser_root, "bundle.second")), "bundle.second"))
         assert.equal("wasm", object.format)
         local native = remember(native_root)
-        fixtures.write(object_path(native_root, "bundle.first"),
-            fixtures.read(object_path(browser_root, "bundle.first")))
+        fixtures.write(object_path(native_root, "bundle.second"),
+            fixtures.read(object_path(browser_root, "bundle.second")))
         fixtures.write(native_record, fixtures.read(browser_record))
         local host_rebuilt = compiled(fixture.host, native_root)
-        decisions(host_rebuilt, native, "bundle.first")
+        decisions(host_rebuilt, native, "bundle.second")
         assert.matches("Titan link miss", host_rebuilt, 1, true)
         local native_object = assert(staticmetadata.classify_object(
-            fixtures.read(object_path(native_root, "bundle.first")), "bundle.first"))
+            fixtures.read(object_path(native_root, "bundle.second")), "bundle.second"))
         assert.not_equal("wasm", native_object.format)
     end)
 
