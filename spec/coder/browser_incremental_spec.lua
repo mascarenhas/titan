@@ -8,7 +8,7 @@ local types = require "titan-compiler.types"
 
 local repository = assert(lfs.currentdir())
 local modules = { "bundle.first", "bundle.second" }
-local fixture, native_root, browser_root
+local fixture, native_root, browser_root, provider_images
 local semantic_driver, semantic_contexts, saved_registry
 
 local function arguments(target, compile_only)
@@ -94,7 +94,9 @@ describe("browser incremental compilation", function()
         end
         semantic_contexts, semantic_driver = nil, nil
         if saved_registry then types.registry, saved_registry = saved_registry, nil end
-        if fixture then fixture:close(); fixture = nil end
+        local owned_fixture, images = fixture, provider_images
+        fixture, provider_images = nil, nil
+        if owned_fixture then owned_fixture:close(images) end
     end)
 
     it("reuses warm browser objects and archives, recompiles only the edited variant, and leaves the native root unchanged", function()
@@ -230,6 +232,7 @@ describe("browser incremental compilation", function()
         assert.is_table(owner)
         local provider = load(native_loader, "warm.provider")
         local native_provider = subject.imported["warm.provider"]
+        provider_images = { native_provider.filename }
         assert.is_true(native_provider.kind == "dynamic" or native_provider.kind == "static")
         assert.equal(provider, load(native_loader, "warm.provider"))
         local browser = context("browser")

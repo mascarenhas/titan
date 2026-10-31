@@ -41,7 +41,7 @@ end
 -- frozen fixture. Constructors, accessors and cache activation remain real.
 describe("browser semantic cache isolation", function()
     local subject, root, contexts, saved_registry, saved_browser, saved_initialize_platform
-    local provider_fixture
+    local provider_fixture, provider_images
     local function context(target, data, analysis_only)
         subject._browser_target = setmetatable({
             build = function() return data or descriptor(root) end,
@@ -73,7 +73,9 @@ describe("browser semantic cache isolation", function()
         subject._browser_target = saved_browser
         subject.initialize_platform = saved_initialize_platform
         types.registry = saved_registry
-        if provider_fixture then provider_fixture:close(); provider_fixture = nil end
+        local owned_fixture, images = provider_fixture, provider_images
+        provider_fixture, provider_images = nil, nil
+        if owned_fixture then owned_fixture:close(images) end
         files.remove(root)
     end)
 
@@ -238,6 +240,7 @@ describe("browser semantic cache isolation", function()
         assert.is_table(native_owner)
         local provider = loaded(native_loader, "warm.provider")
         local native_provider = subject.imported["warm.provider"]
+        provider_images = { native_provider.filename }
         assert.is_true(native_provider.kind == "dynamic" or native_provider.kind == "static")
         assert.equal(provider, loaded(native_loader, "warm.provider"))
         local browser = context("browser")
@@ -318,6 +321,68 @@ describe("browser semantic cache isolation", function()
         loaded(subject.defaultloader({}, { context = ctx, source_roots = { ["browser.member"] = true } }), "browser.member")
         assert.equal(root .. "/browser/member.native.titan", subject.imported["browser.member"].filename)
     end)
+end)
+
+describe("native provider fixture cleanup", function()
+    local fixture, saved_windows, saved_remove
+    before_each(function()
+        saved_windows, saved_remove = platform.windows, os.remove
+        fixture = files.new()
+    end)
+    after_each(function()
+        platform.windows, os.remove = saved_windows, saved_remove
+        files.remove(fixture.root)
+    end)
+    local function deny_removal(filename, code)
+        local selected = path.normalize(filename)
+        os.remove = function(candidate)
+            if path.normalize(candidate) == selected then
+                return nil, "injected unlink failure", code
+            end
+            return saved_remove(candidate)
+        end
+    end
+    it("retains only a recorded mapped Windows DLL and its ancestors while removing every other artifact", function()
+        local image = fixture.output .. "/warm/provider.dll"
+        local unloaded = fixture.output .. "/unloaded.dll"
+        local sidecar = fixture.output .. "/sidecar.txt"
+        files.write(image, "mapped provider")
+        files.write(unloaded, "unloaded provider")
+        files.write(sidecar, "other artifact")
+        platform.windows = true
+        deny_removal(image, 13)
+        fixture:close({ path.from_slash(image) })
+        assert.equal("mapped provider", files.read(image))
+        assert.is_nil(lfs.attributes(unloaded))
+        assert.is_nil(lfs.attributes(sidecar))
+        assert.is_nil(lfs.attributes(fixture.source))
+        assert.is_nil(lfs.attributes(fixture.frontend))
+        local entries = {}
+        for name in lfs.dir(fixture.root) do
+            if name ~= "." and name ~= ".." then entries[#entries + 1] = name end
+        end
+        assert.same({ "out" }, entries)
+    end)
+    for _, case in ipairs({
+        { name = "an unrecorded Windows DLL", windows = true, filename = "provider.dll", recorded = "other.dll", code = 13 },
+        { name = "strict cleanup without loaded images", windows = true, filename = "provider.dll", code = 13 },
+        { name = "a recorded non-DLL artifact", windows = true, filename = "provider.o", recorded = "provider.o", code = 13 },
+        { name = "an unexpected error on a recorded Windows DLL", windows = true, filename = "provider.dll", recorded = "provider.dll", code = 5 },
+        { name = "a recorded DLL on POSIX", windows = false, filename = "provider.dll", recorded = "provider.dll", code = 13 },
+    }) do
+        it("reports removal failure for " .. case.name, function()
+            local image = fixture.output .. "/" .. case.filename
+            files.write(image, "unremoved artifact")
+            local images = case.recorded and { fixture.output .. "/" .. case.recorded } or nil
+            platform.windows = case.windows
+            deny_removal(image, case.code)
+            local ok, failure = pcall(function() fixture:close(images) end)
+            assert.is_false(ok)
+            assert.is_table(failure)
+            assert.matches("injected unlink failure$", failure.message)
+            assert.equal("unremoved artifact", files.read(image))
+        end)
+    end
 end)
 
 describe("browser output-root ownership", function()
