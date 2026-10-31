@@ -233,6 +233,43 @@ function test_mixed(_context: test.Context) test.assert(true) end
         assert.truthy(lfs.attributes(output_root .. "/.coverage/calc.gcda"))
     end)
 
+    for _, folder in ipairs({ false, true }) do
+        for _, relocated in ipairs({ false, true }) do
+            it("keeps target variant coverage stems logical and reports the selected " ..
+                (folder and "folder" or "flat") .. " source " ..
+                (relocated and "under --output" or "beside sources"), function()
+                available()
+                local context = driver.new_resolver_context()
+                local host = assert(driver.context_target(context))
+                assert(driver.close_resolver_context(context))
+                local base = workspace .. (folder and "/calc/calc" or "/calc")
+                if folder then assert(lfs.mkdir(workspace .. "/calc")) end
+                local selected = base .. "." .. host .. ".titan"
+                write(selected, PRODUCTION)
+                write(base .. ".browser.titan", 'foreign import "missing-inactive.h"\n')
+                local output_root = relocated and workspace .. "/build" or workspace
+                local options = coverage_options("--coverage-module", "calc")
+                if relocated then
+                    options[#options + 1] = "-o"; options[#options + 1] = output_root
+                end
+                local ok, output = compile(options)
+                assert.truthy(ok, output)
+                local stem = output_root .. (folder and "/calc/.coverage/calc" or "/.coverage/calc")
+                for _, extension in ipairs({ ".c", ".o", ".gcno" }) do
+                    assert.equal("file", lfs.attributes(stem .. extension, "mode"), stem .. extension)
+                    assert.is_nil(lfs.attributes(stem .. "." .. host .. extension))
+                end
+                local program = platform.windows and
+                    assert(driver.windows_program_paths("checks", nil, nil, output_root)).executable or
+                    output_root .. "/checks"
+                ok, output = run_program({ program })
+                assert.truthy(ok, output)
+                assert.is_true((line_count(annotated(), selected, 2) or 0) > 0, annotated())
+                assert.equal("file", lfs.attributes(stem .. ".gcda", "mode"))
+            end)
+        end
+    end
+
     it("resets previous counters on every direct execution", function()
         available()
         local ok, output = compile(coverage_options("--coverage-module", "calc"))

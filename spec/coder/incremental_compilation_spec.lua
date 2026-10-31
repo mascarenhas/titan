@@ -1545,3 +1545,104 @@ os.exit(result.ok and 0 or result.status or 1)
         end
     end)
 end)
+
+describe("target selection incremental certificates", function()
+    local fixtures = require "spec.fixtures.target_selection.support"
+    local fixture
+    before_each(function() fixture = fixtures.new() end)
+    after_each(function() fixture:close() end)
+    local function build(name)
+        return fixture:compiled({ "-v", "--incremental", "--source-first", name })
+    end
+    local function miss(output, name, reason)
+        assert.matches("Titan object miss " .. name .. ": " .. reason, output, 1, true)
+    end
+    local function hit(output, name)
+        assert.matches("Titan object hit " .. name .. ":", output, 1, true)
+    end
+
+    it("misses with source-set on add, byte-identical selection switches and removal", function()
+        local bytes = "function main(args: {string}): integer return 17 end\n"
+        fixtures.write(fixture.source .. "/switcher.titan", bytes)
+        miss(build("switcher"), "switcher", "no-object")
+        local output = build("switcher")
+        hit(output, "switcher")
+        assert.matches("Titan link hit", output, 1, true)
+        fixtures.write(fixture.source .. "/switcher.native.titan", bytes)
+        miss(build("switcher"), "switcher", "source-set")
+        if fixture.host ~= "native" then
+            fixtures.write(fixture.source .. "/switcher." .. fixture.host .. ".titan", bytes)
+            miss(build("switcher"), "switcher", "source-set")
+            assert(os.remove(fixture.source .. "/switcher." .. fixture.host .. ".titan"))
+            miss(build("switcher"), "switcher", "source-set")
+        end
+        assert(os.remove(fixture.source .. "/switcher.native.titan"))
+        miss(build("switcher"), "switcher", "source-set")
+        assert.equal(17, fixture:program("switcher").status)
+    end)
+
+    it("does not compile or link after an inactive variant edit", function()
+        fixtures.write(fixture.source .. "/stable.titan",
+            "function main(args: {string}): integer return 29 end\n")
+        fixtures.write(fixture.source .. "/stable.browser.titan", "inactive syntax @@@")
+        build("stable")
+        local object = fixture.output .. "/stable.o"
+        local executable = platform.windows and
+            assert(driver.windows_program_paths("stable", nil, nil, fixture.output)).executable or
+            fixture.output .. "/stable"
+        local old = os.time() - 120
+        assert(lfs.touch(object, old, old)); assert(lfs.touch(executable, old, old))
+        local bytes, image = fixtures.read(object), fixtures.read(executable)
+        fixtures.write(fixture.source .. "/stable.browser.titan", 'foreign import "absent.h"\n')
+        local output = build("stable")
+        hit(output, "stable")
+        assert.matches("Titan link hit", output, 1, true)
+        assert.is_nil(output:match("%s['\"]?%-c['\"]?%s"), output)
+        assert.equal(old, lfs.attributes(object, "modification"))
+        assert.equal(old, lfs.attributes(executable, "modification"))
+        assert.equal(bytes, fixtures.read(object)); assert.equal(image, fixtures.read(executable))
+    end)
+
+    it("replans imports from a newly selected variant", function()
+        fixtures.write(fixture.source .. "/olddep.titan",
+            "function answer(): integer return 11 end\n")
+        fixtures.write(fixture.source .. "/newdep.titan",
+            "function answer(): integer return 31 end\n")
+        fixtures.write(fixture.source .. "/replanned.titan", [[
+local dep = import "olddep"
+function main(args: {string}): integer return dep.answer() end
+]])
+        build("replanned")
+        assert.equal(11, fixture:program("replanned").status)
+        fixtures.write(fixture.source .. "/replanned." .. fixture.host .. ".titan", [[
+local dep = import "newdep"
+function main(args: {string}): integer return dep.answer() end
+]])
+        local output = build("replanned")
+        miss(output, "replanned", "source-set")
+        miss(output, "newdep", "no-object")
+        assert.is_nil(output:find("Titan object hit olddep:", 1, true))
+        assert.equal(31, fixture:program("replanned").status)
+    end)
+
+    it("invalidates only the folder whose selected contributor set changes", function()
+        fixtures.write(fixture.source .. "/ensemble/ensemble.titan",
+            "function answer(): integer return chosen() end\n")
+        fixtures.write(fixture.source .. "/ensemble/operations.titan",
+            "local function chosen(): integer return 8 end\n")
+        fixtures.write(fixture.source .. "/unrelated.titan",
+            "function answer(): integer return 3 end\n")
+        fixtures.write(fixture.source .. "/caller.titan", [[
+local ensemble = import "ensemble"
+local unrelated = import "unrelated"
+function main(args: {string}): integer return ensemble.answer() + unrelated.answer() end
+]])
+        build("caller")
+        fixtures.write(fixture.source .. "/ensemble/operations." .. fixture.host .. ".titan",
+            "local function chosen(): integer return 13 end\n")
+        local output = build("caller")
+        miss(output, "ensemble", "source-set")
+        hit(output, "unrelated")
+        assert.equal(16, fixture:program("caller").status)
+    end)
+end)

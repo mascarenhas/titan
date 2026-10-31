@@ -79,6 +79,7 @@ p:flag('--no-line-directives',
     'Omit source #line directives from generated C.')
 p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed compilers use their matching Lua SDK).')
 p:option('-t --tree', 'Root of the source tree, used for looking for source modules (defaults to ".").')
+p:option('-T --target', 'Compilation target (default: TITAN_TARGET or the host OS).')
 p:option('-o --output', 'Folder for generated files, preserving the source hierarchy (created if needed).')
 p:option('-l --link', 'Library linked into the final executable or provider; repeatable, comma lists allowed, order kept.'):count('*'):action(native_switch('library'))
 p:option('-L --library-dir', 'Native library search directory for final links; repeatable, order kept.'):count('*'):action(native_switch('libdir'))
@@ -234,11 +235,6 @@ if reporter and report_kind == progress.LIVE then
     -- The live region owns terminal stderr: children are captured instead.
     driver.LIVE_PROGRESS = reporter
 end
-if #args.module == 0 and #args.test_dir == 0 and
-   not (args.compile_only and #args.c_source > 0) then
-    exit("at least one module name is required (or use --print-root, " ..
-        "--test-dir, or -c --c-source)")
-end
 
 if args.incremental and args.print_ast then
     exit("--incremental cannot be combined with --print-ast")
@@ -329,6 +325,19 @@ resolver_context = driver.new_resolver_context({
     -- frontend that actually runs.
     frontend = arg and arg[0] or nil,
 })
+local target_value, target_origin = args.target, "--target"
+if target_value == nil then
+    target_value, target_origin = platform.getenv("TITAN_TARGET"), "TITAN_TARGET"
+end
+local target, target_error =
+    driver.validate_target(resolver_context, target_value, target_origin)
+if not target then exit(target_error) end
+resolver_context.target = target
+if #args.module == 0 and #args.test_dir == 0 and
+   not (args.compile_only and #args.c_source > 0) then
+    exit("at least one module name is required (or use --print-root, " ..
+        "--test-dir, or -c --c-source)")
+end
 if driver.TOOLCHAIN_ERROR then exit(driver.TOOLCHAIN_ERROR) end
 if args.lua and driver.INSTALLED then
     exit("--lua is only available in a source checkout; the installed " ..

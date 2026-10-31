@@ -25,6 +25,7 @@ local incremental = require "titan-compiler.incremental"
 local documentation = require "titan-compiler.documentation"
 local jobs = require "titan-compiler.jobs"
 local progress = require "titan-compiler.progress"
+local source_selection = require "titan-compiler.source_selection"
 
 local lfs = require "lfs"
 
@@ -50,40 +51,13 @@ driver.LUA_VERSION = version.LUA_VERSION
 driver.LANGUAGE_SERVER_API_VERSION = 1
 driver.PROJECT_CACHE_VERSION = projectcache.VERSION
 
-driver.SOURCE_LABELS = { "windows", "darwin", "linux", "browser", "native" }
+driver.SOURCE_LABELS = source_selection.LABELS
 local source_labels = {}
 for _, label in ipairs(driver.SOURCE_LABELS) do source_labels[label] = true end
 
-function driver.classify_source_filename(basename)
-    local stem = basename:match("^(.*)%.titan$")
-    if not stem then return nil end
-    local base, label = stem:match("^(.+)%.([^.]+)$")
-    if not label or not source_labels[label:lower()] then
-        return basename
-    end
-    if label ~= label:lower() then
-        return nil, nil, "mis-cased target label in source '" .. basename .. "'"
-    end
-    local previous_base, previous = base:match("^(.+)%.([^.]+)$")
-    if previous_base and source_labels[previous:lower()] then
-        return nil, nil, "stacked target labels in source '" .. basename .. "'"
-    end
-    return base .. ".titan", label
-end
-
-function driver.target_selection_labels(target)
-    if target == "linux" or target == "darwin" or target == "windows" then
-        return { target, "native" }
-    elseif target == "native" or target == "browser" then
-        return { target }
-    end
-    error("invalid source selection target '" .. tostring(target) .. "'", 2)
-end
-
-function driver.target_label_applies(target, label)
-    return label == target or (label == "native" and
-        (target == "linux" or target == "darwin" or target == "windows"))
-end
+driver.classify_source_filename = source_selection.classify
+driver.target_selection_labels = source_selection.target_labels
+driver.target_label_applies = source_selection.applies
 
 function driver.encode_project_entry(entry, options)
     return projectcache.encode(entry, options)
@@ -697,6 +671,9 @@ function driver.initialize_platform(context)
 end
 
 function driver.context_target(context)
+    if type(context) == "table" and context.io and context.target then
+        return context.target
+    end
     local ok, err = driver.initialize_platform(context)
     if not ok then return nil, err end
     return context.target
@@ -2394,15 +2371,25 @@ local function regular_file(filename, context)
     return lfs.attributes(filename, "mode") == "file"
 end
 
+local function select_source_family(filename, labels, context)
+    local stem = filename:sub(1, -7)
+    for _, label in ipairs(labels) do
+        local candidate = stem .. "." .. label .. ".titan"
+        if regular_file(candidate, context) then return candidate end
+    end
+    if regular_file(filename, context) then return filename end
+end
+
 -- Implementation notes: doc/implementation/folder-modules.md#tagged-source-resolution
 local function source_resolution_in_root(root, modname, context)
     local module_path = modname:gsub("[.]", "/")
     local basename = modname:match("([^.]+)$")
     if not basename then return nil end
     local folder = append_path(root, module_path)
-    local folder_main = append_path(folder, basename .. ".titan")
+    local canonical_main = append_path(folder, basename .. ".titan")
+    local folder_main = select_source_family(canonical_main, context.source_labels, context)
 
-    if regular_file(folder_main, context) then
+    if folder_main then
         local entries
         if context and context.io then
             local list_err
@@ -2434,39 +2421,61 @@ local function source_resolution_in_root(root, modname, context)
                 "' at '" .. folder_main .. "': invalid directory entries"
         end
 
-        local contributors = {}
+        local families = {}
         for _, name in ipairs(entries) do
-            if name ~= "." and name ~= ".." and
-               name ~= basename .. ".titan" and
-               name:sub(-6) == ".titan" and
+            if name:sub(-6) == ".titan" and
                regular_file(append_path(folder, name), context) then
-                table.insert(contributors, name)
+                local logical, label, name_error = driver.classify_source_filename(name)
+                if name_error then return nil, name_error end
+                if logical ~= basename .. ".titan" then
+                    local family = families[logical]
+                    if not family then family = {}; families[logical] = family end
+                    family[label or "default"] = name
+                end
+            end
+        end
+        local contributors = {}
+        local selected = {}
+        for logical, family in pairs(families) do
+            local name
+            for _, label in ipairs(context.source_labels) do
+                name = family[label]
+                if name then break end
+            end
+            name = name or family.default
+            if name then
+                contributors[#contributors + 1] = logical
+                selected[logical] = name
             end
         end
         table.sort(contributors, util.bytewise_less)
 
         local files = { folder_main }
-        for _, name in ipairs(contributors) do
-            table.insert(files, append_path(folder, name))
+        for _, logical in ipairs(contributors) do
+            files[#files + 1] = append_path(folder, selected[logical])
         end
         return {
             kind = "folder",
             main = folder_main,
             files = files,
+            native_output = canonical_main,
             program_output = module_path .. "__main",
         }
     end
 
-    local flat = append_path(root, module_path .. ".titan")
-    if not regular_file(flat, context) then return nil end
+    local canonical_flat = append_path(root, module_path .. ".titan")
+    local flat = select_source_family(canonical_flat, context.source_labels, context)
+    if not flat then return nil end
 
     local owner = modname:match("^(.*)[.][^.]+$")
     if owner then
         local owner_path = owner:gsub("[.]", "/")
         local owner_basename = owner:match("([^.]+)$")
         if not owner_basename then return nil end
-        local owner_main = append_path(root, owner_path .. "/" .. owner_basename .. ".titan")
-        if regular_file(owner_main, context) then
+        local owner_main = select_source_family(
+            append_path(root, owner_path .. "/" .. owner_basename .. ".titan"),
+            driver.SOURCE_LABELS, context)
+        if owner_main then
             return {
                 kind = "blocked",
                 owner = owner,
@@ -2480,11 +2489,15 @@ local function source_resolution_in_root(root, modname, context)
         kind = "flat",
         main = flat,
         files = { flat },
+        native_output = canonical_flat,
         program_output = module_path,
     }
 end
 
 local function resolve_source(paths, modname, context)
+    local target, target_error = driver.context_target(context)
+    if not target then return nil, target_error end
+    context.source_labels = context.source_labels or driver.target_selection_labels(target)
     for root in paths:gmatch("[^;]+") do
         local source, err = source_resolution_in_root(root, modname, context)
         if source or err then return source, err end
@@ -4419,7 +4432,8 @@ function driver.find_dependency_interface(paths, modname, context)
 end
 
 function driver.prepare_source_ffi_header(context, modname, ast, sourcef)
-    return ffiheaders.prepare(context, modname, ast, sourcef)
+    local native_output = driver.module_output_stem(sourcef, modname) .. ".titan"
+    return ffiheaders.prepare(context, modname, ast, native_output)
 end
 
 local function prepare_source_checking_header(context, modname, ast)
@@ -4897,12 +4911,15 @@ function driver.defaultloader(static_deps, options)
             return false, "cached interface for module '" .. modname ..
                 "' must list its main source filename first"
         end
-        return {
-            kind = #source_files == 1 and "flat" or "folder",
-            main = filename,
-            files = source_files,
-            native_output = filename,
-        }
+        local source, source_error = resolve_source(
+            driver.TITAN_SOURCE_PATH, modname, context)
+        if source_error then return false, source_error end
+        if not source or source.kind == "blocked" or source.main ~= filename or
+           #source.files ~= #source_files then return nil end
+        for index, selected in ipairs(source.files) do
+            if selected ~= source_files[index] then return nil end
+        end
+        return source
     end
 
     local cached_source_loading, cached_source_loaded = {}, {}
@@ -5132,6 +5149,7 @@ function driver.defaultloader(static_deps, options)
             type = modtype,
             filename = filename,
             source_files = source_files,
+            native_output = source_selection.output_stem(filename, modname) .. ".titan",
             deps = deps,
             c_header_dependencies = header_dependencies,
             _cached_interface = true,
@@ -6626,6 +6644,7 @@ function driver.worker_configuration(context)
                 copy_strings(driver.NATIVE_COMPILE_FLAGS) or nil,
         },
         resolver = {
+            target = assert(driver.context_target(context)),
             prefer_static = context.prefer_static,
             source_first = context.source_first,
             verbose = context.probe_verbose,
@@ -6685,6 +6704,7 @@ function driver.new_worker_context(configuration, io_strategy)
     local resolver = configuration.resolver
     local context = driver.new_resolver_context({
         io = io_strategy,
+        target = resolver.target,
         cache_adapter = { sha256_binary = support._sha256_binary,
             sha256_stream = support._sha256_stream },
         prefer_static = resolver.prefer_static,
@@ -8094,30 +8114,24 @@ driver.FOREIGN_HEADER_MARKER =
 driver.FFI_HEADER_MARKER = ffiheaders.MARKER
 driver.PRIVATE_HEADER_MARKER = coder.PRIVATE_HEADER_MARKER
 
-function driver.module_output_stem(sourcef, modname)
-    sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
-    return (sourcef:gsub("[.]titan$", ""))
-end
+driver.module_output_stem = source_selection.output_stem
 
 function driver.foreign_header_filename(sourcef)
-    local stem, count = sourcef:gsub("[.]titan$", "")
-    assert(count == 1, "foreign header source path must end in .titan")
-    return stem .. ".titan.h"
+    assert(sourcef:sub(-6) == ".titan", "foreign header source path must end in .titan")
+    return driver.module_output_stem(sourcef) .. ".titan.h"
 end
 
 function driver.ffi_header_filename(sourcef)
-    local stem, count = sourcef:gsub("[.]titan$", "")
-    assert(count == 1, "FFI header source path must end in .titan")
-    return stem .. ".ffi.h"
+    assert(sourcef:sub(-6) == ".titan", "FFI header source path must end in .titan")
+    return driver.module_output_stem(sourcef) .. ".ffi.h"
 end
 
 function driver.private_header_filename(sourcef)
-    local stem = sourcef:gsub("[.]titan$", "")
-    return stem .. ".priv.h"
+    return driver.module_output_stem(sourcef) .. ".priv.h"
 end
 
 function driver.part_c_filename(stem, part_index)
-    stem = stem:gsub("[.]titan$", "")
+    stem = driver.module_output_stem(stem)
     assert(type(part_index) == "number" and part_index >= 0
         and part_index % 1 == 0, "part_index must be a nonnegative integer")
     return part_index == 0 and (stem .. ".c")
@@ -8125,7 +8139,7 @@ function driver.part_c_filename(stem, part_index)
 end
 
 function driver.part_object_filename(stem, part_index)
-    stem = stem:gsub("[.]titan$", "")
+    stem = driver.module_output_stem(stem)
     assert(type(part_index) == "number" and part_index >= 0
         and part_index % 1 == 0, "part_index must be a nonnegative integer")
     return part_index == 0 and (stem .. ".o")
@@ -9269,7 +9283,7 @@ local function validate_compile_requests(requests)
                 request.modname:gsub("[.]", "/") .. ".titan"
             assert(type(sourcef) == "string",
                 "each compilation request needs a source output path")
-            libname = sourcef:gsub("[.]titan$", "") .. ".o"
+            libname = driver.module_output_stem(sourcef, request.modname) .. ".o"
         end
         assert(type(libname) == "string",
             "each compilation request needs an object output path")
@@ -12051,7 +12065,7 @@ function driver.validate_program_output_paths(
         end
     else
     for _, source in ipairs(source_outputs or {}) do
-        local stem = assert(source.output):gsub("[.]titan$", "")
+        local stem = driver.module_output_stem(assert(source.output), source.modname)
         local owner = "logical module '" .. source.modname .. "'"
         local ok, err = add_output(stem .. ".c", owner, "file")
         if not ok then return nil, err end

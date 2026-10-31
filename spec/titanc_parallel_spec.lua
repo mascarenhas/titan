@@ -63,6 +63,7 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
         observed.native_inputs = normalized
     end
     function driver.configure_foreign_c() return true end
+    function driver.validate_target() return "native" end
     function driver.default_c_parts() return 4 end
     function driver.prepare_output_root(dir) return dir end
     function driver.cleanup_stale_staging(context, outputs, locks, protection)
@@ -1353,5 +1354,84 @@ end
 
     it("contains C-only native writers when the first guard starts after lock admission", function()
         killed_coordinator("native_startup.c", 1, true)
+    end)
+end)
+
+describe("titanc target vocabulary", function()
+    local fixtures = require "spec.fixtures.target_selection.support"
+    local fixture
+    before_each(function()
+        fixture = fixtures.new()
+        fixtures.write(fixture.source .. "/target_cli.titan",
+            "function answer(): integer return 42 end\n")
+    end)
+    after_each(function() fixture:close() end)
+
+    it("accepts the host, empty values and both flag spellings with flag precedence", function()
+        for _, case in ipairs({
+            { {}, "" }, { {}, fixture.host ~= "native" and fixture.host or "" },
+            { { "--target", "" }, "bogus" },
+            { { "-T", "" }, "bogus" },
+        }) do
+            local args = { "-q", "--print-ast", "target_cli" }
+            for _, value in ipairs(case[1]) do args[#args + 1] = value end
+            local result = fixture:compile(args, { TITAN_TARGET = case[2] })
+            assert.is_true(result.ok, result.output)
+        end
+        if fixture.host ~= "native" then
+            for _, flags in ipairs({ { "-T", fixture.host },
+                    { "--target=" .. fixture.host } }) do
+                local args = { "-q", "--print-ast", "target_cli" }
+                for _, value in ipairs(flags) do args[#args + 1] = value end
+                local result = fixture:compile(args, { TITAN_TARGET = "browser" })
+                assert.is_true(result.ok, result.output)
+            end
+        end
+    end)
+
+    it("validates every explicit value before Titan or C-source lookup", function()
+        for _, value in ipairs({ "linux", "darwin", "windows", "native", "browser", "wasm32" }) do
+            if value ~= fixture.host or value == "native" then
+                for _, environment in ipairs({ false, true }) do
+                    for _, c_only in ipairs({ false, true }) do
+                        local args = { "-q", "-c" }
+                        if c_only then
+                            args[#args + 1] = "--c-source"
+                            args[#args + 1] = fixture.source .. "/missing.c"
+                        else args[#args + 1] = "missing_module" end
+                        if not environment then
+                            args[#args + 1] = "--target"; args[#args + 1] = value
+                        end
+                        local result = fixture:compile(args,
+                            { TITAN_TARGET = environment and value or "" })
+                        assert.is_false(result.ok)
+                        assert.matches(environment and "TITAN_TARGET=" .. value or
+                            "--target " .. value, result.output, 1, true)
+                        local reason = value == "native" and "not a compilation target" or
+                            value == "browser" and "not available yet" or
+                            value == "wasm32" and "unknown target" or
+                            "native cross-compilation is not supported"
+                        assert.matches(reason, result.output, 1, true)
+                        assert.is_nil(result.output:find("not found", 1, true))
+                    end
+                end
+            end
+        end
+        local result = fixture:compile({ "-q", "--target", "bogus" })
+        assert.is_false(result.ok)
+        assert.matches("unknown target", result.output, 1, true)
+        result = fixture:compile({ "-q", "--target", "" })
+        assert.is_false(result.ok)
+        assert.matches("at least one module name is required", result.output, 1, true)
+    end)
+
+    it("ignores target configuration for the runtime SDK-root query", function()
+        local result = fixture:compile({ "--print-root" }, { TITAN_TARGET = "bogus" })
+        assert.is_true(result.ok, result.output)
+        assert.matches(fixture.prefix, result.output, 1, true)
+        result = fixture:compile({ "--print-root", "--target", "bogus" },
+            { TITAN_TARGET = "browser" })
+        assert.is_true(result.ok, result.output)
+        assert.matches(fixture.prefix, result.output, 1, true)
     end)
 end)

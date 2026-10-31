@@ -1,3 +1,4 @@
+local source_selection = require "titan-compiler.source_selection"
 -- Coverage is an ordinary source build in output-local .coverage directories.
 local lfs = require "lfs"
 local path = require "titan-compiler.path"
@@ -131,7 +132,9 @@ end
 
 function coverage.source(build, name, source)
     if not source._coverage_output then
-        source.native_output = coverage.output_path(source.native_output or source.main)
+        local native_output = source_selection.output_stem(
+            source.native_output or source.main, name) .. ".titan"
+        source.native_output = coverage.output_path(native_output)
         source._coverage_output = true
     end
     build.outputs[name] = source.native_output
@@ -168,7 +171,8 @@ function coverage.compile_flags(build, name)
         flags[#flags + 1] = "-fkeep-static-functions"
         -- The compiler's temporary .o pathname must not rename its notes.
         flags[#flags + 1] = "-dumpbase"
-        flags[#flags + 1] = path.basename(build.outputs[name] or (name:gsub("[.]", "/") .. ".titan")):gsub("[.]titan$", ".c")
+        flags[#flags + 1] = path.basename(source_selection.output_stem(
+            assert(build.outputs[name]), name)) .. ".c"
         flags[#flags + 1] = "-dumpbase-ext"
         flags[#flags + 1] = ".c"
     end
