@@ -33,24 +33,27 @@ function fixtureRoot(image) {
     return directory;
 }
 
-function run(args, env = {}) {
-    return new Promise((resolve, reject) => {
-        const child = spawn(runner, args, { cwd: tmpdir(), env: { ...process.env, TITAN_NODE: process.execPath, ...env } });
-        let hard;
-        const deadline = setTimeout(() => {
-            child.kill("SIGTERM");
-            hard = setTimeout(() => child.kill("SIGKILL"), 3000);
-        }, 45000);
-        const stdout = [], stderr = [];
-        child.stdout.on("data", chunk => stdout.push(chunk));
-        child.stderr.on("data", chunk => stderr.push(chunk));
+function launch(args, env = {}) {
+    const child = spawn(runner, args, { cwd: tmpdir(), env: { ...process.env, TITAN_NODE: process.execPath, ...env } });
+    const stdout = [], stderr = [];
+    let hard;
+    const deadline = setTimeout(() => {
+        child.kill("SIGTERM");
+        hard = setTimeout(() => child.kill("SIGKILL"), 3000);
+    }, 45000);
+    child.stdout.on("data", chunk => stdout.push(chunk));
+    child.stderr.on("data", chunk => stderr.push(chunk));
+    const result = new Promise((resolve, reject) => {
         child.on("error", error => { clearTimeout(deadline); reject(error); });
         child.on("close", (status, signal) => {
             clearTimeout(deadline); clearTimeout(hard);
             resolve({ status, signal, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr) });
         });
     });
+    return { child, result, stdout: () => Buffer.concat(stdout), stderr: () => Buffer.concat(stderr) };
 }
+
+function run(args, env = {}) { return launch(args, env).result; }
 
 async function chromium(t) {
     const result = await run(["--probe"]);
@@ -84,6 +87,56 @@ async function cleanChromium(result) {
     if (pid) assert.throws(() => process.kill(Number(pid[1]), 0), { code: "ESRCH" });
     const { stdout } = await exec("ps", ["-axo", "pid=,args="]);
     assert.equal(stdout.includes(`--user-data-dir=${path}`), false, `Chromium process still owns ${path}`);
+}
+
+async function until(check, milliseconds = 5000) {
+    const deadline = performance.now() + milliseconds;
+    while (performance.now() < deadline) {
+        try { if (await check()) return; }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+        await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.fail("fixture did not reach its explicit ready condition");
+}
+
+async function descendantFixture(directory) {
+    const files = Object.fromEntries(["descendant", "record", "term", "leader", "ready", "connected"]
+        .map(name => [name, join(directory, name + (name === "descendant" ? ".mjs" : ".json"))]));
+    await writeFile(files.descendant, `
+        import { appendFileSync, writeFileSync } from "node:fs";
+        process.on("SIGTERM", () => appendFileSync(${JSON.stringify(files.term)}, "TERM\\n"));
+        writeFileSync(${JSON.stringify(files.record)}, JSON.stringify({pid: process.pid, argv: process.argv}));
+        process.send("ready");
+        process.disconnect();
+        setInterval(() => {}, 1000);
+    `);
+    return files;
+}
+
+async function descendantGone(files) {
+    const record = JSON.parse(await readFile(files.record, "utf8"));
+    const leader = Number(await readFile(files.leader, "utf8"));
+    assert.ok(record.pid > 0 && leader > 0 && record.pid !== leader, "fixture did not create a separate descendant");
+    assert.ok(record.argv.every(arg => !arg.includes("--user-data-dir")), "descendant unexpectedly matched profile fallback");
+    assert.match(await readFile(files.term, "utf8"), /TERM\n/, "descendant never observed and resisted group SIGTERM");
+    assert.throws(() => process.kill(record.pid, 0), { code: "ESRCH" }, "TERM-resistant descendant survived");
+    assert.throws(() => process.kill(-leader, 0), { code: "ESRCH" }, "owned process group survived");
+}
+
+async function cleanupTrackedRun(execution, files, directory) {
+    try {
+        if (execution && execution.child.exitCode === null && execution.child.signalCode === null) {
+            execution.child.kill("SIGTERM");
+            await execution.result;
+        }
+    } finally {
+        try {
+            // Retire the recorded, test-owned group even if a regression failed.
+            const leader = Number(await readFile(files.leader, "utf8"));
+            if (leader > 0) process.kill(-leader, "SIGKILL");
+        } catch (error) { if (!["ENOENT", "ESRCH"].includes(error.code)) throw error; }
+        finally { await rm(directory, { recursive: true, force: true }); }
+    }
 }
 
 test("relative asset paths stay beneath the root", () => {
@@ -286,9 +339,20 @@ for (const engine of ["node", "chromium"]) {
                 await writeFile(join(outside, "image.mjs"), "export default function forbidden() {};\n");
                 await symlink(outside, join(inside, "escape"), "dir");
                 const file = join(inside, "fixture unicode λ.mjs");
-                // Path-only factory fixture: real Wasm execution is exercised above.
-                await writeFile(join(inside, "factory #?.mjs"),
-                    "export default ({locateFile}) => locateFile('sibling #?.wasm');\n");
+                // Fetch and instantiate a real sibling Wasm whose filename contains
+                // URL query/fragment characters, not merely inspect its locateFile URL.
+                await writeFile(join(inside, "sibling #?.wasm"), new Uint8Array([
+                    0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 127,
+                    3, 2, 1, 0, 7, 10, 1, 6, 97, 110, 115, 119, 101, 114, 0, 0,
+                    10, 6, 1, 4, 0, 65, 42, 11,
+                ]));
+                await writeFile(join(inside, "factory #?.mjs"), `export default async ({locateFile}) => {
+                    const filename = locateFile("sibling #?.wasm");
+                    const bytes = typeof process === "object" && process.versions?.node ?
+                        await (await import("node:fs/promises")).readFile(filename) :
+                        await (await fetch(filename)).arrayBuffer();
+                    return new WebAssembly.Instance(await WebAssembly.compile(bytes)).exports.answer();
+                };\n`);
                 await writeFile(file, `export async function run(context) {
                     for (const [method, path] of [["bytes", "escape/secret"], ["image", "escape/image.mjs"]]) {
                         let rejected = false;
@@ -296,9 +360,8 @@ for (const engine of ["node", "chromium"]) {
                         context.assert(rejected, "symlink escaped --root");
                     }
                     const image = await context.image("factory #?.mjs");
-                    const located = image.factory({locateFile: image.locateFile});
-                    context.assert(located.endsWith(context.engine === "node" ?
-                        "/sibling #?.wasm" : "/sibling%20%23%3F.wasm"), "locateFile treated filename bytes as a URL query/fragment");
+                    context.assert(await image.factory({locateFile: image.locateFile}) === 42,
+                        "real special-name sibling Wasm was not fetched and instantiated");
                 }\n`);
                 const isolated = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--js-test", file]);
                 assert.equal(isolated.status, 0, isolated.stderr.toString());
@@ -354,5 +417,114 @@ for (const cdp of ["pipe", "port"]) {
                 await cleanChromium(result);
             });
         } finally { await rm(directory, { recursive: true, force: true }); }
+    });
+}
+
+test("Node retires TERM-resistant descendants independently of its worker leader", { skip: !supported }, async t => {
+    for (const mode of ["leader-exit", "deadline", "SIGINT", "SIGTERM"]) await t.test(mode, async () => {
+        const directory = await mkdtemp(join(tmpdir(), "titan-node-group-"));
+        const files = await descendantFixture(directory);
+        let execution;
+        try {
+            const worker = join(directory, "worker.mjs");
+            await writeFile(worker, `
+                import { fork } from "node:child_process";
+                import { once } from "node:events";
+                import { writeFileSync } from "node:fs";
+                export async function run(context) {
+                    writeFileSync(${JSON.stringify(files.leader)}, String(process.pid));
+                    const child = fork(${JSON.stringify(files.descendant)}, [], {stdio: ["ignore", "ignore", "ignore", "ipc"]});
+                    await once(child, "message");
+                    writeFileSync(${JSON.stringify(files.ready)}, "ready");
+                    if (${JSON.stringify(mode)} === "leader-exit") process.exit(0);
+                    const {run: block} = await import(${JSON.stringify(new URL("./runner-fixtures.mjs", import.meta.url).href)});
+                    await block({...context, args: ["timeout"]});
+                }
+            `);
+            execution = launch(["--engine", "node", "--timeout", mode === "deadline" ? "1500" : "10000",
+                "--grace", "0", "--js-test", worker]);
+            if (mode.startsWith("SIG")) {
+                await until(async () => (await readFile(files.ready)).length > 0 &&
+                    execution.stdout().includes(Buffer.from("hang-entered\n")));
+                assert.equal(execution.child.kill(mode), true);
+            }
+            const result = await execution.result;
+            assert.equal(result.status, mode === "deadline" ? 72 : 75, result.stderr.toString());
+            if (mode.startsWith("SIG")) assert.ok(result.stderr.includes(Buffer.from(`interrupted by ${mode}`)));
+            assert.doesNotMatch(result.stderr.toString(), /cleanup failed/);
+            await descendantGone(files);
+        } finally { await cleanupTrackedRun(execution, files, directory); }
+    });
+});
+
+for (const cdp of ["pipe", "port"]) {
+    test(`Chromium retires TERM-resistant profile-less descendants (${cdp})`, { skip: !supported }, async t => {
+        for (const mode of ["leader-exit", "deadline", "SIGINT", "SIGTERM"]) await t.test(mode, async () => {
+            const directory = await mkdtemp(join(tmpdir(), "titan-chrome-group-"));
+            const files = await descendantFixture(directory);
+            let execution;
+            try {
+                const chrome = join(directory, "chrome");
+                await writeFile(chrome, `#!${process.execPath}
+                    const {fork} = require("node:child_process");
+                    const {writeFileSync} = require("node:fs");
+                    const {join} = require("node:path");
+                    const net = require("node:net");
+                    if (process.argv.includes("--version")) {
+                        console.log("Chromium 156.0.8078.80");
+                    } else {
+                        writeFileSync(${JSON.stringify(files.leader)}, String(process.pid));
+                        const child = fork(${JSON.stringify(files.descendant)}, [], {stdio: ["ignore", "ignore", "ignore", "ipc"]});
+                        child.once("message", () => {
+                            if (${JSON.stringify(mode)} === "leader-exit") process.exit(9);
+                            if (process.argv.includes("--remote-debugging-port=0")) {
+                                const profile = process.argv.find(arg => arg.startsWith("--user-data-dir=")).slice(16);
+                                const server = net.createServer(() => writeFileSync(${JSON.stringify(files.connected)}, "connected"));
+                                server.listen(0, "127.0.0.1", () => {
+                                    writeFileSync(join(profile, "DevToolsActivePort"), server.address().port + "\\n/devtools/browser/pending\\n");
+                                    writeFileSync(${JSON.stringify(files.ready)}, "ready");
+                                });
+                            } else writeFileSync(${JSON.stringify(files.ready)}, "ready");
+                            setInterval(() => {}, 1000);
+                        });
+                    }
+                `, { mode: 0o755 });
+                execution = launch(["--engine", "chromium", "--chrome", chrome, "--cdp", cdp,
+                    "--timeout", mode === "deadline" ? "1500" : "10000", "--grace", "0",
+                    "--root", root, "--js-test", fixture]);
+                if (mode.startsWith("SIG")) {
+                    await until(async () => (await readFile(cdp === "port" ? files.connected : files.ready)).length > 0);
+                    assert.equal(execution.child.kill(mode), true);
+                }
+                const result = await execution.result;
+                assert.equal(result.status, mode === "deadline" ? 72 : 75, result.stderr.toString());
+                if (mode.startsWith("SIG")) assert.ok(result.stderr.includes(Buffer.from(`interrupted by ${mode}`)));
+                assert.doesNotMatch(result.stderr.toString(), /cleanup failed/);
+                await descendantGone(files);
+                await cleanChromium(result);
+            } finally { await cleanupTrackedRun(execution, files, directory); }
+        });
+    });
+
+    test(`SIGINT and SIGTERM retire Chromium while real Wasm is busy (${cdp})`, { skip: !supported }, async t => {
+        if (!await chromium(t)) return;
+        for (const signal of ["SIGINT", "SIGTERM"]) await t.test(signal, async () => {
+            const execution = launch(["--engine", "chromium", "--cdp", cdp, "--timeout", "10000",
+                "--grace", "0", "--root", root, "--js-test", fixture, "--", "timeout"]);
+            try {
+                await until(() => execution.stdout().includes(Buffer.from("hang-entered\n")));
+                assert.equal(execution.child.kill(signal), true);
+                const result = await execution.result;
+                assert.equal(result.status, 75, result.stderr.toString());
+                assert.ok(result.stderr.includes(Buffer.from(`interrupted by ${signal}`)));
+                assert.doesNotMatch(result.stderr.toString(), /cleanup failed/);
+                await cleanChromium(result);
+            } finally {
+                if (execution.child.exitCode === null && execution.child.signalCode === null) {
+                    execution.child.kill("SIGTERM");
+                    await execution.result;
+                }
+            }
+        });
     });
 }
