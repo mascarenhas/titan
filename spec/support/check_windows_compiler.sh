@@ -45,7 +45,7 @@ perl -e '
     unless index($image, $manifest) >= 0;
 ' vendor/windows-compiler/titanc.manifest "$runtime/bin/titanc.exe"
 unset LUA_INIT LUA_INIT_5_5 LUA_PATH LUA_PATH_5_5 LUA_CPATH LUA_CPATH_5_5
-unset TITAN_ROOT TITANC TITAN_PATH_0_6 TITAN_PATH
+unset TITAN_ROOT TITANC TITAN_PATH_0_6 TITAN_PATH TITAN_TARGET
 export MSYS2_ARG_CONV_EXCL='*'
 (cd "$check/cwd"; "$runtime/bin/lua.exe" -E -e '
   for _, name in ipairs {"argparse", "inspect", "lfs", "lpeglabel", "luv", "relabel", "titan-compiler.driver"} do
