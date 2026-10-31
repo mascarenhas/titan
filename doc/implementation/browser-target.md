@@ -1155,11 +1155,10 @@ An image owns no DSO, debug bundle, or dSYM companion
 `extra_outputs` and omits `.dSYM` on Darwin hosts for a browser context). A
 warm link hit verifies both files, and a damaged `.mjs` or `.wasm` forces a
 relink while objects still hit. Final images never read `.titan.meta`,
-`.titan.source`, or `.titan.cprobe`; `wasm-ld` drops the `.titan.meta` and
-`.titan.cprobe` payload segments, keeps the `.titan.source` payload as an
-ordinary data segment, and retains the `.titan.meta` and `.titan.source` names
-only in the `name` section ([Baseline](#baseline)). Every image imports Lua's
-`env.exit`, which neither the entrypoint nor completion uses.
+`.titan.source`, or `.titan.cprobe`; `wasm-ld` keeps the `.titan.source` and
+`.titan.meta` payloads as named data segments and drops `.titan.cprobe`
+([Baseline](#baseline)). Every image imports Lua's `env.exit`, which neither
+the entrypoint nor completion uses.
 
 ## The browser entrypoint
 
@@ -1787,20 +1786,20 @@ release-profile and packaging work. `scripts/browser_baseline.lua` builds the
 micro-benchmark program (`spec/fixtures/browser_baseline/`) through the
 `baseline` profile (`entry = "titan"`) and the fork's Lua interpreter (`entry
 = "lua-main"`, built from `lua-5.5.1/src/*.c` with the profile's flags) at
-`-O1` and `-O2`, each with and without Asyncify (the Asyncify-off Titan
-control creates no coroutine and never suspends), in separate output trees,
-and runs each image three times per engine; every published value below is the
-median of the three raw repeats (`format = "titan-browser-baseline-2"`).
+`-O1` and `-O2`, each with and without Asyncify (the Asyncify-off controls
+create no coroutine of either kind and never suspend), in separate output
+trees, and runs each image three times per engine; every published value below
+is the median of the three raw repeats (`format = "titan-browser-baseline-2"`).
 Toolchain: Emscripten 6.0.13, Node 24.19.0, Google Chrome for Testing
 156.0.8078.80 headless shell, fork commit `4f740a4b`, all with
 `-sFORCE_FILESYSTEM=1`.
 
 | Titan cell | `.wasm` bytes | `.mjs` bytes | Node instantiate / run (ms) | Chromium instantiate / run (ms) | Suspension, Node / Chromium (ms) |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| O1, Asyncify | 4082537 | 218265 | 15.2 / 706 | 24.3 / 1360 | 1.06 / 4.08 |
-| O1, no Asyncify | 2095071 | 188462 | 11.8 / 19 | 15.0 / 15 | — |
-| O2, Asyncify | 2328085 | 218265 | 15.9 / 430 | 20.9 / 1040 | 1.07 / 4.19 |
-| O2, no Asyncify | 1893486 | 188462 | 15.2 / 15 | 16.7 / 17 | — |
+| O1, Asyncify | 4082312 | 218265 | 18.6 / 650 | 22.3 / 1371 | 1.08 / 3.99 |
+| O1, no Asyncify | 2095004 | 188462 | 12.9 / 15 | 18.3 / 25 | — |
+| O2, Asyncify | 2328050 | 218265 | 17.2 / 435 | 20.7 / 1133 | 1.08 / 4.47 |
+| O2, no Asyncify | 1893502 | 188462 | 15.1 / 16 | 18.5 / 21 | — |
 
 The Asyncify Titan runs include a 200-suspension loop and the coroutine
 benchmark, which the controls omit. Titan micro-benchmark medians under Node,
@@ -1809,42 +1808,46 @@ in milliseconds, with the native build and the fork's standalone interpreter
 
 | Benchmark | O1 Asyncify | O1 no Asyncify | O2 Asyncify | O2 no Asyncify | native | `lua.js` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 200 000 calls | 7.67 | 3.01 | 5.12 | 2.56 | 8.26 | 7.65 |
-| 50 000 closures | 8.80 | 4.92 | 8.54 | 4.68 | 5.14 | 11.73 |
-| 100 000-element Array | 1.91 | 0.93 | 1.61 | 1.07 | 1.33 | 4.35 |
-| 5 000-step string build | 2.49 | 1.25 | 2.64 | 1.53 | 1.45 | 1.84 |
-| 20 000 coroutine switches | 362.34 | — | 191.33 | — | 10.36 | 38.22 |
+| 200 000 calls | 7.63 | 2.32 | 5.11 | 2.42 | 3.97 | 11.62 |
+| 50 000 closures | 10.38 | 5.04 | 8.89 | 4.82 | 3.63 | 11.48 |
+| 100 000-element Array | 2.22 | 0.99 | 1.82 | 1.28 | 1.23 | 4.46 |
+| 5 000-step string build | 2.56 | 1.36 | 2.75 | 1.53 | 1.46 | 1.82 |
+| 20 000 coroutine switches | 327.05 | — | 189.07 | — | 9.94 | 41.47 |
 
 Lua interpreter cells (`entry = "lua-main"`, running `bench.lua` with an
 explicit heap-marshalled `argv` in both engines), median of three repeats:
 
 | Lua cell | `.wasm` bytes | `.mjs` bytes | Node instantiate / run (ms) | Chromium instantiate / run (ms) |
 | --- | ---: | ---: | ---: | ---: |
-| O1, Asyncify | 1101816 | 199701 | 11.5 / 294 | 14.0 / 325 |
-| O1, no Asyncify | 328025 | 181337 | 9.7 / 90 | 12.1 / 88 |
-| O2, Asyncify | 529190 | 105285 | 9.0 / 84 | 11.8 / 94 |
-| O2, no Asyncify | 297192 | 95960 | 8.8 / 42 | 13.6 / 69 |
+| O1, Asyncify | 1101816 | 199701 | 11.0 / 242 | 14.2 / 390 |
+| O1, no Asyncify | 328025 | 181337 | 11.8 / 80 | 14.2 / 77 |
+| O2, Asyncify | 529190 | 105285 | 9.7 / 65 | 15.3 / 96 |
+| O2, no Asyncify | 297192 | 95960 | 5.3 / 27 | 12.4 / 39 |
 
-Lua interpreter micro-benchmark medians under Node, in milliseconds:
+Lua interpreter micro-benchmark medians under Node, in milliseconds (the
+coroutine row runs only in the Asyncify cells and in the fork `lua.js` lane
+above):
 
 | Benchmark | O1 Asyncify | O1 no Asyncify | O2 Asyncify | O2 no Asyncify |
 | --- | ---: | ---: | ---: | ---: |
-| 200 000 calls | 46.76 | 26.30 | 9.29 | 8.30 |
-| 50 000 closures | 29.96 | 20.49 | 12.18 | 7.07 |
-| 100 000-element Array | 13.10 | 6.82 | 4.02 | 2.82 |
-| 5 000-step string build | 2.96 | 1.77 | 1.90 | 1.27 |
-| 20 000 coroutine switches | 64.26 | 31.89 | 45.49 | 20.75 |
+| 200 000 calls | 32.19 | 35.85 | 9.79 | 10.69 |
+| 50 000 closures | 22.16 | 22.36 | 9.79 | 6.64 |
+| 100 000-element Array | 9.02 | 9.46 | 3.12 | 2.32 |
+| 5 000-step string build | 2.10 | 2.30 | 1.40 | 0.90 |
+| 20 000 coroutine switches | 43.90 | — | 33.22 | — |
 
 Asyncify roughly doubles the Titan image at `-O1` and costs about a quarter at
 `-O2`, and instrumented coroutine switches are an order of magnitude slower
 than native ones. Per-suspension cost does not depend on the optimization
-level. In the Titan images, the `.titan.source` payload survives as an
-ordinary data segment (104 368 B at `-O1` and 33 169 B at `-O2` in this
-fixture, inside a 449–450 KB data section), the `.titan.meta` and
-`.titan.source` names survive only in the 31–34 KB `name` custom section, and
-`.titan.cprobe` is absent; because the payload is a data segment, custom-section
-stripping alone cannot remove it. Every Titan image imports 50 symbols (every
-Lua interpreter image 27), none of them `dlopen`, `dlsym`, `dlerror`, or a
+level. In the Titan images, the `.titan.source` and `.titan.meta` payloads
+survive as ordinary data segments named by the linker's data-segment name
+table (`.titan.source` is 339 808 B in the Asyncify cells and 339 814 B in the
+Asyncify-off controls; `.titan.meta` is 5 672 B in every cell; ordinary
+`.rodata` is 104 368 B at `-O1` and 69 B at `-O2`, and `.data` is 460 B and 8
+B, inside a 448 986 to 450 348 B data section), while `.titan.cprobe` is
+absent; because the payloads are data segments, custom-section stripping alone
+cannot remove them. Every Titan image imports 50 symbols (every Lua
+interpreter image 27), none of them `dlopen`, `dlsym`, `dlerror`, or a
 backtrace function.
 
 ## Host processes
