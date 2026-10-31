@@ -312,6 +312,46 @@ if not support_loaded or type(support) ~= "table" or
         (support_loaded and "" or ": " .. tostring(support):match("^[^\n]*")))
 end
 
+-- Browser descriptor probes write through this context's output-scoped I/O.
+-- Own that root before initialization; native invocations retain their later
+-- lock boundary, after option normalization and source discovery.
+local lock_directories = {}
+local digest_cache_loaded = false
+local function acquire_output_locks()
+    if output_locks then return end
+    if args.output then
+        lock_directories[1] = args.output
+    else
+        -- Source-adjacent objects may belong to any search root, while final
+        -- providers and executables belong to the invocation's working tree.
+        for directory in driver.TITAN_SOURCE_PATH:gmatch("[^;]+") do
+            lock_directories[#lock_directories + 1] = directory
+        end
+        if #lock_directories == 0 then lock_directories[1] = "." end
+        lock_directories[#lock_directories + 1] = "."
+    end
+    if args.exe then
+        local exe_directory, directory_error =
+            driver.prepare_output_root(path.dirname(args.exe))
+        if not exe_directory then exit(directory_error) end
+        lock_directories[#lock_directories + 1] = exe_directory
+    end
+    local lock_error
+    output_locks, lock_error = build.lock_outputs(
+        resolver_context.io, lock_directories, { verbose = args.verbose })
+    if not output_locks then exit(lock_error) end
+    driver.OUTPUT_LOCKS = output_locks
+    if not platform.windows then
+        locked_io = resolver_context.io
+        locked_io._process_inherit = output_locks:descriptors()
+    end
+    for _, directory in ipairs(lock_directories) do
+        local valid, target_error = driver.validate_output_target(
+            resolver_context, directory, directory == args.output)
+        if not valid then exit(target_error) end
+    end
+end
+
 resolver_context = driver.new_resolver_context({
     prefer_static = args.static,
     source_first = args.test or args.source_first,
@@ -333,8 +373,11 @@ local target, target_error =
     driver.validate_target(resolver_context, target_value, target_origin)
 if not target then exit(target_error) end
 resolver_context.target = target
-if target == "browser" and not args.output then
-    exit("--target browser requires --output")
+if target == "browser" then
+    if not args.output then exit("--target browser requires --output") end
+    acquire_output_locks()
+    incremental.load_digest_cache(resolver_context, args.output)
+    digest_cache_loaded = true
 end
 if #args.module == 0 and #args.test_dir == 0 and
    not (args.compile_only and #args.c_source > 0) then
@@ -428,41 +471,15 @@ local loader_options = {
 }
 
 -- One exclusive lock per output domain, held from certification through
--- publication; a second invocation sharing the domain waits and recertifies.
-local lock_directories = {}
-if args.output then
-    lock_directories[1] = args.output
-else
-    -- Source-adjacent objects may belong to any search root, while default
-    -- final providers/executables belong to the invocation's working tree.
-    for directory in driver.TITAN_SOURCE_PATH:gmatch("[^;]+") do
-        lock_directories[#lock_directories + 1] = directory
-    end
-    if #lock_directories == 0 then lock_directories[1] = "." end
-    lock_directories[#lock_directories + 1] = "."
+-- publication; browser already acquired it before descriptor probes.
+acquire_output_locks()
+if not digest_cache_loaded then
+    incremental.load_digest_cache(resolver_context, args.output)
 end
-if args.exe then
-    local exe_directory, directory_error =
-        driver.prepare_output_root(path.dirname(args.exe))
-    if not exe_directory then exit(directory_error) end
-    lock_directories[#lock_directories + 1] = exe_directory
-end
-local lock_error
-output_locks, lock_error = build.lock_outputs(
-    resolver_context.io, lock_directories, { verbose = args.verbose })
-if not output_locks then exit(lock_error) end
-driver.OUTPUT_LOCKS = output_locks
-if not platform.windows then
-    locked_io = resolver_context.io
-    locked_io._process_inherit = output_locks:descriptors()
-end
-for _, directory in ipairs(lock_directories) do
-    local valid, target_error = driver.validate_output_target(
-        resolver_context, directory, directory == args.output)
-    if not valid then exit(target_error) end
-end
-incremental.load_digest_cache(resolver_context, args.output)
-if driver.INSTALLED and driver.INSTALL_PATHS then
+if resolver_context.target_descriptor then
+    incremental.load_sdk_digests(resolver_context,
+        resolver_context.target_descriptor.paths.sdk_digests)
+elseif driver.INSTALLED and driver.INSTALL_PATHS then
     incremental.load_sdk_digests(resolver_context, driver.INSTALL_PATHS.sdk_digests)
 end
 

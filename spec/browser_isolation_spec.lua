@@ -133,6 +133,12 @@ describe("browser semantic cache isolation", function()
         local imported = {}
         local loader = subject.tableloader({ cached = "record Item\n value: integer\nend\n" }, imported, {}, { context = first })
         loaded(loader, "cached")
+        files.write(root .. "/planned.titan", "function answer(): integer return 42 end\n")
+        local planning = subject.defaultloader({}, { context = first,
+            source_roots = { planned = true }, plan_mode = true,
+            imports_for = function() return {} end })
+        loaded(planning, "planned")
+        local plan = subject.resolution_plan(first)
         local browser = context("browser")
         local message = "compiler caches now belong to target " .. browser.target_descriptor.identity .. "; create a new context"
         for _, action in ipairs({
@@ -144,6 +150,11 @@ describe("browser semantic cache isolation", function()
             function() subject.resolution_plan(first) end,
             function() subject.finalize_resolver_context(first) end,
             function() subject.completion_binary_catalog(first) end,
+            function() plan.linked("planned") end,
+            function() plan.provider_file("planned") end,
+            function() plan.digest("planned", "public") end,
+            function() plan.update("planned", {}) end,
+            function() plan.accepted("planned") end,
         }) do assert.has_error(action, message) end
         assert(subject.assert_target_context(browser))
     end)
@@ -298,6 +309,9 @@ describe("browser object and link certificate identity", function()
             ar = { root .. "/emar" }, ranlib = { root .. "/emranlib" } } }))
         assert.is_table(tools.ar); assert.is_table(tools.ranlib); assert.is_nil(tools.linker)
         assert.equal("archive", certificate.linker_backend(ctx))
+        local opaque = certificate.native_library_policy(ctx, { argv = { "@opaque-link-input" } })
+        assert.is_false(opaque.cacheable)
+        assert.equal("opaque linker input mechanism: @opaque-link-input", opaque.reason)
         local spec = { output_root = root, outputs = { root .. "/provider.a" },
             kind = "library", policy = { target = "native-profile" }, native_libraries = { backend = "gnu" } }
         local browser = certificate.prepare(ctx, spec)
