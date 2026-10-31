@@ -225,6 +225,36 @@ static const unsigned char wasm_probe_bytes[] = {
                 end
             end
         end
+
+        local asm_source = [[
+.text
+.globl x
+.type x,@object
+.section .data.x,"",@
+x:
+.int64 foo+4294967296
+.int64 foo-4294967296
+.size x, 16
+]]
+        local asm_path = track_file(root .. "/reloc64.s")
+        local asm_obj = track_file(root .. "/reloc64.o")
+        assert(util.set_file_contents(asm_path, asm_source))
+        run_tool(strategy, info.tools.clang, {
+            "--target=wasm32-unknown-emscripten", "-x", "assembler",
+            "-c", asm_path, "-o", asm_obj,
+        })
+        local asm_bytes = assert(util.get_file_contents(asm_obj, "rb"))
+        local parsed_asm = assert(staticmetadata.classify_object(
+            asm_bytes, asm_obj))
+        assert.equal("wasm", parsed_asm.format)
+        assert.same({
+            format = "wasm",
+            word_size = 32,
+            linking_version = 2,
+            features = "",
+        }, parsed_asm.fingerprint)
+        assert.equal(".data.x", parsed_asm.sections[1].name)
+        assert.equal(16, parsed_asm.sections[1].size)
     end)
 
     it("scans emar archives, verifies manifests, and rejects bitcode and mixed archives", function()

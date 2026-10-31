@@ -36,16 +36,16 @@ local WASM_PAYLOAD_NAMES = {
 }
 local WASM_RELOC_TYPES = {
     [0] = { width = 5 }, [1] = { width = 5 }, [2] = { width = 4 },
-    [3] = { width = 5, addend = true }, [4] = { width = 5, addend = true },
-    [5] = { width = 4, addend = true }, [6] = { width = 5 }, [7] = { width = 5 },
-    [8] = { width = 4, addend = true }, [9] = { width = 4, addend = true },
-    [10] = { width = 5 }, [11] = { width = 5, addend = true }, [12] = { width = 5 },
-    [13] = { width = 4 }, [14] = { width = 10, addend = true },
-    [15] = { width = 10, addend = true }, [16] = { width = 8, addend = true },
-    [17] = { width = 10, addend = true }, [18] = { width = 10 }, [19] = { width = 8 },
-    [20] = { width = 5 }, [21] = { width = 5, addend = true },
-    [22] = { width = 8, addend = true }, [23] = { width = 4, addend = true },
-    [24] = { width = 10 }, [25] = { width = 10, addend = true }, [26] = { width = 4 },
+    [3] = { width = 5, addend = 32 }, [4] = { width = 5, addend = 32 },
+    [5] = { width = 4, addend = 32 }, [6] = { width = 5 }, [7] = { width = 5 },
+    [8] = { width = 4, addend = 32 }, [9] = { width = 4, addend = 32 },
+    [10] = { width = 5 }, [11] = { width = 5, addend = 32 }, [12] = { width = 5 },
+    [13] = { width = 4 }, [14] = { width = 10, addend = 64 },
+    [15] = { width = 10, addend = 64 }, [16] = { width = 8, addend = 64 },
+    [17] = { width = 10, addend = 64 }, [18] = { width = 10 }, [19] = { width = 8 },
+    [20] = { width = 5 }, [21] = { width = 5, addend = 32 },
+    [22] = { width = 8, addend = 64 }, [23] = { width = 4, addend = 32 },
+    [24] = { width = 10 }, [25] = { width = 10, addend = 64 }, [26] = { width = 4 },
 }
 local COFF_BIGOBJ_UUID = "\199\161\186\209\238\186\169\75" ..
     "\175\32\250\246\106\164\220\184"
@@ -1092,7 +1092,7 @@ local function wasm_u32_leb(reader, offset, limit, origin)
 end
 
 local function wasm_s32_leb(reader, offset, limit, origin)
-    local value, shift, count = 0, 1, 0
+    local value, shift, count = 0, 0, 0
     while true do
         if offset >= limit then
             fail(origin, "truncated Wasm i32 LEB128")
@@ -1107,23 +1107,71 @@ local function wasm_s32_leb(reader, offset, limit, origin)
                 end
                 fail(origin, "Wasm i32 LEB128 exceeds 5 bytes")
             end
-            local sign = (digit & 0x08) ~= 0
-            local upper = digit & 0x70
-            if (sign and upper ~= 0x70) or (not sign and upper ~= 0) then
+            if digit > 0x07 and digit < 0x78 then
                 fail(origin, "Wasm i32 LEB128 overflows")
             end
-        end
-        value = value + (digit & 0x7f) * shift
-        shift = shift * 128
-        if digit < 0x80 then
-            if count < 5 and (digit & 0x40) ~= 0 then
-                value = value - shift
-            elseif count == 5 and (digit & 0x08) ~= 0 then
+            value = value | ((digit & 0x0f) << 28)
+            if (digit & 0x08) ~= 0 then
                 value = value - (1 << 32)
             end
             return value, offset
         end
+        value = value | ((digit & 0x7f) << shift)
+        shift = shift + 7
+        if digit < 0x80 then
+            if (digit & 0x40) ~= 0 then
+                value = value - (1 << shift)
+            end
+            return value, offset
+        end
     end
+end
+
+local function wasm_s64_leb(reader, offset, limit, origin)
+    local value, shift, count = 0, 0, 0
+    while true do
+        if offset >= limit then
+            fail(origin, "truncated Wasm i64 LEB128")
+        end
+        local digit = byte(reader.bytes, offset + 1)
+        offset = offset + 1
+        count = count + 1
+        if count == 10 then
+            if digit >= 0x80 then
+                if offset >= limit then
+                    fail(origin, "truncated Wasm i64 LEB128")
+                end
+                fail(origin, "Wasm i64 LEB128 exceeds 10 bytes")
+            end
+            if digit ~= 0x00 and digit ~= 0x7f then
+                fail(origin, "Wasm i64 LEB128 overflows")
+            end
+            if digit == 0x7f then
+                value = value | (1 << 63)
+            end
+            return value, offset
+        end
+        value = value | ((digit & 0x7f) << shift)
+        shift = shift + 7
+        if digit < 0x80 then
+            if (digit & 0x40) ~= 0 then
+                value = value | (-1 << shift)
+            end
+            return value, offset
+        end
+    end
+end
+
+local function wasm_name(reader, offset, limit, origin, what, outside_message)
+    local length, next_offset = wasm_u32_leb(reader, offset, limit, origin)
+    if length > limit - next_offset then
+        fail(origin, outside_message or (what .. " is outside its section"))
+    end
+    local name = sub(reader.bytes, next_offset + 1, next_offset + length)
+    if name == "" or name:find("[%z%c%s]") then
+        fail(origin, "invalid " .. what)
+    end
+    return name, next_offset + length
 end
 
 local function check_wasm_memory_limits(reader, offset, limit, origin)
@@ -1229,20 +1277,15 @@ local function parse_wasm(bytes, origin, target, options)
                 local import_count, pos =
                     wasm_u32_leb(reader, payload_offset, section_end, origin)
                 for _ = 1, import_count do
-                    local mod_len, ignored
-                    mod_len, pos = wasm_u32_leb(reader, pos, section_end, origin)
-                    if mod_len > section_end - pos then
-                        fail(origin, "Wasm import module name is outside its section")
-                    end
-                    local mod_name = sub(bytes, pos + 1, pos + mod_len)
-                    pos = pos + mod_len
-                    local field_len
-                    field_len, pos = wasm_u32_leb(reader, pos, section_end, origin)
-                    if field_len > section_end - pos then
-                        fail(origin, "Wasm import name is outside its section")
-                    end
-                    local field_name = sub(bytes, pos + 1, pos + field_len)
-                    pos = pos + field_len
+                    local mod_name, field_name, ignored
+                    mod_name, pos = wasm_name(
+                        reader, pos, section_end, origin,
+                        "Wasm import module name",
+                        "Wasm import module name is outside its section")
+                    field_name, pos = wasm_name(
+                        reader, pos, section_end, origin,
+                        "Wasm import name",
+                        "Wasm import name is outside its section")
                     if mod_name == "GOT.mem" or mod_name == "GOT.func" then
                         fail(origin, "Wasm GOT import is not supported")
                     end
@@ -1380,13 +1423,10 @@ local function parse_wasm(bytes, origin, target, options)
             if payload_offset >= section_end then
                 fail(origin, "Wasm custom section name is outside its section")
             end
-            local name_len, name_offset =
-                wasm_u32_leb(reader, payload_offset, section_end, origin)
-            if name_len > section_end - name_offset then
-                fail(origin, "Wasm custom section name is outside its section")
-            end
-            local custom_name = sub(bytes, name_offset + 1, name_offset + name_len)
-            local content_offset = name_offset + name_len
+            local custom_name, content_offset = wasm_name(
+                reader, payload_offset, section_end, origin,
+                "Wasm custom section name",
+                "Wasm custom section name is outside its section")
             local content_size = section_end - content_offset
             raw_sections[section_index + 1] = {
                 index = section_index,
@@ -1432,13 +1472,11 @@ local function parse_wasm(bytes, origin, target, options)
                                 "Wasm segment-info count does not match DATA segment count")
                         end
                         for seg_idx = 1, seg_count do
-                            local sname_len
-                            sname_len, sp = wasm_u32_leb(reader, sp, sub_end, origin)
-                            if sname_len > sub_end - sp then
-                                fail(origin, "Wasm segment name is outside its subsection")
-                            end
-                            local sname = sub(bytes, sp + 1, sp + sname_len)
-                            sp = sp + sname_len
+                            local sname
+                            sname, sp = wasm_name(
+                                reader, sp, sub_end, origin,
+                                "Wasm segment name",
+                                "Wasm segment name is outside its subsection")
                             local align_exp, sflags
                             align_exp, sp = wasm_u32_leb(reader, sp, sub_end, origin)
                             sflags, sp = wasm_u32_leb(reader, sp, sub_end, origin)
@@ -1470,12 +1508,11 @@ local function parse_wasm(bytes, origin, target, options)
                         local comdat_count, sp =
                             wasm_u32_leb(reader, pos, sub_end, origin)
                         for _ = 1, comdat_count do
-                            local cname_len, ignored
-                            cname_len, sp = wasm_u32_leb(reader, sp, sub_end, origin)
-                            if cname_len > sub_end - sp then
-                                fail(origin, "Wasm COMDAT name is outside its subsection")
-                            end
-                            sp = sp + cname_len
+                            local ignored
+                            ignored, sp = wasm_name(
+                                reader, sp, sub_end, origin,
+                                "Wasm COMDAT name",
+                                "Wasm COMDAT name is outside its subsection")
                             ignored, sp = wasm_u32_leb(reader, sp, sub_end, origin)
                             local entry_count
                             entry_count, sp = wasm_u32_leb(reader, sp, sub_end, origin)
@@ -1527,13 +1564,10 @@ local function parse_wasm(bytes, origin, target, options)
                                skind == "tag" or skind == "table" then
                                 sym_index, sp = wasm_u32_leb(reader, sp, sub_end, origin)
                                 if defined or explicit_name then
-                                    local sname_len
-                                    sname_len, sp = wasm_u32_leb(reader, sp, sub_end, origin)
-                                    if sname_len > sub_end - sp then
-                                        fail(origin, "Wasm symbol name is outside its subsection")
-                                    end
-                                    sname = sub(bytes, sp + 1, sp + sname_len)
-                                    sp = sp + sname_len
+                                    sname, sp = wasm_name(
+                                        reader, sp, sub_end, origin,
+                                        "Wasm symbol name",
+                                        "Wasm symbol name is outside its subsection")
                                 else
                                     local imp = imported_by_kind[skind][sym_index + 1]
                                     if not imp then
@@ -1544,13 +1578,11 @@ local function parse_wasm(bytes, origin, target, options)
                                     sname = imp.name
                                 end
                             elseif skind == "data" then
-                                local sname_len, ignored
-                                sname_len, sp = wasm_u32_leb(reader, sp, sub_end, origin)
-                                if sname_len > sub_end - sp then
-                                    fail(origin, "Wasm symbol name is outside its subsection")
-                                end
-                                sname = sub(bytes, sp + 1, sp + sname_len)
-                                sp = sp + sname_len
+                                local ignored
+                                sname, sp = wasm_name(
+                                    reader, sp, sub_end, origin,
+                                    "Wasm symbol name",
+                                    "Wasm symbol name is outside its subsection")
                                 if defined then
                                     if (sflags & 0x200) == 0 then
                                         sym_index, sp = wasm_u32_leb(reader, sp, sub_end, origin)
@@ -1600,13 +1632,14 @@ local function parse_wasm(bytes, origin, target, options)
                     if not prefix then
                         fail(origin, "invalid Wasm target feature prefix")
                     end
-                    local fname_len
-                    fname_len, pos = wasm_u32_leb(reader, pos, section_end, origin)
-                    if fname_len == 0 or fname_len > section_end - pos then
-                        fail(origin, "Wasm target feature name is outside its section")
+                    local fname
+                    fname, pos = wasm_name(
+                        reader, pos, section_end, origin,
+                        "Wasm target feature name",
+                        "Wasm target feature name is outside its section")
+                    if fname:find("[^!-\126]") then
+                        fail(origin, "invalid Wasm target feature name")
                     end
-                    local fname = sub(bytes, pos + 1, pos + fname_len)
-                    pos = pos + fname_len
                     local previous = seen_features[fname]
                     if previous == prefix then
                         fail(origin, "duplicate Wasm target feature " ..
@@ -1650,7 +1683,9 @@ local function parse_wasm(bytes, origin, target, options)
                     local roffset, ignored
                     roffset, pos = wasm_u32_leb(reader, pos, section_end, origin)
                     ignored, pos = wasm_u32_leb(reader, pos, section_end, origin)
-                    if spec.addend then
+                    if spec.addend == 64 then
+                        ignored, pos = wasm_s64_leb(reader, pos, section_end, origin)
+                    elseif spec.addend == 32 then
                         ignored, pos = wasm_s32_leb(reader, pos, section_end, origin)
                     end
                     if roffset > target_sec.content_size or
