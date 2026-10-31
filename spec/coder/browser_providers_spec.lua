@@ -118,6 +118,7 @@ local function scan(bytes)
 end
 local function browser_context(root, options)
     local context = driver.new_resolver_context(options)
+    assert(driver.initialize_platform(context))
     context.target = "browser"
     context.target_descriptor = assert(require("titan-compiler.browsertarget").import(fixtures.descriptor(root)))
     driver.activate_target_caches(context, context.target_descriptor.identity)
@@ -333,6 +334,18 @@ describe("browser providers", function()
         assert.equal(4, #commands)
     end)
 
+    it("does not add target probes to native provider lookup", function()
+        local context = driver.new_resolver_context()
+        context.io.run = function() error("unexpected native target probe") end
+        os.execute = function() error("unexpected native process") end
+        io.popen = function() error("unexpected native command capture") end
+        assert.is_nil(driver.find_dynamic_interface(root .. "/empty", "pkg.mod", context))
+        assert.is_nil(driver.find_static_interface(root .. "/empty", "pkg.mod", context))
+        assert.is_nil(driver.find_dependency_interface(root .. "/empty", "pkg.mod", context))
+        local expected = require("titan-compiler.platform").windows and ".dll" or ".so"
+        assert.equal(root .. "/pkg" .. expected, driver.provider_output_path("pkg", root, context))
+    end)
+
     it("stops program and executable probes before any process or loader call", function()
         local context = browser_context(root)
         os.execute = function() error("unexpected program process") end
@@ -359,15 +372,69 @@ function require(name)
                 "validate_library_image", "validate_library_image_fresh" }) do
             module[field] = function() error("browser entered executable path " .. field) end
         end
-        local execute = os.execute
-        os.execute = function(command)
-            local argv = assert(original_require("c-parser.cdriver").split_shell_words(command))
-            local tool = argv[1]:match("([^/]+)$")
-            assert(tool == "emcc" or tool == "emar" or tool == "emranlib",
-                "browser executed a non-compile/archive command: " .. command)
+        local browser_active = false
+        local finish = module._finish_target_initialization
+        module._finish_target_initialization = function(context)
+            if context.target == "browser" then browser_active = true end
+            return finish(context)
+        end
+        local function audit(argv)
+            if not browser_active then return end
+            if argv[1] == "/bin/sh" and argv[2] == "-c" then
+                argv = assert(original_require("c-parser.cdriver").split_shell_words(argv[3]))
+            end
+            local index = 1
+            if argv[index] == "env" then
+                index = index + 1
+                while argv[index] and argv[index]:match("^[A-Za-z_][A-Za-z_0-9]*=") do
+                    index = index + 1
+                end
+            end
+            local tool = argv[index]:match("([^/]+)$")
             local file = assert(io.open(assert(os.getenv("BROWSER_COMMAND_LOG")), "a"))
             file:write(tool, "\n"); file:close()
-            return execute(command)
+            assert(tool == "emcc" or tool == "emar" or tool == "emranlib",
+                "browser executed a non-compile/archive command: " .. tostring(argv[index]))
+            return argv, tool
+        end
+        local corrupted = {}
+        local function after_tool(argv, tool)
+            if tool ~= "emranlib" or os.getenv("BROWSER_CORRUPTION") ~= "corrupt-member" then return end
+            local filename = argv[#argv]
+            if not filename:match("/output[.]a$") or corrupted[filename] then return end
+            corrupted[filename] = true
+            local parsed = assert(original_require("titan-compiler.staticmetadata").scan_archive(filename))
+            local file = assert(io.open(filename, "r+b"))
+            assert(file:seek("set", parsed.members[1].data_offset))
+            assert(file:write("X")); assert(file:close())
+        end
+        local execute = os.execute
+        os.execute = function(command)
+            local argv, tool = audit(assert(
+                original_require("c-parser.cdriver").split_shell_words(command)))
+            local result = table.pack(execute(command))
+            after_tool(argv, tool)
+            return table.unpack(result, 1, result.n)
+        end
+        local process = original_require("titan-compiler.process")
+        for _, field in ipairs({ "run", "capture", "start_job" }) do
+            local original = process[field]
+            process[field] = function(argv, ...)
+                local normalized, tool = audit(argv)
+                local result = table.pack(original(argv, ...))
+                after_tool(normalized, tool)
+                return table.unpack(result, 1, result.n)
+            end
+        end
+        local new_batch = process.new_batch
+        process.new_batch = function(...)
+            local batch = new_batch(...)
+            local spawn = batch.spawn
+            batch.spawn = function(self, argv, ...)
+                audit(argv)
+                return spawn(self, argv, ...)
+            end
+            return batch
         end
         local stage = module.link_provider_pair
         module.link_provider_pair = function(request)
@@ -382,7 +449,9 @@ function require(name)
                 local parsed = assert(metadata.classify_object(
                     assert(util.get_file_contents(filename, "rb")), filename, request.target))
                 local entry = assert(parsed.metadata)
-                local source = assert(metadata.source_declaration(entry.payload, "browser_fixture_metadata"))
+                local source = '__attribute__((used, aligned(1), section(".titan.meta")))\n' ..
+                    'static const unsigned char browser_fixture_metadata[] = ' ..
+                    assert(metadata.c_initializer(entry.payload)) .. ';\n'
                 local prefix = module.mangle_module_name(entry.module)
                 for _, symbol in ipairs({ prefix .. "_abi", prefix .. "_types",
                         prefix .. "_layouts", "luaopen_" .. prefix }) do
@@ -461,6 +530,9 @@ describe("browser providers real toolchain", function()
         assert.matches("emcc", commands, 1, true)
         assert.matches("emar", commands, 1, true)
         assert.matches("emranlib", commands, 1, true)
+        for tool in commands:gmatch("[^\n]+") do
+            assert.is_true(tool == "emcc" or tool == "emar" or tool == "emranlib", tool)
+        end
         write(root .. "/providers/pkg.a", read(output))
         write(root .. "/src/consumer.titan",
             'local left = import "pkg.left"\nfunction answer(): integer return left.answer() end\n')
@@ -471,7 +543,8 @@ describe("browser providers real toolchain", function()
         assert.equal("direct", source_record.object_metadata.bindings["pkg.left"])
     end)
     for _, case in ipairs({
-        { mode = "corrupt", message = "unsupported native object format" },
+        { mode = "corrupt", message = "unsupported native container format" },
+        { mode = "corrupt-member", message = "differs byte-for-byte" },
         { mode = "missing-symbol", message = "requires global non-weak function" },
         { mode = "lto", message = "LLVM bitcode (LTO) object is not supported" },
     }) do

@@ -4456,7 +4456,7 @@ function driver.find_static_interface(paths, modname, context)
     local occupied = {}
 
     local roots, roots_error
-    if driver.context_target(context) == "browser" then
+    if context.target == "browser" then
         local descriptor, descriptor_error = driver.context_target_descriptor(context)
         if not descriptor then return nil, descriptor_error end
         roots, roots_error = driver.titan_bin_path_entries(paths, ".")
@@ -4575,7 +4575,7 @@ end
 function driver.find_dependency_interface(paths, modname, context)
     context = context or driver.new_resolver_context()
     driver.assert_target_context(context)
-    local browser = driver.context_target(context) == "browser"
+    local browser = context.target == "browser"
     local embedded = not browser and find_embedded_interface(modname, context) or nil
     if embedded then return embedded end
     local formats = browser and { "static" } or
@@ -11599,7 +11599,7 @@ end
 -- pipeline order is reported. Any failure or interruption drains running
 -- links, discards their output, and removes the whole stage.
 function driver.link_provider_pair(request)
-    if request.context and driver.context_target(request.context) == "browser" then
+    if request.context and request.context.target == "browser" then
         return driver.stage_browser_provider(request)
     end
     assert(not platform.windows, "Windows DLL providers have no paired archive")
@@ -12543,7 +12543,7 @@ end
 
 function driver.validate_provider_output_paths(
         public_dso, native_inputs, generated_outputs, context)
-    local browser = context and driver.context_target(context) == "browser"
+    local browser = context and context.target == "browser"
     local public_archive = browser and public_dso or
         public_dso and not platform.windows and public_dso:gsub("[.]so$", ".a")
     if browser then
@@ -12849,7 +12849,7 @@ function driver.preflight_build_outputs(context, plan, options)
         return nil, "--coverage requires a test or standalone executable; use -c for coverage objects"
     end
     if builds_program then
-        if driver.context_target(context) == "browser" then
+        if context.target == "browser" then
             return nil, "browser program linking is not available yet"
         end
         local root = options.test and options.roots[1] or main
@@ -12874,7 +12874,7 @@ function driver.preflight_build_outputs(context, plan, options)
         local library, library_err =
             driver.provider_output_path(provider, options.output_root, context)
         if not library then return nil, library_err end
-        local browser = driver.context_target(context) == "browser"
+        local browser = context.target == "browser"
         output(library, browser and "provider archive" or "provider DSO")
         if not browser and not platform.windows then
             output((library:gsub("[.]so$", ".a")), "provider archive")
@@ -12945,7 +12945,7 @@ end
 
 -- The library DSO path of one provider prefix, below output_root if given.
 function driver.provider_output_path(provider, output_root, context)
-    local extension = context and driver.context_target(context) == "browser" and
+    local extension = context and context.target == "browser" and
         ".a" or (platform.windows and ".dll" or ".so")
     local provider_path = safe_provider_output_path(provider, extension)
     if not provider_path then
@@ -13208,7 +13208,7 @@ function driver.run_standalone_archive_probe(
         entries, module_names, libnames, static_archives,
         link, verbose, extra_objects, options)
     options = options or {}
-    if options.context and driver.context_target(options.context) == "browser" then
+    if options.context and options.context.target == "browser" then
         return nil, "browser program linking is not available yet"
     end
     if #module_names == 0 then return true end
@@ -13420,7 +13420,7 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
                                 program_output, static_archives,
                                 entrypoint_output, program_name, options)
     options = options or {}
-    if options.context and driver.context_target(options.context) == "browser" then
+    if options.context and options.context.target == "browser" then
         return nil, "browser program linking is not available yet"
     end
     local runtime_ok, runtime_err = perf.check_runtime(verbose)
