@@ -744,7 +744,7 @@ function driver.initialize_platform(context)
     driver.assert_target_context(context)
     if context._platform_initialized then
         initialize_source_target(context)
-        select_platform_defaults(context.uname, context.is_darwin)
+        if context.target ~= "browser" then select_platform_defaults(context.uname, context.is_darwin) end
         local ready, err = driver._finish_target_initialization(context)
         if not ready then return nil, err end
         return true, context.uname, context.is_darwin
@@ -755,7 +755,7 @@ function driver.initialize_platform(context)
         context.is_darwin = false
         context._platform_initialized = true
         initialize_source_target(context)
-        select_platform_defaults(context.uname, false)
+        if context.target ~= "browser" then select_platform_defaults(context.uname, false) end
         local ready, err = driver._finish_target_initialization(context)
         if not ready then return nil, err end
         return true, context.uname, false
@@ -783,7 +783,7 @@ function driver.initialize_platform(context)
     -- Retain the historical process-visible fields for build/publication APIs.
     -- The subprocess which populates them now belongs to an explicit resolver
     -- context instead of running while this module is loaded.
-    select_platform_defaults(uname, context.is_darwin)
+    if context.target ~= "browser" then select_platform_defaults(uname, context.is_darwin) end
     local ready, err = driver._finish_target_initialization(context)
     if not ready then return nil, err end
     return true, uname, context.is_darwin
@@ -8045,6 +8045,7 @@ local function static_flag()
 end
 
 function driver.compile_module(modname, mod, static_deps, verbose, options)
+    if options and options.context then driver.assert_target_context(options.context) end
     if mod.compiled then return true, nil, nil end
     local ok, err, libname, native_references, objects = driver.compile(
         modname, mod.ast, mod.native_output or mod.filename,

@@ -5,6 +5,7 @@ local incremental = require "titan-compiler.incremental"
 local sha256 = require "titan-compiler.sha256"
 local version = require "titan-compiler.version"
 local cprobe_cache = require "titan-compiler.cprobe_cache"
+local platform = require "titan-compiler.platform"
 local M = {}
 
 M.features = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue " ..
@@ -45,7 +46,7 @@ function M.profile_data()
 end
 
 function M.paths(root)
-    root = root or "/browser-fixture"
+    root = root or (platform.windows and "C:/browser-fixture" or "/browser-fixture")
     local sdk = root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION
     return { root = root, lua_source = root .. "/lib/browser/include",
         include = root .. "/include", lib = root .. "/lib/browser",
@@ -85,7 +86,7 @@ function M.descriptor(root, overrides)
     local paths = M.paths(root)
     local record, record_text = M.record()
     local profile = M.profile_data()
-    local tools = "/emsdk/upstream/emscripten/"
+    local tools = (platform.windows and "C:" or "") .. "/emsdk/upstream/emscripten/"
     local flags = { "--std=c99", "-O2", "-Wall", "-Wno-unused-but-set-variable",
         "-Wno-unused-function", "-gline-tables-only", "-sSUPPORT_LONGJMP=emscripten",
         "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", "-DTITAN_TARGET_BROWSER=1" }
