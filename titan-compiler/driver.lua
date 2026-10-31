@@ -58,10 +58,12 @@ function driver.activate_target_caches(context, identity)
     assert(type(identity) == "string" and identity ~= "",
         "semantic cache target identity is required")
     if semantic_target_identity ~= identity then
-        -- Rebind the complete closure, rather than pruning individual owners.
-        -- Same-target contexts intentionally keep the existing warm caches.
-        driver.imported = {}
-        types.registry = {}
+        -- The first owner adopts tables installed by an embedding host.
+        -- A real target change rebinds the complete nominal closure.
+        if semantic_target_identity ~= nil then
+            driver.imported = {}
+            types.registry = {}
+        end
         semantic_cache_generation = semantic_cache_generation + 1
         semantic_target_identity = identity
     end
@@ -788,8 +790,24 @@ local function initialize_source_target(context)
     context.target = context.target or context.host_target
 end
 
+function perf.native_platform(strategy)
+    if platform.windows then return "Windows", false end
+    local result = strategy:run({ "uname" }, { stderr_to_stdout = true })
+    if type(result) ~= "table" or not result.started or not result.ok then
+        local detail = type(result) == "table" and
+            (result.diagnostic or result.output) or result
+        return nil, "cannot determine the native platform with uname: " ..
+            tostring(detail or "command failed")
+    end
+    local uname = tostring(result.output or ""):match("^%s*(.-)%s*$")
+    if uname == "" then
+        return nil, "cannot determine the native platform with uname: " ..
+            "command produced no output"
+    end
+    return uname, uname:match("Darwin") ~= nil
+end
+
 function driver.initialize_platform(context)
-    context = context or driver.new_resolver_context()
     if type(context) ~= "table" or context.io == nil then
         error("platform initialization requires a resolver context", 2)
     end
@@ -803,39 +821,13 @@ function driver.initialize_platform(context)
         return true, context.uname, context.is_darwin
     end
 
-    if platform.windows then
-        context.uname = "Windows"
-        context.is_darwin = false
-        context._platform_initialized = true
-        initialize_source_target(context)
-        if context.target ~= "browser" then select_platform_defaults(context.uname, false) end
-        local ready, err = driver._finish_target_initialization(context)
-        if not ready then return nil, err end
-        return true, context.uname, false
-    end
-
-    local result = context.io:run({ "uname" }, {
-        stderr_to_stdout = true,
-    })
-    if type(result) ~= "table" or not result.started or not result.ok then
-        local detail = type(result) == "table" and
-            (result.diagnostic or result.output) or result
-        return nil, "cannot determine the native platform with uname: " ..
-            tostring(detail or "command failed")
-    end
-    local uname = tostring(result.output or ""):match("^%s*(.-)%s*$")
-    if uname == "" then
-        return nil, "cannot determine the native platform with uname: " ..
-            "command produced no output"
-    end
-    context.uname = uname
-    context.is_darwin = uname:match("Darwin") ~= nil
+    local uname, is_darwin = perf.native_platform(context.io)
+    if not uname then return nil, is_darwin end
+    context.uname, context.is_darwin = uname, is_darwin
     context._platform_initialized = true
     initialize_source_target(context)
 
-    -- Retain the historical process-visible fields for build/publication APIs.
-    -- The subprocess which populates them now belongs to an explicit resolver
-    -- context instead of running while this module is loaded.
+    -- Native publication retains its historical process-visible host fields.
     if context.target ~= "browser" then select_platform_defaults(uname, context.is_darwin) end
     local ready, err = driver._finish_target_initialization(context)
     if not ready then return nil, err end
@@ -877,7 +869,6 @@ function driver.validate_target(context, value, origin)
 end
 
 function driver.configure_foreign_c(context)
-    context = context or driver.new_resolver_context()
     if type(context) ~= "table" or context.io == nil then
         error("foreign C configuration requires a resolver context", 2)
     end
@@ -1626,6 +1617,20 @@ end
 local compiler_family_caches = setmetatable({}, { __mode = "k" })
 local compiler_family_io
 
+function perf.initialize_native_platform(context)
+    if context then return driver.initialize_platform(context) end
+    if type(driver.UNAME) == "string" and type(driver.IS_DARWIN) == "boolean" then
+        return true
+    end
+    -- Native object/publication helpers need host flags, not semantic caches
+    -- or resolver-owned probe services. Sync operations close their own I/O.
+    compiler_family_io = compiler_family_io or compiler_io.new_sync()
+    local uname, is_darwin = perf.native_platform(compiler_family_io)
+    if not uname then return nil, is_darwin end
+    select_platform_defaults(uname, is_darwin)
+    return true
+end
+
 local function compiler_family(cc, strategy)
     local key_parts = {}
     for _, argument in ipairs(cc) do
@@ -1681,22 +1686,12 @@ local function compiler_argv(include_extra_compile_flags, context, user_c_helper
         return args
     end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
-    local supplied_context = context
-    if context or not driver.UNAME then
-        local owns_context = context == nil
-        context = context or driver.new_resolver_context()
-        local ok, err = driver.initialize_platform(context)
-        local closed, close_error = true
-        if owns_context then
-            closed, close_error = driver.close_resolver_context(context)
-        end
-        if not ok then return nil, err end
-        if not closed then return nil, close_error end
-    end
+    local initialized, platform_error = perf.initialize_native_platform(context)
+    if not initialized then return nil, platform_error end
     local cc, err = perf.tool_command(driver.CC, "CC")
     if not cc then return nil, err end
     if driver.BUILD_PROFILE == "production" and driver.CFLAGS == default_cflags then
-        local strategy = supplied_context and supplied_context.io
+        local strategy = context and context.io
         if not strategy then
             -- Object/link APIs have no resolver argument. Reuse their one lazy
             -- synchronous strategy so every object does not repeat this probe.
@@ -2215,24 +2210,22 @@ end
 
 local function resolver_context_from_options(options, level)
     level = level or 3
-    if options == nil then
-        return driver.new_resolver_context(), true
-    elseif type(options) ~= "table" then
+    if options ~= nil and type(options) ~= "table" then
         error("resolver options must be a table", level)
-    elseif options._resolver_context == true then
+    elseif options and options._resolver_context == true then
         driver.assert_target_context(options)
         compiler_io.validate(options.io, level)
-        return options, false
-    elseif options.context ~= nil then
+        return options
+    elseif options and options.context ~= nil then
         local context = options.context
         if type(context) ~= "table" or context.io == nil then
             error("options.context must be a resolver context", level)
         end
         driver.assert_target_context(context)
         compiler_io.validate(context.io, level)
-        return context, false
+        return context
     end
-    return driver.new_resolver_context(options), true
+    error("resolver options require an explicit context", level)
 end
 
 local function copy_c_header_dependencies(value, label)
@@ -2372,42 +2365,39 @@ end
 -- `c-input <path>: content|provenance|missing|unreadable|candidate|changed-during-read`.
 -- Implementation notes: doc/implementation/driver.md#driverrestat_c_header_dependenciesdependencies-options
 function driver.restat_c_header_dependencies(value, options)
-    local context, owns_context =
-        resolver_context_from_options(options, 2)
-    local result, err, changed, classified =
-        perf.restat_c_header_dependencies(value, {
+    local validation_options
+    if options == nil or (type(options) == "table" and
+       options._resolver_context ~= true and options.context == nil) then
+        options = options or {}
+        local valid, validation_error = cacheadapter.validate(options.cache_adapter)
+        if not valid then error(validation_error, 2) end
+        local strategy = options.io or compiler_io.new_sync()
+        compiler_io.validate(strategy, 2)
+        validation_options = {
+            io = strategy,
+            cache_adapter = options.cache_adapter or default_digest_adapter(),
+            header_observations = cdriver.header_observation_index(options.header_inputs),
+            header_validation = options.header_validation or {},
+        }
+    else
+        local context = resolver_context_from_options(options, 2)
+        validation_options = {
             io = context.io,
             cache_adapter = context.cache_adapter,
             header_observations = context.header_observations,
-            header_validation = options and options.header_validation
-                or context.header_validation or {},
-        })
-    if owns_context then
-        local closed, close_error = driver.close_resolver_context(context)
-        if result and not closed then return nil, close_error end
+            header_validation = options.header_validation or context.header_validation or {},
+        }
     end
-    return result, err, changed, classified
+    return perf.restat_c_header_dependencies(value, validation_options)
 end
 
 function driver.close_loader(loader)
-    local binding = loader_contexts[loader]
-    if not binding then return true end
-    if not binding.owned then
-        loader_contexts[loader] = nil
-        return true
-    end
-    local closed, close_error =
-        driver.close_resolver_context(binding.context)
-    -- A thrown cancellation leaves this assignment unreached so an
-    -- uncancelled owner can retry. Ordinary returned success or failure keeps
-    -- close_loader's historical terminal behavior.
-    loader_contexts[loader] = nil
-    return closed, close_error
+    if loader ~= nil then loader_contexts[loader] = nil end
+    return true
 end
 
--- Execute a loader-scoped operation and close an internally owned resolver on
--- both returns and exceptions. A caller which injected `options.context`
--- retains ownership of that context; close_loader is then an idempotent no-op.
+-- Execute a loader-scoped operation and release its bookkeeping on returns or
+-- exceptions. The caller owns and closes the explicitly supplied context.
 function driver.with_loader(loader, body, ...)
     if type(loader) ~= "function" then
         error("loader must be a function", 2)
@@ -2418,15 +2408,8 @@ function driver.with_loader(loader, body, ...)
     local results = table.pack(xpcall(function()
         return body(loader, table.unpack(arguments, 1, arguments.n))
     end, function(err) return err end))
-    local close_call = table.pack(pcall(driver.close_loader, loader))
-    if not results[1] then
-        error(results[2], 0)
-    elseif not close_call[1] then
-        error(close_call[2], 0)
-    elseif not close_call[2] then
-        error("failed to close loader resolver context: " ..
-            tostring(close_call[3]), 0)
-    end
+    driver.close_loader(loader)
+    if not results[1] then error(results[2], 0) end
     return table.unpack(results, 2, results.n)
 end
 
@@ -4528,7 +4511,6 @@ local function inspect_static_provider(context, filename, relative)
 end
 
 function driver.find_static_interface(paths, modname, context)
-    context = context or driver.new_resolver_context()
     driver.assert_target_context(context)
     local candidates =
         driver.module_compiled_candidates(modname, ".a")
@@ -4653,7 +4635,6 @@ local function find_embedded_interface(modname, context)
 end
 
 function driver.find_dependency_interface(paths, modname, context)
-    context = context or driver.new_resolver_context()
     driver.assert_target_context(context)
     local browser = context.target == "browser"
     local embedded = not browser and find_embedded_interface(modname, context) or nil
@@ -5000,8 +4981,7 @@ end
 function driver.defaultloader(static_deps, options)
     static_deps = static_deps or {}
     options = options or {}
-    local owns_context = options.context == nil
-    local context = options.context or driver.new_resolver_context(options)
+    local context = options.context
     driver.assert_target_context(context)
     local source_roots = options.source_roots or {}
     -- The object code-generation policy certification compares records
@@ -6596,7 +6576,6 @@ function driver.defaultloader(static_deps, options)
     context.loader = loader
     loader_contexts[loader] = {
         context = context,
-        owned = owns_context,
         restore = function(modname, source, record, published)
             return restore_source_object(
                 modname, source, record, loader, published)
@@ -7423,91 +7402,79 @@ function driver.resolve_external_modules(
         error("known_source_modules must be a module-keyed table", 2)
     end
 
-    local context, owns_context =
-        resolver_context_from_options(options, 2)
+    local context = resolver_context_from_options(options, 2)
     local results = {}
     local names = {}
-    local ok, failure = xpcall(function()
-        for name, present in pairs(known_source_modules) do
-            if not staticmetadata.valid_module_name(name) or present ~= true then
-                error("known_source_modules must contain valid module names " ..
-                    "mapped to true", 2)
-            end
-            context.source_modules[name] = true
+    for name, present in pairs(known_source_modules) do
+        if not staticmetadata.valid_module_name(name) or present ~= true then
+            error("known_source_modules must contain valid module names " ..
+                "mapped to true", 2)
         end
-        for name, source_required in pairs(requests) do
-            if not staticmetadata.valid_module_name(name) or
-               type(source_required) ~= "boolean" then
-                error("external resolution requests must contain valid " ..
-                    "module names mapped to booleans", 2)
-            end
-            names[#names + 1] = name
-            if source_required then context.source_modules[name] = true end
-        end
-        table.sort(names, util.bytewise_less)
-
-        for _, name in ipairs(names) do
-            local source_required = requests[name]
-            if not source_required then
-                local resolved, compiled_error =
-                    driver.find_dependency_interface(
-                        driver.TITAN_BIN_PATH, name, context)
-                if resolved then
-                    results[name] = {
-                        kind = resolved.kind,
-                        provider_file = resolved.static_archive or
-                            resolved.filename,
-                    }
-                elseif compiled_error then
-                    results[name] = {
-                        kind = "error",
-                        message = compiled_error,
-                    }
-                end
-            end
-
-            if not results[name] then
-                local source, source_error = resolve_source(
-                    driver.TITAN_SOURCE_PATH, name, context)
-                if source_error then
-                    results[name] = {
-                        kind = "error",
-                        message = source_error,
-                    }
-                elseif source and source.kind == "blocked" then
-                    results[name] = {
-                        kind = "error",
-                        message = blocked_source_error(name, source),
-                    }
-                elseif source then
-                    local files = {}
-                    for index, filename in ipairs(source.files) do
-                        files[index] = filename
-                    end
-                    results[name] = {
-                        kind = "source",
-                        main_file = source.main,
-                        source_files = files,
-                    }
-                elseif source_required then
-                    results[name] = {
-                        kind = "error",
-                        message = "source module '" .. name .. "' not found",
-                    }
-                else
-                    results[name] = { kind = "missing" }
-                end
-            end
-        end
-    end, function(err) return err end)
-    local closed, close_error = true
-    if owns_context then
-        closed, close_error = driver.close_resolver_context(context)
+        context.source_modules[name] = true
     end
-    if not ok then error(failure, 0) end
-    if not closed then
-        error("failed to close external resolver context: " ..
-            tostring(close_error), 0)
+    for name, source_required in pairs(requests) do
+        if not staticmetadata.valid_module_name(name) or
+           type(source_required) ~= "boolean" then
+            error("external resolution requests must contain valid " ..
+                "module names mapped to booleans", 2)
+        end
+        names[#names + 1] = name
+        if source_required then context.source_modules[name] = true end
+    end
+    table.sort(names, util.bytewise_less)
+
+    for _, name in ipairs(names) do
+        local source_required = requests[name]
+        if not source_required then
+            local resolved, compiled_error =
+                driver.find_dependency_interface(
+                    driver.TITAN_BIN_PATH, name, context)
+            if resolved then
+                results[name] = {
+                    kind = resolved.kind,
+                    provider_file = resolved.static_archive or
+                        resolved.filename,
+                }
+            elseif compiled_error then
+                results[name] = {
+                    kind = "error",
+                    message = compiled_error,
+                }
+            end
+        end
+
+        if not results[name] then
+            local source, source_error = resolve_source(
+                driver.TITAN_SOURCE_PATH, name, context)
+            if source_error then
+                results[name] = {
+                    kind = "error",
+                    message = source_error,
+                }
+            elseif source and source.kind == "blocked" then
+                results[name] = {
+                    kind = "error",
+                    message = blocked_source_error(name, source),
+                }
+            elseif source then
+                local files = {}
+                for index, filename in ipairs(source.files) do
+                    files[index] = filename
+                end
+                results[name] = {
+                    kind = "source",
+                    main_file = source.main,
+                    source_files = files,
+                }
+            elseif source_required then
+                results[name] = {
+                    kind = "error",
+                    message = "source module '" .. name .. "' not found",
+                }
+            else
+                results[name] = { kind = "missing" }
+            end
+        end
     end
     return results
 end
@@ -7586,7 +7553,6 @@ function perf.resolver_selection(context, previous)
 end
 
 function driver.finalize_resolver_context(context)
-    context = context or driver.new_resolver_context()
     driver.assert_target_context(context)
     reconcile_embedded_import_cache(context)
     if context.finalized_selection and
@@ -7962,8 +7928,7 @@ end
 function driver.tableloader(modtable, imported, deps, options)
     deps = deps or {}
     options = options or {}
-    local owns_context = options.context == nil
-    local context = options.context or driver.new_resolver_context(options)
+    local context = options.context
     driver.assert_target_context(context)
     local source_view = options.interface == "source"
 
@@ -8112,7 +8077,6 @@ function driver.tableloader(modtable, imported, deps, options)
     end
     loader_contexts[loader] = {
         context = context,
-        owned = owns_context,
     }
     return loader
 end
@@ -8121,23 +8085,11 @@ function driver.close_tableloader(loader)
     return driver.close_loader(loader)
 end
 
--- Native publication can run in a fresh Lua process after the compiler has
--- already produced its objects. Module loading performs no subprocess I/O, so
--- recover the platform through an explicit resolver strategy when no earlier
--- compiler operation initialized it.
+-- Native publication may run before any semantic resolver. Recover only the
+-- host platform; never activate or replace the process's semantic cache pair.
 function driver.shared_library_flags(context)
-    local owns_context = context == nil
-    if context ~= nil or type(driver.UNAME) ~= "string"
-       or type(driver.IS_DARWIN) ~= "boolean" then
-        context = context or driver.new_resolver_context()
-        local initialized, platform_error = driver.initialize_platform(context)
-        local closed, close_error = true
-        if owns_context then
-            closed, close_error = driver.close_resolver_context(context)
-        end
-        if not initialized then return nil, platform_error end
-        if not closed then return nil, close_error end
-    end
+    local initialized, platform_error = perf.initialize_native_platform(context)
+    if not initialized then return nil, platform_error end
 
     local shared = { "-shared" }
     if platform.windows then
@@ -10871,7 +10823,8 @@ function driver.derive_target_fingerprint(filename, expected_module, context)
 end
 
 function driver.validate_generated_objects(objects, target, entries, context)
-    context = context or driver.new_resolver_context()
+    if context then driver.assert_target_context(context) end
+    local file_context = context
     for _, input in ipairs(objects or {}) do
         local filename = type(input) == "table" and input.filename or input
         local expected_module =
@@ -10895,14 +10848,17 @@ function driver.validate_generated_objects(objects, target, entries, context)
         local part_objects = type(input) == "table" and input.objects or nil
         for part_idx = 2, #(part_objects or {}) do
             local part_file = part_objects[part_idx]
-            if context.target == "browser" and
+            file_context = file_context or {
+                io = compiler_io.new_sync(), cache_adapter = default_digest_adapter(),
+            }
+            if context and context.target == "browser" and
                not context.io:stat(part_file) then
                 return nil, string.format(
                     "browser provider module %q is missing split part %d",
                     expected_module, part_idx - 1)
             end
             local part_fingerprint, part_err =
-                incremental.part_fingerprint(context, part_file)
+                incremental.part_fingerprint(file_context, part_file)
             if not part_fingerprint then
                 return nil, "generated module part object '" ..
                     tostring(part_file) .. "': " .. tostring(part_err)

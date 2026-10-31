@@ -3,6 +3,9 @@ local types = require 'titan-compiler.types'
 local driver = require 'titan-compiler.driver'
 local util = require 'titan-compiler.util'
 local h = require 'spec.support.helpers'
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local run_checker = h.run_checker
 local run_checker_modules = h.run_checker_modules
@@ -2257,7 +2260,7 @@ describe("Titan type checker", function()
             else return real(f, attr) end
         end
         driver.imported = {}
-        local loader = driver.defaultloader()
+        local loader = driver.defaultloader({}, resolver_options())
         local ok, err = pcall(driver.with_loader, loader, function(loader)
             return loader("no_such_titan_module")
         end)
