@@ -40,8 +40,10 @@ local semantic_target_identity
 local semantic_cache_generation = 0
 
 function driver.assert_target_context(context)
-    if context._semantic_cache_generation ~= nil and
-       context._semantic_cache_generation ~= semantic_cache_generation then
+    if type(context) ~= "table" or context._semantic_cache_generation == nil then
+        error("compiler target context is not initialized", 0)
+    end
+    if context._semantic_cache_generation ~= semantic_cache_generation then
         error("compiler caches now belong to target " ..
             semantic_target_identity .. "; create a new context", 0)
     end
@@ -49,7 +51,9 @@ function driver.assert_target_context(context)
 end
 
 function driver.activate_target_caches(context, identity)
-    driver.assert_target_context(context)
+    if context._semantic_cache_generation ~= nil then
+        driver.assert_target_context(context)
+    end
     assert(type(identity) == "string" and identity ~= "",
         "semantic cache target identity is required")
     if semantic_target_identity ~= identity then
