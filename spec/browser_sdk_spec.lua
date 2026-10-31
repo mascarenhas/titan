@@ -117,6 +117,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         workspace = temporary.name(suffix or "-browser-sdk")
         os.remove(workspace)
         files.mkdir(workspace)
+        workspace = assert(strategy:realpath(workspace))
         return workspace
     end
 
@@ -592,7 +593,7 @@ end
         assert.is_false(bad_node_res.ok)
         contains(bad_node_res.output,
             string.format('browser provider validation requires Node 24: %q reports v26.1.0; expected Node 24; set TITAN_NODE to a Node 24 executable',
-                bad_node))
+                assert(strategy:realpath(bad_node))))
 
         -- 2. Run make browser-sdk into a genuinely empty differing ROCKS_TREE, with fake Node 26
         -- first on PATH and TITAN_NODE unset so EMSDK's bundled Node 24 must take precedence.
