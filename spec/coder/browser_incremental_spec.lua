@@ -108,6 +108,7 @@ describe("browser incremental compilation", function()
         local archive, member, direct = directory .. "/lib(helper).a",
             directory .. "/helper(part).o", directory .. "/direct(part).o"
         local helper, object = fixture.source .. "/helper.c", fixture.source .. "/direct.c"
+        local prefix_source, prefix_object = fixture.source .. "/prefix.c", directory .. "/lib"
         fixtures.write(fixture.source .. "/punctuation.h", "int archive_answer(void);\nint object_answer(void);\n")
         fixtures.write(fixture.source .. "/pair_main.titan", [[
 foreign import "punctuation.h"
@@ -117,19 +118,24 @@ end
 ]])
         fixtures.write(helper, "int archive_answer(void) { return 0; }\n")
         fixtures.write(object, "int object_answer(void) { return 0; }\n")
+        fixtures.write(prefix_source, "int unused_prefix_answer(void) { return 19; }\n")
         local function payload()
             local result = fixture:compile({ "-q", "--target", "browser", "-c", "--incremental",
-                "--c-source", helper, "--c-source", object, "--print-c-objects", "pair_main" })
+                "--c-source", helper, "--c-source", object, "--c-source", prefix_source,
+                "--print-c-objects", "pair_main" })
             assert.is_true(result.ok, result.output)
             local objects = {}
             for filename in result.output:gmatch("[^\r\n]+") do objects[#objects + 1] = filename end
-            assert.equal(2, #objects, result.output)
+            assert.equal(3, #objects, result.output)
             fixtures.copy(objects[1], member); fixtures.copy(objects[2], direct)
+            fixtures.copy(objects[3], prefix_object)
             result = fixture:run({ info.tools.ar[1], "rcsD", archive, member })
             assert.is_true(result.ok, result.output)
         end
         payload()
-        local arguments = { "--target", "browser", "--incremental", "-v", "pair_main", "-X", archive, direct }
+        -- A known direct object is also a lexical prefix of the archive path.
+        local arguments = { "--target", "browser", "--incremental", "-v", "pair_main",
+            "-X", archive, direct, prefix_object }
         local result = fixture:compile(arguments)
         assert.is_true(result.ok, result.output)
         local record = record_path(fixture.output)

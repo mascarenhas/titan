@@ -798,7 +798,8 @@ local function native_dependencies(context, policy)
                 -- The archive path is a literal recipe input, not the first
                 -- or last parenthesis: both it and the member may contain '('.
                 for _, candidate in ipairs(candidates) do
-                    if policy.trace_inputs[candidate] then
+                    if policy.trace_inputs[candidate] and
+                       context.io:read_file(candidate, 7) == "!<arch>\n" then
                         need(not filename, "ambiguous Wasm linker input trace: " .. line)
                         filename = candidate
                     end
