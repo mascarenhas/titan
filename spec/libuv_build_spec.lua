@@ -5975,8 +5975,13 @@ printf '%s\n' "${schedule[@]}"
                 '"$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"',
                 'TITAN_CHROME_VERSION: "156.0.8078.80"',
                 "547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4",
-                "chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-v1",
+                "chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-${{ env.TITAN_CHROME_SHA256 }}-v1",
                 "sha256sum -c --strict -",
+                "python3 scripts/browser_extract_zip.py",
+                'rm -f "$PREFIX/bin/titanc"',
+                'rm -rf "$PREFIX/share/lua/5.5/titan-compiler"',
+                "browser-loader.log",
+                "browser-guard.log",
                 "actions/download-artifact@v8",
                 "name: titan-linux-prepared.tar.gz",
                 'echo "$PWD/.lua/bin" >> "$GITHUB_PATH"',
@@ -6053,13 +6058,27 @@ printf '%s\n' "${schedule[@]}"
                 browser_gate)
             assert.truthy(browser_gate:find(
                 'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"', 1, true), browser_gate)
-            -- Emscripten must stay out of the ordinary native rock build.
+            -- Emscripten must stay out of the ordinary native rock build, and
+            -- the unregistered preparation copies must not survive as backups.
             local browser_rocks = named_step(browser_job,
                 "Install the native runtime and compiler with LuaRocks")
             assert.truthy(browser_rocks:find('test -z "${EMSDK:-}"', 1, true),
                 browser_rocks)
             assert.truthy(browser_rocks:find("! command -v emcc", 1, true),
                 browser_rocks)
+            assert.truthy(browser_rocks:find(
+                'rm -rf "$PREFIX/share/lua/5.5/c-parser"', 1, true),
+                browser_rocks)
+            -- A re-pinned ZIP digest must invalidate the restored browser.
+            local browser_chrome_cache = named_step(browser_job,
+                "Restore the pinned Chrome for Testing headless shell")
+            assert.truthy(browser_chrome_cache:find(
+                "${{ env.TITAN_CHROME_SHA256 }}", 1, true), browser_chrome_cache)
+            assert.falsy(browser_chrome_cache:find("restore-keys:", 1, true))
+            local browser_extract = named_step(browser_job,
+                "Install Chrome for Testing headless shell")
+            assert.truthy(browser_extract:find(
+                "scripts/browser_extract_zip.py", 1, true), browser_extract)
             local browser_loader = named_step(browser_job,
                 "Run the portable loader suite under Node and Chromium")
             assert.truthy(browser_loader:find("for engine in node chromium",

@@ -117,6 +117,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         workspace = temporary.name(suffix or "-browser-sdk")
         os.remove(workspace)
         files.mkdir(workspace)
+        workspace = paths.to_slash(assert(strategy:realpath(workspace)))
         return workspace
     end
 
@@ -146,31 +147,43 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local installed = driver.installed_paths(root, "browser")
         local native = driver.installed_paths(root, "linux")
         assert.not_equal(native.titan_bin, installed.titan_bin)
-        assert.equal(root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION, installed.titan_bin)
+        assert.equal(root .. "/lib/titan-browser/" .. version.TITAN_LIBRARY_VERSION,
+            paths.to_slash(installed.titan_bin))
 
         local assets = browserlink.sdk_assets(installed)
+        local slashed_assets = {}
+        for key, value in pairs(assets) do
+            slashed_assets[key] = paths.to_slash(paths.normalize(value))
+        end
+        local expected_bin = paths.to_slash(paths.normalize(installed.titan_bin))
         assert.same({
-            runtime = installed.titan_bin .. "/libtitan.a",
-            js_library = installed.titan_bin .. "/titan-browser-library.js",
-            loader = installed.titan_bin .. "/titan-browser.mjs",
-            runner = installed.titan_bin .. "/titan-browser-run",
-            runner_module = installed.titan_bin .. "/titan-browser-run.mjs",
-            node_worker = installed.titan_bin .. "/titan-browser-node-worker.mjs",
-            page = installed.titan_bin .. "/titan-browser-page.mjs",
-            lpeglabel = installed.titan_bin .. "/libtitan-lpeglabel.a",
-            provider = installed.titan_bin .. "/titan.a",
-            sdk_digests = installed.titan_bin .. "/sdk-digests",
-        }, assets)
+            runtime = expected_bin .. "/libtitan.a",
+            js_library = expected_bin .. "/titan-browser-library.js",
+            loader = expected_bin .. "/titan-browser.mjs",
+            runner = expected_bin .. "/titan-browser-run",
+            runner_module = expected_bin .. "/titan-browser-run.mjs",
+            node_worker = expected_bin .. "/titan-browser-node-worker.mjs",
+            page = expected_bin .. "/titan-browser-page.mjs",
+            lpeglabel = expected_bin .. "/libtitan-lpeglabel.a",
+            provider = expected_bin .. "/titan.a",
+            sdk_digests = expected_bin .. "/sdk-digests",
+        }, slashed_assets)
 
         local descriptor = assert(browser.import(fixtures.descriptor(root)))
+        local descriptor_assets = browserlink.sdk_assets(descriptor.paths)
         local present = {}
+        local function norm_key(filename)
+            return paths.to_slash(paths.normalize(filename))
+        end
         local fake_io = {
             stat = function(_, filename)
-                if present[filename] then return { kind = "file", size = #present[filename] } end
+                local content = present[norm_key(filename)]
+                if content then return { kind = "file", size = #content } end
                 return nil
             end,
             read_file = function(_, filename)
-                return present[filename], present[filename] == nil and "missing" or nil
+                local content = present[norm_key(filename)]
+                return content, content == nil and "missing" or nil
             end,
         }
         local required_order = {
@@ -182,7 +195,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             assert.is_nil(ok)
             assert.equal(
                 string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
-                    assets[key], root),
+                    descriptor_assets[key], root),
                 err)
             local ok_empty_tree, err_empty_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
                 prefix = root,
@@ -191,7 +204,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             assert.is_nil(ok_empty_tree)
             assert.equal(
                 string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s\'',
-                    assets[key], root),
+                    descriptor_assets[key], root),
                 err_empty_tree)
             local ok_tree, err_tree = browserlink.require_sdk({ io = fake_io }, descriptor, {
                 prefix = root,
@@ -200,14 +213,14 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             assert.is_nil(ok_tree)
             assert.equal(
                 string.format('browser SDK is incomplete: missing %q; run \'make browser-sdk PREFIX=%s ROCKS_TREE=%s\'',
-                    assets[key], root, root .. "-rocks"),
+                    descriptor_assets[key], root, root .. "-rocks"),
                 err_tree)
-            present[assets[key]] = "ok"
+            present[norm_key(descriptor_assets[key])] = "ok"
         end
 
         -- lpeglabel, provider, and sdk_digests are not bootstrap readiness prerequisites.
         local ready, ready_err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
-        assert.same(assets, ready, ready_err)
+        assert.same(descriptor_assets, ready, ready_err)
     end)
 
     it("writes and reloads browser sdk-digests with schema 1 and invalidates modified entries", function()
@@ -215,18 +228,18 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local browser_paths = driver.installed_paths(root, "browser")
         local assets = browserlink.sdk_assets(browser_paths)
         files.mkdir(browser_paths.lua_source)
-        files.mkdir(browser_paths.include .. "/titan")
+        files.mkdir(paths.join(browser_paths.include, "titan"))
         files.mkdir(browser_paths.titan_bin)
 
         local inputs = {
             browser_paths.liblua,
             browser_paths.lua_record,
-            browser_paths.lua_source .. "/lua.h",
-            browser_paths.lua_source .. "/luaconf.h",
-            browser_paths.include .. "/minicoro.h",
-            browser_paths.include .. "/titan.h",
-            browser_paths.include .. "/transfer.h",
-            browser_paths.include .. "/titan/ffi.h",
+            paths.join(browser_paths.lua_source, "lua.h"),
+            paths.join(browser_paths.lua_source, "luaconf.h"),
+            paths.join(browser_paths.include, "minicoro.h"),
+            paths.join(browser_paths.include, "titan.h"),
+            paths.join(browser_paths.include, "transfer.h"),
+            paths.join(browser_paths.include, "titan/ffi.h"),
             assets.runtime,
             assets.js_library,
             assets.loader,
@@ -592,7 +605,7 @@ end
         assert.is_false(bad_node_res.ok)
         contains(bad_node_res.output,
             string.format('browser provider validation requires Node 24: %q reports v26.1.0; expected Node 24; set TITAN_NODE to a Node 24 executable',
-                bad_node))
+                assert(strategy:realpath(bad_node))))
 
         -- 2. Run make browser-sdk into a genuinely empty differing ROCKS_TREE, with fake Node 26
         -- first on PATH and TITAN_NODE unset so EMSDK's bundled Node 24 must take precedence.
