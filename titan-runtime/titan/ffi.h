@@ -1,12 +1,21 @@
 #ifndef TITAN_FFI_H
 #define TITAN_FFI_H
 
+#if defined(__wasm__)
+#include <lauxlib.h>
+#include <ldo.h>
+#include <lobject.h>
+#include <lstate.h>
+#include <lgc.h>
+#include <lua.h>
+#else
 #include "lauxlib.h"
 #include "ldo.h"
 #include "lobject.h"
 #include "lstate.h"
 #include "lgc.h"
 #include "lua.h"
+#endif
 
 /* Runtime helpers are linked into each Titan provider. A shared Lua DLL may
 ** export Lua internals, but does not own these helpers. Keep their existing

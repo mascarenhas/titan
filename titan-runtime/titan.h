@@ -10,12 +10,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__wasm__)
+#include <llimits.h>
+#include <lobject.h>
+#include <lstring.h>
+#include <ltable.h>
+#include <luaconf.h>
+#include <lvm.h>
+#else
 #include "llimits.h"
 #include "lobject.h"
 #include "lstring.h"
 #include "ltable.h"
 #include "luaconf.h"
 #include "lvm.h"
+#endif
 
 /*
 ** Small trusted Lua-internal value bridges live with their FFI declarations.

@@ -521,7 +521,7 @@ function driver.initialize_layout(context)
         error("compiler layout initialization requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
-    if driver.assert_target_context then driver.assert_target_context(context) end
+    driver.assert_target_context(context)
     if context._layout_initialized then return true end
 
     local installation_root
@@ -707,16 +707,14 @@ function driver._finish_target_initialization(context)
             context.target_profile = profile
         end
     end
-    if driver.activate_target_caches then
-        driver.activate_target_caches(context,
-            context.target_descriptor and context.target_descriptor.identity or context.target)
-    end
+    driver.activate_target_caches(context,
+        context.target_descriptor and context.target_descriptor.identity or context.target)
     return true
 end
 
 function driver.context_target_descriptor(context)
     if context == nil then return nil end
-    if driver.assert_target_context then driver.assert_target_context(context) end
+    driver.assert_target_context(context)
     if context.target ~= "browser" then return nil end
     local ok, err = driver.initialize_platform(context)
     if not ok then return nil, err end
@@ -743,7 +741,7 @@ function driver.initialize_platform(context)
         error("platform initialization requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
-    if driver.assert_target_context then driver.assert_target_context(context) end
+    driver.assert_target_context(context)
     if context._platform_initialized then
         initialize_source_target(context)
         select_platform_defaults(context.uname, context.is_darwin)
@@ -830,7 +828,7 @@ function driver.configure_foreign_c(context)
         error("foreign C configuration requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
-    if driver.assert_target_context then driver.assert_target_context(context) end
+    driver.assert_target_context(context)
     local io_strategy = context.io
     local platform_ok, platform_result = driver.initialize_platform(context)
     local platform_err = not platform_ok and platform_result or nil
@@ -2032,7 +2030,7 @@ end
 -- without touching a C compiler or SDK. Each checker clones this profile;
 -- every native probe still crosses get_probe_service's live-target boundary.
 function driver.get_target_profile(context)
-    if driver.assert_target_context then driver.assert_target_context(context) end
+    driver.assert_target_context(context)
     if context.target == "browser" then
         local descriptor, err = driver.context_target_descriptor(context)
         if not descriptor then return nil, err end

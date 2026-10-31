@@ -17,7 +17,7 @@ function M.fingerprint()
     return { format = "wasm", word_size = 32, linking_version = 2, features = M.features }
 end
 
-function M.profile()
+function M.profile_inputs()
     local macros = {
         __CHAR_BIT__ = "8", __SIZEOF_BOOL__ = "1", __SIZEOF_SHORT__ = "2",
         __SIZEOF_INT__ = "4", __SIZEOF_LONG__ = "4", __SIZEOF_LONG_LONG__ = "8",
@@ -28,12 +28,16 @@ function M.profile()
         __INT_MAX__ = "2147483647", __LONG_MAX__ = "2147483647L",
         __LONG_LONG_MAX__ = "9223372036854775807LL",
     }
-    return assert(csemantics.build_profile({ macros = macros,
+    return { macros = macros,
         lua_integer = "long long", lua_number = "double", size_t = "unsigned long",
         ptrdiff_t = "long", signed_minima = {
             ["signed char"] = "-128", short = "-32768", int = "-2147483648",
             long = "-2147483648", ["long long"] = "-9223372036854775808",
-        } }))
+        } }
+end
+
+function M.profile()
+    return assert(csemantics.build_profile(M.profile_inputs()))
 end
 
 function M.profile_data()
@@ -89,7 +93,7 @@ function M.descriptor(root, overrides)
         tools = { cc = { tools .. "emcc" }, ar = { tools .. "emar" },
             ranlib = { tools .. "emranlib" }, version = "6.0.13", source = "EMSDK",
             location = tools:sub(1, -2), version_output = "emcc (Emscripten) 6.0.13\n" },
-        compile_flags = flags, include_dirs = { paths.include, paths.lua_source },
+        compile_flags = flags, include_dirs = { paths.lua_source, paths.include },
         target_defines = { "-DTITAN_TARGET_BROWSER=1" }, paths = paths,
         lua = { path = paths.lua_record, record = record, record_sha256 = sha256.hex(record_text) },
         profile_data = profile, profile_identity = profile.identity, fingerprint = M.fingerprint(),

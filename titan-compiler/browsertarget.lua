@@ -388,7 +388,7 @@ function M.build(context, inputs)
         local target_defines = { "-DTITAN_TARGET_BROWSER=1" }
         for _, define in ipairs(target_defines) do flags[#flags + 1] = define end
         for _, flag in ipairs(inputs.compile_flags or {}) do flags[#flags + 1] = flag end
-        local includes = { inputs.runtime_include or paths.include, paths.lua_source }
+        local includes = { paths.lua_source, inputs.runtime_include or paths.include }
         for _, directory in ipairs(context.extra_ffi_include_dirs or {}) do includes[#includes + 1] = directory end
         local provisional = { io = context.io, compiler_argv = tool.cc, compile_flags = flags,
             language_mode = "c99", language_flag = false, cppflags = {}, cflags = {}, include_dirs = includes }
