@@ -81,8 +81,7 @@ function M.require()
     if os.getenv("TITAN_REQUIRE_BROWSER_TOOLCHAIN") == "1" then
         error(reason, 2)
     end
-    pending(reason)
-    return nil
+    return nil, reason
 end
 
 return M
