@@ -5669,11 +5669,11 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(workflow:find(removed, 1, true), removed)
             end
             assert.falsy(workflow:find("awk", 1, true), workflow)
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 "codecov/codecov-action@v7"), workflow)
-            assert.equal(2, count_literal(workflow,
+            assert.equal(3, count_literal(workflow,
                 "id-token: write"), workflow)
-            assert.equal(2, count_literal(workflow,
+            assert.equal(3, count_literal(workflow,
                 'luacov "titan%-compiler/"'), workflow)
             assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
 
@@ -6064,6 +6064,32 @@ printf '%s\n' "${schedule[@]}"
                 "Run the portable loader suite under Node and Chromium")
             assert.truthy(browser_loader:find("for engine in node chromium",
                 1, true), browser_loader)
+            -- The browser job is the only lane that exercises real linking and
+            -- the executing protocol, so it publishes its own compiler coverage.
+            assert.truthy(browser_gate:find("-c -o gtest", 1, true), browser_gate)
+            local browser_coverage = named_step(browser_job,
+                "Upload browser coverage to Codecov")
+            assert.truthy(browser_coverage:find("name: browser", 1, true),
+                browser_coverage)
+            assert.truthy(browser_coverage:find("flags: compiler", 1, true),
+                browser_coverage)
+            assert.truthy(browser_coverage:find("use_oidc: true", 1, true),
+                browser_coverage)
+            local browser_coverage_index = assert(browser_job:find(
+                "- name: Upload browser coverage to Codecov",
+                browser_gate_index, true))
+            assert.is_true(browser_coverage_index <
+                assert(browser_job:find(
+                    "- name: Run the portable loader suite under Node and Chromium",
+                    browser_coverage_index, true)))
+            local browser_guard = named_step(browser_job,
+                "Run the optimized guard suite under Node and Chromium")
+            assert.truthy(browser_guard:find("optimized-guard.mjs", 1, true),
+                browser_guard)
+            local browser_guard_build = named_step(browser_job,
+                "Build the portable loader images for both assertion profiles")
+            assert.truthy(browser_guard_build:find("--ldflag=-Os", 1, true),
+                browser_guard_build)
 
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",
