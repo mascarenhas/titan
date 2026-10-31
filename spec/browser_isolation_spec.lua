@@ -10,6 +10,7 @@ local temporary = require "spec.support.temporary"
 local platform = require "titan-compiler.platform"
 local build = require "titan-compiler.build"
 local lfs = require "lfs"
+local path = require "titan-compiler.path"
 
 local function fresh_driver()
     local saved = package.loaded["titan-compiler.driver"]
@@ -320,9 +321,10 @@ describe("browser semantic cache isolation", function()
 end)
 
 describe("browser output-root ownership", function()
-    local subject, root, strategy, locks, saved_registry
+    local subject, root, marker, strategy, locks, saved_registry
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
+        marker = path.join(root, ".titan-target")
         saved_registry = types.registry
         subject, strategy = fresh_driver(), compiler_io.new_sync()
     end)
@@ -345,12 +347,12 @@ describe("browser output-root ownership", function()
     it("marks a fresh browser root after taking its lock, and accepts warm roots without rewriting the marker", function()
         locks = assert(build.lock_outputs(strategy, { root }))
         assert(claim("browser"))
-        assert.equal("browser\n", files.read(root .. "/.titan-target"))
+        assert.equal("browser\n", files.read(marker))
         files.write(root .. "/module.o", "object")
         local past = os.time() - 120
-        assert(lfs.touch(root .. "/.titan-target", past, past))
+        assert(lfs.touch(marker, past, past))
         assert(claim("browser"))
-        assert.equal(past, lfs.attributes(root .. "/.titan-target", "modification"))
+        assert.equal(past, lfs.attributes(marker, "modification"))
         local ok, message = claim("linux")
         assert.is_nil(ok); assert.equal(conflict("browser", "linux"), message)
         ok, message = claim("native", nil, false)
@@ -359,14 +361,14 @@ describe("browser output-root ownership", function()
     it("refuses unmarked nonempty browser roots and does not create a marker for hosts", function()
         files.write(root .. "/module.o", "native object")
         assert(claim("linux"))
-        assert.is_nil(lfs.attributes(root .. "/.titan-target"))
+        assert.is_nil(lfs.attributes(marker))
         local ok, message = claim("browser")
         assert.is_nil(ok)
         assert.equal(string.format("browser output root %q is not empty and has no .titan-target marker; use a separate --output directory", root), message)
         assert.equal("native object", files.read(root .. "/module.o"))
     end)
     it("recognizes host markers, rejects mismatches in both directions, and allows separate roots", function()
-        files.write(root .. "/.titan-target", "linux\n")
+        files.write(marker, "linux\n")
         assert(claim("linux"))
         local ok, message = claim("browser")
         assert.is_nil(ok); assert.equal(conflict("linux", "browser"), message)
@@ -374,41 +376,44 @@ describe("browser output-root ownership", function()
         files.mkdir(browser_root)
         assert(claim("browser", browser_root))
         assert(claim("linux"))
-        assert.equal("linux\n", files.read(root .. "/.titan-target"))
+        assert.equal("linux\n", files.read(marker))
     end)
     it("rejects malformed, unreadable, and non-file markers without relabeling", function()
         for _, content in ipairs({ "", "browser", "Browser\n", "browser\nlinux\n", "unknown\n", "browser\r\n", string.rep("x", 17) }) do
-            files.write(root .. "/.titan-target", content)
+            files.write(marker, content)
             local ok, message = claim("browser")
             assert.is_nil(ok)
-            assert.equal(string.format("cannot read target marker %q: invalid target marker", root .. "/.titan-target"), message)
-            assert.equal(content, files.read(root .. "/.titan-target"))
+            assert.equal(string.format("cannot read target marker %q: invalid target marker", marker), message)
+            assert.equal(content, files.read(marker))
         end
-        files.write(root .. "/.titan-target", "browser\n")
+        files.write(marker, "browser\n")
         local original = strategy.read_file
         function strategy:read_file(filename)
-            if filename == root .. "/.titan-target" then return nil, "read denied" end
+            if filename == marker then return nil, "read denied" end
             return original(self, filename)
         end
         local ok, message = claim("browser")
-        assert.is_nil(ok); assert.equal(string.format("cannot read target marker %q: read denied", root .. "/.titan-target"), message)
+        assert.is_nil(ok); assert.equal(string.format("cannot read target marker %q: read denied", marker), message)
         strategy.read_file = original
-        assert(os.remove(root .. "/.titan-target")); files.mkdir(root .. "/.titan-target")
+        assert(os.remove(marker)); files.mkdir(marker)
         ok, message = claim("browser")
         assert.is_nil(ok); assert.matches("invalid target marker", message, 1, true)
     end)
     it("reports marker write and inspection failures", function()
         function strategy:write_file() return nil, "write denied" end
         local ok, message = claim("browser")
-        assert.is_nil(ok); assert.equal(string.format("cannot write target marker %q: write denied", root .. "/.titan-target"), message)
+        assert.is_nil(ok); assert.equal(string.format("cannot write target marker %q: write denied", marker), message)
         function strategy:lstat() return nil, "stat denied" end
         ok, message = claim("browser")
-        assert.is_nil(ok); assert.equal(string.format("cannot read target marker %q: stat denied", root .. "/.titan-target"), message)
+        assert.is_nil(ok); assert.equal(string.format("cannot read target marker %q: stat denied", marker), message)
     end)
 end)
 
 describe("browser object and link certificate identity", function()
     local root
+    local function tool_path(name)
+        return path.join(root, name .. (platform.windows and ".exe" or ""))
+    end
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
     end)
@@ -420,7 +425,7 @@ describe("browser object and link certificate identity", function()
         return { io = strategy }
     end
     it("hashes browser target identity in toolchain details while keeping the native table unchanged", function()
-        local tool = root .. "/compiler"
+        local tool = tool_path("compiler")
         files.write(tool, "controlled compiler bytes")
         local ctx = tool_context()
         local request = { compiler_argv = { tool }, preprocessor_identity = "macros",
@@ -442,12 +447,13 @@ describe("browser object and link certificate identity", function()
     end)
     it("uses archive tools only and refuses cross-target link records without changing the output-only key", function()
         files.write(root .. "/provider.a", "published archive")
-        files.write(root .. "/emar", "archive tool")
-        files.write(root .. "/emranlib", "archive index tool")
+        local ar, ranlib = tool_path("emar"), tool_path("emranlib")
+        files.write(ar, "archive tool")
+        files.write(ranlib, "archive index tool")
         local ctx = tool_context()
         ctx.target_descriptor = descriptor(root)
         local tools = assert(certificate.output_tools(ctx, { tools = {
-            ar = { root .. "/emar" }, ranlib = { root .. "/emranlib" } } }))
+            ar = { ar }, ranlib = { ranlib } } }))
         assert.is_table(tools.ar); assert.is_table(tools.ranlib); assert.is_nil(tools.linker)
         assert.equal("archive", certificate.linker_backend(ctx))
         local opaque = certificate.native_library_policy(ctx, { argv = { "@opaque-link-input" } })
