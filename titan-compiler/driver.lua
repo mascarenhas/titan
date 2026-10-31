@@ -12626,7 +12626,7 @@ end
 
 function driver.validate_program_output_paths(
         source_outputs, executable, entrypoint_c, native_inputs, extra_outputs,
-        planned_outputs)
+        planned_outputs, context)
     if type(executable) ~= "string" or executable == "" then
         return nil, "standalone executable path must be a nonempty string"
     end
@@ -12698,7 +12698,7 @@ function driver.validate_program_output_paths(
         ok, err = add_output(path, "standalone native auxiliary output", "file")
         if not ok then return nil, err end
     end
-    if driver.IS_DARWIN then
+    if driver.IS_DARWIN and not (context and context.target == "browser") then
         ok, err = add_output(
             executable .. ".dSYM", "standalone dSYM", "directory")
         if not ok then return nil, err end
@@ -13762,6 +13762,15 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         valid, err = options.before_commit()
         if not valid then return nil, err end
     end
+    local mjs_backup, mjs_backed, mjs_published
+    if options.after_publish then
+        local mode = lfs.symlinkattributes(executable, "mode")
+        if mode then
+            if mode ~= "file" then return nil, "browser module output '" .. executable .. "' is not a regular file" end
+            mjs_backup, err = driver.sibling_temporary_path(executable .. ".old")
+            if not mjs_backup then return nil, err end
+        end
+    end
     local backup
     local previous = lfs.symlinkattributes(wasm, "mode")
     if previous then
@@ -13772,11 +13781,19 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         if not valid then return nil, err end
     end
     local function rollback(reason)
+        if mjs_published then remove_path(executable) end
+        if mjs_backed then
+            local restored, restore_error = rename_output(mjs_backup, executable)
+            if not restored then
+                reason = tostring(reason) .. "\ncannot restore browser module: " .. tostring(restore_error) ..
+                    "; predecessor retained at " .. mjs_backup
+            end
+        end
         remove_path(wasm)
         if backup then
             local restored, restore_error = rename_output(backup, wasm)
             if not restored then
-                return nil, tostring(reason) .. "\ncannot restore Wasm: " .. tostring(restore_error) ..
+                reason = tostring(reason) .. "\ncannot restore Wasm: " .. tostring(restore_error) ..
                     "; predecessor retained at " .. backup
             end
         end
@@ -13784,8 +13801,27 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     end
     valid, err = rename_output(staged_wasm, wasm)
     if not valid then return rollback(err) end
+    if mjs_backup then
+        valid, err = rename_output(executable, mjs_backup)
+        if not valid then return rollback(err) end
+        mjs_backed = true
+    end
     valid, err = rename_output(staged, executable)
     if not valid then return rollback(err) end
+    mjs_published = true
+    if options.after_publish then
+        local called, committed, commit_error = pcall(options.after_publish)
+        if not called then
+            local _, rollback_error = rollback(committed)
+            if type(committed) ~= "string" then error(committed, 0) end
+            return nil, rollback_error
+        end
+        if not committed then return rollback(commit_error) end
+    end
+    if mjs_backed then
+        valid, err = remove_path(mjs_backup)
+        if not valid then return nil, err end
+    end
     if backup then
         valid, err = remove_path(backup)
         if not valid then return nil, err end
