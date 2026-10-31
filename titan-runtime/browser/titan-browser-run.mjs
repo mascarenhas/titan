@@ -126,11 +126,24 @@ class Monitor {
     }
     control(message) {
         if (!message || typeof message !== "object" || Array.isArray(message)) return this.fail("harness", "malformed control message");
-        if (message.type === "failure") {
+        if (message.type === "abort") {
+            if (typeof message.reason !== "string") return this.fail("harness", "malformed abort observation");
+            this.abortReason ??= message.reason;
+            if (this.completion) this.fail("abort", this.abortReason);
+        } else if (message.type === "failure") {
             if (!["abort", "trap", "unhandled", "sink", "harness"].includes(message.category) || typeof message.reason !== "string") {
                 return this.fail("harness", "malformed failure control");
             }
-            this.fail(message.category, message.reason, message.knownTrap === true);
+            const originalTrap = message.category === "trap" && message.knownTrap === true;
+            if (this.abortReason !== undefined && !this.completion && !originalTrap &&
+                ["abort", "trap", "harness"].includes(message.category)) {
+                // An onAbort callback can be followed by a raw RuntimeError before
+                // the loader's rejection/dispose continuation gets its microtask.
+                // Observation is not cleanup completion: wait for execute's terminal
+                // failure, retaining the ordinary deadline if disposal is broken.
+                if (message.terminal !== true) return;
+                this.fail("abort", this.abortReason);
+            } else this.fail(message.category, message.reason, originalTrap);
         } else if (message.type === "complete") {
             if (this.completion) return this.fail("harness", "duplicate completion");
             if (!["returned", "failed", "host-test"].includes(message.kind) || !Number.isInteger(message.status) ||
@@ -138,6 +151,7 @@ class Monitor {
                 (message.kind === "host-test" && ![0, 1].includes(message.status))) {
                 return this.fail("harness", "malformed completion control");
             }
+            if (this.abortReason !== undefined) return this.fail("abort", this.abortReason);
             this.completion = message;
             this.deadline();
             this.grace = later(() => this.finish(), this.options.grace);
@@ -177,6 +191,33 @@ function killGroup(child, signal) {
     try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
 }
 
+function groupAlive(child) {
+    if (!child?.pid) return false;
+    try { process.kill(-child.pid, 0); return true; }
+    catch (error) { if (error.code === "ESRCH") return false; throw error; }
+}
+
+async function waitGroup(child, milliseconds) {
+    const deadline = performance.now() + milliseconds;
+    while (groupAlive(child)) {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) return false;
+        await delay(Math.min(25, remaining));
+    }
+    return true;
+}
+
+async function retireGroup(child) {
+    // Leader exit is not group retirement: a descendant can retain this PGID
+    // without either the leader PID or a browser profile in its argv.
+    killGroup(child, "SIGTERM");
+    if (!await waitGroup(child, 500)) {
+        killGroup(child, "SIGKILL");
+        if (!await waitGroup(child, 1500)) throw new Error(`owned process group ${child.pid} survived SIGKILL`);
+    }
+    if (!await waitExit(child, 1000)) throw new Error(`engine leader ${child.pid} did not exit`);
+}
+
 class NodeEngine {
     constructor(monitor) { this.monitor = monitor; }
     async start(config) {
@@ -201,12 +242,12 @@ class NodeEngine {
         const child = this.child;
         if (!child) return;
         if (!exited(child) && child.connected) child.send({ type: "shutdown" }, () => {});
-        if (!await waitExit(child, 500)) { killGroup(child, "SIGTERM"); }
-        if (!await waitExit(child, 500)) { killGroup(child, "SIGKILL"); }
-        await waitExit(child, 1000);
-        killGroup(child, "SIGTERM");
-        // close, unlike exit, follows EOF/drain of both output pipes.
-        await bounded(this.drained, 1000);
+        await waitExit(child, 500);
+        try { await retireGroup(child); }
+        finally {
+            // close, unlike exit, follows EOF/drain of both output pipes.
+            await bounded(this.drained, 1000);
+        }
     }
 }
 
@@ -376,12 +417,9 @@ class ChromiumEngine {
         try {
             if (this.cdp?.send) await bounded(this.cdp.request("Browser.close").catch(() => {}), 500);
             if (this.child) {
-                if (!await waitExit(this.child, 1500)) killGroup(this.child, "SIGTERM");
-                if (!await waitExit(this.child, 500)) killGroup(this.child, "SIGKILL");
-                await waitExit(this.child, 1000);
-                // Retire same-group renderer descendants even if the main PID exited.
-                killGroup(this.child, "SIGTERM");
-                await this.removeProfileProcesses();
+                await waitExit(this.child, 1500);
+                try { await retireGroup(this.child); }
+                finally { await this.removeProfileProcesses(); }
             }
         } finally {
             this.cdp?.close();
@@ -454,7 +492,12 @@ async function main() {
         await new Promise(resolve => setImmediate(resolve));
     } finally {
         monitor.stop();
-        try { await engine.close(); } catch (error) { monitor.failure ??= { category: "harness", reason: `cleanup failed: ${error.message}` }; }
+        try { await engine.close(); }
+        catch (error) {
+            const reason = `cleanup failed: ${error.message}`;
+            if (monitor.failure) diagnostic(`harness failure: ${reason}`);
+            else monitor.failure = { category: "harness", reason };
+        }
         process.off("SIGINT", sigint); process.off("SIGTERM", sigterm);
     }
     return monitor.result();

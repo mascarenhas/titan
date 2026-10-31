@@ -819,14 +819,33 @@ describe("minicoro Emscripten fiber backend", function()
     it("rejects a real coroutine creation without Asyncify with its diagnostic", function()
         local info, why = browser_toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = browser_support.workspace()
+        -- A capability refusal is a normal nonzero C-program result, not an
+        -- assertion abort: broken Wasm cannot promise the final libc drain.
+        -- The diagnostic below must still originate in real mco_create.
+        local control = [[
+#include <assert.h>
+#include <stdio.h>
+#define MINICORO_IMPL
+#include "titan-runtime/minicoro.h"
+static void unused_entry(mco_coro *co) { (void)co; }
+int main(void) {
+  mco_coro *co = NULL;
+  mco_desc desc = mco_desc_init(unused_entry, 262144);
+  mco_result result = mco_create(&co, &desc);
+  assert(result == MCO_MAKE_CONTEXT_ERROR);
+  assert(co == NULL);
+  puts("minicoro no-Asyncify control: 1 creation case refused");
+  return 1;
+}
+]]
         local ok, log = browser_support.c_image(info, workspace, "no-asyncify",
-            minicoro_suite({}), { purpose = "minicoro", assertions = 2, asyncify = false })
+            control, { purpose = "minicoro", assertions = 2, asyncify = false })
         assert.truthy(ok, log)
         for _, engine in ipairs({ "node", "chromium" }) do
             local status
             ok, log, status = browser_support.image(info, workspace, engine, "no-asyncify")
             assert.is_false(ok)
-            assert.equal(70, status, log)
+            assert.equal(1, status, log)
             assert.truthy(log:find("ASYNCIFY is not enabled", 1, true), log)
         end
     end)

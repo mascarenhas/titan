@@ -9,6 +9,7 @@ local function output(bytes: string)
 end
 
 function main(args: {string}): integer
+  if ffi.browser_loader_buffer_stdio() ~= 0 then raise "could not buffer loader stdio" end
   local child = coroutine.create(function(_input: value): value
     coroutine.yield("parked", "loader")
     return 23

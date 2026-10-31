@@ -1,0 +1,12 @@
+function main(args: {string}): integer
+    if #args == 0 then
+        return 0
+    elseif #args == 1 and args[1] == "minus" then
+        return 4294967295
+    elseif #args == 1 and args[1] == "error" then
+        raise "uncaught\0\255\195("
+    elseif #args == 3 and args[1] == "" and args[2] == "A\0\255\195(" and #args[3] == 2097152 then
+        return 4294967297
+    end
+    return 2
+end

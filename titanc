@@ -375,6 +375,9 @@ local target_value, target_origin = args.target, "--target"
 if target_value == nil then
     target_value, target_origin = platform.getenv("TITAN_TARGET"), "TITAN_TARGET"
 end
+if target_value == "browser" and args.coverage then
+    exit("--coverage is not supported for --target browser")
+end
 local target, target_error =
     driver.validate_target(resolver_context, target_value, target_origin)
 if not target then exit(target_error) end

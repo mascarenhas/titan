@@ -124,6 +124,20 @@ end
         end
     end)
 
+    it("names a real feature-changing cflag instead of blaming the Lua record", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        prepare()
+        local ok, output = cli(info, "-c", "--cflag=-O1", "--cflag=-msimd128", "object_fixture")
+        assert.is_false(ok)
+        assert.truthy(output:find("browser target compiler probe", 1, true), output)
+        assert.truthy(output:find('"-msimd128"', 1, true), output)
+        assert.truthy(output:find("remove feature-changing flags", 1, true), output)
+        assert.is_nil(output:find("browser Lua record", 1, true))
+        assert.is_nil(output:find("make install-browser", 1, true))
+        assert.is_nil(lfs.attributes(workspace .. "/out/object_fixture.c"))
+        assert.is_nil(lfs.attributes(workspace .. "/out/object_fixture.o"))
+    end)
+
     it("transports a verified descriptor to build workers and preserves every Lua header origin", function()
         local info, why = toolchain.require(); if not info then pending(why) return end
         prepare()

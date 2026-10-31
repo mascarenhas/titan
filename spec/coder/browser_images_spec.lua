@@ -8,6 +8,8 @@ local compiler_io = require "titan-compiler.io"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
+local process = require "titan-compiler.process"
 local repository = assert(lfs.currentdir())
 local workspace
 
@@ -31,9 +33,11 @@ local function cli(info, ...)
     return run(argv)
 end
 
-local function c_image(info, name, worker)
+local function c_image(info, name, worker, flags)
     local output = workspace .. "/out"
     files.mkdir(output)
+    local quoted_flags = {}
+    for _, flag in ipairs(flags or {}) do quoted_flags[#quoted_flags + 1] = string.format("%q", flag) end
     local script = string.format([[
 local driver = require "titan-compiler.driver"
 driver.TITAN_SOURCE_PATH = %q
@@ -41,16 +45,59 @@ local output, name, worker = %q, %q, %q
 local context = driver.new_resolver_context({ target = "browser", output_root = output })
 local ok, why, code = driver.compile_browser_image(driver.browser_c_image_contents(worker),
     output .. "/" .. name .. ".c", output .. "/" .. name .. ".mjs", {}, {}, {}, false,
-    { context = context, profile = { purpose = "protocol", assertions = 2 } })
+    { context = context, profile = { purpose = "protocol", assertions = 2 }, final_link_flags = { %s } })
 assert(ok, tostring(why) .. (code and (", exit " .. code) or ""))
 assert(driver.close_resolver_context(context))
-]], workspace .. "/src", output, name, worker)
+]], workspace .. "/src", output, name, worker, table.concat(quoted_flags, ","))
     local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
             repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script })
     assert.is_true(result.ok, result.output or result.diagnostic)
     return output .. "/" .. name .. ".mjs"
+end
+
+local function native_trace(null_backend)
+    local prefix = require("spec.support.installed_prefix").active()
+    local suffix = platform.windows and ".exe" or ""
+    local script = string.format([[
+local driver = require "titan-compiler.driver"
+local context = driver.new_resolver_context({ target = %q })
+assert(driver.configure_foreign_c(context))
+local runtime, fixture, output, prefix, null_backend = %q, %q, %q, %q, %s
+local function append(argv, extra)
+    for _, argument in ipairs(extra) do argv[#argv + 1] = argument end
+    return argv
+end
+local function command(argv)
+    local result = context.io:run(argv, { stderr_to_stdout = true })
+    assert(result.ok, result.output or result.diagnostic)
+    return result
+end
+local compile = assert(driver.generated_compile_prefix(context))
+append(compile, { "-DTITAN_NO_LIBBACKTRACE", "-c", runtime, "-o", output .. ".runtime.o" })
+if null_backend then compile[#compile + 1] = "-DTITAN_TARGET_BROWSER" end
+command(compile)
+compile = assert(driver.authored_c_compile_prefix(context))
+append(compile, { "-c", fixture, "-o", output .. ".fixture.o" })
+if null_backend then compile[#compile + 1] = "-DFIXTURE_NULL" end
+command(compile)
+local link = assert(driver.authored_c_compile_prefix(context))
+append(link, { "-o", output, output .. ".fixture.o", output .. ".runtime.o" })
+append(link, driver.installed_link_inputs(driver.installed_paths(prefix), driver.IS_DARWIN))
+if driver.UNAME == "Linux" then link[#link + 1] = "-rdynamic" end
+command(link)
+io.write(command({ output }).output)
+assert(driver.close_resolver_context(context))
+]], files.host(), repository .. "/titan-runtime/titan.c",
+        repository .. "/spec/fixtures/browser_images/native-trace.c",
+        workspace .. "/trace" .. suffix, prefix, tostring(null_backend))
+    local result = process.capture({ prefix .. "/bin/lua" .. suffix, "-E", "-e",
+        string.format("package.path=%q..package.path;", repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script },
+        { env = { TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_BUILD_PROFILE = "validation",
+            TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" } })
+    assert.is_true(result.ok, result.output or result.diagnostic)
+    return result.output
 end
 
 describe("browser image profile and SDK readiness", function()
@@ -96,6 +143,7 @@ describe("browser image profile and SDK readiness", function()
             "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
+            "-sFORCE_FILESYSTEM=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_malloc","_free"]',
             '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
@@ -172,6 +220,99 @@ describe("real browser test image", function()
     after_each(function()
         if workspace then files.remove(workspace); workspace = nil end
     end)
+    it("raises the seven dynamic-provider guard diagnostics without native loader imports", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        local image = c_image(info, "dynamic-guards", read(repository .. "/spec/fixtures/browser_images/dynamic-guards.c"))
+        for _, engine in ipairs({ "node", "chromium" }) do
+            local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", image })
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            assert.truthy(result.output:find("dynamic-guards=7", 1, true), result.output)
+        end
+    end)
+
+    it("links default and explicit programs through main, support preloads and the bootstrap hook", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.write(workspace .. "/src/image_main.titan",
+            read(repository .. "/spec/fixtures/browser_images/program-main.titan"))
+        local source = repository .. "/spec/fixtures/browser_images/program-bootstrap.c"
+        local result = cli(info, "--incremental", "--c-source", source,
+            "--ldflag=-Wl,--wrap=luaL_openselectedlibs", "image_main")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.is_nil(result.output:find("support-bootstrap", 1, true), "compiler unexpectedly ran main")
+        local explicit = workspace .. "/out/explicit-program.mjs"
+        result = cli(info, "--incremental", "--exe", explicit, "--c-source", source,
+            "--ldflag=-Wl,--wrap=luaL_openselectedlibs", "image_main")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        local runtime = assert(require("titan-compiler.staticmetadata").scan_archive(
+            info.sdk_root .. "/libtitan.a", { target = fixtures.fingerprint() }))
+        local members = {}
+        for index, member in ipairs(runtime.members) do members[index] = member.display_name end
+        assert.same({ "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }, members)
+        assert.is_true(driver.validate_browser_provider(runtime))
+        for _, image in ipairs({ "image_main", "explicit-program" }) do
+            assert.equal("file", lfs.attributes(workspace .. "/out/" .. image .. ".mjs", "mode"))
+            local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/" .. image .. ".wasm")))
+            local exports = {}
+            for _, item in ipairs(inventory.exports) do exports[item.name] = true end
+            assert.is_true(exports.titan_browser_entry)
+            assert.is_true(exports.malloc)
+            assert.is_true(exports.free)
+            assert.is_nil(exports.titan_browser_gate_guarded)
+            assert.is_nil(exports.main)
+        end
+        local fixture = workspace .. "/out/program-results.mjs"
+        files.write(fixture, read(repository .. "/spec/fixtures/browser_images/program-results.mjs"))
+        for _, engine in ipairs({ "node", "chromium" }) do
+            result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--",
+                "image_main.mjs", "explicit-program.mjs" })
+            assert.is_true(result.ok, result.output or result.diagnostic)
+        end
+    end)
+
+    it("attempts both final libc drains and preserves stdout-first or original-error precedence", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        c_image(info, "entry-flush", read(repository .. "/spec/fixtures/browser_images/entry-flush.c"))
+        local fixture = workspace .. "/out/flush-results.mjs"
+        files.write(fixture, read(repository .. "/spec/fixtures/browser_images/flush-results.mjs"))
+        for _, engine in ipairs({ "node", "chromium" }) do
+            local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--", "entry-flush.mjs" })
+            assert.is_true(result.ok, result.output or result.diagnostic)
+        end
+    end)
+
+    it("contains initialization, conversion and allocation failures through the protected entry", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        local names = {}
+        for _, case in ipairs({
+            { "entry-close" }, { "entry-binary" }, { "entry-tostring" },
+            { "entry-state-oom", { "-Wl,--wrap=luaL_newstate" } },
+            { "entry-copy-oom", { "-Wl,--wrap=malloc" } },
+            { "entry-bootstrap-oom", { "-Wl,--wrap=luaL_openselectedlibs", "-Wl,--wrap=lua_pcallk" } },
+        }) do
+            names[#names + 1] = case[1]
+            c_image(info, case[1], read(repository .. "/spec/fixtures/browser_images/" .. case[1] .. ".c"), case[2])
+        end
+        local fixture = workspace .. "/out/entry-results.mjs"
+        files.write(fixture, read(repository .. "/spec/fixtures/browser_images/entry-results.mjs"))
+        for _, engine in ipairs({ "node", "chromium" }) do
+            local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--" }
+            for _, name in ipairs(names) do argv[#argv + 1] = name end
+            local result = run(argv)
+            assert.is_true(result.ok, result.output or result.diagnostic)
+        end
+    end)
+
     it("delivers pure-C stdio-only binary tails to Chromium byte sinks", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
@@ -180,8 +321,9 @@ describe("real browser test image", function()
 static int titan_browser_worker(lua_State *L) {
     static const unsigned char out[] = {65, 0, 255, 195, 40};
     static const unsigned char err[] = {66, 0, 254, 226, 40};
-    if (setvbuf(stdout, NULL, _IOFBF, BUFSIZ) != 0 ||
-        setvbuf(stderr, NULL, _IOFBF, BUFSIZ) != 0)
+    static char out_buffer[BUFSIZ], err_buffer[BUFSIZ];
+    if (setvbuf(stdout, out_buffer, _IOFBF, sizeof out_buffer) != 0 ||
+        setvbuf(stderr, err_buffer, _IOFBF, sizeof err_buffer) != 0)
         return luaL_error(L, "cannot buffer stdio fixture");
     if (fwrite(out, 1, sizeof out, stdout) != sizeof out ||
         fwrite(err, 1, sizeof err, stderr) != sizeof err)
@@ -290,5 +432,23 @@ end
         assert.is_true(result.ok, result.output or result.diagnostic)
         assert.truthy(result.output:find("[==========] 1 test ran.", 1, true), result.output)
         assert.truthy(result.output:find("[  PASSED  ] 1 test.", 1, true), result.output)
+    end)
+end)
+
+describe("native trace backend invariance", function()
+    after_each(function()
+        if workspace then files.remove(workspace); workspace = nil end
+    end)
+
+    it("keeps direct fallback capture depth, frame order and the 255-frame truncation boundary", function()
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local output = native_trace(false)
+        assert.match("fallback shallow=%d+ deep=255 long%-trace=%d+", output)
+    end)
+
+    it("runs the focused native null backend with Lua frames and one-shot trace pinning", function()
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local output = native_trace(true)
+        assert.match("null shallow=0 deep=0 long%-trace=%d+", output)
     end)
 end)

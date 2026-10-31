@@ -1,11 +1,12 @@
 import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { classify, execute, knownTrap, observeFactory, reason, relativePath } from "./titan-browser-page.mjs";
 
 const control = message => process.send?.(message);
-const failure = error => control({ type: "failure", category: classify(error), reason: reason(error), knownTrap: knownTrap(error) });
-process.on("uncaughtException", failure);
+const failure = (error, terminal = false) =>
+    control({ type: "failure", category: classify(error), reason: reason(error), knownTrap: knownTrap(error), terminal });
+process.on("uncaughtException", error => failure(error));
 process.on("unhandledRejection", error => control({ type: "failure", category: "unhandled", reason: reason(error) }));
 
 // IPC keeps the worker alive even if an unfinished image has no live JS handles.
@@ -13,7 +14,7 @@ process.on("message", message => {
     if (message?.type === "shutdown") {
         process.stdout.write("", () => process.stderr.write("", () => process.exit(0)));
     } else if (message?.type === "start") {
-        run(message.config).catch(failure);
+        run(message.config).catch(error => failure(error, true));
     } else {
         control({ type: "failure", category: "harness", reason: "invalid supervisor command" });
     }
@@ -42,7 +43,7 @@ async function run(config) {
                 if (!wrappers.has(module.default)) wrappers.set(module.default, observeFactory(module.default, control));
                 return Object.freeze({
                     factory: wrappers.get(module.default),
-                    locateFile: name => fileURLToPath(new URL(name, pathToFileURL(file))),
+                    locateFile: name => resolve(dirname(file), name),
                 });
             })());
             return images.get(path);
