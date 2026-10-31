@@ -17,6 +17,36 @@ local ELF_MAGIC = "\127ELF"
 local ARCHIVE_MAGIC = "!<arch>\n"
 local THIN_ARCHIVE_MAGIC = "!<thin>\n"
 local COFF_SPECIAL_MAGIC = "\0\0\255\255"
+local WASM_MAGIC = "\0asm"
+local BITCODE_MAGIC = "BC\192\222"
+local BITCODE_WRAPPER_MAGIC = "\222\192\023\011"
+local WASM_SECTION_ORDER = {
+    [1] = 1, [2] = 2, [3] = 3, [4] = 4, [5] = 5, [13] = 6,
+    [6] = 7, [7] = 8, [8] = 9, [9] = 10, [12] = 11, [10] = 12, [11] = 13,
+}
+local WASM_IMPORT_KINDS = {
+    [0] = "function", [1] = "table", [2] = "memory", [3] = "global", [4] = "tag",
+}
+local WASM_SYMBOL_KINDS = {
+    [0] = "function", [1] = "data", [2] = "global",
+    [3] = "section", [4] = "tag", [5] = "table",
+}
+local WASM_PAYLOAD_NAMES = {
+    [".titan.meta"] = true, [".titan.source"] = true, [".titan.cprobe"] = true,
+}
+local WASM_RELOC_TYPES = {
+    [0] = { width = 5 }, [1] = { width = 5 }, [2] = { width = 4 },
+    [3] = { width = 5, addend = true }, [4] = { width = 5, addend = true },
+    [5] = { width = 4, addend = true }, [6] = { width = 5 }, [7] = { width = 5 },
+    [8] = { width = 4, addend = true }, [9] = { width = 4, addend = true },
+    [10] = { width = 5 }, [11] = { width = 5, addend = true }, [12] = { width = 5 },
+    [13] = { width = 4 }, [14] = { width = 10, addend = true },
+    [15] = { width = 10, addend = true }, [16] = { width = 8, addend = true },
+    [17] = { width = 10, addend = true }, [18] = { width = 10 }, [19] = { width = 8 },
+    [20] = { width = 5 }, [21] = { width = 5, addend = true },
+    [22] = { width = 8, addend = true }, [23] = { width = 4, addend = true },
+    [24] = { width = 10 }, [25] = { width = 10, addend = true }, [26] = { width = 4 },
+}
 local COFF_BIGOBJ_UUID = "\199\161\186\209\238\186\169\75" ..
     "\175\32\250\246\106\164\220\184"
 local COFF_MACHINES = {
@@ -188,7 +218,7 @@ function staticmetadata.source_declaration(payload, symbol)
 #if defined(__APPLE__)
 #define TITAN_SOURCE_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titansrc")))
-#elif defined(__ELF__) || defined(_WIN32)
+#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)
 #define TITAN_SOURCE_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.source")))
 #else
@@ -509,6 +539,14 @@ function staticmetadata.fingerprint_matches(actual, expected)
         for _, field in ipairs({ "word_size", "endian", "machine" }) do
             if actual[field] ~= expected[field] then
                 return false, "COFF " .. field .. " " ..
+                    tostring(actual[field]) .. " does not match target " ..
+                    tostring(expected[field])
+            end
+        end
+    elseif actual.format == "wasm" then
+        for _, field in ipairs({ "word_size", "linking_version", "features" }) do
+            if actual[field] ~= expected[field] then
+                return false, "Wasm " .. field .. " " ..
                     tostring(actual[field]) .. " does not match target " ..
                     tostring(expected[field])
             end
@@ -1027,9 +1065,672 @@ local function parse_coff(bytes, origin, target, options)
     }
 end
 
+local function wasm_u32_leb(reader, offset, limit, origin)
+    local value, shift, count = 0, 1, 0
+    while true do
+        if offset >= limit then
+            fail(origin, "truncated Wasm u32 LEB128")
+        end
+        local digit = byte(reader.bytes, offset + 1)
+        offset = offset + 1
+        count = count + 1
+        if count == 5 then
+            if digit >= 0x80 then
+                if offset >= limit then
+                    fail(origin, "truncated Wasm u32 LEB128")
+                end
+                fail(origin, "Wasm u32 LEB128 exceeds 5 bytes")
+            end
+            if digit > 0x0f then
+                fail(origin, "Wasm u32 LEB128 overflows")
+            end
+        end
+        value = value + (digit & 0x7f) * shift
+        if digit < 0x80 then return value, offset end
+        shift = shift * 128
+    end
+end
+
+local function wasm_s32_leb(reader, offset, limit, origin)
+    local value, shift, count = 0, 1, 0
+    while true do
+        if offset >= limit then
+            fail(origin, "truncated Wasm i32 LEB128")
+        end
+        local digit = byte(reader.bytes, offset + 1)
+        offset = offset + 1
+        count = count + 1
+        if count == 5 then
+            if digit >= 0x80 then
+                if offset >= limit then
+                    fail(origin, "truncated Wasm i32 LEB128")
+                end
+                fail(origin, "Wasm i32 LEB128 exceeds 5 bytes")
+            end
+            local sign = (digit & 0x08) ~= 0
+            local upper = digit & 0x70
+            if (sign and upper ~= 0x70) or (not sign and upper ~= 0) then
+                fail(origin, "Wasm i32 LEB128 overflows")
+            end
+        end
+        value = value + (digit & 0x7f) * shift
+        shift = shift * 128
+        if digit < 0x80 then
+            if count < 5 and (digit & 0x40) ~= 0 then
+                value = value - shift
+            elseif count == 5 and (digit & 0x08) ~= 0 then
+                value = value - (1 << 32)
+            end
+            return value, offset
+        end
+    end
+end
+
+local function check_wasm_memory_limits(reader, offset, limit, origin)
+    local flags, next_offset = wasm_u32_leb(reader, offset, limit, origin)
+    if (flags & 0x04) ~= 0 then
+        fail(origin, "Wasm memory64 is not supported")
+    end
+    if (flags & 0x02) ~= 0 then
+        fail(origin, "Wasm shared memory is not supported")
+    end
+    if (flags & ~0x07) ~= 0 then
+        fail(origin, "invalid Wasm memory limits flags")
+    end
+    local ignored
+    ignored, next_offset = wasm_u32_leb(reader, next_offset, limit, origin)
+    if (flags & 0x01) ~= 0 then
+        ignored, next_offset = wasm_u32_leb(reader, next_offset, limit, origin)
+    end
+    return next_offset
+end
+
+local function check_wasm_payload_segment(segment, origin)
+    if not segment.active then
+        fail(origin, "Wasm payload segment " .. format("%q", segment.name) ..
+            " is not active")
+    end
+    if segment.tls then
+        fail(origin, "Wasm payload segment " .. format("%q", segment.name) ..
+            " is TLS")
+    end
+    if segment.alignment ~= 1 then
+        fail(origin, "Wasm payload segment " .. format("%q", segment.name) ..
+            " alignment is not 1")
+    end
+    if segment.relocated then
+        fail(origin, "Wasm payload segment " .. format("%q", segment.name) ..
+            " is targeted by a DATA relocation")
+    end
+end
+
+local function parse_wasm(bytes, origin, target, options)
+    local reader = Reader.new(bytes, origin)
+    reader:range(0, 8, "Wasm header")
+    if reader:slice(0, 4, "Wasm magic") ~= WASM_MAGIC then
+        fail(origin, "invalid Wasm magic")
+    end
+    local version = reader:uint(4, 4, "little", "Wasm version")
+    if version ~= 1 then
+        fail(origin, "unsupported Wasm version " .. tostring(version))
+    end
+
+    local raw_sections = {}
+    local seen_known = {}
+    local last_order = 0
+    local has_linking = false
+    local has_segment_info = false
+    local has_symbol_table = false
+    local has_target_features = false
+    local linking_version = 2
+    local word_size = 32
+    local features = ""
+    local datacount_value
+    local data_segments = {}
+    local imports = {}
+    local imported_by_kind = {
+        ["function"] = {}, ["table"] = {}, ["memory"] = {},
+        ["global"] = {}, ["tag"] = {},
+    }
+    local symbols = {}
+    local offset = 8
+
+    while offset < reader.length do
+        local section_id = byte(bytes, offset + 1)
+        local section_size, payload_offset =
+            wasm_u32_leb(reader, offset + 1, reader.length, origin)
+        reader:range(payload_offset, section_size, "Wasm section")
+        local section_end = payload_offset + section_size
+        local section_index = #raw_sections
+
+        if section_id ~= 0 then
+            local order = WASM_SECTION_ORDER[section_id]
+            if not order then
+                fail(origin, "out-of-order Wasm section " .. tostring(section_id))
+            end
+            if seen_known[section_id] then
+                fail(origin, "duplicate Wasm section " .. tostring(section_id))
+            end
+            if has_linking or order < last_order then
+                fail(origin, "out-of-order Wasm section " .. tostring(section_id))
+            end
+            seen_known[section_id] = true
+            last_order = order
+            raw_sections[section_index + 1] = {
+                index = section_index,
+                id = section_id,
+                offset = payload_offset,
+                size = section_size,
+                content_offset = payload_offset,
+                content_size = section_size,
+            }
+
+            if section_id == 2 then
+                local import_count, pos =
+                    wasm_u32_leb(reader, payload_offset, section_end, origin)
+                for _ = 1, import_count do
+                    local mod_len, ignored
+                    mod_len, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    if mod_len > section_end - pos then
+                        fail(origin, "Wasm import module name is outside its section")
+                    end
+                    local mod_name = sub(bytes, pos + 1, pos + mod_len)
+                    pos = pos + mod_len
+                    local field_len
+                    field_len, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    if field_len > section_end - pos then
+                        fail(origin, "Wasm import name is outside its section")
+                    end
+                    local field_name = sub(bytes, pos + 1, pos + field_len)
+                    pos = pos + field_len
+                    if mod_name == "GOT.mem" or mod_name == "GOT.func" then
+                        fail(origin, "Wasm GOT import is not supported")
+                    end
+                    if pos >= section_end then
+                        fail(origin, "truncated Wasm import descriptor")
+                    end
+                    local desc_byte = byte(bytes, pos + 1)
+                    pos = pos + 1
+                    local import_kind = WASM_IMPORT_KINDS[desc_byte]
+                    if not import_kind then
+                        fail(origin, "unsupported Wasm import kind " .. tostring(desc_byte))
+                    end
+                    if import_kind == "function" then
+                        ignored, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    elseif import_kind == "table" then
+                        if pos >= section_end then
+                            fail(origin, "truncated Wasm table import")
+                        end
+                        pos = pos + 1
+                        local tflags
+                        tflags, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                        if (tflags & 0x04) ~= 0 then
+                            fail(origin, "Wasm memory64 is not supported")
+                        end
+                        ignored, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                        if (tflags & 0x01) ~= 0 then
+                            ignored, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                        end
+                    elseif import_kind == "memory" then
+                        pos = check_wasm_memory_limits(reader, pos, section_end, origin)
+                        if mod_name == "env" and field_name == "__linear_memory" then
+                            word_size = 32
+                        end
+                    elseif import_kind == "global" then
+                        if pos + 2 > section_end then
+                            fail(origin, "truncated Wasm global import")
+                        end
+                        local mut = byte(bytes, pos + 2)
+                        if mut ~= 0 and mut ~= 1 then
+                            fail(origin, "invalid Wasm global mutability")
+                        end
+                        pos = pos + 2
+                    elseif import_kind == "tag" then
+                        if pos >= section_end then
+                            fail(origin, "truncated Wasm tag import")
+                        end
+                        pos = pos + 1
+                        ignored, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    end
+                    local entry = {
+                        module = mod_name,
+                        name = field_name,
+                        kind = import_kind,
+                    }
+                    imports[#imports + 1] = entry
+                    local by_kind = imported_by_kind[import_kind]
+                    by_kind[#by_kind + 1] = entry
+                end
+                if pos ~= section_end then
+                    fail(origin, "malformed Wasm IMPORT section")
+                end
+            elseif section_id == 5 then
+                local mem_count, pos =
+                    wasm_u32_leb(reader, payload_offset, section_end, origin)
+                for _ = 1, mem_count do
+                    pos = check_wasm_memory_limits(reader, pos, section_end, origin)
+                end
+                if pos ~= section_end then
+                    fail(origin, "malformed Wasm MEMORY section")
+                end
+            elseif section_id == 12 then
+                local pos
+                datacount_value, pos =
+                    wasm_u32_leb(reader, payload_offset, section_end, origin)
+                if pos ~= section_end then
+                    fail(origin, "malformed Wasm DATACOUNT section")
+                end
+            elseif section_id == 11 then
+                local data_count, pos =
+                    wasm_u32_leb(reader, payload_offset, section_end, origin)
+                for seg_index = 0, data_count - 1 do
+                    local mode, ignored
+                    mode, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    if mode == 0 or mode == 2 then
+                        if mode == 2 then
+                            ignored, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                        end
+                        if pos >= section_end then
+                            fail(origin, "truncated Wasm DATA offset expression")
+                        end
+                        local opcode = byte(bytes, pos + 1)
+                        pos = pos + 1
+                        if opcode == 0x42 then
+                            fail(origin, "Wasm memory64 is not supported")
+                        end
+                        if opcode ~= 0x41 then
+                            fail(origin, "unsupported Wasm DATA offset expression")
+                        end
+                        local mem_offset
+                        mem_offset, pos = wasm_s32_leb(reader, pos, section_end, origin)
+                        if mem_offset < 0 or pos >= section_end or
+                           byte(bytes, pos + 1) ~= 0x0b then
+                            fail(origin, "malformed Wasm DATA offset expression")
+                        end
+                        pos = pos + 1
+                    elseif mode ~= 1 then
+                        fail(origin, "unsupported Wasm DATA segment mode " .. tostring(mode))
+                    end
+                    local seg_size
+                    seg_size, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    if seg_size > section_end - pos then
+                        fail(origin, "Wasm DATA segment is outside its section")
+                    end
+                    data_segments[seg_index + 1] = {
+                        index = seg_index,
+                        name = "",
+                        offset = pos,
+                        section_body_offset = pos - payload_offset,
+                        size = seg_size,
+                        active = mode == 0,
+                        tls = false,
+                        alignment = 1,
+                        origin = origin,
+                    }
+                    pos = pos + seg_size
+                end
+                if pos ~= section_end then
+                    fail(origin, "malformed Wasm DATA section")
+                end
+                if datacount_value ~= nil and datacount_value ~= #data_segments then
+                    fail(origin, "Wasm DATACOUNT does not match DATA segment count")
+                end
+            end
+        else
+            if payload_offset >= section_end then
+                fail(origin, "Wasm custom section name is outside its section")
+            end
+            local name_len, name_offset =
+                wasm_u32_leb(reader, payload_offset, section_end, origin)
+            if name_len > section_end - name_offset then
+                fail(origin, "Wasm custom section name is outside its section")
+            end
+            local custom_name = sub(bytes, name_offset + 1, name_offset + name_len)
+            local content_offset = name_offset + name_len
+            local content_size = section_end - content_offset
+            raw_sections[section_index + 1] = {
+                index = section_index,
+                id = 0,
+                name = custom_name,
+                offset = payload_offset,
+                size = section_size,
+                content_offset = content_offset,
+                content_size = content_size,
+            }
+
+            if custom_name == "dylink.0" or custom_name == "dylink" then
+                fail(origin, "Wasm dylink.0 side module is not supported")
+            elseif custom_name == "linking" then
+                if has_linking then
+                    fail(origin, "duplicate Wasm section 0")
+                end
+                has_linking = true
+                local pos
+                linking_version, pos =
+                    wasm_u32_leb(reader, content_offset, section_end, origin)
+                if linking_version ~= 2 then
+                    fail(origin, "unsupported Wasm linking version " ..
+                        tostring(linking_version))
+                end
+                while pos < section_end do
+                    local sub_type = byte(bytes, pos + 1)
+                    local sub_len
+                    sub_len, pos = wasm_u32_leb(reader, pos + 1, section_end, origin)
+                    if sub_len > section_end - pos then
+                        fail(origin, "Wasm linking subsection is outside its section")
+                    end
+                    local sub_end = pos + sub_len
+                    if sub_type == 5 then
+                        if has_segment_info then
+                            fail(origin, "duplicate Wasm segment-info subsection")
+                        end
+                        has_segment_info = true
+                        local seg_count, sp =
+                            wasm_u32_leb(reader, pos, sub_end, origin)
+                        if seg_count ~= #data_segments then
+                            fail(origin,
+                                "Wasm segment-info count does not match DATA segment count")
+                        end
+                        for seg_idx = 1, seg_count do
+                            local sname_len
+                            sname_len, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            if sname_len > sub_end - sp then
+                                fail(origin, "Wasm segment name is outside its subsection")
+                            end
+                            local sname = sub(bytes, sp + 1, sp + sname_len)
+                            sp = sp + sname_len
+                            local align_exp, sflags
+                            align_exp, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            sflags, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            if align_exp > 62 then
+                                fail(origin, "Wasm segment alignment exponent is too large")
+                            end
+                            local segment = data_segments[seg_idx]
+                            segment.name = sname
+                            segment.alignment = 1 << align_exp
+                            segment.tls = (sflags & 0x02) ~= 0
+                            segment.origin = origin .. ": Wasm segment #" ..
+                                tostring(seg_idx - 1) .. " " .. format("%q", sname)
+                        end
+                        if sp ~= sub_end then
+                            fail(origin, "malformed Wasm segment-info subsection")
+                        end
+                    elseif sub_type == 6 then
+                        local init_count, sp =
+                            wasm_u32_leb(reader, pos, sub_end, origin)
+                        for _ = 1, init_count do
+                            local ignored
+                            ignored, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            ignored, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                        end
+                        if sp ~= sub_end then
+                            fail(origin, "malformed Wasm init-functions subsection")
+                        end
+                    elseif sub_type == 7 then
+                        local comdat_count, sp =
+                            wasm_u32_leb(reader, pos, sub_end, origin)
+                        for _ = 1, comdat_count do
+                            local cname_len, ignored
+                            cname_len, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            if cname_len > sub_end - sp then
+                                fail(origin, "Wasm COMDAT name is outside its subsection")
+                            end
+                            sp = sp + cname_len
+                            ignored, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            local entry_count
+                            entry_count, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            for _ = 1, entry_count do
+                                if sp >= sub_end then
+                                    fail(origin, "truncated Wasm COMDAT entry")
+                                end
+                                local ekind = byte(bytes, sp + 1)
+                                sp = sp + 1
+                                if ekind > 5 then
+                                    fail(origin, "unsupported Wasm COMDAT kind " .. tostring(ekind))
+                                end
+                                ignored, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            end
+                        end
+                        if sp ~= sub_end then
+                            fail(origin, "malformed Wasm COMDAT subsection")
+                        end
+                    elseif sub_type == 8 then
+                        if has_symbol_table then
+                            fail(origin, "duplicate Wasm symbol table subsection")
+                        end
+                        has_symbol_table = true
+                        local sym_count, sp =
+                            wasm_u32_leb(reader, pos, sub_end, origin)
+                        for _ = 1, sym_count do
+                            if sp >= sub_end then
+                                fail(origin, "truncated Wasm symbol entry")
+                            end
+                            local skind_byte = byte(bytes, sp + 1)
+                            sp = sp + 1
+                            local skind = WASM_SYMBOL_KINDS[skind_byte]
+                            if not skind then
+                                fail(origin, "unsupported Wasm symbol kind " ..
+                                    tostring(skind_byte))
+                            end
+                            local sflags
+                            sflags, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            local binding_bits = sflags & 0x03
+                            if binding_bits == 0x03 then
+                                fail(origin, "invalid Wasm symbol binding flags")
+                            end
+                            local binding = binding_bits == 0x01 and "weak"
+                                or binding_bits == 0x02 and "local" or "global"
+                            local defined = (sflags & 0x10) == 0
+                            local explicit_name = (sflags & 0x40) ~= 0
+                            local sname, sym_index
+                            if skind == "function" or skind == "global" or
+                               skind == "tag" or skind == "table" then
+                                sym_index, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                                if defined or explicit_name then
+                                    local sname_len
+                                    sname_len, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                                    if sname_len > sub_end - sp then
+                                        fail(origin, "Wasm symbol name is outside its subsection")
+                                    end
+                                    sname = sub(bytes, sp + 1, sp + sname_len)
+                                    sp = sp + sname_len
+                                else
+                                    local imp = imported_by_kind[skind][sym_index + 1]
+                                    if not imp then
+                                        fail(origin,
+                                            "Wasm undefined symbol references missing import " ..
+                                            tostring(sym_index))
+                                    end
+                                    sname = imp.name
+                                end
+                            elseif skind == "data" then
+                                local sname_len, ignored
+                                sname_len, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                                if sname_len > sub_end - sp then
+                                    fail(origin, "Wasm symbol name is outside its subsection")
+                                end
+                                sname = sub(bytes, sp + 1, sp + sname_len)
+                                sp = sp + sname_len
+                                if defined then
+                                    if (sflags & 0x200) == 0 then
+                                        sym_index, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                                    end
+                                    ignored, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                                    ignored, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                                end
+                            elseif skind == "section" then
+                                sym_index, sp = wasm_u32_leb(reader, sp, sub_end, origin)
+                            end
+                            symbols[#symbols + 1] = {
+                                kind = skind,
+                                name = sname,
+                                binding = binding,
+                                defined = defined,
+                                index = sym_index,
+                            }
+                        end
+                        if sp ~= sub_end then
+                            fail(origin, "malformed Wasm symbol table subsection")
+                        end
+                    end
+                    pos = sub_end
+                end
+                if not has_segment_info and #data_segments > 0 then
+                    fail(origin,
+                        "Wasm segment-info count does not match DATA segment count")
+                end
+            elseif custom_name == "target_features" then
+                if has_target_features then
+                    fail(origin, "duplicate Wasm section 0")
+                end
+                has_target_features = true
+                local feat_count, pos =
+                    wasm_u32_leb(reader, content_offset, section_end, origin)
+                local seen_features = {}
+                local tokens = {}
+                for _ = 1, feat_count do
+                    if pos >= section_end then
+                        fail(origin, "truncated Wasm target feature")
+                    end
+                    local prefix_byte = byte(bytes, pos + 1)
+                    pos = pos + 1
+                    local prefix = prefix_byte == 0x2b and "+"
+                        or prefix_byte == 0x2d and "-"
+                        or prefix_byte == 0x3d and "=" or nil
+                    if not prefix then
+                        fail(origin, "invalid Wasm target feature prefix")
+                    end
+                    local fname_len
+                    fname_len, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    if fname_len == 0 or fname_len > section_end - pos then
+                        fail(origin, "Wasm target feature name is outside its section")
+                    end
+                    local fname = sub(bytes, pos + 1, pos + fname_len)
+                    pos = pos + fname_len
+                    local previous = seen_features[fname]
+                    if previous == prefix then
+                        fail(origin, "duplicate Wasm target feature " ..
+                            format("%q", fname))
+                    elseif previous ~= nil then
+                        fail(origin, "conflicting Wasm target feature " ..
+                            format("%q", fname))
+                    end
+                    seen_features[fname] = prefix
+                    tokens[#tokens + 1] = prefix .. fname
+                end
+                if pos ~= section_end then
+                    fail(origin, "malformed Wasm target_features section")
+                end
+                table.sort(tokens, bytewise_less)
+                features = table.concat(tokens, " ")
+            elseif custom_name:sub(1, 6) == "reloc." then
+                if not has_linking then
+                    fail(origin, "out-of-order Wasm section 0")
+                end
+                local target_index, pos =
+                    wasm_u32_leb(reader, content_offset, section_end, origin)
+                local target_sec = raw_sections[target_index + 1]
+                if not target_sec or target_sec.index == section_index then
+                    fail(origin, "Wasm relocation targets missing section " ..
+                        tostring(target_index))
+                end
+                local reloc_count
+                reloc_count, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                for _ = 1, reloc_count do
+                    if pos >= section_end then
+                        fail(origin, "truncated Wasm relocation entry")
+                    end
+                    local rtype = byte(bytes, pos + 1)
+                    pos = pos + 1
+                    local spec = WASM_RELOC_TYPES[rtype]
+                    if not spec then
+                        fail(origin, "unsupported Wasm relocation type " ..
+                            tostring(rtype))
+                    end
+                    local roffset, ignored
+                    roffset, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    ignored, pos = wasm_u32_leb(reader, pos, section_end, origin)
+                    if spec.addend then
+                        ignored, pos = wasm_s32_leb(reader, pos, section_end, origin)
+                    end
+                    if roffset > target_sec.content_size or
+                       spec.width > target_sec.content_size - roffset then
+                        fail(origin, "Wasm relocation is outside its target section")
+                    end
+                    if target_sec.id == 11 then
+                        for _, segment in ipairs(data_segments) do
+                            if (roffset < segment.section_body_offset + segment.size and
+                                roffset + spec.width > segment.section_body_offset) or
+                               (segment.size == 0 and
+                                roffset == segment.section_body_offset) then
+                                segment.relocated = true
+                            end
+                        end
+                    end
+                end
+                if pos ~= section_end then
+                    fail(origin, "malformed Wasm relocation section")
+                end
+            end
+        end
+        offset = section_end
+    end
+
+    if datacount_value ~= nil and datacount_value ~= #data_segments then
+        fail(origin, "Wasm DATACOUNT does not match DATA segment count")
+    end
+    if not has_linking then
+        fail(origin, "Wasm object has no linking section")
+    end
+
+    local seen_payloads = {}
+    local metadata_section
+    for _, segment in ipairs(data_segments) do
+        if WASM_PAYLOAD_NAMES[segment.name] then
+            if seen_payloads[segment.name] then
+                fail(origin, "duplicate Wasm payload segment " ..
+                    format("%q", segment.name))
+            end
+            seen_payloads[segment.name] = segment
+            check_wasm_payload_segment(segment, origin)
+            if segment.name == ".titan.meta" then
+                segment.payload = reader:slice(
+                    segment.offset, segment.size, "Titan metadata section")
+                segment.entry = validate_metadata_or_fail(
+                    segment.payload, segment.origin, options)
+                metadata_section = segment
+            end
+        end
+    end
+
+    local fingerprint = {
+        format = "wasm",
+        word_size = word_size,
+        linking_version = linking_version,
+        features = features,
+    }
+    check_target_or_fail(fingerprint, target, origin)
+    return {
+        kind = "object",
+        format = "wasm",
+        bytes = bytes,
+        origin = origin,
+        fingerprint = fingerprint,
+        sections = data_segments,
+        metadata_section = metadata_section,
+        metadata = metadata_section and metadata_section.entry or nil,
+        symbols = symbols,
+        imports = imports,
+    }
+end
+
 local function object_magic_kind(bytes)
     local magic = sub(bytes, 1, 4)
     if magic == ELF_MAGIC then return "elf" end
+    if magic == WASM_MAGIC then return "wasm" end
+    if magic == BITCODE_MAGIC or magic == BITCODE_WRAPPER_MAGIC then
+        return "bitcode"
+    end
     if MACH_MAGICS[magic] then return "macho" end
     if FAT_MAGICS[magic] then return "fat" end
     if sub(bytes, 1, #ARCHIVE_MAGIC) == ARCHIVE_MAGIC then return "archive" end
@@ -1053,6 +1754,10 @@ local function classify_object_internal(bytes, origin, target, options)
         return parse_macho(bytes, origin, target, options)
     elseif kind == "coff" then
         return parse_coff(bytes, origin, target, options)
+    elseif kind == "wasm" then
+        return parse_wasm(bytes, origin, target, options)
+    elseif kind == "bitcode" then
+        fail(origin, "LLVM bitcode (LTO) object is not supported")
     elseif kind == "coff_bigobj" then
         fail(origin, "COFF BigObj objects are not supported")
     elseif kind == "coff_import" then
@@ -1088,6 +1793,7 @@ function staticmetadata.read_object_section(bytes, origin, names, max_bytes)
            type(names.macho_segment) ~= "string" or
            type(names.macho_section) ~= "string" or
            (names.coff ~= nil and type(names.coff) ~= "string") or
+           (names.wasm ~= nil and type(names.wasm) ~= "string") or
            math.type(max_bytes) ~= "integer" or max_bytes < 0 then
             fail(origin, "invalid object section request")
         end
@@ -1100,8 +1806,18 @@ function staticmetadata.read_object_section(bytes, origin, names, max_bytes)
                 and section.segname == names.macho_segment
                 and section.sectname == names.macho_section
                 or object.format == "coff" and section.name == names.coff
+                or object.format == "wasm" and section.name == names.wasm
             if matches then
-                if selected then fail(origin, "duplicate requested object section") end
+                if selected then
+                    if object.format == "wasm" then
+                        fail(origin, "duplicate Wasm payload segment " ..
+                            format("%q", section.name))
+                    end
+                    fail(origin, "duplicate requested object section")
+                end
+                if object.format == "wasm" then
+                    check_wasm_payload_segment(section, origin)
+                end
                 if section.size > max_bytes then
                     fail(origin, "requested object section exceeds size limit")
                 end
@@ -1114,7 +1830,7 @@ function staticmetadata.read_object_section(bytes, origin, names, max_bytes)
                     end
                 elseif object.format == "coff" then
                     check_coff_payload_section(section, origin, "requested object section")
-                else
+                elseif object.format == "macho" then
                     if section.section_type ~= S_REGULAR then
                         fail(origin, "requested object section is not S_REGULAR")
                     end
@@ -1340,8 +2056,17 @@ local function parse_archive(bytes, origin, options, context)
 
         if not record.index_kind then
             local member_origin = archive_member_origin(origin, record)
+            local member_target = options.target or
+                (members[1] and members[1].fingerprint.format == "wasm"
+                    and members[1].fingerprint or nil)
             local object = classify_object_internal(
-                record.bytes, member_origin, options.target, options)
+                record.bytes, member_origin, member_target, options)
+            if not options.target and #members > 0 and
+               object.format == "wasm" and
+               members[1].fingerprint.format ~= "wasm" then
+                check_target_or_fail(
+                    object.fingerprint, members[1].fingerprint, member_origin)
+            end
             if context.fat_arch then
                 if object.format ~= "macho" then
                     fail(member_origin,
@@ -1630,6 +2355,7 @@ local function scan_bytes_internal(bytes, origin, options)
     elseif kind == "fat" then
         return parse_fat(bytes, origin, options)
     elseif kind == "elf" or kind == "macho" or kind == "coff" or
+           kind == "wasm" or kind == "bitcode" or
            kind == "coff_bigobj" or kind == "coff_import" or kind == "pe" then
         return classify_object_internal(
             bytes, origin, options.target, options)

@@ -66,6 +66,11 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
     function driver.validate_target() return "native" end
     function driver.default_c_parts() return 4 end
     function driver.prepare_output_root(dir) return dir end
+    function driver.validate_output_target(context)
+        assert.equal(resolver, context)
+        assert.falsy(observed.lock_released)
+        return true
+    end
     function driver.cleanup_stale_staging(context, outputs, locks, protection)
         assert.equal(resolver, context)
         assert.equal(observed.output_locks, locks)
