@@ -1244,7 +1244,6 @@ local function parse_wasm(bytes, origin, target, options)
     local has_symbol_table = false
     local has_target_features = false
     local linking_version = 2
-    local word_size = 32
     local features = ""
     local datacount_value
     local data_segments = {}
@@ -1267,7 +1266,7 @@ local function parse_wasm(bytes, origin, target, options)
         if section_id ~= 0 then
             local order = WASM_SECTION_ORDER[section_id]
             if not order then
-                fail(origin, "out-of-order Wasm section " .. tostring(section_id))
+                fail(origin, "unsupported Wasm section " .. tostring(section_id))
             end
             if seen_known[section_id] then
                 fail(origin, "duplicate Wasm section " .. tostring(section_id))
@@ -1327,9 +1326,6 @@ local function parse_wasm(bytes, origin, target, options)
                         end
                     elseif import_kind == "memory" then
                         pos = check_wasm_memory_limits(reader, pos, section_end, origin)
-                        if mod_name == "env" and field_name == "__linear_memory" then
-                            word_size = 32
-                        end
                     elseif import_kind == "global" then
                         if pos + 2 > section_end then
                             fail(origin, "truncated Wasm global import")
@@ -1698,7 +1694,21 @@ local function parse_wasm(bytes, origin, target, options)
                         fail(origin, "Wasm relocation is outside its target section")
                     end
                     if target_sec.id == 11 then
-                        for _, segment in ipairs(data_segments) do
+                        local lo, hi = 1, #data_segments + 1
+                        while lo < hi do
+                            local mid = (lo + hi) // 2
+                            local seg = data_segments[mid]
+                            if seg.section_body_offset + seg.size < roffset then
+                                lo = mid + 1
+                            else
+                                hi = mid
+                            end
+                        end
+                        for idx = lo, #data_segments do
+                            local segment = data_segments[idx]
+                            if segment.section_body_offset >= roffset + spec.width then
+                                break
+                            end
                             if (roffset < segment.section_body_offset + segment.size and
                                 roffset + spec.width > segment.section_body_offset) or
                                (segment.size == 0 and
@@ -1745,7 +1755,7 @@ local function parse_wasm(bytes, origin, target, options)
 
     local fingerprint = {
         format = "wasm",
-        word_size = word_size,
+        word_size = 32,
         linking_version = linking_version,
         features = features,
     }
