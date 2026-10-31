@@ -588,11 +588,13 @@ describe("Windows compiler path integration", function()
     it("searches DLL containers root-major with extended-safe joins", function()
         assert.same({ "a.dll", "a/b.dll" }, driver.module_binary_candidates("a.b"))
         local observed = {}
-        local context = { io = {
-            lstat = function(_, filename)
-                observed[#observed + 1] = filename
-            end,
-        } }
+        local mocked_native = platform.native
+        platform.windows, platform.native = originals.windows, originals.native
+        local context = driver.new_resolver_context()
+        platform.windows, platform.native = true, mocked_native
+        context.io.lstat = function(_, filename)
+            observed[#observed + 1] = filename
+        end
         assert.is_nil(driver.find_dynamic_interface(
             [[C:\First;\\?\D:\Second]], "a.b", context))
         assert.same({
@@ -603,6 +605,7 @@ describe("Windows compiler path integration", function()
         local value, err = driver.find_dynamic_interface("C:/First", "a.b", context)
         assert.is_nil(value)
         assert.matches("native access denied", err, 1, true)
+        assert.is_true(driver.close_resolver_context(context))
     end)
 
     it("stops ancestor creation at the drive root and keeps stage separators", function()

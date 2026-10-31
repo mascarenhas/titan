@@ -10733,7 +10733,7 @@ function driver.derive_target_fingerprint(filename, expected_module, context)
 end
 
 function driver.validate_generated_objects(objects, target, entries, context)
-    context = context or { io = compiler_io.new_sync() }
+    context = context or driver.new_resolver_context()
     for _, input in ipairs(objects or {}) do
         local filename = type(input) == "table" and input.filename or input
         local expected_module =
