@@ -515,9 +515,13 @@ jobs:
           # survives export minification: baseline purpose, O2, assertions off.
           optimized="$root/optimized"
           mkdir -p "$optimized"
+          # Emscripten 6.0.13 only reaches its static export minifier at OPT>=3
+          # or SHRINK>=1, so the approved harness link adds a shrink/debug
+          # reduction here; the profile itself stays O2.
           TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e \
             "package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='baseline',optimization='O2',assertions=0}" \
-            "$GITHUB_WORKSPACE/titanc" -q --target browser --no-uv-bootstrap \
+            "$GITHUB_WORKSPACE/titanc" -q --target browser --incremental --no-uv-bootstrap \
+            --cflag=-g2 --ldflag=-g2 --ldflag=-Os \
             --tree spec/fixtures/browser_loader -o "$optimized" \
             --exe "$optimized/fidelity.mjs" \
             --c-source spec/fixtures/browser_loader/loader.c fidelity
