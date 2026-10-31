@@ -230,6 +230,10 @@ end
     it("certifies both image files, invalidates every shared asset and rolls back a failed pair commit", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         fixture = fixtures.new()
+        local physical_output = fixture.root .. "/physical-out"
+        fixtures.mkdir(physical_output)
+        fixture.output = fixture.root .. "/output-alias"
+        assert(lfs.link(physical_output, fixture.output, true))
         local root = fixture.root .. "/sdk"
         fixtures.mkdir(root .. "/lib")
         assert(lfs.link(info.prefix .. "/lib/browser", root .. "/lib/browser", true))
@@ -287,6 +291,9 @@ end
 local io_module = require "titan-compiler.io"
 local original = io_module.new_sync
 local mjs, wasm, log = %q, %q, %q
+local canonical = require("titan-compiler.linkcertificate").canonical_path
+local path_context = { io = original() }
+mjs, wasm = canonical(path_context, mjs), canonical(path_context, wasm)
 local failed
 local function record(message)
     local file = assert(io.open(log, "ab"))
@@ -296,9 +303,10 @@ function io_module.new_sync(...)
     local strategy = original(...)
     local rename = strategy.rename
     function strategy:rename(from, to)
-        if from == wasm and to ~= wasm then record("backup") end
-        if to == wasm then record("wasm") end
-        if to == mjs and not failed then
+        local source, target = canonical(path_context, from), canonical(path_context, to)
+        if source == wasm and target ~= wasm then record("backup") end
+        if target == wasm then record("wasm") end
+        if target == mjs and not failed then
             failed = true
             record("mjs-failed")
             return nil, "forced browser mjs commit failure"
