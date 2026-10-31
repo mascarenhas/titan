@@ -186,20 +186,52 @@ function waitExit(child, ms) {
         child.once("exit", done);
     });
 }
-function killGroup(child, signal) {
-    if (!child?.pid) return;
-    try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
+async function hasLiveMembers(group, pid) {
+    // Darwin can report EPERM for an empty group or zombie-only membership.
+    // Inspect only the owned PGID/PID and confirm non-zombie rows individually:
+    // a stale ps row may already be gone, while PID-level EPERM is still live
+    // (permission denied), never evidence that cleanup succeeded.
+    const { stdout } = await exec("ps", ["-axo", "pid=,pgid=,stat="], { timeout: 2000, maxBuffer: 4 * 1024 * 1024 });
+    for (const line of stdout.split("\n")) {
+        if (!line.trim()) continue;
+        const member = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/.exec(line);
+        if (!member) throw new Error("cannot inspect owned processes: malformed ps output");
+        const memberPid = Number(member[1]);
+        if ((group !== null && Number(member[2]) !== group) || (pid !== undefined && memberPid !== pid) ||
+            /^[ZX]/.test(member[3])) continue;
+        try { process.kill(memberPid, 0); return true; }
+        catch (error) {
+            if (error.code === "ESRCH") continue;
+            if (error.code === "EPERM") return true;
+            throw error;
+        }
+    }
+    return false;
 }
 
-function groupAlive(child) {
+async function killGroup(child, signal) {
+    if (!child?.pid) return;
+    try { process.kill(-child.pid, signal); }
+    catch (error) {
+        if (error.code === "ESRCH") return;
+        if (error.code === "EPERM" && !await hasLiveMembers(child.pid)) return;
+        throw error;
+    }
+}
+
+async function groupAlive(child) {
     if (!child?.pid) return false;
     try { process.kill(-child.pid, 0); return true; }
-    catch (error) { if (error.code === "ESRCH") return false; throw error; }
+    catch (error) {
+        if (error.code === "ESRCH") return false;
+        if (error.code === "EPERM") return hasLiveMembers(child.pid);
+        throw error;
+    }
 }
 
 async function waitGroup(child, milliseconds) {
     const deadline = performance.now() + milliseconds;
-    while (groupAlive(child)) {
+    while (await groupAlive(child)) {
         const remaining = deadline - performance.now();
         if (remaining <= 0) return false;
         await delay(Math.min(25, remaining));
@@ -210,9 +242,9 @@ async function waitGroup(child, milliseconds) {
 async function retireGroup(child) {
     // Leader exit is not group retirement: a descendant can retain this PGID
     // without either the leader PID or a browser profile in its argv.
-    killGroup(child, "SIGTERM");
+    await killGroup(child, "SIGTERM");
     if (!await waitGroup(child, 500)) {
-        killGroup(child, "SIGKILL");
+        await killGroup(child, "SIGKILL");
         if (!await waitGroup(child, 1500)) throw new Error(`owned process group ${child.pid} survived SIGKILL`);
     }
     if (!await waitExit(child, 1000)) throw new Error(`engine leader ${child.pid} did not exit`);
@@ -450,7 +482,14 @@ class ChromiumEngine {
         for (const signal of ["SIGTERM", "SIGKILL"]) {
             const pids = await matching();
             if (!pids.length) return;
-            for (const pid of pids) try { process.kill(pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
+            for (const pid of pids) {
+                try { process.kill(pid, signal); }
+                catch (error) {
+                    if (error.code === "ESRCH") continue;
+                    if (error.code === "EPERM" && !await hasLiveMembers(null, pid)) continue;
+                    throw error;
+                }
+            }
             await delay(100);
         }
         if ((await matching()).length) throw new Error("Chromium profile processes survived cleanup");

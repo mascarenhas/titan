@@ -4,7 +4,7 @@ import { spawn, execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { classify, knownTrap, observeFactory, relativePath } from "../../titan-runtime/browser/titan-browser-page.mjs";
 
@@ -137,6 +137,57 @@ async function cleanupTrackedRun(execution, files, directory) {
         } catch (error) { if (!["ENOENT", "ESRCH"].includes(error.code)) throw error; }
         finally { await rm(directory, { recursive: true, force: true }); }
     }
+}
+
+async function permissionFixture(directory, mode, files) {
+    const groupFile = join(directory, "group.json");
+    const lastFile = join(directory, "last.json");
+    const callsFile = join(directory, "calls.jsonl");
+    const profileFile = join(directory, "profile.json");
+    const profileSeen = join(directory, "profile-seen");
+    const hook = join(directory, "permission.mjs");
+    await writeFile(hook, `
+        import {appendFileSync, writeFileSync} from "node:fs";
+        const original = process.kill;
+        const mode = ${JSON.stringify(mode)};
+        const denied = () => Object.assign(new Error("kill EPERM"), {code: "EPERM", syscall: "kill"});
+        process.kill = (pid, signal) => {
+            const call = {pid, signal};
+            appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(call) + "\\n");
+            writeFileSync(${JSON.stringify(lastFile)}, JSON.stringify(call));
+            if (pid < 0) {
+                writeFileSync(${JSON.stringify(groupFile)}, String(-pid));
+                throw denied();
+            }
+            if (signal === 0 && (mode === "pid-denied" || mode === "profile-denied")) throw denied();
+            if (signal !== 0 && mode.startsWith("profile-")) throw denied();
+            return original(pid, signal);
+        };
+    `);
+    const ps = join(directory, "ps");
+    await writeFile(ps, `#!${process.execPath}
+        const {existsSync, readFileSync, writeFileSync} = require("node:fs");
+        const mode = ${JSON.stringify(mode)};
+        const group = Number(readFileSync(${JSON.stringify(groupFile)}, "utf8"));
+        const query = process.argv.slice(2).join(" ");
+        if (query === "-axo pid=,pgid=,stat=") {
+            const last = JSON.parse(readFileSync(${JSON.stringify(lastFile)}, "utf8"));
+            const pid = mode === "live" ? JSON.parse(readFileSync(${JSON.stringify(files.record)}, "utf8")).pid : group;
+            const state = mode === "zombie" || mode === "profile-zombie" ||
+                (mode === "profile-denied" && last.pid < 0) ? "Z" : "S";
+            if (mode !== "empty") process.stdout.write(pid + " " + (group + (mode === "other-group" ? 1 : 0)) + " " + state + "\\n");
+        } else if (query === "-axo pid=,args=" && mode.startsWith("profile-")) {
+            if (!existsSync(${JSON.stringify(profileSeen)})) {
+                const profile = JSON.parse(readFileSync(${JSON.stringify(profileFile)}, "utf8"));
+                writeFileSync(${JSON.stringify(profileSeen)}, "seen");
+                process.stdout.write(profile.pid + " owned --user-data-dir=" + profile.path + "\\n");
+            }
+        } else throw new Error("unexpected process inspection: " + query);
+    `, { mode: 0o755 });
+    const node = join(directory, "node");
+    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+    await writeFile(node, "#!/bin/sh\nexec " + quote(process.execPath) + " --import " + quote(pathToFileURL(hook).href) + " \"$@\"\n", { mode: 0o755 });
+    return { node, callsFile, profileFile, env: { TITAN_NODE: node, PATH: directory + ":" + process.env.PATH } };
 }
 
 test("relative asset paths stay beneath the root", () => {
@@ -528,3 +579,82 @@ for (const cdp of ["pipe", "port"]) {
         });
     });
 }
+
+test("owned group EPERM distinguishes retired members from live permission failures", { skip: !supported }, async t => {
+    for (const mode of ["empty", "zombie", "stale", "other-group", "live", "pid-denied"]) await t.test(mode, async () => {
+        const directory = await mkdtemp(join(tmpdir(), "titan-group-eperm-"));
+        const files = await descendantFixture(directory);
+        const fault = await permissionFixture(directory, mode, files);
+        let execution;
+        let livePid;
+        try {
+            let args = ["--root", root, "--js-test", fixture, "--", "args"];
+            if (mode === "live") {
+                const worker = join(directory, "worker.mjs");
+                await writeFile(worker, `
+                    import {fork} from "node:child_process";
+                    import {once} from "node:events";
+                    import {writeFileSync} from "node:fs";
+                    export async function run() {
+                        writeFileSync(${JSON.stringify(files.leader)}, String(process.pid));
+                        const child = fork(${JSON.stringify(files.descendant)}, [], {stdio: ["ignore", "ignore", "ignore", "ipc"]});
+                        await once(child, "message");
+                    }
+                `);
+                args = ["--js-test", worker];
+            }
+            execution = launch(["--engine", "node", "--timeout", "5000", "--grace", "0", ...args], fault.env);
+            const result = await execution.result;
+            const denied = mode === "live" || mode === "pid-denied";
+            assert.equal(result.status, denied ? 75 : 0, result.stderr.toString());
+            if (denied) assert.match(result.stderr.toString(), /cleanup failed: kill EPERM/);
+            else assert.doesNotMatch(result.stderr.toString(), /cleanup failed/);
+            const calls = (await readFile(fault.callsFile, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+            assert.ok(calls.some(call => call.pid < 0 && call.signal === "SIGTERM"), "group signal EPERM was not exercised");
+            if (!denied) assert.ok(calls.some(call => call.pid < 0 && call.signal === 0), "group liveness EPERM was not exercised");
+            if (["zombie", "other-group", "empty"].includes(mode)) {
+                assert.equal(calls.some(call => call.pid > 0), false, "unowned/zombie PID was probed");
+            } else assert.ok(calls.some(call => call.pid > 0 && call.signal === 0), "exact member PID was not probed");
+            if (mode === "live") {
+                livePid = JSON.parse(await readFile(files.record, "utf8")).pid;
+                assert.equal(process.kill(livePid, 0), true, "test did not retain a real denied descendant");
+            }
+        } finally {
+            await cleanupTrackedRun(execution, files, directory);
+            if (livePid) await until(() => {
+                try { process.kill(livePid, 0); return false; }
+                catch (error) { if (error.code === "ESRCH") return true; throw error; }
+            });
+        }
+    });
+});
+
+test("exact-profile PID EPERM ignores only retired processes", { skip: !supported }, async t => {
+    for (const mode of ["profile-zombie", "profile-stale", "profile-denied"]) await t.test(mode, async () => {
+        const directory = await mkdtemp(join(tmpdir(), "titan-profile-eperm-"));
+        const files = await descendantFixture(directory);
+        const fault = await permissionFixture(directory, mode, files);
+        let execution;
+        try {
+            const chrome = join(directory, "chrome");
+            await writeFile(chrome, `#!${process.execPath}
+                const {writeFileSync} = require("node:fs");
+                if (process.argv.includes("--version")) console.log("Chromium 156.0.8078.80");
+                else {
+                    const path = process.argv.find(arg => arg.startsWith("--user-data-dir=")).slice(16);
+                    writeFileSync(${JSON.stringify(fault.profileFile)}, JSON.stringify({pid: process.pid, path}));
+                    process.exit(9);
+                }
+            `, { mode: 0o755 });
+            execution = launch(["--engine", "chromium", "--chrome", chrome, "--cdp", "pipe",
+                "--timeout", "5000", "--grace", "0", "--root", root, "--js-test", fixture], fault.env);
+            const result = await execution.result;
+            assert.equal(result.status, 75, result.stderr.toString());
+            if (mode === "profile-denied") assert.match(result.stderr.toString(), /cleanup failed: kill EPERM/);
+            else assert.doesNotMatch(result.stderr.toString(), /cleanup failed/);
+            const calls = (await readFile(fault.callsFile, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+            assert.ok(calls.some(call => call.pid > 0 && call.signal === "SIGTERM"), "exact-profile signal EPERM was not exercised");
+            await absent(cleanProfile(result));
+        } finally { await cleanupTrackedRun(execution, files, directory); }
+    });
+});
