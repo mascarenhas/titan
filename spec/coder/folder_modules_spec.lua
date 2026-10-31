@@ -720,11 +720,11 @@ end
         local folder = fixture.source .. "/ensemble"
         fixtures.write(folder .. "/ensemble.titan", "this default main must never parse @@@")
         fixtures.write(folder .. "/ensemble." .. fixture.host .. ".titan", [[
-local io = import "io"
+foreign import "stdio.h"
 local total = 0
 local calls = 0
 function main(args: {string}): integer
-    io.print("" .. total .. ":" .. calls)
+    ffi.printf("%d:%d\n", total as foreign int, calls as foreign int)
     return 0
 end
 do

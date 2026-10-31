@@ -1,6 +1,6 @@
-local io = import "io"
+foreign import "stdio.h"
 
 function main(args: {string}): integer
-    io.print("browser")
+    ffi.puts("browser")
     return 0
 end
