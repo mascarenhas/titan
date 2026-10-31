@@ -461,9 +461,11 @@ Lua settings that the record could not describe truthfully.
 `make browser-sdk` uses the installed `titanc` to build the browser runtime,
 loader, runner, and standard library into `lib/titan-browser/0.6/`, and writes
 the SDK digest manifest last. It needs Node 24 to check the standard library
-before publishing it. When `EMSDK` is set and `TITAN_NODE` is not, it appends
-emsdk's bundled Node directory to `PATH`; set `TITAN_NODE` to a Node 24
-executable if an earlier `node` on `PATH` has another version. In a [separate
+before publishing it: `make browser-sdk` uses `TITAN_NODE` when set and
+nonempty, otherwise places emsdk's bundled Node directory ahead of `PATH` when
+`EMSDK` is set, and otherwise uses `node` on `PATH` (`browser provider
+validation requires Node 24: <reason>; set TITAN_NODE to a Node 24
+executable`). In a [separate
 rocks tree](#a-separate-rocks-tree), pass both roots: `make browser-sdk
 PREFIX="$PREFIX" ROCKS_TREE="$ROCKS_TREE"` copies the verified browser Lua from
 `PREFIX` into `ROCKS_TREE` before it builds.
@@ -718,9 +720,10 @@ under [Bundled OpenSSL](#bundled-openssl).
 Run `titan-uninstall` from the installation. It asks LuaRocks to remove every installed
 Titan rock version in the selected tree, including the compiler scripts and modules,
 the support module, and private payloads. Only if that succeeds does it remove Titan's
-external headers, providers, runtime archive, notices, and build-profile record. Lua, LuaRocks,
-dependency Lua modules, the browser Lua in `lib/browser/`, the browser SDK in
-`lib/titan-browser/`, and shared third-party headers and libraries stay. Titan's
+external headers, providers, runtime archive, notices, build-profile record, and the
+`make browser-sdk`-owned files under `lib/titan-browser/<ver>/`. Lua, LuaRocks,
+dependency Lua modules, the browser Lua in `lib/browser/`, user archives in
+`lib/titan-browser/<ver>/`, and shared third-party headers and libraries stay. Titan's
 canonical paths are shared by all rock versions, so the command cleans the whole Titan
 installation in that tree. You cannot remove one version.
 

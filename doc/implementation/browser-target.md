@@ -243,7 +243,8 @@ browser SDK is incomplete: missing "<path>"; run 'make browser-sdk PREFIX=<prefi
 
 `driver.require_browser_sdk(context)` supplies `install`: `prefix` is
 `driver.INSTALL_PATHS.root` (the descriptor root when unset) and `rocks_tree`
-is the `ROCKS_TREE` environment variable, which selects the second form. The
+is the nonempty `ROCKS_TREE` environment variable, which selects the second
+form. The
 check runs only at a program or test link, before the executing protocol
 check, and in `make browser-sdk` itself; object compilation never runs it.
 
@@ -258,14 +259,18 @@ library, or the native SDK build, and it clears ambient `LUA_PATH`,
 `browser-sdk: installed titanc not found; run 'luarocks make' or 'make
 install-compiler-sdk' first`. Every child gets `TITAN_ROOT` set to the
 installation tree, `TITAN_PATH_0_6` set to the checkout, and an empty
-`TITAN_PATH`. When `EMSDK` is set and `TITAN_NODE` is not, the recipe appends
-the first executable `$EMSDK/node/*/bin` directory to `PATH`. The build
-directory is `TITAN_BROWSER_BUILD_DIR` (default `$(TITAN_OUTPUT_DIR)/browser-sdk`),
-a browser `--output` root.
+`TITAN_PATH`. When `TITAN_NODE` is unset or empty, the recipe unsets
+`TITAN_NODE` and, when `EMSDK` is set, prepends the first executable
+`$EMSDK/node/*/bin` directory to `PATH` ahead of any existing `node`. The
+build directory is `TITAN_BROWSER_BUILD_DIR` (default
+`$(TITAN_OUTPUT_DIR)/browser-sdk`), a browser `--output` root.
 
-1. `scripts/browser_sdk.lua prepare` stages a differing root (below), removes
-   a stale `sdk-digests` so that an interrupted run cannot leave a manifest
-   describing old files, and creates `titan_bin`.
+1. `scripts/browser_sdk.lua prepare` stages a differing root (below), checks
+   Node 24 up front with `driver.browser_node_ready` against the checkout's
+   runner (`browser provider validation requires Node 24: <reason>; set
+   TITAN_NODE to a Node 24 executable`), removes a stale `sdk-digests` so that
+   an interrupted run cannot leave a manifest describing old files, and creates
+   `titan_bin`.
 2. `titanc --target browser --output <build> -c --incremental
    --print-c-objects` compiles the four runtime sources and the five
    LPegLabel sources as `--c-source` nodes; Make reads the certified object
@@ -276,7 +281,8 @@ a browser `--output` root.
    member-verification path), rejects any member that imports a `GOT.*`
    symbol or refers to `dlopen`, `dlsym`, `dlerror`, or a `backtrace_` name,
    copies the JavaScript and runner assets (the launcher executable), and
-   checks readiness with `browserlink.require_sdk`.
+   checks readiness with `browserlink.require_sdk` and
+   `driver.browser_node_ready` against the staged runner.
 4. `titanc --target browser --output <build> --source-first --incremental
    titan.test titan.coroutine titan.gc` publishes `<build>/titan.a` through
    ordinary library mode, which runs the executing protocol check against the

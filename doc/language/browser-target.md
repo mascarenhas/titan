@@ -134,10 +134,12 @@ make browser-sdk PREFIX="$PREFIX"
 
 It uses the installed `titanc --target browser` and needs Node 24, because it
 publishes the browser standard library through the same check as any browser
-library. When `EMSDK` is set and `TITAN_NODE` is not, the target appends
-emsdk's bundled Node directory to the end of `PATH`, so a different `node`
-earlier on `PATH` still wins; set `TITAN_NODE` when that `node` is not version
-24. It installs into `lib/titan-browser/0.6/` under the Titan installation
+library. The target prefers `TITAN_NODE` when set and nonempty; otherwise,
+when `EMSDK` is set, it places emsdk's bundled Node directory ahead of `PATH`,
+and otherwise uses `node` on `PATH`, checking for Node 24 before compiling
+(`browser provider validation requires Node 24: <reason>; set TITAN_NODE to a
+Node 24 executable`). It installs into `lib/titan-browser/0.6/` under the
+Titan installation
 root:
 
 | File | Contents |
@@ -183,7 +185,7 @@ library is published, and then names the command that installs it:
 browser SDK is incomplete: missing "/home/me/.local/titan/lib/titan-browser/0.6/libtitan.a"; run 'make browser-sdk PREFIX=/home/me/.local/titan'
 ```
 
-When `ROCKS_TREE` is set, the command also passes `ROCKS_TREE=<tree>`.
+When `ROCKS_TREE` is set and not empty, the command also passes `ROCKS_TREE=<tree>`.
 Compiling objects never needs the SDK.
 
 ## Selecting the target
