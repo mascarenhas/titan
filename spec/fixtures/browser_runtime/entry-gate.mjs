@@ -76,7 +76,7 @@ export async function run(context) {
         context.assert((observed & 255) === 0, "authored FFI frames did not retire");
         context.assert(((observed >>> 8) & 63) === 63, "lua_close omitted a retained nested defer");
         context.assert((observed & (1 << 14)) === 0, "lua_close repeated a defer or entered abandoned continuation/catch");
-        context.assert((observed >>> 16) >= 2576, "gate did not perform the required real waits");
+        context.assert((observed >>> 16) === 2578, "gate did not perform exactly 2578 real waits");
         emit({item: 9, closeMask: (observed >>> 8) & 63, duplicateOrContinuation: 0, waits: observed >>> 16});
       }
       return {elapsed, tickTimes, frames, output};

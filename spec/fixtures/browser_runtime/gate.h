@@ -12,4 +12,6 @@ void gate_close_event(int id);
 void gate_forbidden(void);
 int gate_wait_count(void);
 int gate_frame_peak(void);
+int gate_lua_depth(void);
+int gate_callinfo_c_depth(void);
 #endif
