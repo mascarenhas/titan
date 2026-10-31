@@ -900,14 +900,17 @@ output root and each held lock domain again and reserves every
   selection, compiler link-stage discovery, or native library execution, and
   the native library policy carries no native link inputs. A program or test
   uses backend `wasm`: the policy appends `-Wl,--trace` (the pinned `wasm-ld`
-  rejects GNU `--dependency-file`), `compile_browser_image` captures the
-  linker's stdout through `context.io:run` with stderr inherited and writes it
-  to the ticket's `dependency_output`, and on commit each trace line must name
-  a regular file, or an `archive(member)` whose archive is one, and every
-  named file is hashed through the existing certificate machinery (`NUL in
-  Wasm linker input trace`, `invalid Wasm linker input trace: <line>`, `empty
-  Wasm linker input trace`). Opaque link-flag mechanisms and uncertified inputs
-  still make either record uncacheable; neither backend is a permissive
+  rejects GNU `--dependency-file`) and `prepare` records `policy.trace_inputs`
+  (the `FILE_FIELDS` paths); `compile_browser_image` captures the linker's
+  stdout through `context.io:run` with stderr inherited and writes it to the
+  ticket's `dependency_output`, and on commit each trace line must name a
+  regular file, or an `archive(member)` whose archive is resolved by testing
+  every `(` boundary against `policy.trace_inputs` first and then against
+  regular archives on disk, and every named file is hashed through the existing
+  certificate machinery (`NUL in Wasm linker input trace`, `ambiguous Wasm
+  linker input trace: <line>`, `invalid Wasm linker input trace: <line>`,
+  `empty Wasm linker input trace`). Opaque link-flag mechanisms and uncertified
+  inputs still make either record uncacheable; neither backend is a permissive
   fallback.
 * **SDK digests.** `titanc` loads the browser SDK digest manifest only from
   `descriptor.paths.sdk_digests`; a missing browser SDK contributes no entries,
@@ -1107,8 +1110,8 @@ entrypoint](#the-browser-entrypoint) and calls `driver.compile_browser_image`.
 
 `driver.compile_browser_image(contents, entrypoint, executable, objects,
 archives, extra_objects, verbose, options)` (with `options.context` required,
-plus optional `profile`, `before_commit`, `final_link_flags`, and
-`dependency_output`) links one image:
+plus optional `profile`, `before_commit`, `after_publish`, `final_link_flags`,
+and `dependency_output`) links one image:
 
 1. require the SDK, select the plan (an explicit `options.profile`, otherwise
    `browser_link_plan`), and check the final link extras with
@@ -1129,15 +1132,23 @@ plus optional `profile`, `before_commit`, `final_link_flags`, and
    `dlerror`, or `backtrace` (with or without a leading underscore): `browser
    image imports forbidden symbol "<name>"`;
 6. run `before_commit` (which invalidates the link record);
-7. move an existing Wasm aside, rename the staged Wasm into place, then rename
-   the staged `.mjs` over the destination. The `.mjs` rename is the commit
-   point: if either rename fails, the new Wasm is removed and the previous one
-   restored (`cannot restore Wasm: <reason>; predecessor retained at <path>`
-   when even that fails). The backup is removed after the commit.
+7. move an existing Wasm (`Wasm output '<path>' is not a regular file`) and,
+   when `after_publish` is set, an existing `.mjs` (`browser module output
+   '<path>' is not a regular file`) aside, rename the staged Wasm into place,
+   rename the staged `.mjs` over the destination, and run `after_publish`
+   (`titanc` commits the link certificate there). The `.mjs` rename (followed
+   by `after_publish` when present) is the commit point: if either rename or
+   `after_publish` fails, the new files are removed and the previous ones
+   restored (`cannot restore browser module: <reason>; predecessor retained at
+   <path>` and `cannot restore Wasm: <reason>; predecessor retained at <path>`
+   when even that fails). The backups are removed after the commit.
 
-An image owns no DSO, debug bundle, or dSYM companion. A warm link hit
-verifies both files, and a damaged `.mjs` or `.wasm` forces a relink while
-objects still hit. Final images never read `.titan.meta`, `.titan.source`, or
+An image owns no DSO, debug bundle, or dSYM companion
+(`validate_program_output_paths` reserves the `.wasm` sibling in
+`extra_outputs` and omits `.dSYM` on Darwin hosts for a browser context). A
+warm link hit verifies both files, and a damaged `.mjs` or `.wasm` forces a
+relink while objects still hit. Final images never read `.titan.meta`,
+`.titan.source`, or
 `.titan.cprobe`; `wasm-ld` drops the `.titan.meta` and `.titan.cprobe`
 segments and keeps `.titan.source` ([Baseline](#baseline)). Every image
 imports Lua's `env.exit`, which neither the entrypoint nor completion uses.

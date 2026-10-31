@@ -1099,8 +1099,12 @@ are never part of `spec.outputs`. Each target owns
     `ticket.dependency_argv` is `{ "-Wl,--trace" }` and
     `ticket.dependency_output` names the dependency file; the image link
     captures `wasm-ld`'s stdout there. On commit each trace line must be a
-    regular file or an `archive(member)` whose archive is one, and every file
-    is hashed ([Object and link identity](browser-target.md#object-and-link-identity)).
+    regular file or an `archive(member)` whose archive is resolved across `(`
+    boundaries against `policy.trace_inputs` (`FILE_FIELDS` paths) and then
+    regular archives on disk, and every file is hashed (`titanc` commits the
+    certificate inside `compile_browser_image`'s `after_publish` rollback
+    window; see [Object and link
+    identity](browser-target.md#object-and-link-identity)).
   * **`darwin` backend (`driver.IS_DARWIN`).** Appends
     `ticket.dependency_argv = { "-Wl,-dependency_info," .. dependency_file }`
     to the final executable or public DSO link. On commit,

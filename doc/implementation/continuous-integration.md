@@ -91,8 +91,8 @@ Each covered shard excludes explicit `#stress` cases, then runs its listed
 stress oracles separately without LuaCov. Keep a small covered companion over
 the same compiler paths. A shard pair merges stats only after both workers
 pass, generates its own report, and uploads directly with the `compiler`
-Codecov flag. The stdlib integration upload uses that same flag, so there is
-no full-tree merger job.
+Codecov flag. The stdlib integration and `browser-toolchain` uploads use that
+same flag, so there is no full-tree merger job.
 
 Local `rock-test` uses the same timing dataset and partition rule, per file and
 without LuaCov; see [Busted partitions](test-runner.md#busted-partitions).
@@ -185,7 +185,8 @@ fork's installer reads the gitlinked revision to write the record; the
 workflow hardcodes no fork revision. Pins live in `TITAN_`-prefixed variables
 (`TITAN_EMSDK_VERSION`, `TITAN_EMSDK_ROOT`, `TITAN_CHROME_VERSION`,
 `TITAN_CHROME_SHA256`, `TITAN_CHROME_ROOT`), because `emsdk_env.sh` unsets
-every `EMSDK_*` variable it does not set itself. The steps are:
+every `EMSDK_*` variable it does not set itself, and the job sets
+`permissions.id-token: write` for its Codecov upload. The steps are:
 
 1. **Emscripten.** `ubicloud/cache@v4` restores `.emsdk` under the key
    `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
@@ -218,41 +219,48 @@ every `EMSDK_*` variable it does not set itself. The steps are:
    LPegLabel archive.
 7. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
-   prefix's installed `busted` runs the eleven real-toolchain files
-   `spec/wasm_toolchain_spec.lua`, `spec/coder/browser_toolchain_spec.lua`,
+   prefix's installed `busted -c -o gtest -v` runs the eleven real-toolchain
+   files `spec/wasm_toolchain_spec.lua`, `spec/coder/browser_toolchain_spec.lua`,
    `spec/coder/browser_providers_spec.lua`,
    `spec/coder/browser_incremental_spec.lua`,
    `spec/coder/browser_images_spec.lua`, `spec/coder/browser_protocol_spec.lua`,
    `spec/browser_sdk_spec.lua`, `spec/coder/browser_entry_gate_spec.lua`,
    `spec/coder/browser_fixtures_spec.lua`,
-   `spec/coder/browser_budgets_spec.lua`, and `spec/minicoro_spec.lua`, with
-   output copied to `$RUNNER_TEMP/browser-gate.log`. A missing gate file fails
-   with `missing browser real-toolchain spec: <path>` before Busted starts.
-   The entry-gate and budget specs build their own assertion-on and
-   assertion-off images, and the gate, fixture, budget, and minicoro specs run
-   both engines.
-8. **Runner images.** The installed `titanc` builds `runner_image` (a
+   `spec/coder/browser_budgets_spec.lua`, and `spec/minicoro_spec.lua` under
+   LuaCov, with output copied to `$RUNNER_TEMP/browser-gate.log`. A missing
+   gate file fails with `missing browser real-toolchain spec: <path>` before
+   Busted starts. The entry-gate and budget specs build their own assertion-on
+   and assertion-off images, and the gate, fixture, budget, and minicoro specs
+   run both engines.
+8. **Browser compiler coverage.** `luacov "titan%-compiler/" "titanc$"` and
+   `prepare_codecov_report.lua` produce `luacov.report.out` and
+   `luacov.codecov.out`, and `codecov/codecov-action@v7` uploads
+   `./luacov.codecov.out` with `flags: compiler`, `name: browser`,
+   `use_oidc: true`, and `fail_ci_if_error: true`, so the real linking and
+   executing-protocol paths that are pending in the emsdk-free shards are
+   measured.
+9. **Runner images.** The installed `titanc` builds `runner_image` (a
    `--test` image) and `runner_status` (a program) from `spec/browser` into
    `out/browser/runner`.
-9. **Loader images.** For assertions 2 and 0, the job selects the `program`
-   profile through `driver.browser_link_options` and builds `loader_app` and
-   `fidelity` (programs with `--c-source spec/fixtures/browser_loader/loader.c`)
-   and `loader_names` (a `--test` image) into `out/browser/loader`. It also
-   builds one `fidelity` image with the `baseline` profile at `O2` and
-   assertions off, plus the harness-only `--cflag=-g2 --ldflag=-g2
-   --ldflag=-Os`, because Emscripten 6.0.13 minifies export names only at
-   `-O3` or a shrink level.
-10. **Loader suite.** The installed `titan-browser-run --js-test
+10. **Loader images.** For assertions 2 and 0, the job selects the `program`
+    profile through `driver.browser_link_options` and builds `loader_app` and
+    `fidelity` (programs with `--c-source spec/fixtures/browser_loader/loader.c`)
+    and `loader_names` (a `--test` image) into `out/browser/loader`. It also
+    builds one `fidelity` image with the `baseline` profile at `O2` and
+    assertions off, plus the harness-only `--cflag=-g2 --ldflag=-g2
+    --ldflag=-Os`, because Emscripten 6.0.13 minifies export names only at
+    `-O3` or a shrink level.
+11. **Loader suite.** The installed `titan-browser-run --js-test
     spec/browser/loader.test.mjs`, rooted at the workspace with relative image
     paths, runs under Node and then Chromium.
-11. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
+12. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
     runs against the minified image under both engines.
-12. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
+13. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
     `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
     `TITAN_BROWSER_RUNNER` (the installed launcher), and
     `TITAN_BROWSER_LOADER_IMAGE` (the assertions-2 `fidelity` image), with
     output copied to `$RUNNER_TEMP/browser-runner.log`.
-13. **Failure logs.** On failure, `actions/upload-artifact` uploads the
+14. **Failure logs.** On failure, `actions/upload-artifact` uploads the
     `browser-*.log` files and `out/browser` for seven days.
 
 The browser target's spec files (`spec/browser_isolation_spec.lua`,

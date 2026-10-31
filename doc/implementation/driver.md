@@ -2023,7 +2023,8 @@ identity. The optional `options` table carries `context`, `no_uv_bootstrap`,
 dependency-report flag, appended only to the final Unix executable link),
 `dependency_output` (where a browser link writes its captured linker trace),
 `before_commit` (invalidating the link certificate record before mutating
-public outputs), `output_module`, `output_root`, `coverage_runtime`,
+public outputs), `after_publish` (committing the browser link certificate inside
+the image rollback window), `output_module`, `output_root`, `coverage_runtime`,
 `module_names`, `archive_entries`, and `archive_names`. On Windows,
 `compile_windows_program` stages both the
 provider `.dll` and launcher `.exe`, validates the staged DLL in a fresh child
@@ -2187,7 +2188,8 @@ path with `.mjs` appended. The details are in the browser-target chapter:
 * **Linking** uses `browserlink.profile`, compiles the entrypoint with the
   descriptor's prefix, links with `emcc` into a staging directory, checks the
   final image's imports, and publishes `<stem>.wasm` and then `<stem>.mjs` as
-  one pair with Wasm rollback
+  one pair (running `after_publish` inside the rollback window and restoring
+  both predecessors on failure)
   ([Program and test images](browser-target.md#program-and-test-images),
   [The link profile](browser-target.md#the-link-profile)).
 * **The protocol runner.** Before a browser program or test links, `titanc`
