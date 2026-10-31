@@ -276,11 +276,10 @@ jobs:
       contents: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      CC: gcc-14
-      # One pin for the toolchain, its cache key and the build record the
-      # fork's install-browser writes.
-      EMSDK_VERSION: "6.0.13"
-      EMSDK_ROOT: ${{ github.workspace }}/.emsdk
+      # emsdk_env.sh unsets every EMSDK_* input it does not set itself, so the
+      # pin and the installation root must not use that prefix.
+      TITAN_EMSDK_VERSION: "6.0.13"
+      TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
 
@@ -309,32 +308,32 @@ jobs:
         uses: ubicloud/cache@v4
         with:
           path: ${{ github.workspace }}/.emsdk
-          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.EMSDK_VERSION }}-v1
+          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.EMSDK_VERSION }}-
+            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
 
-      - name: Install Emscripten ${{ env.EMSDK_VERSION }}
+      - name: Install Emscripten ${{ env.TITAN_EMSDK_VERSION }}
         run: |
-          if [ ! -x "$EMSDK_ROOT/emsdk" ]; then
+          if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
             # The clone is the installer, not the pin: the pin is the release
             # tag that install activates and the record names.
-            rm -rf "$EMSDK_ROOT"
+            rm -rf "$TITAN_EMSDK_ROOT"
             git clone --depth 1 https://github.com/emscripten-core/emsdk.git \
-              "$EMSDK_ROOT"
+              "$TITAN_EMSDK_ROOT"
           fi
           # Both commands are idempotent, so a restored installation only
           # verifies the pinned version instead of downloading it again.
-          "$EMSDK_ROOT/emsdk" install "$EMSDK_VERSION"
-          "$EMSDK_ROOT/emsdk" activate "$EMSDK_VERSION"
-          source "$EMSDK_ROOT/emsdk_env.sh"
+          "$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"
+          "$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
           emcc --version | head -n 1
           installed=$(emcc --version |
             sed -n 's/.*) \([0-9][0-9.]*\).*/\1/p' | head -n 1)
-          test "$installed" = "$EMSDK_VERSION"
+          test "$installed" = "$TITAN_EMSDK_VERSION"
 
       - name: Install the fork's browser Lua into the validation prefix
         run: |
-          source "$EMSDK_ROOT/emsdk_env.sh"
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
           make -C lua-5.5.1 install-browser PREFIX="$PREFIX"
           for installed in liblua.a liblua-config.txt \
               include/lua.h include/luaconf.h include/lstate.h; do
@@ -350,7 +349,7 @@ jobs:
           TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
           TITAN_PROBE_CACHE_DISABLE: "1"
         run: |
-          source "$EMSDK_ROOT/emsdk_env.sh"
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
           gate_specs=(
             spec/wasm_toolchain_spec.lua
             spec/coder/browser_toolchain_spec.lua
