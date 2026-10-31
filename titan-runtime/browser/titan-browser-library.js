@@ -6,7 +6,9 @@ addToLibrary({
   $TitanBrowser__postset: 'TitanBrowser.install();',
   $TitanBrowser: {
     liveDepth: 0,
-    continuing: 0,
+    admissionDepth: 0,
+    continuing: -1,
+    guarded: null,
     suspensionPending: false,
     completionCount: 0,
     terminalFailure: null,
@@ -35,14 +37,24 @@ addToLibrary({
 
     install() {
 #if ASYNCIFY
+      TitanBrowser.guarded = new Set();
+      var instrumentExports = Asyncify.instrumentWasmExports;
+      Asyncify.instrumentWasmExports = (exports) => {
+        for (var name of ['titan_browser_entry', 'titan_browser_gate_guarded']) {
+          if (typeof exports[name] === 'function') TitanBrowser.guarded.add(exports[name]);
+        }
+        return instrumentExports(exports);
+      };
       // Pin to Emscripten 6.0.13's export instrumentation. The outer wrapper
       // stays live through maybeStopUnwind's entire fiber trampoline, not just
       // one fiber switch. doRewind's map must use this same wrapper.
       var instrument = Asyncify.instrumentFunction;
       Asyncify.instrumentFunction = (original) => {
         var inner = instrument(original);
+        var guarded = TitanBrowser.guarded.has(original);
         var outer = (...args) => {
           ++TitanBrowser.liveDepth;
+          if (guarded) ++TitanBrowser.admissionDepth;
           try {
             return inner(...args);
           } catch (cause) {
@@ -51,6 +63,7 @@ addToLibrary({
             }
             throw cause;
           } finally {
+            if (guarded) --TitanBrowser.admissionDepth;
             --TitanBrowser.liveDepth;
             TitanBrowser.schedule();
           }
@@ -82,7 +95,10 @@ addToLibrary({
           Module['titanBrowserSafePoint']?.(TitanBrowser.suspensionPending);
         }
         var previous = TitanBrowser.continuing;
-        TitanBrowser.continuing = TitanBrowser.liveDepth + 1;
+        // invoke_* / dynCall_* may re-enter compiled code internally. They
+        // affect safe delivery, but are not a new Titan-facing admission.
+        TitanBrowser.continuing = TitanBrowser.admissionDepth +
+          (TitanBrowser.guarded.has(Asyncify.getDataRewindFunc(data)) ? 1 : 0);
         try {
           return rewind(data);
         } finally {
@@ -111,12 +127,12 @@ addToLibrary({
   titan_browser_entry_allowed: () => {
     // Rewind/fiber continuations are already admitted. External calls must not
     // enter an active compiled stack, a pending wait, or a retired instance.
-    return (TitanBrowser.continuing &&
-            TitanBrowser.liveDepth === TitanBrowser.continuing) ||
+    return (TitanBrowser.continuing >= 0 &&
+            TitanBrowser.admissionDepth === TitanBrowser.continuing) ||
       (!TitanBrowser.blocked && !TitanBrowser.terminalFailure &&
        !TitanBrowser.completionCount && !TitanBrowser.suspensionPending &&
 #if ASYNCIFY
-       TitanBrowser.liveDepth === 1
+       TitanBrowser.admissionDepth === 1
 #else
        true
 #endif
