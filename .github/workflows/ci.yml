@@ -275,6 +275,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      # The browser gate uploads its own compiler coverage report.
+      id-token: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       MAKEFLAGS: "-j4"
@@ -462,8 +464,29 @@ jobs:
               exit 1
             fi
           done
-          "$PREFIX/bin/busted" "${gate_specs[@]}" \
+          "$PREFIX/bin/busted" -c -o gtest -v "${gate_specs[@]}" \
             2>&1 | tee "$RUNNER_TEMP/browser-gate.log"
+
+      # The real linking and executing-protocol paths only run here, so this
+      # job contributes its own compiler coverage instead of leaving them
+      # unmeasured in the emsdk-free shards.
+      - name: Generate browser coverage report
+        run: |
+          set -euo pipefail
+          luacov "titan%-compiler/" "titanc$"
+          grep "Summary" -B1 -A1000 luacov.report.out
+          lua spec/support/prepare_codecov_report.lua \
+            luacov.report.out luacov.codecov.out
+
+      - name: Upload browser coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: ./luacov.codecov.out
+          flags: compiler
+          name: browser
+          use_oidc: true
 
       - name: Build the browser runner images
         run: |
