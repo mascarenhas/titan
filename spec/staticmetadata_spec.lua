@@ -282,9 +282,280 @@ local function coff_object(payload, options)
     return table.concat(parts)
 end
 
+local function uleb(value, width)
+    local bytes = {}
+    repeat
+        local digit = value & 0x7f
+        value = value >> 7
+        local more = value ~= 0 or (width ~= nil and #bytes + 1 < width)
+        if more then digit = digit | 0x80 end
+        bytes[#bytes + 1] = string.char(digit)
+    until not more
+    return table.concat(bytes)
+end
+
+local function sleb(value, width)
+    local bytes = {}
+    while true do
+        local digit = value & 0x7f
+        value = value >> 7
+        local sign = (digit & 0x40) ~= 0
+        local done = ((value == 0 and not sign) or (value == -1 and sign)) and
+            (width == nil or #bytes + 1 >= width)
+        if not done then digit = digit | 0x80 end
+        bytes[#bytes + 1] = string.char(digit)
+        if done then break end
+    end
+    return table.concat(bytes)
+end
+
+local function wasm_str(text, width)
+    return uleb(#text, width) .. text
+end
+
+local function wasm_sec(id, body, width)
+    return string.char(id) .. uleb(#body, width) .. body
+end
+
+local function wasm_custom(name, body, width)
+    return wasm_sec(0, wasm_str(name, width) .. body, width)
+end
+
+local function wasm_object(payload, options)
+    options = options or {}
+    local pad = options.pad and 5 or nil
+    local out = {
+        (options.magic or "\0asm") .. uint(options.version or 1, 4, "little"),
+    }
+    local section_count = 0
+    local data_section_index
+    local function emit(bytes)
+        out[#out + 1] = bytes
+        section_count = section_count + 1
+        return section_count - 1
+    end
+
+    if options.dylink then
+        emit(wasm_custom(options.dylink == true and "dylink.0" or options.dylink, "\0", pad))
+    end
+    if options.type_section then
+        emit(wasm_sec(1, options.type_section, pad))
+    end
+    if options.imports ~= false then
+        local imports = options.imports or {
+            {
+                module = "env",
+                name = "__linear_memory",
+                kind = 2,
+                flags = options.memory_flags or 0,
+                initial = 1,
+                maximum = options.memory_max,
+            },
+        }
+        local items = { uleb(#imports, pad) }
+        for _, imp in ipairs(imports) do
+            items[#items + 1] = wasm_str(imp.module, pad) ..
+                wasm_str(imp.name, pad) .. string.char(imp.kind)
+            if imp.kind == 0 then
+                items[#items + 1] = uleb(imp.type_index or 0, pad)
+            elseif imp.kind == 1 then
+                items[#items + 1] = string.char(imp.elem_type or 0x70) ..
+                    uleb(imp.flags or 0, pad) .. uleb(imp.initial or 1, pad) ..
+                    ((imp.flags or 0) & 1 ~= 0 and uleb(imp.maximum or 1, pad) or "")
+            elseif imp.kind == 2 then
+                items[#items + 1] = uleb(imp.flags or 0, pad) ..
+                    uleb(imp.initial or 1, pad) ..
+                    ((imp.flags or 0) & 1 ~= 0 and uleb(imp.maximum or 1, pad) or "")
+            elseif imp.kind == 3 then
+                items[#items + 1] = string.char(imp.valtype or 0x7f) ..
+                    string.char(imp.mutable or 1)
+            elseif imp.kind == 4 then
+                items[#items + 1] = string.char(imp.attribute or 0) ..
+                    uleb(imp.type_index or 0, pad)
+            end
+        end
+        emit(wasm_sec(2, table.concat(items), pad))
+    end
+    if options.memory_section_flags ~= nil then
+        emit(wasm_sec(5, uleb(1, pad) .. uleb(options.memory_section_flags, pad) .. uleb(1, pad), pad))
+    end
+    for _, raw in ipairs(options.extra_sections_before_data or {}) do
+        emit(raw)
+    end
+
+    local segments = options.segments
+    if not segments then
+        segments = {}
+        if payload ~= nil then
+            local seg = {
+                name = options.section_name or ".titan.meta",
+                payload = payload,
+                mode = options.segment_mode or 0,
+                memory_index = options.segment_memory or 0,
+                offset = options.segment_offset or 0,
+                opcode = options.segment_opcode or 0x41,
+                align_exp = options.align_exp or 0,
+                flags = options.segment_flags or 0,
+            }
+            segments[1] = seg
+            if options.duplicate then segments[2] = seg end
+        end
+    end
+
+    if options.datacount ~= nil or options.include_datacount then
+        emit(wasm_sec(12, uleb(options.datacount or #segments, pad), pad))
+    end
+    if options.include_code then
+        emit(wasm_sec(10, uleb(0, pad), pad))
+    end
+
+    local first_payload_body_offset = 0
+    if #segments > 0 and not options.no_data_section then
+        local data_items = { uleb(#segments, pad) }
+        local current_len = #data_items[1]
+        for index, seg in ipairs(segments) do
+            local mode = seg.mode or 0
+            local header = uleb(mode, pad)
+            if mode == 0 or mode == 2 then
+                if mode == 2 then
+                    header = header .. uleb(seg.memory_index or 0, pad)
+                end
+                header = header .. string.char(seg.opcode or 0x41) ..
+                    sleb(seg.offset or 0, pad) .. "\x0b"
+            end
+            local size_leb = uleb(#seg.payload, pad)
+            if index == 1 then
+                first_payload_body_offset = current_len + #header + #size_leb
+            end
+            local entry = header .. size_leb .. seg.payload
+            data_items[#data_items + 1] = entry
+            current_len = current_len + #entry
+        end
+        data_section_index = emit(wasm_sec(11, table.concat(data_items), pad))
+    end
+
+    for _, raw in ipairs(options.extra_sections_before_linking or {}) do
+        emit(raw)
+    end
+
+    if not options.no_linking then
+        local linking_parts = { uleb(options.linking_version or 2, pad) }
+        if not options.no_segment_info and (#segments > 0 or options.segment_info_count ~= nil) then
+            local info_count = options.segment_info_count or #segments
+            local seg_items = { uleb(info_count, pad) }
+            for index = 1, info_count do
+                local seg = segments[index] or { name = ".data", align_exp = 0, flags = 0 }
+                seg_items[#seg_items + 1] = wasm_str(seg.name or ".titan.meta", pad) ..
+                    uleb(seg.align_exp or 0, pad) .. uleb(seg.flags or 0, pad)
+            end
+            local sub_body = table.concat(seg_items)
+            linking_parts[#linking_parts + 1] = "\5" .. uleb(#sub_body, pad) .. sub_body
+        end
+        if options.init_funcs then
+            local items = { uleb(#options.init_funcs, pad) }
+            for _, fn in ipairs(options.init_funcs) do
+                items[#items + 1] = uleb(fn.priority or 65535, pad) .. uleb(fn.symbol or 0, pad)
+            end
+            local sub_body = table.concat(items)
+            linking_parts[#linking_parts + 1] = "\6" .. uleb(#sub_body, pad) .. sub_body
+        end
+        if options.comdats then
+            local items = { uleb(#options.comdats, pad) }
+            for _, comdat in ipairs(options.comdats) do
+                local entries = { wasm_str(comdat.name or "grp", pad), uleb(comdat.flags or 0, pad),
+                    uleb(#(comdat.entries or {}), pad) }
+                for _, entry in ipairs(comdat.entries or {}) do
+                    entries[#entries + 1] = string.char(entry.kind or 0) .. uleb(entry.index or 0, pad)
+                end
+                items[#items + 1] = table.concat(entries)
+            end
+            local sub_body = table.concat(items)
+            linking_parts[#linking_parts + 1] = "\7" .. uleb(#sub_body, pad) .. sub_body
+        end
+        if options.symbols then
+            local items = { uleb(#options.symbols, pad) }
+            for _, sym in ipairs(options.symbols) do
+                local flags = sym.flags or 0
+                local defined = (flags & 0x10) == 0
+                local explicit_name = (flags & 0x40) ~= 0
+                local part = string.char(sym.kind) .. uleb(flags, pad)
+                if sym.kind == 0 or sym.kind == 2 or sym.kind == 4 or sym.kind == 5 then
+                    part = part .. uleb(sym.index or 0, pad)
+                    if defined or explicit_name then
+                        part = part .. wasm_str(sym.name or "sym", pad)
+                    end
+                elseif sym.kind == 1 then
+                    part = part .. wasm_str(sym.name or "data_sym", pad)
+                    if defined then
+                        if (flags & 0x200) == 0 then
+                            part = part .. uleb(sym.index or 0, pad)
+                        end
+                        part = part .. uleb(sym.offset or 0, pad) .. uleb(sym.size or 0, pad)
+                    end
+                elseif sym.kind == 3 then
+                    part = part .. uleb(sym.index or 0, pad)
+                end
+                items[#items + 1] = part
+            end
+            local sub_body = table.concat(items)
+            linking_parts[#linking_parts + 1] = "\8" .. uleb(#sub_body, pad) .. sub_body
+        end
+        for _, sub_raw in ipairs(options.extra_linking_subsections or {}) do
+            linking_parts[#linking_parts + 1] = sub_raw
+        end
+        emit(wasm_custom("linking", table.concat(linking_parts), pad))
+    end
+
+    if options.relocation or options.relocations then
+        local relocs = options.relocations or {
+            {
+                name = "reloc.DATA",
+                target = options.relocation_target or data_section_index or 0,
+                entries = {
+                    {
+                        type = options.relocation_type or 5,
+                        offset = options.relocation_offset or first_payload_body_offset,
+                        symbol = 0,
+                        addend = 0,
+                    },
+                },
+            },
+        }
+        for _, reloc in ipairs(relocs) do
+            local rparts = {
+                uleb(reloc.target, pad),
+                uleb(#reloc.entries, pad),
+            }
+            for _, entry in ipairs(reloc.entries) do
+                rparts[#rparts + 1] = string.char(entry.type) ..
+                    uleb(entry.offset or 0, pad) .. uleb(entry.symbol or 0, pad) ..
+                    (entry.addend ~= nil and sleb(entry.addend, pad) or "")
+            end
+            emit(wasm_custom(reloc.name or "reloc.DATA", table.concat(rparts), pad))
+        end
+    end
+
+    if options.features ~= false then
+        local features = options.features or {
+            { "+", "bulk-memory" },
+            { "+", "sign-ext" },
+        }
+        local fparts = { uleb(#features, pad) }
+        for _, feat in ipairs(features) do
+            fparts[#fparts + 1] = feat[1] .. wasm_str(feat[2], pad)
+        end
+        emit(wasm_custom("target_features", table.concat(fparts), pad))
+    end
+
+    for _, raw in ipairs(options.extra_sections_after_linking or {}) do
+        emit(raw)
+    end
+    return table.concat(out)
+end
+
 describe("bounded raw object sections", function()
     local names = { elf = ".titan.cprobe", macho_segment = "__DATA",
-        macho_section = "__titancprobe", coff = ".titan.cprobe" }
+        macho_section = "__titancprobe", coff = ".titan.cprobe", wasm = ".titan.cprobe" }
     local payload = "TITENUM\0\1\12\1\6"
     local function extract(bytes, limit)
         return staticmetadata.read_object_section(bytes, "query.o", names, limit or 12)
@@ -304,14 +575,22 @@ describe("bounded raw object sections", function()
         options.section_name = names.coff
         return coff_object(payload, options)
     end
+    local function wasm(options)
+        options = options or {}
+        options.section_name = names.wasm
+        return wasm_object(payload, options)
+    end
 
     it("extracts exact COFF bytes using long section names", function()
         assert.equal(payload, assert(extract(coff())))
         local short_names = { elf = ".probe", macho_segment = "__DATA",
-            macho_section = "__probe", coff = ".probe" }
+            macho_section = "__probe", coff = ".probe", wasm = ".probe" }
         assert.equal(payload, assert(staticmetadata.read_object_section(
             coff_object(payload, { section_name = ".probe", symbol_offset = 0 }),
             "short.o", short_names, 12)))
+        assert.equal(payload, assert(staticmetadata.read_object_section(
+            wasm_object(payload, { section_name = ".probe", pad = true }),
+            "short.wasm.o", short_names, 12)))
     end)
 
     it("extracts exact bytes from ELF and Mach-O in either width and byte order", function()
@@ -326,14 +605,18 @@ describe("bounded raw object sections", function()
     end)
 
     it("rejects missing, duplicate, oversized and relocated result sections", function()
-        for _, build in ipairs({ elf, macho, coff }) do
+        for _, build in ipairs({ elf, macho, coff, wasm }) do
             assert.is_nil(extract(build(), 11))
             assert.is_nil(extract(build({ duplicate = true })))
-            assert.is_nil(extract(build():sub(1, 50)))
+            assert.is_nil(extract(build():sub(1, 20)))
         end
         assert.is_nil(extract(elf({ relocation = true })))
         assert.is_nil(extract(macho({ relocations = 1 })))
         assert.is_nil(extract(coff({ relocations = 1 })))
+        assert.is_nil(extract(wasm({ relocation = true })))
+        assert.is_nil(extract(wasm({ segment_mode = 1 })))
+        assert.is_nil(extract(wasm({ segment_flags = 2 })))
+        assert.is_nil(extract(wasm({ align_exp = 2 })))
         assert.is_nil(extract(elf_object(payload, { section_name = ".other" })))
         assert.is_nil(extract(macho_object(payload, { sectname = "__other" })))
         assert.is_nil(extract(elf({ metadata_type = 8 })))
@@ -342,6 +625,7 @@ describe("bounded raw object sections", function()
         assert.is_nil(extract(coff({ section_flags = 0x80 })))
         assert.is_nil(extract(coff({ section_flags = 0x20 })))
         assert.is_nil(extract(coff_object(payload, { section_name = ".other" })))
+        assert.is_nil(extract(wasm_object(payload, { section_name = ".other" })))
         assert.is_nil(extract("!<arch>\n"))
         assert.is_nil(extract("not an object"))
     end)
@@ -433,6 +717,10 @@ describe("trusted object source metadata", function()
             { section_name = ".titan.source" }), "producer.obj"))
         assert.equal("cache.producer", coff.type.name)
         assert.equal("secret", coff.type.source_members[1].name)
+        local wasm = assert(objectmetadata.read(wasm_object(payload,
+            { section_name = ".titan.source", pad = true }), "producer.wasm.o"))
+        assert.equal("cache.producer", wasm.type.name)
+        assert.equal("secret", wasm.type.source_members[1].name)
         for _, width in ipairs({ 32, 64 }) do
             for _, endian in ipairs({ "little", "big" }) do
                 for _, bytes in ipairs({
@@ -1149,6 +1437,424 @@ return {
                 assert.is_nil(object)
                 assert.matches(case[2], err, 1, true)
             end
+        end)
+    end)
+
+    describe("Wasm relocatable objects", function()
+        it("reads all three payloads, padded LEB128 fields, symbols and imports", function()
+            local source_payload = "source-record-bytes"
+            local probe_payload = "TITENUM\0\1\12\1\6"
+            for _, pad in ipairs({ false, true }) do
+                local bytes = wasm_object(nil, {
+                    pad = pad,
+                    include_datacount = true,
+                    include_code = true,
+                    imports = {
+                        { module = "env", name = "__linear_memory", kind = 2, flags = 0, initial = 1 },
+                        { module = "env", name = "imported_fn", kind = 0, type_index = 0 },
+                        { module = "env", name = "__indirect_function_table", kind = 1, elem_type = 0x70, flags = 0, initial = 1 },
+                        { module = "env", name = "__stack_pointer", kind = 3, valtype = 0x7f, mutable = 1 },
+                        { module = "env", name = "c_longjmp", kind = 4, attribute = 0, type_index = 0 },
+                    },
+                    segments = {
+                        { name = ".rodata.aligned", payload = "12345678", mode = 0, offset = 0, align_exp = 3, flags = 0 },
+                        { name = ".tdata.local", payload = "tls!", mode = 0, offset = 8, align_exp = 2, flags = 2 },
+                        { name = ".passive.seg", payload = "passive", mode = 1, align_exp = 0, flags = 0 },
+                        { name = ".titan.meta", payload = PAYLOAD, mode = 0, offset = 16, align_exp = 0, flags = 0 },
+                        { name = ".titan.source", payload = source_payload, mode = 0, offset = 32, align_exp = 0, flags = 0 },
+                        { name = ".titan.cprobe", payload = probe_payload, mode = 0, offset = 64, align_exp = 0, flags = 0 },
+                    },
+                    init_funcs = { { priority = 100, symbol = 1 } },
+                    comdats = { { name = "comdat_grp", flags = 0, entries = { { kind = 0, index = 0 } } } },
+                    extra_linking_subsections = { "\99" .. uleb(3, pad and 5 or nil) .. "xyz" },
+                    symbols = {
+                        { kind = 0, flags = 0x10, index = 0 },
+                        { kind = 0, flags = 0x00, index = 1, name = "pkg_mod_init" },
+                        { kind = 0, flags = 0x01, index = 2, name = "weak_helper" },
+                        { kind = 0, flags = 0x02, index = 3, name = "local_helper" },
+                        { kind = 0, flags = 0x50, index = 0, name = "explicit_import_alias" },
+                        { kind = 1, flags = 0x00, index = 0, name = "rodata_sym", offset = 0, size = 8 },
+                        { kind = 1, flags = 0x10, name = "external_data" },
+                        { kind = 2, flags = 0x10, index = 0 },
+                        { kind = 3, flags = 0x02, index = 0 },
+                        { kind = 4, flags = 0x10, index = 0 },
+                        { kind = 5, flags = 0x10, index = 0 },
+                    },
+                    features = {
+                        { "+", "sign-ext" },
+                        { "-", "shared-mem" },
+                        { "+", "bulk-memory" },
+                        { "=", "atomics" },
+                    },
+                })
+                local object = assert(scan(bytes))
+                assert.equal("object", object.kind)
+                assert.equal("wasm", object.format)
+                assert.same({
+                    format = "wasm",
+                    word_size = 32,
+                    linking_version = 2,
+                    features = "+bulk-memory +sign-ext -shared-mem =atomics",
+                }, object.fingerprint)
+                assert.equal("pkg.mod", object.metadata.module)
+                assert.equal(PAYLOAD, object.metadata_section.payload)
+                assert.equal(3, object.metadata_section.index)
+                assert.equal(1, object.metadata_section.alignment)
+                assert.is_true(object.metadata_section.active)
+                assert.is_false(object.metadata_section.tls)
+                assert.equal(8, object.sections[1].alignment)
+                assert.is_true(object.sections[2].tls)
+                assert.is_false(object.sections[3].active)
+                assert.same({
+                    { module = "env", name = "__linear_memory", kind = "memory" },
+                    { module = "env", name = "imported_fn", kind = "function" },
+                    { module = "env", name = "__indirect_function_table", kind = "table" },
+                    { module = "env", name = "__stack_pointer", kind = "global" },
+                    { module = "env", name = "c_longjmp", kind = "tag" },
+                }, object.imports)
+                assert.same({
+                    { kind = "function", name = "imported_fn", binding = "global", defined = false, index = 0 },
+                    { kind = "function", name = "pkg_mod_init", binding = "global", defined = true, index = 1 },
+                    { kind = "function", name = "weak_helper", binding = "weak", defined = true, index = 2 },
+                    { kind = "function", name = "local_helper", binding = "local", defined = true, index = 3 },
+                    { kind = "function", name = "explicit_import_alias", binding = "global", defined = false, index = 0 },
+                    { kind = "data", name = "rodata_sym", binding = "global", defined = true, index = 0 },
+                    { kind = "data", name = "external_data", binding = "global", defined = false, index = nil },
+                    { kind = "global", name = "__stack_pointer", binding = "global", defined = false, index = 0 },
+                    { kind = "section", name = nil, binding = "local", defined = true, index = 0 },
+                    { kind = "tag", name = "c_longjmp", binding = "global", defined = false, index = 0 },
+                    { kind = "table", name = "__indirect_function_table", binding = "global", defined = false, index = 0 },
+                }, object.symbols)
+                local selector = {
+                    elf = ".unused", macho_segment = "__DATA",
+                    macho_section = "__unused", coff = ".unused",
+                    wasm = ".titan.source",
+                }
+                assert.equal(source_payload, assert(staticmetadata.read_object_section(
+                    bytes, "combined.wasm.o", selector, #source_payload)))
+                selector.wasm = ".titan.cprobe"
+                assert.equal(probe_payload, assert(staticmetadata.read_object_section(
+                    bytes, "combined.wasm.o", selector, #probe_payload)))
+            end
+        end)
+
+        it("rejects every malformed Wasm object and bitcode input with exact diagnostics", function()
+            local bad_classify, bad_classify_err =
+                staticmetadata.classify_object("bad!", "fixture with spaces")
+            assert.is_nil(bad_classify)
+            assert.equal('"fixture with spaces": unsupported native object format', bad_classify_err)
+
+            local bad_scan, bad_scan_err = scan("bad!")
+            assert.is_nil(bad_scan)
+            assert.equal('"fixture with spaces": unsupported native container format', bad_scan_err)
+
+            local oversized_sec = "\0asm\1\0\0\0\1" .. uleb(100) .. "abc"
+            local custom_cross = "\0asm\1\0\0\0\0\3\5ab"
+            local six_byte_leb = "\0asm\1\0\0\0\1\x80\x80\x80\x80\x80\x00"
+            local overflow_leb = "\0asm\1\0\0\0\1\x80\x80\x80\x80\x10"
+            local truncated_leb = "\0asm\1\0\0\0\1\x80\x80"
+
+            local cases = {
+                { wasm_object(PAYLOAD, { version = 2 }),
+                    '"fixture with spaces": unsupported Wasm version 2' },
+                { oversized_sec,
+                    '"fixture with spaces": Wasm section is outside the input (offset 10, size 100, input size 13)' },
+                { six_byte_leb,
+                    '"fixture with spaces": Wasm u32 LEB128 exceeds 5 bytes' },
+                { overflow_leb,
+                    '"fixture with spaces": Wasm u32 LEB128 overflows' },
+                { truncated_leb,
+                    '"fixture with spaces": truncated Wasm u32 LEB128' },
+                { custom_cross,
+                    '"fixture with spaces": Wasm custom section name is outside its section' },
+                { wasm_object(PAYLOAD, {
+                    extra_sections_before_data = { wasm_sec(3, "\0"), wasm_sec(2, "\0") },
+                    imports = false,
+                }), '"fixture with spaces": out-of-order Wasm section 2' },
+                { wasm_object(PAYLOAD, {
+                    extra_sections_before_data = { wasm_sec(10, "\0"), wasm_sec(12, "\1") },
+                }), '"fixture with spaces": out-of-order Wasm section 12' },
+                { wasm_object(PAYLOAD, {
+                    no_data_section = true,
+                    no_segment_info = true,
+                    extra_sections_after_linking = { wasm_sec(11, "\0") },
+                }), '"fixture with spaces": out-of-order Wasm section 11' },
+                { wasm_object(PAYLOAD, {
+                    extra_sections_before_linking = { wasm_custom("reloc.DATA", "\0\0") },
+                }), '"fixture with spaces": out-of-order Wasm section 0' },
+                { wasm_object(PAYLOAD, {
+                    extra_sections_before_data = { wasm_sec(3, "\0"), wasm_sec(3, "\0") },
+                }), '"fixture with spaces": duplicate Wasm section 3' },
+                { wasm_object(PAYLOAD, {
+                    extra_sections_after_linking = { wasm_custom("linking", "\2") },
+                }), '"fixture with spaces": duplicate Wasm section 0' },
+                { wasm_object(PAYLOAD, { no_linking = true }),
+                    '"fixture with spaces": Wasm object has no linking section' },
+                { wasm_object(PAYLOAD, { linking_version = 1 }),
+                    '"fixture with spaces": unsupported Wasm linking version 1' },
+                { wasm_object(PAYLOAD, { dylink = true }),
+                    '"fixture with spaces": Wasm dylink.0 side module is not supported' },
+                { wasm_object(PAYLOAD, {
+                    imports = { { module = "GOT.mem", name = "foo", kind = 3, valtype = 0x7f, mutable = 1 } },
+                }), '"fixture with spaces": Wasm GOT import is not supported' },
+                { wasm_object(PAYLOAD, {
+                    imports = { { module = "GOT.func", name = "bar", kind = 3, valtype = 0x7f, mutable = 1 } },
+                }), '"fixture with spaces": Wasm GOT import is not supported' },
+                { wasm_object(PAYLOAD, { memory_flags = 0x04 }),
+                    '"fixture with spaces": Wasm memory64 is not supported' },
+                { wasm_object(PAYLOAD, { memory_section_flags = 0x04 }),
+                    '"fixture with spaces": Wasm memory64 is not supported' },
+                { wasm_object(PAYLOAD, { segment_opcode = 0x42 }),
+                    '"fixture with spaces": Wasm memory64 is not supported' },
+                { wasm_object(PAYLOAD, { memory_flags = 0x02 }),
+                    '"fixture with spaces": Wasm shared memory is not supported' },
+                { wasm_object(PAYLOAD, { memory_section_flags = 0x03, memory_max = 2 }),
+                    '"fixture with spaces": Wasm shared memory is not supported' },
+                { wasm_object(PAYLOAD, { segment_info_count = 2 }),
+                    '"fixture with spaces": Wasm segment-info count does not match DATA segment count' },
+                { wasm_object(PAYLOAD, { no_segment_info = true }),
+                    '"fixture with spaces": Wasm segment-info count does not match DATA segment count' },
+                { wasm_object(PAYLOAD, { datacount = 2 }),
+                    '"fixture with spaces": Wasm DATACOUNT does not match DATA segment count' },
+                { wasm_object(nil, { datacount = 1 }),
+                    '"fixture with spaces": Wasm DATACOUNT does not match DATA segment count' },
+                { wasm_object(PAYLOAD, { duplicate = true }),
+                    '"fixture with spaces": duplicate Wasm payload segment ".titan.meta"' },
+                { wasm_object(PAYLOAD, { segment_mode = 1 }),
+                    '"fixture with spaces": Wasm payload segment ".titan.meta" is not active' },
+                { wasm_object(PAYLOAD, { segment_mode = 2, segment_memory = 0 }),
+                    '"fixture with spaces": Wasm payload segment ".titan.meta" is not active' },
+                { wasm_object(PAYLOAD, { segment_flags = 0x02 }),
+                    '"fixture with spaces": Wasm payload segment ".titan.meta" is TLS' },
+                { wasm_object(PAYLOAD, { align_exp = 2 }),
+                    '"fixture with spaces": Wasm payload segment ".titan.meta" alignment is not 1' },
+                { wasm_object(PAYLOAD, { relocation = true }),
+                    '"fixture with spaces": Wasm payload segment ".titan.meta" is targeted by a DATA relocation' },
+                { wasm_object(PAYLOAD, { relocation = true, relocation_target = 99 }),
+                    '"fixture with spaces": Wasm relocation targets missing section 99' },
+                { wasm_object(PAYLOAD, { relocation = true, relocation_offset = #PAYLOAD + 20 }),
+                    '"fixture with spaces": Wasm relocation is outside its target section' },
+                { wasm_object(PAYLOAD, { relocation = true, relocation_type = 99 }),
+                    '"fixture with spaces": unsupported Wasm relocation type 99' },
+                { wasm_object(PAYLOAD, {
+                    features = { { "+", "bulk-memory" }, { "-", "bulk-memory" } },
+                }), '"fixture with spaces": conflicting Wasm target feature "bulk-memory"' },
+                { wasm_object(PAYLOAD, {
+                    features = { { "+", "bulk-memory" }, { "+", "bulk-memory" } },
+                }), '"fixture with spaces": duplicate Wasm target feature "bulk-memory"' },
+                { "BC\192\222bitcode",
+                    '"fixture with spaces": LLVM bitcode (LTO) object is not supported' },
+                { "\222\192\023\011bitcode",
+                    '"fixture with spaces": LLVM bitcode (LTO) object is not supported' },
+            }
+            for index, case in ipairs(cases) do
+                local object, err = scan(case[1])
+                assert.is_nil(object, "case #" .. tostring(index))
+                assert.equal(case[2], err, "case #" .. tostring(index))
+            end
+
+            local oversized, oversized_err = scan(wasm_object(PAYLOAD), {
+                max_metadata_size = #PAYLOAD - 1,
+            })
+            assert.is_nil(oversized)
+            assert.matches(
+                "metadata section size " .. tostring(#PAYLOAD) ..
+                " exceeds limit " .. tostring(#PAYLOAD - 1),
+                oversized_err, 1, true)
+
+            local section_oversized, section_err = staticmetadata.read_object_section(
+                wasm_object("123456", { section_name = ".titan.cprobe" }),
+                "probe.wasm.o",
+                {
+                    elf = ".titan.cprobe", macho_segment = "__DATA",
+                    macho_section = "__titancprobe", coff = ".titan.cprobe",
+                    wasm = ".titan.cprobe",
+                }, 5)
+            assert.is_nil(section_oversized)
+            assert.equal('"probe.wasm.o": requested object section exceeds size limit', section_err)
+        end)
+
+        it("reports Wasm fingerprint mismatches field by field and rejects mixed archives", function()
+            local baseline = assert(scan(wasm_object(PAYLOAD))).fingerprint
+            local ok, mismatch = staticmetadata.fingerprint_matches(
+                { format = "elf", class = 64, endian = "little", machine = 62, flags = 0 },
+                baseline)
+            assert.is_false(ok)
+            assert.equal("object format elf does not match target format wasm", mismatch)
+
+            ok, mismatch = staticmetadata.fingerprint_matches(
+                { format = "wasm", word_size = 64, linking_version = 1, features = "" },
+                baseline)
+            assert.is_false(ok)
+            assert.equal("Wasm word_size 64 does not match target 32", mismatch)
+
+            ok, mismatch = staticmetadata.fingerprint_matches(
+                { format = "wasm", word_size = 32, linking_version = 1, features = "" },
+                baseline)
+            assert.is_false(ok)
+            assert.equal("Wasm linking_version 1 does not match target 2", mismatch)
+
+            ok, mismatch = staticmetadata.fingerprint_matches(
+                { format = "wasm", word_size = 32, linking_version = 2, features = "+sign-ext" },
+                baseline)
+            assert.is_false(ok)
+            assert.equal("Wasm features +sign-ext does not match target +bulk-memory +sign-ext", mismatch)
+
+            local other_payload = assert(staticmetadata.render(
+                "pkg.other", ABI, 'Module("pkg.other",{}, {})'))
+            local valid_archive = assert(scan(archive({
+                ar_member("mod.o/", wasm_object(PAYLOAD)),
+                ar_member("other.o/", wasm_object(other_payload)),
+                ar_member("helper.o/", wasm_object(nil, {
+                    segments = { { name = ".rodata", payload = "ok", mode = 0, align_exp = 0, flags = 0 } },
+                })),
+            }), { target = baseline }))
+            assert.equal("archive", valid_archive.kind)
+            assert.equal(3, #valid_archive.members)
+            assert.same({ "pkg.mod", "pkg.other" }, valid_archive.key_order)
+
+            local mixed_elf, mixed_elf_err = scan(archive({
+                ar_member("wasm.o/", wasm_object(PAYLOAD)),
+                ar_member("elf.o/", elf_object(other_payload)),
+            }))
+            assert.is_nil(mixed_elf)
+            assert.matches('archive member #2 .* name "elf.o": target mismatch: object format elf does not match target format wasm', mixed_elf_err)
+
+            local mixed_wasm_second, mixed_wasm_second_err = scan(archive({
+                ar_member("elf.o/", elf_object(PAYLOAD)),
+                ar_member("wasm.o/", wasm_object(other_payload)),
+            }))
+            assert.is_nil(mixed_wasm_second)
+            assert.matches('archive member #2 .* name "wasm.o": target mismatch: object format wasm does not match target format elf', mixed_wasm_second_err)
+
+            local mixed_features, mixed_features_err = scan(archive({
+                ar_member("first.o/", wasm_object(PAYLOAD)),
+                ar_member("second.o/", wasm_object(other_payload, {
+                    features = { { "+", "bulk-memory" } },
+                })),
+            }))
+            assert.is_nil(mixed_features)
+            assert.matches('archive member #2 .* name "second.o": target mismatch: Wasm features %+bulk%-memory does not match target %+bulk%-memory %+sign%-ext', mixed_features_err)
+
+            local dup_keys, dup_keys_err = scan(archive({
+                ar_member("first.o/", wasm_object(PAYLOAD)),
+                ar_member("second.o/", wasm_object(PAYLOAD)),
+            }))
+            assert.is_nil(dup_keys)
+            assert.matches('archive member #2 .* name "second.o".*duplicate logical metadata key "pkg.mod"; first declared at .*"first.o"', dup_keys_err)
+
+            local bitcode_member, bitcode_member_err = scan(archive({
+                ar_member("first.o/", wasm_object(PAYLOAD)),
+                ar_member("lto.o/", "BC\192\222payload"),
+            }))
+            assert.is_nil(bitcode_member)
+            assert.matches('archive member #2 .* name "lto.o": LLVM bitcode %(LTO%) object is not supported', bitcode_member_err)
+        end)
+
+        it("classifies Wasm objects and archives and persists Wasm part fingerprints", function()
+            local incremental = require "titan-compiler.incremental"
+            local wasm_part = wasm_object(nil, {
+                pad = true,
+                segments = { { name = ".rodata", payload = "part", mode = 0, align_exp = 0, flags = 0 } },
+            })
+            local wasm_ar = archive({ ar_member("part.o/", wasm_part) })
+            local bitcode_ar = archive({
+                ar_member("part.o/", wasm_part),
+                ar_member("lto.o/", "BC\192\222payload"),
+            })
+            local linked_wasm = wasm_object(PAYLOAD, { no_linking = true })
+            local side_wasm = wasm_object(PAYLOAD, { dylink = true })
+
+            local strategy = require("titan-compiler.io").new_sync()
+            local root = temporary.name("-wasm-inc")
+            assert(strategy:mkdir(root))
+            local obj_path = root .. "/part.o"
+            local ar_path = root .. "/libpart.a"
+            local bc_path = root .. "/lto.o"
+            local bcar_path = root .. "/liblto.a"
+            local linked_path = root .. "/linked.wasm"
+            local side_path = root .. "/side.wasm"
+            local ok, failure = xpcall(function()
+                local util = require "titan-compiler.util"
+                assert(util.set_file_contents(obj_path, wasm_part))
+                assert(util.set_file_contents(ar_path, wasm_ar))
+                assert(util.set_file_contents(bc_path, "BC\192\222payload"))
+                assert(util.set_file_contents(bcar_path, bitcode_ar))
+                assert(util.set_file_contents(linked_path, linked_wasm))
+                assert(util.set_file_contents(side_path, side_wasm))
+
+                local ctx = { io = strategy }
+                assert(incremental.load_digest_cache(ctx, root))
+
+                local kind, err, lto = incremental.native_input_kind(ctx, obj_path)
+                assert.equal("object", kind, err)
+                assert.is_false(lto)
+
+                kind, err, lto = incremental.native_input_kind(ctx, ar_path)
+                assert.equal("archive", kind, err)
+                assert.is_false(lto)
+
+                kind, err, lto = incremental.native_input_kind(ctx, bc_path)
+                assert.equal("object", kind, err)
+                assert.is_true(lto)
+
+                kind, err, lto = incremental.native_input_kind(ctx, bcar_path)
+                assert.equal("archive", kind, err)
+                assert.is_true(lto)
+
+                kind, err = incremental.native_input_kind(ctx, linked_path)
+                assert.is_nil(kind)
+                assert.matches("not a recognized object, archive or shared library", err, 1, true)
+
+                kind, err = incremental.native_input_kind(ctx, side_path)
+                assert.is_nil(kind)
+                assert.matches("not a recognized object, archive or shared library", err, 1, true)
+
+                local fp = assert(incremental.part_fingerprint(ctx, obj_path))
+                assert.same({
+                    format = "wasm",
+                    word_size = 32,
+                    linking_version = 2,
+                    features = "+bulk-memory +sign-ext",
+                }, fp)
+                assert(incremental.save_digest_cache(ctx))
+
+                local warm = { io = strategy }
+                assert(incremental.load_digest_cache(warm, root))
+                local digest = incremental.file_digest(warm, obj_path)
+                assert.same(fp, warm.incremental.persistent.objects[digest].fingerprint)
+                assert.same(fp, assert(incremental.part_fingerprint(warm, obj_path)))
+
+                for _, invalid_fp in ipairs({
+                    { format = "wasm", word_size = 64, linking_version = 2, features = "+bulk-memory" },
+                    { format = "wasm", word_size = 32, linking_version = 1, features = "+bulk-memory" },
+                    { format = "wasm", word_size = 32, linking_version = 2, features = " +bulk-memory" },
+                    { format = "wasm", word_size = 32, linking_version = 2, features = "+sign-ext +bulk-memory" },
+                    { format = "wasm", word_size = 32, linking_version = 2, features = "+bulk-memory -bulk-memory" },
+                    { format = "wasm", word_size = 32, linking_version = 2, features = "+bulk-memory", extra = true },
+                }) do
+                    local poisoned = { io = strategy }
+                    assert(incremental.load_digest_cache(poisoned, root))
+                    poisoned.incremental.persistent.objects[digest].fingerprint = invalid_fp
+                    poisoned.incremental.persistent.dirty = true
+                    assert(incremental.save_digest_cache(poisoned))
+
+                    local reloaded = { io = strategy }
+                    assert(incremental.load_digest_cache(reloaded, root))
+                    assert.is_nil(reloaded.incremental.persistent.objects[digest])
+                    assert.same(fp, assert(incremental.part_fingerprint(reloaded, obj_path)))
+                    assert(incremental.save_digest_cache(reloaded))
+                end
+            end, debug.traceback)
+            for _, file in ipairs({
+                obj_path, ar_path, bc_path, bcar_path, linked_path, side_path,
+                root .. "/.titan/digests",
+            }) do
+                os.remove(file)
+            end
+            strategy:rmdir(root .. "/.titan")
+            strategy:rmdir(root)
+            assert.is_true(ok, failure)
         end)
     end)
 

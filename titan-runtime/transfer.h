@@ -6,10 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__wasm__)
+#include <lua.h>
+#include <lobject.h>
+#include <lstring.h>
+#include <ltable.h>
+#else
 #include "lua.h"
 #include "lobject.h"
 #include "lstring.h"
 #include "ltable.h"
+#endif
 #include "titan/ffi.h"
 
 /* Immutable code addresses and compile-time metadata only. Titan's private
