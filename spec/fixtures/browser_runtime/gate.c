@@ -9,6 +9,7 @@
  * Volatile canaries and the post-call check prevent tail-call elimination. */
 static unsigned int active_frames, peak_frames, waits, close_mask, bad_close;
 static unsigned int close_counts[6];
+static unsigned int lua_depth, callinfo_c_depth;
 
 EM_ASYNC_JS(void, gate_timeout, (int milliseconds), {
   await new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -34,7 +35,21 @@ static int bridge_frames(lua_State *L, int depth) {
   return 1;
 }
 
-int gate_bridge(lua_State *L) { return bridge_frames(L, 3); }
+int gate_bridge(lua_State *L) {
+  lua_Debug frame;
+  unsigned int lua_count = 0, c_count = 0;
+  int level = 0;
+  while (lua_getstack(L, level++, &frame)) {
+    lua_getinfo(L, "S", &frame);
+    if (frame.what[0] == 'C') ++c_count;
+    else ++lua_count;
+  }
+  if (lua_count > lua_depth) lua_depth = lua_count;
+  if (c_count > callinfo_c_depth) callinfo_c_depth = c_count;
+  return bridge_frames(L, 3);
+}
+int gate_lua_depth(void) { return (int)lua_depth; }
+int gate_callinfo_c_depth(void) { return (int)callinfo_c_depth; }
 
 void gate_wait(int form, int milliseconds) {
   volatile uint32_t canary = 0x329abcdeU;
