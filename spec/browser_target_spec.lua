@@ -11,6 +11,7 @@ local cprobe_cache = require "titan-compiler.cprobe_cache"
 local cprobe = require "titan-compiler.cprobe"
 local incremental = require "titan-compiler.incremental"
 local types = require "titan-compiler.types"
+local path = require "titan-compiler.path"
 local lfs = require "lfs"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
@@ -26,23 +27,29 @@ end
 
 local function fake_context(options)
     options = options or {}
+    local function key(filename)
+        -- NTFS accepts either separator; an exact-string map must model that.
+        return (platform.windows or options.windows_paths) and
+            assert(platform.path.normalize(filename)) or filename
+    end
     local paths = fixtures.paths(options.root)
     local record, record_text, archive, headers = fixtures.record(options.record)
-    local files = { [paths.lua_record] = options.record_text or record_text,
-        [paths.liblua] = options.archive or archive }
-    for name, contents in pairs(headers) do files[paths.lua_source .. "/" .. name] = contents end
-    if options.header then files[paths.lua_source .. "/lua.h"] = options.header end
+    local files = { [key(paths.lua_record)] = options.record_text or record_text,
+        [key(paths.liblua)] = options.archive or archive }
+    for name, contents in pairs(headers) do files[key(paths.lua_source .. "/" .. name)] = contents end
+    if options.header then files[key(paths.lua_source .. "/lua.h")] = options.header end
     local directory = FAKE_ROOT .. "/emsdk/upstream/emscripten"
-    for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do files[directory .. "/" .. tool] = "fake launcher" end
-    if options.missing then files[directory .. "/" .. options.missing] = nil end
-    if options.missing_record then files[paths.lua_record] = nil end
-    if options.missing_archive then files[paths.liblua] = nil end
+    for _, tool in ipairs({ "emcc", "emar", "emranlib" }) do files[key(directory .. "/" .. tool)] = "fake launcher" end
+    if options.missing then files[key(directory .. "/" .. options.missing)] = nil end
+    if options.missing_record then files[key(paths.lua_record)] = nil end
+    if options.missing_archive then files[key(paths.liblua)] = nil end
     local calls, serial = {}, 0
-    local directories = { [paths.lua_source] = true }
+    local directories = { [key(paths.lua_source)] = true }
     local strategy = setmetatable({}, { __index = compiler_io.new_sync() })
     function strategy:cwd() return FAKE_ROOT end
-    function strategy:realpath(filename) return filename end
+    function strategy:realpath(filename) return key(filename) end
     function strategy:stat(filename)
+        filename = key(filename)
         if directories[filename] then return { kind = "directory", size = 0, mode = 0x41ed } end
         local bytes = files[filename]
         if bytes then return { kind = "file", size = #bytes, mode = 0x81ed,
@@ -50,17 +57,20 @@ local function fake_context(options)
         return nil
     end
     strategy.lstat = strategy.stat
-    function strategy:readable(filename) return files[filename] ~= nil end
-    function strategy:executable(filename) return files[filename] ~= nil end
-    function strategy:read_file(filename) return files[filename], files[filename] == nil and "not found" or nil end
+    function strategy:readable(filename) return files[key(filename)] ~= nil end
+    function strategy:executable(filename) return files[key(filename)] ~= nil end
+    function strategy:read_file(filename)
+        local bytes = files[key(filename)]
+        return bytes, bytes == nil and "not found" or nil
+    end
     function strategy:list(filename)
-        if filename ~= paths.lua_source then return {} end
+        if key(filename) ~= key(paths.lua_source) then return {} end
         return { "luaconf.h", "lua.h", "not-a-header.txt" }
     end
-    function strategy:write_file(filename, bytes) files[filename] = bytes; return true end
-    function strategy:unlink(filename) files[filename] = nil; return true end
-    function strategy:mkdir(filename) directories[filename] = true; return true end
-    function strategy:rmdir(filename) directories[filename] = nil; return true end
+    function strategy:write_file(filename, bytes) files[key(filename)] = bytes; return true end
+    function strategy:unlink(filename) files[key(filename)] = nil; return true end
+    function strategy:mkdir(filename) directories[key(filename)] = true; return true end
+    function strategy:rmdir(filename) directories[key(filename)] = nil; return true end
     function strategy:tmpname() serial = serial + 1; return FAKE_ROOT .. "/probe-" .. serial end
     function strategy:run(argv)
         calls[#calls + 1] = { table.unpack(argv) }
@@ -69,7 +79,7 @@ local function fake_context(options)
             return { started = true, ok = true, output = "emcc (Emscripten) " .. (options.version or "6.0.13") .. "\n" }
         end
         for index, flag in ipairs(argv) do
-            if flag == "-o" then files[argv[index + 1]] = "fake relocatable Wasm object" end
+            if flag == "-o" then files[key(argv[index + 1])] = "fake relocatable Wasm object" end
         end
         return { started = true, ok = true, output = "", why = "exit", status = 0 }
     end
@@ -110,6 +120,29 @@ describe("browser target descriptor", function()
             saved_getenv, saved_profile, saved_classify
         types.registry = saved_registry
         if workspace then files.remove(workspace); workspace = nil end
+    end)
+
+    it("models Windows separator aliases in every fake SDK filesystem operation", function()
+        local context, inputs = fake_context({ root = "C:/fixture", windows_paths = true })
+        local strategy = context.io
+        local forward = inputs.paths.lua_source .. "/lua.h"
+        local backward = forward:gsub("/", "\\")
+        assert.same(strategy:stat(forward), strategy:stat(backward))
+        assert.same(strategy:lstat(forward), strategy:lstat(backward))
+        assert.is_true(strategy:readable(backward))
+        assert.is_true(strategy:executable(backward))
+        assert.equal(assert(strategy:read_file(forward)), assert(strategy:read_file(backward)))
+        assert.equal(forward, strategy:realpath(backward))
+        assert.same(strategy:list(inputs.paths.lua_source), strategy:list(inputs.paths.lua_source:gsub("/", "\\")))
+        assert(strategy:write_file(backward, "replacement"))
+        assert.equal("replacement", strategy:read_file(forward))
+        assert(strategy:unlink(backward))
+        assert.is_nil(strategy:read_file(forward))
+        local directory = inputs.paths.root .. "/temporary"
+        assert(strategy:mkdir(directory:gsub("/", "\\")))
+        assert.equal("directory", strategy:stat(directory).kind)
+        assert(strategy:rmdir(directory:gsub("/", "\\")))
+        assert.is_nil(strategy:stat(directory))
     end)
 
     it("builds a verified closed descriptor, retains all record facts, and freezes every level", function()
@@ -636,9 +669,11 @@ describe("browser target descriptor", function()
             return subject._finish_target_initialization(ctx)
         end
         local context = subject.new_resolver_context({ io = guarded, target = "browser" })
+        local driver_source = assert(debug.getinfo(subject.new_worker_context, "S").source:match("^@(.*)$"))
+        local compiler_root = assert(strategy:realpath(path.dirname(path.dirname(driver_source))))
         context.incremental_configuration = {
             compiler = assert(incremental.compiler_component(context, {
-                compiler_root = assert(strategy:cwd()), frontend = "api" })),
+                compiler_root = compiler_root, frontend = "api" })),
             digest = string.rep("1", 64), toolchain = string.rep("2", 64),
             preamble = string.rep("3", 64), options = string.rep("4", 64),
         }
@@ -651,8 +686,13 @@ describe("browser target descriptor", function()
         assert.equal(context.incremental_configuration, worker.incremental_configuration)
         assert(subject.close_resolver_context(worker))
         assert(subject.close_resolver_context(context))
-        wire.resolver.target = "linux"
+        wire.compiler = string.rep("0", 64)
+        wire.configuration.compiler = wire.compiler
         local rejected, err = subject.new_worker_context(wire, guarded)
+        assert.is_nil(rejected); assert.equal("compiler installation changed during build", err)
+        assert.equal(0, runs)
+        wire.resolver.target = "linux"
+        rejected, err = subject.new_worker_context(wire, guarded)
         assert.is_nil(rejected); assert.equal("incompatible build worker configuration", err)
     end)
     it("never reuses an identical native probe source from the browser cache directory", function()
