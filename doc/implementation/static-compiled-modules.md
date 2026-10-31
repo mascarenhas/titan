@@ -66,10 +66,9 @@ and the enum-carrier `.titan.cprobe` emitter already used the generic name.
 Clang emits each array as a named DATA segment recorded in the `linking`
 section's segment info. Byte alignment and the absence of relocations keep the
 segment length equal to the payload. The final browser image link keeps the
-`.titan.source` payload as an ordinary data segment, drops the `.titan.meta`
-and `.titan.cprobe` payloads, and retains the `.titan.meta` and
-`.titan.source` names only in the `name` section; no image reads any of them
-at run time, and metadata reading never depends on the linked image.
+`.titan.source` and `.titan.meta` payloads as named data segments and drops
+`.titan.cprobe`; no image reads any of them at run time, and metadata reading
+never depends on the linked image.
 
 The standalone entrypoint, runtime objects, `ltitanlib.o`, ordinary native
 payload, and the part objects of split modules do not carry logical metadata.
