@@ -50,6 +50,19 @@ export async function fidelity(context, paths) {
     context.assert(contains(failed.stderr, encode('stack traceback:\n\t')),
       'uncaught error omitted the standalone trace report');
 
+    for (const [mode, message] of [['duplicate', 'browser entry completed more than once'],
+      ['invalid', 'browser entry reported invalid completion kind 9']]) {
+      const stdout = [], stderr = [];
+      const instance = context.create(image.factory, {locateFile: image.locateFile,
+        stdout: bytes => { stdout.push(bytes); }, stderr: bytes => { stderr.push(bytes); }});
+      try {
+        await rejection(context, instance.run([mode]), {code: 'TITAN_BROWSER_PROTOCOL', message});
+        context.equalBytes(join(stdout), closeBytes, 'protocol failure abandoned stdout cleanup');
+        context.equalBytes(join(stderr), closeBytes, 'protocol failure abandoned stderr cleanup');
+        await rejection(context, instance.run(), closed);
+      } finally { await instance.dispose(); runs++; }
+    }
+
     for (const stream of ['stdout', 'stderr']) {
       for (const behavior of ['throw', 'value', 'thenable']) {
         const cause = new Error(`${stream} ${behavior}`);
@@ -118,7 +131,7 @@ export async function fidelity(context, paths) {
         context.assert(retained[stream].every(bytes => bytes.every(byte => byte === 90)), 'retained sink chunk changed later');
       }
     } finally { await mutable.dispose(); module = undefined; runs++; }
-    context.stdout(encode(`loader fidelity: ${path}: 16 runs passed\n`));
+    context.stdout(encode(`loader fidelity: ${path}: 18 runs passed\n`));
   }
   return runs;
 }
