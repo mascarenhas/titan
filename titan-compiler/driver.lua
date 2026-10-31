@@ -50,6 +50,41 @@ driver.LUA_VERSION = version.LUA_VERSION
 driver.LANGUAGE_SERVER_API_VERSION = 1
 driver.PROJECT_CACHE_VERSION = projectcache.VERSION
 
+driver.SOURCE_LABELS = { "windows", "darwin", "linux", "browser", "native" }
+local source_labels = {}
+for _, label in ipairs(driver.SOURCE_LABELS) do source_labels[label] = true end
+
+function driver.classify_source_filename(basename)
+    local stem = basename:match("^(.*)%.titan$")
+    if not stem then return nil end
+    local base, label = stem:match("^(.+)%.([^.]+)$")
+    if not label or not source_labels[label:lower()] then
+        return basename
+    end
+    if label ~= label:lower() then
+        return nil, nil, "mis-cased target label in source '" .. basename .. "'"
+    end
+    local previous_base, previous = base:match("^(.+)%.([^.]+)$")
+    if previous_base and source_labels[previous:lower()] then
+        return nil, nil, "stacked target labels in source '" .. basename .. "'"
+    end
+    return base .. ".titan", label
+end
+
+function driver.target_selection_labels(target)
+    if target == "linux" or target == "darwin" or target == "windows" then
+        return { target, "native" }
+    elseif target == "native" or target == "browser" then
+        return { target }
+    end
+    error("invalid source selection target '" .. tostring(target) .. "'", 2)
+end
+
+function driver.target_label_applies(target, label)
+    return label == target or (label == "native" and
+        (target == "linux" or target == "darwin" or target == "windows"))
+end
+
 function driver.encode_project_entry(entry, options)
     return projectcache.encode(entry, options)
 end
@@ -607,6 +642,13 @@ local function select_platform_defaults(uname, is_darwin, compiler_family)
     driver.IS_DARWIN = is_darwin
 end
 
+local function initialize_source_target(context)
+    context.host_target = context.uname == "Windows" and "windows" or
+        context.uname == "Linux" and "linux" or
+        context.is_darwin and "darwin" or "native"
+    context.target = context.target or context.host_target
+end
+
 function driver.initialize_platform(context)
     context = context or driver.new_resolver_context()
     if type(context) ~= "table" or context.io == nil then
@@ -614,6 +656,7 @@ function driver.initialize_platform(context)
     end
     compiler_io.validate(context.io, 2)
     if context._platform_initialized then
+        initialize_source_target(context)
         select_platform_defaults(context.uname, context.is_darwin)
         return true, context.uname, context.is_darwin
     end
@@ -622,6 +665,7 @@ function driver.initialize_platform(context)
         context.uname = "Windows"
         context.is_darwin = false
         context._platform_initialized = true
+        initialize_source_target(context)
         select_platform_defaults(context.uname, false)
         return true, context.uname, false
     end
@@ -643,12 +687,39 @@ function driver.initialize_platform(context)
     context.uname = uname
     context.is_darwin = uname:match("Darwin") ~= nil
     context._platform_initialized = true
+    initialize_source_target(context)
 
     -- Retain the historical process-visible fields for build/publication APIs.
     -- The subprocess which populates them now belongs to an explicit resolver
     -- context instead of running while this module is loaded.
     select_platform_defaults(uname, context.is_darwin)
     return true, uname, context.is_darwin
+end
+
+function driver.context_target(context)
+    local ok, err = driver.initialize_platform(context)
+    if not ok then return nil, err end
+    return context.target
+end
+
+function driver.validate_target(context, value, origin)
+    local ok, err = driver.initialize_platform(context)
+    if not ok then return nil, err end
+    if value == nil or value == "" then return context.host_target end
+    local prefix = origin == "TITAN_TARGET" and "TITAN_TARGET=" .. value or
+        (origin or "--target") .. " " .. value
+    if value == "native" then
+        return nil, prefix .. ": 'native' selects source files for native hosts; " ..
+            "it is not a compilation target"
+    elseif value == "browser" then
+        return nil, prefix .. " is not available yet"
+    elseif value == "linux" or value == "darwin" or value == "windows" then
+        if value == context.host_target then return value end
+        return nil, prefix .. ": native cross-compilation is not supported " ..
+            "(host is " .. context.host_target .. ")"
+    end
+    return nil, prefix .. ": unknown target '" .. value ..
+        "': expected linux, darwin, windows or browser"
 end
 
 function driver.configure_foreign_c(context)
@@ -914,6 +985,10 @@ function driver.new_resolver_context(options)
     if type(options) ~= "table" then
         error("resolver context options must be a table", 2)
     end
+    if options.target ~= nil and options.target ~= "" and
+       not source_labels[options.target] then
+        error("invalid source selection target '" .. tostring(options.target) .. "'", 2)
+    end
     local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
     if not cache_valid then error(cache_error, 2) end
     local embedded_interface_provider, embedded_error =
@@ -1014,6 +1089,7 @@ function driver.new_resolver_context(options)
     local context = {
         _resolver_context = true,
         io = io_strategy,
+        target = options.target ~= "" and options.target or nil,
         cache_adapter = options.cache_adapter or default_digest_adapter(),
         header_observations = cdriver.header_observation_index(options.header_inputs),
         prefer_static = options.prefer_static == true,

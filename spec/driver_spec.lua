@@ -233,6 +233,119 @@ local function posix_model_it(name, callback)
     end)
 end
 
+describe("target source selection API", function()
+    it("classifies reserved filename suffixes without changing dotted names", function()
+        assert.same({ "windows", "darwin", "linux", "browser", "native" },
+            driver.SOURCE_LABELS)
+        for _, label in ipairs(driver.SOURCE_LABELS) do
+            local logical, selected, err =
+                driver.classify_source_filename("foo." .. label .. ".titan")
+            assert.equal("foo.titan", logical)
+            assert.equal(label, selected)
+            assert.is_nil(err)
+            assert.equal(label .. ".titan",
+                driver.classify_source_filename(label .. ".titan"))
+        end
+        assert.equal("x.y.titan", driver.classify_source_filename("x.y.titan"))
+        assert.equal("linux.titan",
+            driver.classify_source_filename("linux.titan"))
+        assert.same({ "linux.titan", "native" },
+            { driver.classify_source_filename("linux.native.titan") })
+        assert.is_nil(driver.classify_source_filename("foo.c"))
+        for _, case in ipairs({
+            { "x.linux.native.titan", "stacked target labels" },
+            { "x.Linux.titan", "mis-cased target label" },
+            { "x.Linux.native.titan", "stacked target labels" },
+        }) do
+            local logical, label, err = driver.classify_source_filename(case[1])
+            assert.is_nil(logical)
+            assert.is_nil(label)
+            assert.matches(case[2], err, 1, true)
+            assert.matches(case[1], err, 1, true)
+        end
+    end)
+
+    it("exposes the complete applicability rows", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local expected = (target == "browser" or target == "native") and
+                { target } or { target, "native" }
+            assert.same(expected, driver.target_selection_labels(target))
+            for _, label in ipairs(driver.SOURCE_LABELS) do
+                local applies = false
+                for _, selected in ipairs(expected) do
+                    applies = applies or selected == label
+                end
+                assert.equal(applies, driver.target_label_applies(target, label))
+            end
+        end
+        assert.has_error(function() driver.target_selection_labels("bogus") end,
+            "invalid source selection target 'bogus'")
+        assert.has_error(function() driver.new_resolver_context({ target = "bogus" }) end,
+            "invalid source selection target 'bogus'")
+    end)
+
+    for _, host in ipairs({ "Linux", "Darwin", "FreeBSD" }) do
+        posix_model_it("resolves and validates the target on " .. host, function()
+            local strategy = compiler_io.new_sync()
+            local calls = 0
+            function strategy:run(argv)
+                assert.same({ "uname" }, argv)
+                calls = calls + 1
+                return { started = true, ok = true, output = host .. "\n" }
+            end
+            local context = driver.new_resolver_context({ io = strategy })
+            local expected = host == "Linux" and "linux" or
+                host == "Darwin" and "darwin" or "native"
+            assert.is_nil(context.target)
+            assert.equal(expected, driver.context_target(context))
+            assert.equal(expected, driver.validate_target(context, nil))
+            assert.equal(expected, driver.validate_target(context, ""))
+            for _, value in ipairs({ "linux", "darwin", "windows",
+                    "native", "browser", "wasm32" }) do
+                for _, origin in ipairs({ "--target", "TITAN_TARGET" }) do
+                    local target, err = driver.validate_target(context, value, origin)
+                    if value == expected and value ~= "native" then
+                        assert.equal(expected, target)
+                        assert.is_nil(err)
+                    else
+                        assert.is_nil(target)
+                        assert.matches(origin == "TITAN_TARGET" and
+                            "TITAN_TARGET=" .. value or "--target " .. value,
+                            err, 1, true)
+                        local reason = value == "native" and "not a compilation target" or
+                            value == "browser" and "not available yet" or
+                            value == "wasm32" and "unknown target" or
+                            "native cross-compilation is not supported"
+                        assert.matches(reason, err, 1, true)
+                    end
+                end
+            end
+            assert.equal(1, calls)
+            assert.is_true(driver.close_resolver_context(context))
+
+            local explicit = driver.new_resolver_context({ io = strategy, target = "browser" })
+            assert.equal("browser", driver.context_target(explicit))
+            assert.is_true(driver.close_resolver_context(explicit))
+        end)
+    end
+
+    it("resolves the Windows host without uname", function()
+        local windows = platform.windows
+        local uname, darwin, cflags = driver.UNAME, driver.IS_DARWIN, driver.CFLAGS
+        local context = driver.new_resolver_context()
+        function context.io:run() error("Windows must not run uname") end
+        platform.windows = true
+        local ok, err = xpcall(function()
+            assert.equal("windows", driver.context_target(context))
+            assert.equal("windows", driver.validate_target(context, "windows"))
+        end, debug.traceback)
+        platform.windows = windows
+        driver.UNAME, driver.IS_DARWIN, driver.CFLAGS = uname, darwin, cflags
+        assert.is_true(driver.close_resolver_context(context))
+        assert.truthy(ok, err)
+    end)
+end)
+
 -- These assertions model the POSIX standalone writer. Its lexical
 -- hierarchy uses POSIX spellings, so a Windows host supplies the small
 -- directory-type model instead of passing fictional POSIX paths to LFS.
