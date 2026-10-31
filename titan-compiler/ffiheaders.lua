@@ -1,3 +1,4 @@
+local source_selection = require "titan-compiler.source_selection"
 -- Deterministic module C environments and their resolver-owned physical tree.
 -- Keep this usable by the checker, C driver and coder without importing any
 -- of them: direct checker clients need the same lifecycle as source loaders.
@@ -185,10 +186,8 @@ function ffiheaders.filename(owner, logical_name)
     return root .. "/" .. logical_name, nil, root
 end
 
-local function origin_identity(owner, modname, sourcef)
-    sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
-    local stem = sourcef:gsub("[.]titan$", "")
-    local path = stem .. ".ffi.h"
+local function origin_identity(owner, modname, native_output)
+    local path = source_selection.output_stem(native_output, modname) .. ".ffi.h"
     if platform.windows then
         -- This is a normalized logical origin, not a physical header-input key.
         -- Preserve the existing Unix identity algorithm below.

@@ -1,0 +1,6 @@
+local io = import "io"
+
+function main(args: {string}): integer
+    io.print("default")
+    return 0
+end

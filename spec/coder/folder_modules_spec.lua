@@ -656,3 +656,142 @@ end
         assert.equal("", output)
     end)
 end)
+
+describe("target-selected files through the public compiler", function()
+    local fixtures = require "spec.fixtures.target_selection.support"
+    local fixture
+    before_each(function() fixture = fixtures.new() end)
+    after_each(function() fixture:close() end)
+
+    it("platform proof selects the host OS label over native and default", function()
+        local tree = REPO .. "/spec/fixtures/target_selection"
+        for _, label in ipairs({ "", "native", "linux", "darwin", "windows", "browser" }) do
+            local name = "host_label" .. (label ~= "" and "." .. label or "") .. ".titan"
+            fixtures.copy(tree .. "/" .. name, fixture.source .. "/" .. name)
+        end
+        fixture:compiled({ "-q", "host_label" })
+        local result = fixture:program("host_label")
+        assert.is_true(result.ok, result.output)
+        assert.equal(fixture.host .. "\n", result.output)
+        if fixture.host ~= "native" then
+            assert(os.remove(fixture.source .. "/host_label." .. fixture.host .. ".titan"))
+            fixture:compiled({ "-q", "host_label" })
+            result = fixture:program("host_label")
+            assert.is_true(result.ok, result.output)
+            assert.equal("native\n", result.output)
+        end
+        assert(os.remove(fixture.source .. "/host_label.native.titan"))
+        fixture:compiled({ "-q", "host_label" })
+        result = fixture:program("host_label")
+        assert.is_true(result.ok, result.output)
+        assert.equal("default\n", result.output)
+    end)
+
+    for _, folder in ipairs({ false, true }) do
+        for _, adjacent in ipairs({ false, true }) do
+            it("uses logical native artifacts for " .. (folder and "folder" or "flat") ..
+                " variant mains " .. (adjacent and "beside sources" or "under --output"), function()
+                local relative = folder and "artifact/artifact" or "artifact"
+                local selected = fixture.source .. "/" .. relative .. "." .. fixture.host .. ".titan"
+                fixtures.write(selected, [[
+foreign function target_artifact_increment(n: int): int
+    return n + 1
+end
+function main(args: {string}): integer
+    return target_artifact_increment(4)
+end
+]])
+                fixture:compiled({ "-q", "artifact" }, nil, adjacent)
+                local stem = (adjacent and fixture.source or fixture.output) .. "/" .. relative
+                for _, extension in ipairs({ ".c", ".o", ".ffi.h", ".titan.h" }) do
+                    assert.equal("file", lfs.attributes(stem .. extension, "mode"), stem .. extension)
+                    assert.is_nil(lfs.attributes(stem .. "." .. fixture.host .. extension))
+                end
+                local generated = fixtures.read(stem .. ".c")
+                assert.matches(selected, generated, 1, true)
+                assert.matches("#line", generated, 1, true)
+                local result = fixture:program("artifact", folder and "artifact__main" or "artifact", adjacent)
+                assert.equal(5, result.status, result.output)
+            end)
+        end
+    end
+
+    it("keeps shared contributors, logical sort order and the selected main's sole initializer", function()
+        local folder = fixture.source .. "/ensemble"
+        fixtures.write(folder .. "/ensemble.titan", "this default main must never parse @@@")
+        fixtures.write(folder .. "/ensemble." .. fixture.host .. ".titan", [[
+local io = import "io"
+local total = 0
+local calls = 0
+function main(args: {string}): integer
+    io.print("" .. total .. ":" .. calls)
+    return 0
+end
+do
+    total = first * 100 + second * 10 + third
+    calls = calls + 1
+end
+]])
+        fixtures.write(folder .. "/a-common.titan", "local first = 1\n")
+        fixtures.write(folder .. "/a.titan", "local second = 2\n")
+        fixtures.write(folder .. "/a_extra.titan", "local third = 3\n")
+        fixture:compiled({ "-q", "ensemble" })
+        local result = fixture:program("ensemble", "ensemble__main")
+        assert.is_true(result.ok, result.output); assert.equal("123:1\n", result.output)
+        assert(os.rename(folder .. "/a.titan", folder .. "/a.native.titan"))
+        fixture:compiled({ "-q", "ensemble" })
+        result = fixture:program("ensemble", "ensemble__main")
+        assert.is_true(result.ok, result.output); assert.equal("123:1\n", result.output)
+        fixtures.write(folder .. "/a.native.titan", "do local forbidden = 1 end\n")
+        result = fixture:compile({ "-q", "ensemble" })
+        assert.is_false(result.ok)
+        assert.matches("module initializer is only allowed", result.output, 1, true)
+        assert.matches("ensemble." .. fixture.host .. ".titan", result.output, 1, true)
+    end)
+
+    it("source imports select the composition without treating a variant as an importable file", function()
+        fixtures.write(fixture.source .. "/ensemble/ensemble." .. fixture.host .. ".titan",
+            "local function hidden(): integer return 19 end\n")
+        fixtures.write(fixture.source .. "/ensemble/extra.native.titan",
+            "function public(): integer return hidden() end\n")
+        fixtures.write(fixture.source .. "/ensemble/bad.browser.titan",
+            'foreign import "missing-inactive-target.h"\nthis is not Titan @@@')
+        fixtures.write(fixture.source .. "/foo/linux.titan",
+            "local function hidden(): integer return 23 end\n")
+        fixtures.write(fixture.source .. "/consumer.titan", [[
+local selected = import "ensemble.titan"
+local dotted = import "foo.linux.titan"
+function main(args: {string}): integer
+    return selected.hidden() + dotted.hidden()
+end
+]])
+        fixture:compiled({ "-q", "consumer" })
+        assert.equal(42, fixture:program("consumer").status)
+        local ffi = fixtures.read(fixture.output .. "/ensemble/ensemble.ffi.h")
+        assert.is_nil(ffi:find("missing-inactive-target.h", 1, true))
+        assert.is_nil(lfs.attributes(fixture.output .. "/foo.linux.c"))
+        assert.equal("file", lfs.attributes(fixture.output .. "/foo/linux.c", "mode"))
+    end)
+
+    it("attributes type diagnostics and native tracebacks to the selected physical file", function()
+        local selected = fixture.source .. "/location." .. fixture.host .. ".titan"
+        fixtures.write(selected, "function main(args: {string}): integer return false end\n")
+        local result = fixture:compile({ "-q", "location" })
+        assert.is_false(result.ok)
+        assert.matches(selected .. ":1:", result.output, 1, true)
+        fixtures.write(selected, [[
+local function selected_raise()
+    raise "selected target traceback"
+end
+function main(args: {string}): integer
+    selected_raise()
+    return 0
+end
+]])
+        fixture:compiled({ "-q", "location" })
+        result = fixture:program("location")
+        assert.is_false(result.ok)
+        assert.matches("selected target traceback", result.output, 1, true)
+        assert.matches("location." .. fixture.host .. ".titan", result.output, 1, true)
+    end)
+end)

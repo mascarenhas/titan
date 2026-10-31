@@ -141,4 +141,18 @@ describe("native coverage source build", function()
             coverage.absolute(root .. "/one/.coverage") .. "/" }, coverage.compile_flags(build, "one.leaf"))
         assert.same({ "-O0", "-fno-lto" }, coverage.compile_flags(build, "tests"))
     end)
+
+    it("uses the logical target-selection stem for coverage notes and dumpbase", function()
+        platform.windows = false
+        local build = assert(prepare())
+        local source = { kind = "flat", main = root .. "/foo.linux.titan",
+            native_output = root .. "/foo.titan", files = { root .. "/foo.linux.titan" } }
+        assert(coverage.source(build, "foo", source))
+        assert.equal(path.join(root, ".coverage", "foo.titan"), source.native_output)
+        build.selected.foo = true
+        assert.same({ "-O0", "-fno-lto", "--coverage", "-fprofile-update=atomic",
+            "-fkeep-static-functions", "-dumpbase", "foo.c", "-dumpbase-ext", ".c" },
+            coverage.compile_flags(build, "foo"))
+        assert.same({ root .. "/foo.linux.titan" }, source.files)
+    end)
 end)
