@@ -199,7 +199,7 @@ end
 ]], mjs, previous_mjs, wasm, previous_wasm, log, failure))
             local setup = string.format("package.path=%q..package.path;",
                 fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;") ..
-                fixture.collector:init_code() .. string.format("dofile(%q);", hook)
+                fixture.collector:init_code() .. ";\n" .. string.format("dofile(%q);", hook)
             local argv = { info.prefix .. "/bin/lua", "-E", "-e", setup, fixture.frontend .. "/titanc",
                 "--tree", fixture.source, "--output", fixture.output }
             for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
@@ -310,7 +310,7 @@ end
 ]], mjs, wasm, log))
         local setup = string.format("package.path=%q..package.path;",
             fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;") ..
-            fixture.collector:init_code() .. string.format("dofile(%q);", hook)
+            fixture.collector:init_code() .. ";\n" .. string.format("dofile(%q);", hook)
         local argv = { info.prefix .. "/bin/lua", "-E", "-e", setup, fixture.frontend .. "/titanc",
             "--tree", fixture.source, "--output", fixture.output }
         for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
