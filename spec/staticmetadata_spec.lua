@@ -2005,6 +2005,103 @@ return {
             assert.matches('archive member #2 .* name "lto.o": LLVM bitcode %(LTO%) object is not supported', bitcode_member_err)
         end)
 
+        it("permits standalone -shared-mem SjLj feature differences only in non-threaded comparisons", function()
+            local function fp(features)
+                return { format = "wasm", word_size = 32, linking_version = 2, features = features }
+            end
+
+            -- Both operand orders and marker-only/empty boundary succeed in non-threaded comparisons.
+            for _, pair in ipairs({
+                { "+bulk-memory +sign-ext -shared-mem", "+bulk-memory +sign-ext" },
+                { "+bulk-memory +sign-ext", "+bulk-memory +sign-ext -shared-mem" },
+                { "-shared-mem", "" },
+                { "", "-shared-mem" },
+                { "-shared-mem", "-shared-mem" },
+            }) do
+                local ok, err = staticmetadata.fingerprint_matches(fp(pair[1]), fp(pair[2]))
+                assert.is_true(ok, err)
+            end
+
+            -- Lookalike feature names, duplicate/conflicting markers, threading/atomics tokens,
+            -- and unrelated feature additions/removals/sign changes all fail.
+            for _, pair in ipairs({
+                { "-shared-mem+atomics", "+atomics" },
+                { "+atomics", "-shared-mem+atomics" },
+                { "+bulk-memory -shared-memory", "+bulk-memory" },
+                { "+bulk-memory -shared-mem-ext", "+bulk-memory" },
+                { "+bulk-memory -shared-mem -shared-mem", "+bulk-memory" },
+                { "+bulk-memory +shared-mem -shared-mem", "+bulk-memory" },
+                { "+bulk-memory =shared-mem -shared-mem", "+bulk-memory" },
+                { "+atomics -shared-mem", "+atomics" },
+                { "+atomics", "+atomics -shared-mem" },
+                { "=atomics -shared-mem", "=atomics" },
+                { "-atomics -shared-mem", "-atomics" },
+                { "+shared-mem", "-shared-mem" },
+                { "=shared-mem", "-shared-mem" },
+                { "+bulk-memory -shared-mem", "+bulk-memory +sign-ext" },
+                { "-bulk-memory -shared-mem", "+bulk-memory" },
+                { " +bulk-memory -shared-mem", "+bulk-memory" },
+                { "+bulk-memory  -shared-mem", "+bulk-memory" },
+            }) do
+                local ok, err = staticmetadata.fingerprint_matches(fp(pair[1]), fp(pair[2]))
+                assert.is_false(ok, pair[1] .. " vs " .. pair[2])
+                assert.equal("Wasm features " .. pair[1] .. " does not match target " .. pair[2], err)
+            end
+
+            -- Targeted and untargeted mixed archives with -shared-mem and non--shared-mem members
+            -- retain raw per-member features while passing non-threaded compatibility checks.
+            local other_payload = assert(staticmetadata.render(
+                "pkg.other", ABI, 'Module("pkg.other",{}, {})'))
+            local sjlj_obj = wasm_object(PAYLOAD, {
+                features = {
+                    { "+", "bulk-memory" },
+                    { "+", "sign-ext" },
+                    { "-", "shared-mem" },
+                },
+            })
+            local plain_obj = wasm_object(other_payload, {
+                features = {
+                    { "+", "bulk-memory" },
+                    { "+", "sign-ext" },
+                },
+            })
+            local baseline = fp("+bulk-memory +sign-ext")
+            for _, member_order in ipairs({
+                { ar_member("sjlj.o/", sjlj_obj), ar_member("plain.o/", plain_obj) },
+                { ar_member("plain.o/", plain_obj), ar_member("sjlj.o/", sjlj_obj) },
+            }) do
+                local untargeted = assert(scan(archive(member_order)))
+                local targeted = assert(scan(archive(member_order), { target = baseline }))
+                assert.equal(2, #untargeted.members)
+                assert.equal(2, #targeted.members)
+            end
+            local parsed_mixed = assert(scan(archive({
+                ar_member("sjlj.o/", sjlj_obj),
+                ar_member("plain.o/", plain_obj),
+            }), { target = baseline }))
+            assert.equal("+bulk-memory +sign-ext -shared-mem", parsed_mixed.members[1].fingerprint.features)
+            assert.equal("+bulk-memory +sign-ext", parsed_mixed.members[2].fingerprint.features)
+
+            -- Mixed archive with +atomics and -shared-mem is rejected even untargeted.
+            local threaded_sjlj = wasm_object(PAYLOAD, {
+                features = {
+                    { "+", "atomics" },
+                    { "-", "shared-mem" },
+                },
+            })
+            local threaded_plain = wasm_object(other_payload, {
+                features = {
+                    { "+", "atomics" },
+                },
+            })
+            local rejected_ar, rejected_err = scan(archive({
+                ar_member("t1.o/", threaded_sjlj),
+                ar_member("t2.o/", threaded_plain),
+            }))
+            assert.is_nil(rejected_ar)
+            assert.matches('archive member #2 .* name "t2.o": target mismatch: Wasm features %+atomics does not match target %+atomics %-shared%-mem', rejected_err)
+        end)
+
         it("classifies Wasm objects and archives and persists Wasm part fingerprints", function()
             local incremental = require "titan-compiler.incremental"
             local wasm_part = wasm_object(nil, {

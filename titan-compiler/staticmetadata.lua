@@ -551,14 +551,56 @@ function staticmetadata.fingerprint_matches(actual, expected)
                     tostring(expected[field])
             end
         end
-        local function wasm_toolchain_features(features)
-            if type(features) ~= "string" then return features end
-            return (features:gsub(" %-shared%-mem$", "")
-                :gsub("^%-shared%-mem ?", "")
-                :gsub(" %-shared%-mem ", " "))
+        local function non_threaded_wasm_tokens(features)
+            if type(features) ~= "string" then return nil end
+            if features == "" then return {} end
+            if features:sub(1, 1) == " " or features:sub(-1) == " " or
+               features:find("  ", 1, true) then
+                return nil
+            end
+            local tokens, seen, previous = {}, {}, nil
+            for token in features:gmatch("[^ ]+") do
+                local prefix = token:sub(1, 1)
+                local fname = token:sub(2)
+                if (prefix ~= "+" and prefix ~= "-" and prefix ~= "=") or
+                   fname == "" or fname:find("[^!-\126]") then
+                    return nil
+                end
+                if previous and not bytewise_less(previous, token) then
+                    return nil
+                end
+                if seen[fname] then return nil end
+                seen[fname] = true
+                previous = token
+                if token == "-shared-mem" then
+                    -- Ignore at most one standalone -shared-mem SjLj marker.
+                elseif fname == "shared-mem" or fname == "atomics" then
+                    return nil
+                else
+                    tokens[#tokens + 1] = token
+                end
+            end
+            return tokens
         end
-        if wasm_toolchain_features(actual.features) ~=
-           wasm_toolchain_features(expected.features) then
+        local function wasm_features_match(actual_features, expected_features)
+            if type(actual_features) ~= "string" or type(expected_features) ~= "string" then
+                return false
+            end
+            if actual_features == expected_features then return true end
+            local actual_tokens = non_threaded_wasm_tokens(actual_features)
+            local expected_tokens = non_threaded_wasm_tokens(expected_features)
+            if not actual_tokens or not expected_tokens or
+               #actual_tokens ~= #expected_tokens then
+                return false
+            end
+            for index = 1, #actual_tokens do
+                if actual_tokens[index] ~= expected_tokens[index] then
+                    return false
+                end
+            end
+            return true
+        end
+        if not wasm_features_match(actual.features, expected.features) then
             return false, "Wasm features " ..
                 tostring(actual.features) .. " does not match target " ..
                 tostring(expected.features)

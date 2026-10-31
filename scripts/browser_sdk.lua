@@ -2,8 +2,6 @@
 local action = ...
 assert(type(action) == "string", "usage: browser_sdk.lua <prepare|stage-runtime|finalize> ...")
 
-local lfs = require "lfs"
-
 local function getenv(name)
     local value = os.getenv(name)
     if value == nil or value == "" then return nil end
@@ -13,17 +11,27 @@ end
 local prefix = assert(getenv("PREFIX"), "PREFIX is required")
 local install_tree = assert(getenv("TITAN_INSTALL_TREE") or prefix, "TITAN_INSTALL_TREE is required")
 
--- Allow loading the compiler and support module from TITAN_INSTALL_TREE or PREFIX.
-for _, root in ipairs({ install_tree, prefix }) do
-    if lfs.attributes(root .. "/share/lua/5.5", "mode") == "directory" then
-        package.path = root .. "/share/lua/5.5/?.lua;" ..
-            root .. "/share/lua/5.5/?/init.lua;" .. package.path
+-- Configure search paths before requiring non-core modules (including lfs),
+-- keeping TITAN_INSTALL_TREE ahead of PREFIX to match Makefile's titanc selection.
+do
+    local roots = install_tree ~= prefix and { install_tree, prefix } or { install_tree }
+    local lua_paths, c_paths = {}, {}
+    for _, root in ipairs(roots) do
+        lua_paths[#lua_paths + 1] = root .. "/share/lua/5.5/?.lua"
+        lua_paths[#lua_paths + 1] = root .. "/share/lua/5.5/?/init.lua"
+        c_paths[#c_paths + 1] = root .. "/lib/lua/5.5/?.so"
     end
-    if lfs.attributes(root .. "/lib/lua/5.5", "mode") == "directory" then
-        package.cpath = root .. "/lib/lua/5.5/?.so;" .. package.cpath
-    end
+    lua_paths[#lua_paths + 1] = package.path
+    c_paths[#c_paths + 1] = package.cpath
+    package.path = table.concat(lua_paths, ";")
+    package.cpath = table.concat(c_paths, ";")
 end
 
+local ok_lfs, lfs = pcall(require, "lfs")
+if not ok_lfs or type(lfs) ~= "table" then
+    io.stderr:write("browser-sdk: LuaFileSystem (lfs) is unavailable; run 'luarocks make' first\n")
+    os.exit(1)
+end
 local ok_support, support = pcall(require, "titan")
 if not ok_support or type(support) ~= "table" then
     io.stderr:write("browser-sdk: installed Titan support module is unavailable; run 'luarocks make' or 'make install-compiler-sdk' first\n")
@@ -103,10 +111,6 @@ local function check_no_forbidden_symbols(archive_path, archive)
 end
 
 local function stage_differing_roots()
-    local norm_prefix = strategy:realpath(prefix) or paths.normalize(prefix)
-    ensure_dir(install_tree)
-    local norm_tree = strategy:realpath(install_tree) or paths.normalize(install_tree)
-
     local common_headers = {
         "include/minicoro.h",
         "include/titan.h",
@@ -114,35 +118,49 @@ local function stage_differing_roots()
         "include/titan/ffi.h",
     }
 
+    local norm_prefix = strategy:realpath(prefix) or paths.normalize(prefix)
+    local existing_tree = lfs.attributes(install_tree, "mode") == "directory"
+    local norm_tree = (existing_tree and strategy:realpath(install_tree)) or paths.normalize(install_tree)
+
     if norm_prefix ~= norm_tree then
-        -- Stage fork-owned verified browser Lua into the differing install tree
-        -- before constructing any browser target context against it.
+        -- Validate the authoritative PREFIX browser-Lua prerequisites before
+        -- touching or reading the destination tree, so an incomplete PREFIX
+        -- fails naming PREFIX rather than consuming a stale ROCKS_TREE copy.
+        local runtime_inc = lfs.attributes(install_tree .. "/include/titan.h", "mode") == "file"
+            and (install_tree .. "/include") or (prefix .. "/include")
+        local prefix_paths = driver.installed_paths(prefix, "browser")
+        local prefix_ctx = { io = strategy, extra_ffi_include_dirs = {} }
+        local prefix_desc, prefix_err = driver._browser_target.build(prefix_ctx, {
+            paths = prefix_paths,
+            runtime_include = runtime_inc,
+            compile_flags = {},
+            build_profile = getenv("TITAN_BUILD_PROFILE") or "production",
+        })
+        if not prefix_desc then
+            fail(prefix_err)
+        end
+
+        ensure_dir(install_tree)
         local src_browser = prefix .. "/lib/browser"
         local dst_browser = install_tree .. "/lib/browser"
-        local src_record = src_browser .. "/liblua-config.txt"
-        local src_archive = src_browser .. "/liblua.a"
         local src_inc = src_browser .. "/include"
-        if lfs.attributes(src_record, "mode") == "file" and
-           lfs.attributes(src_archive, "mode") == "file" and
-           lfs.attributes(src_inc, "mode") == "directory" then
-            ensure_dir(dst_browser .. "/include")
-            local existing = strategy:list(dst_browser .. "/include") or {}
-            for _, name in ipairs(existing) do
-                if name:match("^[^/\\]+[.]h$") then
-                    strategy:unlink(dst_browser .. "/include/" .. name)
-                end
+        ensure_dir(dst_browser .. "/include")
+        local existing = strategy:list(dst_browser .. "/include") or {}
+        for _, name in ipairs(existing) do
+            if name:match("^[^/\\]+[.]h$") then
+                strategy:unlink(dst_browser .. "/include/" .. name)
             end
-            local headers, list_err = strategy:list(src_inc)
-            if not headers then fail(list_err) end
-            table.sort(headers, util.bytewise_less)
-            for _, name in ipairs(headers) do
-                if name:match("^[^/\\]+[.]h$") then
-                    copy_file_atomic(src_inc .. "/" .. name, dst_browser .. "/include/" .. name, false)
-                end
-            end
-            copy_file_atomic(src_archive, dst_browser .. "/liblua.a", false)
-            copy_file_atomic(src_record, dst_browser .. "/liblua-config.txt", false)
         end
+        local headers, list_err = strategy:list(src_inc)
+        if not headers then fail(list_err) end
+        table.sort(headers, util.bytewise_less)
+        for _, name in ipairs(headers) do
+            if name:match("^[^/\\]+[.]h$") then
+                copy_file_atomic(src_inc .. "/" .. name, dst_browser .. "/include/" .. name, false)
+            end
+        end
+        copy_file_atomic(src_browser .. "/liblua.a", dst_browser .. "/liblua.a", false)
+        copy_file_atomic(src_browser .. "/liblua-config.txt", dst_browser .. "/liblua-config.txt", false)
 
         -- Ensure common Titan headers exist in the differing install tree without
         -- ever touching native Lua headers.
@@ -153,6 +171,8 @@ local function stage_differing_roots()
                 copy_file_atomic(src, dst, false)
             end
         end
+    else
+        ensure_dir(install_tree)
     end
 
     for _, rel in ipairs(common_headers) do
