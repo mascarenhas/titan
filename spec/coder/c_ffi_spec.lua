@@ -1,6 +1,7 @@
 local temporary = require "spec.support.temporary"
 local h = require 'spec.support.helpers'
 local driver = require 'titan-compiler.driver'
+local platform = require 'titan-compiler.platform'
 
 local function with_header(contents, fn)
     local header = temporary.name(".h")
@@ -373,15 +374,43 @@ describe("C FFI code generation", function()
         end)
     end)
 
-    it("passes real standard stream macro values to fwrite", function()
-        h.run_coder([[
+    it("passes host-supported standard stream expressions to fwrite", function()
+        local stdout_expression, stderr_expression = "ffi.stdout", "ffi.stderr"
+        if platform.windows then
+            -- UCRT's call-expression macros are not imported values; their
+            -- declared accessor remains an ordinary supported foreign call.
+            stdout_expression = "ffi.__acrt_iob_func(1)"
+            stderr_expression = "ffi.__acrt_iob_func(2)"
+        end
+        h.run_coder(string.format([[
             foreign import "stdio.h"
 
             function write_empty(): boolean
-                return ffi.fwrite("", 1, 0, ffi.stdout) == 0
-                    and ffi.fwrite("", 1, 0, ffi.stderr) == 0
+                return ffi.fwrite("", 1, 0, %s) == 0
+                    and ffi.fwrite("", 1, 0, %s) == 0
             end
-        ]], [[ assert(test.write_empty()) ]])
+        ]], stdout_expression, stderr_expression), [[ assert(test.write_empty()) ]])
+    end)
+
+    it("executes declared UCRT-style stream accessors directly", function()
+        with_header([[
+            typedef struct ffi_crt_stream { int marker; } ffi_crt_stream;
+            static ffi_crt_stream ffi_crt_streams[3] = { { 0 }, { 17 }, { 29 } };
+            static ffi_crt_stream *ffi_crt_iob_func(unsigned index) {
+                return &ffi_crt_streams[index];
+            }
+            #define ffi_crt_stdout (ffi_crt_iob_func(1))
+            #define ffi_crt_stderr (ffi_crt_iob_func(2))
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                function read_streams(): integer
+                    return ffi.ffi_crt_iob_func(1).marker
+                        + ffi.ffi_crt_iob_func(2).marker
+                end
+            ]], [[ assert(test.read_streams() == 46) ]])
+        end)
     end)
 
     it("preserves Udata pointers as full-userdata TValues", function()
