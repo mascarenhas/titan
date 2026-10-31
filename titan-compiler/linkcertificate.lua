@@ -786,8 +786,36 @@ local function native_dependencies(context, policy)
         for line in (bytes .. "\n"):gmatch("([^\r\n]+)[\r\n]+") do
             local filename = line
             local stat = context.io:stat(filename)
-            if not stat then
-                filename = line:match("^(.*)%(.+%)$")
+            if not stat and line:sub(-1) == ")" then
+                local candidates, offset = {}, 1
+                while true do
+                    local boundary = line:find("(", offset, true)
+                    if not boundary or boundary >= #line - 1 then break end
+                    candidates[#candidates + 1] = absolute(context, line:sub(1, boundary - 1))
+                    offset = boundary + 1
+                end
+                filename = nil
+                -- The archive path is a literal recipe input, not the first
+                -- or last parenthesis: both it and the member may contain '('.
+                for _, candidate in ipairs(candidates) do
+                    if policy.trace_inputs[candidate] and
+                       context.io:read_file(candidate, 7) == "!<arch>\n" then
+                        need(not filename, "ambiguous Wasm linker input trace: " .. line)
+                        filename = candidate
+                    end
+                end
+                if not filename then
+                    -- Implicit toolchain libraries are not recipe argv inputs.
+                    -- Accept only one regular archive at a literal boundary.
+                    for _, candidate in ipairs(candidates) do
+                        local info = context.io:stat(candidate)
+                        if info and info.kind == "file" and
+                           context.io:read_file(candidate, 7) == "!<arch>\n" then
+                            need(not filename, "ambiguous Wasm linker input trace: " .. line)
+                            filename = candidate
+                        end
+                    end
+                end
                 stat = filename and context.io:stat(filename)
             end
             need(stat and stat.kind == "file", "invalid Wasm linker input trace: " .. line)
@@ -854,6 +882,12 @@ function certificate.prepare(context, spec)
     -- Staged object/synthetic paths reported by the linker are reconstructed
     -- from the recipe. Track real libraries, scripts and all other read files.
     for _, filename in ipairs(spec.dependency_excludes or {}) do policy.exclude[absolute(context, filename)] = true end
+    if policy.backend == "wasm" then
+        policy.trace_inputs = {}
+        for _, field in ipairs(FILE_FIELDS) do
+            for _, file in ipairs(input[field]) do policy.trace_inputs[file.path] = true end
+        end
+    end
     input.native_policy = { backend = policy.backend, cacheable = policy.cacheable,
         files = policy.files and certificate.files(context, policy.files) or nil }
     return { key = key, directory = directory, synthetic_directory = paths.join(directory, "synthetic"),

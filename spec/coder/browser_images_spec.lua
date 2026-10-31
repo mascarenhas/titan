@@ -95,6 +95,7 @@ assert(driver.close_resolver_context(context))
     local result = process.capture({ prefix .. "/bin/lua" .. suffix, "-E", "-e",
         string.format("package.path=%q..package.path;", repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script },
         { env = { TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_BUILD_PROFILE = "validation",
+            PATH = prefix .. "/bin" .. (platform.windows and ";" or ":") .. (os.getenv("PATH") or ""),
             TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" } })
     assert.is_true(result.ok, result.output or result.diagnostic)
     return result.output
@@ -199,6 +200,39 @@ describe("browser image profile and SDK readiness", function()
         assert.is_true(policy.capture_trace)
         assert.equal("/out/link.d", policy.dependency_file)
         assert.same({ "-Wl,--trace" }, policy.argv)
+    end)
+
+    it("owns only the browser pair at final validation even on a Darwin host", function()
+        local root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
+        local previous = driver.IS_DARWIN
+        local cleanup <close> = setmetatable({}, { __close = function()
+            driver.IS_DARWIN = previous
+            files.remove(root)
+        end })
+        driver.IS_DARWIN = true
+        local context = { target = "browser", uname = "Darwin", is_darwin = true }
+        local executable, wasm = root .. "/app.mjs", root .. "/app.wasm"
+        local dsym, entrypoint = executable .. ".dSYM", root .. "/entrypoint.c"
+        files.write(dsym, "unrelated user file")
+        local ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
+            { dsym }, { wasm }, {}, context)
+        assert.is_true(ok, why)
+        assert.equal("unrelated user file", read(dsym))
+        ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
+            { wasm }, { wasm }, {}, context)
+        assert.is_nil(ok)
+        assert.truthy(why:find("aliases input", 1, true), why)
+        ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
+            {}, { wasm }, {}, { target = "macos" })
+        assert.is_nil(ok)
+        assert.truthy(why:find(dsym, 1, true), why)
+        files.remove(dsym)
+        local header = dsym .. "/authored.h"
+        files.write(header, "/* user header */")
+        ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
+            { header }, { wasm }, {}, context)
+        assert.is_true(ok, why)
+        assert.equal("/* user header */", read(header))
     end)
 
     it("rejects trailing attempts to override profile-owned settings", function()

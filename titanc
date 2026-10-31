@@ -698,6 +698,7 @@ if #extra_objects == 0 then extra_objects = nil end
 -- archive probe, validation link and final link. A hit changes nothing.
 local browser_assets, browser_profile, browser_probe
 local link_ticket, program_path, windows_paths, coverage_runtime, dsymutil
+local link_record_committed
 -- The final link's output basename, reported as the progress step.
 local link_name
 if not args.compile_only and not args.print_ast then
@@ -1155,7 +1156,11 @@ if main_module then
     local entrypoint_output = test_entrypoint_output or
         driver.generated_output_path(main_module:gsub("[.]", "/") .. "__entrypoint.c", args.output)
     local extra_outputs
-    if platform.windows then
+    if target == "browser" then
+        local browser_output, wasm = driver.browser_program_path(program_output, program_output)
+        if not browser_output then exit(wasm) end
+        extra_outputs = { wasm }
+    elseif platform.windows then
         local paths, path_error = windows_paths, nil
         if not paths then
             paths, path_error = driver.windows_program_paths(main_module,
@@ -1170,7 +1175,7 @@ if main_module then
     end
     local outputs_ok, outputs_err = driver.validate_program_output_paths(
         source_outputs, program_output, entrypoint_output, native_inputs,
-        extra_outputs, compile_plans.outputs)
+        extra_outputs, compile_plans.outputs, resolver_context)
     if not outputs_ok then table.insert(errors, outputs_err) end
 end
 
@@ -1306,6 +1311,12 @@ if main_module then
                 dsymutil = dsymutil,
                 before_commit = link_ticket and function()
                     return linkcertificate.invalidate(resolver_context, link_ticket)
+                end or nil,
+                after_publish = target == "browser" and link_ticket and function()
+                    local committed, why = linkcertificate.commit(resolver_context, link_ticket)
+                    if not committed then return nil, "cannot record final link: " .. tostring(why) end
+                    link_record_committed = true
+                    return true
                 end or nil,
                 output_module = args.test and requested_modules[1] or nil,
                 output_root = args.output,
@@ -1466,7 +1477,7 @@ end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 -- The success record is written last, after the complete output set.
-if link_ticket then
+if link_ticket and not link_record_committed then
     local called, committed, commit_error =
         pcall(linkcertificate.commit, resolver_context, link_ticket)
     if not called then
