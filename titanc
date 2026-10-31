@@ -333,6 +333,9 @@ local target, target_error =
     driver.validate_target(resolver_context, target_value, target_origin)
 if not target then exit(target_error) end
 resolver_context.target = target
+if target == "browser" and not args.output then
+    exit("--target browser requires --output")
+end
 if #args.module == 0 and #args.test_dir == 0 and
    not (args.compile_only and #args.c_source > 0) then
     exit("at least one module name is required (or use --print-root, " ..
@@ -587,7 +590,7 @@ end
 -- position, before -X payloads.
 local c_objects = {}
 if #normalized_native.c_sources > 0 then
-    local compile_argv, compile_error = driver.authored_c_compile_prefix()
+    local compile_argv, compile_error = driver.authored_c_compile_prefix(resolver_context)
     if not compile_argv then exit(compile_error) end
     local toolchain, toolchain_error = driver.toolchain_descriptor(resolver_context)
     if not toolchain then exit(toolchain_error) end
@@ -748,7 +751,7 @@ if not args.compile_only and not args.print_ast then
             incremental.compiler_component(resolver_context)
         if not compiler_inventory then exit(inventory_error) end
     end
-    local compile_prefix, prefix_error = driver.generated_compile_prefix()
+    local compile_prefix, prefix_error = driver.generated_compile_prefix(resolver_context)
     if not compile_prefix then exit(prefix_error) end
     local backend, backend_error, backend_status =
         driver.native_link_backend(resolver_context)
