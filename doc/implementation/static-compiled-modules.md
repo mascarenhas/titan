@@ -33,7 +33,7 @@ module's primary object (part 0 of a
 #if defined(__APPLE__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
-#elif defined(__ELF__) || defined(_WIN32)
+#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.meta")))
 #endif
@@ -58,6 +58,17 @@ with the object that defines the module's `_abi`, `_types`, `_layouts`, `_init`,
 `luaopen_` entries. Archive flattening naturally retains it, with no aggregate
 metadata member to regenerate and no archive leaf name used as logical
 identity.
+
+When Emscripten or Clang compiles for `wasm32`, `__ELF__`, `__APPLE__`, and
+`_WIN32` are all undefined, so the `__wasm__` branch selects the same
+`.titan.meta` name; the trusted `.titan.source` emitter has the same branch
+and the enum-carrier `.titan.cprobe` emitter already used the generic name.
+Clang emits each array as a named DATA segment recorded in the `linking`
+section's segment info. Byte alignment and the absence of relocations keep the
+segment length equal to the payload. Whether `used` retains the segments in a
+final linked Wasm image is a link-profile question for
+[#329](https://github.com/mascarenhas/titan/issues/329); metadata reading
+never depends on it.
 
 The standalone entrypoint, runtime objects, `ltitanlib.o`, ordinary native
 payload, and the part objects of split modules do not carry logical metadata.
@@ -184,6 +195,106 @@ Every slice must expose the exact same logical key set and byte-identical
 canonical payload for each key. Lookup can validate that agreement before
 knowing the active target.
 
+### Relocatable WebAssembly
+
+The reader accepts relocatable Wasm objects as produced by `emcc -c` and by
+Clang's `wasm32-unknown-emscripten` target, alone or as regular-archive
+members written by `emar`/`llvm-ar`. It uses the same `Reader:range` bounds,
+`fail(origin, ...)` diagnostics, and archive-member origins as the other
+formats, reads the input once, and starts no subprocess.
+
+* **Header.** Magic `\0asm` and version 1 (`unsupported Wasm version <version>`
+  otherwise). The LLVM bitcode magics `BC\xC0\xDE` and `\xDE\xC0\x17\x0B` fail
+  with `LLVM bitcode (LTO) object is not supported`, as an object or as an
+  archive member; any other magic fails with `unsupported native object format`
+  through `classify_object` or `unsupported native container format` through
+  `scan_bytes`/`scan_archive`.
+* **LEB128.** An unsigned 32-bit value has at most five bytes. Padded,
+  non-minimal encodings are accepted because LLVM pads relocatable fields;
+  a sixth byte (`Wasm u32 LEB128 exceeds 5 bytes`), excess bits in the fifth
+  (`Wasm u32 LEB128 overflows`), and a missing terminator or a read past the
+  section (`truncated Wasm u32 LEB128`) are rejected. Signed values occur in
+  an `i32.const` segment offset (`Wasm i32 LEB128 exceeds 5 bytes`, `Wasm i32
+  LEB128 overflows`, `truncated Wasm i32 LEB128`) and in relocation addends,
+  decoded at 32-bit width or, for the 64-bit-addend relocation types, with a
+  bounded ten-byte decoder (`Wasm i64 LEB128 exceeds 10 bytes`, `Wasm i64
+  LEB128 overflows`, `truncated Wasm i64 LEB128`).
+* **Sections.** Each section is an id and a u32 size inside the input
+  (`Wasm section is outside the input (offset <offset>, size <size>, input size
+  <size>)`). Known sections appear at most once and in canonical order, with
+  DATACOUNT in its position before CODE (`duplicate Wasm section <id>`,
+  `out-of-order Wasm section <id>`). A custom section's name lies inside the
+  section (`Wasm custom section name is outside its section`). `linking`
+  follows every known section, including DATA, and each `reloc.*` section
+  follows `linking`.
+* **Relocatable objects only.** A module without `linking` is a linked image
+  (`Wasm object has no linking section`); `linking` must be version 2
+  (`unsupported Wasm linking version <version>`). `dylink.0` marks a side
+  module (`Wasm dylink.0 side module is not supported`) and imports from
+  `GOT.mem`/`GOT.func` mark PIC code (`Wasm GOT import is not supported`). The
+  word size comes from the `env.__linear_memory` import; memory64 and shared
+  memory fail with `Wasm memory64 is not supported` and `Wasm shared memory is
+  not supported`.
+* **DATA.** Each segment's flags (active memory 0 with an `i32.const` offset,
+  passive, or an explicit memory index), size, and bounds are checked, and
+  DATACOUNT must agree with the segment count (`Wasm DATACOUNT does not match
+  DATA segment count`). The reader records each payload's absolute byte offset
+  for the relocation checks.
+* **`linking`.** The segment-info count must equal the DATA segment count
+  (`Wasm segment-info count does not match DATA segment count`); each entry
+  supplies the segment name, alignment, and flags (TLS among them). The symbol
+  table is read for structural validation, resolving the names of undefined
+  function, global, tag, and table symbols through the import index so no
+  import loses its name. Init-function and COMDAT entries are only
+  bounds-checked, and unknown subsections are skipped inside their bounds.
+* **`target_features`.** Entries are `+`, `-`, or `=` prefixes with
+  printable, non-whitespace ASCII names. A repeated name is a duplicate
+  (`duplicate Wasm target feature "<name>"`) and a name with two different
+  prefixes is a conflict (`conflicting Wasm target feature "<name>"`); the
+  rest are sorted bytewise into a single-space list.
+* **`reloc.*`.** The target section must exist (`Wasm relocation targets
+  missing section <index>`), each entry type must be a known relocation type
+  (`unsupported Wasm relocation type <type>`), offset plus width must lie
+  inside the target section (`Wasm relocation is outside its target section`),
+  and addends are parsed at their 32- or 64-bit width. A DATA relocation that
+  patches a Titan payload segment fails with `Wasm payload segment "<name>" is
+  targeted by a DATA relocation`, as ELF rejects `SHT_REL`/`SHT_RELA` sections
+  targeting `.titan.meta`.
+* **Payload segments.** `.titan.meta`, `.titan.source`, and `.titan.cprobe`
+  occur at most once per object each (`duplicate Wasm payload segment
+  "<name>"`) and must be active (`Wasm payload segment "<name>" is not
+  active`), non-TLS (`Wasm payload segment "<name>" is TLS`), alignment 1
+  (`Wasm payload segment "<name>" alignment is not 1`), untouched by any
+  relocation (`Wasm payload segment "<name>" is targeted by a DATA
+  relocation`), and inside the caller's size bound (`requested object section
+  exceeds size limit`, or `metadata section size <size> exceeds limit <limit>`
+  for `.titan.meta`). Other segments may be passive or more strictly aligned.
+  `.titan.meta` then goes through the ordinary banner, schema, and re-render
+  validation.
+
+Names are decoded by length and bounds only; diagnostics quote them with
+control bytes escaped. A parsed Wasm object exposes `format = "wasm"`, its
+fingerprint, its DATA segments (`index`, `name`, absolute `offset`, `size`,
+`active`, `tls`, `alignment` in bytes, `origin`), the selected metadata
+segment and entry, the linking symbols in order (`kind`, `name`, `binding` of
+`global`/`local`/`weak`, `defined`, `index`), and the imports in order
+(`module`, `name`, `kind`). `staticmetadata.read_object_section` takes a
+`wasm` segment name beside its ELF, COFF, and Mach-O selectors, so
+`objectmetadata` reads `.titan.source` records and `cprobe` reads enum-carrier
+answers from Wasm objects through the same accessor.
+
+The Wasm target fingerprint is `{ format = "wasm", word_size = 32,
+linking_version = 2, features = "<canonical list>" }`. Fingerprints are
+compared field by field in the order `word_size`, `linking_version`,
+`features`, reporting `Wasm <field> <actual> does not match target
+<expected>`; a different format reports `object format <actual> does not
+match target format <expected>`. Features match exactly: a subset is not
+compatible, and `-x` never matches `+x`. A regular archive that contains any
+Wasm member requires every member to be Wasm with the same fingerprint, even
+when the caller supplies no expected target, and names the offending member.
+In real `emar` archives the symbol index is record #1, so the first object is
+`archive member #2`.
+
 ## Target selection
 
 Interface resolution may scan an archive before source compilation. It must
@@ -196,6 +307,14 @@ generated object, selected archive member, and library-mode `-X` object must
 match. A universal input is then reduced to its one matching slice. The
 current compiler publishes a regular single-architecture archive; it does not
 silently preserve foreign slices that lack the newly generated modules.
+
+For the [browser target](browser-target.md), the expected fingerprint is known
+before resolution: it is the descriptor's. Browser archive scans pass it as
+the expected target, so a native or differently featured archive fails at scan
+time with the member origin, and the first generated object is cross-checked
+against it rather than becoming the authority. A Wasm target also reduces a
+metadata-only planned provider to a fresh scan of its bytes before structural
+validation.
 
 ## Resolver state and format passes
 
@@ -213,7 +332,9 @@ archives by normalized absolute path and keeps these concepts separate:
 Default lookup performs a complete `.so` pass, then a complete `.a` pass, then
 source. `--static` swaps the first two. Each compiled pass remains
 path-root-major and shallow-to-exact, with an independent occupied-relative-
-pathname set for its extension.
+pathname set for its extension. A browser context has only the `.a` pass,
+rooted first at the browser SDK directory and then at the browser Titan path
+([Provider lookup](browser-target.md#provider-lookup)).
 
 An archive claim materializes only the requested key in `driver.imported`.
 Other physical keys remain provider metadata, not resolver results. An exact
@@ -318,10 +439,16 @@ Runtime, backtrace, Lua, `-l`, and final flags are not copied into the archive.
 The configured `AR` creates a regular archive with order-preserving `qDc`
 operations, split into command batches below a 64 KiB command-line ceiling
 (`archive_batches`, `ARCHIVE_SHELL_COMMAND_LIMIT`). The configured `RANLIB`
-indexes it with `-D`. `archive_tool_capabilities` probes both tools and falls
-back to `qc` and plain `ranlib` only when deterministic `D` is unsupported; it
-never substitutes another tool. Each input member is staged in a unique
-numbered directory so duplicate leaf names remain distinct.
+indexes it with `-D`. `archive_tool_capabilities` probes both tools (for native
+`AR`/`RANLIB` and browser `emar`/`emranlib`) and falls back to `qc` and plain
+`ranlib` only when deterministic `D` is unsupported; it never substitutes
+another tool. Those four capability probes run through `run_argv`'s
+output-discard mode (`process.capture`), capturing and discarding tool
+stderr/stdout independently of `driver.LIVE_PROGRESS` so expected `qDc` or `-D`
+rejections do not leak usage output in quiet or non-live runs, while keeping
+`-v` command echoes, the exit status, and the diagnostics of actual archive
+writes and indexing. Each input member is staged in a unique numbered directory
+so duplicate leaf names remain distinct.
 
 Before archiving, the driver records every object's ordinal, byte length,
 target fingerprint, origin, and exact numbered staging file. It then walks the
@@ -335,7 +462,7 @@ union.
 
 ## Three-way validation
 
-Before publication, the driver:
+Before publication of a native provider pair, the driver:
 
 1. validates every logical protocol in the staged DSO;
 2. scans the staged archive and checks its exact intended key set;
@@ -492,6 +619,82 @@ dual failures where the later step fails first, and sends `TERM`, `HUP`, and
 `INT` while links are live. The overlapped `TERM` case runs under a shared
 jobserver. `spec/coder/lto_spec.lua` repeats its optimized provider pair under
 a shared jobserver.
+
+## Browser archive-only providers
+
+A [browser](browser-target.md) library build publishes `<provider>.a` with no
+DSO, dSYM, validation image, or fresh-process load. The provider output path,
+the preflight reservation, and the certified output set all name the archive
+alone, and the native runtime inputs are not linked. `driver.link_provider_pair`
+dispatches a browser request to `driver.stage_browser_provider`, which stages
+the archive in a sibling directory through `driver.build_static_archive` (see
+[Library mode and structural
+validation](browser-target.md#library-mode-and-structural-validation)) and then
+runs the structural check against the coordinator's expected entries.
+
+### Structural validation
+
+`driver.validate_browser_provider(archive, expected_entries?, generated_objects?)`
+inspects the reader's parsed archive and never loads or executes it. Provider
+lookup runs it on every browser archive it inspects, without the optional
+arguments; publication supplies both.
+
+1. With `expected_entries`, the archive's key set and each entry's ABI,
+   serialized types, and layouts must equal the coordinator's entries
+   (`driver.compare_archive_entries`).
+2. Every member must be a Wasm object:
+   `<member-origin>: browser provider requires Wasm objects`.
+3. No member may import, or leave undefined, `dlopen`, `dlsym`, or any name
+   beginning `backtrace_` or `__backtrace_`, whatever the symbol kind; both
+   the Wasm import list and the undefined linking symbols are checked:
+   `<member-origin>: browser provider imports forbidden symbol "<symbol>"`.
+4. For each logical key, the member that carries its metadata (the primary
+   member) must itself define `<prefix>_abi`, `<prefix>_types`,
+   `<prefix>_layouts`, `<prefix>_init`, and `luaopen_<prefix>` as defined,
+   global, non-weak functions, where `<prefix>` is the mangled module name.
+   A definition in a sibling or a split part does not count, and a weak,
+   local, or data definition fails:
+   `<member-origin>: browser provider module "<name>" requires global non-weak function "<symbol>"`.
+5. With `generated_objects`, every planned object of every module must occur
+   in the archive with its original bytes, counting multiplicity:
+   `browser provider module "<name>" is missing split part <index>` or
+   `browser provider module "<name>" is missing its primary member`.
+
+Generated-object validation reports a split part file that does not exist
+with the same split-part diagnostic. This check replaces the host
+`_loadlib` inspection that native publication performs; it is not a disabled
+check, and #329 adds an executing check (link and run under Node) on top.
+
+### Archive-only publication and native companions
+
+`driver.publish_provider_bundle(nil, staged_archive, public_archive, {
+archive_only = true, context = ... })` publishes the archive alone:
+
+1. the destination must end in `.a` (`browser provider path must end in .a`);
+2. no native companion may exist (see below);
+3. the staged archive must be a regular file that does not alias the
+   destination;
+4. a destination with the same regular-archive contents is kept, with its
+   mtime, and the staged copy is removed;
+5. otherwise the optional `before_commit` hook runs, the companions are checked
+   again, and the rename of the staged archive over the destination is the
+   single commit point.
+
+A browser publication cannot know whether an existing native file beside the
+archive belongs to it, so it refuses rather than deleting anything. The
+companion suffixes are `.so`, `.so.dSYM`, `.dll`, `.dll.def`, `.dylib`,
+`.dylib.dSYM`, `.dll.a`, `.lib`, `.exp`, and `.pdb` on the archive's stem.
+Files, directories, and symlinks all count, and symlinks are not followed:
+
+```text
+browser provider "<archive>" has native companion "<path>"; use a separate --output directory
+cannot inspect browser provider companion "<path>": <reason>
+```
+
+The check runs in the output preflight (before a warm final-link certificate
+could hit), in output-path validation (before the unchanged-archive
+shortcut), and again after `before_commit`. A refusal leaves the existing
+archive, the staged input, and the companion untouched.
 
 ## Publication and installation
 

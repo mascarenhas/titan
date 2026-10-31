@@ -44,7 +44,8 @@ Without an output root the resolver keeps the source-adjacent canonical paths. R
 neither serialized interfaces nor the generated-code ABI.
 
 Final providers keep common-prefix naming below the output root; library mode
-writes no Lua loader files. Without `--exe`, Unix programs
+writes no Lua loader files, and a [browser](browser-target.md) library writes
+only `<provider>.a`. Without `--exe`, Unix programs
 and test runners use mapped `program_output` stems below the output root, and
 Windows programs use `<output>/bin/<logical>.exe` and
 `<output>/lib/titan/0.6/<logical/module>.dll` (`driver.windows_program_paths`).
@@ -69,12 +70,16 @@ dispatching a worker for a module miss, the coordinator unlinks the old primary
 the worker compiles object parts into unique sibling temporaries and the
 coordinator renames non-primary parts before renaming `<stem>.o` last. Provider
 and archive publication stages sit beside their mapped final paths. The C probe
-cache keeps its own storage root.
+cache keeps its own storage root, separate for the browser target
+([Probe-cache isolation](browser-target.md#probe-cache-isolation)).
 
 `titanc` locks `--output`, or without `--output` every `--tree` source root
 plus the working directory, and adds `dirname(--exe)` when `--exe` is used.
-Under the primary output domain (`--output`, or the first `--tree` source root
-when `--output` is omitted), `titanc` also owns:
+A browser invocation takes these locks immediately after validating its target
+and required `--output`, before its descriptor probes write output-scoped
+temporaries; a native invocation locks after option normalization and source
+discovery. Under the primary output domain (`--output`, or the first `--tree`
+source root when `--output` is omitted), `titanc` also owns:
 
 - `<domain>/.titan-build.lock` (`build.lock_outputs`): the permanent OS lock
   file (`O_NOFOLLOW | O_CLOEXEC` + `flock` on POSIX; `CreateFileW` with
@@ -92,14 +97,20 @@ when `--output` is omitted), `titanc` also owns:
 - `<domain>/.native/<sha256(canonical-source-path)>.{o,record}`
   (`nativeinputs.compile`): the compiled object and sidecar certificate
   (`TITAN_NATIVE_RECORD_SCHEMA`) for each `--c-source` input, with
-  preprocessed output and dependency files as invocation scratch; and
+  preprocessed output and dependency files as invocation scratch;
 - `<domain>/.titan-links/<sha256(canonical-final-output-set)>/`
   (`linkcertificate.prepare`): the target's final-link certificate (`record`,
   `TITAN_LINK_RECORD_SCHEMA`), linker dependency output (`link.d`), and
   `synthetic/` directory (`<leaf>__test_runner.{titan,c,o}` and
   `<leaf>__[test_]entrypoint.{c,o}`, plus Windows `.manifest`/`.rc`/`.res` and
   `__coverage_dump.{c,o}` companions), isolating synthetic sources when several
-  executables in one output tree share a first root.
+  executables in one output tree share a first root; and
+- `<output>/.titan-target` (`driver.validate_output_target`): the one-line
+  target marker. Only a browser invocation that owns an empty `--output` root
+  writes it (`browser\n`); every invocation validates the marker of each
+  locked domain under its lock and refuses a domain that belongs to another
+  target, and the preflight reserves the marker path against every output
+  ([Output roots and the target marker](browser-target.md#output-roots-and-the-target-marker)).
 
 Before any worker starts, the coordinator reserves every generated path a
 planned module may write, including split parts up to the configured

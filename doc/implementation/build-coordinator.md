@@ -50,6 +50,11 @@ instead of dispatching workers:
    `.titan-links/`, and `.titan/`. With `--output`,
    `incremental.load_digest_cache` then loads `<output>/.titan/digests`
    ([Persistent digest cache](incremental-compilation.md#persistent-digest-cache)).
+   Every locked domain's [target
+   marker](browser-target.md#output-roots-and-the-target-marker) is validated
+   under its lock. A browser invocation performs this step right after target
+   validation, before step 1's foreign-C configuration builds its descriptor,
+   and is the only one that may write a marker.
 4. **Coordinate the module closure.** `build.run` resolves the transitive
    import closure, runs the [pre-dispatch output
    preflight](#pre-dispatch-output-preflight), certifies hits in-process
@@ -242,6 +247,10 @@ written. Earlier planning may already have refreshed compiler bookkeeping such
 as `.titan/preamble.c`, and the exit path still saves the digest cache. The
 pass itself never runs the checker, code generator, or C preprocessor:
 
+* **Target markers.** The output root's `.titan-target` marker is validated
+  (and, for a browser invocation, created in an empty root), and so is the
+  marker of every held lock domain
+  ([Output roots and the target marker](browser-target.md#output-roots-and-the-target-marker)).
 * **Reserved outputs.** Every planned source module, cached or fresh, reserves
   `<stem>.c`/`.o` and every potential split part
   `<stem>.part<k>.c`/`.part<k>.o` with `1 <= k < effective c_parts`, each
@@ -270,13 +279,17 @@ pass itself never runs the checker, code generator, or C preprocessor:
   still decided by its certificate.
 * **Final outputs.** The pass reserves the actual program path and Darwin
   `.dSYM`, the Windows launcher and provider DLL, or the library provider,
-  archive, and `.dSYM`.
+  archive, and `.dSYM`. A browser library reserves only its provider archive,
+  after refusing any [native companion](static-compiled-modules.md#archive-only-publication-and-native-companions)
+  beside it, and a browser program or test plan fails with `browser program
+  linking is not available yet`.
 * **Protected inputs.** `--c-source` files and `-X` payloads, every source
   constituent, the non-`search` C headers recorded by cached modules, selected
-  binary providers and archives, every held `.titan-build.lock` file, and the
-  metadata roots `.titan/`, `.titan-links/`, and `.native/` of the first lock
-  domain are inputs that no output may alias. Final outputs that would replace
-  a lock file or a metadata root are therefore rejected before any
+  binary providers and archives, every held `.titan-build.lock` file, every
+  held domain's `.titan-target` path, and the metadata roots `.titan/`,
+  `.titan-links/`, `.native/`, and `.titan-target` of the first lock domain are
+  inputs that no output may alias. Final outputs that would replace a lock
+  file, a marker, or a metadata root are therefore rejected before any
   invalidation.
 * **Graph-dependent CLI checks.** For roots without a certified record, the
   pass parses declarations only and follows transparent local and imported
@@ -580,7 +593,11 @@ Inside the worker (`build_worker.lua`),
 `driver.new_worker_context(request.configuration, worker_io(session))`
 (`driver.lua`) restores the coordinator's driver paths, flags,
 resolver settings (including the source-selection `target`, which the
-coordinator writes as `configuration.resolver.target`), and `codegen_policy`, then calls
+coordinator writes as `configuration.resolver.target`), and `codegen_policy`.
+A browser configuration also carries the closed descriptor as
+`configuration.target_descriptor`, which the worker imports and freezes before
+creating its context, without rerunning `emcc --version` or reverifying the
+record ([Worker transport](browser-target.md#worker-transport)). It then calls
 `incremental.compiler_component(context, options)` to hash the loaded compiler
 Lua files and frontend script. If the resulting digest differs from the
 top-level `configuration.compiler`, the worker fails immediately with
@@ -1012,7 +1029,8 @@ is:
 * **Unix provider library:** `{ path = "<prefix>.so" }`, `{ path =
   "<prefix>.a" }`, and optional `{ path = "<prefix>.so.dSYM", kind =
   "directory" }` on Darwin;
-* **Windows provider library:** `{ path = "<prefix>.dll" }`.
+* **Windows provider library:** `{ path = "<prefix>.dll" }`;
+* **browser provider library:** `{ path = "<prefix>.a" }` only.
 
 Mutable runtime coverage outputs (`.gcda` files and rendered coverage reports)
 are never part of `spec.outputs`. Each target owns
@@ -1046,7 +1064,9 @@ are never part of `spec.outputs`. Each target owns
   (Windows launcher manifest and `relative_provider` path), `policy` (`{ uname,
   darwin, profile, target }`), `bindings` (`resolver_context.native_bindings`),
   `target`, and `environment` (`{ runtime_flags, MACOSX_DEPLOYMENT_TARGET,
-  SDKROOT }`);
+  SDKROOT }`); for a browser context `policy.target` is the browser descriptor
+  identity, which `prepare` also writes into its own copy of the policy, while
+  a host keeps the native profile identity;
 * `FILE_FIELDS` (`linkcertificate.lua`): `objects` (every linked
   module's primary `.o` and `.part<k>.o` files in bytewise module and part
   order), `c_objects` (`--c-source` objects), `payloads` (`-X` arguments in CLI
@@ -1063,6 +1083,11 @@ are never part of `spec.outputs`. Each target owns
     `-filelist` option, the link is marked `cacheable = false` (`reason =
     "opaque linker input mechanism: ..."` or `"opaque native C input
     mechanism"`).
+  * **`archive` backend (browser context).** A [browser](browser-target.md)
+    provider archive has no linker. The backend is `archive`, the policy is
+    cacheable with no native files or argv, and `output_tools` records only
+    the descriptor's `emar` and `emranlib`, without linker selection or
+    link-stage discovery. The opaque-mechanism checks above still apply.
   * **`darwin` backend (`driver.IS_DARWIN`).** Appends
     `ticket.dependency_argv = { "-Wl,-dependency_info," .. dependency_file }`
     to the final executable or public DSO link. On commit,

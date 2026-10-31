@@ -129,6 +129,9 @@ The resulting root selects the matching `src/lua-5.5.1`, `include`,
 compiled Titan module, including `titan.test` for native test executables.
 Bundled libuv headers are staged under `include`, but its static archive
 remains a private source-build input rather than part of the installed SDK.
+The browser target resolves its separate Lua and SDK paths under the same root
+with `driver.installed_paths(root, "browser")`; the native table is unchanged
+for every host label ([Installed paths](browser-target.md#installed-paths)).
 Outside a checkout, an unknown root becomes `driver.INSTALLATION_ERROR`,
 `cannot locate the Titan installation root[: <reason>]; set TITAN_ROOT to the
 installation prefix`, and stops compiler/toolchain use instead of silently
@@ -360,6 +363,9 @@ archive path in `Type.Module.file`. [Claim and terminal-error
 states](multi-module-libraries.md#claim-and-terminal-error-states) owns the
 claim protocol, and [Static compiled modules](static-compiled-modules.md) owns
 archive validation, contextual owner recovery, and native-binding constraints.
+A browser context has no DSO pass, never calls `titan._loadlib`, skips the
+embedded inventory, and searches only archives, from the browser SDK root and
+then the browser Titan path ([Provider lookup](browser-target.md#provider-lookup)).
 
 A provider's `<mangled>_abi` marker must equal `TITAN_ABI_VERSION` before its
 `<mangled>_types` is evaluated; a mismatch is terminal before native linking
@@ -404,7 +410,7 @@ created.
 | `output_root` | The `titanc --output` folder. Wraps `io:tmpname` so checking headers and transient probe payloads are reserved as `<output_root>/.titan-temporary-*`; persistent probe-cache destinations do not change. See [Output directory](output-directory.md). |
 | `prefer_static` | `titanc --static`: run the archive pass before the DSO pass. |
 | `source_first` | `--test` or `--source-first`: try source before compiled formats for every dependency, keeping compiled fallback on a clean miss. |
-| `target` | Source-selection target: `nil`/`""` for the host, or one of `driver.SOURCE_LABELS`; any other value raises. It selects source files only and is not checked against the host; `titanc` validates its CLI value first. See [Target source selection](target-source-selection.md#the-context-target). |
+| `target` | Source-selection target: `nil`/`""` for the host, or one of `driver.SOURCE_LABELS`; any other value raises. A host label selects source files only and is not checked against the host; `titanc` validates its CLI value first. `"browser"` also builds the [browser target descriptor](browser-target.md#the-descriptor) during construction and selects the browser toolchain, probe cache, provider lookup, and output policy. See [Target source selection](target-source-selection.md#the-context-target). |
 | `verbose`, `pretty_print` | Carry `-v` and `--pretty-print` into resolver-owned C-probe and checking-header work. |
 | `extra_ffi_include_dirs` | Analysis-local include roots, normalized here and appended to a fresh C-probe toolchain descriptor without changing the process-global foreign-C configuration. |
 | `cache_adapter`, `header_inputs`, `c_header_analysis` | Persistent cache callbacks (default: the digest-only native adapter when available), host-validated input observations, and the per-analysis header-validation token; see [Cache adapter and persistent payloads](#cache-adapter-and-persistent-payloads). |
@@ -416,14 +422,19 @@ created.
 
 Checkout/installation discovery and platform initialization do not perform
 filesystem or subprocess work while `driver.lua` is loaded. Context creation
-resolves the compiler layout through `context.io` (`driver.initialize_layout`);
-`driver.configure_foreign_c(context)` later obtains `uname` and the target
-profile through the same strategy. The first source lookup obtains the
-selection target with `driver.context_target(context)`, which initializes the
-platform through the same strategy only when the context names no explicit
-target. `titanc` explicitly creates the default
+resolves the compiler layout through `context.io` (`driver.initialize_layout`)
+and returns an activated context: an explicit host label activates the
+semantic caches for that label without platform initialization, while an
+omitted target initializes the platform through the same strategy (`uname`)
+and activates the resolved host label, and `"browser"` also builds, freezes,
+and activates the descriptor. A constructor failure raises its diagnostic.
+`driver.configure_foreign_c(context)` later obtains the native target profile
+through the same strategy. `titanc` explicitly creates the default
 synchronous context before reading layout-dependent settings, validates its
-target, and configures foreign C.
+target, and configures foreign C. A context whose semantic-cache generation
+was replaced by another target's activation raises `compiler caches now
+belong to target <identity>; create a new context` at every semantic entry
+point; see [Semantic-cache ownership](browser-target.md#semantic-cache-ownership).
 
 `context.checked_source_modules` is an ordered dense list of modules actually
 parsed and checked by that context. Cached source entries and serialized
@@ -449,7 +460,10 @@ the argument and does nothing.
   static_archive, static_provider, layouts, layout_inventory }`; trusted
   host-inventory entries carry `{ kind = "embedded", type, filename,
   embedded_provider }`. Tests and long-lived tools reset this cache together
-  with `types.registry`.
+  with `types.registry`. Both belong to one target identity at a time:
+  activating a context of another target replaces both tables and advances the
+  generation that every older context checks
+  ([Semantic-cache ownership](browser-target.md#semantic-cache-ownership)).
 * **`CIRCULAR_MARK`** — a unique sentinel stored before recursively checking a
   source module; encountering it reports `"circular reference to module"`.
 * **the resolver context** — invocation-wide compiled-format preference,
@@ -690,6 +704,13 @@ reports the host executable as stable binary provenance. The inventory is
 analysis-only: `provider_file` is trusted provenance which the driver does not
 stat, open, or otherwise inspect; the executable never becomes a native link
 input.
+
+An embedded inventory describes native host code and native C facts, so a
+browser context never uses one: the browser constructor does not decode a
+supplied provider, and browser initialization discards the provider, its
+rejection and overlap state, and any used target-profile identity before the
+descriptor is built or any consumer runs
+([Context initialization and activation](browser-target.md#context-initialization-and-activation)).
 
 An optional `target_profile` extends that analysis-only provider.
 It is declarative numeric metadata exported by `csemantics.export_profile`
@@ -1419,10 +1440,11 @@ native_references, objects`.
    diagnostic artifact. Coverage mode converts each part's markers and then
    appends the record to part 0 ([native
    coverage](native-coverage.md#selection-and-object-ownership)).
-7. **Compile.** Each part's C is compiled with `driver.generated_compile_prefix()`
+7. **Compile.** Each part's C is compiled with `driver.generated_compile_prefix(context)`
    (the parsed `driver.CC`, `driver.CFLAGS`, normalized compile extras from
    `TITAN_EXTRA_CPPFLAGS`/`TITAN_EXTRA_CFLAGS` and CLI `-I`/`-D`/`--cflag`, and
-   trailing SDK `-I` include roots), followed by `driver.test_owner_flags` and
+   trailing SDK `-I` include roots; for a browser context, the descriptor's
+   `emcc`, flags, and include roots), followed by `driver.test_owner_flags` and
    per-request `extra_compile_flags`. When the resulting
    command enables LTO and names no seed, the driver appends a stable seed so
    archive bytes stay reproducible: `-frandom-seed=<modname>` for an unsplit
@@ -1569,8 +1591,8 @@ discovery:
 | `driver.resolve_source(context, modname, source_path?)` | Runs the tagged source resolver over `source_path` (default `driver.TITAN_SOURCE_PATH`), returning a `flat`, `folder`, or `blocked` descriptor, `nil` on a clean miss, or `nil, err`. Used by `titan-compiler/testroots.lua`. |
 | `driver.resolution_plan(context)` | Closes a `plan_mode` loader and returns the authoritative `plan` (`modules`, topological/bytewise `order`, `archives`, `linked`, `provider_file`, `digest`, `update`, `accepted`). `archives[path]` holds the coordinator's metadata scan of each selected static archive (per carried module its canonical payload and origin, plus the precise pre-scan observation), or nothing when that observation was coarse. |
 | `driver.plan_descriptor(plan, modname)` | Projects `plan` into the closed `titan-build-worker-v1` table sent to `modname`'s worker, carrying accepted dependency `.o` paths, exact selected binary providers, and the data-only archive metadata scans (`archives`). |
-| `driver.worker_configuration(context)` | Serializes driver paths/flags, resolver options, `codegen_policy`, the coordinator's compiler digest (`compiler`), and either `context.incremental_configuration` or the `uncertified` reason as closed data for a worker. |
-| `driver.new_worker_context(configuration, io_strategy)` | Reconstructs a worker's resolver context from `worker_configuration` and verifies `incremental.compiler_component` against the top-level `configuration.compiler` (failing with `compiler installation changed during build` on mismatch). A nested certified configuration must carry the same compiler digest; the uncertified form has none. |
+| `driver.worker_configuration(context)` | Serializes driver paths/flags, resolver options, `codegen_policy`, the coordinator's compiler digest (`compiler`), either `context.incremental_configuration` or the `uncertified` reason, and, for a browser context, the exported descriptor as `target_descriptor`, all as closed data for a worker. Browser configurations skip the native runtime check. |
+| `driver.new_worker_context(configuration, io_strategy)` | Reconstructs a worker's resolver context from `worker_configuration` and verifies `incremental.compiler_component` against the top-level `configuration.compiler` (failing with `compiler installation changed during build` on mismatch). A nested certified configuration must carry the same compiler digest; the uncertified form has none. A browser worker imports and freezes `target_descriptor` before construction, without reprobing; a missing or invalid descriptor, or a descriptor with a host label, fails with `incompatible build worker configuration`. |
 | `driver.invalidate_source_object(context, modname, source)` | Coordinator pre-dispatch step: reads any existing `<stem>.o`'s validated `parts` list, unlinks `<stem>.o` first, and unlinks recorded `.part<k>.{o,c,gcno,gcda}` files. |
 | `driver.compile_planned_module(context, modname, options)` | Worker entry: checks `modname` against `options.plan` (`worker_plan` loader mode, reporting `build plan divergence` on any discrepancy), writes generated headers and C files, compiles object parts to sibling temporaries (`staged = true`), and returns `{ modname, object, objects, staged, diagnostics }`. An optional `options.on_phase(phase, detail)` receives `parsing` and `checking` for `modname` only, `generating C`, and `compiling C` (with `"<n> parts"` above one part) before the parts compile on either path ([progress record](build-coordinator.md#control-protocol-titan-build-worker-v1)). |
 | `driver.publish_staged_module(context, result)` | Coordinator post-worker step: decodes the staged primary `.o`, resolves a fresh source descriptor, runs `incremental.revalidate_record` in a fresh pass, and renames sidecar `.part<k>.o` files then `<stem>.o` last. |
@@ -1793,7 +1815,7 @@ rules above. When `titanc` runs, `nativeinputs.normalize` and
 repeatable CLI native switches in a single deterministic order
 ([Native inputs and `--c-source` nodes](build-coordinator.md#native-inputs-and---c-source-nodes)):
 
-* **Compilation (`driver.generated_compile_prefix()`).** Starts with parsed
+* **Compilation (`driver.generated_compile_prefix(context?)`).** Starts with parsed
   `CC` and profile-selected `driver.CFLAGS`. When `driver.NATIVE_COMPILE_FLAGS`
   is installed (`titanc`), it appends `TITAN_EXTRA_CPPFLAGS`,
   `TITAN_EXTRA_CFLAGS`, and CLI `-I`/`--include-dir`, `-D`/`--define`, and
@@ -1804,10 +1826,14 @@ repeatable CLI native switches in a single deterministic order
   keep `driver.EXTRA_CPPFLAGS` before `driver.CFLAGS` and `driver.EXTRA_CFLAGS`
   after it. The C parser, C probe service, preamble certification probe,
   generated module C, and standalone entrypoints all use this same prefix.
-  `--c-source` nodes use `driver.authored_c_compile_prefix()`, which is
+  `--c-source` nodes use `driver.authored_c_compile_prefix(context?)`, which is
   identical except that on Windows it omits Titan's Lua DLL import
   definitions ([Windows consumer
-  definitions](windows-build.md#one-controlled-lua-dll-and-its-sdk)).
+  definitions](windows-build.md#one-controlled-lua-dll-and-its-sdk)). Both
+  take an optional resolver context; for a browser context they return the
+  descriptor's `emcc` argv, compile flags, and `-I` roots instead of the host
+  configuration ([Compile prefix and target
+  defines](browser-target.md#compile-prefix-and-target-defines)).
 * **Linking (`driver.link_extra_flags()`).** Appends `TITAN_EXTRA_LDFLAGS`
   followed by CLI `-L`/`--library-dir`, `-l`/`--link` (comma lists expanded,
   repeats and interleaving preserved), and `--ldflag` options in exact
@@ -1833,7 +1859,9 @@ diagnostics and optional typed enum selection at
 `<prefix>/var/cache/titan-probes/2/<digest>.result`, where `<prefix>` is
 `TITAN_PREFIX` when set and otherwise the installation root. Clear that
 directory or set `TITAN_PROBE_CACHE_DISABLE=1` to bypass persistent reuse if
-external changes make results stale. Generated C is compiled normally. See
+external changes make results stale. Browser probes use the separate
+directory `<prefix>/var/cache/titan-probes/browser-6.0.13/2/`
+([Probe-cache isolation](browser-target.md#probe-cache-isolation)). Generated C is compiled normally. See
 [compiled probe caching](c-ffi-expressions.md#analysis-local-and-persistent-semantic-results)
 for record and failure handling.
 
@@ -2196,19 +2224,30 @@ Before creating a resolver, `titanc` rejects:
 
 After those preflight checks, `titanc` loads `require "titan"`, requires
 `_sha256_binary` and `_sha256_stream` (a support library without either is
-reported as missing or stale), creates its resolver context with `frontend = arg[0]`,
+reported as missing or stale), creates its resolver context with `frontend = arg[0]`
+(a constructor diagnostic exits without a traceback),
 and validates the target with `driver.validate_target` (`-T`/`--target` wins
-over `TITAN_TARGET`, and an empty value means the host). Only then does it reject
+over `TITAN_TARGET`, and an empty value means the host). For `browser` it then
+requires `--output` (`--target browser requires --output`), takes the output
+locks, validates or writes the [target
+marker](browser-target.md#output-roots-and-the-target-marker), and loads the
+persistent digest cache, before any descriptor probe. Only then does it reject
 an invocation with no module names unless `--test-dir` or `-c --c-source` is
 given, so an invalid target is reported first, even without roots. It then
-applies normalized native inputs, configures foreign C, and discovers any
-`--test-dir` roots. It
+applies normalized native inputs, configures foreign C (which builds the
+browser descriptor), and discovers any `--test-dir` roots. It
 locks the `--output` directory, or without `--output` every `--tree` source
 root plus the working directory (source-adjacent objects may belong to any
 root, and default providers and executables are CWD-relative), and adds the
-`--exe` directory when given, all through `build.lock_outputs`. With
-`--output` it then loads the
-[persistent digest cache](incremental-compilation.md#persistent-digest-cache).
+`--exe` directory when given, all through `build.lock_outputs` (a browser
+invocation already holds them), and validates each locked domain's target
+marker. With `--output` it then loads the
+[persistent digest cache](incremental-compilation.md#persistent-digest-cache)
+unless the browser path already did; an installed compiler also loads the
+native SDK digest manifest, and a browser context loads only its descriptor's
+browser manifest. A browser `--test` without `-c` stops here, and a browser
+build whose plan has a `main` stops after planning, both with `browser program
+linking is not available yet`.
 It runs `build.run`, whose coordinator-side pre-dispatch
 [output preflight](build-coordinator.md#pre-dispatch-output-preflight)
 rejects output collisions and graph-dependent option errors (`--exe` or
@@ -2378,20 +2417,25 @@ all-hit build shows `[total/total]`.
 
 While the live renderer owns the terminal, `titanc` sets `driver.LIVE_PROGRESS`
 to the reporter. `run_argv` then runs a child that would otherwise inherit
-stderr (final links, archive probes) through `process.capture`, and replays its
-combined output through `LIVE_PROGRESS:write`. On Unix the child runs as
-`/bin/sh -c <command>` with the held output-lock descriptors, as on the
-non-live path. The exit status, termination kind, and failure text are returned
-exactly as the inherited run reports them. Provider-pair links (the public DSO
-and the archive-validation image) already capture each job's output to log
-files. `finish_prepared_compile` replays those logs through
+stderr (final links, archive creation and indexing, standalone archive probes)
+through `process.capture`, and replays its combined output through
+`LIVE_PROGRESS:write`. The speculative archive capability probes in
+`archive_tool_capabilities` pass `run_argv`'s output-discard flag, which runs
+`process.capture` and discards tool stderr/stdout even when `LIVE_PROGRESS` is
+nil, while keeping `-v` command echoes and exit status. On Unix the captured
+child runs as `/bin/sh -c <command>` with the held output-lock descriptors, as
+on the non-live path. The exit status, termination kind, and failure text are
+returned exactly as the inherited run reports them. Provider-pair links (the
+public DSO and the archive-validation image) already capture each job's output
+to log files. `finish_prepared_compile` replays those logs through
 `LIVE_PROGRESS:write` as well, and through the stream path with its write
 checks otherwise.
 
 Plain, verbose, and quiet runs, and every non-CLI caller, leave
-`LIVE_PROGRESS` nil and keep inherited stderr. Worker output and
-coordinator-run native jobs are already captured. They reach the terminal
-through the scheduler's plan-order flush, which writes through the reporter.
+`LIVE_PROGRESS` nil and keep inherited stderr for real build commands. Worker
+output and coordinator-run native jobs are already captured. They reach the
+terminal through the scheduler's plan-order flush, which writes through the
+reporter.
 
 ## Optional `clang-format` generated-source formatting
 
@@ -2829,7 +2873,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--no-line-directives` | Omit generated Titan `#line` directives. | |
 | `-u`, `--lua <dir>` | Lua source tree (`driver.LUA_SOURCE_PATH`). | Source checkouts only. |
 | `-t`, `--tree <dir>` | Source root, or an ordered `;`-separated list of roots searched in order (`driver.TITAN_SOURCE_PATH`, default `.`). | |
-| `-T`, `--target <label>` | [Source-selection target](target-source-selection.md#the-titanc-option); overrides `TITAN_TARGET`, and an empty value means the host. Only the host's own OS label is accepted; `native`, `browser`, another OS label, and unknown values are errors. `--target=<label>` is also accepted. | Validated before any lookup; ignored by `--print-root`. |
+| `-T`, `--target <label>` | [Source-selection target](target-source-selection.md#the-titanc-option); overrides `TITAN_TARGET`, and an empty value means the host. The host's own OS label and, on Linux and macOS hosts, `browser` ([browser target](browser-target.md)) are accepted; `native`, another OS label, and unknown values are errors. `--target=<label>` is also accepted. | Validated before any lookup; ignored by `--print-root`. `browser` requires `--output`. |
 | `-o`, `--output <dir>` | Folder for generated files, preserving the source hierarchy. | |
 | `-I`, `--include-dir <dir>` | Native include directory for C headers, probes, generated C, and `--c-source`; repeatable, order kept, searched before the SDK. | |
 | `-D`, `--define <def>` | Native preprocessor definition `NAME[=VALUE]`; repeatable, order kept. | |
@@ -2856,7 +2900,8 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; any other value is a toolchain error. |
 | `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
-| `TITAN_TARGET` | `titanc` | unset (empty means unset) | Source-selection target when `-T`/`--target` is absent; same vocabulary, with diagnostics naming `TITAN_TARGET=<value>`. Ignored by `--print-root`; never read by the driver library or the language server. Make's native `titanc` recipes unset it. |
+| `TITAN_TARGET` | `titanc` | unset (empty means unset) | Source-selection target when `-T`/`--target` is absent; same vocabulary, with diagnostics naming `TITAN_TARGET=<value>`. Ignored by `--print-root`; never read by the driver library, build workers, or the language server. Make's native `titanc` recipes unset it. |
+| `EMSDK` | `browsertarget.lua` | unset (empty means unset) | Emscripten SDK root for the browser target: its `upstream/emscripten/{emcc,emar,emranlib}` are the only tools tried; otherwise `emcc` is found on `PATH`. |
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |
 | `TERM` | `titanc` (`progress.select`, `progress.colour`) | unset | `dumb` selects the plain progress form and disables colour. |
 | `NO_COLOR` | `titanc` (`progress.colour`) | unset | Non-empty disables progress colour only; the live region stays. |
@@ -2866,7 +2911,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_PATH_0_6`, `TITAN_PATH` | `driver.lua` (`titan_bin_path_entries`), `titan_path.c` | unset | [Titan path](#titan-path-syntax): `;`-separated directories, `;;` inserts the default, `!` is the executable directory, an empty value searches nothing; the versioned name wins. |
 | `TITAN_ROOT` | `driver.lua`, `titanc --print-root`, `titan_path.c` (`_compiler_root()` and the run-time SDK fallback), Make | unset (empty means unset) | Explicit Titan SDK/rocks-tree root; otherwise the compiler uses the parent of its interpreter directory and the run-time fallback asks `titanc --print-root`. |
 | `TITANC` | `titan_path.c` (run-time SDK fallback) | unset (empty means unset) | One program name or path, run as `<TITANC> --print-root` without a shell and without `LUA_INIT`/`LUA_INIT_5_5`, instead of `titanc` from `PATH`; not a command line with arguments, and it must terminate. On Windows a name without `\`, `/`, or `:` is looked up only in the `PATH` entries, with `.exe` appended when it contains no `.`. Make's stdlib compiler command is the distinct `STDLIB_TITANC`. |
-| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`. |
+| `TITAN_PREFIX` | `driver.lua` | installation root | Root of the persistent C-probe cache `var/cache/titan-probes/2`, and of the browser cache `var/cache/titan-probes/browser-6.0.13/2`. |
 | `TITAN_PROBE_CACHE_DISABLE` | `driver.lua` | unset | Exact value `1` disables persistent C-probe reuse. |
 | `TITAN_RUNTIME_PREBUILT` | `driver.lua` `check_runtime` | unset | Exact value `1` skips the checkout `libtitan.a` rebuild. |
 | `GCOV`, `GCOVR` | `coverage.lua` | `gcov`/`llvm-cov gcov`, `gcovr` | Coverage readers when the matching `--coverage-*` flag is absent. |
@@ -2885,7 +2930,7 @@ workflow sets them equal, but they are separate ownership concepts.
 | --- | --- | --- |
 | `driver.TITAN_ROOT` | non-empty `TITAN_ROOT`, otherwise the support module's `_compiler_root()` (parent of the interpreter's realpath directory) | Titan SDK/rocks-tree root. Module loading only parses absolute roots lexically; resolver initialization normalizes relative roots through `context.io`. `driver.compiler_root()` returns it or the diagnostic. |
 | `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | detected from checkout files unless `TITAN_ROOT` is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. Detection is lazy (`driver.initialize_layout`); before resolver initialization the module exposes only a provisional lexical checkout layout. |
-| `driver.INSTALL_PATHS` | `driver.installed_paths(root)` | `root`, `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua` (`liblua55.a` on Windows), `titan_bin`, and `sdk_digests`; bundled `libuv.a` is deliberately not an installed SDK path. |
+| `driver.INSTALL_PATHS` | `driver.installed_paths(root)` | `root`, `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua` (`liblua55.a` on Windows), `titan_bin`, and `sdk_digests`; bundled `libuv.a` is deliberately not an installed SDK path. The browser table, `installed_paths(root, "browser")`, lives only in a browser descriptor ([Installed paths](browser-target.md#installed-paths)). |
 | `driver.TITAN_BIN_PATH` / `driver.DEFAULT_TITAN_BIN_PATH` | `TITAN_PATH_0_6`, then `TITAN_PATH`, else `nil` / `.;<root>/lib/titan/0.6`, or `.` without a root | Configured and default compile-time Titan paths; `driver.titan_bin_path_entries` expands them. |
 | `driver.TITAN_SOURCE_PATH` | `"."` (`titanc --tree`) | Semicolon-separated source roots. |
 | `driver.LUA_SOURCE_PATH` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode | Lua internal source/header tree; checkout-only override by `titanc --lua`. |
@@ -2896,7 +2941,7 @@ workflow sets them equal, but they are separate ownership concepts.
 | `driver.CFLAGS` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC` plus compiler-specific debug flags; Linux production adds `-flto=auto -ffat-lto-objects` | GCC uses `-g1`, Clang `-gline-tables-only -fdebug-info-for-profiling`, other compilers `-g`. |
 | `driver.NATIVE_COMPILE_FLAGS` / `driver.NATIVE_LINK_FLAGS` | `driver.apply_native_inputs(normalized)` | Normalized ordered compile and link extras (`TITAN_EXTRA_*` then CLI native switches). |
 | `driver.OUTPUT_ROOT` | `args.output` in `titanc` | Selected `--output` directory for synchronous native publication temporaries. |
-| `driver.LIVE_PROGRESS` | `nil`; the live reporter in `titanc` | While set, `run_argv` captures children that would inherit stderr and replays their output above the live region, and the native batch ledgers of `run_prepared_compiles` and `link_provider_pair` take the idle frame hook ([Progress reporting](#progress-reporting)). |
+| `driver.LIVE_PROGRESS` | `nil`; the live reporter in `titanc` | While set, `run_argv` captures children that would inherit stderr and replays their output above the live region (capability probes capture and discard independently), and the native batch ledgers of `run_prepared_compiles` and `link_provider_pair` take the idle frame hook ([Progress reporting](#progress-reporting)). |
 | `driver.PROJECT_CACHE_VERSION` | `version.PROJECT_CACHE_VERSION` (`6`) | Language-server project-manifest schema version. |
 | shared-library flags | `driver.shared_library_flags` | `-shared`; Darwin adds `-undefined dynamic_lookup`, Windows `-Wl,--exclude-all-symbols`. |
 | installed link set | `driver.installed_link_inputs` | Unix: `libtitan.a`, `libbacktrace.a`, `liblua.a`, `-ldl` (non-Darwin), `-lm`; Windows: `libtitan.a`, `libbacktrace.a`, `liblua55.a`, `-static-libgcc`. Not copied into package archives. |
