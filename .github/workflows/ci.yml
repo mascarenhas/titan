@@ -479,8 +479,9 @@ jobs:
             test -f "$output/$image.wasm"
           done
 
-      # The loader suite takes image paths relative to --root, so both
-      # assertion profiles are built into one isolated root.
+      # The loader suite takes image paths relative to --root, so every fixture
+      # is built into one isolated root: loader_app and fidelity as programs,
+      # loader_names as a test image, each at both assertion profiles.
       - name: Build the portable loader images for both assertion profiles
         run: |
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
@@ -488,31 +489,48 @@ jobs:
           for assertions in 2 0; do
             output="$root/assertions-$assertions"
             mkdir -p "$output"
-            TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e \
-              "package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='program',assertions=$assertions}" \
-              "$GITHUB_WORKSPACE/titanc" -q --target browser --no-uv-bootstrap \
+            preamble="package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='program',assertions=$assertions}"
+            for module in loader_app fidelity; do
+              TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e "$preamble" \
+                "$GITHUB_WORKSPACE/titanc" -q --target browser --no-uv-bootstrap \
+                --tree spec/fixtures/browser_loader -o "$output" \
+                --exe "$output/$module.mjs" \
+                --c-source spec/fixtures/browser_loader/loader.c "$module"
+            done
+            TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e "$preamble" \
+              "$GITHUB_WORKSPACE/titanc" -q --target browser --test --no-uv-bootstrap \
               --tree spec/fixtures/browser_loader -o "$output" \
-              --exe "$output/loader_app.mjs" \
-              --c-source spec/fixtures/browser_loader/loader.c loader_app
-            test -f "$output/loader_app.mjs"
-            test -f "$output/loader_app.wasm"
+              --exe "$output/loader_names.mjs" loader_names
+            for image in loader_app fidelity loader_names; do
+              test -f "$output/$image.mjs"
+              test -f "$output/$image.wasm"
+            done
           done
 
       - name: Run the portable loader suite under Node and Chromium
         run: |
           set -euo pipefail
           runner="$PREFIX/lib/titan-browser/0.6/titan-browser-run"
+          root="$GITHUB_WORKSPACE/out/browser/loader"
+          images=(
+            "$root/assertions-2/loader_app.mjs" "$root/assertions-0/loader_app.mjs"
+            --fidelity
+            "$root/assertions-2/fidelity.mjs" "$root/assertions-0/fidelity.mjs"
+            --names
+            "$root/assertions-2/loader_names.mjs" "$root/assertions-0/loader_names.mjs"
+          )
           for engine in node chromium; do
             echo "loader suite: $engine"
-            "$runner" --engine "$engine" \
-              --root "$GITHUB_WORKSPACE/out/browser/loader" \
-              --js-test spec/browser/loader.test.mjs -- \
-              assertions-2/loader_app.mjs assertions-0/loader_app.mjs
+            "$runner" --engine "$engine" --root "$GITHUB_WORKSPACE" \
+              --js-test spec/browser/loader.test.mjs -- "${images[@]}"
           done
 
       - name: Run the browser runner supervisor suite
         env:
           TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
+          # The supervisor's containment case reuses the loader suite's fidelity
+          # image instead of building a second copy.
+          TITAN_BROWSER_LOADER_IMAGE: ${{ github.workspace }}/out/browser/loader/assertions-2/fidelity.mjs
         run: |
           set -euo pipefail
           node --test spec/browser/runner.test.mjs \

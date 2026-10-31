@@ -25,14 +25,25 @@ local function increment(value: integer): integer
   return value + 1
 end
 
+local function decrement(value: integer): integer
+  return value - 1
+end
+
 -- `extra` arrives from the process arguments, so no optimizer can replace the
 -- loop with its closed form; a compile-time constant would make this row
 -- measure nothing.
+-- The call goes through an Array slot so the compiler cannot replace the loop
+-- with its closed form, and the alternating sign keeps the result dependent on
+-- every iteration.
 local function bench_calls(extra: integer): ()
   local limit = 200000 + extra
+  local operations: {function(integer): (integer)} = {increment, decrement}
   local value = 0
-  for _index = 1, limit do value = increment(value) end
-  if value ~= limit then raise "calls benchmark changed its value" end
+  for index = 1, limit do
+    local operation = operations[((index - 1) % 2) + 1]
+    value = operation(value)
+  end
+  if value ~= limit % 2 then raise "calls benchmark changed its value" end
 end
 
 local function make_adder(base: integer): (function(integer): (integer))
