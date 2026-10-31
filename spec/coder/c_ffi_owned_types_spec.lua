@@ -966,7 +966,9 @@ describe("source-written owned C type code generation", function()
                 driver.EXTRA_CPPFLAGS = { table.unpack(previous or {}) }
                 driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = "-include"
                 driver.EXTRA_CPPFLAGS[#driver.EXTRA_CPPFLAGS + 1] = header
-                assert(driver.configure_foreign_c())
+                h.with_resolver_context(nil, function(context)
+                    assert(driver.configure_foreign_c(context))
+                end)
             end
             local ok, failure = xpcall(function()
                 local imports = forced and "" or string.format("foreign import %q\n", header)
@@ -1019,7 +1021,9 @@ describe("source-written owned C type code generation", function()
                 end
             end, debug.traceback)
             driver.EXTRA_CPPFLAGS = previous
-            assert(driver.configure_foreign_c())
+            h.with_resolver_context(nil, function(context)
+                assert(driver.configure_foreign_c(context))
+            end)
             assert.truthy(ok, failure)
         end)
     end

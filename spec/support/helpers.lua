@@ -134,6 +134,35 @@ local function checker_probe_options(session)
     }
 end
 
+-- Test helpers are deliberate resolver owners. Preserve every return value and
+-- exception while closing a context even when a checker assertion unwinds.
+function M.with_resolver_context(options, body)
+    options = options or {}
+    local context, owned = options.context, options.context == nil
+    if owned then
+        context = driver.new_resolver_context(options)
+        options.context = context
+    end
+    local results = table.pack(xpcall(function()
+        return body(context, options)
+    end, function(err) return err end))
+    local closed = table.pack(true, true)
+    if owned then
+        options.context = nil
+        closed = table.pack(pcall(driver.close_resolver_context, context))
+    end
+    if not results[1] then error(results[2], 0) end
+    if not closed[1] then error(closed[2], 0) end
+    if not closed[2] then error(closed[3], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
+local function configure_foreign_c()
+    return M.with_resolver_context(nil, function(context)
+        return driver.configure_foreign_c(context)
+    end)
+end
+
 -- Production libuv is compiled with this feature-test macro on Linux. Scope
 -- the same flag around compiler/codegen fixtures which import uv.h directly,
 -- then restore the process-global driver configuration even if an assertion
@@ -150,11 +179,11 @@ function M.with_libuv_feature_flags(body)
     end
     configured[#configured + 1] = "-D_GNU_SOURCE"
     driver.EXTRA_CPPFLAGS = configured
-    driver.configure_foreign_c()
+    configure_foreign_c()
 
     local results = table.pack(xpcall(body, debug.traceback))
     driver.EXTRA_CPPFLAGS = previous
-    driver.configure_foreign_c()
+    configure_foreign_c()
     if not results[1] then error(results[2], 0) end
     return table.unpack(results, 2, results.n)
 end
@@ -175,10 +204,10 @@ function M.with_extra_cflags(flags, fn)
         configured[#configured + 1] = flag
     end
     driver.EXTRA_CFLAGS = configured
-    driver.configure_foreign_c()
+    configure_foreign_c()
     local results = table.pack(xpcall(fn, debug.traceback))
     driver.EXTRA_CFLAGS = previous
-    driver.configure_foreign_c()
+    configure_foreign_c()
     if not results[1] then error(results[2], 0) end
     return table.unpack(results, 2, results.n)
 end
@@ -424,36 +453,38 @@ function M.generate_modules(modules, main, forapp, options)
     reset(true)
     local imported, deps = {}, {}
     options = options or { interface = "source" }
-    local loader = driver.tableloader(modules, imported, deps, options)
-    return driver.with_loader(loader, function(loader)
-        local typ, err = checker.checkimport(main, loader)
-        if not typ then return nil, err end
-        if #err ~= 0 then return nil, table.concat(err, "\n") end
-        local names = {}
-        for name in pairs(imported) do names[#names + 1] = name end
-        table.sort(names)
-        local headers_ok, headers_error =
-            driver.prepare_foreign_headers(names, imported, verbose())
-        if not headers_ok then return nil, headers_error end
-        local ofiles = {}
-        for name, mod in pairs(imported) do
-            local ok, e = driver.compile_module(name, mod, deps, verbose())
-            if not ok then return nil, e end
-            for _, object in ipairs(driver.module_compiled_objects(mod)) do
-                table.insert(ofiles, object)
-            end
-        end
-        if forapp then
-            local ok, e = compile_program(main, ofiles)
-            if not ok then return nil, e end
-        else
-            for name, _ in pairs(imported) do
-                local ok, e =
-                    driver.compile_library(name, ofiles, nil, verbose())
+    return M.with_resolver_context(options, function(_, loader_options)
+        local loader = driver.tableloader(modules, imported, deps, loader_options)
+        return driver.with_loader(loader, function(loader)
+            local typ, err = checker.checkimport(main, loader)
+            if not typ then return nil, err end
+            if #err ~= 0 then return nil, table.concat(err, "\n") end
+            local names = {}
+            for name in pairs(imported) do names[#names + 1] = name end
+            table.sort(names)
+            local headers_ok, headers_error =
+                driver.prepare_foreign_headers(names, imported, verbose())
+            if not headers_ok then return nil, headers_error end
+            local ofiles = {}
+            for name, mod in pairs(imported) do
+                local ok, e = driver.compile_module(name, mod, deps, verbose())
                 if not ok then return nil, e end
+                for _, object in ipairs(driver.module_compiled_objects(mod)) do
+                    table.insert(ofiles, object)
+                end
             end
-        end
-        return true
+            if forapp then
+                local ok, e = compile_program(main, ofiles)
+                if not ok then return nil, e end
+            else
+                for name, _ in pairs(imported) do
+                    local ok, e =
+                        driver.compile_library(name, ofiles, nil, verbose())
+                    if not ok then return nil, e end
+                end
+            end
+            return true
+        end)
     end)
 end
 
@@ -472,30 +503,32 @@ local function build_one_so(name, src, names)
     -- a `.so`-only module invisible in traces.
     local ast = M.parse(src, name .. ".titan")
     if not ast then return nil, "parse error in " .. name end
-    local loader = driver.defaultloader(static_deps)
-    return driver.with_loader(loader, function(loader)
-        local _, errs = checker.check(
-            name, ast, src, name .. ".titan", loader)
-        if #errs ~= 0 then return nil, name .. ": " .. table.concat(errs, "\n") end
-        local dependencies = {}
-        for dep in pairs(static_deps) do dependencies[#dependencies + 1] = dep end
-        table.sort(dependencies)
-        for _, dep in ipairs(dependencies) do
-            if names[dep] and dep ~= name then
-                return nil, name .. " linked '" .. dep .. "' statically, not via .so"
+    return M.with_resolver_context(nil, function(context)
+        local loader = driver.defaultloader(static_deps, { context = context })
+        return driver.with_loader(loader, function(loader)
+            local _, errs = checker.check(
+                name, ast, src, name .. ".titan", loader)
+            if #errs ~= 0 then return nil, name .. ": " .. table.concat(errs, "\n") end
+            local dependencies = {}
+            for dep in pairs(static_deps) do dependencies[#dependencies + 1] = dep end
+            table.sort(dependencies)
+            for _, dep in ipairs(dependencies) do
+                if names[dep] and dep ~= name then
+                    return nil, name .. " linked '" .. dep .. "' statically, not via .so"
+                end
             end
-        end
-        if #dependencies > 0 then
-            return nil, name .. ": dependency '" .. dependencies[1] ..
-                "' resolved from source or a static archive; build_so_chain and " ..
-                "check_against_so link only the root module; list tests importing " ..
-                "standard-library modules in spec/support/ci_stdlib_compiler_test_files.txt " ..
-                "with a matching stdlib row in spec/support/ci_compiler_test_groups.txt"
-        end
-        local ok, err, _, _, objects =
-            driver.compile(name, ast, nil, static_deps, verbose())
-        if not ok then return nil, err end
-        return driver.compile_library(name, objects, nil, verbose())
+            if #dependencies > 0 then
+                return nil, name .. ": dependency '" .. dependencies[1] ..
+                    "' resolved from source or a static archive; build_so_chain and " ..
+                    "check_against_so link only the root module; list tests importing " ..
+                    "standard-library modules in spec/support/ci_stdlib_compiler_test_files.txt " ..
+                    "with a matching stdlib row in spec/support/ci_compiler_test_groups.txt"
+            end
+            local ok, err, _, _, objects =
+                driver.compile(name, ast, nil, static_deps, verbose())
+            if not ok then return nil, err end
+            return driver.compile_library(name, objects, nil, verbose())
+        end)
     end)
 end
 
@@ -524,7 +557,9 @@ function M.build_so_chain(mods, in_process)
             end
             assert(file:write("}\n"))
         end
-        assert(file:write("assert(driver.configure_foreign_c())\nlocal modules={\n"))
+        assert(file:write("local context=driver.new_resolver_context()\n" ..
+            "assert(driver.configure_foreign_c(context))\n" ..
+            "assert(driver.close_resolver_context(context))\nlocal modules={\n"))
         for _, module in ipairs(mods) do
             assert(file:write(string.format("{name=%q,src=%q},\n", module.name, module.src)))
         end
@@ -551,11 +586,13 @@ end
 function M.run_checker(code, probe_session)
     reset(true)
     local ast = assert(M.parse(code))
-    local loader = driver.defaultloader()
-    local t, errs = driver.with_loader(loader, function(loader)
-        return checker.check(
-            "test", ast, code, "test.titan", loader,
-            checker_probe_options(probe_session))
+    local t, errs = M.with_resolver_context(nil, function(context)
+        local loader = driver.defaultloader({}, { context = context })
+        return driver.with_loader(loader, function(loader)
+            return checker.check(
+                "test", ast, code, "test.titan", loader,
+                checker_probe_options(probe_session))
+        end)
     end)
     return #errs == 0, table.concat(errs, "\n"), ast, t
 end
@@ -564,9 +601,11 @@ function M.run_checker_modules(modules, main, options)
     reset(true)
     local imported = {}
     options = options or { interface = "compiled" }
-    local loader = driver.tableloader(modules, imported, nil, options)
-    local modt, err = driver.with_loader(loader, function(loader)
-        return checker.checkimport(main, loader)
+    local modt, err = M.with_resolver_context(options, function(_, loader_options)
+        local loader = driver.tableloader(modules, imported, nil, loader_options)
+        return driver.with_loader(loader, function(loader)
+            return checker.checkimport(main, loader)
+        end)
     end)
     if not modt then return false, err end
     return #err == 0, table.concat(err, "\n"), imported
@@ -593,10 +632,12 @@ function M.check_against_so(deps, main_name, main_src)
     end
     reset(true)
     local mast = assert(M.parse(main_src))
-    local loader = driver.defaultloader({})
-    local mtype, errs = driver.with_loader(loader, function(loader)
-        return checker.check(main_name, mast, main_src,
-            main_name .. ".titan", loader)
+    local mtype, errs = M.with_resolver_context(nil, function(context)
+        local loader = driver.defaultloader({}, { context = context })
+        return driver.with_loader(loader, function(loader)
+            return checker.check(main_name, mast, main_src,
+                main_name .. ".titan", loader)
+        end)
     end)
     return errs, mtype
 end

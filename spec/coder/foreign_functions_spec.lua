@@ -191,7 +191,8 @@ describe("source-defined foreign functions", function()
             local checker = require "titan-compiler.checker"
             h.reset(true)
             local deps = {}
-            local loader = driver.defaultloader(deps)
+            h.with_resolver_context(nil, function(context)
+            local loader = driver.defaultloader(deps, { context = context })
             driver.with_loader(loader, function(loader)
                 local typ, errors = checker.checkimport("foreign_slot_consumer", loader)
                 assert(typ, errors)
@@ -206,6 +207,7 @@ describe("source-defined foreign functions", function()
                     objects[#objects + 1] = name .. ".o"
                 end
                 assert(driver.compile_library("foreign_slot_consumer", objects, nil, false))
+            end)
             end)
             assert(require("foreign_slot_consumer").exercise() == 42)
         ]])

@@ -8,6 +8,9 @@ local cpp = require "c-parser.cpp"
 local coder = require "titan-compiler.coder"
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 describe("declared project manifests", function()
     local previous_imported, previous_registry, loaders
@@ -32,7 +35,7 @@ describe("declared project manifests", function()
             cached_source_entries = retained,
         }
         for key, value in pairs(extra_options or {}) do options[key] = value end
-        local loader = driver.defaultloader({}, options)
+        local loader = driver.defaultloader({}, resolver_options(options))
         loaders[#loaders + 1] = loader
         local ok, result, errors = loader(name)
         assert.is_true(ok, result)
@@ -70,10 +73,8 @@ describe("declared project manifests", function()
                 contents = { [filename] = source },
             }
         end
-        local loader = driver.defaultloader({}, {
-            analysis_only = true, source_roots = { [root] = true },
-            source_overrides = overrides, cached_source_entries = retained,
-        })
+        local loader = driver.defaultloader({}, resolver_options({ analysis_only = true, source_roots = { [root] = true },
+        source_overrides = overrides, cached_source_entries = retained, }))
         loaders[#loaders + 1] = loader
         local ok, result, errors = loader(root)
         assert.is_true(ok, result)
@@ -803,6 +804,7 @@ describe("declared project manifests", function()
         assert.is_nil(payload:find(original_bundle, 1, true))
         assert.equal(original_bundle, provider.ast._ffi_header.bundle_root)
         assert.is_true(driver.close_loader(loaders[1]))
+        close_contexts()
         assert.is_nil(lfs.attributes(original_header))
         assert.is_nil(lfs.attributes(original_ffi))
         driver.imported, types.registry = {}, {}
@@ -856,6 +858,7 @@ describe("declared project manifests", function()
             end
         end
         for _, loader in ipairs(loaders) do assert.is_true(driver.close_loader(loader)) end
+        close_contexts()
         driver.imported, types.registry = {}, {}
         local retained = {
             provider = assert(driver.decode_project_entry(payloads.provider, options)),
@@ -1020,6 +1023,7 @@ describe("declared project manifests", function()
                 end
                 check_consumer()
                 for _, loader in ipairs(loaders) do assert.is_true(driver.close_loader(loader)) end
+                close_contexts()
                 for _ = 1, 3 do collectgarbage("collect") end
                 assert.is_nil(weak.ast)
                 assert.is_nil(weak.body)
@@ -1057,6 +1061,7 @@ describe("declared project manifests", function()
             local payload = assert(driver.encode_project_entry(provider))
             assert.is_nil(payload:find("CPP_BODY_ONLY_MANIFEST_SENTINEL", 1, true))
             for _, loader in ipairs(loaders) do assert.is_true(driver.close_loader(loader)) end
+            close_contexts()
             driver.imported, types.registry = {}, {}
             local restored = assert(driver.decode_project_entry(payload))
             assert_declarations_only(restored)
@@ -1105,7 +1110,7 @@ describe("declared project manifests", function()
         local first = load_module("native_manifest", "function answer(): integer return 1 end")
         local compact = assert(driver.compact_project_entry(first))
         driver.imported, types.registry = {}, {}
-        local loader = driver.defaultloader({}, { cached_source_entries = { native_manifest = compact } })
+        local loader = driver.defaultloader({}, resolver_options({ cached_source_entries = { native_manifest = compact } }))
         loaders[#loaders + 1] = loader
         local ok, err = loader("native_manifest")
         assert.is_false(ok)
@@ -1127,9 +1132,7 @@ describe("declared project manifests", function()
         for _, global_cache in ipairs({false, true}) do
             driver.imported, types.registry = {}, {}
             if global_cache then driver.imported[name] = analyzed end
-            local loader = driver.defaultloader({}, {
-                cached_source_entries = global_cache and {} or { [name] = analyzed },
-            })
+            local loader = driver.defaultloader({}, resolver_options({ cached_source_entries = global_cache and {} or { [name] = analyzed },  }))
             loaders[#loaders + 1] = loader
             local ok, err = loader(name)
             assert.is_false(ok)
@@ -1147,7 +1150,7 @@ describe("declared project manifests", function()
             assert.is_table(native.ast._erased_registry)
             assert.equal(analyzed.source_manifest, native.source_manifest)
             driver.imported, types.registry = {}, {}
-            local loader = driver.defaultloader({}, { cached_source_entries = { [name] = native } })
+            local loader = driver.defaultloader({}, resolver_options({ cached_source_entries = { [name] = native } }))
             loaders[#loaders + 1] = loader
             local ok, result, errors = loader(name)
             assert.is_true(ok, tostring(result))
@@ -1175,7 +1178,7 @@ describe("declared project manifests", function()
         driver.imported[dependency] = nil
         local analyzed = load_module(dependency, dependency_source)
         assert.is_true(analyzed.ast._analysis_only)
-        local loader = driver.defaultloader({})
+        local loader = driver.defaultloader({}, resolver_options())
         loaders[#loaders + 1] = loader
         local ok, err = loader(name)
         assert.is_false(ok)
