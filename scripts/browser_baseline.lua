@@ -228,60 +228,71 @@ function readVaruint(buffer, position) {
   while (byte & 0x80);
   return [value, position];
 }
-// Metadata was emitted as custom sections in the relocatable objects. In the
-// final image the payloads are ordinary data segments and the names survive in
-// the link name table, so report both byte costs instead of a bare marker.
-const markers = [".titan.meta", ".titan.source", ".titan.cprobe"];
-const sourceMarker = "benchmark changed its";
-const segments = [];
-const metadataSections = new Map();
-let dataBytes = 0;
-let sourceBytes = 0;
+// Section layout, the data segments, and the data-segment names the linker
+// keeps. The named payload segments are the metadata measurement; ordinary
+// .rodata must never be mistaken for .titan.source.
+const sections = [];
+let dataPayload = 0;
 let position = 8;
 while (position < bytes.length) {
   const id = bytes[position++];
   let size; [size, position] = readVaruint(bytes, position);
-  const body = position;
-  const end = body + size;
-  if (id === 11) {
-    dataBytes += size;
-    let count; [count, position] = readVaruint(bytes, position);
-    for (let index = 0; index < count; index++) {
-      let flags; [flags, position] = readVaruint(bytes, position);
-      if (flags === 2) { let ignored; [ignored, position] = readVaruint(bytes, position); }
-      if (flags === 0 || flags === 2) {
-        // Active segment offset expression: i32.const N, end.
-        position += 1;
-        let offset; [offset, position] = readVaruint(bytes, position);
-        position += 1;
-      }
-      let length; [length, position] = readVaruint(bytes, position);
-      segments.push({ start: position, size: length });
-      position += length;
-    }
-  } else if (id === 0) {
-    let length; [length, position] = readVaruint(bytes, position);
-    const name = bytes.toString("latin1", position, position + length);
-    for (const marker of markers) {
-      const offset = bytes.indexOf(marker, body);
-      if (offset >= 0 && offset < end) {
-        metadataSections.set(marker, { section: name, bytes: size });
-      }
-    }
-  }
-  position = end;
+  sections.push({ id, body: position, size });
+  if (id === 11) dataPayload = size;
+  position += size;
 }
-console.log("data_bytes="+dataBytes);
+const dataSection = sections.find(entry => entry.id === 11);
+const segments = [];
+if (dataSection) {
+  let cursor = dataSection.body;
+  let count; [count, cursor] = readVaruint(bytes, cursor);
+  for (let index = 0; index < count; index++) {
+    let flags; [flags, cursor] = readVaruint(bytes, cursor);
+    if (flags === 2) { let ignored; [ignored, cursor] = readVaruint(bytes, cursor); }
+    if (flags === 0 || flags === 2) {
+      // Active segment offset expression: i32.const N, end.
+      cursor += 1;
+      let offset; [offset, cursor] = readVaruint(bytes, cursor);
+      cursor += 1;
+    }
+    let length; [length, cursor] = readVaruint(bytes, cursor);
+    segments.push({ index, start: cursor, size: length });
+    cursor += length;
+  }
+}
+console.log("data_bytes="+dataPayload);
+const named = new Map();
+for (const section of sections) {
+  if (section.id !== 0) continue;
+  let cursor = section.body;
+  let nameLength; [nameLength, cursor] = readVaruint(bytes, cursor);
+  if (bytes.toString("latin1", cursor, cursor + nameLength) !== "name") continue;
+  cursor += nameLength;
+  const sectionEnd = section.body + section.size;
+  while (cursor < sectionEnd) {
+    let subsection; [subsection, cursor] = readVaruint(bytes, cursor);
+    let length; [length, cursor] = readVaruint(bytes, cursor);
+    const end = cursor + length;
+    if (subsection === 9) {
+      let count; [count, cursor] = readVaruint(bytes, cursor);
+      for (let index = 0; index < count; index++) {
+        let segment; [segment, cursor] = readVaruint(bytes, cursor);
+        let size; [size, cursor] = readVaruint(bytes, cursor);
+        named.set(segment, bytes.toString("latin1", cursor, cursor + size));
+        cursor += size;
+      }
+    }
+    cursor = end;
+  }
+}
 for (const segment of segments) {
-  if (bytes.indexOf(sourceMarker, segment.start) >= 0 &&
-      bytes.indexOf(sourceMarker, segment.start) < segment.start + segment.size) {
-    sourceBytes = segment.size;
-    break;
+  const name = named.get(segment.index);
+  if (name === undefined) continue;
+  if (name === ".rodata") console.log("rodata_bytes=" + segment.size);
+  else if (name === ".data") console.log("data_segment_bytes=" + segment.size);
+  else if (name.indexOf(".titan.") === 0) {
+    console.log("metadata=" + name + ":" + segment.size);
   }
-}
-console.log("source_payload_bytes="+sourceBytes);
-for (const [marker, where] of metadataSections) {
-  console.log("metadata="+marker+":"+where.section+":"+where.bytes);
 }
 ]]
 
@@ -291,17 +302,14 @@ local function image_report(out, image)
     local output, failure = run({ node, "-e", metadata_script,
         out .. "/" .. image .. ".wasm", out .. "/" .. image .. ".mjs" })
     if not output then return { error = failure } end
-    local report = { imports = {}, metadata_bytes = {}, metadata_sections = {} }
+    local report = { imports = {}, metadata_bytes = {} }
     for line in output:gmatch("[^\n]+") do
         local name, value = line:match("^([%w%._%-]+)=(.*)$")
         if name == "import" then
             report.imports[#report.imports + 1] = value
         elseif name == "metadata" then
-            local marker, section, size = value:match("^([^:]+):([^:]+):(%d+)$")
-            if marker then
-                report.metadata_bytes[marker] = tonumber(size)
-                report.metadata_sections[marker] = section
-            end
+            local marker, size = value:match("^([^:]+):(%d+)$")
+            if marker then report.metadata_bytes[marker] = tonumber(size) end
         elseif name then
             report[name] = tonumber(value) or value
         end
@@ -484,7 +492,7 @@ for _, cell in ipairs(cells) do
             for _, engine in ipairs({ "node", "chromium" }) do
                 local results = repeat_runs(options.repeats, function()
                     local values = engine_run(engine, out, "lua-bench.mjs", "lua.mjs",
-                        false)
+                        cell.asyncify)
                     if values.error then
                         fail("lua " .. cell.name .. "/" .. engine .. ": " .. values.error)
                         return nil
@@ -536,7 +544,8 @@ do
             -- The standalone interpreter parses any argument that starts with
             -- "-" as another option, so a leading newline keeps a comment-first
             -- benchmark chunk out of its option scan.
-            local output, run_error = run({ node, script, "-e", "\n" .. code })
+            local output, run_error = run({ node, script, "-e",
+                "BENCH_ASYNCIFY=true", "-e", "\n" .. code })
             if not output then
                 fail("lua.js: " .. tostring(run_error))
                 return nil

@@ -44,13 +44,18 @@ measure("lua.strings", function()
     assert(#text == 5000)
 end)
 
-measure("lua.coroutine_switch", function()
-    local child = coroutine.create(function()
-        for _ = 1, 20000 do coroutine.yield("tick") end
-        return "done"
+-- Asyncify-off cells must create no coroutine at all, so the host sets this
+-- flag only for cells whose build enables Asyncify. The fork lua.js lane sets
+-- it too, because it keeps the coroutine row for scale.
+if BENCH_ASYNCIFY then
+    measure("lua.coroutine_switch", function()
+        local child = coroutine.create(function()
+            for _ = 1, 20000 do coroutine.yield("tick") end
+            return "done"
+        end)
+        for _ = 1, 20000 do assert(coroutine.resume(child) ~= nil) end
     end)
-    for _ = 1, 20000 do assert(coroutine.resume(child) ~= nil) end
-end)
+end
 
 io.write("lua.done=1\n")
 -- The interpreter image keeps stdio buffered after main returns, so the host

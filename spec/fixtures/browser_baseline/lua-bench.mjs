@@ -54,8 +54,13 @@ export async function run(context) {
   });
   const instantiated = now();
   // A comment-first chunk looks like another option, so keep it off the
-  // interpreter's option scan with a leading newline.
-  const argv = marshal(module, ['lua', '-e', '\n' + source]);
+  // interpreter's option scan with a leading newline. The Asyncify marker is a
+  // separate earlier chunk so the benchmark can skip coroutine work entirely in
+  // the controls.
+  const argvList = ['lua'];
+  if (context.args[1] === 'asyncify') argvList.push('-e', 'BENCH_ASYNCIFY=true');
+  argvList.push('-e', '\n' + source);
+  const argv = marshal(module, argvList);
   const status = module.ccall('main', 'number', ['number', 'number'],
     [argv.count, argv.pointers]);
   const finished = now();

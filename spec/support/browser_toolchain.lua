@@ -246,12 +246,11 @@ end
 
 local record_keys = { path = true, version = true, ok = true, reason = true }
 
--- A capability value must be real, nonempty text: an empty or control-bearing
--- path is a malformed probe result, not a usable tool, and must never be
--- cached or downgraded to an absence.
+-- A capability value must be real, nonempty text. Escaped control characters
+-- are legitimate JSON (a multi-line Chrome diagnostic is the common case), so
+-- only the raw-byte form is rejected, at the decoder.
 local function usable(value)
-    return type(value) == "string" and value ~= "" and
-        not value:find("[%z\1-\31\127]")
+    return type(value) == "string" and value ~= ""
 end
 
 local function probe_record(records, name)

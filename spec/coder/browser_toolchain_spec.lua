@@ -219,6 +219,7 @@ local installed = require "spec.support.installed_prefix"
 local baseline_json = require "spec.support.browser_baseline_json"
 
 local validation_prefix = installed.active()
+local platform = require "titan-compiler.platform"
 
 local SDK_ASSETS = { "libtitan.a", "titan-browser-library.js", "titan-browser.mjs",
     "titan-browser-run", "titan-browser-run.mjs", "titan-browser-node-worker.mjs",
@@ -229,6 +230,17 @@ local CHROME_OK = { path = "/opt/chrome/chrome-headless-shell",
 
 describe("browser toolchain capabilities", function()
     local prefixes
+
+    -- These cases drive POSIX fixture executables; the helper itself rejects a
+    -- Windows host before any capability work, so the same host fact is the
+    -- honest pending reason there.
+    local function posix_only()
+        if platform.windows then
+            pending("browser builds are supported from Linux and macOS hosts")
+            return true
+        end
+        return false
+    end
 
     after_each(function()
         for _, root in ipairs(prefixes or {}) do files.remove(root) end
@@ -272,9 +284,21 @@ describe("browser toolchain capabilities", function()
     end
 
     local function probe_json(node, chrome)
+        -- JSON escapes, not Lua %q: a diagnostic may contain newlines, and a
+        -- raw newline inside a JSON string would be corruption.
+        local function text(value)
+            return '"' .. value:gsub('[%z\1-\31\\"]', function(char)
+                if char == '"' then return '\\"' end
+                if char == "\\" then return "\\\\" end
+                if char == "\n" then return "\\n" end
+                if char == "\r" then return "\\r" end
+                if char == "\t" then return "\\t" end
+                return string.format("\\u%04x", char:byte())
+            end) .. '"'
+        end
         local function record(values)
-            local function value(text)
-                return type(text) == "string" and string.format("%q", text) or "null"
+            local function value(item)
+                return type(item) == "string" and text(item) or "null"
             end
             return string.format('{"path":%s,"version":%s,"ok":%s,"reason":%s}',
                 value(values.path), value(values.version),
@@ -330,6 +354,7 @@ describe("browser toolchain capabilities", function()
     end
 
     it("reports Node and Chrome from the installed runner probe without changing the compile-only result", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         install_probe(root, NODE_OK, CHROME_OK)
         local ok, output = helper_child(fixture_environment(root), [[
@@ -355,6 +380,7 @@ print("capabilities-ok")
     end)
 
     it("pends on an unavailable capability, raises it under the strict variable, and retries after it appears", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         install_probe(root, { path = "/usr/bin/node", version = "v22.23.4",
             ok = false, reason = "\"/usr/bin/node\" reports v22.23.4; expected Node 24" },
@@ -407,7 +433,27 @@ print("retry-ok")
         assert.truthy(retry_output:find("retry%-ok"), retry_output)
     end)
 
+    it("accepts a multi-line escaped failure reason as a normal absence", function()
+        if posix_only() then return end
+        local root = fixture_prefix()
+        install_probe(root, { path = "/usr/bin/node", version = nil, ok = false,
+            reason = "first line of the diagnostic\nsecond line: expected Node 24" },
+            CHROME_OK)
+        local ok, output = helper_child(fixture_environment(root), [[
+local toolchain = require "spec.support.browser_toolchain"
+local found, reason, malformed = toolchain.detect({ node = true })
+assert(found == nil, "a refusal is not a capability")
+assert(malformed == nil, "escaped text is not corruption")
+assert(reason == "first line of the diagnostic\nsecond line: expected Node 24",
+    string.format("%q", tostring(reason)))
+print("escaped-reason-ok")
+]])
+        assert.is_true(ok, output)
+        assert.truthy(output:find("escaped%-reason%-ok"), output)
+    end)
+
     it("treats a malformed probe record as corruption instead of an absence or a success", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         install_probe(root, NODE_OK, CHROME_OK)
         local directory = sdk_directory(root)
@@ -480,6 +526,7 @@ print("repaired-ok")
     end)
 
     it("reports a probe that cannot start Node as an unavailable capability", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         files.write(sdk_directory(root) .. "/titan-browser-run",
             "#!/bin/sh\n" ..
@@ -498,6 +545,7 @@ print("probe-failure-ok")
     end)
 
     it("distinguishes an absent browser SDK from a present but incomplete one", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
@@ -539,6 +587,7 @@ print("sdk-complete-ok")
     end)
 
     it("resolves the browser SDK under an explicit ROCKS_TREE", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         local rocks = temporary.name()
         assert(os.remove(rocks))
@@ -560,6 +609,7 @@ print("rocks-tree-ok")
     end)
 
     it("rechecks an absent SDK instead of caching the absence", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         files.mkdir(root .. "/lib/titan-browser")
         local ok, output = helper_child(
@@ -587,6 +637,7 @@ print("sdk-retry-ok")
     end)
 
     it("caches successful capabilities separately and re-probes a missing peer", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         local counter = root .. "/probe-count"
         install_probe(root, NODE_OK,
@@ -629,6 +680,7 @@ print("cache-ok")
     end)
 
     it("accepts empty requirements and rejects malformed requirement tables", function()
+        if posix_only() then return end
         local root = fixture_prefix()
         install_probe(root, NODE_OK, CHROME_OK)
         local ok, output = helper_child(fixture_environment(root), [[
@@ -659,6 +711,7 @@ print("invalid-ok")
     end)
 
     it("falls back to the source runner before the SDK exists", function()
+        if posix_only() then return end
         local info, why = toolchain.require({ node = true })
         if not info then pending(why) return end
         local root = fixture_prefix()
@@ -701,6 +754,7 @@ print("source-fallback-ok")
     end)
 
     it("restores executable modes from a pinned ZIP", function()
+        if posix_only() then return end
         local python = compiler_io.new_sync():run({ "python3", "--version" })
         if not python or not python.started or not python.ok then
             pending("python3 is required for the archive fixture")
