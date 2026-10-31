@@ -235,9 +235,13 @@ or fixed value for the fixed fields, the computed digest for
 absent). An unreadable archive or header directory reports `expected
 "unavailable: <reason>"` in the matching digest field, and a header directory
 without `*.h` files reports `unavailable: no installed Lua headers`. When the
-fingerprint probe of step 13 disagrees, the `wasm_features` diagnostic carries
-the fingerprint mismatch description in the `recorded` slot and the baseline
-as `expected`.
+fingerprint probe of step 13 disagrees, the failure is a compiler-probe target
+mismatch, not a Lua record mismatch. It reports the actual and required target
+facts and quotes the supplied compile flags, including feature-changing options
+such as `-msimd128`. The remedy is to remove feature-changing
+`TITAN_EXTRA_CPPFLAGS`/`TITAN_EXTRA_CFLAGS`/`--cflag` arguments, not reinstall Lua.
+Without user flags, the diagnostic instead points to the selected Emscripten
+installation.
 
 ## Emscripten pin and tool location
 
@@ -491,6 +495,12 @@ data segments to read. The descriptor never adds LTO and the Wasm reader
 rejects bitcode objects and archive members
 (`<origin>: LLVM bitcode (LTO) object is not supported`). Enabling LTO later
 requires the same metadata and provider gates.
+
+`titanc` rejects `--coverage` for an explicit or environment-selected browser
+target before target-tool discovery and before `coverage.prepare`. This covers
+object-only, library, test, and authored-C-only builds; native gcov backend and
+report options cannot inject host coverage flags into emcc. Coverage options
+without `--coverage` retain their ordinary CLI rejection.
 
 ## Semantic-cache ownership
 
