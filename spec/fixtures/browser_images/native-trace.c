@@ -30,9 +30,13 @@ static size_t native_frames(const char *trace, void **frames, const char **first
     *first = NULL;
     while (*line) {
         const char *end = strchr(line, '\n');
-        const char *address;
+        int found;
         void *frame;
         if (!end) end = line + strlen(line);
+#if defined(__APPLE__)
+        found = sscanf(line, "%*u %*s %p", &frame) == 1;
+#else
+        const char *address;
 #if defined(_WIN32)
         address = strstr(line, "[native address ");
         if (address && address < end) address += strlen("[native address ");
@@ -40,7 +44,9 @@ static size_t native_frames(const char *trace, void **frames, const char **first
         address = memchr(line, '[', (size_t)(end - line));
         if (address) address++;
 #endif
-        if (address && address < end && sscanf(address, "%p", &frame) == 1) {
+        found = address && address < end && sscanf(address, "%p", &frame) == 1;
+#endif
+        if (found) {
             assert(count < 512);
             frames[count++] = frame;
             if (!*first) *first = line;

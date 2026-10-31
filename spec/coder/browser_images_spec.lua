@@ -220,6 +220,60 @@ describe("real browser test image", function()
     after_each(function()
         if workspace then files.remove(workspace); workspace = nil end
     end)
+    it("raises the seven dynamic-provider guard diagnostics without native loader imports", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        local image = c_image(info, "dynamic-guards", read(repository .. "/spec/fixtures/browser_images/dynamic-guards.c"))
+        for _, engine in ipairs({ "node", "chromium" }) do
+            local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", image })
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            assert.truthy(result.output:find("dynamic-guards=7", 1, true), result.output)
+        end
+    end)
+
+    it("links default and explicit programs through main, support preloads and the bootstrap hook", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.write(workspace .. "/src/image_main.titan",
+            read(repository .. "/spec/fixtures/browser_images/program-main.titan"))
+        local source = repository .. "/spec/fixtures/browser_images/program-bootstrap.c"
+        local result = cli(info, "--incremental", "--c-source", source,
+            "--ldflag=-Wl,--wrap=luaL_openselectedlibs", "image_main")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.is_nil(result.output:find("support-bootstrap", 1, true), "compiler unexpectedly ran main")
+        local explicit = workspace .. "/out/explicit-program.mjs"
+        result = cli(info, "--incremental", "--exe", explicit, "--c-source", source,
+            "--ldflag=-Wl,--wrap=luaL_openselectedlibs", "image_main")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        local runtime = assert(require("titan-compiler.staticmetadata").scan_archive(
+            info.sdk_root .. "/libtitan.a", { target = fixtures.fingerprint() }))
+        local members = {}
+        for index, member in ipairs(runtime.members) do members[index] = member.display_name end
+        assert.same({ "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }, members)
+        assert.is_true(driver.validate_browser_provider(runtime))
+        for _, image in ipairs({ "image_main", "explicit-program" }) do
+            assert.equal("file", lfs.attributes(workspace .. "/out/" .. image .. ".mjs", "mode"))
+            local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/" .. image .. ".wasm")))
+            local exports = {}
+            for _, item in ipairs(inventory.exports) do exports[item.name] = true end
+            assert.is_true(exports.titan_browser_entry)
+            assert.is_true(exports.malloc)
+            assert.is_true(exports.free)
+            assert.is_nil(exports.titan_browser_gate_guarded)
+            assert.is_nil(exports.main)
+        end
+        local fixture = workspace .. "/out/program-results.mjs"
+        files.write(fixture, read(repository .. "/spec/fixtures/browser_images/program-results.mjs"))
+        for _, engine in ipairs({ "node", "chromium" }) do
+            result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--",
+                "image_main.mjs", "explicit-program.mjs" })
+            assert.is_true(result.ok, result.output or result.diagnostic)
+        end
+    end)
+
     it("attempts both final libc drains and preserves stdout-first or original-error precedence", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
