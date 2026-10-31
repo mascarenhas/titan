@@ -1,0 +1,7 @@
+local test = import "test"
+
+function test_names(context: test.Context)
+  context:run("name\0\255\195(", function(child: test.Context)
+    child:log("message\0\255\195(")
+  end)
+end
