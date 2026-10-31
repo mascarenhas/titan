@@ -49,7 +49,7 @@ use the chapters below for the normative language reference.
 | Chapter | Covers |
 | --- | --- |
 | [Native build profiles](build-profiles.md) | Production optimization defaults, isolated O0/no-LTO validation SDKs, `titanc` worker and native job slot bounds inside and outside GNU Make, `--c-parts` splitting of large modules, and the checkout's build and test parallelism settings. |
-| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, upgrading from a pre-release build, what the installation contains (including the support module and the installer's SDK digest manifest), the optional browser Lua for `--target browser`, how Titan finds it, bundled libuv and OpenSSL, compilation job defaults, building the standard library during development, uninstalling, and cleaning. |
+| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, upgrading from a pre-release build, what the installation contains (including the support module and the installer's SDK digest manifest), the optional browser prerequisites (Emscripten, Node 24, Chrome), `make lua-browser` and `make browser-sdk` for `--target browser`, how Titan finds them, bundled libuv and OpenSSL, compilation job defaults, building the standard library during development, uninstalling, and cleaning. |
 | [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, the native `titanc.exe` compiler, DLL programs and `--exe` launcher paths, link staging directories, the SDK fallback's `PATH` lookup, packaging, cleanup, native test entrypoints, Busted workers, and build parallelism. |
 | [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
@@ -82,7 +82,7 @@ use the chapters below for the normative language reference.
 | [Output directories](output-directory.md) | `-o/--output` directory creation, `--exe` executable paths, `-I`/`-D`/`-L`/`-l`/`--cflag`/`--ldflag`/`--c-source`/`--print-c-objects` switches, reserved generated-C names and upgrading older (including moved) output trees, `.titan/`, `.native/`, and `.titan-links/` contents, the `.titan-target` one-target marker, `.titan-build.lock` coordination, coverage, and platform output layouts. |
 | [Folder modules](folder-modules.md) | Splitting one logical module across a canonical main and immediate contributors: shared scope, deterministic order, lookup privacy, initialization, and artifacts. |
 | [Target source selection](target-source-selection.md) | `name.<label>.titan` variants for `linux`, `darwin`, `windows`, `browser`, and the umbrella `native`: reserved spellings, per-target selection with absence-only fallback, target-only files, precedence, folder composition and the initializer rule, source imports, `-T`/`--target` and `TITAN_TARGET`, logical artifact names, incremental reuse, test roots, and editor behavior. |
-| [Compiling for the browser target](browser-target.md) | `--target browser`/`TITAN_TARGET=browser` on Linux and macOS: Emscripten 6.0.13, the fork's verified browser Lua (`make install-browser`), the bootstrap order, required `--output` with one target per output directory, object and archive-only library builds with structural checks, the browser Titan path, rejected native-only flags, and the current compile-only scope. |
+| [Compiling for the browser target](browser-target.md) | `--target browser`/`TITAN_TARGET=browser` on Linux and macOS: prerequisites (Emscripten 6.0.13, Node 24, Chrome or Chromium), `make lua-browser` and `make browser-sdk`, the bootstrap order, required `--output` with one target per output directory, objects, archive-only libraries with structural and executing checks, `.mjs`/`.wasm` programs and tests, the `titan-browser-run` runner and its exit statuses, status and output semantics, Lua-frame traces, the loader API and its sink contract, the browser Titan path, rejected flags, fixed limits, and the `test`/`coroutine`/`gc` standard library. |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, explicit non-raising transfer outcomes with owned traces, current coroutine identity, status, Lua interop, and unwinding of abandoned coroutines (`defer`, generic-`for` close functions, and Lua `<close>` run at collection and state close), cleanup that needs asynchronous I/O, and unwinding limits. |
@@ -114,7 +114,7 @@ use the chapters below for the normative language reference.
 | [SQLite standard library](standard-library-sqlite3.md) | Embedded SQLite with asynchronous native work, prepared statements, owned rows and cursors, reflection bindings and mapping, explicit transactions, cancellation-safe cleanup, and connection release at Lua-state close. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, the unsafe-boundary rules, and limitations. |
 | [Foreign functions](foreign-functions.md) | Exact C-ABI exports through regular imports, runtime provider selection and stable per-image bindings, local source callbacks, restricted raw-C bodies, pointer identity, generated companion headers, and sequencing. |
-| [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, compiled-probe caching and manual clearing, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), C storage after a caught error, typed object-macro values, macro-projected fields, and target-correct C operators. |
+| [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, compiled-probe caching and manual clearing, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), C storage after a caught error, typed object-macro values, identifier-macro aliases such as `stdout`, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
 ## Status and limitations
@@ -239,9 +239,10 @@ remains rejected.
   and native test infrastructure through `test`.
   Lua loads every standard module through its qualified `titan.*` name,
   leaving Lua's own standard modules unchanged.
-* **The browser target is compile-only.** `titanc --target browser` builds
-  WebAssembly objects and library archives; linking and running browser
-  programs and tests is not available yet
+* **The browser target is young.** `titanc --target browser` builds
+  WebAssembly programs, tests, and libraries that run under Node and headless
+  Chromium, but its standard library provides only `test`, `coroutine`, and
+  `gc`, and its traces show Lua frames only
   ([browser target](browser-target.md#current-limits)).
 
 The [README roadmap](../../README.md) lists where the language is headed;

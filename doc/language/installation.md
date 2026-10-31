@@ -112,7 +112,9 @@ compiler or other native tools, pass them explicitly to each LuaRocks command.
 | OpenSSL 3.0 or newer with development files, and `pkg-config` | The default system-OpenSSL mode, used by `titan.ssl`. |
 | Perl | Only with `OPENSSL_MODE=bundled`. |
 | `clang-format` | Only for `titanc --pretty-print`. |
-| Emscripten 6.0.13 | Only for `titanc --target browser` and its [browser Lua](#the-browser-lua). |
+| Emscripten 6.0.13 | Only for `titanc --target browser`, its [browser Lua, and the browser SDK](#the-browser-lua-and-sdk). |
+| Node 24 | Only for the browser target: building the browser SDK, publishing browser libraries, and linking and running browser programs. emsdk 6.0.13 ships one. |
+| Chrome, Chromium, or the Chrome for Testing headless shell | Only for running browser programs in a browser engine. |
 
 Install them with your package manager:
 
@@ -432,36 +434,54 @@ reinstall with `luarocks make`, or select the checkout compiler and runtime with
 1 when `bin/titanc` is already installed in the selected tree, and to 0 otherwise. For
 the test suite, see the [repository workflow](../implementation/repository-workflow.md).
 
-### The browser Lua
+### The browser Lua and SDK
 
-The [browser target](browser-target.md) needs Emscripten 6.0.13 and a browser
-build of the Lua fork in the same prefix as Titan. The rock's installation does
-not need either: `luarocks install titan` and `luarocks make` never run
-Emscripten. Install the browser Lua with the fork's own `install-browser`
-target, which builds the WebAssembly archive when needed and then installs it.
-With Emscripten active (`source <emsdk>/emsdk_env.sh`), from a checkout:
+The [browser target](browser-target.md) needs Emscripten 6.0.13, Node 24, a
+browser build of the Lua fork, and the browser SDK, all in the same prefix as
+Titan; running programs in a browser engine also needs Chrome or Chromium. The
+rock's installation needs none of them: `luarocks install titan` and
+`luarocks make` never run Emscripten. Only Linux and macOS hosts are
+supported.
+
+With Emscripten active (`source <emsdk>/emsdk_env.sh`), after `luarocks make`
+and from the checkout, install the browser Lua and then the browser SDK:
 
 ```sh
-make -C lua-5.5.1 install-browser PREFIX="$PREFIX"
+make lua-browser PREFIX="$PREFIX"
+make browser-sdk PREFIX="$PREFIX"
 ```
 
-From the fork's release archive, which has no Git metadata, pass the commit
-the `v5.5.1-1` tag names as well, because the build record states the exact
-commit:
+`make lua-browser` builds the fork's `browser` target and installs it below
+`$PREFIX/lib/browser/`, without touching the native Lua files. It reuses an
+existing installation only when the fork commit, the Emscripten version, the
+compile settings, and the digests of the installed archive and headers all
+match; otherwise it rebuilds. It refuses a missing or different `emcc`, and
+Lua settings that the record could not describe truthfully.
+
+`make browser-sdk` uses the installed `titanc` to build the browser runtime,
+loader, runner, and standard library into `lib/titan-browser/0.6/`, and writes
+the SDK digest manifest last. It needs Node 24 to check the standard library
+before publishing it. When `EMSDK` is set and `TITAN_NODE` is not, it appends
+emsdk's bundled Node directory to `PATH`; set `TITAN_NODE` to a Node 24
+executable if an earlier `node` on `PATH` has another version. In a [separate
+rocks tree](#a-separate-rocks-tree), pass both roots: `make browser-sdk
+PREFIX="$PREFIX" ROCKS_TREE="$ROCKS_TREE"` copies the verified browser Lua from
+`PREFIX` into `ROCKS_TREE` before it builds.
+
+The fork's own `install-browser` target installs the browser Lua without the
+reuse check. From the fork's release archive, which has no Git metadata, pass
+the commit the `v5.5.1-1` tag names as well, because the build record states
+the exact commit:
 
 ```sh
 (cd lua-5.5.1-5.5.1-1 &&
   make install-browser PREFIX="$PREFIX" FORK_REVISION=<40-hex commit>)
 ```
 
-The target writes only below `$PREFIX/lib/browser/` and never touches the
-native Lua files. It refuses a missing or different `emcc`, and Lua settings
-that the record could not describe truthfully. The compiler looks for
-`lib/browser/` under its own installation root, so in a [separate rocks
-tree](#a-separate-rocks-tree) pass `PREFIX="$ROCKS_TREE"` to this command. Rerun
-it after changing Emscripten or the fork; every browser compilation verifies
-the installed archive, headers, and record and names this command when they
-disagree. Only Linux and macOS hosts are supported.
+Rerun both Make targets after changing Emscripten, the fork, or Titan. Every
+browser compilation verifies the installed archive, headers, and record and
+names the fork's install command when they disagree, and every browser link
+names `make browser-sdk` when an SDK file is missing.
 
 ### Windows
 
@@ -504,12 +524,17 @@ archives (`libuv.a`, LPegLabel, llhttp, bundled OpenSSL) are carried into `titan
 and `titan.a` and are not installed as libraries, so applications need no separate LPeg
 or LPegLabel module.
 
-The rock installs nothing for the browser target. The fork's `install-browser`
-target, described in [The browser Lua](#the-browser-lua), adds
+The rock installs nothing for the browser target. `make lua-browser`, described
+in [The browser Lua and SDK](#the-browser-lua-and-sdk), adds
 `lib/browser/liblua.a`, the Lua headers in `lib/browser/include/`, and the build
-record `lib/browser/liblua-config.txt`. `lib/titan-browser/0.6/` is reserved for
-the browser runtime and standard library, which the current compiler does not
-build; it is never inside `lib/titan/0.6/`, and native builds never search it.
+record `lib/browser/liblua-config.txt`. `make browser-sdk` adds
+`lib/titan-browser/0.6/`: the browser runtime `libtitan.a`, the browser PEG
+engine `libtitan-lpeglabel.a`, the browser standard library `titan.a` (the
+`test`, `coroutine`, and `gc` modules), the loader `titan-browser.mjs` and its
+Emscripten library `titan-browser-library.js`, the runner
+`titan-browser-run` with its three `.mjs` modules, and `sdk-digests`. That
+directory is never inside `lib/titan/0.6/`, and native builds never search
+it. See [the browser SDK](browser-target.md#installing-the-browser-sdk).
 
 ### How the rock installs
 
@@ -694,8 +719,8 @@ Run `titan-uninstall` from the installation. It asks LuaRocks to remove every in
 Titan rock version in the selected tree, including the compiler scripts and modules,
 the support module, and private payloads. Only if that succeeds does it remove Titan's
 external headers, providers, runtime archive, notices, and build-profile record. Lua, LuaRocks,
-dependency Lua modules, the browser Lua in `lib/browser/`, and shared third-party
-headers and libraries stay. Titan's
+dependency Lua modules, the browser Lua in `lib/browser/`, the browser SDK in
+`lib/titan-browser/`, and shared third-party headers and libraries stay. Titan's
 canonical paths are shared by all rock versions, so the command cleans the whole Titan
 installation in that tree. You cannot remove one version.
 

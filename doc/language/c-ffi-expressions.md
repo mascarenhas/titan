@@ -583,6 +583,24 @@ accessors, such as the common `errno` expansion `*accessor()`, when the imported
 accessor declaration establishes the result type. This is not general support
 for arbitrary call-containing object macros.
 
+An object-like macro whose fully expanded replacement is a single identifier,
+with or without parentheses, has the type of the declaration it names. This
+covers headers that define a standard stream as a macro naming its own
+declaration, as in `extern FILE *const stdout;` followed by `#define stdout
+(stdout)`, and headers that alias one declared name to another. The member
+keeps the complete declaration: pointer qualifiers, array bounds, and callback
+signatures. A replacement identifier with no visible declaration gives the
+macro no type, rather than a guessed `int`:
+
+```titan
+foreign import "stdio.h"
+
+local function write_line(line: string)
+    local text = line .. "\n"
+    ffi.fwrite(text, 1, #text, ffi.stdout)
+end
+```
+
 Some system headers expose a public field name as an object-like macro whose
 replacement is only a dotted identifier path, for example:
 
@@ -634,8 +652,9 @@ enum exception.
 
 Function-like macros remain unavailable as foreign members. Other object-like
 forms beyond recognized existing integer/accessor expressions, fully expanded
-outer casts to supported scalar types, and pure dotted field projections are
-not generally supported. All imported headers are now preprocessed in one
+outer casts to supported scalar types, single declared identifiers, and pure
+dotted field projections are not generally supported. All imported headers
+are preprocessed in one
 ordered module environment. Conditional declarations and supported scalar
 macros therefore observe earlier headers, and later definitions or undefinitions
 determine the final `ffi` members and projected-field behavior.
