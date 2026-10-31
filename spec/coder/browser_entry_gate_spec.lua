@@ -4,6 +4,7 @@ local compiler_io = require "titan-compiler.io"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
+local sha256 = require "titan-compiler.sha256"
 local repository = assert(lfs.currentdir())
 local fixture = repository .. "/spec/fixtures/browser_runtime"
 local workspace
@@ -12,6 +13,12 @@ local function read(filename)
     local file = assert(io.open(filename, "rb"))
     local bytes = assert(file:read("a")); assert(file:close())
     return bytes
+end
+
+local function receipt(filename, label)
+    local bytes = read(filename)
+    io.stdout:write(string.format("GATE artifact=%s bytes=%d sha256=%s\n",
+        label, #bytes, sha256.hex(bytes)))
 end
 
 local function run(argv)
@@ -53,6 +60,13 @@ describe("browser real runtime entry gate", function()
             files.write(workspace .. "/entry-gate.mjs", read(fixture .. "/entry-gate.mjs"))
             build(info, assertions, "entry_gate", "gate", true)
             build(info, assertions, "final_fiber", "final-fiber", false)
+            receipt(info.sdk_root .. "/sdk-digests", "sdk-digests")
+            for _, name in ipairs({ "gate.mjs", "gate.wasm", "final-fiber.mjs", "final-fiber.wasm" }) do
+                receipt(workspace .. "/assertions-" .. assertions .. "/" .. name, name)
+            end
+            for _, name in ipairs({ "entry_gate.titan", "final_fiber.titan", "gate.c", "gate.h", "entry-gate.mjs" }) do
+                receipt(fixture .. "/" .. name, "fixture/" .. name)
+            end
             -- Node is deliberately first; the exact same image pair then runs
             -- through the installed Chromium runner, not a research adapter.
             for _, engine in ipairs({ "node", "chromium" }) do

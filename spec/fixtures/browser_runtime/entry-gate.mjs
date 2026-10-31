@@ -10,9 +10,13 @@ export async function run(context) {
 
   async function execute(image, args, selected, inspect = false, timer = false) {
     let module;
+    let bridge;
     let output = "";
     const factory = async options => {
-      module = await image.factory(options);
+      module = await image.factory({...options, titanBrowserAttach(state) {
+        bridge = state;
+        options.titanBrowserAttach(state);
+      }});
       return module;
     };
     const instance = context.create(factory, {
@@ -21,8 +25,6 @@ export async function run(context) {
       stderr: context.stderr,
     });
     await instance.initialize();
-    if (inspect) context.assert(module._titan_browser_gate_guarded() === 1,
-      "admitted guarded export did not execute its real nonlocal unwind");
     const before = performance.now();
     const tickTimes = [];
     let frames = 0;
@@ -38,6 +40,16 @@ export async function run(context) {
     let settled = false;
     let running;
     try {
+      if (inspect) {
+        const snapshot = () => ({liveDepth: bridge.liveDepth, continuing: bridge.continuing,
+          suspensionPending: bridge.suspensionPending, blocked: bridge.blocked,
+          completionCount: bridge.completionCount, terminalFailure: String(bridge.terminalFailure)});
+        const beforeGuard = snapshot();
+        const admittedGuard = module._titan_browser_gate_guarded();
+        emit({guardAdmission: String(admittedGuard), before: beforeGuard, after: snapshot()});
+        context.assert(admittedGuard === 1,
+          "admitted guarded export did not execute its real nonlocal unwind: " + String(admittedGuard));
+      }
       running = instance.run(args);
       running.then(() => { settled = true; }, () => { settled = true; });
       if (inspect) {
@@ -84,7 +96,7 @@ export async function run(context) {
       clearInterval(interval);
       if (raf !== undefined) cancelAnimationFrame(raf);
       await instance.dispose();
-      module = undefined;
+      module = bridge = undefined;
     }
   }
 
