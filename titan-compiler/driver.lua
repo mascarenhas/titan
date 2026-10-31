@@ -10771,20 +10771,22 @@ function driver.validate_browser_provider(archive, expected_entries, generated_o
             archive.entries, expected_entries, "browser provider")
         if not valid then return nil, err end
     end
-    local primaries, available = {}, {}
+    local primaries, available = {}, generated_objects and {} or nil
+    local function forbidden(name)
+        return name == "dlopen" or name == "dlsym" or
+            type(name) == "string" and
+            (name:match("^backtrace_") or name:match("^__backtrace_"))
+    end
     for _, member in ipairs(archive.members or {}) do
         local object = member.object
         if object.format ~= "wasm" then
             return nil, tostring(member.origin) ..
                 ": browser provider requires Wasm objects"
         end
-        available[object.bytes] = (available[object.bytes] or 0) + 1
-        if object.metadata then primaries[object.metadata.module] = member end
-        local function forbidden(name)
-            return name == "dlopen" or name == "dlsym" or
-                type(name) == "string" and
-                (name:match("^backtrace_") or name:match("^__backtrace_"))
+        if available then
+            available[object.bytes] = (available[object.bytes] or 0) + 1
         end
+        if object.metadata then primaries[object.metadata.module] = member end
         for _, import in ipairs(object.imports or {}) do
             if forbidden(import.name) then
                 return nil, string.format(
