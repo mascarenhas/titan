@@ -10,6 +10,9 @@ local sha256 = require "titan-compiler.sha256"
 local types = require "titan-compiler.types"
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local PREFIX = require("spec.support.installed_prefix").active()
 local LUA = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
@@ -1079,7 +1082,7 @@ end
         local filename = workspace .. "/fixture_consumer.titan"
         local ast, parse_err = parser.parse(filename, consumer_source)
         assert.truthy(ast, parse_err)
-        local loader = driver.defaultloader(static_deps)
+        local loader = driver.defaultloader(static_deps, resolver_options())
         local _, errors = driver.with_loader(loader, function(active)
             return checker.check(
                 "fixture.consumer", ast, consumer_source,

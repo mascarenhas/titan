@@ -6,6 +6,9 @@ local parser=require 'titan-compiler.parser'
 local checker=require 'titan-compiler.checker'
 local projectcache=require 'titan-compiler.projectcache'
 local graphcodec=require 'titan-compiler.graphcodec'
+local _,close_contexts,resolver_options=
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local function prepare(source,filename)
     local caret=assert(source:find('@',1,true))-1
@@ -18,8 +21,8 @@ local function analyze(source,modules)
     local inputs={test=prepared.text}
     for name,text in pairs(modules or {}) do inputs[name]=text end
     local entries={}
-    local loader=driver.tableloader(inputs,entries,{}, {completion=prepared.request,
-        analysis_only=true,transient_caches=true,interface='source'})
+    local loader=driver.tableloader(inputs, entries, {}, resolver_options({completion=prepared.request,
+        analysis_only=true,transient_caches=true,interface='source'}))
     local ok,typ,errors=loader('test')
     assert.is_true(ok,tostring(typ))
     local result=assert(entries.test.completion,'no completion result')
@@ -291,9 +294,9 @@ describe('completion analysis',function()
     end)
     it('does not consult saved graph state or disk dependencies when using detached descriptors',function()
         local filename='/tmp/titan-completion-provider.titan'
-        local loader=driver.defaultloader({}, {analysis_only=true,source_roots={provider=true},
+        local loader=driver.defaultloader({}, resolver_options({ analysis_only = true, source_roots={provider=true},
             source_overrides={provider={kind='generated',main=filename,files={filename},contents={
-                [filename]='local record Hidden<|T|> field:T end local function secret():integer return 1 end'}}}})
+                [filename]='local record Hidden<|T|> field:T end local function secret():integer return 1 end'}}} }))
         local ok,typ,errors=loader('provider');assert.is_true(ok,tostring(typ));assert.equal(0,#errors,table.concat(errors,'\n'))
         local payload=assert(projectcache.encode(driver.imported.provider));assert.is_true(driver.close_loader(loader))
         driver.imported={};types.registry={}
@@ -306,9 +309,9 @@ describe('completion analysis',function()
             assert.not_matches('%.titan$',path,'completion tried to read source from disk')
             return ordinary_read(self,path)
         end
-        loader=driver.defaultloader({}, {analysis_only=true,completion_closed_world=true,transient_caches=true,
+        loader=driver.defaultloader({}, resolver_options({ analysis_only = true, completion_closed_world=true,transient_caches=true,
             completion=prepared.request,io=io_strategy,cached_source_entries=entries,
-            source_roots={test=true},source_overrides={test={kind='generated',main='./test.titan',files={'./test.titan'},contents={['./test.titan']=prepared.text}}}})
+            source_roots={test=true},source_overrides={test={kind='generated',main='./test.titan',files={'./test.titan'},contents={['./test.titan']=prepared.text}}} }))
         ok,typ,errors=loader('test');assert.is_true(ok,tostring(typ))
         local result=driver.imported.test.completion
         assert.equal('field',result.candidates[1].name);assert.equal('integer',result.candidates[1].detail)
@@ -318,7 +321,7 @@ describe('completion analysis',function()
         local module=types.Module('captured',{},{});module.members[1]=types.ModuleVariable('captured','value',types.Integer(),false)
         module.members.value=module.members[1]
         local captured={captured={serialized=types.serialize(module),kind='dynamic',filename='/absent/captured.so'}}
-        local loader=driver.defaultloader({}, {analysis_only=true,completion_closed_world=true,cached_binary_interfaces=captured})
+        local loader=driver.defaultloader({}, resolver_options({ analysis_only = true, completion_closed_world=true,cached_binary_interfaces=captured }))
         local ok,typ,errors=loader('captured');assert.is_true(ok,tostring(typ));assert.equal('Type.Integer',typ.members.value.type._tag)
         ok,typ=loader('captured',{kind='source-import'});assert.is_false(ok);assert.matches('absent from completion catalog',typ,1,true)
         ok,typ=loader('uncaptured');assert.is_false(ok);assert.matches('absent from completion catalog',typ,1,true)

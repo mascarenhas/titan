@@ -163,6 +163,9 @@ describe("browser semantic cache isolation", function()
             function() subject.cleanup_stale_staging(native, {}) end,
             function() subject.restat_c_header_dependencies({}, native) end,
             function() subject.restat_c_header_dependencies({}, { context = native }) end,
+            function() subject.generated_compile_prefix(native) end,
+            function() subject.shared_library_flags(native) end,
+            function() subject.validate_generated_objects({}, fixtures.fingerprint(), {}, native) end,
             function() subject.resolve_external_modules({}, { unrelated = true }, native) end,
             function() subject.resolve_external_modules({}, { unrelated = true }, { context = native }) end,
             function() subject.language_server_cache_identity({ context = native }) end,
@@ -172,7 +175,7 @@ describe("browser semantic cache isolation", function()
         end
     end)
 
-    it("rejects never-activated contexts at compile and borrowed boundaries but accepts raw I/O constructor options", function()
+    it("rejects never-activated contexts but accepts nonsemantic file I/O options", function()
         local _, _, entry, _, _, unchanged = stale_compilation(false)
         local uninitialized = { io = compiler_io.new_sync(), _resolver_context = true }
         local request = { modname = "frozen", mod = entry, options = { context = uninitialized } }
@@ -193,12 +196,76 @@ describe("browser semantic cache isolation", function()
             assert.has_error(action, "compiler target context is not initialized")
             unchanged()
         end
-        assert.same({}, subject.resolve_external_modules({}, {}, { io = compiler_io.new_sync() }))
+        assert.has_error(function()
+            subject.resolve_external_modules({}, {}, { io = compiler_io.new_sync() })
+        end, "resolver options require an explicit context")
+        assert.same({}, subject.restat_c_header_dependencies({}, { io = compiler_io.new_sync() }))
+        unchanged()
     end)
 
     it("rejects a context that has never activated semantic caches", function()
         assert.has_error(function() subject.assert_target_context({ io = compiler_io.new_sync() }) end,
             "compiler target context is not initialized")
+    end)
+
+    it("requires explicit semantic contexts without changing the active browser owner", function()
+        local _, _, _, _, _, unchanged = stale_compilation(false)
+        for _, action in ipairs({
+            function() subject.find_static_interface("", "unused") end,
+            function() subject.find_dependency_interface("", "unused") end,
+            function() subject.defaultloader({}, {}) end,
+            function() subject.tableloader({}, {}, {}, {}) end,
+            function() subject.finalize_resolver_context() end,
+        }) do
+            assert.has_error(action, "compiler target context is not initialized")
+            unchanged()
+        end
+        assert.has_error(function() subject.initialize_platform() end,
+            "platform initialization requires a resolver context")
+        unchanged()
+        assert.has_error(function() subject.configure_foreign_c() end,
+            "foreign C configuration requires a resolver context")
+        unchanged()
+        assert.has_error(function() subject.resolve_external_modules({}, {}) end,
+            "resolver options require an explicit context")
+        unchanged()
+    end)
+
+    it("keeps contextless native flags and file verification nonactivating", function()
+        local _, browser, _, _, _, unchanged = stale_compilation(false)
+        subject.UNAME, subject.IS_DARWIN = nil, nil
+        assert.is_table(assert(subject.generated_compile_prefix()))
+        unchanged()
+        subject.UNAME, subject.IS_DARWIN = nil, nil
+        assert.is_table(assert(subject.shared_library_flags()))
+        unchanged()
+        assert.same({}, subject.restat_c_header_dependencies({}))
+        unchanged()
+        assert.is_true(subject.validate_generated_objects({}, fixtures.fingerprint()))
+        unchanged()
+        local valid, failure = subject.validate_generated_objects(
+            { root .. "/frozen.o" }, fixtures.fingerprint())
+        assert.is_nil(valid)
+        assert.is_string(failure)
+        unchanged()
+        local cancellation = { kind = "simulated file cancellation" }
+        local strategy = compiler_io.new_sync()
+        function strategy:run() error(cancellation) end
+        local saved_sync = compiler_io.new_sync
+        compiler_io.new_sync = function() return strategy end
+        -- A new driver has no shared native strategy yet. It uses only the
+        -- injected I/O path and cannot activate its first semantic owner.
+        local fresh = fresh_driver()
+        local called, reason = pcall(fresh.shared_library_flags)
+        compiler_io.new_sync = saved_sync
+        if platform.windows then
+            assert.is_true(called)
+        else
+            assert.is_false(called)
+            assert.equal(cancellation, reason)
+        end
+        assert(subject.assert_target_context(browser))
+        unchanged()
     end)
 
     it("adopts host-installed semantic tables on first activation in a fresh process", function()
@@ -561,7 +628,7 @@ describe("browser object and link certificate identity", function()
         assert.is_false(opaque.cacheable)
         assert.equal("opaque linker input mechanism: @opaque-link-input", opaque.reason)
         local spec = { output_root = root, outputs = { root .. "/provider.a" },
-            kind = "library", policy = { target = "native-profile" }, native_libraries = { backend = "gnu" } }
+            kind = "library", policy = { target = "native-profile" }, native_libraries = { backend = "archive" } }
         local browser = certificate.prepare(ctx, spec)
         assert.equal(ctx.target_descriptor.identity, browser.recipe.policy.target)
         assert.equal("native-profile", spec.policy.target)

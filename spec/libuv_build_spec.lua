@@ -14,6 +14,9 @@ local platform = require "titan-compiler.platform"
 local paths = require "titan-compiler.path"
 local source_inventory = require "spec.support.source_inventory"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
 local STDLIB_TYPES_FIXTURE =
@@ -3174,14 +3177,11 @@ int main(void) {
         local loader
         local completed, failure = xpcall(function()
             local filename = assert(compiler_io.new_sync():realpath("titan/path.titan"))
-            loader = driver.defaultloader({}, {
-                analysis_only = true,
-                source_roots = { ["titan.path"] = true },
-                source_overrides = { ["titan.path"] = {
-                    kind = "generated", main = filename, files = { filename },
-                    contents = { [filename] = read_file(filename) },
-                } },
-            })
+            loader = driver.defaultloader({}, resolver_options({ analysis_only = true, source_roots = { ["titan.path"] = true },
+            source_overrides = { ["titan.path"] = {
+                kind = "generated", main = filename, files = { filename },
+                contents = { [filename] = read_file(filename) },
+            } }, }))
             local loaded, module, errors = loader("titan.path")
             assert.truthy(loaded, module)
             assert.equal(0, #errors, table.concat(errors, "\n"))
