@@ -699,8 +699,8 @@ describe("automatic test-root discovery", function()
             assert.equal(slashed(joined(root, "pkg/tests/tests.native.titan")),
                 slashed(folder.main))
             assert.same({
-                "alpha.native.titan",
                 "tests.native.titan",
+                "alpha.native.titan",
             }, basenames(folder.files))
         end)
 
