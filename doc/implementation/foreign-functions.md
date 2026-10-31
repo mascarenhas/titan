@@ -292,7 +292,8 @@ contributors never own separate headers.
 `coder.generate_ffi_header` delegates to `ffiheaders.render`: ownership banner
 and guard, explicit-source dependency `.ffi.h` includes in declaration order,
 then local foreign directives in combined AST order. For folder modules this is
-main first, then bytewise-sorted contributors.
+the selected main first, then the selected contributors in bytewise order of
+logical filenames.
 
 `coder.generate_foreign_header` emits:
 

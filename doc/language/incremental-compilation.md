@@ -88,12 +88,16 @@ following inputs before accepting `<stem>.o`:
 
 * **Own sources and folder membership.** The certificate records whether the
   module resolved as `flat` or `folder`, the exact ordered list of constituent
-  `.titan` paths (canonical main first, then immediate contributors in bytewise
-  order), and the SHA-256 content digest of each file. Adding or removing a
+  `.titan` paths (main first, then immediate contributors in bytewise order of
+  their logical filenames), and the SHA-256 content digest of each file. Adding or removing a
   folder contributor, switching between flat and folder layout, or editing a
   file with a preserved timestamp misses; touching a timestamp without changing
   bytes remains a hit. Explicit roots and direct `.titan` imports still require
-  actual source files on disk.
+  actual source files on disk. The paths are the files selected for the
+  compilation's [target](target-source-selection.md#incremental-builds):
+  adding or removing a target variant that changes the selection, or switching
+  between byte-identical files, misses; editing, adding, or removing a variant
+  whose label does not apply is a hit that compiles and links nothing.
 * **Compiler and native configuration.** One invocation-wide configuration
   has four components, and `-v` names the one that changed:
   * `compiler`: the contents of every compiler and C-parser Lua file in the
@@ -289,7 +293,7 @@ titanc: waiting for build lock '<lock-path>'
 | `record-unreadable [<detail>]` | Object file or its `.titan.source` metadata section cannot be read or decoded. |
 | `record-schema [<detail>]` | Another Titan ABI, an older or incompatible record schema or digest algorithm, a module-name mismatch, or missing/invalid certificate fields. |
 | `configuration compiler\|preamble\|toolchain\|options` | Loaded compiler/parser/frontend Lua inventory, generated-C preamble header closure, native toolchain identity, or effective compile options changed. |
-| `source-set added\|removed <path>` | Flat-versus-folder layout or folder contributor membership changed. |
+| `source-set added\|removed <path>` | Flat-versus-folder layout, folder contributor membership, or the selected target variant of a source changed. |
 | `source-content <path>` | SHA-256 content of the main `.titan` source or a contributor changed, or could not be read. |
 | `output-moved` | Output stem differs from the stem recorded in the certificate. |
 | `codegen-options c_parts\|split_threshold\|test_flags\|coverage` | Per-module code-generation policy changed. |

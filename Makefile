@@ -312,6 +312,13 @@ LPEGLABEL_LUA_HEADERS = $(ROCK_LUA_HEADERS)
 # Keep parser execution optimized even when generic Titan extras select O0.
 LPEGLABEL_BUILD_CFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 
+# Every standard-library Titan source is listed here explicitly. A target
+# variant (`name.<label>.titan`, labels windows/darwin/linux/browser and the
+# umbrella native) is its own entry immediately after the default
+# (`name.titan`) it replaces; there are no wildcards. Only the selected
+# variant of a family compiles, so the Busted source-policy audits read this
+# inventory family by family and fail on a folder file no entry declares.
+# Implementation notes: doc/implementation/target-source-selection.md#make-inventories-and-audits
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
 	titan/uv/address.titan \
@@ -1208,12 +1215,12 @@ STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC)) \
 
 stdlib-objects: $(STDLIB_NATIVE_PREREQS) $(STDLIB_TOOL_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) $(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS) ## Compile standard-library objects without linking a provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c $(STDLIB_ROOTS)
 
 stdlib: $(STDLIB_NATIVE_PREREQS) $(STDLIB_TOOL_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) $(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS) ## Build the paired standard-library provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) \
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	$(STDLIB_COMPILER_ENV) $(STDLIB_TITANC) --output $(call make_shell_quote,$(TITAN_OUTPUT_DIR)) --source-first --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
 	  $(STDLIB_ROOTS) -X $(STDLIB_EXTRA_OBJECTS)
 
@@ -1354,7 +1361,7 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE | check-titan-test-sdk
 
 titan-stdlib-test-objects: $(filter %.h,$(TITAN_TEST_FIXTURE_OUTPUTS)) | check-titan-test-sdk ## Compile native test modules and aggregate helpers without linking
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
 	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) -c \
@@ -1379,7 +1386,7 @@ $(addprefix $(TITAN_TEST_BUILD_DIR)/,$(TITAN_TEST_FIXTURE_HEADERS)): $(TITAN_TES
 define titan_test_native_rule
 $(TITAN_TEST_BUILD_DIR)/$(1).o: spec/fixtures/stdlib/native/$(1).c FORCE | check-titan-test-sdk
 	+@$$(RECURSIVE_WRAPPER_GUARD) $$(TITAN_JOBS_CHECK) set -e; \
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	native_output=$$(call make_shell_quote,$$(TITAN_TEST_BUILD_DIR)/native/$(1).o); \
 	native_object=$$$$(CC=$$(call make_shell_quote,$$(CC)) \
 	TITAN_ROOT=$$(call make_shell_quote,$$(TITAN_TEST_INSTALL_ROOT)) \
@@ -1411,7 +1418,7 @@ $(TITAN_TEST_BUILD_DIR)/os_process_host_child: spec/fixtures/stdlib/native/os_pr
 
 titan-stdlib-test-build: $(TITAN_TEST_FIXTURE_OUTPUTS) | check-titan-test-sdk ## Build every native Titan stdlib test into one incremental executable
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
 	TITAN_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
 	$(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --output . --test --incremental --no-uv-bootstrap -j$(TITAN_JOBS) $(TITAN_VERBOSE_FLAG) \
@@ -1506,7 +1513,7 @@ TITAN_COVERAGE_EXECUTABLE = $(abspath $(TITAN_COVERAGE_BUILD_DIR))/$(TITAN_STDLI
 .PHONY: titan-native-coverage-build titan-native-coverage-run titan-native-coverage
 titan-native-coverage-build: $(STDLIB_NATIVE_PREREQS) $(TITAN_TEST_FIXTURE_OUTPUTS) | check-titan-test-sdk ## Compile source-linked native tests with line coverage
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	mkdir -p $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)); cd $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)); \
 	CC=$(call make_shell_quote,$(CC)) TITAN_BUILD_PROFILE=validation \
 	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_COVERAGE_CPPFLAGS)) \

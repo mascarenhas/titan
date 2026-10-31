@@ -109,8 +109,10 @@ part's notes.
 `coverage.compile_flags` gives every source object `-O0 -fno-lto`. Selected
 objects add `--coverage -fprofile-update=atomic`. The GCC backend adds
 `-fkeep-static-functions` and `-dumpbase`/`-dumpbase-ext` so the compiler's
-temporary object name cannot rename the notes; for a nonzero part the driver
-replaces the `-dumpbase` value with that part's C basename, so its notes are
+temporary object name cannot rename the notes; the `-dumpbase` value is the
+logical `<leaf>.c` from `source_selection.output_stem`, never a target
+variant's name, and for a nonzero part the driver
+replaces it with that part's C basename, so its notes are
 `<leaf>.part<k>.gcno`. The LLVM backend adds `-dumpdir`
 and marks selected source-owned native lambdas `__attribute__((used))`
 (`coder._coverage_keep_native_lambdas`) without emitting every unrelated inline

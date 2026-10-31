@@ -25,6 +25,14 @@ import logical module `titan.uv`. Likewise,
 usual source-root precedence. All checker, dependency, native-symbol, generated-
 artifact, and manifest identities remain `foo.bar.baz`.
 
+The marker names a logical module, never a file. When the module's sources have
+[target variants](target-source-selection.md#module-identity-imports-and-c-headers),
+the edge uses the files selected for the compilation's target, and local
+visibility covers exactly that composition. There is no syntax for importing a
+particular variant: `import "foo.linux.titan"` is an explicit source import of
+logical module `foo.linux` (`foo/linux/linux.titan` or `foo/linux.titan`), not
+of the file `foo.linux.titan`.
+
 Because the terminal spelling is always interpreted as this marker, a dotted
 logical module name ending in the component `titan`, such as `example.titan`, is
 not allowed. The root logical module `titan` and a nonterminal component such as

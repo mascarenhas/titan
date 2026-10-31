@@ -429,7 +429,7 @@ does not reject unknown extra keys:
 | --- | --- | --- |
 | `configuration` | `{ digest, compiler, preamble, toolchain, options }` | Invocation-wide configuration digests (all strings). |
 | `layout` | `"flat"` \| `"folder"` | Source module layout from the tagged source resolver. |
-| `sources` | `{ { path, sha256 }, ... }` | Dense ordered own-source list (main first, then bytewise-sorted contributors). |
+| `sources` | `{ { path, sha256 }, ... }` | Dense ordered own-source list (the selected main first, then the selected contributors in bytewise order of logical filenames). |
 | `stem` | `string` | Normalized absolute output stem (`<stem>.o` without `.o`). |
 | `codegen` | `{ c_parts, split_threshold, test_flags, coverage? }` | Per-module code-generation policy (`coverage` is `nil` or `{ enabled, backend }`). |
 | `imports` | `{ { name, source_required, view, interface }, ... }` | Direct imports in declaration/constituent order (`view` is `"source"` or `"public"`). |
@@ -644,8 +644,8 @@ reports the exact component:
 `incremental.source_certificate(context, source, contents_by_path)`
 (`incremental.lua`) records `layout = source.kind` (`"flat"` or
 `"folder"`) and `sources = { { path, sha256 }, ... }` in the tagged source
-resolver's canonical order: `source.main` first, followed by bytewise-sorted
-immediate folder contributors (`source.files`). Paths use the exact spelling
+resolver's canonical order: the selected `source.main` first, followed by the
+selected immediate folder contributors sorted by logical filename (`source.files`). Paths use the exact spelling
 that `driver.lua` embeds in `#line` directives. That spelling comes from the
 selected `--tree` root and is deliberately not canonicalized: it reaches
 generated C, native debug information, and tracebacks, so a different spelling
@@ -677,6 +677,17 @@ observation changed after its digest was accepted. `prepare_compile` passes
 the precomputed `entry.source_certificate` into
 `incremental.make_certificate`. The new object record therefore certifies the
 exact source bytes that were parsed and compiled.
+
+The paths are the [target-selected](target-source-selection.md#certificates)
+files, so the existing verdict already covers target variants without a format
+change: adding or removing a variant that changes the selection, or switching
+between byte-identical files, changes a path and misses with `source-set`; a
+contributor variant misses for its owning folder module only. Editing,
+adding, or removing a variant whose label does not apply leaves the selected
+list and digests unchanged, so the module hits and nothing compiles or links.
+Certificates record no absent candidates: every invocation selects afresh, and
+that resolution supplies the negative evidence. The output stem compared by
+`output-moved` is the logical stem, never a variant's name.
 
 ## Semantic C header identity summary
 

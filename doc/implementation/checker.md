@@ -57,7 +57,7 @@ rethrown after cleanup.
 
 For a [folder module](folder-modules.md), `driver.defaultloader` independently
 parses all source files and calls this entry point once with one dense combined
-AST, the logical module name, and the canonical main's subject/filename. The
+AST, the logical module name, and the selected main's subject/filename. The
 checker does not know or create file scopes; contributor filenames remain only
 on the existing node locations.
 
@@ -1067,7 +1067,7 @@ acceptance or rejection. The checker records complete conversion/operator
 traits and coercion plans on the AST, and the coder consumes them without
 repeating target-C reasoning. See
 [C FFI declarations and expressions](c-ffi-expressions.md). The checker
-derives its C include `source_dir` from the canonical main filename; folder
+derives its C include `source_dir` from the selected main filename; folder
 contributors are immediate siblings of that main, so quoted headers imported
 from a contributor resolve against the same directory.
 

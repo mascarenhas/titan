@@ -224,8 +224,9 @@ providers to prove lifecycle and cleanup without depending on a real compiler.
 
 `titan-compiler/ffiheaders.lua` renders each module's `A.ffi.h` with explicit
 source dependencies first and local foreign directives afterward. Folder
-modules use the canonical main's directives followed by contributors in
-bytewise filename order. The C driver preprocesses and parses that actual
+modules use the selected main's directives followed by the selected
+contributors in bytewise order of their logical filenames. The C driver
+preprocesses and parses that actual
 header once. Include guards, macro definitions and undefinitions, ordinary
 redeclarations, and C tag scopes therefore act on one ordered translation unit.
 

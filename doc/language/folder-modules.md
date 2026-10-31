@@ -32,6 +32,12 @@ Every immediate regular file ending in `.titan` beside `scene.titan`
 contributes to `graphics.scene`. Other files and subdirectories are ignored.
 The compiler does not recursively collect sources from nested directories.
 
+Any of these files may have target variants, such as `camera.linux.titan` or
+`scene.native.titan`, and each compilation uses one file per logical filename
+for its target. A selected variant takes the place of its default in
+everything this chapter describes; see [Target source
+selection](target-source-selection.md#folder-modules).
+
 ## One module and one namespace
 
 All contributing files form one module named `graphics.scene`. Their
@@ -74,8 +80,8 @@ graphics/scene/geometry.titan:8:1: type error: duplicate declaration for bounds,
 The compiler constructs the logical declaration sequence deterministically:
 
 1. declarations from the main source, in their written order;
-2. declarations from contributors sorted by basename using numeric byte
-   order, preserving the written order inside each file;
+2. declarations from contributors sorted by logical filename using numeric
+   byte order, preserving the written order inside each file;
 3. the main source's optional module initializer, last.
 
 Numeric byte order compares the bytes of two basenames from left to right;
@@ -83,7 +89,8 @@ the first different byte decides, and a shorter prefix sorts first. It is
 independent of the process locale. Thus ASCII `A.titan` sorts before
 `a.titan`, `a.titan` before `aa.titan`, and UTF-8 names sort by their encoded
 bytes. The main source always comes first even if its basename would sort
-elsewhere.
+elsewhere. A target variant sorts under its logical filename with the label
+removed, so `camera.linux.titan` takes the place of `camera.titan`.
 
 This combined order is not a general visibility order. Records, unions,
 aliases, ordinary functions, methods, and nominal functions may refer across files
@@ -114,7 +121,9 @@ absolute tags across contributor boundaries.
 ## Module initializer
 
 A Titan module may end with one root `do ... end` initialization block. In a
-folder module it may appear only at the end of the main source. Contributor
+folder module it may appear only at the end of the main source, which is the
+[selected main](target-source-selection.md#the-module-initializer) when the
+main has target variants. Contributor
 files may contain ordinary nested `do` statements inside functions and other
 blocks, but may not contain a root module initializer.
 
@@ -140,7 +149,11 @@ initializer.
 ## Lookup and precedence
 
 Source roots are searched from left to right. Within one source root, the
-folder main `P/B.titan` is tried before the flat source `P.titan`. Once a
+folder main `P/B.titan` is tried before the flat source `P.titan`. Each of
+those is a family whose target variants are probed before the default file;
+specificity never crosses families, so an earlier root or the folder form wins
+over a more specific variant of a later candidate ([target source
+selection](target-source-selection.md#precedence)). Once a
 folder main is selected, an error while reading, enumerating, parsing, or
 checking that folder is an error in that module; the compiler does not fall
 back to the flat file or a later source root.
@@ -164,7 +177,8 @@ the module's logical and manifest identity remains `pkg.service`.
 ### Contributors are not directly importable
 
 Once a parent folder module exists, its immediate `.titan` constituents stay
-private to that logical module. Suppose this layout exists:
+private to that logical module. Any file of the parent's main family counts,
+even a variant for another target. Suppose this layout exists:
 
 ```
 pkg/
@@ -201,7 +215,8 @@ considered.
 
 ## Generated artifacts
 
-The canonical main source controls where generated C and object files go.
+The canonical main path controls where generated C and object files go, even
+when a target variant of the main is selected.
 The logical module name controls the program entrypoint paths. In a single-root
 library build it is also the provider name; with several roots, their common
 provider prefix controls the one paired shared/static provider base.

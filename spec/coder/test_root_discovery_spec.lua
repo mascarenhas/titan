@@ -22,6 +22,19 @@ local function joined(root, name)
     return root .. "/" .. name
 end
 
+-- The host's own source-selection target, resolved once. Discovery specs pass
+-- it explicitly so an inventory never has to run `uname`; a case that needs
+-- another target sets its own.
+local HOST_TARGET = (function()
+    local context = driver.new_resolver_context({})
+    local target = assert(driver.context_target(context))
+    assert(driver.close_resolver_context(context))
+    return target
+end)()
+
+-- A label that does not apply to this host, for inactive-variant cases.
+local INACTIVE_LABEL = HOST_TARGET == "windows" and "linux" or "windows"
+
 local function slashed(value)
     return path.to_slash(value)
 end
@@ -100,17 +113,24 @@ local function require_symlink_capability()
     return true
 end
 
-local function discovery_context(io_strategy)
-    return driver.new_resolver_context({
-        io = io_strategy or compiler_io.new_sync(),
-    })
+-- Discovery contexts are platform-initialized, as `titanc` provides them, so
+-- an inventory never runs `uname`. The observed strategy is attached after
+-- initialization so a no-process inventory case measures discovery alone.
+local function discovery_context(io_strategy, options)
+    local base = compiler_io.new_sync()
+    local settings = { io = base }
+    for name, value in pairs(options or {}) do settings[name] = value end
+    local context = driver.new_resolver_context(settings)
+    assert(driver.initialize_platform(context))
+    context.io = io_strategy or base
+    return context
 end
 
 -- Observe the compiler I/O strategy handed to discovery. Discovery may list,
 -- stat, resolve paths, and yield; it must never read, write, or run anything.
 local function observed(overrides)
     local base = compiler_io.new_sync()
-    local calls = { methods = {}, yields = {} }
+    local calls = { methods = {}, yields = {}, stats = {} }
     local strategy = {}
     for _, name in ipairs(IO_METHODS) do
         local method = name
@@ -118,6 +138,8 @@ local function observed(overrides)
             calls.methods[method] = (calls.methods[method] or 0) + 1
             if method == "yield" then
                 calls.yields[#calls.yields + 1] = ...
+            elseif method == "stat" then
+                calls.stats[#calls.stats + 1] = ...
             end
             local override = overrides and overrides[method]
             if override then return override(...) end
@@ -579,6 +601,142 @@ describe("automatic test-root discovery", function()
         end)
     end)
 
+    describe("target variants", function()
+        -- Expected roots are computed from the host's row, so the same
+        -- expectations hold on Linux, macOS and Windows.
+
+        it("discovers a root whose only files are variants", function()
+            local root = make({
+                ["alpha_test.native.titan"] = "",
+                ["nested/beta_spec.native.titan"] = "",
+                ["gamma_tests.titan"] = "",
+            })
+
+            local roots, sources = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test", "gamma_tests", "nested.beta_spec" },
+                roots)
+            assert.equal(slashed(joined(root, "alpha_test.native.titan")),
+                slashed(sources["alpha_test"].main))
+            assert.equal("flat", sources["alpha_test"].kind)
+        end)
+
+        it("skips another target's variant without an error", function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["beta_test." .. INACTIVE_LABEL .. ".titan"] = "",
+                ["nested/gamma_spec." .. INACTIVE_LABEL .. ".titan"] = "",
+            })
+
+            local roots = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+        end)
+
+        it("deduplicates the variants of one root through its selection",
+           function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["alpha_test.native.titan"] = "",
+                ["alpha_test.browser.titan"] = "",
+            })
+
+            local roots, sources = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+            -- The resolver's row, not enumeration order, selects the file.
+            assert.equal(slashed(joined(root, "alpha_test.native.titan")),
+                slashed(sources["alpha_test"].main))
+        end)
+
+        it("selects the exact OS label over native over the default",
+           function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["alpha_test.native.titan"] = "",
+                ["alpha_test." .. HOST_TARGET .. ".titan"] = "",
+            })
+
+            local roots, sources = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+            local expected = HOST_TARGET == "native" and "alpha_test.native.titan"
+                or ("alpha_test." .. HOST_TARGET .. ".titan")
+            assert.equal(slashed(joined(root, expected)),
+                slashed(sources["alpha_test"].main))
+        end)
+
+        it("skips a folder root with no main for the target", function()
+            local root = make({
+                ["pkg/tests/tests." .. INACTIVE_LABEL .. ".titan"] = "",
+                ["pkg/tests/extra_test.titan"] = "",
+                ["plain_test.titan"] = "",
+            })
+
+            local roots = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "plain_test" }, roots)
+        end)
+
+        it("composes a folder root from the host's selected contributors",
+           function()
+            local root = make({
+                ["pkg/tests/tests.native.titan"] = "",
+                ["pkg/tests/alpha.titan"] = "",
+                ["pkg/tests/alpha.native.titan"] = "",
+                ["pkg/tests/alpha." .. INACTIVE_LABEL .. ".titan"] = "",
+            })
+
+            local roots, sources = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "pkg.tests" }, roots)
+            local folder = sources["pkg.tests"]
+            assert.equal("folder", folder.kind)
+            assert.equal(slashed(joined(root, "pkg/tests/tests.native.titan")),
+                slashed(folder.main))
+            assert.same({
+                "tests.native.titan",
+                "alpha.native.titan",
+            }, basenames(folder.files))
+        end)
+
+        it("keeps other dotted stems skipped", function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["alpha_test.helper.titan"] = "",
+                ["beta_test.notes.titan"] = "",
+                ["gamma_test.helper.native.titan"] = "",
+            })
+
+            local roots = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+        end)
+
+        it("diagnoses reserved variant spellings", function()
+            for _, case in ipairs({
+                { "alpha_test.linux.native.titan", "stacked target labels" },
+                { "beta_test.Linux.titan", "mis-cased target label" },
+            }) do
+                local root = make({ [case[1]] = "", ["gamma_test.titan"] = "" })
+
+                local missing, message = testroots.discover(discovery_context(),
+                    { root }, {}, {}, root)
+
+                assert.is_nil(missing)
+                assert.truthy(message:find(case[2], 1, true), message)
+                assert.truthy(message:find(case[1], 1, true), message)
+            end
+        end)
+    end)
+
     describe("symbolic links and traversal", function()
         it("resolves a file symlink through the ordinary source resolver",
            function()
@@ -641,6 +799,99 @@ describe("automatic test-root discovery", function()
             assert(lfs.link(joined(root, "missing"), joined(root, "notes.txt"), true))
             local roots = testroots.discover(discovery_context(), { root }, {}, {}, root)
             assert.same({ "visible_tests" }, roots)
+        end)
+
+        it("never follows an excluded source link", function()
+            if not require_symlink_capability() then return end
+            local root = make({ ["alpha_test.titan"] = "" })
+            local excluded = {
+                joined(root, "inactive_test." .. INACTIVE_LABEL .. ".titan"),
+                joined(root, "notes_test.helper.titan"),
+                joined(root, "helper.titan"),
+            }
+            for _, link in ipairs(excluded) do
+                assert(lfs.link(joined(root, "absent.titan"), link, true))
+            end
+
+            local strategy, calls = observed()
+            local roots = testroots.discover(discovery_context(strategy),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+            local followed = {}
+            for _, path in ipairs(calls.stats) do followed[slashed(path)] = true end
+            for _, link in ipairs(excluded) do
+                assert.falsy(followed[slashed(link)], link)
+            end
+        end)
+
+        it("diagnoses reserved source link names that resolve to a regular source",
+           function()
+            if not require_symlink_capability() then return end
+            for _, case in ipairs({
+                { "stacked_test.linux.native.titan", "stacked target labels" },
+                { "notes.linux.native.titan", "stacked target labels" },
+                { "cased_test.Linux.titan", "mis-cased target label" },
+                { "helper.Linux.titan", "mis-cased target label" },
+            }) do
+                local root = make({ ["alpha_test.titan"] = "" })
+                put(root, "target.titan",
+                    "function value(): integer return 1 end\n")
+                assert(lfs.link(joined(root, "target.titan"),
+                    joined(root, case[1]), true))
+
+                local missing, message = testroots.discover(discovery_context(),
+                    { root }, {}, {}, root)
+
+                assert.is_nil(missing)
+                assert.truthy(message:find(case[2], 1, true), message)
+                assert.truthy(message:find(case[1], 1, true), message)
+            end
+        end)
+
+        it("ignores a reserved source link that does not resolve to a file",
+           function()
+            if not require_symlink_capability() then return end
+            local root = make({ ["alpha_test.titan"] = "" })
+            mkdirs(joined(root, "place"))
+            assert(lfs.link(joined(root, "absent.titan"),
+                joined(root, "stacked_test.linux.native.titan"), true))
+            assert(lfs.link(joined(root, "place"),
+                joined(root, "cased_test.Linux.titan"), true))
+
+            local roots = testroots.discover(discovery_context(),
+                { root }, {}, {}, root)
+
+            assert.same({ "alpha_test" }, roots)
+        end)
+
+        it("ignores a non-regular entry whatever its name spells", function()
+            local root = make({
+                ["alpha_test.titan"] = "",
+                ["fifo.linux.native.titan"] = "",
+            })
+            local fifo = joined(root, "fifo.linux.native.titan")
+            local base = compiler_io.new_sync()
+            local inspected = false
+            local strategy, calls = observed({
+                lstat = function(filename)
+                    if slashed(filename) == slashed(fifo) then
+                        inspected = true
+                        return { kind = "other" }
+                    end
+                    return base:lstat(filename)
+                end,
+            })
+
+            local roots = testroots.discover(discovery_context(strategy),
+                { root }, {}, {}, root)
+
+            assert.is_true(inspected,
+                "the non-regular entry was never enumerated or inspected")
+            assert.same({ "alpha_test" }, roots)
+            for _, path in ipairs(calls.stats) do
+                assert.not_equal(slashed(fifo), slashed(path))
+            end
         end)
 
         it("skips hidden descendant directories", function()

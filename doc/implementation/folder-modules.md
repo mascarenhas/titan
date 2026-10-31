@@ -7,7 +7,12 @@ generated module protocol, or runtime loader.
 
 For logical module `M`, the driver derives the slash path `P` and final
 component `B`. A flat source is `P.titan`; a folder source has the required
-main `P/B.titan` plus every other immediate regular `*.titan` sibling.
+main `P/B.titan` plus every other immediate regular `*.titan` sibling. Each of
+these logical filenames is a family whose target variants
+`name.<label>.titan` are selected per compilation target before anything else
+happens; [Target source selection](target-source-selection.md) owns the
+grammar, the selection rows, and the probes. Below, "the main" and "a
+contributor" mean the selected member of the family.
 
 ## Tagged source resolution
 
@@ -18,8 +23,9 @@ decisions explicit:
 -- selected source
 {
     kind = "flat" | "folder",
-    main = "<canonical main filename>",
-    files = { "<main>", "<sorted contributor>", ... },
+    main = "<selected main filename>",
+    files = { "<main>", "<sorted selected contributor>", ... },
+    native_output = "<canonical logical P.titan or P/B.titan>",
     program_output = "<module-relative executable path>",
 }
 
@@ -27,7 +33,7 @@ decisions explicit:
 {
     kind = "blocked",
     owner = "<parent logical module>",
-    main = "<parent main filename>",
+    main = "<an existing file of the parent's main family>",
     contributor = "<requested flat filename>",
 }
 ```
@@ -39,21 +45,27 @@ or a later source root.
 
 For each source-root entry, resolution (`driver.lua` `source_resolution_in_root`):
 
-1. tests the requested folder main `P/B.titan` as a regular file;
-2. if found, enumerates its directory, retains only immediate regular
-   `.titan` siblings, sorts contributor basenames with
-   `util.bytewise_less`, and returns main followed by contributors;
-3. otherwise tests the flat source `P.titan`;
-4. before accepting a nested flat source, tests whether its immediate parent
-   has a folder main and the flat source is therefore a constituent; if so it
-   returns `blocked`;
+1. probes the folder main family (`P/B.<label>.titan` for each label of the
+   target's row, then `P/B.titan`) for a regular file;
+2. if one is selected, enumerates its directory, classifies every immediate
+   regular `.titan` name (a stacked or mis-cased label is a hard error),
+   removes the whole main family, selects one member per remaining logical
+   filename, drops families with no applicable member, sorts the selected
+   logical filenames with `util.bytewise_less`, and returns main followed by
+   contributors;
+3. otherwise probes the flat family of `P.titan`;
+4. before accepting a nested flat source, probes its immediate parent's main
+   family with every label, applicable or not; if any member exists the flat
+   source is a constituent and the result is `blocked`;
 5. otherwise accepts the flat source or proceeds to the next root.
 
 Testing the requested folder form before the flat form is what permits a real
 deeper folder module such as `pkg/service/worker/worker.titan` even when
 `pkg/service/worker.titan` contributes to `pkg.service`. Conversely, the
 parent marker alone does not block a missing child: the privacy result exists
-only when the requested flat constituent itself is present.
+only when the requested flat constituent itself has an applicable member. The
+any-label parent check keeps a folder's default contributors private on a
+target for which the folder has no main and is itself absent.
 
 The source resolver runs only after ordinary compiled-module lookup for a
 dependency has missed, so compiled providers keep precedence. `titanc` marks
@@ -81,7 +93,8 @@ Assembly order (`driver.lua` `parse_source_inner`) is:
 
 1. main-source roots in their parser order, temporarily excluding its final
    parser-marked module initializer when present;
-2. contributor roots in numeric-byte basename order and their parser order;
+2. contributor roots in numeric-byte order of their logical filenames
+   (`.titan` included, target label removed) and their parser order;
 3. the saved main initializer, appended once at the end.
 
 The parser annotates that root role with `_module_initializer`, because a
@@ -184,7 +197,8 @@ attribution](codegen-overview.md#mixed-source-line-attribution).
 ## C, library, and program paths
 
 `driver.compile` derives its `.c` and `.o` paths from the entry's
-`native_output` stem, which is the canonical main's path. With `-o` that stem
+`native_output` stem, which is the canonical main's logical path even when a
+main variant is selected. With `-o` that stem
 is rerooted under the output directory (see [output-directory
 routing](output-directory.md)); the table shows paths relative to the source
 root or output root:
@@ -256,8 +270,11 @@ module-private scope, one generated C/object pair, and one logical Lua entry.
 Contributor filenames never become modules or archive metadata keys.
 
 `titan.uv` is the largest. Its sources are enumerated explicitly by the
-Makefile's `UV_TITAN_SOURCES`, not by a wildcard, and every listed source is a
-prerequisite of the standard-library build. The canonical `uv.titan` shares one
+Makefile's `UV_TITAN_SOURCES`, not by a wildcard. The list is the source
+inventory the Busted audits read; the compiler's own incremental build
+certifies the module graph, so no listed source is a Make prerequisite of the
+standard-library build. Its variants, when a source gains them, are listed
+beside their default. The canonical `uv.titan` shares one
 logical module with contributors for callbacks, constants, data records,
 addresses, descriptors, streams, TCP/UDP, DNS, processes, threading,
 synchronization, dynamic libraries, startup, and utilities. Exported records

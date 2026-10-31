@@ -92,6 +92,16 @@ titanc --test --incremental -o out --exe out/suite \
   starting with `.`) are skipped, and directory symlinks are not descended
   implicitly, although a symlinked directory passed explicitly to `--test-dir`
   is traversed and a matching linked folder owner is resolved normally.
+* **Target variants.** A [target variant](target-source-selection.md#test-roots)
+  `foo_test.<label>.titan` names the root `foo_test` when its label applies to
+  the compilation target, and ordinary selection decides which member of the
+  family runs, so several variants of one root are one root. A variant for
+  another target is skipped without an error: a platform-only test written as
+  `foo_test.windows.titan` needs no `--test-exclude` on other hosts. A folder
+  root with no main for the target is skipped like a plain directory. Other
+  dotted names, such as `foo_test.extra.titan`, are not roots, and a stacked
+  or mis-cased label (`foo_test.linux.native.titan`, `foo_test.Linux.titan`)
+  fails discovery with the file's path.
 * **Resolver consistency.** Each candidate is resolved through the ordinary
   tagged source resolver. If an earlier `--tree` root shadows a candidate with a
   source outside the requested `--test-dir` areas, or if overlapping discovery

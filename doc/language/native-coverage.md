@@ -22,7 +22,10 @@ By default, `--coverage` instruments every module imported from source in this
 build's dependency graph that has no top-level function whose name starts with
 `test_`. A module containing such a function is excluded as a whole, including
 production functions colocated with tests. A folder module includes all its
-contributors. Prebuilt modules and native dependencies are unmeasured.
+contributors. Prebuilt modules and native dependencies are unmeasured. Only the
+files selected for the compilation's [target](target-source-selection.md) are
+measured: a module built from `calc.linux.titan` reports its lines under that
+file, while its coverage C, objects, and notes keep the logical `calc` names.
 
 Selection follows imports; it does not scan the repository or force additional
 modules into the build. To include an unused production module in the coverage

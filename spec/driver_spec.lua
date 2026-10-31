@@ -233,6 +233,119 @@ local function posix_model_it(name, callback)
     end)
 end
 
+describe("target source selection API", function()
+    it("classifies reserved filename suffixes without changing dotted names", function()
+        assert.same({ "windows", "darwin", "linux", "browser", "native" },
+            driver.SOURCE_LABELS)
+        for _, label in ipairs(driver.SOURCE_LABELS) do
+            local logical, selected, err =
+                driver.classify_source_filename("foo." .. label .. ".titan")
+            assert.equal("foo.titan", logical)
+            assert.equal(label, selected)
+            assert.is_nil(err)
+            assert.equal(label .. ".titan",
+                driver.classify_source_filename(label .. ".titan"))
+        end
+        assert.equal("x.y.titan", driver.classify_source_filename("x.y.titan"))
+        assert.equal("linux.titan",
+            driver.classify_source_filename("linux.titan"))
+        assert.same({ "linux.titan", "native" },
+            { driver.classify_source_filename("linux.native.titan") })
+        assert.is_nil(driver.classify_source_filename("foo.c"))
+        for _, case in ipairs({
+            { "x.linux.native.titan", "stacked target labels" },
+            { "x.Linux.titan", "mis-cased target label" },
+            { "x.Linux.native.titan", "stacked target labels" },
+        }) do
+            local logical, label, err = driver.classify_source_filename(case[1])
+            assert.is_nil(logical)
+            assert.is_nil(label)
+            assert.matches(case[2], err, 1, true)
+            assert.matches(case[1], err, 1, true)
+        end
+    end)
+
+    it("exposes the complete applicability rows", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local expected = (target == "browser" or target == "native") and
+                { target } or { target, "native" }
+            assert.same(expected, driver.target_selection_labels(target))
+            for _, label in ipairs(driver.SOURCE_LABELS) do
+                local applies = false
+                for _, selected in ipairs(expected) do
+                    applies = applies or selected == label
+                end
+                assert.equal(applies, driver.target_label_applies(target, label))
+            end
+        end
+        assert.has_error(function() driver.target_selection_labels("bogus") end,
+            "invalid source selection target 'bogus'")
+        assert.has_error(function() driver.new_resolver_context({ target = "bogus" }) end,
+            "invalid source selection target 'bogus'")
+    end)
+
+    for _, host in ipairs({ "Linux", "Darwin", "FreeBSD" }) do
+        posix_model_it("resolves and validates the target on " .. host, function()
+            local strategy = compiler_io.new_sync()
+            local calls = 0
+            function strategy:run(argv)
+                assert.same({ "uname" }, argv)
+                calls = calls + 1
+                return { started = true, ok = true, output = host .. "\n" }
+            end
+            local context = driver.new_resolver_context({ io = strategy })
+            local expected = host == "Linux" and "linux" or
+                host == "Darwin" and "darwin" or "native"
+            assert.is_nil(context.target)
+            assert.equal(expected, driver.context_target(context))
+            assert.equal(expected, driver.validate_target(context, nil))
+            assert.equal(expected, driver.validate_target(context, ""))
+            for _, value in ipairs({ "linux", "darwin", "windows",
+                    "native", "browser", "wasm32" }) do
+                for _, origin in ipairs({ "--target", "TITAN_TARGET" }) do
+                    local target, err = driver.validate_target(context, value, origin)
+                    if value == expected and value ~= "native" then
+                        assert.equal(expected, target)
+                        assert.is_nil(err)
+                    else
+                        assert.is_nil(target)
+                        assert.matches(origin == "TITAN_TARGET" and
+                            "TITAN_TARGET=" .. value or "--target " .. value,
+                            err, 1, true)
+                        local reason = value == "native" and "not a compilation target" or
+                            value == "browser" and "not available yet" or
+                            value == "wasm32" and "unknown target" or
+                            "native cross-compilation is not supported"
+                        assert.matches(reason, err, 1, true)
+                    end
+                end
+            end
+            assert.equal(1, calls)
+            assert.is_true(driver.close_resolver_context(context))
+
+            local explicit = driver.new_resolver_context({ io = strategy, target = "browser" })
+            assert.equal("browser", driver.context_target(explicit))
+            assert.is_true(driver.close_resolver_context(explicit))
+        end)
+    end
+
+    it("resolves the Windows host without uname", function()
+        local windows = platform.windows
+        local uname, darwin, cflags = driver.UNAME, driver.IS_DARWIN, driver.CFLAGS
+        local context = driver.new_resolver_context()
+        function context.io:run() error("Windows must not run uname") end
+        platform.windows = true
+        local ok, err = xpcall(function()
+            assert.equal("windows", driver.context_target(context))
+            assert.equal("windows", driver.validate_target(context, "windows"))
+        end, debug.traceback)
+        platform.windows = windows
+        driver.UNAME, driver.IS_DARWIN, driver.CFLAGS = uname, darwin, cflags
+        assert.is_true(driver.close_resolver_context(context))
+        assert.truthy(ok, err)
+    end)
+end)
+
 -- These assertions model the POSIX standalone writer. Its lexical
 -- hierarchy uses POSIX spellings, so a Windows host supplies the small
 -- directory-type model instead of passing fictional POSIX paths to LFS.
@@ -3138,6 +3251,7 @@ describe("loader resolver ownership", function()
             TITAN_SOURCE_PATH = ".",
             deduplicate_module_names = function(modules) return modules end,
             new_resolver_context = function() return fake_context end,
+            validate_target = function() return "native" end,
             apply_native_inputs = function() end,
             configure_foreign_c = function() end,
             default_c_parts = function() return 1 end,
@@ -3282,6 +3396,7 @@ describe("loader resolver ownership", function()
                 },
                 deduplicate_module_names = function(modules) return modules end,
                 new_resolver_context = function() return fake_context end,
+                validate_target = function() return "native" end,
                 prepare_output_root = function(dir) return dir end,
                 apply_native_inputs = function() end,
                 initialize_platform = function(context)
@@ -6232,6 +6347,31 @@ describe("compiler module loader", function()
             assert.is_nil(lfs.attributes(result.object))
         end)
 
+        it("discards staged objects when a target variant appears during publication", function()
+            for _, certified in ipairs({ false, true }) do
+                local name = "planned_target_override_" .. tostring(certified)
+                local contents = "function answer(): integer return 42 end\n"
+                local context, loader = planning_loader({ [name] = contents }, {}, certified)
+                assert.is_true((loader(name)))
+                local configuration = assert(driver.worker_configuration(context))
+                assert.equal(driver.context_target(context), configuration.resolver.target)
+                local plan = driver.resolution_plan(context)
+                assert(driver.invalidate_source_object(context, name, plan.modules[name].source))
+                local result = assert(worker_compile(context,
+                    driver.plan_descriptor(plan, name), name))
+                write_file(source .. "/" .. name .. "." ..
+                    assert(driver.context_target(context)) .. ".titan", contents)
+                local published, err = driver.publish_staged_module(context, result)
+                assert.is_nil(published)
+                assert.matches("inputs of module '" .. name .. "' changed during the build",
+                    err, 1, true)
+                assert.is_nil(lfs.attributes(result.object))
+                for _, item in ipairs(result.staged) do
+                    assert.is_nil(lfs.attributes(item.from), item.from)
+                end
+            end
+        end)
+
         it("loads exactly the binary providers the coordinator planned in a worker", function()
             local provider = "planned_binary_provider"
             local consumer = "planned_binary_consumer"
@@ -7115,6 +7255,7 @@ describe("compiler module loader", function()
         ]])
         local context = driver.new_resolver_context({
             io = strategy,
+            target = require("spec.fixtures.target_selection.support").host(),
             embedded_interface_provider = embedded_provider(
                 root .. "/language-server", {
                     [name] = numeric_embedded_module(name, profile),
@@ -7230,6 +7371,7 @@ describe("compiler module loader", function()
         ]])
         local context = driver.new_resolver_context({
             io = strategy,
+            target = require("spec.fixtures.target_selection.support").host(),
             embedded_interface_provider = embedded_provider(
                 root .. "/language-server", {
                     [name] = result_module(name, profile.integers.int.type),
@@ -12873,5 +13015,271 @@ describe("Windows driver dispatch", function()
         assert.equal("C:/project/module.c.tmp.owned-reservation",
             driver.sibling_temporary_path("C:/project/module.c", strategy))
         assert.same({ "reserve", "release" }, calls)
+    end)
+end)
+
+describe("target-aware source resolver", function()
+    local fixtures = require "spec.fixtures.target_selection.support"
+    local root, contexts, saved_imported, saved_registry, saved_path
+    local function context(target, strategy)
+        local value = driver.new_resolver_context({ target = target, io = strategy,
+            analysis_only = true })
+        contexts[#contexts + 1] = value
+        return value
+    end
+    local function put(relative, bytes)
+        fixtures.write(root .. "/" .. relative, bytes or "function answer(): integer return 42 end\n")
+    end
+    before_each(function()
+        root = temporary.name(); assert(os.remove(root)); fixtures.mkdir(root)
+        contexts = {}
+        saved_imported, saved_registry, saved_path =
+            driver.imported, types.registry, driver.TITAN_SOURCE_PATH
+        driver.imported, types.registry, driver.TITAN_SOURCE_PATH = {}, {}, root
+    end)
+    after_each(function()
+        for _, value in ipairs(contexts) do assert(driver.close_resolver_context(value)) end
+        driver.imported, types.registry, driver.TITAN_SOURCE_PATH =
+            saved_imported, saved_registry, saved_path
+        fixtures.remove(root)
+    end)
+
+    it("selects every target row, including target-only modules and canonical paths", function()
+        put("choice.titan")
+        for _, label in ipairs(driver.SOURCE_LABELS) do put("choice." .. label .. ".titan") end
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local ctx = context(target)
+            local source = assert(driver.resolve_source(ctx, "choice"))
+            assert.equal(root .. "/choice." .. target .. ".titan", source.main)
+            assert.equal(root .. "/choice.titan", source.native_output)
+            assert.equal("choice", source.program_output)
+            assert(os.remove(source.main))
+            local fallback = assert(driver.resolve_source(ctx, "choice"))
+            local label = target ~= "browser" and target ~= "native" and "native" or nil
+            assert.equal(root .. "/choice" .. (label and "." .. label or "") .. ".titan",
+                fallback.main)
+            put("choice." .. target .. ".titan")
+        end
+        put("only.browser.titan")
+        assert.is_nil(driver.resolve_source(context("linux"), "only"))
+        assert.equal(root .. "/only.browser.titan",
+            assert(driver.resolve_source(context("browser"), "only")).main)
+    end)
+
+    posix_model_it("selects native then default on an unlisted native host", function()
+        local strategy = compiler_io.new_sync()
+        function strategy:run(argv)
+            assert.same({ "uname" }, argv)
+            return { started = true, ok = true, output = "FreeBSD\n" }
+        end
+        put("choice.titan"); put("choice.native.titan"); put("choice.linux.titan")
+        local ctx = context(nil, strategy)
+        assert.equal("native", driver.context_target(ctx))
+        assert.equal(root .. "/choice.native.titan",
+            assert(driver.resolve_source(ctx, "choice")).main)
+        assert(os.remove(root .. "/choice.native.titan"))
+        assert.equal(root .. "/choice.titan",
+            assert(driver.resolve_source(ctx, "choice")).main)
+    end)
+
+    it("preserves root and folder precedence and target-independent privacy", function()
+        put("early/pick.titan"); put("late/pick.linux.titan")
+        local ctx = context("linux")
+        local roots = root .. "/early;" .. root .. "/late"
+        assert.equal(root .. "/early/pick.titan",
+            assert(driver.resolve_source(ctx, "pick", roots)).main)
+        put("early/pick/pick.titan")
+        assert.equal("folder", assert(driver.resolve_source(ctx, "pick", roots)).kind)
+        assert(os.remove(root .. "/early/pick/pick.titan"))
+        put("early/pick/pick.browser.titan")
+        assert.equal("flat", assert(driver.resolve_source(ctx, "pick", roots)).kind)
+        assert.equal("folder", assert(driver.resolve_source(context("browser"), "pick", roots)).kind)
+        put("early/pick/child.titan")
+        local blocked = assert(driver.resolve_source(ctx, "pick.child", roots))
+        assert.equal("blocked", blocked.kind)
+        assert.equal(root .. "/early/pick/pick.browser.titan", blocked.main)
+        put("early/pick/child/child.native.titan")
+        assert.equal("folder", assert(driver.resolve_source(ctx, "pick.child", roots)).kind)
+        put("early/pick/absent.browser.titan")
+        assert.is_nil(driver.resolve_source(ctx, "pick.absent", roots))
+    end)
+
+    it("selects contributor groups and sorts their logical filenames bytewise", function()
+        put("ensemble/ensemble.titan")
+        put("ensemble/ensemble.linux.titan")
+        put("ensemble/a.titan"); put("ensemble/a-common.native.titan")
+        put("ensemble/a_extra.linux.titan"); put("ensemble/x.y.titan")
+        put("ensemble/ignored.browser.titan"); put("ensemble/native_only.native.titan")
+        local source = assert(driver.resolve_source(context("linux"), "ensemble"))
+        local expected = { "ensemble.linux.titan", "a-common.native.titan", "a.titan",
+            "a_extra.linux.titan", "native_only.native.titan", "x.y.titan" }
+        for index, name in ipairs(expected) do expected[index] = root .. "/ensemble/" .. name end
+        assert.same(expected, source.files)
+        local browser = assert(driver.resolve_source(context("browser"), "ensemble"))
+        assert.same({ root .. "/ensemble/ensemble.titan", root .. "/ensemble/a.titan",
+            root .. "/ensemble/ignored.browser.titan", root .. "/ensemble/x.y.titan" }, browser.files)
+        assert.equal(root .. "/ensemble/ensemble.titan", source.native_output)
+    end)
+
+    it("preserves no-variant contributor order when any one member becomes a variant", function()
+        put("ensemble/ensemble.titan")
+        local names = { "a-common", "a", "a_extra" }
+        for _, name in ipairs(names) do put("ensemble/" .. name .. ".titan") end
+        local ctx = context("native")
+        local function selected()
+            return assert(driver.resolve_source(ctx, "ensemble")).files
+        end
+        local expected = { root .. "/ensemble/ensemble.titan" }
+        for _, name in ipairs(names) do expected[#expected + 1] = root .. "/ensemble/" .. name .. ".titan" end
+        assert.same(expected, selected())
+        for index, name in ipairs(names) do
+            local plain = root .. "/ensemble/" .. name .. ".titan"
+            local variant = root .. "/ensemble/" .. name .. ".native.titan"
+            assert(os.rename(plain, variant))
+            expected[index + 1] = variant
+            assert.same(expected, selected())
+            assert(os.rename(variant, plain))
+            expected[index + 1] = plain
+        end
+    end)
+
+    it("diagnoses reserved suffix errors even in inactive main-family files", function()
+        put("ensemble/ensemble.titan")
+        for _, case in ipairs({ { "x.linux.native.titan", "stacked target labels" },
+                { "ensemble.Linux.titan", "mis-cased target label" } }) do
+            put("ensemble/" .. case[1])
+            local source, err = driver.resolve_source(context("browser"), "ensemble")
+            assert.is_nil(source); assert.matches(case[2], err, 1, true)
+            assert(os.remove(root .. "/ensemble/" .. case[1]))
+        end
+    end)
+
+    it("does not fall back after a selected file read or folder enumeration fails", function()
+        put("selected.titan"); put("selected.native.titan")
+        put("folder.titan"); put("folder/folder.native.titan")
+        local strategy = compiler_io.new_sync()
+        local original_read = strategy.read_file
+        function strategy:read_file(filename)
+            if filename == root .. "/selected.native.titan" then
+                return nil, "selected read denied"
+            end
+            assert.not_equal(root .. "/selected.titan", filename)
+            return original_read(self, filename)
+        end
+        function strategy:list() return nil, "selected enumeration denied" end
+        local ctx = context("native", strategy)
+        local source, err = driver.resolve_source(ctx, "folder")
+        assert.is_nil(source)
+        assert.matches("selected enumeration denied", err, 1, true)
+        assert.matches("folder.native.titan", err, 1, true)
+        local ok, message = driver.defaultloader({}, { context = ctx,
+            source_roots = { selected = true } })("selected")
+        assert.is_false(ok)
+        assert.matches("selected read denied", message, 1, true)
+    end)
+
+    it("never reads inactive syntax or foreign headers and never falls back from selected errors", function()
+        put("ensemble/ensemble.titan")
+        put("ensemble/bad.browser.titan", "this is not Titan syntax @@@")
+        put("ensemble/header.browser.titan", 'foreign import "missing-inactive.h"\n')
+        local strategy = compiler_io.new_sync()
+        local reads, original_read = {}, strategy.read_file
+        function strategy:read_file(filename)
+            reads[filename] = true
+            return original_read(self, filename)
+        end
+        local ctx = context("linux", strategy)
+        local ok, _, errors = driver.defaultloader({}, { context = ctx,
+            source_roots = { ensemble = true } })("ensemble")
+        assert.is_true(ok); assert.equal(0, #errors)
+        assert.is_nil(reads[root .. "/ensemble/bad.browser.titan"])
+        assert.is_nil(reads[root .. "/ensemble/header.browser.titan"])
+        put("terminal.titan")
+        put("terminal.native.titan", "function broken(: end")
+        local selected, message = driver.defaultloader({}, { context = ctx,
+            source_roots = { terminal = true } })("terminal")
+        assert.is_false(selected)
+        assert.matches("terminal.native.titan", message, 1, true)
+        assert.is_nil(reads[root .. "/terminal.titan"])
+    end)
+
+    it("re-resolves cached interface descriptors before admitting their selection", function()
+        put("cached.titan", "local old: integer = 1\n")
+        local ctx = context("linux")
+        local loader = driver.defaultloader({}, { context = ctx,
+            source_roots = { cached = true } })
+        local ok, _, errors = loader("cached")
+        assert.is_true(ok); assert.equal(0, #errors)
+        local old = driver.imported.cached
+        local cached = { serialized = old.source_manifest, filename = old.filename,
+            source_files = old.source_files }
+        driver.imported, types.registry = {}, {}
+        put("cached.linux.titan", "function selected(): integer return 7 end\n")
+        local current = driver.defaultloader({}, { context = context("linux"),
+            source_roots = { cached = true }, cached_interfaces = { cached = cached } })
+        ok, _, errors = current("cached", { kind = "source-import" })
+        assert.is_true(ok); assert.equal(0, #errors)
+        assert.equal(root .. "/cached.linux.titan", driver.imported.cached.filename)
+        assert.equal(root .. "/cached.titan", driver.imported.cached.native_output)
+    end)
+
+    it("keeps every generated stem logical when given a physical variant main", function()
+        local source = root .. "/foo.linux.titan"
+        assert.equal(root .. "/foo", driver.module_output_stem(source))
+        assert.equal(root .. "/foo.titan.h", driver.foreign_header_filename(source))
+        assert.equal(root .. "/foo.ffi.h", driver.ffi_header_filename(source))
+        assert.equal(root .. "/foo.priv.h", driver.private_header_filename(source))
+        assert.equal(root .. "/foo.part1.c", driver.part_c_filename(source, 1))
+        assert.equal(root .. "/foo.part1.o", driver.part_object_filename(source, 1))
+    end)
+
+    it("raises source-name diagnostics through public compiler filename APIs", function()
+        local ctx = context("native")
+        local apis = {
+            driver.module_output_stem,
+            driver.foreign_header_filename,
+            driver.ffi_header_filename,
+            driver.private_header_filename,
+            function(filename) return driver.part_c_filename(filename, 1) end,
+            function(filename) return driver.part_object_filename(filename, 1) end,
+            function(filename) return driver.plan_foreign_header("filename_error", {}, filename) end,
+            function(filename) return driver.prepare_source_ffi_header(ctx, "filename_error", {}, filename) end,
+            function(filename) return ffiheaders.prepare(ctx, "filename_error", {}, filename) end,
+            function(filename) return driver.compile("filename_error", {}, filename, {}, false) end,
+        }
+        for _, case in ipairs({
+            { "x.linux.native.titan", "stacked target labels" },
+            { "x.Linux.titan", "mis-cased target label" },
+        }) do
+            for _, api in ipairs(apis) do
+                local ok, diagnostic = pcall(api, root .. "/" .. case[1])
+                assert.is_false(ok)
+                assert.equal(case[2] .. " in source '" .. case[1] .. "'", diagnostic)
+            end
+        end
+    end)
+
+    it("compiles variant mains into logical split objects and private headers", function()
+        put("parts.native.titan", [[
+foreign function target_parts_increment(n: int): int return n + 1 end
+function first(): integer return 1 end
+function second(): integer return first() + 2 end
+function third(): integer return second() + 3 end
+function fourth(): integer return third() + 4 end
+]])
+        local deps = {}
+        local ctx = context("native")
+        local loader = driver.defaultloader(deps, { context = ctx,
+            source_roots = { parts = true } })
+        local ok, result, errors = loader("parts")
+        assert.is_true(ok, tostring(result)); assert.equal(0, #errors)
+        local compiled, compile_error = driver.compile_module("parts", driver.imported.parts,
+            deps, false, { c_parts = 3, split_threshold = 0 })
+        assert.truthy(compiled, compile_error)
+        for _, suffix in ipairs({ ".c", ".o", ".part1.c", ".part1.o",
+                ".priv.h", ".titan.h", ".ffi.h" }) do
+            assert.equal("file", lfs.attributes(root .. "/parts" .. suffix, "mode"), suffix)
+            assert.is_nil(lfs.attributes(root .. "/parts.native" .. suffix))
+        end
     end)
 end)

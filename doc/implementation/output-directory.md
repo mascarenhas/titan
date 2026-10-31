@@ -25,14 +25,22 @@ owned by the canonical main. Its part files (`<stem>.part<k>.c`/`.o`) and
 parts](codegen-overview.md#translation-unit-parts)) and are recorded in the
 primary `<stem>.o`'s `.titan.source` metadata.
 
-The resolver's `output_root` option maps the canonical main's
-source-root-relative path to `native_output` and `program_output`
-(`driver.relocate_source_output`; other generated files use
+The resolver sets `native_output` on every filesystem source descriptor to the
+canonical logical path in the selected source root, `<root>/P.titan` or
+`<root>/P/B.titan`, whether or not that file exists; a selected [target
+variant](target-source-selection.md#logical-output-stems) such as
+`P.linux.titan` stays in `main` and `files` only. The resolver's `output_root`
+option maps that canonical source-root-relative path to `native_output` and
+`program_output` (`driver.relocate_source_output`; other generated files use
 `driver.generated_output_path`). The stem is the logical name with dots
 replaced by slashes, plus the repeated final component for a folder module.
+Every stem consumer derives its names through `driver.module_output_stem`
+(`source_selection.output_stem`), which also normalizes a variant leaf passed
+by a direct API, so no generated C, object, header, part, coverage, or
+executable name carries a target label.
 Incremental object lookup and missing-header restoration consume that mapped
 stem, so they never pick up source-adjacent objects from another configuration.
-Without an output root the resolver keeps source-adjacent paths. Routing changes
+Without an output root the resolver keeps the source-adjacent canonical paths. Routing changes
 neither serialized interfaces nor the generated-code ABI.
 
 Final providers keep common-prefix naming below the output root; library mode

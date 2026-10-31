@@ -1,0 +1,6 @@
+foreign import "stdio.h"
+
+function main(args: {string}): integer
+    ffi.puts("default")
+    return 0
+end

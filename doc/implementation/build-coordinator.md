@@ -163,7 +163,10 @@ the module graph through `driver.defaultloader({}, loader_options)` with
    command-line roots and explicit `.titan` imports are source-required,
    `--test` and `--source-first` prefer source with compiled fallback on a
    clean miss, and ordinary imports run the complete `.so`/`.a` passes (swapped
-   by `--static`) before falling back to source. Selecting a later source
+   by `--static`) before falling back to source. Every source descriptor comes
+   from the target-aware tagged resolver, which selects one file per family for
+   the context's [target](target-source-selection.md#the-resolver) before any
+   source byte is read. Selecting a later source
    module rebinds any overlapping static archive (`rebind_overlapping_static_providers`).
 2. **Stage-1 local certification.** When `request.incremental` is true and the
    source descriptor is not in-memory, `plan_source` (`driver.lua`)
@@ -177,9 +180,11 @@ the module graph through `driver.defaultloader({}, loader_options)` with
      `codegen-options`, `parts`, or `c-input` missed—`build.imports_for`
      returns that saved import list directly without reading or scanning the
      `.titan` files again.
-   * Otherwise, `build.imports_for` reads each constituent in canonical order
-     (`source.main` first, then bytewise-sorted contributors) and calls
-     `parser.scan_imports(contents)` (`titan-compiler/parser.lua`).
+   * Otherwise, `build.imports_for` reads exactly the selected `source.files`
+     in order (`source.main` first, then the selected contributors in
+     logical-filename order) and calls `parser.scan_imports(contents)`
+     (`titan-compiler/parser.lua`). Target variants that do not apply are never
+     read, and imports introduced by a newly selected variant re-plan.
    * `parser.scan_imports` uses an LPeg grammar built from the compiler's own
      lexer tokens (`lexer.SPACE`, `lexer.COMMENT`, `lexer.LOCAL`, `lexer.NAME`,
      `lexer.ASSIGN`, `lexer.IMPORT`, `lexer.LPAREN`, `lexer.RPAREN`,
@@ -574,7 +579,8 @@ before.
 Inside the worker (`build_worker.lua`),
 `driver.new_worker_context(request.configuration, worker_io(session))`
 (`driver.lua`) restores the coordinator's driver paths, flags,
-resolver settings, and `codegen_policy`, then calls
+resolver settings (including the source-selection `target`, which the
+coordinator writes as `configuration.resolver.target`), and `codegen_policy`, then calls
 `incremental.compiler_component(context, options)` to hash the loaded compiler
 Lua files and frontend script. If the resulting digest differs from the
 top-level `configuration.compiler`, the worker fails immediately with
@@ -594,7 +600,9 @@ coordinator without re-probing.
 (`driver.plan_descriptor(plan, modname)`). Under `worker_plan`, the loader
 never searches `TITAN_BIN_PATH` or `TITAN_SOURCE_PATH`:
 
-* requesting `modname` itself parses and checks the planned source descriptor;
+* requesting `modname` itself parses and checks the planned source descriptor,
+  passed as a `source_overrides` entry, so the worker never re-selects target
+  variants;
 * requesting any other planned `source` module restores its parent-certified
   `item.object` record via `restore_planned_source` (`driver.lua`)
   without re-running `certify_local` or `verdict`;
@@ -828,8 +836,11 @@ coordinator publishes module objects:
 3. **Coordinator revalidation and commit (`driver.publish_staged_module`,
    `driver.lua`).** When the worker reports `ok = true`, the
    coordinator reads the staged primary object, decodes its `.titan.source`
-   record, resolves a fresh source descriptor (`current_source_descriptor`),
-   and runs `incremental.revalidate_record(context, modname, source, record)`.
+   record, resolves a fresh source descriptor (`current_source_descriptor`,
+   through the same target-aware resolver), and runs
+   `incremental.revalidate_record(context, modname, source, record)`. A target
+   variant created or removed during the build changes the selected path list,
+   so even a byte-identical override discards the staged object.
    If validation fails, all `staged[i].from` temporaries are unlinked and the
    module fails. Otherwise, the coordinator unlinks any existing `primary.to`,
    renames sidecar part temporaries `parts[#parts .. 1]` into place from the
@@ -1223,11 +1234,18 @@ discovery](test-runner.md#automatic-test-root-discovery).
   each directory with `context.io:list`, sorts entry names with
   `util.bytewise_less`, calls `context.io:yield(directory)` between entries,
   and inspects each entry with `context.io:lstat`:
-  * entries starting with `"."` (hidden files and directories) and names that
-    are not valid module components are skipped;
-  * a symbolic link whose name (or `<stem>.titan` stem) matches the test naming
-    convention is followed with `context.io:stat` (reporting an explicit error
-    on a broken link); unselected broken symlinks are ignored;
+  * entries starting with `"."` (hidden files and directories), directory
+    names that are not valid module components, and entries of another kind
+    (`other`: FIFOs, sockets, and devices) are skipped;
+  * a non-hidden `*.titan` symbolic link is classified by name once, before
+    any target access. A reserved spelling is `stat`ed only to decide whether
+    to diagnose it: it fails discovery when the link resolves to a regular
+    file, and is otherwise ignored, including when the link is broken. A link
+    is followed with `context.io:stat`, which reports an explicit error on a
+    broken link, only when its whole name is a root name (`is_root_name`) or
+    its name is a root candidate for the selected target. Any other link, such
+    as an inactive variant, a non-root stem, or a non-label dotted stem, is
+    never followed, so its broken target is never reported;
   * a directory entry is considered as a folder-module candidate, and if it is
     **not** a symbolic link (`not linked`), `walk` recurses into it; directory
     symlinks are never descended recursively (preventing symlink cycles),
@@ -1236,6 +1254,20 @@ discovery](test-runner.md#automatic-test-root-discovery).
   candidate module is selected only when its final dotted component is `test`,
   `tests`, `spec`, or `specs`, or ends in `_test`, `_tests`, `_spec`, or
   `_specs`.
+* **Target variants (`source_candidate`, `testroots.lua`).** `discover` reads
+  the selection target with `driver.context_target(context)`; `titanc` has
+  already initialized the platform, so discovery starts no `uname`. Every
+  non-hidden `*.titan` regular file and symbolic link is classified once by
+  name with `driver.classify_source_filename`. A stacked or mis-cased label
+  fails discovery with `invalid test source '<path>': <error>` when the entry
+  is a regular file, or a link that resolves to one; a reserved link to a
+  directory or to a missing target is ignored.
+  A variant `<base>.<label>.titan` with a valid component `<base>` names the
+  candidate `<base>` only when `driver.target_label_applies(target, label)`;
+  an inactive variant is skipped silently. Other dotted stems are not
+  candidates. The candidate stem, never the enumerated spelling, names the
+  root, and the resolver decides which family member it selects
+  ([Target source selection](target-source-selection.md#test-root-discovery)).
 
 ### Resolver authority, shadowing diagnostics, and ordering
 
@@ -1261,7 +1293,10 @@ listed in `explicit_roots`), `consider` (`testroots.lua`) delegates to
      `test module '<logical>' at '<physical>' is shadowed by '<main>'; reorder --tree roots or narrow --test-dir`;
    * if two discovery areas resolve the same `logical` name to different source
      descriptors (`not same_source_descriptor`), discovery fails with
-     `ambiguous test module '<logical>': '<main1>' and '<main2>'`.
+     `ambiguous test module '<logical>': '<main1>' and '<main2>'`. Several
+     variants of one root in the same directory resolve to the same descriptor
+     and deduplicate here. A folder directory with no applicable main resolves
+     to nothing and is skipped in step 1.
 3. **Final root ordering and overrides (`testroots.lua`).**
    * Explicit positional CLI roots stay first in deduplicated CLI order, so an
      explicit first root (such as `test.tests` in the repository's native
@@ -1281,7 +1316,7 @@ actual `test_*` case discovery still runs in `test_runner.discover` from
 certified `record.object_metadata.test_functions` (or freshly checked ASTs on
 misses). Selected modules with zero `test_*` functions are valid. While
 `testroots.discover` reports errors from its own `--test-dir` `stat`/`realpath`,
-`list`, entry `lstat`, and candidate-symlink `stat` calls (and reports vanished
+`list`, entry `lstat`, and the `stat` of each followed link (and reports vanished
 selected files), candidate lookup itself uses the shared `driver.resolve_source`
 helper, whose POSIX `regular_file` probe ignores `stat` errors on non-matching
 candidate paths.
