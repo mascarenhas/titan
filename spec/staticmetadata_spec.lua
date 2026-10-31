@@ -1929,7 +1929,7 @@ return {
             local incremental = require "titan-compiler.incremental"
             local wasm_part = wasm_object(nil, {
                 pad = true,
-                segments = { { name = ".rodata", payload = "part", mode = 0, align_exp = 0, flags = 0 } },
+                segments = { { name = ".rodata", payload = "part\n", mode = 0, align_exp = 0, flags = 0 } },
             })
             local wasm_ar = archive({ ar_member("part.o/", wasm_part) })
             local bitcode_ar = archive({
@@ -1950,12 +1950,12 @@ return {
             local side_path = root .. "/side.wasm"
             local ok, failure = xpcall(function()
                 local util = require "titan-compiler.util"
-                assert(util.set_file_contents(obj_path, wasm_part))
-                assert(util.set_file_contents(ar_path, wasm_ar))
-                assert(util.set_file_contents(bc_path, "BC\192\222payload"))
-                assert(util.set_file_contents(bcar_path, bitcode_ar))
-                assert(util.set_file_contents(linked_path, linked_wasm))
-                assert(util.set_file_contents(side_path, side_wasm))
+                assert(util.set_file_contents(obj_path, wasm_part, "wb"))
+                assert(util.set_file_contents(ar_path, wasm_ar, "wb"))
+                assert(util.set_file_contents(bc_path, "BC\192\222payload\n", "wb"))
+                assert(util.set_file_contents(bcar_path, bitcode_ar, "wb"))
+                assert(util.set_file_contents(linked_path, linked_wasm, "wb"))
+                assert(util.set_file_contents(side_path, side_wasm, "wb"))
 
                 local ctx = { io = strategy }
                 assert(incremental.load_digest_cache(ctx, root))
