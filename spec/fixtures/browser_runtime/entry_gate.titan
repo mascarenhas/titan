@@ -1,0 +1,289 @@
+local test = import "test"
+local coroutine = import "coroutine"
+local gc = import "gc"
+foreign import "gate.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+
+local type Body = function(value): value
+local type LuaFrame = function(value, Body, value): value
+
+-- The raw Lua boundary is necessary to retain *loaded Lua* frames alongside
+-- Titan and authored C frames, without adding titan.lua to the minimal SDK.
+local function loaded_frames(): (LuaFrame, value)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 3) ~= 0)
+  local source = [==[
+    local function descend(depth, bridge, body, argument)
+      local canary = { depth = depth, text = "loaded-Lua-canary" }
+      local result
+      if depth == 0 then result = bridge(body, argument)
+      else result = descend(depth - 1, bridge, body, argument) end
+      assert(canary.depth == depth and canary.text == "loaded-Lua-canary")
+      return result
+    end
+    return function(bridge, body, argument)
+      local result = descend(4, bridge, body, argument)
+      return result
+    end
+  ]==]
+  test.assert(ffi.luaL_loadstring(L, source) == ffi.LUA_OK)
+  test.assert(ffi.lua_pcallk(L, 0, 1, 0, 0, nil) == ffi.LUA_OK)
+  local wrapper: LuaFrame = ffi.lua_totvalue(L, -1)
+  ffi.lua_pushcclosure(L, ffi.gate_bridge, 0)
+  local bridge: value = ffi.lua_totvalue(L, -1)
+  return wrapper, bridge
+end
+
+local function titan_frames(depth: integer, action: Body, argument: value): value
+  local canary = "Titan-canary:" .. depth
+  local result: value = nil
+  if depth == 0 then result = action(argument)
+  else result = titan_frames(depth - 1, action, argument) end
+  test.assert(canary == "Titan-canary:" .. depth)
+  return result
+end
+
+local function mixed(action: Body): coroutine.Coroutine
+  local wrapper, bridge = loaded_frames()
+  return coroutine.create(function(argument: value): value
+    return titan_frames(3, function(input: value): value
+      return wrapper(bridge, action, input)
+    end, argument)
+  end, "gate")
+end
+
+local function wait_both(milliseconds: integer)
+  ffi.gate_wait(0, milliseconds)
+  ffi.gate_wait(1, milliseconds)
+end
+
+function test_01_parked_mixed_frames(context: test.Context)
+  local defers = 0
+  local owners: {coroutine.Coroutine} = {}
+  for id = 1, 4 do
+    owners[id] = mixed(function(input: value): value
+      defer defers = defers + 1
+      local canary = "owner:" .. (input as integer)
+      local answer = coroutine.yield(input, "gate")
+      test.assert(canary == "owner:" .. (input as integer))
+      return answer
+    catch
+      raise error
+    end)
+    test.assert(owners[id]:resume(id) == id)
+  end
+  test.assert(ffi.gate_frame_peak() >= 16)
+  wait_both(40)
+  test.assert(defers == 0, "parked mixed owner unwound during outer wait")
+  for id = 1, 4 do
+    test.assert(owners[id]:status() == "suspended")
+    test.assert(owners[id]:resume(id + 100) == id + 100)
+  end
+  test.assert(defers == 4)
+  context:log("GATE item=1 owners=4 Titan_depth=4 Lua_depth=6 FFI_depth=4 waits=2 defers=4")
+end
+
+local function sequence_owner(id: integer): coroutine.Coroutine
+  return mixed(function(_: value): value
+    local payload: {integer} = {id, id * 7919, 0x329}
+    for sequence = 0, 20 do
+      local next = coroutine.yield(sequence, "gate")
+      test.assert(next == sequence + 1, "per-coroutine sequence changed")
+      test.assert(payload[1] == id and payload[2] == id * 7919 and payload[3] == 0x329,
+                  "parked stack payload canary changed")
+    end
+    return id
+  end)
+end
+
+function test_02_64_coroutines_20_outer_waits_each(context: test.Context)
+  for form = 0, 1 do
+    local owners: {coroutine.Coroutine} = {}
+    for id = 1, 64 do
+      owners[id] = sequence_owner(id)
+      test.assert(owners[id]:resume(nil) == 0)
+    end
+    local before = ffi.gate_now()
+    local before_waits = ffi.gate_wait_count()
+    for sequence = 1, 20 do
+      for id = 1, 64 do
+        test.assert(owners[id]:resume(sequence) == sequence)
+        ffi.gate_wait(form, 1)
+      end
+    end
+    for id = 1, 64 do
+      test.assert(owners[id]:resume(21) == id)
+      test.assert(owners[id]:status() == "dead")
+    end
+    local elapsed = ffi.gate_now() - before
+    test.assert(ffi.gate_wait_count() - before_waits == 1280)
+    context:log("GATE item=2 form=" .. form .. " coroutines=64 rounds=20 waits=1280 canary_checks=1344 elapsed_ms=" .. elapsed .. " per_suspension_ms=" .. elapsed / 1280)
+  end
+end
+
+function test_03_gc_while_parked(context: test.Context)
+  local was_generational = gc.generational()
+  defer do
+    if not was_generational then gc.incremental() end
+  end
+  local owners: {coroutine.Coroutine} = {}
+  for id = 1, 8 do
+    owners[id] = sequence_owner(id)
+    test.assert(owners[id]:resume(nil) == 0)
+  end
+  gc.collect()
+  wait_both(20)
+  for _ = 1, 80 do gc.step() end
+  wait_both(20)
+  for id = 1, 8 do
+    for sequence = 1, 21 do owners[id]:resume(sequence) end
+    test.assert(owners[id]:status() == "dead")
+  end
+  context:log("GATE item=3 owners=8 full_gc=1 generational_steps=80 waits=4 canaries=168")
+end
+
+function test_04_preexisting_catch_and_ordered_defers(context: test.Context)
+  local log = ""
+  local owner = mixed(function(_: value): value
+    defer log = log .. "outer;"
+    do
+      defer log = log .. "inner;"
+      coroutine.yield("parked", "gate")
+      raise "after-rewind"
+    catch
+      test.assert(error == "after-rewind")
+      log = log .. "catch;"
+    end
+    return "caught"
+  end)
+  test.assert(owner:resume(nil) == "parked")
+  wait_both(20)
+  test.assert(owner:resume(nil) == "caught")
+  test.assert(log == "inner;catch;outer;", "post-rewind defer order: " .. log)
+  local failure_log = ""
+  local failing = coroutine.create(function(_: value): value
+    defer failure_log = failure_log .. "outer;"
+    do
+      defer failure_log = failure_log .. "inner;"
+      coroutine.yield("parked", "gate")
+      raise "uncaught-after-rewind"
+    end
+    return nil
+  end, "gate")
+  test.assert(failing:resume(nil) == "parked")
+  wait_both(20)
+  local failed, raised, trace? = failing:transfer(nil, nil, false)
+  test.assert(failed and raised == "uncaught-after-rewind" and trace ~= nil)
+  test.assert(failure_log == "inner;outer;")
+  context:log("GATE item=4 catches=1 success_defers=2 failure_defers=2 waits=4")
+end
+
+function test_05_nested_tagged_transfer(context: test.Context)
+  local outer: coroutine.Coroutine?
+  local inner: coroutine.Coroutine?
+  inner = coroutine.create(function(_: value): value
+    test.assert(coroutine.running() == inner)
+    local result = coroutine.yield("nested-parked", "outer")
+    test.assert(coroutine.running() == inner)
+    return result
+  end, "inner")
+  outer = coroutine.create(function(_: value): value
+    test.assert(coroutine.running() == outer)
+    local result = inner:resume(nil)
+    test.assert(coroutine.running() == outer)
+    return result
+  end, "outer")
+  test.assert(outer:resume(nil) == "nested-parked")
+  test.assert(outer:status() == "suspended" and inner:status() == "stacked")
+  wait_both(20)
+  test.assert(coroutine.running() == nil)
+  test.assert(outer:resume("nested-result") == "nested-result")
+  test.assert(outer:status() == "dead" and inner:status() == "dead")
+  context:log("GATE item=5 nested=2 tagged_nonlocal=1 identity_checks=4 waits=2")
+end
+
+function test_06_last_case_action_is_fiber_switch(context: test.Context)
+  local owner = coroutine.create(function(_: value): value
+    return "fiber-last"
+  end, "last")
+  context:log("GATE item=6 final_case_action=fiber_switch expected_status=0")
+  owner:resume(nil)
+end
+
+function test_07_responsive_outer_wait(context: test.Context)
+  local before = ffi.gate_now()
+  wait_both(300)
+  context:log("GATE item=7 outer_wait_ms=" .. (ffi.gate_now() - before) .. " requested_ms=600")
+end
+
+function test_08_guard_window(context: test.Context)
+  wait_both(80)
+  context:log("GATE item=8 outer_waits=2 host_checks=wrapper_reentry,raw_guard,observe")
+end
+
+-- Retained roots survive every ordinary GC and are unwound by the production
+-- entry's lua_close. Their native counters are inspected after completion.
+local close_roots: {coroutine.Coroutine} = {}
+
+local function retained_pair(first: integer)
+  local inner = coroutine.create(function(_: value): value
+    defer ffi.gate_close_event(first + 1)
+    do
+      coroutine.yield("close-parked", "close-outer")
+      ffi.gate_forbidden()
+    catch
+      ffi.gate_forbidden()
+    end
+    return nil
+  end, "close-inner")
+  local outer = coroutine.create(function(_: value): value
+    defer ffi.gate_close_event(first)
+    do
+      inner:resume(nil)
+      ffi.gate_forbidden()
+    catch
+      ffi.gate_forbidden()
+    end
+    return nil
+  end, "close-outer")
+  test.assert(outer:resume(nil) == "close-parked")
+  close_roots[#close_roots + 1] = outer
+  close_roots[#close_roots + 1] = inner
+end
+
+function test_09_lua_close_retained_nested_coroutines(context: test.Context)
+  retained_pair(0)
+  retained_pair(2)
+  retained_pair(4)
+  wait_both(20)
+  test.assert(#close_roots == 6)
+  context:log("GATE item=9 retained=6 nested_pairs=3 expected_close_mask=63 forbidden=0")
+end
+
+function test_negative_fiber_internal_sleep_starves_peers(context: test.Context)
+  for form = 0, 1 do
+    local peer_steps = 0
+    local peer = coroutine.create(function(_: value): value
+      peer_steps = peer_steps + 1
+      return nil
+    end, "peer")
+    local sleeper = coroutine.create(function(_: value): value
+      ffi.gate_wait(form, 60)
+      test.assert(peer_steps == 0, "fiber-internal sleep unexpectedly scheduled peer")
+      return nil
+    end, "sleep")
+    local before = ffi.gate_now()
+    sleeper:resume(nil)
+    test.assert(peer_steps == 0 and peer:status() == "suspended")
+    peer:resume(nil)
+    test.assert(peer_steps == 1)
+    context:log("GATE negative=fiber_internal_sleep form=" .. form .. " elapsed_ms=" .. (ffi.gate_now() - before) .. " peer_steps_during_sleep=0 peer_steps_after_resume=1")
+  end
+end
+
+function test_negative_busy_wait_blocks_host(context: test.Context)
+  ffi.gate_busy(150)
+  context:log("GATE negative=busy_wait requested_ms=150")
+end

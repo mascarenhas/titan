@@ -1,0 +1,13 @@
+local coroutine = import "coroutine"
+
+function main(args: {string}): integer
+  local status = 0
+  if args[1] == "nonzero" then status = 7 end
+  if args[1] == "two" then status = 2 end
+  local owner = coroutine.create(function(_: value): value
+    return status
+  end, "final")
+  -- Completion must come from the Titan-owned import even when this final
+  -- application action switches fibers and ccall's return value is unrelated.
+  return owner:resume(nil)
+end
