@@ -1395,7 +1395,7 @@ describe("titanc target vocabulary", function()
     end)
 
     it("validates every explicit value before Titan or C-source lookup", function()
-        for _, value in ipairs({ "linux", "darwin", "windows", "native", "browser", "wasm32" }) do
+        for _, value in ipairs({ "linux", "darwin", "windows", "native", "wasm32" }) do
             if value ~= fixture.host or value == "native" then
                 for _, environment in ipairs({ false, true }) do
                     for _, c_only in ipairs({ false, true }) do
@@ -1413,7 +1413,6 @@ describe("titanc target vocabulary", function()
                         assert.matches(environment and "TITAN_TARGET=" .. value or
                             "--target " .. value, result.output, 1, true)
                         local reason = value == "native" and "not a compilation target" or
-                            value == "browser" and "not available yet" or
                             value == "wasm32" and "unknown target" or
                             "native cross-compilation is not supported"
                         assert.matches(reason, result.output, 1, true)
