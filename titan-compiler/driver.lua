@@ -58,10 +58,12 @@ function driver.activate_target_caches(context, identity)
     assert(type(identity) == "string" and identity ~= "",
         "semantic cache target identity is required")
     if semantic_target_identity ~= identity then
-        -- Rebind the complete closure, rather than pruning individual owners.
-        -- Same-target contexts intentionally keep the existing warm caches.
-        driver.imported = {}
-        types.registry = {}
+        -- The first owner adopts tables installed by an embedding host.
+        -- A real target change rebinds the complete nominal closure.
+        if semantic_target_identity ~= nil then
+            driver.imported = {}
+            types.registry = {}
+        end
         semantic_cache_generation = semantic_cache_generation + 1
         semantic_target_identity = identity
     end

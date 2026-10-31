@@ -55,6 +55,7 @@ describe("browser semantic cache isolation", function()
     before_each(function()
         root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
         saved_registry, contexts = types.registry, {}
+        types.registry = {}
         subject = fresh_driver()
         subject.TITAN_SOURCE_PATH = root
         saved_browser = subject._browser_target
@@ -198,6 +199,41 @@ describe("browser semantic cache isolation", function()
     it("rejects a context that has never activated semantic caches", function()
         assert.has_error(function() subject.assert_target_context({ io = compiler_io.new_sync() }) end,
             "compiler target context is not initialized")
+    end)
+
+    it("adopts host-installed semantic tables on first activation in a fresh process", function()
+        provider_fixture = files.new()
+        files.write(provider_fixture.source .. "/first_owner.titan",
+            "record Item\n value: integer\nend\n")
+        local script = provider_fixture.root .. "/first-activation.lua"
+        files.write(script, string.format([[
+local driver = require "titan-compiler.driver"
+local types = require "titan-compiler.types"
+local imported, registry = {}, {}
+driver.imported, types.registry = imported, registry
+driver.TITAN_SOURCE_PATH = %q
+local context = driver.new_resolver_context({ analysis_only = true })
+assert(driver.imported == imported, "first activation replaced the host's import map")
+assert(types.registry == registry, "first activation replaced the host's nominal registry")
+local loader = driver.defaultloader({}, { context = context, source_roots = { first_owner = true } })
+local ok, modtype, errors = loader("first_owner")
+assert(ok, modtype)
+assert(#errors == 0, table.concat(errors, "\n"))
+assert(imported.first_owner and imported.first_owner.type == modtype,
+    "checked module did not land in the host's installed import map")
+assert(types.registry == registry and registry["first_owner.Item"],
+    "checked nominal owner did not land in the host's installed registry")
+assert(driver.close_loader(loader))
+assert(driver.close_resolver_context(context))
+]], provider_fixture.source))
+        local init = string.format("package.path=%q..package.path; ",
+            provider_fixture.frontend .. "/?.lua;" .. provider_fixture.frontend .. "/?/init.lua;") ..
+            provider_fixture.collector:init_code()
+        local result = provider_fixture:run({
+            provider_fixture.prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""),
+            "-E", "-e", init, script,
+        })
+        assert.is_true(result.ok, result.output)
     end)
 
     it("rebinds the whole nominal closure, preserves same-target sharing, and never reactivates a stale context", function()

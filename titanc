@@ -869,9 +869,7 @@ if not args.compile_only and not args.print_ast then
             profile = driver.BUILD_PROFILE,
             browser_profile = browser_profile and browser_profile.identity_inputs or nil,
             browser_probe = browser_probe,
-            target = resolver_context.target_descriptor and
-                resolver_context.target_descriptor.identity or
-                (driver.TARGET_PROFILE and driver.TARGET_PROFILE.identity or ""),
+            target = driver.TARGET_PROFILE and driver.TARGET_PROFILE.identity or "",
         },
         bindings = resolver_context.native_bindings,
         environment = {
