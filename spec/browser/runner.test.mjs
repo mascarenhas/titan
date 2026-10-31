@@ -254,25 +254,27 @@ for (const engine of ["node", "chromium"]) {
             assert.equal(short.status, 0, short.stderr.toString());
             if (engine === "chromium") await cleanChromium(short);
         });
-        test(`fatal abort drops a forever-pending ccall before shutdown (${engine}/${cdp})`, { skip: !supported }, async t => {
-            const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
-            if (!named) {
-                if (strict) assert.fail("TITAN_BROWSER_LOADER_IMAGE must name the compiled fidelity fixture");
-                t.skip("TITAN_BROWSER_LOADER_IMAGE is unset");
-                return;
-            }
-            if (engine === "chromium" && !await chromium(t)) return;
-            const image = resolve(named);
-            const directory = fixtureRoot(image);
-            const before = performance.now();
-            const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000", "--grace", "200", "--root", directory,
-                "--js-test", join(root, "spec/fixtures/browser_loader/abort-dispose.mjs"), "--",
-                relative(directory, image).split(sep).join("/")]);
-            assert.equal(result.status, 70, result.stderr.toString());
-            assert.deepEqual(result.stdout, Buffer.from("dispose-complete\n"), "abort status alone does not prove fatal disposal finished");
-            assert.ok(performance.now() - before < 5000, "fatal disposal waited for the pending internal ccall");
-            if (engine === "chromium") await cleanChromium(result);
-        });
+        for (const [phase, fixtureName] of [["suspended", "abort-dispose"], ["initializing", "initialize-abort"]]) {
+            test(`fatal ${phase} abort completes disposal before shutdown (${engine}/${cdp})`, { skip: !supported }, async t => {
+                const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
+                if (!named) {
+                    if (strict) assert.fail("TITAN_BROWSER_LOADER_IMAGE must name the compiled fidelity fixture");
+                    t.skip("TITAN_BROWSER_LOADER_IMAGE is unset");
+                    return;
+                }
+                if (engine === "chromium" && !await chromium(t)) return;
+                const image = resolve(named);
+                const directory = fixtureRoot(image);
+                const before = performance.now();
+                const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000", "--grace", "200", "--root", directory,
+                    "--js-test", join(root, `spec/fixtures/browser_loader/${fixtureName}.mjs`), "--",
+                    relative(directory, image).split(sep).join("/")]);
+                assert.equal(result.status, 70, result.stderr.toString());
+                assert.deepEqual(result.stdout, Buffer.from("dispose-complete\n"), "abort status alone does not prove fatal disposal finished");
+                assert.ok(performance.now() - before < 5000, "fatal disposal waited for an unusable instance");
+                if (engine === "chromium") await cleanChromium(result);
+            });
+        }
         test(`JS module/path isolation and long deadlines (${engine}/${cdp})`, { skip: !supported }, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const directory = await mkdtemp(join(tmpdir(), "titan runner-"));
