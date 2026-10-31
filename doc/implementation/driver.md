@@ -43,12 +43,16 @@ modules](static-compiled-modules.md) owns the archive reader and the shared
 invocation-wide resolver state.
 
 Source lookup has a separate tagged resolver because a logical module may be
-flat or a [folder module](folder-modules.md). In each source root it tests the
-folder main `P/B.titan` before the flat `P.titan` and returns a `flat`,
-`folder`, or `blocked` result; `nil` is only a clean miss, and a selected or
-blocked result never falls through to another source form or later root.
-[Tagged source resolution](folder-modules.md#tagged-source-resolution) owns the
-order, contributor enumeration, and the constituent-privacy rule.
+flat or a [folder module](folder-modules.md), and because each logical source
+file may have [target variants](target-source-selection.md). In each source
+root it probes the folder main family `P/B.titan` before the flat family
+`P.titan`, selecting the target's most specific existing member of each, and
+returns a `flat`, `folder`, or `blocked` result; `nil` is only a clean miss,
+and a selected or blocked result never falls through to another source form or
+later root. [Tagged source resolution](folder-modules.md#tagged-source-resolution)
+owns the order, contributor enumeration, and the constituent-privacy rule;
+[Target source selection](target-source-selection.md#the-resolver) owns the
+family probes and the folder sweep's grammar.
 
 All modules, including the standard library, use the same two path strings:
 
@@ -400,6 +404,7 @@ created.
 | `output_root` | The `titanc --output` folder. Wraps `io:tmpname` so checking headers and transient probe payloads are reserved as `<output_root>/.titan-temporary-*`; persistent probe-cache destinations do not change. See [Output directory](output-directory.md). |
 | `prefer_static` | `titanc --static`: run the archive pass before the DSO pass. |
 | `source_first` | `--test` or `--source-first`: try source before compiled formats for every dependency, keeping compiled fallback on a clean miss. |
+| `target` | Source-selection target: `nil`/`""` for the host, or one of `driver.SOURCE_LABELS`; any other value raises. It selects source files only and is not checked against the host; `titanc` validates its CLI value first. See [Target source selection](target-source-selection.md#the-context-target). |
 | `verbose`, `pretty_print` | Carry `-v` and `--pretty-print` into resolver-owned C-probe and checking-header work. |
 | `extra_ffi_include_dirs` | Analysis-local include roots, normalized here and appended to a fresh C-probe toolchain descriptor without changing the process-global foreign-C configuration. |
 | `cache_adapter`, `header_inputs`, `c_header_analysis` | Persistent cache callbacks (default: the digest-only native adapter when available), host-validated input observations, and the per-analysis header-validation token; see [Cache adapter and persistent payloads](#cache-adapter-and-persistent-payloads). |
@@ -413,9 +418,12 @@ Checkout/installation discovery and platform initialization do not perform
 filesystem or subprocess work while `driver.lua` is loaded. Context creation
 resolves the compiler layout through `context.io` (`driver.initialize_layout`);
 `driver.configure_foreign_c(context)` later obtains `uname` and the target
-profile through the same strategy. `titanc` explicitly creates the default
-synchronous context before reading layout-dependent settings and configuring
-foreign C.
+profile through the same strategy. The first source lookup obtains the
+selection target with `driver.context_target(context)`, which initializes the
+platform through the same strategy only when the context names no explicit
+target. `titanc` explicitly creates the default
+synchronous context before reading layout-dependent settings, validates its
+target, and configures foreign C.
 
 `context.checked_source_modules` is an ordered dense list of modules actually
 parsed and checked by that context. Cached source entries and serialized
@@ -463,7 +471,9 @@ Loader-owned options are:
 * `source_overrides` — in-memory or pre-resolved source descriptors keyed by
   module name, such as `titanc`'s generated `titan.test.runner` or descriptors
   returned by `testroots.discover`; an override makes that module
-  source-preferred.
+  source-preferred. The loader uses an override as given and does not select
+  target variants for it, so a client-built filesystem descriptor supplies the
+  selected files and the canonical logical `native_output`.
 * `incremental`, `test`, `coverage`, `output_root`, `c_parts`,
   `split_threshold` — [object-backed source reuse](incremental-compilation.md),
   test-owner flag policy (`context.codegen_policy`), [native
@@ -668,8 +678,8 @@ option table lists every context option.
 The subsections below are the complete compiler-side contract, in order: the
 embedded interface provider, declared project manifests, the cache adapter and
 its persistent payloads, observability callbacks, the compiler I/O strategy,
-analysis loader options, C-header dependency closures, and the two
-metadata-only helpers.
+analysis loader options, the target source selection helpers, C-header
+dependency closures, and the two metadata-only helpers.
 
 ### Embedded interface provider and target profile
 
@@ -1169,6 +1179,33 @@ analysis and is described in [Completion](completion.md).
   when an earlier ordinary import in the same analysis already decoded that
   public view; the external AST is not added to the caller's retained project
   cache.
+
+### Target source selection helpers
+
+Semantic clients discover projects themselves, so the driver exposes the
+[target source selection](target-source-selection.md) rule as data instead of
+leaving clients to mirror it. These are additive exports under
+`LANGUAGE_SERVER_API_VERSION = 1`:
+
+| Helper | Contract |
+| --- | --- |
+| `driver.SOURCE_LABELS` | `{ "windows", "darwin", "linux", "browser", "native" }`. |
+| `driver.classify_source_filename(basename)` | For a basename without a directory: `logical_basename, label` for a variant (`"foo.linux.titan"` → `"foo.titan", "linux"`); `logical_basename, nil` for a default or non-variant name (`"linux.titan"`, `"x.y.titan"`); `nil, nil, err` for stacked (`x.linux.native.titan`) or mis-cased (`x.Linux.titan`) labels; no values for a non-`.titan` name. |
+| `driver.target_selection_labels(target)` | The labels that apply to `target`, most specific first, without the always-last default: `{ "linux", "native" }`, `{ "darwin", "native" }`, `{ "windows", "native" }`, `{ "native" }` for a native host without an OS label, or `{ "browser" }`; raises for any other value. |
+| `driver.target_label_applies(target, label)` | Whether `label` appears in that list. |
+| `driver.context_target(context)` | The context's selection target, including the internal `native` target of a label-less native host; returns `nil, err` when the host cannot be determined. |
+| `driver.new_resolver_context{ target = ... }` | Optional explicit selection target; omitted means the host. |
+| `driver.validate_target(context, value, origin)` | The `titanc` vocabulary, for clients that accept a user-written target; semantic clients do not need it. |
+
+The selected files, composition order, and privacy rules the client builds from
+these helpers are those of [the resolver](target-source-selection.md#the-resolver);
+filesystem descriptors that a client passes as `source_overrides` carry the
+canonical logical `native_output`. Selection freshness in caller-certified
+caches (`cached_source_entries`, public-view `cached_interfaces`) belongs to the
+client, which re-selects when a variant is created or deleted; only the
+source-required reparse path re-resolves its cached descriptor (see [cache
+admission](target-source-selection.md#cache-admission-scope)). The driver never
+reads `TITAN_TARGET`, so a client that omits the option analyzes the host.
 
 ### C-header dependency closures
 
@@ -2070,7 +2107,7 @@ policy.
     [--coverage-format <format>]... [--coverage-output <dir>] \
     [--coverage-gcovr <cmd>]] \
   [--no-uv-bootstrap] [--no-line-directives] [-u|--lua <luasrc>] \
-  [-t|--tree <srcroot>] [-o|--output <dir>] \
+  [-t|--tree <srcroot>] [-T|--target <label>] [-o|--output <dir>] \
   [-I|--include-dir <dir>]... [-D|--define <def>]... [--cflag <arg>]... \
   [-L|--library-dir <dir>]... [-l|--link <libs>]... [--ldflag <arg>]... \
   [--c-source <file>]... [--print-c-objects] \
@@ -2081,7 +2118,10 @@ policy.
 module names, `--test-dir` discovery directories, or `-c --c-source` files; the
 [flag table](#titanc-flags) lists every option and constraint. `--print-root`
 prints the installation root and exits ([above](#module-names-and-the-search-paths)).
-`--tree` overrides `driver.TITAN_SOURCE_PATH`. In source-checkout mode, `--lua`
+`--tree` overrides `driver.TITAN_SOURCE_PATH`. `-T`/`--target` (also
+`--target=<label>`), or `TITAN_TARGET` when the option is absent, selects the
+[source-selection target](target-source-selection.md#the-titanc-option); `-t`
+remains `--tree`. In source-checkout mode, `--lua`
 overrides `driver.LUA_SOURCE_PATH`; installed mode rejects it so the installed
 headers, `liblua.a`, and `libtitan.a` remain a matched SDK. `-o`/`--output`
 routes generated files below one folder while preserving the source hierarchy
@@ -2139,9 +2179,9 @@ Before creating a resolver, `titanc` rejects:
 
 * `-q`/`--quiet` together with `-v`/`--verbose` (checked first, right after
   argument parsing, and written straight to standard error);
-* `--print-root` with module names;
-* no module names unless `--print-root`, `--test-dir`, or `-c --c-source` is
-  given;
+* `--print-root` with module names (an accepted `--print-root` then prints and
+  returns before every later check, ignoring `-T`/`--target` and
+  `TITAN_TARGET`);
 * `--incremental` with `--print-ast`;
 * any `--coverage-*` option without `--coverage`;
 * `--static` on Windows;
@@ -2157,7 +2197,12 @@ Before creating a resolver, `titanc` rejects:
 After those preflight checks, `titanc` loads `require "titan"`, requires
 `_sha256_binary` and `_sha256_stream` (a support library without either is
 reported as missing or stale), creates its resolver context with `frontend = arg[0]`,
-applies normalized native inputs, and discovers any `--test-dir` roots. It
+and validates the target with `driver.validate_target` (`-T`/`--target` wins
+over `TITAN_TARGET`, and an empty value means the host). Only then does it reject
+an invocation with no module names unless `--test-dir` or `-c --c-source` is
+given, so an invalid target is reported first, even without roots. It then
+applies normalized native inputs, configures foreign C, and discovers any
+`--test-dir` roots. It
 locks the `--output` directory, or without `--output` every `--tree` source
 root plus the working directory (source-adjacent objects may belong to any
 root, and default providers and executables are CWD-relative), and adds the
@@ -2757,7 +2802,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | Flag | Effect | Constraints |
 | --- | --- | --- |
 | `<module>...` | Logical modules to build; all become source-required roots. | At least one, unless `--print-root`, `--test-dir`, or `-c --c-source`. |
-| `--print-root` | Print the selected installation root and exit. | No module names. |
+| `--print-root` | Print the selected installation root and exit; ignores `-T`/`--target` and `TITAN_TARGET`. | No module names. |
 | `--print-ast` | Print each module's AST after checking. | Not with `--incremental`. |
 | `--pretty-print` | Format generated C and headers with `CLANG_FORMAT`. | |
 | `-q`, `--quiet` | Create no progress reporter: standard error carries only diagnostics and native-tool output, exactly as before progress reporting. | Not with `-v`. |
@@ -2784,6 +2829,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `--no-line-directives` | Omit generated Titan `#line` directives. | |
 | `-u`, `--lua <dir>` | Lua source tree (`driver.LUA_SOURCE_PATH`). | Source checkouts only. |
 | `-t`, `--tree <dir>` | Source root, or an ordered `;`-separated list of roots searched in order (`driver.TITAN_SOURCE_PATH`, default `.`). | |
+| `-T`, `--target <label>` | [Source-selection target](target-source-selection.md#the-titanc-option); overrides `TITAN_TARGET`, and an empty value means the host. Only the host's own OS label is accepted; `native`, `browser`, another OS label, and unknown values are errors. `--target=<label>` is also accepted. | Validated before any lookup; ignored by `--print-root`. |
 | `-o`, `--output <dir>` | Folder for generated files, preserving the source hierarchy. | |
 | `-I`, `--include-dir <dir>` | Native include directory for C headers, probes, generated C, and `--c-source`; repeatable, order kept, searched before the SDK. | |
 | `-D`, `--define <def>` | Native preprocessor definition `NAME[=VALUE]`; repeatable, order kept. | |
@@ -2810,6 +2856,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; any other value is a toolchain error. |
 | `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
+| `TITAN_TARGET` | `titanc` | unset (empty means unset) | Source-selection target when `-T`/`--target` is absent; same vocabulary, with diagnostics naming `TITAN_TARGET=<value>`. Ignored by `--print-root`; never read by the driver library or the language server. Make's native `titanc` recipes unset it. |
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |
 | `TERM` | `titanc` (`progress.select`, `progress.colour`) | unset | `dumb` selects the plain progress form and disables colour. |
 | `NO_COLOR` | `titanc` (`progress.colour`) | unset | Non-empty disables progress colour only; the live region stays. |

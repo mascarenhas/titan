@@ -87,6 +87,18 @@ resolve through the ordinary source resolver, while directory symlinks are
 tested at most once as a folder module owner and are not descended into
 recursively (an explicitly passed `--test-dir` directory symlink is traversed).
 
+Discovery is [target-aware](target-source-selection.md#test-root-discovery).
+It reads the selection target with `driver.context_target(context)` (the CLI
+has already initialized the platform) and classifies each `*.titan` entry with
+`driver.classify_source_filename`. A variant `<base>.<label>.titan` contributes
+the candidate `<base>` only when its label applies to that target; an inactive
+variant is skipped silently, so platform-only roots need no `--test-exclude`.
+A stacked or mis-cased label fails discovery with `invalid test source
+'<path>': ...`. Other dotted stems are not candidates. The candidate stem names
+the root and `driver.resolve_source` selects its file, so variants of one root
+deduplicate as one descriptor, and a folder root without an applicable main
+resolves to nothing and is skipped.
+
 Each candidate name is resolved both against its containing source root and
 across the full `--tree` path with `driver.resolve_source`. Immediate folder
 contributors (`kind == "blocked"`) and non-folder directories are ignored, while

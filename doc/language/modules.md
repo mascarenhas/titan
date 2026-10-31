@@ -464,7 +464,7 @@ titanc [--print-ast] [--pretty-print] [-q|-v] [-j jobs] [--c-parts n] [--static]
   [--source-first] [--incremental] [-c|--compile-only] \
   [--test [--test-dir dir]... [--test-exclude module]...] [--exe path] \
   [--no-uv-bootstrap] [--no-line-directives] [--lua <luasrc>] \
-  [--tree <srcroot>] [-o|--output <directory>] \
+  [--tree <srcroot>] [-T|--target <label>] [-o|--output <directory>] \
   [-I dir]... [-D name[=value]]... [--cflag arg]... \
   [-L dir]... [-l lib1,lib2]... [--ldflag arg]... \
   [--c-source file]... [--print-c-objects] [-X object...] <module>...
@@ -477,7 +477,8 @@ creating a probe cache. Do not pass module names with the query. The root is
 directory that contains the Lua interpreter running `titanc` (symlinks
 resolved), so an installation at `<root>/bin/lua` reports `<root>`, including
 on Windows and after the tree is moved. `TITAN_PREFIX` only selects the
-C-probe cache and does not affect this query. An undiscoverable installation
+C-probe cache and does not affect this query. The query ignores `-T`/`--target`
+and `TITAN_TARGET`, whatever their values. An undiscoverable installation
 reports an error and exits with status 1. Build tools can use this query to
 find the matching SDK rather than infer the installation layout from the
 compiler launcher filename, and compiled programs use it as their [SDK
@@ -490,6 +491,14 @@ fallback](#the-titan-path).
   list of roots (quote it in the shell, as in `--tree 'src;tests'`); each
   module is looked up in the roots in order, and the first root that has it
   wins.
+* `-T/--target <label>` selects the compilation target for [target source
+  selection](target-source-selection.md), as a separate argument or as
+  `--target=<label>` (`-t` stays `--tree`). Without it, `titanc` reads
+  `TITAN_TARGET`; absent or empty selects the host. Only the host's own OS
+  label (`linux`, `darwin`, or `windows`) is accepted; `native`, `browser`,
+  other OS labels, and unknown values are errors. Each module source file
+  `name.titan` may have variants `name.<label>.titan`, and the target selects
+  one file per logical filename.
 * `-o/--output <directory>` creates the destination and missing parents, then
   writes generated files beneath it. Generated C, objects, and headers recreate
   the selected source root's hierarchy there; final providers,
@@ -635,7 +644,9 @@ With `--output`, all paths in the table are below that output directory, and
 generated C and objects are relative to the selected source root. Without the
 option, the provider pair, executable, and entrypoint paths are
 relative to the directory `titanc` runs in. Generated C and objects are beside
-the flat source or folder main, even when `--tree` points elsewhere. A folder
+the canonical flat source or folder main path, even when `--tree` points
+elsewhere or a [target variant](target-source-selection.md#generated-files-keep-logical-names)
+of it is selected. A folder
 contributor never produces a separate C file, object, DSO, archive, or
 executable. The folder program's `__main` suffix avoids colliding with its
 source directory; the logical module name and entrypoint path remain
@@ -792,7 +803,10 @@ rules](../implementation/windows-build.md#relocation-and-native-library-loading)
 * **Source modules** are looked up in the *source tree* — the directory
   given by `--tree`, defaulting to the current directory. In each source root,
   the folder main `P/B.titan` wins over flat `P.titan`; a selected folder's
-  immediate regular `.titan` siblings are assembled as contributors.
+  immediate regular `.titan` siblings are assembled as contributors. Each
+  source file may have target variants such as `P.linux.titan`, and the
+  compilation's target selects one file per logical filename; see [Target
+  source selection](target-source-selection.md#precedence).
   Constituents are not directly importable as flat child modules, although a
   genuine deeper folder module remains legal. See
   [Folder modules](folder-modules.md#lookup-and-precedence) for the complete

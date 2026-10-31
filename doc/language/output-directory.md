@@ -38,6 +38,13 @@ This reads `/projects/demo/src/app/main.titan` and writes `out/app/main.c` and
 absolute `/projects/demo/src` prefix. A folder module's canonical main owns
 its generated C and objects, just as in a build without `--output`.
 
+Generated names always come from the logical module, never from a selected
+[target variant](target-source-selection.md#generated-files-keep-logical-names).
+When the selected source is `app/main.linux.titan`, the build still writes
+`out/app/main.c`, `out/app/main.o`, and the program `out/app/main`; no
+generated file carries the `.linux` label. Diagnostics and tracebacks still
+name the selected file.
+
 For Linux and macOS, these examples show the paths relative to `out/`:
 
 | Source for `app.main` | C and object | Library provider pair | Program |
