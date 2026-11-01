@@ -64,8 +64,14 @@ local function run_titanc(arguments, environment_jobs, customize, expect)
     end
     function driver.configure_foreign_c() return true end
     function driver.validate_target() return "native" end
+    function driver.context_target(context) return context.target end
     function driver.default_c_parts() return 4 end
     function driver.prepare_output_root(dir) return dir end
+    function driver.validate_output_target(context)
+        assert.equal(resolver, context)
+        assert.falsy(observed.lock_released)
+        return true
+    end
     function driver.cleanup_stale_staging(context, outputs, locks, protection)
         assert.equal(resolver, context)
         assert.equal(observed.output_locks, locks)
@@ -1390,7 +1396,7 @@ describe("titanc target vocabulary", function()
     end)
 
     it("validates every explicit value before Titan or C-source lookup", function()
-        for _, value in ipairs({ "linux", "darwin", "windows", "native", "browser", "wasm32" }) do
+        for _, value in ipairs({ "linux", "darwin", "windows", "native", "wasm32" }) do
             if value ~= fixture.host or value == "native" then
                 for _, environment in ipairs({ false, true }) do
                     for _, c_only in ipairs({ false, true }) do
@@ -1408,7 +1414,6 @@ describe("titanc target vocabulary", function()
                         assert.matches(environment and "TITAN_TARGET=" .. value or
                             "--target " .. value, result.output, 1, true)
                         local reason = value == "native" and "not a compilation target" or
-                            value == "browser" and "not available yet" or
                             value == "wasm32" and "unknown target" or
                             "native cross-compilation is not supported"
                         assert.matches(reason, result.output, 1, true)

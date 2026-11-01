@@ -30,8 +30,43 @@ local source_selection = require "titan-compiler.source_selection"
 local lfs = require "lfs"
 
 local driver = {}
+driver._browser_target = require "titan-compiler.browsertarget"
 
 driver.imported = {}
+
+-- Logical module names and FQTNs have one process-wide nominal closure.
+-- Contexts survive only while that closure belongs to their target generation.
+local semantic_target_identity
+local semantic_cache_generation = 0
+
+function driver.assert_target_context(context)
+    if type(context) ~= "table" or context._semantic_cache_generation == nil then
+        error("compiler target context is not initialized", 0)
+    end
+    if context._semantic_cache_generation ~= semantic_cache_generation then
+        error("compiler caches now belong to target " ..
+            semantic_target_identity .. "; create a new context", 0)
+    end
+    return true
+end
+
+function driver.activate_target_caches(context, identity)
+    if context._semantic_cache_generation ~= nil then
+        driver.assert_target_context(context)
+    end
+    assert(type(identity) == "string" and identity ~= "",
+        "semantic cache target identity is required")
+    if semantic_target_identity ~= identity then
+        -- Rebind the complete closure, rather than pruning individual owners.
+        -- Same-target contexts intentionally keep the existing warm caches.
+        driver.imported = {}
+        types.registry = {}
+        semantic_cache_generation = semantic_cache_generation + 1
+        semantic_target_identity = identity
+    end
+    context._semantic_cache_generation = semantic_cache_generation
+    return true
+end
 
 -- Compiled-module metadata encodes the monotonic ABI integer as its canonical
 -- decimal string. The semantic release and its major/minor library namespace
@@ -270,9 +305,20 @@ local function append_path(directory, suffix)
     return directory .. "/" .. suffix
 end
 
-function driver.installed_paths(root)
+function driver.installed_paths(root, target)
     root = normalize_root(root)
     if not root then return nil end
+    if target == "browser" then
+        local titan_lib = root_join(root, "lib/titan-browser/" .. driver.TITAN_LIBRARY_VERSION)
+        return {
+            root = root, lua_source = root_join(root, "lib/browser/include"),
+            include = root_join(root, "include"), lib = root_join(root, "lib/browser"),
+            liblua = root_join(root, "lib/browser/liblua.a"),
+            lua_record = root_join(root, "lib/browser/liblua-config.txt"),
+            libtitan = root_join(titan_lib, "libtitan.a"), titan_bin = titan_lib,
+            sdk_digests = root_join(titan_lib, incremental.SDK_DIGESTS),
+        }
+    end
     local titan_lib = root_join(
         root, "lib/titan/" .. driver.TITAN_LIBRARY_VERSION)
     return {
@@ -479,6 +525,7 @@ function driver.initialize_layout(context)
         error("compiler layout initialization requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
+    if not context._target_initializing then driver.assert_target_context(context) end
     if context._layout_initialized then return true end
 
     local installation_root
@@ -516,8 +563,8 @@ end
 driver.TITAN_SOURCE_PATH = "."
 driver.EMIT_LINE_DIRECTIVES = platform.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 -- Set by the titanc CLI when its live progress renderer owns terminal stderr:
--- a child that would write into the region is captured and replayed above it
--- instead. Every other caller leaves it nil and children inherit stderr.
+-- build children are captured and replayed above that region. Otherwise build
+-- commands inherit stderr; capability probes capture and discard independently.
 driver.LIVE_PROGRESS = nil
 
 -- A native batch waits in the private `_jobserver_wait` helper, which blocks
@@ -616,6 +663,86 @@ local function select_platform_defaults(uname, is_darwin, compiler_family)
     driver.IS_DARWIN = is_darwin
 end
 
+-- Browser state is context-owned. Native process globals remain a host profile.
+function driver._finish_target_initialization(context)
+    if context.target == "browser" then
+        -- Embedded inventories describe native host code and native C facts.
+        -- Drop the complete state at the target boundary, before any browser
+        -- descriptor/probe or resolver consumer can observe it.
+        context.embedded_interface_provider = nil
+        context.embedded_interface_provider_rejected = false
+        context.embedded_interface_provider_overlap = nil
+        context.used_embedded_target_profile_identity = nil
+        if context.host_target ~= "linux" and context.host_target ~= "darwin" then
+            return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
+                tostring(context.host_target) .. ")"
+        end
+        if not context.target_descriptor then
+            for _, item in ipairs({
+                { driver.EXTRA_CPPFLAGS, "TITAN_EXTRA_CPPFLAGS" },
+                { driver.EXTRA_CFLAGS, "TITAN_EXTRA_CFLAGS" },
+                { driver.EXTRA_LDFLAGS, "TITAN_EXTRA_LDFLAGS" },
+                { driver.NATIVE_COMPILE_FLAGS, "--cflag" },
+                { driver.NATIVE_LINK_FLAGS, "--ldflag" },
+            }) do
+                local valid, err = driver._browser_target.validate_flags(item[1], item[2])
+                if not valid then return nil, err end
+            end
+            local paths = driver.installed_paths(driver.TITAN_ROOT, "browser")
+            if not paths then
+                return nil, "cannot locate the Titan installation root; set TITAN_ROOT to the installation prefix"
+            end
+            local probe_cache_directory
+            if not probe_cache_disabled then
+                local cache_root, cache_error = normalize_root(probe_prefix or driver.TITAN_ROOT, context.io)
+                if not cache_root then return nil, cache_error end
+                probe_cache_directory = root_join(cache_root, "var/cache/titan-probes/browser-" ..
+                    driver._browser_target.EMSCRIPTEN_VERSION .. "/" .. cprobe_cache.VERSION)
+            end
+            local runtime_include = driver.SOURCE_CHECKOUT_ROOT and
+                root_join(driver.SOURCE_CHECKOUT_ROOT, "titan-runtime") or paths.include
+            local extras = driver.NATIVE_COMPILE_FLAGS
+            if not extras then
+                extras = {}
+                for _, flag in ipairs(driver.EXTRA_CPPFLAGS or {}) do extras[#extras + 1] = flag end
+                for _, flag in ipairs(driver.EXTRA_CFLAGS or {}) do extras[#extras + 1] = flag end
+            end
+            local descriptor, err = driver._browser_target.build(context, {
+                paths = paths, runtime_include = runtime_include, compile_flags = extras,
+                build_profile = driver.BUILD_PROFILE,
+                probe_cache_directory = probe_cache_directory,
+            })
+            if not descriptor then return nil, err end
+            context.target_descriptor = descriptor
+        end
+        if not context.target_profile then
+            local profile, err = csemantics.import_profile(
+                driver._browser_target.export(context.target_descriptor.profile_data))
+            if not profile then return nil, err end
+            context.target_profile = profile
+        end
+    end
+    driver.activate_target_caches(context,
+        context.target_descriptor and context.target_descriptor.identity or context.target)
+    return true
+end
+
+function driver.context_target_descriptor(context)
+    if context == nil then return nil end
+    driver.assert_target_context(context)
+    if context.target ~= "browser" then return nil end
+    local ok, err = driver.initialize_platform(context)
+    if not ok then return nil, err end
+    return context.target_descriptor
+end
+
+function driver.context_target_identity(context)
+    local descriptor, err = driver.context_target_descriptor(context)
+    if err then return nil, err end
+    if descriptor then return descriptor.identity end
+    return driver.context_target(context)
+end
+
 local function initialize_source_target(context)
     context.host_target = context.uname == "Windows" and "windows" or
         context.uname == "Linux" and "linux" or
@@ -629,9 +756,12 @@ function driver.initialize_platform(context)
         error("platform initialization requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
+    if not context._target_initializing then driver.assert_target_context(context) end
     if context._platform_initialized then
         initialize_source_target(context)
-        select_platform_defaults(context.uname, context.is_darwin)
+        if context.target ~= "browser" then select_platform_defaults(context.uname, context.is_darwin) end
+        local ready, err = driver._finish_target_initialization(context)
+        if not ready then return nil, err end
         return true, context.uname, context.is_darwin
     end
 
@@ -640,7 +770,9 @@ function driver.initialize_platform(context)
         context.is_darwin = false
         context._platform_initialized = true
         initialize_source_target(context)
-        select_platform_defaults(context.uname, false)
+        if context.target ~= "browser" then select_platform_defaults(context.uname, false) end
+        local ready, err = driver._finish_target_initialization(context)
+        if not ready then return nil, err end
         return true, context.uname, false
     end
 
@@ -666,12 +798,15 @@ function driver.initialize_platform(context)
     -- Retain the historical process-visible fields for build/publication APIs.
     -- The subprocess which populates them now belongs to an explicit resolver
     -- context instead of running while this module is loaded.
-    select_platform_defaults(uname, context.is_darwin)
+    if context.target ~= "browser" then select_platform_defaults(uname, context.is_darwin) end
+    local ready, err = driver._finish_target_initialization(context)
+    if not ready then return nil, err end
     return true, uname, context.is_darwin
 end
 
 function driver.context_target(context)
     if type(context) == "table" and context.io and context.target then
+        driver.assert_target_context(context)
         return context.target
     end
     local ok, err = driver.initialize_platform(context)
@@ -689,7 +824,11 @@ function driver.validate_target(context, value, origin)
         return nil, prefix .. ": 'native' selects source files for native hosts; " ..
             "it is not a compilation target"
     elseif value == "browser" then
-        return nil, prefix .. " is not available yet"
+        if context.host_target ~= "linux" and context.host_target ~= "darwin" then
+            return nil, "browser builds are supported from Linux and macOS hosts (host is " ..
+                context.host_target .. ")"
+        end
+        return value
     elseif value == "linux" or value == "darwin" or value == "windows" then
         if value == context.host_target then return value end
         return nil, prefix .. ": native cross-compilation is not supported " ..
@@ -705,9 +844,16 @@ function driver.configure_foreign_c(context)
         error("foreign C configuration requires a resolver context", 2)
     end
     compiler_io.validate(context.io, 2)
+    driver.assert_target_context(context)
     local io_strategy = context.io
     local platform_ok, platform_result = driver.initialize_platform(context)
     local platform_err = not platform_ok and platform_result or nil
+    if not platform_ok then return nil, platform_err end
+    if context.target_descriptor then
+        context.foreign_c_profile_error = nil
+        context.foreign_c_configuration_id = driver.FOREIGN_C_CONFIGURATION_ID
+        return true
+    end
 
     -- Configuration is replaceable in embeddings and tests. A profile belongs
     -- to one exact compiler identity and must never survive a reconfiguration.
@@ -957,7 +1103,7 @@ local function default_digest_adapter()
 end
 
 -- Implementation notes: doc/implementation/driver.md#drivernew_resolver_contextoptions
-function driver.new_resolver_context(options)
+function driver._new_resolver_context(options, target_descriptor)
     options = options or {}
     if type(options) ~= "table" then
         error("resolver context options must be a table", 2)
@@ -968,9 +1114,11 @@ function driver.new_resolver_context(options)
     end
     local cache_valid, cache_error = cacheadapter.validate(options.cache_adapter)
     if not cache_valid then error(cache_error, 2) end
-    local embedded_interface_provider, embedded_error =
-        validate_embedded_interface_provider(
-            options.embedded_interface_provider)
+    local embedded_interface_provider, embedded_error
+    if options.target ~= "browser" then
+        embedded_interface_provider, embedded_error =
+            validate_embedded_interface_provider(options.embedded_interface_provider)
+    end
     if embedded_error then
         error("invalid embedded_interface_provider: " .. embedded_error, 2)
     end
@@ -1065,6 +1213,8 @@ function driver.new_resolver_context(options)
     end
     local context = {
         _resolver_context = true,
+        _target_initializing = true,
+        target_descriptor = target_descriptor,
         io = io_strategy,
         target = options.target ~= "" and options.target or nil,
         cache_adapter = options.cache_adapter or default_digest_adapter(),
@@ -1108,10 +1258,26 @@ function driver.new_resolver_context(options)
     }
     local initialized, layout_error = driver.initialize_layout(context)
     if not initialized then
-        error("cannot initialize compiler layout: " ..
-            tostring(layout_error), 2)
+        context._target_initializing = nil
+        error("cannot initialize compiler layout: " .. tostring(layout_error), 2)
     end
+    if context.target and context.target ~= "browser" then
+        driver.activate_target_caches(context, context.target)
+    else
+        local target_error
+        initialized, target_error = driver.initialize_platform(context)
+        if not initialized then
+            context._target_initializing = nil
+            driver.close_resolver_context(context)
+            error(target_error, 0)
+        end
+    end
+    context._target_initializing = nil
     return context
+end
+
+function driver.new_resolver_context(options)
+    return driver._new_resolver_context(options)
 end
 
 local function remember_used_compiled_interface(context, modname, modtype)
@@ -1233,14 +1399,14 @@ local function rename_output(from, to)
     return compiler_io.new_sync():rename(from, to)
 end
 
-local function run_argv(argv, verbose)
+local function run_argv(argv, verbose, discard_output)
     local cmd, err = command_argv(argv)
     if not cmd then return nil, err end
     if verbose then io.stderr:write(cmd, "\n") end
-    if driver.LIVE_PROGRESS then
-        -- A live region owns terminal stderr: run the child (and its shell
-        -- wrapper) with captured output and replay it above the region. The
-        -- exit status and the diagnostic text stay exactly as inherited.
+    if discard_output or driver.LIVE_PROGRESS then
+        -- Capability checks discard expected tool rejections even without a
+        -- progress renderer. Other children replay captured output above the
+        -- live region. Both paths preserve the command's exit status.
         local captured
         if platform.windows then
             captured = require("titan-compiler.process").capture(argv)
@@ -1251,11 +1417,11 @@ local function run_argv(argv, verbose)
                         driver.OUTPUT_LOCKS:descriptors() or nil,
                 })
         end
-        if captured.output and captured.output ~= "" then
+        if not discard_output and captured.output and captured.output ~= "" then
             driver.LIVE_PROGRESS:write(captured.output)
         end
         if not captured.started then
-            if captured.diagnostic then
+            if not discard_output and captured.diagnostic then
                 driver.LIVE_PROGRESS:write(captured.diagnostic .. "\n")
             end
             return nil, "exit", 127
@@ -1469,6 +1635,13 @@ local WINDOWS_LUA_DLL_IMPORTS = {
 }
 
 local function compiler_argv(include_extra_compile_flags, context, user_c_helper)
+    if context and context.target == "browser" then
+        local descriptor, err = driver.context_target_descriptor(context)
+        if not descriptor then return nil, err end
+        local args = { table.unpack(descriptor.tools.cc) }
+        append_argv(args, descriptor.compile_flags)
+        return args
+    end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
     local supplied_context = context
     if context or not driver.UNAME then
@@ -1519,8 +1692,9 @@ local function compiler_argv(include_extra_compile_flags, context, user_c_helper
     return argv
 end
 
-local function append_compile_includes(args)
-    for _, directory in ipairs(driver.foreign_include_dirs()) do
+local function append_compile_includes(args, context)
+    local descriptor = context and context.target_descriptor
+    for _, directory in ipairs(descriptor and descriptor.include_dirs or driver.foreign_include_dirs()) do
         append_argv(args, { "-I", directory })
     end
 end
@@ -1529,19 +1703,19 @@ end
 -- descriptor below represents this as compiler argv + compile flags + ordered
 -- include roots; cprobe/cdriver reconstruct the same sequence before adding
 -- their private source/output arguments.
-function driver.generated_compile_prefix()
-    local args, err = compiler_argv(true)
+function driver.generated_compile_prefix(context)
+    local args, err = compiler_argv(true, context)
     if not args then return nil, err end
-    append_compile_includes(args)
+    append_compile_includes(args, context)
     return args
 end
 
 -- Authored --c-source helpers are the user's own C: they compile with stock
 -- Lua conventions and never receive Titan's Windows DLL import definitions.
-function driver.authored_c_compile_prefix()
-    local args, err = compiler_argv(true, nil, true)
+function driver.authored_c_compile_prefix(context)
+    local args, err = compiler_argv(true, context, true)
     if not args then return nil, err end
-    append_compile_includes(args)
+    append_compile_includes(args, context)
     return args
 end
 
@@ -1582,7 +1756,11 @@ function driver.output_tool_descriptors(context, kind)
     local descriptor, descriptor_error = driver.toolchain_descriptor(context)
     if not descriptor then return nil, descriptor_error end
     local tools, uncacheable = {}, nil
-    if kind == "library" and not platform.windows then
+    local browser = context.target_descriptor
+    if browser then
+        tools.ar = { table.unpack(browser.tools.ar) }
+        tools.ranlib = { table.unpack(browser.tools.ranlib) }
+    elseif kind == "library" and not platform.windows then
         local ar, ar_error = perf.tool_command(driver.AR, "AR")
         if not ar then return nil, ar_error end
         local ranlib, ranlib_error = perf.tool_command(driver.RANLIB, "RANLIB")
@@ -1594,7 +1772,7 @@ function driver.output_tool_descriptors(context, kind)
         if not rc then return nil, rc_error end
         tools.rc = rc
     end
-    if kind and driver.IS_DARWIN then
+    if kind and driver.IS_DARWIN and not browser then
         local dsymutil, dsymutil_error, dsymutil_status =
             perf.dsymutil_executable(context)
         if not dsymutil then
@@ -1616,8 +1794,8 @@ function driver.output_tool_descriptors(context, kind)
         uncacheable = status == "uncertified" and details or uncacheable,
         directory = context.output_root or
             driver.TITAN_SOURCE_PATH:match("[^;]+") or ".",
-        darwin = driver.IS_DARWIN == true,
-        windows = platform.windows,
+        darwin = not browser and driver.IS_DARWIN == true,
+        windows = not browser and platform.windows,
         tools = tools,
     }
 end
@@ -1641,6 +1819,18 @@ end
 -- `compile_flags` deliberately includes Titan's fixed language selection, so
 -- cprobe is told not to synthesize a second `-std` spelling.
 function driver.toolchain_descriptor(context)
+    if context and context.target == "browser" then
+        local descriptor, err = driver.context_target_descriptor(context)
+        if not descriptor then return nil, err end
+        return {
+            io = context.io, compiler_argv = { table.unpack(descriptor.tools.cc) },
+            compile_flags = { table.unpack(descriptor.compile_flags) },
+            language_mode = "c99", language_flag = false, cppflags = {}, cflags = {},
+            include_dirs = { table.unpack(descriptor.include_dirs) },
+            profile = context.target_profile, profile_identity = descriptor.profile_identity,
+            target_identity = descriptor.identity,
+        }
+    end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
     local cc, err = perf.tool_command(driver.CC, "CC")
     if not cc then return nil, err end
@@ -1693,6 +1883,7 @@ end
 -- No filesystem discovery is performed here; provider precedence is already
 -- settled by this resolver's complete source inventory.
 function driver.completion_binary_catalog(context)
+    driver.assert_target_context(context)
     local result = {}
     -- Finalization selects whole archives, including siblings that ordinary
     -- imports never loaded. Capture their interfaces without selecting any
@@ -1762,6 +1953,7 @@ local function context_file_digest(context)
 end
 
 function driver.get_probe_service(context)
+    driver.assert_target_context(context)
     if context.foreign_c_configuration_id ~=
        driver.FOREIGN_C_CONFIGURATION_ID then
         local configured, configure_err = driver.configure_foreign_c(context)
@@ -1820,8 +2012,10 @@ function driver.get_probe_service(context)
     for _, directory in ipairs(toolchain.include_dirs or {}) do
         include_dirs[#include_dirs + 1] = directory
     end
-    for _, directory in ipairs(context.extra_ffi_include_dirs or {}) do
-        include_dirs[#include_dirs + 1] = directory
+    if not context.target_descriptor then
+        for _, directory in ipairs(context.extra_ffi_include_dirs or {}) do
+            include_dirs[#include_dirs + 1] = directory
+        end
     end
     toolchain.include_dirs = include_dirs
     local service
@@ -1856,7 +2050,9 @@ function driver.get_probe_service(context)
         execution_trace = execution_trace,
         toolchain = toolchain,
         verbose = context.probe_verbose,
-        cache_directory = context.transient_caches and "" or driver.PROBE_CACHE_DIRECTORY,
+        cache_directory = context.transient_caches and "" or
+            (context.target_descriptor and context.target_descriptor.probe_cache_directory or
+                (not context.target_descriptor and driver.PROBE_CACHE_DIRECTORY or nil)),
         jobs = driver.probe_batch_jobs(context),
     })
     if not service then
@@ -1871,6 +2067,12 @@ end
 -- without touching a C compiler or SDK. Each checker clones this profile;
 -- every native probe still crosses get_probe_service's live-target boundary.
 function driver.get_target_profile(context)
+    driver.assert_target_context(context)
+    if context.target == "browser" then
+        local descriptor, err = driver.context_target_descriptor(context)
+        if not descriptor then return nil, err end
+        return context.target_profile
+    end
     local provider = available_embedded_interface_provider(context)
     if provider and provider.target_profile then
         context.used_embedded_target_profile_identity =
@@ -1980,6 +2182,7 @@ local function resolver_context_from_options(options, level)
     elseif type(options) ~= "table" then
         error("resolver options must be a table", level)
     elseif options._resolver_context == true then
+        driver.assert_target_context(options)
         compiler_io.validate(options.io, level)
         return options, false
     elseif options.context ~= nil then
@@ -1987,6 +2190,7 @@ local function resolver_context_from_options(options, level)
         if type(context) ~= "table" or context.io == nil then
             error("options.context must be a resolver context", level)
         end
+        driver.assert_target_context(context)
         compiler_io.validate(context.io, level)
         return context, false
     end
@@ -2095,35 +2299,16 @@ function driver.serialize_source_interface(entry)
     return sourceinterface.serialize(normalized)
 end
 
--- Recompute the identities of an already-resolved module header closure. This
--- never searches for a different header wholesale: `search` entries are the
--- exact ordered candidates cdriver consulted, including misses, so a new
--- earlier shadow changes identity without walking an include tree. `origin`
--- entries recheck the realpath that names a C declaration's nominal scope.
--- The fourth result classifies the first changed input as
--- `c-input <path>: content|provenance|missing|unreadable|candidate|changed-during-read`.
--- Implementation notes: doc/implementation/driver.md#driverrestat_c_header_dependenciesdependencies-options
-function driver.restat_c_header_dependencies(value, options)
-    local context, owns_context =
-        resolver_context_from_options(options, 2)
+-- File-only verification also serves publication's fresh digest/header memo;
+-- that memo is not a semantic resolver and must not activate a target.
+function perf.restat_c_header_dependencies(value, validation_options)
     local dependencies, err = copy_c_header_dependencies(value)
-    if not dependencies then
-        if owns_context then driver.close_resolver_context(context) end
-        return nil, err
-    end
+    if not dependencies then return nil, err end
     local result, changed, classified = {}, false, nil
-    local validation_options = {
-        io = context.io,
-        cache_adapter = context.cache_adapter,
-        header_observations = context.header_observations,
-        header_validation = options and options.header_validation
-            or context.header_validation or {},
-    }
     for index, dependency in ipairs(dependencies) do
         local current, identity_error, input_changed, reason =
             cdriver.revalidate_header_input(dependency, validation_options)
         if not current then
-            if owns_context then driver.close_resolver_context(context) end
             return nil, "cannot fingerprint C header input '" ..
                 dependency.path .. "': " .. tostring(identity_error),
                 input_changed == true,
@@ -2137,11 +2322,33 @@ function driver.restat_c_header_dependencies(value, options)
         end
         changed = changed or input_changed
     end
+    return result, nil, changed, classified
+end
+
+-- Recompute the identities of an already-resolved module header closure. This
+-- never searches for a different header wholesale: `search` entries are the
+-- exact ordered candidates cdriver consulted, including misses, so a new
+-- earlier shadow changes identity without walking an include tree. `origin`
+-- entries recheck the realpath that names a C declaration's nominal scope.
+-- The fourth result classifies the first changed input as
+-- `c-input <path>: content|provenance|missing|unreadable|candidate|changed-during-read`.
+-- Implementation notes: doc/implementation/driver.md#driverrestat_c_header_dependenciesdependencies-options
+function driver.restat_c_header_dependencies(value, options)
+    local context, owns_context =
+        resolver_context_from_options(options, 2)
+    local result, err, changed, classified =
+        perf.restat_c_header_dependencies(value, {
+            io = context.io,
+            cache_adapter = context.cache_adapter,
+            header_observations = context.header_observations,
+            header_validation = options and options.header_validation
+                or context.header_validation or {},
+        })
     if owns_context then
         local closed, close_error = driver.close_resolver_context(context)
-        if not closed then return nil, close_error end
+        if result and not closed then return nil, close_error end
     end
-    return result, nil, changed, classified
+    return result, err, changed, classified
 end
 
 function driver.close_loader(loader)
@@ -4020,6 +4227,9 @@ end
 -- a membership absence; an open failure is terminal. Callers decide whether a
 -- clean nonclaim is skippable (ancestor) or an error (exact candidate).
 local function probe_compiled_interface(modname, binf, options)
+    if options and options.target == "browser" then
+        return "error", "browser providers require static archives"
+    end
     local decoded = perf.provider_decoding_cache(options, binf)
     local prefix = driver.mangle_module_name(modname)
     local support = require("titan")
@@ -4147,6 +4357,10 @@ end
 -- same relative pathname in all later roots, even when it is a clean nonclaim.
 -- Implementation notes: doc/implementation/multi-module-libraries.md#claim-and-terminal-error-states
 function driver.find_dynamic_interface(paths, modname, context)
+    if context then
+        driver.assert_target_context(context)
+        if context.target == "browser" then return nil end
+    end
     local candidates = driver.module_binary_candidates(modname)
     if #candidates == 0 then return nil end
     local occupied = {}
@@ -4212,7 +4426,10 @@ local function inspect_static_provider(context, filename, relative)
         return cached
     end
 
+    local browser, descriptor_error = driver.context_target_descriptor(context)
+    if descriptor_error then return nil, descriptor_error end
     local options = {
+        target = browser and browser.fingerprint or nil,
         io = context.io,
         expected_abi = driver.TITAN_ABI_VERSION,
         require_layouts = not context.analysis_only,
@@ -4228,14 +4445,18 @@ local function inspect_static_provider(context, filename, relative)
     -- state. Absent, coarse, changed or rejected plan metadata leaves the
     -- archive itself authoritative.
     local provider, scan_err
-    local planned = decoded and decoded.precise and context.planned_archives
-        and context.planned_archives[filename]
+    local planned = not browser and decoded and decoded.precise and
+        context.planned_archives and context.planned_archives[filename]
     if type(planned) == "table" and
        incremental.observations_equal(planned.observation, decoded.precise) then
         provider = staticmetadata.metadata_view(filename, planned.modules, options)
     end
     if not provider then
         provider, scan_err = staticmetadata.scan_archive(filename, options)
+    end
+    if provider and browser then
+        local valid, validation_error = driver.validate_browser_provider(provider)
+        if not valid then provider, scan_err = nil, validation_error end
     end
     context.provider_cache_identity[filename] = decoded
     if not provider then
@@ -4270,12 +4491,21 @@ end
 
 function driver.find_static_interface(paths, modname, context)
     context = context or driver.new_resolver_context()
+    driver.assert_target_context(context)
     local candidates =
         driver.module_compiled_candidates(modname, ".a")
     if #candidates == 0 then return nil end
     local occupied = {}
 
-    local roots, roots_error = driver.titan_bin_path_entries(paths)
+    local roots, roots_error
+    if context.target == "browser" then
+        local descriptor, descriptor_error = driver.context_target_descriptor(context)
+        if not descriptor then return nil, descriptor_error end
+        roots, roots_error = driver.titan_bin_path_entries(paths, ".")
+        if roots then table.insert(roots, 1, descriptor.paths.titan_bin) end
+    else
+        roots, roots_error = driver.titan_bin_path_entries(paths)
+    end
     if not roots then return nil, roots_error end
     for _, root in ipairs(roots) do
         local absolute_root, root_error = normalize_root(root, context.io)
@@ -4340,6 +4570,7 @@ end
 -- enough for the loader's whole-provider overlap rebind to replace them (or
 -- report that no compatible disk fallback exists).
 local function reconcile_embedded_import_cache(context, static_deps)
+    driver.assert_target_context(context)
     local provider = available_embedded_interface_provider(context)
     local configured = context.embedded_interface_provider
     if provider and static_deps then
@@ -4385,10 +4616,12 @@ end
 
 function driver.find_dependency_interface(paths, modname, context)
     context = context or driver.new_resolver_context()
-    local embedded = find_embedded_interface(modname, context)
+    driver.assert_target_context(context)
+    local browser = context.target == "browser"
+    local embedded = not browser and find_embedded_interface(modname, context) or nil
     if embedded then return embedded end
-    local formats = context.prefer_static
-        and { "static", "dynamic" } or { "dynamic", "static" }
+    local formats = browser and { "static" } or
+        (context.prefer_static and { "static", "dynamic" } or { "dynamic", "static" })
 
     for _, format in ipairs(formats) do
         if format == "dynamic" then
@@ -4592,7 +4825,7 @@ function incremental_options(context)
         return nil, "cannot certify compiler configuration: " ..
             tostring(root_error)
     end
-    local prefix, prefix_error = driver.generated_compile_prefix()
+    local prefix, prefix_error = driver.generated_compile_prefix(context)
     if not prefix then return nil, prefix_error end
     local toolchain, toolchain_error = driver.toolchain_descriptor(context)
     if not toolchain then return nil, toolchain_error end
@@ -4627,6 +4860,7 @@ function driver.incremental_configuration(context)
     if type(context) ~= "table" or context.io == nil then
         error("configuration certification requires a resolver context", 2)
     end
+    driver.assert_target_context(context)
     if context.incremental_configuration then
         return context.incremental_configuration
     end
@@ -4659,6 +4893,7 @@ end
 -- or (type recovery only, without selecting anything) the provider ordinary
 -- lookup would choose, which an exposer can reach only through globals.
 local function certificate_dependency(context, name, linked_names)
+    driver.assert_target_context(context)
     local mod = driver.imported[name]
     if mod and mod ~= CIRCULAR_MARK then
         return mod, linked_names[name] == true
@@ -4694,6 +4929,7 @@ local function resolver_plan(context, linked_names)
         return linked
     end
     function plan.provider_file(name)
+        driver.assert_target_context(context)
         local mod = driver.imported[name]
         if not mod or mod == CIRCULAR_MARK or mod.kind ~= "dynamic" then
             return nil
@@ -4728,6 +4964,7 @@ function driver.defaultloader(static_deps, options)
     options = options or {}
     local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
+    driver.assert_target_context(context)
     local source_roots = options.source_roots or {}
     -- The object code-generation policy certification compares records
     -- against; compilation requests of the same invocation use these values.
@@ -6018,6 +6255,7 @@ function driver.defaultloader(static_deps, options)
     end
 
     local function loader(modname, request)
+        driver.assert_target_context(context)
         if not staticmetadata.valid_module_name(modname) then
             return false, "invalid logical Titan module name " ..
                 string.format("%q", modname)
@@ -6343,6 +6581,7 @@ function driver.restore_source_object(context, modname, source, record, options)
     if type(context) ~= "table" or context.io == nil then
         error("restoring an object requires a resolver context", 2)
     end
+    driver.assert_target_context(context)
     local binding = context.loader and loader_contexts[context.loader]
     if not binding or binding.context ~= context or not binding.restore then
         error("restoring an object requires a loader bound to its " ..
@@ -6364,6 +6603,7 @@ function driver.resolve_source(context, modname, source_path)
     if type(context) ~= "table" or context.io == nil then
         error("source lookup requires a resolver context", 2)
     end
+    driver.assert_target_context(context)
     return resolve_source(source_path or driver.TITAN_SOURCE_PATH, modname,
         context)
 end
@@ -6428,6 +6668,7 @@ function driver.resolution_plan(context)
     if type(context) ~= "table" or context.io == nil then
         error("a resolution plan requires a resolver context", 2)
     end
+    driver.assert_target_context(context)
     local binding = context.loader and loader_contexts[context.loader]
     local planning = binding and binding.planning
     if not planning or not planning.open then
@@ -6525,6 +6766,7 @@ function driver.resolution_plan(context)
     local accepted = {}
     local plan = { modules = modules, order = order, archives = archives }
     function plan.linked(name)
+        driver.assert_target_context(context)
         local module = modules[name]
         if module and module.kind == "unavailable" then return nil end
         local mod, is_linked = certificate_dependency(context, name, linked)
@@ -6532,10 +6774,12 @@ function driver.resolution_plan(context)
         return is_linked
     end
     function plan.provider_file(name)
+        driver.assert_target_context(context)
         local module = modules[name]
         return module and module.kind == "dynamic" and module.provider_file or nil
     end
     function plan.digest(name, view)
+        driver.assert_target_context(context)
         local module = modules[name]
         if module and module.kind == "unavailable" then
             return nil, "unavailable"
@@ -6549,6 +6793,7 @@ function driver.resolution_plan(context)
         return incremental.interface_digest(context, mod, view)
     end
     function plan.update(name, certified)
+        driver.assert_target_context(context)
         local module = modules[name]
         if not module or module.kind ~= "source" then
             error("only planned source modules accept a certified record", 2)
@@ -6558,6 +6803,7 @@ function driver.resolution_plan(context)
         accepted[name] = certified
     end
     function plan.accepted(name)
+        driver.assert_target_context(context)
         return accepted[name]
     end
     return plan
@@ -6625,11 +6871,15 @@ function driver.worker_configuration(context)
     -- This is requested lazily, after graph/output preflight and before the
     -- first worker starts. Source-checkout runtime builds belong exclusively
     -- to the coordinator, including a certified hit that falls back to a miss.
-    local runtime_ok, runtime_error = perf.check_runtime(context.probe_verbose)
-    if not runtime_ok then return nil, runtime_error end
+    if not context.target_descriptor then
+        local runtime_ok, runtime_error = perf.check_runtime(context.probe_verbose)
+        if not runtime_ok then return nil, runtime_error end
+    end
     local policy = context.codegen_policy or {}
     return {
         protocol = version.BUILD_WORKER_PROTOCOL,
+        target_descriptor = context.target_descriptor and
+            driver._browser_target.export(context.target_descriptor) or nil,
         driver = {
             source_path = driver.TITAN_SOURCE_PATH,
             bin_path = driver.TITAN_BIN_PATH,
@@ -6683,6 +6933,13 @@ function driver.new_worker_context(configuration, io_strategy)
              type(configuration.uncertified) == "string")) then
         return nil, "incompatible build worker configuration"
     end
+    local target_descriptor
+    if configuration.resolver.target == "browser" then
+        target_descriptor = driver._browser_target.import(configuration.target_descriptor)
+        if not target_descriptor then return nil, "incompatible build worker configuration" end
+    elseif configuration.target_descriptor ~= nil then
+        return nil, "incompatible build worker configuration"
+    end
     local settings = configuration.driver
     driver.TITAN_SOURCE_PATH = settings.source_path
     driver.TITAN_BIN_PATH = settings.bin_path
@@ -6702,7 +6959,7 @@ function driver.new_worker_context(configuration, io_strategy)
             "missing or stale (it lacks _sha256_binary or _sha256_stream)"
     end
     local resolver = configuration.resolver
-    local context = driver.new_resolver_context({
+    local initialized, context = pcall(driver._new_resolver_context, {
         io = io_strategy,
         target = resolver.target,
         cache_adapter = { sha256_binary = support._sha256_binary,
@@ -6715,7 +6972,11 @@ function driver.new_worker_context(configuration, io_strategy)
         jobs = resolver.jobs,
         frontend = resolver.frontend,
         extra_ffi_include_dirs = resolver.extra_ffi_include_dirs,
-    })
+    }, target_descriptor)
+    if not initialized then
+        if type(context) ~= "string" then error(context, 0) end
+        return nil, context
+    end
     local function fail(message)
         driver.close_resolver_context(context)
         return nil, message
@@ -6764,6 +7025,7 @@ end
 -- unlinked first; then the higher parts and coverage notes its record names.
 -- An interruption at any later point leaves no acceptable object.
 function driver.invalidate_source_object(context, modname, source)
+    driver.assert_target_context(context)
     local stem = driver.module_output_stem(
         source.native_output or source.main, modname)
     local primary = stem .. ".o"
@@ -6810,6 +7072,7 @@ end
 -- coordinator publishes. Returns `{ modname, object, objects, staged =
 -- {{from, to, role}}, diagnostics = {} }` or `nil, diagnostics text`.
 function driver.compile_planned_module(context, modname, options)
+    driver.assert_target_context(context)
     options = options or {}
     local plan = options.plan
     if type(plan) ~= "table" or plan.protocol ~= version.BUILD_WORKER_PROTOCOL
@@ -6996,7 +7259,7 @@ local function revalidate_uncertified_module(context, modname, source, record, s
             record.ffi_header_descriptor and
                 record.ffi_header_descriptor.search_inputs or {} }) do
         local headers, header_error, changed, reason =
-            driver.restat_c_header_dependencies(inputs, { context = fresh })
+            perf.restat_c_header_dependencies(inputs, fresh)
         if not headers or changed then return nil, reason or header_error end
     end
     return true
@@ -7011,6 +7274,7 @@ end
 -- Returns the published metadata (`status`, `record`, `object`, `objects`,
 -- `imports`), with status `built` rather than `hit` when uncertified.
 function driver.publish_staged_module(context, result)
+    driver.assert_target_context(context)
     local modname = result.modname
     local primary, parts = nil, {}
     for _, staged in ipairs(result.staged or {}) do
@@ -7285,6 +7549,7 @@ end
 
 function driver.finalize_resolver_context(context)
     context = context or driver.new_resolver_context()
+    driver.assert_target_context(context)
     reconcile_embedded_import_cache(context)
     if context.finalized_selection and
        perf.resolver_selection(context, context.finalized_selection) then
@@ -7661,6 +7926,7 @@ function driver.tableloader(modtable, imported, deps, options)
     options = options or {}
     local owns_context = options.context == nil
     local context = options.context or driver.new_resolver_context(options)
+    driver.assert_target_context(context)
     local source_view = options.interface == "source"
 
     local function source_requested(request)
@@ -7701,6 +7967,7 @@ function driver.tableloader(modtable, imported, deps, options)
     end
 
     local function loader(modname, request)
+        driver.assert_target_context(context)
         if not staticmetadata.valid_module_name(modname) then
             return false, "invalid logical Titan module name " ..
                 string.format("%q", modname)
@@ -7850,6 +8117,7 @@ local function static_flag()
 end
 
 function driver.compile_module(modname, mod, static_deps, verbose, options)
+    if options and options.context then driver.assert_target_context(options.context) end
     if mod.compiled then return true, nil, nil end
     local ok, err, libname, native_references, objects = driver.compile(
         modname, mod.ast, mod.native_output or mod.filename,
@@ -8493,6 +8761,8 @@ driver.GENERATED_C_MARKER = "/* Generated by Titan: module C translation unit. *
 local function prepare_compile(
         modname, ast, sourcef, static_deps, verbose, options, source_entry,
         header_plan)
+    local context = options and options.context
+    if context then driver.assert_target_context(context) end
     if not staticmetadata.valid_module_name(modname) then
         return nil, "invalid logical Titan module name " ..
             string.format("%q", modname)
@@ -8506,8 +8776,15 @@ local function prepare_compile(
         or split_threshold % 1 ~= 0 then
         return nil, "split_threshold requires a nonnegative integer"
     end
-    local runtime_ok, runtime_err = perf.check_runtime(verbose)
-    if not runtime_ok then return nil, runtime_err end
+    if context and context.target == "browser" then
+        local supported, flag_error = driver._browser_target.validate_flags(
+            options.extra_compile_flags, "--cflag")
+        if not supported then return nil, flag_error end
+    end
+    if not (context and context.target == "browser") then
+        local runtime_ok, runtime_err = perf.check_runtime(verbose)
+        if not runtime_ok then return nil, runtime_err end
+    end
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     static_deps = static_deps or {}
     local stem = driver.module_output_stem(sourcef, modname)
@@ -8557,7 +8834,6 @@ local function prepare_compile(
     -- a certificate. Producer self digests come from this coder output, so a
     -- fresh producer and its later restored record cannot disagree; consumers
     -- planned in the same invocation read them when their records render.
-    local context = options and options.context
     local certify = context ~= nil and source_entry ~= nil and
         source_entry.source_certificate ~= nil
     if certify then
@@ -8712,7 +8988,7 @@ local function prepare_compile(
         end
     end
 
-    local base_args, flags_err = driver.generated_compile_prefix()
+    local base_args, flags_err = driver.generated_compile_prefix(context)
     if not base_args then return nil, flags_err end
     append_argv(base_args, test_flags)
     append_argv(base_args, options and options.extra_compile_flags)
@@ -8797,6 +9073,7 @@ local function prepare_compile(
         inputs[#inputs + 1] = input
     end
     local function materialize()
+        if context then driver.assert_target_context(context) end
         local output_ok, output_err = ensure_output_parent(filename)
         if not output_ok then return nil, output_err end
         if header_plan and owns_header_plan then
@@ -9261,6 +9538,14 @@ end -- native batch helpers
 -- Implementation notes: doc/implementation/driver.md#parallel-generated-c-compilation
 driver.run_prepared_compiles = run_prepared_compiles
 
+function perf.assert_compile_request_contexts(requests)
+    for _, request in ipairs(requests) do
+        assert(type(request) == "table", "each compilation request must be a table")
+        local context = request.options and request.options.context
+        if context then driver.assert_target_context(context) end
+    end
+end
+
 local function validate_compile_requests(requests)
     local module_indices = {}
     local outputs = {}
@@ -9313,6 +9598,7 @@ end
 -- extend this plan with provider/entrypoint outputs before materialization.
 function driver.plan_compile_requests(
         requests, verbose, native_inputs, symbol_owners, header_plans)
+    perf.assert_compile_request_contexts(requests)
     validate_compile_requests(requests)
     local plans, outputs, inputs, symbols, errors = {}, {}, {}, {}, {}
     local input_seen, headers_by_name = {}, {}
@@ -9389,6 +9675,7 @@ function driver.compile_modules(requests, parallelism, verbose, plans)
     assert(type(requests) == "table", "requests must be a table")
     assert(type(parallelism) == "number" and parallelism >= 1 and
         parallelism % 1 == 0, "parallelism must be a positive integer")
+    perf.assert_compile_request_contexts(requests)
     local results, plan_err = {}
     if not plans then plans, plan_err = driver.plan_compile_requests(requests, verbose) end
     if not plans then
@@ -9993,6 +10280,54 @@ function driver.prepare_output_root(directory)
     return output
 end
 
+-- Called under the output-domain lock. A host only observes markers; only an
+-- explicitly owned, empty browser root can acquire one.
+function driver.validate_output_target(context, directory, create)
+    driver.assert_target_context(context)
+    local strategy = context.io
+    local selected = driver.context_target(context)
+    local marker = path.join(directory, ".titan-target")
+    local function read_error(reason)
+        return nil, string.format("cannot read target marker %q: %s",
+            marker, tostring(reason))
+    end
+    local stat, stat_error = strategy:lstat(marker)
+    if stat_error then return read_error(stat_error) end
+    if stat then
+        if stat.kind ~= "file" or stat.size > 16 then
+            return read_error("invalid target marker")
+        end
+        local contents, err = strategy:read_file(marker)
+        if not contents then return read_error(err) end
+        local marked = contents:match("^([a-z]+)\n$")
+        if not marked or not source_labels[marked] then
+            return read_error("invalid target marker")
+        end
+        if marked ~= selected then
+            return nil, string.format(
+                "output root %q belongs to target %q, not %q; use a separate --output directory",
+                directory, marked, selected)
+        end
+        return true
+    end
+    if selected ~= "browser" or not create then return true end
+    local entries, list_error = strategy:list(directory)
+    if not entries then return read_error(list_error) end
+    for _, name in ipairs(entries) do
+        if name ~= "." and name ~= ".." and name ~= ".titan-build.lock" then
+            return nil, string.format(
+                "browser output root %q is not empty and has no .titan-target marker; use a separate --output directory",
+                directory)
+        end
+    end
+    local written, write_error = strategy:write_file(marker, "browser\n")
+    if not written then
+        return nil, string.format("cannot write target marker %q: %s",
+            marker, tostring(write_error))
+    end
+    return true
+end
+
 function driver.sibling_temporary_path(filename, strategy)
     strategy = strategy or compiler_io.new_sync()
     local unique, temporary_error = strategy:tmpname()
@@ -10103,6 +10438,7 @@ end
 -- library policy; `protection.compiler_tools` (nil when uncertified) and
 -- `protection.output_tools` are the compiler and output-tool identities.
 function driver.cleanup_stale_staging(context, outputs, locks, protection)
+    driver.assert_target_context(context)
     if not platform.windows then return true end
     if not locks or not locks.entries or #locks.entries == 0 then
         return nil, "stale staging cleanup requires held output locks"
@@ -10405,8 +10741,11 @@ end
 -- The first real generated module object is the authoritative target. It must
 -- remain a single-architecture relocatable object and carry its own validated
 -- one-key Titan metadata section.
-function driver.derive_target_fingerprint(filename, expected_module)
-    local parsed, scan_err = scan_native_file(filename, nil, true)
+function driver.derive_target_fingerprint(filename, expected_module, context)
+    local descriptor, descriptor_error = driver.context_target_descriptor(context)
+    if descriptor_error then return nil, descriptor_error end
+    local parsed, scan_err = scan_native_file(
+        filename, descriptor and descriptor.fingerprint or nil, true)
     if not parsed then return nil, scan_err end
     if parsed.kind ~= "object" then
         return nil, "generated module object '" .. tostring(filename) ..
@@ -10425,13 +10764,13 @@ function driver.derive_target_fingerprint(filename, expected_module)
 end
 
 function driver.validate_generated_objects(objects, target, entries, context)
-    context = context or { io = compiler_io.new_sync() }
+    context = context or driver.new_resolver_context()
     for _, input in ipairs(objects or {}) do
         local filename = type(input) == "table" and input.filename or input
         local expected_module =
             type(input) == "table" and input.modname or nil
         local fingerprint, parsed_or_err =
-            driver.derive_target_fingerprint(filename, expected_module)
+            driver.derive_target_fingerprint(filename, expected_module, context)
         if not fingerprint then return nil, parsed_or_err end
         local matches, mismatch =
             staticmetadata.fingerprint_matches(fingerprint, target)
@@ -10449,6 +10788,12 @@ function driver.validate_generated_objects(objects, target, entries, context)
         local part_objects = type(input) == "table" and input.objects or nil
         for part_idx = 2, #(part_objects or {}) do
             local part_file = part_objects[part_idx]
+            if context.target == "browser" and
+               not context.io:stat(part_file) then
+                return nil, string.format(
+                    "browser provider module %q is missing split part %d",
+                    expected_module, part_idx - 1)
+            end
             local part_fingerprint, part_err =
                 incremental.part_fingerprint(context, part_file)
             if not part_fingerprint then
@@ -10474,6 +10819,22 @@ end
 function driver.prepare_static_providers_for_target(providers, target)
     for _, provider in ipairs(providers or {}) do
         local active = provider
+        if target.format == "wasm" then
+            if not active.members then
+                local scanned, err = staticmetadata.scan_archive(
+                    provider.archive or provider.filename, metadata_scan_options(target))
+                if not scanned then return nil, err end
+                local equal, equality_error = driver.compare_archive_entries(
+                    scanned.entries, provider.entries, "planned browser provider")
+                if not equal then return nil, equality_error end
+                provider.members, provider.records, provider.bytes =
+                    scanned.members, scanned.records, scanned.bytes
+                provider.kind, provider.format = "archive", "archive"
+                active = provider
+            end
+            local valid, err = driver.validate_browser_provider(active)
+            if not valid then return nil, err end
+        end
         if provider.kind == "fat_archive" then
             local selected, selection_err =
                 staticmetadata.select_fat_slice(provider, target)
@@ -10617,6 +10978,82 @@ function driver.compare_archive_entries(actual, expected, subject)
     return true
 end
 
+-- Validate reader evidence only; browser providers are never host-loaded.
+function driver.validate_browser_provider(archive, expected_entries, generated_objects)
+    if expected_entries then
+        local valid, err = driver.compare_archive_entries(
+            archive.entries, expected_entries, "browser provider")
+        if not valid then return nil, err end
+    end
+    local primaries, available = {}, generated_objects and {} or nil
+    local function forbidden(name)
+        return name == "dlopen" or name == "dlsym" or
+            type(name) == "string" and
+            (name:match("^backtrace_") or name:match("^__backtrace_"))
+    end
+    for _, member in ipairs(archive.members or {}) do
+        local object = member.object
+        if object.format ~= "wasm" then
+            return nil, tostring(member.origin) ..
+                ": browser provider requires Wasm objects"
+        end
+        if available then
+            available[object.bytes] = (available[object.bytes] or 0) + 1
+        end
+        if object.metadata then primaries[object.metadata.module] = member end
+        for _, import in ipairs(object.imports or {}) do
+            if forbidden(import.name) then
+                return nil, string.format(
+                    "%s: browser provider imports forbidden symbol %q",
+                    member.origin, import.name)
+            end
+        end
+        for _, symbol in ipairs(object.symbols or {}) do
+            if not symbol.defined and forbidden(symbol.name) then
+                return nil, string.format(
+                    "%s: browser provider imports forbidden symbol %q",
+                    member.origin, symbol.name)
+            end
+        end
+    end
+    for _, name in ipairs(archive.key_order or {}) do
+        local primary = primaries[name]
+        local defined = {}
+        for _, symbol in ipairs(primary and primary.object.symbols or {}) do
+            if symbol.defined and symbol.kind == "function" and
+               symbol.binding == "global" then
+                defined[symbol.name] = true
+            end
+        end
+        local prefix = driver.mangle_module_name(name)
+        for _, symbol in ipairs({ prefix .. "_abi", prefix .. "_types",
+                prefix .. "_layouts", prefix .. "_init", "luaopen_" .. prefix }) do
+            if not defined[symbol] then
+                return nil, string.format(
+                    "%s: browser provider module %q requires global non-weak function %q",
+                    primary and primary.origin or archive.origin, name, symbol)
+            end
+        end
+    end
+    for _, generated in ipairs(generated_objects or {}) do
+        for index, filename in ipairs(generated.objects or { generated.filename }) do
+            local bytes = read_binary_file(filename)
+            if bytes and (available[bytes] or 0) > 0 then
+                available[bytes] = available[bytes] - 1
+            elseif index > 1 then
+                return nil, string.format(
+                    "browser provider module %q is missing split part %d",
+                    generated.modname, index - 1)
+            else
+                return nil, string.format(
+                    "browser provider module %q is missing its primary member",
+                    generated.modname)
+            end
+        end
+    end
+    return true
+end
+
 local function merge_manifest_entry(entries, entry)
     if not entry then return true end
     local previous = entries[entry.module]
@@ -10744,22 +11181,22 @@ local function copy_argv(argv)
     return copy
 end
 
-local function run_archive_tool(base, arguments, verbose)
+local function run_archive_tool(base, arguments, verbose, discard_output)
     local argv = copy_argv(base)
     append_argv(argv, arguments)
-    return run_argv(argv, verbose)
+    return run_argv(argv, verbose, discard_output)
 end
 
 local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
     os.remove(probe)
     local ar_args = { "qDc", probe }
     if object then ar_args[#ar_args + 1] = object end
-    local ar_d = run_archive_tool(ar, ar_args, verbose)
+    local ar_d = run_archive_tool(ar, ar_args, verbose, true)
     if not ar_d then
         os.remove(probe)
         ar_args[1] = "qc"
         local ar_ok, ar_term, ar_code =
-            run_archive_tool(ar, ar_args, verbose)
+            run_archive_tool(ar, ar_args, verbose, true)
         if not ar_ok then
             os.remove(probe)
             return nil, "configured AR supports neither qDc nor qc (" ..
@@ -10767,10 +11204,10 @@ local function archive_tool_capabilities(ar, ranlib, probe, object, verbose)
         end
     end
 
-    local ranlib_d = run_archive_tool(ranlib, { "-D", probe }, verbose)
+    local ranlib_d = run_archive_tool(ranlib, { "-D", probe }, verbose, true)
     if not ranlib_d then
         local ranlib_ok, ranlib_term, ranlib_code =
-            run_archive_tool(ranlib, { probe }, verbose)
+            run_archive_tool(ranlib, { probe }, verbose, true)
         if not ranlib_ok then
             os.remove(probe)
             return nil, "configured RANLIB supports neither -D nor ordinary " ..
@@ -10840,9 +11277,17 @@ end
 -- receive only uniquely staged ordinary objects.
 -- Implementation notes: doc/implementation/static-compiled-modules.md#native-composition
 function driver.build_static_archive(
-        output, object_inputs, archive_inputs, target, verbose, ordered_inputs)
+        output, object_inputs, archive_inputs, target, verbose, ordered_inputs, context)
     if type(target) ~= "table" then
         return nil, "static archive construction requires a target fingerprint"
+    end
+    local descriptor, descriptor_error = driver.context_target_descriptor(context)
+    if descriptor_error then return nil, descriptor_error end
+    if descriptor then
+        local matches, mismatch = staticmetadata.fingerprint_matches(
+            target, descriptor.fingerprint)
+        if not matches then return nil, "browser archive target mismatch: " .. mismatch end
+        target = descriptor.fingerprint
     end
     local output_ok, output_err = ensure_output_parent(output)
     if not output_ok then return nil, output_err end
@@ -10943,13 +11388,18 @@ function driver.build_static_archive(
         end
     end
 
-    local ar, ar_err = perf.tool_command(driver.AR, "AR")
+    local ar, ar_err = descriptor and copy_argv(descriptor.tools.ar) or nil
+    if not ar then ar, ar_err = perf.tool_command(driver.AR, "AR") end
     if not ar then return abort(ar_err) end
-    local ranlib, ranlib_err = perf.tool_command(driver.RANLIB, "RANLIB")
+    local ranlib, ranlib_err = descriptor and copy_argv(descriptor.tools.ranlib) or nil
+    if not ranlib then ranlib, ranlib_err = perf.tool_command(driver.RANLIB, "RANLIB") end
     if not ranlib then return abort(ranlib_err) end
     local capability, capability_err = archive_tool_capabilities(
         ar, ranlib, probe, staged_paths[1], verbose)
     if not capability then return abort(capability_err) end
+    if descriptor and not capability.deterministic then
+        return abort("browser archive tools require deterministic qDc and -D modes")
+    end
 
     os.remove(temporary)
     local archive_prefix = copy_argv(ar)
@@ -11019,6 +11469,25 @@ function driver.build_static_archive(
     }
     remove_path(stage)
     return result
+end
+
+function driver.stage_browser_provider(request)
+    local staged, directory = driver.staged_library_output(request.public_dso)
+    if not staged then return nil, directory end
+    local result, err = driver.build_static_archive(
+        staged, nil, nil, request.target, request.verbose,
+        request.archive_inputs, request.context)
+    if result then
+        local expected = request.expected_entries or {}
+        local valid
+        valid, err = driver.validate_browser_provider(
+            result.archive, expected, request.generated_objects)
+        if valid then
+            return { archive = staged, directory = directory, entries = expected }
+        end
+    end
+    remove_path(directory)
+    return nil, err
 end
 
 -- Build the private archive-backed sibling image through the same DSO link
@@ -11189,6 +11658,9 @@ end
 -- pipeline order is reported. Any failure or interruption drains running
 -- links, discards their output, and removes the whole stage.
 function driver.link_provider_pair(request)
+    if request.context and request.context.target == "browser" then
+        return driver.stage_browser_provider(request)
+    end
     assert(not platform.windows, "Windows DLL providers have no paired archive")
     local provider, verbose = request.provider, request.verbose
     local module_names = request.module_names
@@ -11315,7 +11787,7 @@ function driver.link_provider_pair(request)
         local function build_archive()
             archive_result, archive_err = driver.build_static_archive(
                 archive, nil, nil, request.target, verbose,
-                request.archive_inputs)
+                request.archive_inputs, request.context)
             check_interrupt()
         end
         if overlap then build_archive() end
@@ -12128,10 +12600,43 @@ function driver.validate_program_output_paths(
     return index.check_inputs(native_inputs)
 end
 
+-- A browser publication cannot safely claim ownership of old native files.
+-- Refuse them, including symlinks and directories, without mutating either
+-- the archive or the unknown companion.
+function perf.check_browser_provider_companions(archive)
+    local stem = archive:sub(1, -3)
+    local filesystem = compiler_io.new_sync()
+    for _, suffix in ipairs({ ".so", ".so.dSYM", ".dll", ".dll.def",
+            ".dylib", ".dylib.dSYM", ".dll.a", ".lib", ".exp", ".pdb" }) do
+        local companion = stem .. suffix
+        local attributes, err = filesystem:lstat(companion)
+        if err then
+            return nil, string.format("cannot inspect browser provider companion %q: %s",
+                companion, tostring(err))
+        elseif attributes then
+            return nil, string.format(
+                "browser provider %q has native companion %q; use a separate --output directory",
+                archive, companion)
+        end
+    end
+    return true
+end
+
 function driver.validate_provider_output_paths(
-        public_dso, native_inputs, generated_outputs)
-    local public_archive = public_dso and not platform.windows and public_dso:gsub("[.]so$", ".a")
-    if public_dso and platform.windows and not public_dso:match("[.]dll$") then
+        public_dso, native_inputs, generated_outputs, context)
+    local browser = context and context.target == "browser"
+    local public_archive = browser and public_dso or
+        public_dso and not platform.windows and public_dso:gsub("[.]so$", ".a")
+    if browser then
+        if public_dso and not public_dso:match("[.]a$") then
+            return nil, "browser provider path must end in .a"
+        end
+        if public_archive then
+            local valid, err = perf.check_browser_provider_companions(public_archive)
+            if not valid then return nil, err end
+        end
+        public_dso = nil
+    elseif public_dso and platform.windows and not public_dso:match("[.]dll$") then
         return nil, "Windows provider path must end in .dll"
     elseif public_dso and public_archive == public_dso then
         return nil, "provider DSO path '" .. tostring(public_dso) ..
@@ -12172,6 +12677,12 @@ end
 -- ownership markers only; fresh C-header discovery belongs to the workers.
 -- Success records `plan.reservations` and the validated `plan.inputs`.
 function driver.preflight_build_outputs(context, plan, options)
+    driver.assert_target_context(context)
+    if options.output_root then
+        local valid, target_error = driver.validate_output_target(
+            context, options.output_root, true)
+        if not valid then return nil, target_error end
+    end
     local inputs, input_seen, outputs, modules = {}, {}, {}, {}
     local output_owners, c_outputs = {}, {}
     local function input(filename)
@@ -12193,9 +12704,15 @@ function driver.preflight_build_outputs(context, plan, options)
     -- hierarchy aliases before a worker invalidates any existing object.
     for _, entry in ipairs(options.locks and options.locks.entries or {}) do
         input(entry.path)
+        if entry.directory then
+            local valid, target_error = driver.validate_output_target(
+                context, entry.directory, false)
+            if not valid then return nil, target_error end
+            input(path.join(entry.directory, ".titan-target"))
+        end
     end
     if options.metadata_root then
-        for _, name in ipairs({ ".titan", ".titan-links", ".native" }) do
+        for _, name in ipairs({ ".titan", ".titan-links", ".native", ".titan-target" }) do
             input(path.join(options.metadata_root, name))
         end
     end
@@ -12417,6 +12934,9 @@ function driver.preflight_build_outputs(context, plan, options)
         return nil, "--coverage requires a test or standalone executable; use -c for coverage objects"
     end
     if builds_program then
+        if context.target == "browser" then
+            return nil, "browser program linking is not available yet"
+        end
         local root = options.test and options.roots[1] or main
         if platform.windows then
             local paths, err = driver.windows_program_paths(
@@ -12437,10 +12957,15 @@ function driver.preflight_build_outputs(context, plan, options)
                 tostring(left) .. "' and '" .. tostring(right) .. "' have no common module prefix"
         end
         local library, library_err =
-            driver.provider_output_path(provider, options.output_root)
+            driver.provider_output_path(provider, options.output_root, context)
         if not library then return nil, library_err end
-        output(library, "provider DSO")
-        if not platform.windows then
+        local browser = context.target == "browser"
+        if browser then
+            local valid, err = driver.validate_provider_output_paths(library, nil, nil, context)
+            if not valid then return nil, err end
+        end
+        output(library, browser and "provider archive" or "provider DSO")
+        if not browser and not platform.windows then
             output((library:gsub("[.]so$", ".a")), "provider archive")
             if driver.IS_DARWIN then output(library .. ".dSYM", "provider dSYM", "directory") end
         end
@@ -12508,8 +13033,10 @@ function driver.preflight_build_outputs(context, plan, options)
 end
 
 -- The library DSO path of one provider prefix, below output_root if given.
-function driver.provider_output_path(provider, output_root)
-    local provider_path = safe_provider_output_path(provider, platform.windows and ".dll" or ".so")
+function driver.provider_output_path(provider, output_root, context)
+    local extension = context and context.target == "browser" and
+        ".a" or (platform.windows and ".dll" or ".so")
+    local provider_path = safe_provider_output_path(provider, extension)
     if not provider_path then
         return nil, "invalid library provider name '" .. tostring(provider) .. "'"
     end
@@ -12549,6 +13076,33 @@ end
 function driver.publish_provider_bundle(
         staged_dso, staged_archive, public_dso, options)
     options = options or {}
+    if options.archive_only then
+        local valid, err = driver.validate_provider_output_paths(
+            public_dso, options.native_inputs, nil, options.context)
+        if not valid then return nil, err end
+        if lfs.symlinkattributes(staged_archive, "mode") ~= "file" then
+            return nil, "staged provider artifact '" .. tostring(staged_archive) ..
+                "' is not a regular file"
+        end
+        if absolute_filename(staged_archive) == absolute_filename(public_dso) or
+           same_existing_file(staged_archive, public_dso) then
+            return nil, "staged provider artifact '" .. staged_archive ..
+                "' aliases destination/input '" .. public_dso .. "'"
+        end
+        if same_regular_archive_contents(staged_archive, public_dso) then
+            remove_path(staged_archive)
+            return true, public_dso
+        end
+        if options.before_commit then
+            valid, err = options.before_commit()
+            if not valid then return nil, err end
+            valid, err = perf.check_browser_provider_companions(public_dso)
+            if not valid then return nil, err end
+        end
+        valid, err = rename_output(staged_archive, public_dso)
+        if not valid then return nil, err end
+        return true, public_dso
+    end
     local public_archive = options.public_archive or
         public_dso:gsub("[.]so$", ".a")
     if public_archive == public_dso then
@@ -12745,6 +13299,9 @@ function driver.run_standalone_archive_probe(
         entries, module_names, libnames, static_archives,
         link, verbose, extra_objects, options)
     options = options or {}
+    if options.context and options.context.target == "browser" then
+        return nil, "browser program linking is not available yet"
+    end
     if #module_names == 0 then return true end
     local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
@@ -12954,6 +13511,9 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
                                 program_output, static_archives,
                                 entrypoint_output, program_name, options)
     options = options or {}
+    if options.context and options.context.target == "browser" then
+        return nil, "browser program linking is not available yet"
+    end
     local runtime_ok, runtime_err = perf.check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     if platform.windows then

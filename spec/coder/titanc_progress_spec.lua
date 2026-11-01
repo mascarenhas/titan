@@ -232,6 +232,46 @@ describe("titanc progress reporting", function()
         if root then remove_tree(root) end
     end)
 
+    local function rejecting_archive_tools(label, failure)
+        local directory = root .. "/archive-tools-" .. label
+        make_directory(directory)
+        local log = directory .. "/calls"
+        local ar = directory .. "/ar.sh"
+        local ranlib = directory .. "/ranlib.sh"
+        local ar_script = {
+            "#!/bin/sh",
+            'printf "ar %s\\n" "$1" >> ' .. quote(log),
+            'case "$1" in',
+            '    *D*) printf "fake ar: illegal option -- D\\nusage: fake ar\\n" >&2; exit 64 ;;',
+            "esac",
+        }
+        if failure == "AR" then
+            ar_script[#ar_script + 1] =
+                'if [ "$1" = "qc" ]; then printf "usage: fake ar fallback\\n" >&2; exit 65; fi'
+        elseif failure == "write" then
+            ar_script[#ar_script + 1] =
+                'case "$2" in */output.a) printf "actual archive write denied\\n" >&2; exit 68 ;; esac'
+        end
+        ar_script[#ar_script + 1] = 'exec ar "$@"'
+        ar_script[#ar_script + 1] = ""
+        write_file(ar, table.concat(ar_script, "\n"))
+        local ranlib_script = {
+            "#!/bin/sh",
+            'if [ "$1" = "-D" ]; then',
+            '    printf "ranlib -D\\n" >> ' .. quote(log),
+            '    printf "fake ranlib: illegal option -- D\\nusage: fake ranlib\\n" >&2',
+            "    exit 66",
+            "fi",
+            'printf "ranlib ordinary\\n" >> ' .. quote(log),
+        }
+        ranlib_script[#ranlib_script + 1] = failure == "RANLIB" and
+            'printf "usage: fake ranlib fallback\\n" >&2; exit 67' or 'exec ranlib "$@"'
+        ranlib_script[#ranlib_script + 1] = ""
+        write_file(ranlib, table.concat(ranlib_script, "\n"))
+        assert.truthy(shell("chmod +x " .. quote(ar) .. " " .. quote(ranlib)))
+        return { "AR=" .. quote(ar), "RANLIB=" .. quote(ranlib) }, log
+    end
+
     it("reports every module phase and the link step on stderr", function()
         local ok, stdout, stderr = run(compiler({
             "--tree", source, "--output", output, "app.one", "app.two",
@@ -307,6 +347,52 @@ describe("titanc progress reporting", function()
         assert.truthy(ok, stderr)
         assert.equal("", stdout)
         assert.equal("", stderr)
+    end)
+
+    it("keeps rejected archive capability diagnostics out of quiet output", function()
+        local environment, log = rejecting_archive_tools("fallback")
+        local quiet_output = root .. "/quiet-archive-fallback"
+        local ok, stdout, stderr = run(compiler({
+            "-q", "--tree", source, "--output", quiet_output, "app.one", "app.two",
+        }), root, environment)
+        assert.truthy(ok, stderr)
+        assert.equal("", stdout)
+        assert.equal("", stderr)
+        local calls = assert(read_file(log))
+        assert.truthy(calls:find("ar qDc\n", 1, true), calls)
+        assert.truthy(calls:find("ar qc\n", 1, true), calls)
+        assert.truthy(calls:find("ranlib -D\n", 1, true), calls)
+        assert.truthy(calls:find("ranlib ordinary\n", 1, true), calls)
+        assert.equal("file", lfs.attributes(quiet_output .. "/app.a", "mode"))
+    end)
+
+    for _, failure in ipairs({ { "AR", "neither qDc nor qc", 65 },
+            { "RANLIB", "neither -D nor ordinary mode", 67 } }) do
+        it("preserves a rejected " .. failure[1] .. " capability verdict without leaking usage", function()
+            local environment = rejecting_archive_tools("failed-" .. failure[1], failure[1])
+            local quiet_output = root .. "/quiet-archive-failed-" .. failure[1]
+            local ok, stdout, stderr = run(compiler({
+                "-q", "--tree", source, "--output", quiet_output, "app.one", "app.two",
+            }), root, environment)
+            assert.is_false(ok)
+            assert.equal("", stdout)
+            assert.truthy(stderr:find("configured " .. failure[1] .. " supports " ..
+                failure[2] .. " (exit, exit " .. failure[3] .. ")", 1, true), stderr)
+            assert.is_nil(stderr:find("usage: fake", 1, true), stderr)
+            assert.is_nil(lfs.attributes(quiet_output .. "/app.a"))
+        end)
+    end
+
+    it("retains real archive-write diagnostics in quiet mode", function()
+        local environment = rejecting_archive_tools("write-failure", "write")
+        local ok, stdout, stderr = run(compiler({
+            "-q", "--tree", source, "--output", root .. "/quiet-archive-write-failed",
+            "app.one", "app.two",
+        }), root, environment)
+        assert.is_false(ok)
+        assert.equal("", stdout)
+        assert.truthy(stderr:find("actual archive write denied", 1, true), stderr)
+        assert.is_nil(stderr:find("usage: fake", 1, true), stderr)
     end)
 
     it("refuses -q together with -v, naming both switches", function()

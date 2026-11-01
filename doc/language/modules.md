@@ -494,11 +494,13 @@ fallback](#the-titan-path).
 * `-T/--target <label>` selects the compilation target for [target source
   selection](target-source-selection.md), as a separate argument or as
   `--target=<label>` (`-t` stays `--tree`). Without it, `titanc` reads
-  `TITAN_TARGET`; absent or empty selects the host. Only the host's own OS
-  label (`linux`, `darwin`, or `windows`) is accepted; `native`, `browser`,
-  other OS labels, and unknown values are errors. Each module source file
-  `name.titan` may have variants `name.<label>.titan`, and the target selects
-  one file per logical filename.
+  `TITAN_TARGET`; absent or empty selects the host. The host's own OS label
+  (`linux`, `darwin`, or `windows`) and, on Linux and macOS hosts, `browser`
+  are accepted; `native`, other OS labels, and unknown values are errors.
+  `browser` compiles objects and library archives with Emscripten and
+  requires `--output` ([Compiling for the browser target](browser-target.md)).
+  Each module source file `name.titan` may have variants
+  `name.<label>.titan`, and the target selects one file per logical filename.
 * `-o/--output <directory>` creates the destination and missing parents, then
   writes generated files beneath it. Generated C, objects, and headers recreate
   the selected source root's hierarchy there; final providers,

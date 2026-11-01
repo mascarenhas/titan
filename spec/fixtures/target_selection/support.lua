@@ -27,14 +27,31 @@ function M.read(path)
     local file = assert(io.open(path, "rb"))
     local bytes = assert(file:read("a")); assert(file:close()); return bytes
 end
-function M.remove(path)
+-- A false result means an explicitly loaded Windows DLL remains mapped until
+-- this process exits. Its ancestors stay for the worker's later temp cleanup.
+function M.remove(path, loaded_images)
     local mode = lfs.symlinkattributes(path, "mode")
     if mode == "directory" then
+        local empty = true
         for name in lfs.dir(path) do
-            if name ~= "." and name ~= ".." then M.remove(path .. "/" .. name) end
+            if name ~= "." and name ~= ".." then
+                if M.remove(path .. "/" .. name, loaded_images) == false then
+                    empty = false
+                end
+            end
         end
+        if not empty then return false end
         assert(lfs.rmdir(path))
-    elseif mode then assert(os.remove(path)) end
+    elseif mode then
+        local removed, message, code = os.remove(path)
+        if not removed and platform.windows and mode == "file" and code == 13
+           and path:lower():match("[.]dll$") and loaded_images
+           and loaded_images[paths.normalize(path)] then
+            return false
+        end
+        assert(removed, message)
+    end
+    return true
 end
 function M.copy(from, to)
     if lfs.attributes(from, "mode") ~= "directory" then M.write(to, M.read(from)); return end
@@ -95,7 +112,15 @@ function M.new()
         local provider_root = platform.windows and output .. "/lib/titan/0.6" or output
         return self:run({ executable }, nil, provider_root)
     end
-    function self:close() self.collector:collect(); M.remove(self.root) end
+    function self:close(loaded_images)
+        self.collector:collect()
+        local retained
+        if platform.windows and loaded_images then
+            retained = {}
+            for _, image in ipairs(loaded_images) do retained[paths.normalize(image)] = true end
+        end
+        M.remove(self.root, retained)
+    end
     return self
 end
 return M

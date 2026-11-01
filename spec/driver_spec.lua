@@ -20,6 +20,7 @@ local platform = require "titan-compiler.platform"
 local paths = require "titan-compiler.path"
 local version = require "titan-compiler.version"
 local incremental = require "titan-compiler.incremental"
+local browser_fixtures = require "spec.support.browser_fixtures"
 
 describe("compiler-specific production debug defaults", function()
     local function fresh_driver(profile)
@@ -49,7 +50,7 @@ describe("compiler-specific production debug defaults", function()
             if type(response) == "function" then return response(argv) end
             return { started = true, ok = true, output = response }
         end
-        local context = subject.new_resolver_context({ io = strategy })
+        local context = subject.new_resolver_context({ io = strategy, target = "linux" })
         context._platform_initialized = true
         context.uname = "Linux"
         context.is_darwin = false
@@ -296,7 +297,7 @@ describe("target source selection API", function()
             local context = driver.new_resolver_context({ io = strategy })
             local expected = host == "Linux" and "linux" or
                 host == "Darwin" and "darwin" or "native"
-            assert.is_nil(context.target)
+            assert.equal(expected, context.target)
             assert.equal(expected, driver.context_target(context))
             assert.equal(expected, driver.validate_target(context, nil))
             assert.equal(expected, driver.validate_target(context, ""))
@@ -304,16 +305,20 @@ describe("target source selection API", function()
                     "native", "browser", "wasm32" }) do
                 for _, origin in ipairs({ "--target", "TITAN_TARGET" }) do
                     local target, err = driver.validate_target(context, value, origin)
-                    if value == expected and value ~= "native" then
-                        assert.equal(expected, target)
+                    if value == expected and value ~= "native" or
+                        value == "browser" and expected ~= "native" then
+                        assert.equal(value, target)
                         assert.is_nil(err)
                     else
                         assert.is_nil(target)
-                        assert.matches(origin == "TITAN_TARGET" and
-                            "TITAN_TARGET=" .. value or "--target " .. value,
-                            err, 1, true)
+                        if value == "browser" then
+                            assert.equal("browser builds are supported from Linux and macOS hosts (host is native)", err)
+                        else
+                            assert.matches(origin == "TITAN_TARGET" and
+                                "TITAN_TARGET=" .. value or "--target " .. value, err, 1, true)
+                        end
                         local reason = value == "native" and "not a compilation target" or
-                            value == "browser" and "not available yet" or
+                            value == "browser" and "supported from Linux and macOS hosts" or
                             value == "wasm32" and "unknown target" or
                             "native cross-compilation is not supported"
                         assert.matches(reason, err, 1, true)
@@ -323,16 +328,27 @@ describe("target source selection API", function()
             assert.equal(1, calls)
             assert.is_true(driver.close_resolver_context(context))
 
-            local explicit = driver.new_resolver_context({ io = strategy, target = "browser" })
-            assert.equal("browser", driver.context_target(explicit))
-            assert.is_true(driver.close_resolver_context(explicit))
+            local implementation = driver._browser_target
+            driver._browser_target = setmetatable({ build = function(_, inputs)
+                return assert(implementation.import(browser_fixtures.descriptor(inputs.paths.root)))
+            end }, { __index = implementation })
+            if expected == "native" then
+                assert.has_error(function()
+                    driver.new_resolver_context({ io = strategy, target = "browser" })
+                end, "browser builds are supported from Linux and macOS hosts (host is native)")
+            else
+                local explicit = driver.new_resolver_context({ io = strategy, target = "browser" })
+                assert.equal("browser", driver.context_target(explicit))
+                assert.is_true(driver.close_resolver_context(explicit))
+            end
+            driver._browser_target = implementation
         end)
     end
 
     it("resolves the Windows host without uname", function()
         local windows = platform.windows
         local uname, darwin, cflags = driver.UNAME, driver.IS_DARWIN, driver.CFLAGS
-        local context = driver.new_resolver_context()
+        local context = driver.new_resolver_context({ target = "windows" })
         function context.io:run() error("Windows must not run uname") end
         platform.windows = true
         local ok, err = xpcall(function()
@@ -374,7 +390,7 @@ end
 
 describe("Windows compiler path integration", function()
     local platform = require "titan-compiler.platform"
-    local originals
+    local originals, resolver, resolver_io
     before_each(function()
         originals = {
             windows = platform.windows,
@@ -383,6 +399,8 @@ describe("Windows compiler path integration", function()
             lfs_attributes = lfs.attributes,
             lfs_symlinkattributes = lfs.symlinkattributes,
         }
+        resolver = driver.new_resolver_context()
+        resolver_io = resolver.io
         platform.windows = true
         platform.native = function(name)
             error("unexpected native call in injected path test: " .. name)
@@ -394,7 +412,14 @@ describe("Windows compiler path integration", function()
         compiler_io.new_sync = originals.new_sync
         lfs.attributes = originals.lfs_attributes
         lfs.symlinkattributes = originals.lfs_symlinkattributes
+        resolver.io = resolver_io
+        assert.is_true(driver.close_resolver_context(resolver))
     end)
+
+    local function staging_context(strategy)
+        resolver.io = strategy
+        return resolver
+    end
 
     local function header_manifest(paths, kind)
         kind = kind or "file"
@@ -572,11 +597,13 @@ describe("Windows compiler path integration", function()
     it("searches DLL containers root-major with extended-safe joins", function()
         assert.same({ "a.dll", "a/b.dll" }, driver.module_binary_candidates("a.b"))
         local observed = {}
-        local context = { io = {
-            lstat = function(_, filename)
-                observed[#observed + 1] = filename
-            end,
-        } }
+        local mocked_native = platform.native
+        platform.windows, platform.native = originals.windows, originals.native
+        local context = driver.new_resolver_context()
+        platform.windows, platform.native = true, mocked_native
+        context.io.lstat = function(_, filename)
+            observed[#observed + 1] = filename
+        end
         assert.is_nil(driver.find_dynamic_interface(
             [[C:\First;\\?\D:\Second]], "a.b", context))
         assert.same({
@@ -587,6 +614,7 @@ describe("Windows compiler path integration", function()
         local value, err = driver.find_dynamic_interface("C:/First", "a.b", context)
         assert.is_nil(value)
         assert.matches("native access denied", err, 1, true)
+        assert.is_true(driver.close_resolver_context(context))
     end)
 
     it("stops ancestor creation at the drive root and keeps stage separators", function()
@@ -662,7 +690,7 @@ describe("Windows compiler path integration", function()
             inputs = { directory .. "/app.dll.stage.tmp.link/source.titan" },
             order = {},
         }
-        assert(driver.cleanup_stale_staging({ io = strategy },
+        assert(driver.cleanup_stale_staging(staging_context(strategy),
             { { path = directory .. "/app.dll" } }, locks,
             { plan = plan, native_objects = {}, link_inputs = {},
                 native_policy = { cacheable = true, backend = "compiler", files = {} },
@@ -677,9 +705,9 @@ describe("Windows compiler path integration", function()
     end)
 
     it("rejects stale cleanup without the matching output lock before touching disk", function()
-        local context = { io = setmetatable({}, {
+        local context = staging_context(setmetatable({}, {
             __index = function() error("cleanup touched an unlocked filesystem") end,
-        }) }
+        }))
         local outputs = { { path = "C:/build/app.dll" } }
         local ok, err = driver.cleanup_stale_staging(context, outputs)
         assert.is_nil(ok)
@@ -865,7 +893,7 @@ describe("Windows compiler path integration", function()
                 local model = staging_model(nodes)
                 driver.imported = case.imported or {}
                 local ok, err = driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, case.protection)
+                    staging_context(model.io), outputs, locks, case.protection)
                 assert.is_nil(ok)
                 assert.matches("refusing to retire stale Windows staging: staging path '" ..
                     authored, err, 1, true)
@@ -886,7 +914,7 @@ describe("Windows compiler path integration", function()
                 if filename == authored then return nil, "list: access denied" end
                 return list(strategy, filename)
             end
-            local ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+            local ok, err = driver.cleanup_stale_staging(staging_context(model.io), outputs, locks,
                 staging_protection({}))
             assert.is_nil(ok)
             assert.matches("cannot list '" .. authored .. "': list: access denied", err, 1, true)
@@ -898,7 +926,7 @@ describe("Windows compiler path integration", function()
                 if filename == "C:/src/denied.h" then return nil, "lstat: access denied" end
                 return lstat(strategy, filename)
             end
-            ok, err = driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+            ok, err = driver.cleanup_stale_staging(staging_context(model.io), outputs, locks,
                 staging_protection({ inputs = { "C:/src/denied.h" } }))
             assert.is_nil(ok)
             assert.matches("refusing to retire stale Windows staging: lstat: access denied",
@@ -921,7 +949,7 @@ describe("Windows compiler path integration", function()
                 app = { source_files = { "C:/src/app.titan" },
                     c_header_dependencies = { { kind = "file", path = "C:/src/target.h" } } },
             }
-            assert(driver.cleanup_stale_staging({ io = model.io }, outputs, locks,
+            assert(driver.cleanup_stale_staging(staging_context(model.io), outputs, locks,
                 staging_protection({
                     order = { "app" },
                     reservations = { { path = bin .. "/app.exe" } },
@@ -962,7 +990,7 @@ describe("Windows compiler path integration", function()
                 local nodes = layout("helper.o")
                 local model = staging_model(nodes)
                 local ok, err = driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, staging_protection(case.fields))
+                    staging_context(model.io), outputs, locks, staging_protection(case.fields))
                 assert.is_nil(ok)
                 assert.matches("refusing to retire stale Windows staging '" .. abandoned ..
                     "': the native link and tool inventory is incomplete (" .. case.reason .. ")",
@@ -980,7 +1008,7 @@ describe("Windows compiler path integration", function()
                 }
                 local model = staging_model(nodes)
                 assert(driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, staging_protection(case.fields)))
+                    staging_context(model.io), outputs, locks, staging_protection(case.fields)))
                 assert.same({}, model.removed)
                 assert.equal("directory", nodes[bin .. "/other.exe.stage.tmp.kept"].kind)
             end)
@@ -1011,7 +1039,7 @@ describe("Windows compiler path integration", function()
         it("retires a stage reached through another spelling of the held lock file", function()
             local model = staging_model(layout(held))
             assert(driver.cleanup_stale_staging(
-                { io = model.io }, outputs, locks, staging_protection({})))
+                staging_context(model.io), outputs, locks, staging_protection({})))
             assert.same({ stage .. "/app.exe", stage }, model.removed)
         end)
 
@@ -1032,7 +1060,7 @@ describe("Windows compiler path integration", function()
                 end
                 local model = staging_model(nodes)
                 local ok, err = driver.cleanup_stale_staging(
-                    { io = model.io }, outputs, locks, staging_protection({}))
+                    staging_context(model.io), outputs, locks, staging_protection({}))
                 assert.is_nil(ok)
                 assert.matches("no output lock for 'C:/alias/bin/app.exe'", err, 1, true)
                 assert.same({}, model.removed)
@@ -1053,7 +1081,7 @@ describe("Windows compiler path integration", function()
                 return lstat(strategy, filename)
             end
             local ok, err = driver.cleanup_stale_staging(
-                { io = model.io }, outputs, locks, staging_protection({}))
+                staging_context(model.io), outputs, locks, staging_protection({}))
             assert.is_nil(ok)
             assert.matches("lstat: access denied", err, 1, true)
             assert.same({}, model.removed)
@@ -1971,6 +1999,7 @@ describe("compiler installation discovery", function()
             local function trace() end
             local adapter = { get = function() end }
             local context = driver.new_resolver_context({
+                target = "native",
                 io = compiler_io.new_sync(),
                 c_header_analysis = analysis,
                 c_header_process_trace = trace,
@@ -2047,7 +2076,7 @@ describe("compiler installation discovery", function()
         assert.equal(cancellation, reason)
     end)
 
-    posix_model_it("initializes uname lazily through the resolver strategy", function()
+    posix_model_it("initializes uname at resolver construction and reuses it", function()
         local strategy = compiler_io.new_sync()
         local commands = {}
         function strategy:run(argv, options)
@@ -2061,11 +2090,11 @@ describe("compiler installation discovery", function()
                 output = "TestOS\n",
             }
         end
-        local context = driver.new_resolver_context({ io = strategy })
-        assert.same({}, commands)
-
         local previous_uname = driver.UNAME
         local previous_is_darwin = driver.IS_DARWIN
+        local context = driver.new_resolver_context({ io = strategy })
+        assert.equal(1, #commands)
+
         local ran, failure = pcall(function()
             local initialized, uname, is_darwin =
                 driver.initialize_platform(context)
@@ -2100,9 +2129,9 @@ describe("compiler installation discovery", function()
                 output = "Darwin\n",
             }
         end
-        local context = driver.new_resolver_context({ io = strategy })
         local previous_uname = driver.UNAME
         local previous_is_darwin = driver.IS_DARWIN
+        local context = driver.new_resolver_context({ io = strategy })
         driver.UNAME = nil
         driver.IS_DARWIN = nil
 
@@ -2170,7 +2199,7 @@ describe("compiler installation discovery", function()
         end, "invalid extra_ffi_include_dirs: compiler include dirs must be " ..
             "an ordered array")
 
-        local failed_platform = driver.new_resolver_context()
+        local failed_platform = driver.new_resolver_context({ target = "native" })
         function failed_platform.io:run(argv, options)
             assert.same({ "uname" }, argv)
             assert.is_true(options.stderr_to_stdout)
@@ -2185,7 +2214,7 @@ describe("compiler installation discovery", function()
         assert.equal("cannot determine the native platform with uname: " ..
             "injected uname failure", err)
 
-        local empty_platform = driver.new_resolver_context()
+        local empty_platform = driver.new_resolver_context({ target = "native" })
         function empty_platform.io:run()
             return { started = true, ok = true, output = "  \n" }
         end
@@ -3252,6 +3281,11 @@ describe("loader resolver ownership", function()
             deduplicate_module_names = function(modules) return modules end,
             new_resolver_context = function() return fake_context end,
             validate_target = function() return "native" end,
+            validate_output_target = function(context)
+                assert.equal(fake_context, context)
+                assert.same({ 17 }, context.io._process_inherit)
+                return true
+            end,
             apply_native_inputs = function() end,
             configure_foreign_c = function() end,
             default_c_parts = function() return 1 end,
@@ -3398,6 +3432,11 @@ describe("loader resolver ownership", function()
                 new_resolver_context = function() return fake_context end,
                 validate_target = function() return "native" end,
                 prepare_output_root = function(dir) return dir end,
+                validate_output_target = function(context)
+                    assert.equal(fake_context, context)
+                    assert.same({ 19 }, context.io._process_inherit)
+                    return true
+                end,
                 apply_native_inputs = function() end,
                 initialize_platform = function(context)
                     assert.equal(fake_context, context)
@@ -12954,6 +12993,7 @@ describe("Windows driver dispatch", function()
         -- Platform dispatch owns no layout discovery. A real Linux prefix is
         -- not a valid synthetic Windows installation for this unit boundary.
         local context = { io = strategy }
+        driver.activate_target_caches(context, "windows")
         local ok, uname, darwin = driver.initialize_platform(context)
         assert.is_true(ok)
         assert.equal("Windows", uname)
@@ -13021,6 +13061,7 @@ end)
 describe("target-aware source resolver", function()
     local fixtures = require "spec.fixtures.target_selection.support"
     local root, contexts, saved_imported, saved_registry, saved_path
+    local saved_browser_target, saved_initialize_platform
     local function context(target, strategy)
         local value = driver.new_resolver_context({ target = target, io = strategy,
             analysis_only = true })
@@ -13036,11 +13077,24 @@ describe("target-aware source resolver", function()
         saved_imported, saved_registry, saved_path =
             driver.imported, types.registry, driver.TITAN_SOURCE_PATH
         driver.imported, types.registry, driver.TITAN_SOURCE_PATH = {}, {}, root
+        saved_browser_target, saved_initialize_platform =
+            driver._browser_target, driver.initialize_platform
+        driver._browser_target = setmetatable({ build = function(_, inputs)
+            return assert(saved_browser_target.import(browser_fixtures.descriptor(inputs.paths.root)))
+        end }, { __index = saved_browser_target })
+        driver.initialize_platform = function(ctx)
+            if ctx.target == "browser" and platform.windows then
+                ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            end
+            return saved_initialize_platform(ctx)
+        end
     end)
     after_each(function()
         for _, value in ipairs(contexts) do assert(driver.close_resolver_context(value)) end
         driver.imported, types.registry, driver.TITAN_SOURCE_PATH =
             saved_imported, saved_registry, saved_path
+        driver._browser_target, driver.initialize_platform =
+            saved_browser_target, saved_initialize_platform
         fixtures.remove(root)
     end)
 
@@ -13094,6 +13148,7 @@ describe("target-aware source resolver", function()
         put("early/pick/pick.browser.titan")
         assert.equal("flat", assert(driver.resolve_source(ctx, "pick", roots)).kind)
         assert.equal("folder", assert(driver.resolve_source(context("browser"), "pick", roots)).kind)
+        ctx = context("linux")
         put("early/pick/child.titan")
         local blocked = assert(driver.resolve_source(ctx, "pick.child", roots))
         assert.equal("blocked", blocked.kind)

@@ -374,6 +374,7 @@ end
 -- Registry for nominal types
 -- Keys are canonical FQTNs (fully qualified type names)
 -- Values are types
+-- The driver rebinds this complete nominal closure with its target generation.
 types.registry = {}
 
 local function is_c_tag(tag)

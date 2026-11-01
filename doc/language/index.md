@@ -49,7 +49,7 @@ use the chapters below for the normative language reference.
 | Chapter | Covers |
 | --- | --- |
 | [Native build profiles](build-profiles.md) | Production optimization defaults, isolated O0/no-LTO validation SDKs, `titanc` worker and native job slot bounds inside and outside GNU Make, `--c-parts` splitting of large modules, and the checkout's build and test parallelism settings. |
-| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, upgrading from a pre-release build, what the installation contains (including the support module and the installer's SDK digest manifest), how Titan finds it, bundled libuv and OpenSSL, compilation job defaults, building the standard library during development, uninstalling, and cleaning. |
+| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, upgrading from a pre-release build, what the installation contains (including the support module and the installer's SDK digest manifest), the optional browser Lua for `--target browser`, how Titan finds it, bundled libuv and OpenSSL, compilation job defaults, building the standard library during development, uninstalling, and cleaning. |
 | [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, the native `titanc.exe` compiler, DLL programs and `--exe` launcher paths, link staging directories, the SDK fallback's `PATH` lookup, packaging, cleanup, native test entrypoints, Busted workers, and build parallelism. |
 | [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
@@ -79,9 +79,10 @@ use the chapters below for the normative language reference.
 | [Static compiled modules](static-compiled-modules.md) | Self-describing `.a` providers, paired `.so`/`.a` outputs, default and `--static` resolution, native composition, and bundled/system OpenSSL final-link behavior. |
 | [Replacing shared-library dependencies](binary-compatibility.md) | Per-consumer load-time compatibility, copied native provider selection, required erased signatures and public nominal shapes, private storage changes, and union control-flow dependencies. |
 | [Incremental and separate compilation](incremental-compilation.md) | Semantic object, `--c-source`, and final-link certification, compiler-owned parallel module scheduling, certified `-c --incremental` roots, `--print-c-objects`, the persistent digest cache and installed SDK digests, source versus output path spellings, reserved output names, verbose hit/miss diagnostics, and single-invocation Make integration. |
-| [Output directories](output-directory.md) | `-o/--output` directory creation, `--exe` executable paths, `-I`/`-D`/`-L`/`-l`/`--cflag`/`--ldflag`/`--c-source`/`--print-c-objects` switches, reserved generated-C names and upgrading older (including moved) output trees, `.titan/`, `.native/`, and `.titan-links/` contents, `.titan-build.lock` coordination, coverage, and platform output layouts. |
+| [Output directories](output-directory.md) | `-o/--output` directory creation, `--exe` executable paths, `-I`/`-D`/`-L`/`-l`/`--cflag`/`--ldflag`/`--c-source`/`--print-c-objects` switches, reserved generated-C names and upgrading older (including moved) output trees, `.titan/`, `.native/`, and `.titan-links/` contents, the `.titan-target` one-target marker, `.titan-build.lock` coordination, coverage, and platform output layouts. |
 | [Folder modules](folder-modules.md) | Splitting one logical module across a canonical main and immediate contributors: shared scope, deterministic order, lookup privacy, initialization, and artifacts. |
 | [Target source selection](target-source-selection.md) | `name.<label>.titan` variants for `linux`, `darwin`, `windows`, `browser`, and the umbrella `native`: reserved spellings, per-target selection with absence-only fallback, target-only files, precedence, folder composition and the initializer rule, source imports, `-T`/`--target` and `TITAN_TARGET`, logical artifact names, incremental reuse, test roots, and editor behavior. |
+| [Compiling for the browser target](browser-target.md) | `--target browser`/`TITAN_TARGET=browser` on Linux and macOS: Emscripten 6.0.13, the fork's verified browser Lua (`make install-browser`), the bootstrap order, required `--output` with one target per output directory, object and archive-only library builds with structural checks, the browser Titan path, rejected native-only flags, and the current compile-only scope. |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, explicit non-raising transfer outcomes with owned traces, current coroutine identity, status, Lua interop, and unwinding of abandoned coroutines (`defer`, generic-`for` close functions, and Lua `<close>` run at collection and state close), cleanup that needs asynchronous I/O, and unwinding limits. |
@@ -238,6 +239,10 @@ remains rejected.
   and native test infrastructure through `test`.
   Lua loads every standard module through its qualified `titan.*` name,
   leaving Lua's own standard modules unchanged.
+* **The browser target is compile-only.** `titanc --target browser` builds
+  WebAssembly objects and library archives; linking and running browser
+  programs and tests is not available yet
+  ([browser target](browser-target.md#current-limits)).
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order
