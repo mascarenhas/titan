@@ -336,14 +336,29 @@ described above.
   (`stack_high_ptr[0]` in `minicoro.h`) is `NULL`, not a poison address. The
   error handler uses libbacktrace, and a poison return address made the native
   unwinder chase invalid memory when an error was raised on a minicoro stack.
-* `create` uses `STACK_SIZE` (2 MiB) in `titan/coroutine.titan`, with
-  `MCO_USE_VMEM_ALLOCATOR`. This leaves room for the error handler, whose
-  libbacktrace scratch state exceeds minicoro's default 56 KiB stack, while
-  physical memory stays lazy on platforms with virtual memory.
+* `create` passes `ffi.TITAN_COROUTINE_STACK_SIZE` to `mco_desc_init`, with
+  `MCO_USE_VMEM_ALLOCATOR`. `titan.h` defines that macro as
+  `(2 * 1024 * 1024)` (2 MiB) unless the target already defines it; the
+  [browser target](browser-target.md#compile-prefix-and-target-defines)
+  defines it as 262144 (256 KiB) in its compile prefix. Natively, 2 MiB leaves
+  room for the error handler, whose libbacktrace scratch state exceeds
+  minicoro's default 56 KiB stack, while physical memory stays lazy on
+  platforms with virtual memory. The browser's allocator commits each stack
+  eagerly and reclaims it (`munmap`) for reuse when the coroutine is destroyed,
+  while the grown WebAssembly linear memory never shrinks back to the host, and
+  the browser has no libbacktrace, so the smaller size bounds memory per
+  coroutine instead. minicoro's own default
+  and minimum stack sizes are not redefined.
 * The Binaryen `MCO_USE_ASYNCIFY` backend cannot express Titan's tagged
   semantics and is removed from the vendored copy. Local Linux tests cover the
-  ASM and UCONTEXT backends; the Fiber backend remains for Windows and
-  Emscripten but cannot be exercised on a native Linux toolchain.
+  ASM and UCONTEXT backends. The Fiber backend serves Windows and Emscripten;
+  its Emscripten form switches with `emscripten_fiber_swap`, refuses to create
+  a fiber without `-sASYNCIFY` (`ASYNCIFY is not enabled`), and adds
+  `MCO_ASYNCFY_STACK_SIZE` bytes of Asyncify data (65536 on the browser
+  target) to every coroutine's allocation and to one static main-context
+  buffer. The browser image's [entry gate](browser-target.md#the-entry-gate-decision)
+  and the Emscripten lane of `spec/minicoro_spec.lua` exercise it under Node
+  and Chromium.
 
 ## Unwinding an abandoned coroutine
 
@@ -541,16 +556,26 @@ compiler and native harness specs.
 
 Unwinding has three layers:
 
-- `spec/stdlib/titan/coroutine/tests/unwind_test.titan` holds the native
-  `test_unwind_*` cases. Native-only cases collect with `gc.collect()`. Lua
-  interleaving and crossing cases run their Lua code in a child `lua.Lua`
-  state, once with collections and once with `state:close()`. The log and the
-  child's Lua warnings go to host-owned buffers through
-  `coroutine.test_support`, and a Lua `__gc` observer created before the
-  abandoned coroutine records thread statuses after the unwind. The fixture
-  module `coroutine.unwind_init_fixture` suspends its initializer when a child
-  state requires it inside a coroutine, which covers an initializer abandoned
-  inside `require`.
+- The `coroutine.tests` folder module in `spec/stdlib/titan/coroutine/tests/`
+  holds the native `test_unwind_*` cases in three contributors.
+  `unwind_common.titan` holds the cases shared by every target; they collect
+  with `gc.collect()`. `unwind_test.native.titan` holds the host cases that
+  need a child Lua state, `titan.async`, or `titan.string`: Lua interleaving
+  and crossing cases run their Lua code in a child `lua.Lua` state, once with
+  collections and once with `state:close()`. The log and the child's Lua
+  warnings go to host-owned buffers through `coroutine.test_support`, and a
+  Lua `__gc` observer created before the abandoned coroutine records thread
+  statuses after the unwind. The fixture module
+  `coroutine.unwind_init_fixture` suspends its initializer when a child state
+  requires it inside a coroutine, which covers an initializer abandoned inside
+  `require`. `close.browser.titan` is the browser's child-closure proof: a
+  test-owned C probe (`browser_close.h`, with
+  `spec/fixtures/browser_runtime/close.c`) initializes an independent state
+  from the parent's production preload descriptors, retains a suspended
+  nested pair there, and checks that the state's `lua_close` runs each defer
+  exactly once and no abandoned `catch` or continuation body.
+  `spec/coder/browser_fixtures_spec.lua` builds the module, with `gc.tests`,
+  for the browser.
 - `spec/coder/error_handling_spec.lua` ("unwind boundaries") checks that a
   finally boundary is initialized with `TITAN_STATUS_FINALLY` and that a
   catch-only try emits no unwind code. `spec/coder/unwind_stdlib_spec.lua`

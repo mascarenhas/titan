@@ -472,6 +472,31 @@ assert(os.remove(arg[0]))
                 write(prefix .. "/" .. name, name)
             end
         end
+        local browser_lua_preserved = {
+            "lib/browser/liblua.a",
+            "lib/browser/liblua-config.txt",
+            "lib/browser/include/lua.h",
+            "lib/titan-browser/0.6/application.a",
+        }
+        for _, name in ipairs(browser_lua_preserved) do
+            write(prefix .. "/" .. name, name)
+        end
+        local browser_sdk_owned = {
+            "lib/titan-browser/0.6/libtitan.a",
+            "lib/titan-browser/0.6/libtitan-lpeglabel.a",
+            "lib/titan-browser/0.6/titan.a",
+            "lib/titan-browser/0.6/titan-browser.mjs",
+            "lib/titan-browser/0.6/titan-browser-library.js",
+            "lib/titan-browser/0.6/titan-browser-run",
+            "lib/titan-browser/0.6/titan-browser-run.mjs",
+            "lib/titan-browser/0.6/titan-browser-node-worker.mjs",
+            "lib/titan-browser/0.6/titan-browser-page.mjs",
+            "lib/titan-browser/0.6/sdk-digests",
+            "lib/titan-browser/0.5/libtitan.a",
+        }
+        for _, name in ipairs(browser_sdk_owned) do
+            write(prefix .. "/" .. name, name)
+        end
         local owned = { "lib/titan/0.6/titan.so", "lib/titan/0.6/titan.a",
             "lib/titan/0.6/libtitan.a", "include/titan.h", "include/minicoro.h", "include/transfer.h",
             "include/titan/ffi.h", "share/titan/LICENSE", "etc/titan/build-profile",
@@ -492,8 +517,15 @@ assert(os.remove(arg[0]))
         assert(installer.uninstall(current))
 
         for _, name in ipairs(owned) do assert.is_nil(lfs.symlinkattributes(prefix .. "/" .. name), name) end
+        for _, name in ipairs(browser_sdk_owned) do
+            assert.is_nil(lfs.symlinkattributes(prefix .. "/" .. name), name)
+        end
         assert.is_nil(lfs.symlinkattributes(prefix .. "/lib/titan/0.5/titan.so"))
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/lib/titan-browser/0.5"))
         for _, name in ipairs(preserved) do assert.equal(name, read(prefix .. "/" .. name)) end
+        for _, name in ipairs(browser_lua_preserved) do
+            assert.equal(name, read(prefix .. "/" .. name), name)
+        end
         assert.equal("third-party SSL", read(prefix .. "/include/openssl/ssl.h"))
     end)
 end)

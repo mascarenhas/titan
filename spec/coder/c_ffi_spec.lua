@@ -1,6 +1,7 @@
 local temporary = require "spec.support.temporary"
 local h = require 'spec.support.helpers'
 local driver = require 'titan-compiler.driver'
+local platform = require 'titan-compiler.platform'
 
 local function with_header(contents, fn)
     local header = temporary.name(".h")
@@ -330,6 +331,85 @@ describe("C FFI code generation", function()
             ]], [[
                 assert(test.identity(1.25) == 1.25)
             ]])
+        end)
+    end)
+
+    it("executes self-referential and non-self object and callable aliases",
+    function()
+        with_header([[
+            #include <stdio.h>
+            extern FILE *const s;
+            FILE *const s = NULL;
+            #define s (s)
+            #define stream_alias (s)
+            #define stream_chain stream_alias
+            static int values[3] = { 7, 11, 13 };
+            #define values_alias (values)
+            static int add_one(int value) { return value + 1; }
+            #define function_alias (add_one)
+            static int (*const callback)(int) = add_one;
+            #define callback (callback)
+            #define callback_alias callback
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                function streams_are_null(): boolean
+                    local original: foreign *FILE = ffi.s
+                    local alias: foreign *FILE = ffi.stream_alias
+                    local chain: foreign *FILE = ffi.stream_chain
+                    return original == nil and alias == original
+                        and chain == original
+                end
+
+                function read_aliases(): integer
+                    return ffi.function_alias(ffi.values_alias[0])
+                        + ffi.callback(ffi.values_alias[1])
+                        + ffi.callback_alias(ffi.values_alias[2])
+                end
+            ]], [[
+                assert(test.streams_are_null())
+                assert(test.read_aliases() == 34)
+            ]])
+        end)
+    end)
+
+    it("passes host-supported standard stream expressions to fwrite", function()
+        local stdout_expression, stderr_expression = "ffi.stdout", "ffi.stderr"
+        if platform.windows then
+            -- UCRT's call-expression macros are not imported values; their
+            -- declared accessor remains an ordinary supported foreign call.
+            stdout_expression = "ffi.__acrt_iob_func(1)"
+            stderr_expression = "ffi.__acrt_iob_func(2)"
+        end
+        h.run_coder(string.format([[
+            foreign import "stdio.h"
+
+            function write_empty(): boolean
+                return ffi.fwrite("", 1, 0, %s) == 0
+                    and ffi.fwrite("", 1, 0, %s) == 0
+            end
+        ]], stdout_expression, stderr_expression), [[ assert(test.write_empty()) ]])
+    end)
+
+    it("executes declared UCRT-style stream accessors directly", function()
+        with_header([[
+            typedef struct ffi_crt_stream { int marker; } ffi_crt_stream;
+            static ffi_crt_stream ffi_crt_streams[3] = { { 0 }, { 17 }, { 29 } };
+            static ffi_crt_stream *ffi_crt_iob_func(unsigned index) {
+                return &ffi_crt_streams[index];
+            }
+            #define ffi_crt_stdout (ffi_crt_iob_func(1))
+            #define ffi_crt_stderr (ffi_crt_iob_func(2))
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                function read_streams(): integer
+                    return ffi.ffi_crt_iob_func(1).marker
+                        + ffi.ffi_crt_iob_func(2).marker
+                end
+            ]], [[ assert(test.read_streams() == 46) ]])
         end)
     end)
 

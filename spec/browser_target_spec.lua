@@ -3,6 +3,7 @@ local browser = require "titan-compiler.browsertarget"
 local cdriver = require "c-parser.cdriver"
 local csemantics = require "titan-compiler.csemantics"
 local compiler_io = require "titan-compiler.io"
+local process = require "titan-compiler.process"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local fixtures = require "spec.support.browser_fixtures"
 local gate = require "spec.support.browser_toolchain"
@@ -168,6 +169,9 @@ describe("browser target descriptor", function()
         contains(flags, "-c")
         contains(flags, "-sSUPPORT_LONGJMP=emscripten")
         contains(flags, "-DTITAN_TARGET_BROWSER=1")
+        contains(flags, "-DTITAN_COROUTINE_STACK_SIZE=262144")
+        contains(flags, "-DMCO_ASYNCFY_STACK_SIZE=65536")
+        assert.same(fixtures.target_defines, browser.export(descriptor.target_defines))
         assert.is_nil(flags:find("-fPIC", 1, true))
         assert.is_nil(flags:find("-flto", 1, true))
     end)
@@ -214,6 +218,9 @@ describe("browser target descriptor", function()
         { "missing browser flags", function(data) data.compile_flags = { "--std=c99" } end },
         { "missing C99 flag", function(data) remove_flag(data, "--std=c99") end },
         { "missing target define", function(data) remove_flag(data, "-DTITAN_TARGET_BROWSER=1") end },
+        { "missing coroutine stack define", function(data) remove_flag(data, "-DTITAN_COROUTINE_STACK_SIZE=262144") end },
+        { "missing fiber Asyncify stack define", function(data) remove_flag(data, "-DMCO_ASYNCFY_STACK_SIZE=65536") end },
+        { "inconsistent target defines", function(data) data.target_defines = { "-DTITAN_TARGET_BROWSER=1" } end },
         { "missing Lua define", function(data) remove_flag(data, "-DLUA_USE_BROWSER") end },
         { "missing longjmp mode", function(data) remove_flag(data, "-sSUPPORT_LONGJMP=emscripten") end },
         { "LTO flag", function(data) data.compile_flags[#data.compile_flags + 1] = "-flto" end },
@@ -504,6 +511,51 @@ describe("browser target descriptor", function()
         end)
     end
 
+    it("keeps invalid record features distinct from user compile flags", function()
+        local context, inputs = fake_context({ record = { wasm_features = "+sign-ext" } })
+        inputs.compile_flags = { "-msimd128" }
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        contains(err, "field wasm_features mismatch")
+        contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+        assert.is_nil(err:find("browser target compiler probe", 1, true))
+    end)
+
+    it("names user flags in a probed feature mismatch without blaming the record", function()
+        local context, inputs = fake_context()
+        inputs.compile_flags = { "-O1", "-msimd128" }
+        staticmetadata.classify_object = function()
+            local fingerprint = fixtures.fingerprint()
+            fingerprint.features = fingerprint.features .. " +simd128"
+            return { fingerprint = fingerprint }
+        end
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        contains(err, "browser target compiler probe")
+        contains(err, "+simd128")
+        contains(err, 'user compile flags: "-O1" "-msimd128"')
+        contains(err, "remove feature-changing flags")
+        contains(err, "TITAN_EXTRA_CPPFLAGS/TITAN_EXTRA_CFLAGS/--cflag")
+        assert.is_nil(err:find("browser Lua record", 1, true))
+        assert.is_nil(err:find("make install-browser", 1, true))
+    end)
+
+    it("attributes feature drift without user flags to the selected toolchain", function()
+        local context, inputs = fake_context()
+        staticmetadata.classify_object = function()
+            local fingerprint = fixtures.fingerprint()
+            fingerprint.features = fingerprint.features .. " +simd128"
+            return { fingerprint = fingerprint }
+        end
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        contains(err, "browser target compiler probe")
+        contains(err, "check the selected Emscripten 6.0.13 installation")
+        assert.is_nil(err:find("user compile flags", 1, true))
+        assert.is_nil(err:find("browser Lua record", 1, true))
+        assert.is_nil(err:find("make install-browser", 1, true))
+    end)
+
     for _, case in ipairs({ { "sjlj", "wasm" }, { "target", "wasm64-unknown-emscripten" },
             { "emscripten_version", "6.0.12" } }) do
         it("prioritizes fixed field " .. case[1] .. " over conflicting cflags", function()
@@ -561,6 +613,21 @@ describe("browser target descriptor", function()
         assert.is_nil(ok); contains(err, 'TITAN_EXTRA_CFLAGS flag "-flto"')
     end)
 
+    it("rejects every LTO spelling through CLI and ambient flag origins", function()
+        for _, origin in ipairs({ "TITAN_EXTRA_CPPFLAGS", "TITAN_EXTRA_CFLAGS",
+                "TITAN_EXTRA_LDFLAGS", "--cflag", "--ldflag", "compile_flags", "cflags" }) do
+            for _, flag in ipairs({ "-flto", "-flto=full", "-flto=thin", "-ffat-lto-objects" }) do
+                local ok, err = browser.validate_flags({ flag }, origin)
+                assert.is_nil(ok)
+                assert.equal("browser target does not support " .. origin ..
+                    " flag " .. string.format("%q", flag), err)
+            end
+        end
+        assert.is_true(browser.validate_flags({
+            "-fno-lto", "-fsanitize=address", "-fsanitize=undefined", "-fsanitize=leak",
+        }, "--cflag"))
+    end)
+
     it("names split conflicting longjmp settings and preserves equivalent forms", function()
         for _, origin in ipairs({ "TITAN_EXTRA_CPPFLAGS", "TITAN_EXTRA_CFLAGS", "TITAN_EXTRA_LDFLAGS",
                 "--cflag", "--ldflag", "cflags" }) do
@@ -611,9 +678,15 @@ describe("browser target descriptor", function()
             subject.CC, subject.CFLAGS, subject.AR, subject.RANLIB, subject.TARGET_PROFILE
         local initialize = subject.initialize_platform
         subject.initialize_platform = function(ctx)
-            ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing then
+                ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            end
             return initialize(ctx)
         end
+        assert.has_error(function() subject.initialize_platform() end,
+            "platform initialization requires a resolver context")
+        assert.has_error(function() subject.initialize_platform({}) end,
+            "platform initialization requires a resolver context")
         local context = subject.new_resolver_context({ io = template.io, target = "browser" })
         local descriptor = assert(subject.context_target_descriptor(context))
         assert.equal(descriptor, subject.context_target_descriptor(context))
@@ -674,10 +747,17 @@ describe("browser target descriptor", function()
         subject._browser_target = setmetatable({ build = function(_, inputs)
             return assert(browser.import(fixtures.descriptor(inputs.paths.root)))
         end }, { __index = browser })
+        local initialize = subject.initialize_platform
         subject.initialize_platform = function(ctx)
-            ctx.host_target, ctx.uname, ctx.is_darwin = "linux", "Linux", false
-            return subject._finish_target_initialization(ctx)
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing then
+                ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            end
+            return initialize(ctx)
         end
+        assert.has_error(function() subject.initialize_platform() end,
+            "platform initialization requires a resolver context")
+        assert.has_error(function() subject.initialize_platform({}) end,
+            "platform initialization requires a resolver context")
         local context = subject.new_resolver_context({ io = guarded, target = "browser" })
         local driver_source = assert(debug.getinfo(subject.new_worker_context, "S").source:match("^@(.*)$"))
         local compiler_root = assert(strategy:realpath(path.dirname(path.dirname(driver_source))))
@@ -740,9 +820,15 @@ describe("browser target descriptor", function()
         end }, { __index = browser })
         local initialize = subject.initialize_platform
         subject.initialize_platform = function(ctx)
-            ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing then
+                ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
+            end
             return initialize(ctx)
         end
+        assert.has_error(function() subject.initialize_platform() end,
+            "platform initialization requires a resolver context")
+        assert.has_error(function() subject.initialize_platform({}) end,
+            "platform initialization requires a resolver context")
         local template = fake_context({ root = subject.TITAN_ROOT })
         assert.has_error(function()
             subject.new_resolver_context({ io = template.io, target = "browser" })
@@ -758,7 +844,7 @@ describe("browser target descriptor", function()
         local prefix = require("spec.support.installed_prefix").active()
         local code = string.format("package.path=%q..package.path; ", root .. "/?.lua;" .. root .. "/?/init.lua;") ..
             "require('titan-compiler.driver').new_resolver_context=function() error('browser descriptor fixture failure',0) end"
-        local result = strategy:run({ prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""),
+        local result = process.capture({ prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""),
             "-E", "-e", code, root .. "/titanc", "-q", "-c", "never_compiled" },
             { env = { TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_EXTRA_CPPFLAGS = "",
                 TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" }, stderr_to_stdout = true })
@@ -767,6 +853,103 @@ describe("browser target descriptor", function()
         assert.equal(1, result.status)
         contains(result.output, "browser descriptor fixture failure")
         assert.is_nil(result.output:find("stack traceback", 1, true))
+    end)
+
+    for _, selection in ipairs({ "CLI", "environment" }) do
+        for _, mode in ipairs({ "objects", "library", "tests", "C-only" }) do
+            it("rejects browser coverage before tool discovery for " ..
+                selection .. " selection in " .. mode .. " mode", function()
+                workspace = temporary.name()
+                assert(os.remove(workspace))
+                files.mkdir(workspace)
+                local strategy = compiler_io.new_sync()
+                local root = assert(strategy:cwd())
+                local prefix = require("spec.support.installed_prefix").active()
+                local code = string.format("package.path=%q..package.path; ",
+                    root .. "/?.lua;" .. root .. "/?/init.lua;") .. [[
+require("titan-compiler.browsertarget").build = function()
+    error("browser tool discovery must not run", 0)
+end
+require("titan-compiler.coverage").prepare = function()
+    error("native coverage preparation must not run", 0)
+end
+]]
+                local argv = { prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""),
+                    "-E", "-e", code, root .. "/titanc", "-q", "--coverage",
+                    "--coverage-backend=llvm-gcov", "--output", workspace .. "/out" }
+                if selection == "CLI" then
+                    argv[#argv + 1] = "--target=browser"
+                end
+                if mode == "objects" or mode == "C-only" then
+                    argv[#argv + 1] = "-c"
+                elseif mode == "tests" then
+                    argv[#argv + 1] = "--test"
+                end
+                if mode == "C-only" then
+                    argv[#argv + 1] = "--c-source"
+                    argv[#argv + 1] = workspace .. "/never_compiled.c"
+                else
+                    argv[#argv + 1] = "never_compiled"
+                end
+                local result = process.capture(argv, {
+                    env = { TITAN_ROOT = prefix,
+                        TITAN_TARGET = selection == "environment" and "browser" or "",
+                        TITAN_EXTRA_CPPFLAGS = "", TITAN_EXTRA_CFLAGS = "",
+                        TITAN_EXTRA_LDFLAGS = "" },
+                    stderr_to_stdout = true,
+                })
+                assert.is_true(result.started)
+                assert.is_false(result.ok)
+                assert.equal(1, result.status)
+                contains(result.output, "--coverage is not supported for --target browser")
+                assert.is_nil(result.output:find("must not run", 1, true))
+                assert.is_nil(result.output:find("stack traceback", 1, true))
+                assert.is_nil(lfs.attributes(workspace .. "/out/.titan-target"))
+                assert.is_nil(lfs.attributes(workspace .. "/out/never_compiled.c"))
+                assert.is_nil(lfs.attributes(workspace .. "/out/never_compiled.o"))
+            end)
+        end
+    end
+
+    it("exposes 2 MiB TITAN_COROUTINE_STACK_SIZE by default in titan.h and 256 KiB / 64 KiB under browser target defines", function()
+        local strategy = compiler_io.new_sync()
+        local root = assert(strategy:cwd())
+        local prefix = require("spec.support.installed_prefix").active()
+        local runtime_dir = root .. "/titan-runtime"
+        local lua_dir = prefix .. "/src/lua-5.5.1"
+        if not strategy:stat(lua_dir .. "/lua.h") then lua_dir = root .. "/lua-5.5.1/src" end
+        local profile = fixtures.profile()
+        local native_types, native_err = cdriver.process_file("titan.h", {
+            compiler_include_dirs = { lua_dir, runtime_dir },
+            cppflags = {},
+        })
+        assert.truthy(native_types, native_err)
+        local native_stack = assert(csemantics.evaluate_macro_expression(
+            profile, native_types.TITAN_COROUTINE_STACK_SIZE.macro_expression))
+        assert.equal(2 * 1024 * 1024, tonumber(native_stack.value))
+
+        local browser_types, browser_err = cdriver.process_file("titan.h", {
+            compiler_include_dirs = { lua_dir, runtime_dir },
+            cppflags = { table.unpack(fixtures.target_defines) },
+        })
+        assert.truthy(browser_types, browser_err)
+        local browser_stack = assert(csemantics.evaluate_macro_expression(
+            profile, browser_types.TITAN_COROUTINE_STACK_SIZE.macro_expression))
+        assert.equal(262144, tonumber(browser_stack.value))
+
+        local asyncfy_stack = assert(csemantics.evaluate_macro_expression(
+            profile, browser_types.MCO_ASYNCFY_STACK_SIZE.macro_expression))
+        assert.equal(65536, tonumber(asyncfy_stack.value))
+        assert.is_nil(browser_types.MCO_DEFAULT_STACK_SIZE)
+        assert.is_nil(browser_types.MCO_MIN_STACK_SIZE)
+        local mco_source = assert(strategy:read_file(runtime_dir .. "/minicoro.h"))
+        contains(mco_source, "#ifndef MCO_MIN_STACK_SIZE\n#define MCO_MIN_STACK_SIZE 32768")
+        contains(mco_source, "#ifndef MCO_ASYNCFY_STACK_SIZE\n#define MCO_ASYNCFY_STACK_SIZE 16384")
+
+        local coro_source = assert(strategy:read_file(root .. "/titan/coroutine.titan"))
+        contains(coro_source, 'foreign import "titan.h"')
+        contains(coro_source, "ffi.TITAN_COROUTINE_STACK_SIZE")
+        assert.is_nil(coro_source:find("local STACK_SIZE =", 1, true))
     end)
 end)
 

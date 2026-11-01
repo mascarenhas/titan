@@ -286,6 +286,15 @@ LTITANLIB_O := titan-runtime/ltitanlib.o
 # `titan` support module; ordinary links pull it only when referenced.
 TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O) $(TITAN_PATH_O) $(LTITANLIB_O)
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
+TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
+	titan-runtime/titan_path.c titan-runtime/ltitanlib.c
+BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc
+TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
+LUA_BROWSER_CC ?=
+LUA_BROWSER_AR ?=
+LUA_BROWSER_RANLIB ?=
+LUA_BROWSER_MYCFLAGS ?= $(MYCFLAGS)
+LUA_BROWSER_MYLDFLAGS ?= $(MYLDFLAGS)
 TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h titan-runtime/transfer.h
 TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h
 
@@ -523,11 +532,11 @@ RECURSIVE_WRAPPER_GUARD = titan_mode=; set -f; set -- $$MAKEFLAGS; set +f; \
 TITAN_JOBS_CHECK = case $(call make_shell_quote,$(TITAN_JOBS)) in ''|0*|*[!0-9]*|?????????*) \
 	  echo 'TITAN_JOBS must be a positive integer' >&2; exit 2 ;; esac;
 
-.PHONY: all help lua luarocks libbacktrace libuv libuv-config llhttp \
+.PHONY: all help lua lua-browser luarocks libbacktrace libuv libuv-config llhttp \
 	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools runtime \
-	install-compiler-sdk install-titan-sdk publish-titan-sdk \
+	install-compiler-sdk install-titan-sdk publish-titan-sdk browser-sdk \
 	stdlib stdlib-objects install-stdlib \
 	install publish-stdlib \
 	rock-test test rock-build \
@@ -580,6 +589,19 @@ lua: ## Build and install Lua unless PREFIX/bin/lua already exists
 	    MYLIBS=$(call make_shell_quote,$(LUA_MYLIBS)); \
 	  $(MAKE) -C "$(LUA_DIR)" install PREFIX="$(PREFIX)"; \
 	fi
+
+lua-browser: ## Build and install the fork's WebAssembly Lua library with configuration + digest reuse
+	+@$(RECURSIVE_WRAPPER_GUARD) \
+	PREFIX=$(call make_shell_quote,$(PREFIX)) \
+	LUA_DIR=$(call make_shell_quote,$(LUA_DIR)) \
+	MAKE=$(call make_shell_quote,$(MAKE)) \
+	FORK_REVISION=$(call make_shell_quote,$(FORK_REVISION)) \
+	LUA_BROWSER_CC=$(call make_shell_quote,$(LUA_BROWSER_CC)) \
+	LUA_BROWSER_AR=$(call make_shell_quote,$(LUA_BROWSER_AR)) \
+	LUA_BROWSER_RANLIB=$(call make_shell_quote,$(LUA_BROWSER_RANLIB)) \
+	LUA_BROWSER_MYCFLAGS=$(call make_shell_quote,$(LUA_BROWSER_MYCFLAGS)) \
+	LUA_BROWSER_MYLDFLAGS=$(call make_shell_quote,$(LUA_BROWSER_MYLDFLAGS)) \
+	sh scripts/lua_browser.sh
 
 luarocks: lua ## Install LuaRocks unless PREFIX/bin/luarocks already exists
 	@set -e; if test ! -f "$(LUAROCKS_BIN)"; then \
@@ -1247,6 +1269,49 @@ install-stdlib publish-stdlib:
 	install -p -m 0644 THIRD_PARTY_NOTICES.md "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"; \
 	install -p -m 0644 $(STDLIB_LICENSES) "$(TITAN_SHARE_DIR)/LICENSES/"
 
+BROWSER_SDK_ENV = PREFIX=$(call make_shell_quote,$(PREFIX)) \
+	TITAN_INSTALL_TREE=$(call make_shell_quote,$(TITAN_INSTALL_TREE)) \
+	ROCKS_TREE=$(call make_shell_quote,$(strip $(ROCKS_TREE))) \
+	TITAN_ROOT=$(call make_shell_quote,$(TITAN_INSTALL_TREE)) \
+	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) \
+	TITAN_PATH= \
+	TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BUILD_PROFILE)) \
+	TITAN_VERBOSE=$(call make_shell_quote,$(TITAN_VERBOSE)) \
+	$(if $(strip $(ROCKS_TREE)),LUA_PATH=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/share/lua/5.5/?.lua;$(TITAN_INSTALL_TREE)/share/lua/5.5/?/init.lua;;)) \
+	$(if $(strip $(ROCKS_TREE)),LUA_CPATH=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/lua/5.5/?.so;;))
+
+browser-sdk: ## Build and install the browser target runtime, tools and minimal provider
+	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
+	if test -z "$${TITAN_NODE:-}"; then \
+	  unset TITAN_NODE; \
+	  if test -n "$${EMSDK:-}"; then \
+	    for node_bin in "$$EMSDK"/node/*/bin/node; do \
+	      if test -x "$$node_bin"; then PATH="$${node_bin%/node}:$$PATH"; export PATH; break; fi; \
+	    done; \
+	  fi; \
+	fi; \
+	titanc_bin=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc); \
+	if test ! -x "$$titanc_bin"; then titanc_bin=$(call make_shell_quote,$(PREFIX)/bin/titanc); fi; \
+	if test ! -x "$$titanc_bin"; then \
+	  echo "browser-sdk: installed titanc not found; run 'luarocks make' or 'make install-compiler-sdk' first" >&2; \
+	  exit 1; \
+	fi; \
+	build_dir=$(call make_shell_quote,$(abspath $(TITAN_BROWSER_BUILD_DIR))); \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua prepare "$$build_dir" $(call make_shell_quote,$(CURDIR)); \
+	c_objects=$$($(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
+	  --output "$$build_dir" -c --incremental -j$(TITAN_JOBS) \
+	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) --print-c-objects \
+	  $(foreach source,$(TITAN_RUNTIME_SOURCES) $(LPEGLABEL_SOURCES),--c-source $(call make_shell_quote,$(abspath $(source))))); \
+	nl="$$(printf '\nX')"; nl="$${nl%X}"; \
+	set -f; IFS="$$nl"; set -- $$c_objects; set +f; unset IFS; \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua stage-runtime \
+	  "$$build_dir" $(call make_shell_quote,$(CURDIR)) "$$@"; \
+	$(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
+	  --output "$$build_dir" --source-first --incremental -j$(TITAN_JOBS) \
+	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) $(BROWSER_STDLIB_ROOTS); \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua finalize "$$build_dir"
+
 # Compatibility name for callers of the former rockspec build target.
 rock-build: all
 
@@ -1584,10 +1649,10 @@ rock-test: ## Run retained Busted specs, then native Titan stdlib tests
 endif
 
 test: lua luarocks ## Build/install the rock and run the suite via `luarocks test`
-	+$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	+$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	  PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 	  "$(PREFIX)/bin/luarocks" make --force
-	+$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	+$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 		PREFIX="$(PREFIX)" PATH="$(PREFIX)/bin:$$PATH" \
 		EXTRA_TEST_FLAGS=$(call make_shell_quote,$(strip $(EXTRA_TEST_FLAGS))) \
 		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \

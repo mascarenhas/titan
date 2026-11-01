@@ -67,6 +67,11 @@ function M.install(options)
                 operation, tool = "frontend", "compiler-worker"
             end
         else
+            if options.runner and argv[1] == options.runner and
+                (#argv == 2 and argv[2] == "--probe" or
+                 #argv == 4 and argv[2] == "--engine" and argv[3] == "node" and argv[4]:match("[.]mjs$")) then
+                operation, tool = "execute", "browser-runner"
+            end
             for _, entry in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
                 local prefix = options.tools[entry[1]]
                 local matches = prefix and #argv >= #prefix
@@ -78,9 +83,12 @@ function M.install(options)
                     local args = { table.unpack(argv, #prefix + 1) }
                     if #args == 1 and args[1] == "--version" then operation = "query"
                     elseif entry[1] == "cc" then
-                        for _, flag in ipairs(args) do
+                        for index, flag in ipairs(args) do
                             if flag == "-c" then operation = "compile"
                             elseif flag == "-E" or flag == "-fsyntax-only" then operation = "preprocess" end
+                            if options.images and flag == "-o" and args[index + 1] and args[index + 1]:match("[.]mjs$") then
+                                operation = "link"
+                            end
                         end
                     elseif entry[1] == "ar" and (args[1] == "qDc" or args[1] == "qc") and #args >= 2 then
                         operation = "archive"

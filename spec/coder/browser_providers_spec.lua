@@ -379,36 +379,6 @@ describe("browser providers", function()
         assert.equal("link", lfs.symlinkattributes(root .. "/out/pkg.so", "mode"))
         assert.equal("preserve me", read(root .. "/user-data")); assert.equal(original, read(destination))
     end)
-    for _, failure in ipairs({ "before_commit", "rename", "late-companion" }) do
-        it("preserves publication inputs on " .. failure .. " failure", function()
-            local context = browser_context(root)
-            local destination, staged = root .. "/out/pkg.a", root .. "/stage/pkg.a"
-            local original, replacement = archive({ wasm("pkg.mod") }), archive({ wasm("pkg.other") })
-            write(destination, original); write(staged, replacement)
-            local options = { archive_only = true, context = context }
-            if failure == "rename" then
-                local filesystem = compiler_io.new_sync()
-                compiler_io.new_sync = function()
-                    return setmetatable({ rename = function(_, from, to)
-                        if from == staged and to == destination then return nil, "injected archive rename failure" end
-                        return filesystem:rename(from, to)
-                    end }, { __index = filesystem })
-                end
-            else
-                options.before_commit = function()
-                    if failure == "late-companion" then
-                        write(root .. "/out/pkg.so", "preserve me")
-                        return true
-                    end
-                    return nil, "injected pre-commit failure"
-                end
-            end
-            local ok, err = driver.publish_provider_bundle(nil, staged, destination, options)
-            assert.is_nil(ok); assert.is_string(err)
-            assert.equal(original, read(destination)); assert.equal(replacement, read(staged))
-            if failure == "late-companion" then assert.equal("preserve me", read(root .. "/out/pkg.so")) end
-        end)
-    end
 
     it("ignores native embedded profiles during browser probe acquisition", function()
         local inventory = native_inventory(root)
@@ -468,7 +438,7 @@ describe("browser providers", function()
         assert(driver.close_resolver_context(context))
     end)
 
-    it("builds and publishes only an archive through the descriptor tools", function()
+    it("stages a structural bootstrap archive through descriptor tools without an image SDK", function()
         local context = browser_context(root)
         local primary, part = wasm("pkg.mod"), wasm(nil)
         write(root .. "/primary.o", primary); write(root .. "/part.o", part)
@@ -515,7 +485,7 @@ describe("browser providers", function()
         audit_guard = process_audit.install({ tools = context.target_descriptor.tools })
         local expected = scan(archive({ primary })).entries
         local destination = assert(driver.provider_output_path("pkg", root .. "/out", context))
-        local staged = assert(driver.link_provider_pair({
+        local staged = assert(driver.stage_browser_provider({
             context = context, provider = "pkg", public_dso = destination,
             target = fixtures.fingerprint(), expected_entries = expected,
             generated_objects = { { modname = "pkg.mod", filename = root .. "/primary.o",
@@ -526,14 +496,11 @@ describe("browser providers", function()
             },
         }))
         assert.is_nil(staged.dso)
-        assert(driver.publish_provider_bundle(nil, staged.archive, destination, {
-            archive_only = true, context = context,
-        }))
+        assert.equal("file", lfs.attributes(staged.archive, "mode"))
+        assert.is_nil(lfs.attributes(destination))
+        assert.is_true(driver.validate_browser_provider(scan(read(staged.archive)), expected))
         assert(driver.remove_path(staged.directory))
-        assert.equal("file", lfs.attributes(root .. "/out/pkg.a", "mode"))
-        assert.is_nil(lfs.attributes(root .. "/out/pkg.so"))
-        assert.is_nil(lfs.attributes(root .. "/out/pkg.so.dSYM"))
-        assert.is_true(driver.validate_browser_provider(scan(read(destination)), expected))
+        assert.is_nil(lfs.attributes(staged.archive))
         assert.equal(4, #commands)
     end)
 
@@ -597,7 +564,7 @@ describe("browser providers", function()
         assert.has_error(function() io.popen("/audit/emcc -c probe.c; node probe.js") end)
     end)
 
-    it("stops program and executable probes before any process or loader call", function()
+    it("diagnoses an incomplete SDK before linking and leaves an empty metadata probe independent", function()
         local context = browser_context(root)
         local attempts = {}
         audit_guard = process_audit.install({
@@ -606,9 +573,10 @@ describe("browser providers", function()
         })
         local ok, err = driver.compile_program("pkg.mod", {}, nil, false, nil,
             nil, nil, nil, nil, { context = context })
-        assert.is_nil(ok); assert.equal("browser program linking is not available yet", err)
-        ok, err = driver.run_standalone_archive_probe({}, {}, {}, {}, nil, false, nil, { context = context })
-        assert.is_nil(ok); assert.equal("browser program linking is not available yet", err)
+        assert.is_nil(ok); assert.matches("browser SDK is incomplete: missing", err, 1, true)
+        ok, err = driver.run_standalone_archive_probe({}, { "pkg.mod" }, {}, {}, nil, false, nil, { context = context })
+        assert.is_nil(ok); assert.matches("browser SDK is incomplete: missing", err, 1, true)
+        assert.is_true(driver.run_standalone_archive_probe({}, {}, {}, {}, nil, false, nil, { context = context }))
         assert.same({}, attempts)
     end)
 end)
@@ -622,8 +590,7 @@ function require(name)
         module._loadlib = function() error("browser must not call _loadlib") end
     elseif name == "titan-compiler.driver" and not hooked then
         hooked = true
-        for _, field in ipairs({ "compile_program", "run_standalone_archive_probe",
-                "compile_library_output", "compile_archive_validation_image",
+        for _, field in ipairs({ "compile_library_output", "compile_archive_validation_image",
                 "validate_library_image", "validate_library_image_fresh" }) do
             module[field] = function() error("browser entered executable path " .. field) end
         end
@@ -647,6 +614,8 @@ function require(name)
         local process = original_require("titan-compiler.process")
         original_require("spec.support.browser_process_audit").install({
             active = function() return browser_active end,
+            images = true,
+            runner = module.browserlink.sdk_assets(module.installed_paths(assert(os.getenv("TITAN_ROOT")), "browser")).runner,
             tools = { cc = { assert(os.getenv("BROWSER_CC")) },
                 ar = { assert(os.getenv("BROWSER_AR")) },
                 ranlib = { assert(os.getenv("BROWSER_RANLIB")) } },
@@ -729,6 +698,8 @@ describe("browser providers real toolchain", function()
         return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
     end
     local function prepare(real_info)
+        -- Only runtime/JS assets are bootstrap prerequisites; deliberately omit
+        -- the provider and manifest in this isolated publication destination.
         info = real_info
         root = temporary.name("-browser-real-provider"); mkdir(root)
         repo = assert(lfs.currentdir()); prefix = root .. "/prefix"
@@ -741,16 +712,28 @@ describe("browser providers real toolchain", function()
         write(root .. "/src/pkg/left.titan", "function answer(): integer return 42 end\n")
         write(root .. "/src/pkg/right.titan", "function twice(n: integer): integer return n * 2 end\n")
     end
+    local function stage_sdk()
+        local assets = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(prefix))
+        local source = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(info.prefix))
+        for _, key in ipairs({ "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+            assert(lfs.link(source[key], assets[key], true))
+        end
+    end
     after_each(function()
         if root then remove(root) end
         root = nil
     end)
-    it("publishes an archive-only multi-module provider with an empty SDK", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
+    it("diagnoses an empty SDK, then publishes without an installed provider or manifest", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare(info)
         local entries = {}; for entry in lfs.dir(sdk) do entries[#entries + 1] = entry end
         table.sort(entries); assert.same({ ".", ".." }, entries)
         local result = run_cli(nil, "--c-parts", "3", "pkg.left", "pkg.right")
+        assert.is_false(result.ok, result.output)
+        assert.matches("browser SDK is incomplete: missing", result.output, 1, true)
+        assert.is_nil(lfs.attributes(root .. "/out/pkg.a"))
+        stage_sdk()
+        result = run_cli(nil, "--c-parts", "3", "pkg.left", "pkg.right")
         assert.is_true(result.ok, result.output)
         local output = root .. "/out/pkg.a"
         assert.equal("file", lfs.attributes(output, "mode"))
@@ -765,6 +748,8 @@ describe("browser providers real toolchain", function()
         assert.matches("emranlib archive", commands, 1, true)
         local allowed = { ["emcc compile"] = true, ["emcc preprocess"] = true, ["emcc query"] = true,
             ["emar archive"] = true, ["emranlib archive"] = true, ["compiler-worker frontend"] = true }
+        allowed["emcc link"] = true
+        allowed["browser-runner execute"] = true
         for operation in commands:gmatch("[^\n]+") do assert.is_true(allowed[operation], operation) end
         write(root .. "/providers/pkg.a", read(output))
         write(root .. "/src/consumer.titan",
@@ -803,8 +788,9 @@ assert(driver.close_resolver_context(context))
         assert.is_true(result.ok, result.output)
     end)
     it("refuses a stale native companion before a warm archive certificate hit", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare(info)
+        stage_sdk()
         local result = run_cli(nil, "--incremental", "pkg.left")
         assert.is_true(result.ok, result.output)
         local archive_path, companion = root .. "/out/pkg/left.a", root .. "/out/pkg/left.so"
@@ -823,8 +809,9 @@ assert(driver.close_resolver_context(context))
         { mode = "lto", message = "LLVM bitcode (LTO) object is not supported" },
     }) do
         it("rejects " .. case.mode .. " and publishes nothing", function()
-            local info, why = toolchain.require(); if not info then pending(why) return end
+            local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
             prepare(info)
+            stage_sdk()
             local result = run_cli(case.mode, "pkg.left")
             assert.is_false(result.ok)
             assert.matches(case.message, result.output, 1, true)
@@ -836,7 +823,7 @@ assert(driver.close_resolver_context(context))
         end)
     end
     for _, mode in ipairs({ "program", "test" }) do
-        it("stops " .. mode .. " linking before executable synthesis", function()
+        it("diagnoses missing browser SDK for " .. mode .. " linking before executable synthesis", function()
             local info, why = toolchain.require(); if not info then pending(why) return end
             prepare(info)
             write(root .. "/src/pkg/program.titan",
@@ -844,7 +831,7 @@ assert(driver.close_resolver_context(context))
             local result = mode == "test" and run_cli(nil, "--test", "pkg.left") or
                 run_cli(nil, "pkg.program")
             assert.is_false(result.ok)
-            assert.matches("browser program linking is not available yet", result.output, 1, true)
+            assert.matches("browser SDK is incomplete: missing", result.output, 1, true)
             assert.is_nil(lfs.attributes(root .. "/out/.titan-links"))
         end)
     end

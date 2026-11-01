@@ -5,6 +5,7 @@
 foreign import "minicoro.h"
 foreign import "lua.h"
 foreign import "lauxlib.h"
+foreign import "titan.h"
 foreign import "titan/ffi.h"
 
 foreign type VoidPointer = *void
@@ -29,7 +30,6 @@ local foreign function coro_entry_trampoline(co: *mco_coro)
   ffi.titan_coroutine_enter(T, module, func, co, entry)
 end
 
-local STACK_SIZE = 2 * 1024 * 1024
 local TITAN_CORO_OWNER_USERVALUES = 6
 local TITAN_CORO_THREAD_USERVALUE = 1
 local TITAN_CORO_MODULE_USERVALUE = 2
@@ -457,7 +457,7 @@ function create(func: function (value): (value), default_tag: value): Coroutine
   ffi.lua_setiuservalue(L, -2, TITAN_CORO_CALLBACK_USERVALUE)
   ffi.luaL_setmetatable(L, "titan.coroutine")
 
-  local desc = ffi.mco_desc_init(nil, STACK_SIZE)
+  local desc = ffi.mco_desc_init(nil, ffi.TITAN_COROUTINE_STACK_SIZE as integer)
   desc.runtime = runtime
   desc.func = coro_entry_trampoline
   desc.user_data = ffi.lua_togco(L, -1)

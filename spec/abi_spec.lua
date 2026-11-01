@@ -5,6 +5,9 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
 local shared_suffix = platform.windows and ".dll" or ".so"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local function run(argv, message)
     local result = compiler_io.new_sync():run(argv)
@@ -166,7 +169,7 @@ describe("compiled-module ABI version", function()
         run(shared_fixture_command("legacy" .. shared_suffix, "legacy.c"),
             "could not build fake legacy module")
 
-        local loader = driver.defaultloader({})
+        local loader = driver.defaultloader({}, resolver_options())
         local loaded, err = driver.with_loader(loader, function(loader)
             return loader("legacy")
         end)
@@ -220,7 +223,7 @@ describe("compiled-module ABI version", function()
         run(shared_fixture_command("incompatible" .. shared_suffix,
             "incompatible.c"), "could not build incompatible module")
 
-        local loader = driver.defaultloader({})
+        local loader = driver.defaultloader({}, resolver_options())
         local loaded, err = driver.with_loader(loader, function(loader)
             return loader("incompatible")
         end)
@@ -276,9 +279,7 @@ int incompatible_archive_payload(void) { return 0; }
                 decoded = true
                 return original_decode(...)
             end
-            local loader = driver.defaultloader({}, {
-                prefer_static = true,
-            })
+            local loader = driver.defaultloader({}, resolver_options({ prefer_static = true,  }))
             local result = table.pack(pcall(function()
                 return driver.with_loader(loader, function(loader)
                     return loader("incompatible_archive")

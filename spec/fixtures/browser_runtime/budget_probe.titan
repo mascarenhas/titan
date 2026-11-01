@@ -1,0 +1,181 @@
+local test = import "test"
+local coroutine = import "coroutine"
+local gc = import "gc"
+foreign import "budget.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "stdlib.h"
+foreign import "string.h"
+
+local type Action = function(): ()
+local type Mixed = function(value, Action, integer): ()
+
+local function recurse(depth: integer): integer
+  local pad = foreign unsigned int.new_array(64)
+  pad[0] = depth
+  pad[63] = depth ~ 0x329
+  local result = 0
+  if depth > 0 then result = recurse(depth - 1) + 1 end
+  test.assert(ffi.budget_check_pad(pad, depth) ~= 0, "Titan C-stack canary changed")
+  return result
+end
+
+local function mixed_titan(depth: integer, action: Action, limit: integer)
+  local canary = "mixed-Titan:" .. depth
+  if depth > 0 then mixed_titan(depth - 1, action, limit)
+  else
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    test.assert(ffi.lua_checkstack(L, 3) ~= 0)
+    test.assert(ffi.budget_load_mixed(L) == ffi.LUA_OK)
+    test.assert(ffi.lua_pcallk(L, 0, 1, 0, 0, nil) == ffi.LUA_OK)
+    local callable_value: value = ffi.lua_totvalue(L, -1)
+    local callable: Mixed = callable_value
+    ffi.lua_pushcclosure(L, ffi.budget_bridge, 0)
+    local bridge: value = ffi.lua_totvalue(L, -1)
+    callable(bridge, action, limit)
+  end
+  test.assert(canary == "mixed-Titan:" .. depth)
+end
+
+local function lua_limit(context: test.Context)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 2) ~= 0)
+  test.assert(ffi.budget_load_lua_limit(L) == ffi.LUA_OK)
+  test.assert(ffi.lua_pcallk(L, 0, 1, 0, 0, nil) == ffi.LUA_OK)
+  local message_value: value = ffi.lua_totvalue(L, -1)
+  local message: string = message_value
+  test.assert(ffi.strstr(message, "C stack overflow") ~= nil)
+  context:log("BUDGET allocator=Lua ordinary_error=" .. message)
+end
+
+local function deterministic_create(context: test.Context)
+  ffi.budget_fail_next_create()
+  local caught = false
+  do
+    coroutine.create(function(_: value): value return nil end, "forced")
+  catch
+    caught = true
+    test.assert(error == "could not create coroutine: Out of memory",
+                "deterministic mco_create failure changed diagnostic")
+  end
+  test.assert(caught)
+  local fresh = coroutine.create(function(_: value): value return 17 end, "fresh")
+  test.assert(fresh:resume(nil) == 17)
+  context:log("BUDGET deterministic_mco_failure=1 fresh_after_failure=1")
+end
+
+local function exhaust_until_failure(canary: coroutine.Coroutine): (integer, integer, value)
+  local owners: {coroutine.Coroutine} = {}
+  local created = 0
+  local caught = false
+  local failure: value = nil
+  local allocator = 0
+  do
+    while created < 20000 do
+      ffi.budget_reset_failure()
+      local owner = coroutine.create(function(_: value): value return 1 end, "exhaust")
+      owners[created + 1] = owner
+      created = created + 1
+    end
+  catch
+    caught = true
+    failure = error
+    allocator = ffi.budget_failed_allocator()
+  end
+  test.assert(caught and created > 0, "creation did not reach a caught real allocation failure")
+  -- Resume the pre-created canary BEFORE owners are released and collected.
+  test.assert(canary:resume(42) == 42 and canary:status() == "dead",
+              "pre-created canary was unusable after caught exhaustion")
+  return created, allocator, failure
+end
+
+local function exhaust(context: test.Context)
+  -- This canary exists and is parked BEFORE exhaustion. Creating a new one
+  -- while memory is still exhausted is not a usability proof.
+  local canary = coroutine.create(function(_: value): value
+    local payload = "pre-created-canary"
+    local result = coroutine.yield(41, "canary")
+    test.assert(payload == "pre-created-canary")
+    return result
+  end, "canary")
+  test.assert(canary:resume(nil) == 41)
+  local initial: integer = ffi.budget_heap_size()
+  local created, allocator, failure = exhaust_until_failure(canary)
+  local exhausted: integer = ffi.budget_heap_size()
+  local cap: integer = ffi.budget_heap_max()
+  gc.collect()
+  gc.collect()
+  local released: integer = ffi.budget_heap_size()
+  local fresh = coroutine.create(function(_: value): value return 43 end, "fresh")
+  test.assert(fresh:resume(nil) == 43)
+  test.assert(cap == 2147483648 and exhausted == cap,
+              "exhaustion did not exercise the delivered actual 2-GiB maximum")
+  test.assert(initial < exhausted and released == exhausted,
+              "Wasm heap did not grow or unexpectedly shrank after release")
+  local description = "non-string allocation failure"
+  if failure is string then description = failure as string end
+  context:log("BUDGET created=" .. created .. " first_failing_allocator=" .. allocator .. " failure=" .. description .. " initial_heap=" .. initial .. " exhausted_heap=" .. exhausted .. " released_heap=" .. released .. " maximum=" .. cap .. " existing_canary=42 fresh_after_gc=43")
+end
+
+local function log_shadow(context: test.Context, label: string, expected_span: integer)
+  local span: integer = ffi.budget_last_stack_span()
+  local free_bytes: integer = ffi.budget_last_stack_free()
+  test.assert(span == expected_span)
+  context:log("BUDGET SHADOW context=" .. label .. " stack_span=" .. span .. " leaf_free=" .. free_bytes)
+end
+
+local function exercise(context: test.Context, mode: string, depth: integer)
+  local main_stack: integer = ffi.TITAN_COROUTINE_STACK_SIZE
+  if main_stack ~= 262144 then raise "browser coroutine stack define drifted from 256 KiB" end
+  context:log("BUDGET BEGIN mode=" .. mode .. " depth=" .. depth .. " coroutine_bytes=" .. main_stack)
+  if mode == "main-titan" then test.assert(recurse(depth) == depth)
+  elseif mode == "fiber-titan" then
+    local owner = coroutine.create(function(_: value): value return recurse(depth) end, "depth")
+    test.assert(owner:resume(nil) == depth)
+  elseif mode == "main-shadow" then
+    test.assert(ffi.budget_shadow_bytes(depth) == 91)
+    log_shadow(context, "main", 1048576)
+  elseif mode == "fiber-shadow" then
+    local owner = coroutine.create(function(_: value): value
+      return ffi.budget_shadow_bytes(depth)
+    end, "shadow")
+    test.assert(owner:resume(nil) == 91)
+    log_shadow(context, "fiber", main_stack)
+  elseif mode == "outer-data" then
+    mixed_titan(3, function() ffi.budget_wait() end, depth)
+  elseif mode == "fiber-data" then
+    local owner = coroutine.create(function(_: value): value
+      mixed_titan(3, function() coroutine.yield("parked", "data") end, depth)
+      return "done"
+    end, "data")
+    test.assert(owner:resume(nil) == "parked")
+    test.assert(owner:resume(nil) == "done")
+  elseif mode == "outer-no-wait" then
+    mixed_titan(3, function() end, depth)
+  elseif mode == "fiber-no-yield" then
+    local owner = coroutine.create(function(_: value): value
+      mixed_titan(3, function() end, depth)
+      return "done"
+    end, "control")
+    test.assert(owner:resume(nil) == "done")
+  elseif mode == "main-fiber-data" then
+    mixed_titan(3, function()
+      local owner = coroutine.create(function(_: value): value return 44 end, "main-buffer")
+      test.assert(owner:resume(nil) == 44)
+    end, depth)
+  elseif mode == "lua-limit" then lua_limit(context)
+  elseif mode == "create-failure" then deterministic_create(context)
+  elseif mode == "exhaust" then exhaust(context)
+  else raise "unknown budget mode" end
+  context:log("BUDGET END mode=" .. mode .. " depth=" .. depth .. " canaries=intact")
+end
+
+function main(args: {string}): integer
+  local mode = args[1]
+  local depth: integer = ffi.atoi(args[2] or "0")
+  -- One real native case in every child, including expected trap controls.
+  return test.run({}, {test.Case.new("budget." .. mode, "budget_probe",
+    function(context: test.Context) exercise(context, mode, depth) end)})
+end

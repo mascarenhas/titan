@@ -2,6 +2,9 @@ local temporary = require "spec.support.temporary"
 local driver = require "titan-compiler.driver"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local types = require "titan-compiler.types"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 describe("foreign alias header manifests", function()
     local loaders, headers, previous_imported, previous_registry
@@ -19,15 +22,12 @@ describe("foreign alias header manifests", function()
 
     local function load_module(name, source, retained)
         local filename = "/tmp/titan-foreign-alias-" .. name .. ".titan"
-        local loader = driver.defaultloader({}, {
-            analysis_only = true,
-            source_roots = { [name] = true },
-            source_overrides = { [name] = {
-                kind = "generated", main = filename, files = { filename },
-                contents = { [filename] = source },
-            } },
-            cached_source_entries = retained,
-        })
+        local loader = driver.defaultloader({}, resolver_options({ analysis_only = true, source_roots = { [name] = true },
+        source_overrides = { [name] = {
+            kind = "generated", main = filename, files = { filename },
+            contents = { [filename] = source },
+        } },
+        cached_source_entries = retained, }))
         loaders[#loaders + 1] = loader
         local ok, result, errors = loader(name)
         assert.is_true(ok, result)

@@ -342,11 +342,24 @@ local function sdk_digests_path(relative)
         relative:match("^lib/titan/%d+[.]%d+/sdk%-digests$") ~= nil
 end
 
+local browser_sdk_owned = {
+    "libtitan.a",
+    "libtitan-lpeglabel.a",
+    "titan.a",
+    "titan-browser.mjs",
+    "titan-browser-library.js",
+    "titan-browser-run",
+    "titan-browser-run.mjs",
+    "titan-browser-node-worker.mjs",
+    "titan-browser-page.mjs",
+    "sdk-digests",
+}
+
 function installer.uninstall(package_dir, program)
     package_dir = physical(package_dir)
     local location = assert(loadfile(package_dir .. "/installer/location.lua", "t", {}))()
     local destination = physical(assert(location.tree))
-    local inventory = {}
+    local inventory, releases = {}, {}
     -- Capture every matching version's inventory while LuaRocks still owns it.
     -- The running helper and lfs are already loaded before those files disappear.
     local versions = assert(parent(package_dir))
@@ -358,12 +371,23 @@ function installer.uninstall(package_dir, program)
                 local installed = assert(loadfile(configuration, "t", {}))()
                 if lfs.attributes(assert(installed.tree), "mode") == "directory" and
                    same(installed.tree, destination) then
+                    local release = version:match("^(%d+[.]%d+)[.]")
+                    if release then releases[release] = true end
                     for _, relative in ipairs(files(candidate .. "/titan-sdk")) do
-                        if titan_owned(relative) then inventory[relative] = true end
+                        if titan_owned(relative) then
+                            inventory[relative] = true
+                            local sdk_release = relative:match("^lib/titan/(%d+[.]%d+)/")
+                            if sdk_release then releases[sdk_release] = true end
+                        end
                     end
                     if sdk_digests_path(installed.digests) then inventory[installed.digests] = true end
                 end
             end
+        end
+    end
+    for release in pairs(releases) do
+        for _, name in ipairs(browser_sdk_owned) do
+            inventory["lib/titan-browser/" .. release .. "/" .. name] = true
         end
     end
     for relative in pairs(inventory) do

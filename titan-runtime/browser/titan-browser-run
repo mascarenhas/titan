@@ -1,0 +1,46 @@
+#!/bin/sh
+# Resolve the interpreter before loading any SDK JavaScript.
+if [ "${TITAN_NODE+x}" = x ]; then
+    node_path=$TITAN_NODE
+    case "$node_path" in
+        */*) ;;
+        *) node_path=$(command -v "$node_path" 2>/dev/null) ;;
+    esac
+    if [ -z "$node_path" ] || [ ! -f "$node_path" ] || [ ! -x "$node_path" ]; then
+        printf 'titan-browser-run: Node 24 is required (node not executable at "%s")\n' "$TITAN_NODE" >&2
+        exit 75
+    fi
+else
+    node_path=$(command -v node 2>/dev/null)
+    if [ -z "$node_path" ]; then
+        printf '%s\n' 'titan-browser-run: Node 24 is required (node not found (TITAN_NODE unset; not on PATH))' >&2
+        exit 75
+    fi
+    if [ ! -f "$node_path" ] || [ ! -x "$node_path" ]; then
+        printf 'titan-browser-run: Node 24 is required (node not executable at "%s")\n' "$node_path" >&2
+        exit 75
+    fi
+fi
+case "$node_path" in */*) node_dir=${node_path%/*} ;; *) node_dir=. ;; esac
+node_name=${node_path##*/}
+node_dir=$(CDPATH= cd -- "$node_dir" 2>/dev/null && pwd -P)
+node_path=$node_dir/$node_name
+version=$("$node_path" --version 2>/dev/null)
+case "$version" in
+    v24.[0-9]*) ;;
+    *)
+        case "$version" in
+            v[0-9]*.[0-9]*.[0-9]*) found=$version ;;
+            *) found=unknown ;;
+        esac
+        printf 'titan-browser-run: Node 24 is required ("%s" reports %s; expected Node 24)\n' "$node_path" "$found" >&2
+        exit 75
+        ;;
+esac
+case "$0" in */*) launcher_dir=${0%/*} ;; *) launcher_dir=. ;; esac
+asset_dir=$(CDPATH= cd -- "$launcher_dir" 2>/dev/null && pwd -P)
+if [ -z "$asset_dir" ] || [ ! -r "$asset_dir/titan-browser-run.mjs" ]; then
+    printf '%s\n' 'titan-browser-run: harness failure: runner assets are missing' >&2
+    exit 75
+fi
+exec "$node_path" "$asset_dir/titan-browser-run.mjs" "$@"

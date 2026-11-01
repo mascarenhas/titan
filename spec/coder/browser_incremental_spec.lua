@@ -5,6 +5,8 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local fixtures = require "spec.fixtures.target_selection.support"
 local toolchain = require "spec.support.browser_toolchain"
 local types = require "titan-compiler.types"
+local browserlink = require "titan-compiler.browserlink"
+local driver = require "titan-compiler.driver"
 
 local repository = assert(lfs.currentdir())
 local modules = { "bundle.first", "bundle.second" }
@@ -99,8 +101,249 @@ describe("browser incremental compilation", function()
         if owned_fixture then owned_fixture:close(images) end
     end)
 
+    it("certifies selected archive members and direct objects with parentheses in every path", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        fixture = fixtures.new()
+        local directory = fixture.root .. "/native(dir)"
+        local archive, member, direct = directory .. "/lib(helper).a",
+            directory .. "/helper(part).o", directory .. "/direct(part).o"
+        local helper, object = fixture.source .. "/helper.c", fixture.source .. "/direct.c"
+        local prefix_source, prefix_object = fixture.source .. "/prefix.c", directory .. "/lib"
+        fixtures.write(fixture.source .. "/punctuation.h", "int archive_answer(void);\nint object_answer(void);\n")
+        fixtures.write(fixture.source .. "/pair_main.titan", [[
+foreign import "punctuation.h"
+function main(args: {string}): integer
+    return ffi.archive_answer() + ffi.object_answer()
+end
+]])
+        fixtures.write(helper, "int archive_answer(void) { return 0; }\n")
+        fixtures.write(object, "int object_answer(void) { return 0; }\n")
+        fixtures.write(prefix_source, "int unused_prefix_answer(void) { return 19; }\n")
+        local function payload()
+            local result = fixture:compile({ "-q", "--target", "browser", "-c", "--incremental",
+                "--c-source", helper, "--c-source", object, "--c-source", prefix_source,
+                "--print-c-objects", "pair_main" })
+            assert.is_true(result.ok, result.output)
+            local objects = {}
+            for filename in result.output:gmatch("[^\r\n]+") do objects[#objects + 1] = filename end
+            assert.equal(3, #objects, result.output)
+            fixtures.copy(objects[1], member); fixtures.copy(objects[2], direct)
+            fixtures.copy(objects[3], prefix_object)
+            result = fixture:run({ info.tools.ar[1], "rcsD", archive, member })
+            assert.is_true(result.ok, result.output)
+        end
+        payload()
+        -- A known direct object is also a lexical prefix of the archive path.
+        local arguments = { "--target", "browser", "--incremental", "-v", "pair_main",
+            "-X", archive, direct, prefix_object }
+        local result = fixture:compile(arguments)
+        assert.is_true(result.ok, result.output)
+        local record = record_path(fixture.output)
+        local trace = fixtures.read(record:gsub("/record$", "/link.d"))
+        assert.truthy(trace:find(archive .. "(helper(part).o)", 1, true), trace)
+        assert.truthy(trace:find(direct, 1, true), trace)
+        result = fixture:compile(arguments)
+        assert.is_true(result.ok, result.output)
+        assert.matches("Titan link hit", result.output, 1, true)
+        local image = fixture.output .. "/pair_main.mjs"
+        local ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", image })
+        assert.is_true(ran.ok, ran.output)
+        fixtures.write(helper, "int archive_answer(void) { return 7; }\n")
+        payload()
+        result = fixture:compile(arguments)
+        assert.is_true(result.ok, result.output)
+        assert.matches("Titan link miss", result.output, 1, true)
+        assert.matches("Titan object hit pair_main", result.output, 1, true)
+        ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", image })
+        assert.is_false(ran.ok)
+        assert.equal(7, ran.status)
+    end)
+
+    for _, failure in ipairs({ "trace", "record" }) do
+        it("restores both predecessor image files after a " .. failure .. " certificate failure", function()
+            local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+            fixture = fixtures.new()
+            local source = fixture.source .. "/pair_main.titan"
+            local arguments = { "--target", "browser", "--incremental", "-v", "pair_main" }
+            fixtures.write(source, "function main(args: {string}): integer return 0 end\n")
+            local result = fixture:compile(arguments)
+            assert.is_true(result.ok, result.output)
+            local mjs, wasm = fixture.output .. "/pair_main.mjs", fixture.output .. "/pair_main.wasm"
+            local previous_mjs, previous_wasm = fixture.root .. "/before.mjs", fixture.root .. "/before.wasm"
+            fixtures.copy(mjs, previous_mjs); fixtures.copy(wasm, previous_wasm)
+            local record = record_path(fixture.output)
+            fixtures.write(source, "function main(args: {string}): integer return 7 end\n")
+            local hook, log = fixture.root .. "/certificate-fault.lua", fixture.root .. "/certificate-observation"
+            fixtures.write(hook, string.format([[
+local certificate = require "titan-compiler.linkcertificate"
+local driver = require "titan-compiler.driver"
+local util = require "titan-compiler.util"
+driver.browser_link_options = { purpose = "program", assertions = 0 }
+local commit = certificate.commit
+function certificate.commit(context, ticket)
+    assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new mjs was not published")
+    assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new wasm was not published")
+    local file = assert(io.open(%q, "wb"))
+    assert(file:write("new pair observed\n")); assert(file:close())
+    if %q == "trace" then
+        assert(context.io:write_file(ticket.native_policy.dependency_file, "missing-archive(member).a\n"))
+    else
+        local write = context.io.write_file
+        function context.io:write_file(filename, bytes)
+            if filename == ticket.record then return nil, "injected browser certificate write failure" end
+            return write(self, filename, bytes)
+        end
+    end
+    return commit(context, ticket)
+end
+]], mjs, previous_mjs, wasm, previous_wasm, log, failure))
+            local setup = string.format("package.path=%q..package.path;",
+                fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;") ..
+                fixture.collector:init_code() .. ";\n" .. string.format("dofile(%q);", hook)
+            local argv = { info.prefix .. "/bin/lua", "-E", "-e", setup, fixture.frontend .. "/titanc",
+                "--tree", fixture.source, "--output", fixture.output }
+            for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+            result = fixture:run(argv)
+            fixture.collector:collect()
+            assert.is_false(result.ok)
+            assert.matches(failure == "trace" and "invalid Wasm linker input trace" or
+                "injected browser certificate write failure", result.output, 1, true)
+            assert.equal("new pair observed\n", fixtures.read(log))
+            assert.equal(fixtures.read(previous_mjs), fixtures.read(mjs))
+            assert.equal(fixtures.read(previous_wasm), fixtures.read(wasm))
+            assert.is_nil(lfs.attributes(record))
+            for name in lfs.dir(fixture.output) do
+                assert.is_nil(name:find(".stage.tmp.", 1, true), name)
+                assert.is_nil(name:find(".old.tmp.", 1, true), name)
+            end
+            local ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+            assert.is_true(ran.ok, ran.output)
+            result = fixture:compile(arguments)
+            assert.is_true(result.ok, result.output)
+            assert.matches("Titan link miss", result.output, 1, true)
+            ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+            assert.is_false(ran.ok)
+            assert.equal(7, ran.status)
+        end)
+    end
+
+    it("certifies both image files, invalidates every shared asset and rolls back a failed pair commit", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        fixture = fixtures.new()
+        local physical_output = fixture.root .. "/physical-out"
+        fixtures.mkdir(physical_output)
+        fixture.output = fixture.root .. "/output-alias"
+        assert(lfs.link(physical_output, fixture.output, true))
+        local root = fixture.root .. "/sdk"
+        fixtures.mkdir(root .. "/lib")
+        assert(lfs.link(info.prefix .. "/lib/browser", root .. "/lib/browser", true))
+        assert(lfs.link(info.prefix .. "/include", root .. "/include", true))
+        local assets = browserlink.sdk_assets(driver.installed_paths(root, "browser"))
+        local installed = browserlink.sdk_assets(driver.installed_paths(info.prefix, "browser"))
+        local keys = { "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }
+        for _, key in ipairs(keys) do fixtures.copy(installed[key], assets[key]) end
+        fixtures.write(fixture.source .. "/pair_main.titan",
+            "function main(args: {string}): integer return 0 end\n")
+        local environment = { TITAN_ROOT = root }
+        local arguments = { "--target", "browser", "--incremental", "-v", "pair_main" }
+        local function build()
+            local result = fixture:compile(arguments, environment)
+            assert.is_true(result.ok, result.output)
+            return result.output
+        end
+        assert.matches("Titan link miss", build(), 1, true)
+        local mjs, wasm = fixture.output .. "/pair_main.mjs", fixture.output .. "/pair_main.wasm"
+        local record = record_path(fixture.output)
+        local original = { mjs = fixtures.read(mjs), wasm = fixtures.read(wasm), record = fixtures.read(record) }
+        local past = os.time() - 120
+        assert(lfs.touch(mjs, past, past)); assert(lfs.touch(wasm, past, past))
+        assert.matches("Titan link hit", build(), 1, true)
+        assert.equal(past, lfs.attributes(mjs, "modification"))
+        assert.equal(past, lfs.attributes(wasm, "modification"))
+        assert.equal(original.record, fixtures.read(record))
+        for _, filename in ipairs({ mjs, wasm }) do
+            fixtures.write(filename, fixtures.read(filename) .. "corrupt")
+            local output = build()
+            assert.matches("Titan link miss", output, 1, true)
+            assert.matches("Titan object hit pair_main", output, 1, true)
+            assert.equal(original.mjs, fixtures.read(mjs))
+            assert.equal(original.wasm, fixtures.read(wasm))
+        end
+        for _, key in ipairs(keys) do
+            local bytes = fixtures.read(assets[key])
+            if key == "runtime" then
+                -- A valid ar timestamp edit changes bytes without breaking objects.
+                bytes = bytes:sub(1, 24) .. "2" .. bytes:sub(26)
+            else
+                bytes = bytes .. (key == "runner" and "\n# image asset invalidation\n" or "\n// image asset invalidation\n")
+            end
+            fixtures.write(assets[key], bytes)
+            local output = build()
+            assert.matches("Titan link miss", output, 1, true)
+            assert.matches("Titan object hit pair_main", output, 1, true)
+        end
+        local predecessor = { mjs = fixtures.read(mjs), wasm = fixtures.read(wasm) }
+        fixtures.write(fixture.source .. "/pair_main.titan",
+            "function main(args: {string}): integer return 7 end\n")
+        local log = fixture.root .. "/renames"
+        local hook = fixture.root .. "/commit-fault.lua"
+        fixtures.write(hook, string.format([[
+local io_module = require "titan-compiler.io"
+local original = io_module.new_sync
+local mjs, wasm, log = %q, %q, %q
+local canonical = require("titan-compiler.linkcertificate").canonical_path
+local path_context = { io = original() }
+mjs, wasm = canonical(path_context, mjs), canonical(path_context, wasm)
+local failed
+local function record(message)
+    local file = assert(io.open(log, "ab"))
+    assert(file:write(message, "\n")); assert(file:close())
+end
+function io_module.new_sync(...)
+    local strategy = original(...)
+    local rename = strategy.rename
+    function strategy:rename(from, to)
+        local source, target = canonical(path_context, from), canonical(path_context, to)
+        if source == wasm and target ~= wasm then record("backup") end
+        if target == wasm then record("wasm") end
+        if target == mjs and not failed then
+            failed = true
+            record("mjs-failed")
+            return nil, "forced browser mjs commit failure"
+        end
+        return rename(self, from, to)
+    end
+    return strategy
+end
+]], mjs, wasm, log))
+        local setup = string.format("package.path=%q..package.path;",
+            fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;") ..
+            fixture.collector:init_code() .. ";\n" .. string.format("dofile(%q);", hook)
+        local argv = { info.prefix .. "/bin/lua", "-E", "-e", setup, fixture.frontend .. "/titanc",
+            "--tree", fixture.source, "--output", fixture.output }
+        for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+        local failed = fixture:run(argv, environment)
+        fixture.collector:collect()
+        assert.is_false(failed.ok)
+        assert.matches("forced browser mjs commit failure", failed.output, 1, true)
+        assert.equal("backup\nwasm\nmjs-failed\nwasm\n", fixtures.read(log))
+        assert.equal(predecessor.mjs, fixtures.read(mjs))
+        assert.equal(predecessor.wasm, fixtures.read(wasm))
+        assert.is_nil(lfs.attributes(record), "failed pair cannot retain a link hit record")
+        for name in lfs.dir(fixture.output) do
+            assert.is_nil(name:find(".stage.tmp.", 1, true), name)
+            assert.is_nil(name:find(".old.tmp.", 1, true), name)
+        end
+        local ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+        assert.is_true(ran.ok, ran.output)
+        assert.matches("Titan link miss", build(), 1, true)
+        ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+        assert.is_false(ran.ok)
+        assert.equal(7, ran.status)
+    end)
+
     it("reuses warm browser objects and archives, recompiles only the edited variant, and leaves the native root unchanged", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare_fixture()
         compiled(fixture.host, native_root)
         local native = remember(native_root)
@@ -143,7 +386,7 @@ describe("browser incremental compilation", function()
     end)
 
     it("rejects transplanted foreign object and link certificates in both target directions", function()
-        local info, why = toolchain.require(); if not info then pending(why) return end
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare_fixture()
         compiled(fixture.host, native_root)
         compiled("browser", browser_root)

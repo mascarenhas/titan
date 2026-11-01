@@ -281,8 +281,9 @@ pass itself never runs the checker, code generator, or C preprocessor:
   `.dSYM`, the Windows launcher and provider DLL, or the library provider,
   archive, and `.dSYM`. A browser library reserves only its provider archive,
   after refusing any [native companion](static-compiled-modules.md#archive-only-publication-and-native-companions)
-  beside it, and a browser program or test plan fails with `browser program
-  linking is not available yet`.
+  beside it, and a browser program or test reserves its `.mjs` ("browser
+  executable") and sibling `.wasm` ("browser Wasm"), after checking that an
+  explicit `--exe` ends in `.mjs`.
 * **Protected inputs.** `--c-source` files and `-X` payloads, every source
   constituent, the non-`search` C headers recorded by cached modules, selected
   binary providers and archives, every held `.titan-build.lock` file, every
@@ -1030,7 +1031,9 @@ is:
   "<prefix>.a" }`, and optional `{ path = "<prefix>.so.dSYM", kind =
   "directory" }` on Darwin;
 * **Windows provider library:** `{ path = "<prefix>.dll" }`;
-* **browser provider library:** `{ path = "<prefix>.a" }` only.
+* **browser provider library:** `{ path = "<prefix>.a" }` only;
+* **browser standalone or `--test` image:** `{ path = "<stem>.mjs" }` and
+  `{ path = "<stem>.wasm" }`.
 
 Mutable runtime coverage outputs (`.gcda` files and rendered coverage reports)
 are never part of `spec.outputs`. Each target owns
@@ -1062,17 +1065,21 @@ are never part of `spec.outputs`. Each target owns
   `templates` (`configuration.compiler`, covering the runner and entrypoint
   templates), `coverage` (`coverage.inventory`), `companions`
   (Windows launcher manifest and `relative_provider` path), `policy` (`{ uname,
-  darwin, profile, target }`), `bindings` (`resolver_context.native_bindings`),
+  darwin, profile, target }`, plus `browser_profile` and, for a browser
+  library, `browser_probe`), `bindings` (`resolver_context.native_bindings`),
   `target`, and `environment` (`{ runtime_flags, MACOSX_DEPLOYMENT_TARGET,
-  SDKROOT }`); for a browser context `policy.target` is the browser descriptor
-  identity, which `prepare` also writes into its own copy of the policy, while
-  a host keeps the native profile identity;
+  SDKROOT }`); `titanc` supplies the native profile identity as
+  `policy.target`, and for a browser context `prepare`, the sole writer of the
+  browser value, replaces it with the descriptor identity in its own copy of
+  the policy;
 * `FILE_FIELDS` (`linkcertificate.lua`): `objects` (every linked
   module's primary `.o` and `.part<k>.o` files in bytewise module and part
   order), `c_objects` (`--c-source` objects), `payloads` (`-X` arguments in CLI
   order), `providers` (selected dynamic provider files), `archives` (selected
   static provider `.a` files), and `runtime` (`libtitan.a`, `libbacktrace.a`,
-  `liblua.a`/`liblua55.a`). Every file in `FILE_FIELDS` is certified by its
+  `liblua.a`/`liblua55.a`; for a browser context the browser `libtitan.a`, the
+  six loader and runner assets, the browser `liblua.a`, and its record). Every
+  file in `FILE_FIELDS` is certified by its
   actual SHA-256 content digest via `incremental.file_digest`, never by
   timestamp or module recipe hash alone; and
 * `native_policy` (`certificate.native_library_policy`,
@@ -1083,11 +1090,21 @@ are never part of `spec.outputs`. Each target owns
     `-filelist` option, the link is marked `cacheable = false` (`reason =
     "opaque linker input mechanism: ..."` or `"opaque native C input
     mechanism"`).
-  * **`archive` backend (browser context).** A [browser](browser-target.md)
+  * **`archive` backend (browser library).** A [browser](browser-target.md)
     provider archive has no linker. The backend is `archive`, the policy is
     cacheable with no native files or argv, and `output_tools` records only
     the descriptor's `emar` and `emranlib`, without linker selection or
     link-stage discovery. The opaque-mechanism checks above still apply.
+  * **`wasm` backend (browser program or test).** The link kind selects it.
+    `ticket.dependency_argv` is `{ "-Wl,--trace" }` and
+    `ticket.dependency_output` names the dependency file; the image link
+    captures `wasm-ld`'s stdout there. On commit each trace line must be a
+    regular file or an `archive(member)` whose archive is resolved across `(`
+    boundaries against `policy.trace_inputs` (`FILE_FIELDS` paths) and then
+    regular archives on disk, and every file is hashed (`titanc` commits the
+    certificate inside `compile_browser_image`'s `after_publish` rollback
+    window; see [Object and link
+    identity](browser-target.md#object-and-link-identity)).
   * **`darwin` backend (`driver.IS_DARWIN`).** Appends
     `ticket.dependency_argv = { "-Wl,-dependency_info," .. dependency_file }`
     to the final executable or public DSO link. On commit,

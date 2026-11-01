@@ -136,6 +136,64 @@ are unsymbolized and dropped. With `TITAN_NO_LIBBACKTRACE` defined (for example
 on musl/Alpine), `errorhandler` falls back to raw Lua traceback lines plus raw
 `execinfo` C frames.
 
+#### Trace backends
+
+`titan.c` selects one trace backend at compile time; there is no vtable,
+dynamic dispatch, or heap capture:
+
+| Backend | Selected when | Shape |
+| --- | --- | --- |
+| libbacktrace | the default (`TITAN_HAVE_LIBBACKTRACE`) | the merged trace above |
+| fallback | `TITAN_NO_LIBBACKTRACE` is defined | raw Lua lines, then raw native frames |
+| browser null | `TITAN_TARGET_BROWSER` is defined | the merged trace with no native frames |
+
+The browser define takes precedence: the null backend is selected by the
+target define, never by `TITAN_NO_LIBBACKTRACE`, and needs neither
+`backtrace.h` nor `execinfo.h`.
+
+The merged backends implement a narrow private interface under the shared
+merge (`titan_push_unified_trace` and `titan_drain_native_run`):
+
+```c
+typedef ... TitanTraceStorage;
+static size_t titan_trace_capture(lua_State *L, TitanTraceStorage *storage);
+static int titan_trace_frame_is_entry(const TitanTraceStorage *storage, size_t i);
+static void titan_trace_format_frame(lua_State *L,
+    const TitanTraceStorage *storage, size_t i, char *out, size_t size);
+static int titan_trace_cfunction_is_entry(lua_State *L, lua_CFunction fn);
+void titan_invalidate_backtrace_state(lua_State *L);  /* exported */
+```
+
+* **libbacktrace.** `TitanTraceStorage` is the native frame stack, backed by
+  the merge's on-stack `TITAN_MAX_NATIVE` (512) frame array. Capture calls
+  `backtrace_full` with skip 1 at the historical call depth; frame and
+  CallInfo entry tests symbolize for the `titanentry` tag; formatting
+  produces the qualified Titan names; invalidation clears the registry-owned
+  state, as described above. The output is unchanged.
+* **Browser null.** `TitanTraceStorage` is a one-byte scalar, so the merge
+  puts no native frame array on the browser C stack. Capture returns zero
+  frames, no frame or `lua_CFunction` is an entry, formatting writes nothing,
+  and invalidation is a no-op. The merge therefore emits the CallInfo chain
+  only: each Lua activation as `src:line: in name` (or `src: in name` without
+  a current line), every C CallInfo, Titan entry wrappers included, as
+  `[C]: in <name>`, and `(...tail calls...)` markers. No compiled Titan
+  frame, native symbol, or address appears. A real browser backend with
+  source-map symbolization replaces it later.
+
+The fallback stays outside this interface so that its raw capture keeps its
+exact call depth: `errorhandler` itself calls `backtrace` (POSIX, then
+`backtrace_symbols`) or `CaptureStackBackTrace(0, ...)` (Windows, rendered as
+`[native address <pointer>]`) into its 255-entry `nbuf`, with the same
+truncation. Both fallback branches root the `luaL_traceback` string on the
+Lua stack below the `luaL_Buffer` before initializing it, because appending a
+long Lua trace can grow the buffer's box, which must stay the topmost stack
+value. The stored value is the Lua trace lines (header removed, presentation
+tabs stripped) followed by the native frames.
+
+Pinning and clearing, `TITAN_BACKTRACE_KEY`, bare rethrow, fresh raise,
+coroutine trace append, and the standalone report format are the same for
+every backend; only the frames differ.
+
 #### Backtrace state invalidation
 
 libbacktrace snapshots the process's loaded objects on its first symbol lookup,
@@ -561,10 +619,23 @@ from silently loading stale build artifacts.
 * `spec/coder/unwind_stdlib_spec.lua`: a grafted catch-plus-finally try
   unwound through its catch boundary under the installed `titan.coroutine`
   (a stdlib compiler spec, run after the full provider is installed).
-* `spec/stdlib/titan/coroutine/tests/unwind_test.titan` (`test_unwind_*`):
-  unwinding behavior, including a coroutine abandoned while suspended in an
-  error-recovery `__close`, a failing finally inside an immediately invoked
-  lambda, and a module initializer suspended inside `require`.
+* The `test_unwind_*` cases of the `coroutine.tests` folder module in
+  `spec/stdlib/titan/coroutine/tests/`: `unwind_common.titan` holds the cases
+  shared by every target; `unwind_test.native.titan` holds the host cases that
+  need a child Lua state, `titan.async`, or `titan.string`, including a
+  coroutine abandoned while suspended in an error-recovery `__close`, a
+  failing finally inside an immediately invoked lambda, and a module
+  initializer suspended inside `require`; and `close.browser.titan` proves
+  that the browser's `lua_close` unwinds a retained suspended chain in an
+  independently initialized child state.
+* `spec/coder/browser_fixtures_spec.lua` and
+  `spec/fixtures/browser_runtime/null_trace.titan`: the browser null backend's
+  trace shape, bare rethrow, pin and clear with a fresh raise, and coroutine
+  trace append. `spec/coder/browser_images_spec.lua` builds `titan.c` natively
+  with `TITAN_NO_LIBBACKTRACE` and checks the fallback's capture depth, frame
+  order, count, and 255-frame truncation against an independent capture, and
+  compiles the null backend natively as a focused configuration; the
+  libbacktrace specs above are unchanged.
 * `spec/coder/stack_relocation_spec.lua`: stack relocation through protected
   recovery.
 * `spec/abi_spec.lua`: runtime/compiler ABI constants.

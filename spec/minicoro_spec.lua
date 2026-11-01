@@ -3,6 +3,8 @@ local lfs = require "lfs"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
+local browser_support = require "spec.fixtures.browser_runtime.support"
+local browser_toolchain = require "spec.support.browser_toolchain"
 
 local function write_file(path, contents)
     local f = assert(io.open(path, "wb"))
@@ -722,120 +724,8 @@ int main(void) {
         os.remove(stem)
         local harness = stem .. ".c"
         local executable = stem .. (platform.windows and ".exe" or "")
-        write_file(harness, [[
-#undef NDEBUG
-#include <assert.h>
-#include <stdio.h>
-#include <string.h>
-#include "lua.h"
-#include "lauxlib.h"
-#include "titan.h"
-#include "minicoro.h"
-
-enum { RAISE, UNWIND, RAISE_THEN_SUSPEND_IN_CLOSE };
-
-static mco_runtime runtime;
-static lua_State *thread;
-static TValue tag;
-static int scenario;
-static int closed_with_error;
-static int closed_without_error;
-static int suspended_in_close;
-
-/* A __close method. In the third scenario the first call (made by the
-** floor's real-error close) suspends the coroutine; it is then resumed as an
-** abandoned coroutine is, and continues the unwind from there. */
-static int close_method(lua_State *L) {
-  if (lua_isnoneornil(L, 2)) closed_without_error++;
-  else closed_with_error++;
-  if (scenario == RAISE_THEN_SUSPEND_IN_CLOSE && !suspended_in_close) {
-    suspended_in_close = 1;
-    assert(mco_yield(runtime.current_co, &tag) == MCO_SUCCESS);
-    titan_unwind(L);
-  }
-  return 0;
-}
-
-static void push_to_be_closed(lua_State *L) {
-  lua_newtable(L);
-  lua_newtable(L);
-  lua_pushcfunction(L, close_method);
-  lua_setfield(L, -2, "__close");
-  lua_setmetatable(L, -2);
-  lua_toclose(L, -1);
-}
-
-static void entry(lua_State *L, Udata *module, CClosure *closure, TValue func,
-                  struct mco_coro *co) {
-  (void)module; (void)closure; (void)func; (void)co;
-  push_to_be_closed(L);
-  push_to_be_closed(L);
-  if (scenario == UNWIND) titan_unwind(L);
-  lua_pushliteral(L, "escaped entry error");
-  lua_error(L);
-}
-
-static void trampoline(mco_coro *co) {
-  TValue func;
-  setnilvalue(&func);
-  titan_coroutine_enter(thread, NULL, func, co, entry);
-}
-
-static void run(lua_State *L, int which, int expected_ok, int with_error,
-                int without_error) {
-  mco_desc desc = mco_desc_init(trampoline, 256 * 1024);
-  mco_coro *co = NULL;
-  int ok = -1;
-  TValue payload;
-  int top = lua_gettop(L);
-  scenario = which;
-  closed_with_error = closed_without_error = suspended_in_close = 0;
-  thread = lua_newthread(L);
-  lua_newuserdatauv(L, sizeof(void *), 6);
-  desc.runtime = &runtime;
-  desc.user_data = uvalue(s2v(L->top.p - 1));
-  assert(mco_create(&co, &desc) == MCO_SUCCESS);
-  assert(mco_resume(co, &tag) == MCO_SUCCESS);
-  if (which == RAISE_THEN_SUSPEND_IN_CLOSE) {
-    /* Abandon it while it is suspended inside the error-recovery close. */
-    assert(suspended_in_close && mco_status(co) == MCO_SUSPENDED);
-    assert(mco_resume(co, &tag) == MCO_SUCCESS);
-  }
-  assert(mco_status(co) == MCO_DEAD);
-  assert(mco_pop(co, &ok, sizeof ok) == MCO_SUCCESS);
-  assert(mco_pop(co, &payload, sizeof payload) == MCO_SUCCESS);
-  assert(ok == expected_ok);
-  if (expected_ok == 0) {
-    assert(ttisstring(&payload));
-    assert(strstr(getstr(tsvalue(&payload)), "escaped entry error") != NULL);
-  } else {
-    assert(ttisnil(&payload));
-  }
-  assert(closed_with_error == with_error);
-  assert(closed_without_error == without_error);
-  assert(thread->errorJmp == NULL);
-  assert(mco_destroy(co) == MCO_SUCCESS);
-  lua_settop(L, top);
-}
-
-int main(void) {
-  lua_State *L = luaL_newstate();
-  assert(L != NULL);
-  setivalue(&tag, 7);
-  /* A real error escapes: both variables close with it, and the resumer
-  ** receives it as an error transfer. */
-  run(L, RAISE, 0, 2, 0);
-  /* An unwind reaches the floor: both close with no error value, and the
-  ** coroutine ends with an unwind transfer. */
-  run(L, UNWIND, 2, 0, 2);
-  /* An unwind lands on the re-armed floor: the error is dropped, and the
-  ** remaining variable closes with no error value. */
-  run(L, RAISE_THEN_SUSPEND_IN_CLOSE, 2, 1, 1);
-  lua_close(L);
-  puts("ok");
-  return 0;
-}
-]])
+        write_file(harness, browser_support.files.read(
+            browser_support.fixture .. "/minicoro_floor.c"))
         local compiler = assert(cdriver.split_shell_words(driver.CC))
         local arguments = {
             "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
@@ -875,5 +765,88 @@ int main(void) {
         os.remove(executable)
         assert.truthy(ran, out)
         assert.match("ok", out)
+    end)
+end)
+
+describe("minicoro Emscripten fiber backend", function()
+    local workspace
+    after_each(function()
+        if workspace then browser_support.files.remove(workspace); workspace = nil end
+    end)
+
+    for debug_off = 0, 1 do
+        for vmem = 0, 1 do
+            for comparator = 0, 1 do
+                local name = string.format("debug%d-vmem%d-comparator%d", debug_off, vmem, comparator)
+                it("runs all seven tagged scenarios on " .. name .. " in both engines", function()
+                    local info, why = browser_toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+                    workspace = browser_support.workspace()
+                    local defines = {}
+                    if debug_off == 1 then defines[#defines + 1] = "#define MCO_NO_DEBUG" end
+                    if vmem == 1 then defines[#defines + 1] = "#define MCO_USE_VMEM_ALLOCATOR" end
+                    if comparator == 1 then
+                        defines[#defines + 1] = "static int tagcmp(void *, void *);"
+                        defines[#defines + 1] = "#define MCO_TAG_COMPARATOR tagcmp"
+                        defines[#defines + 1] = "#define TEST_FIXED_TAG_COMPARATOR"
+                    end
+                    local ok, log = browser_support.c_image(info, workspace, name,
+                        minicoro_suite(defines), { purpose = "minicoro", assertions = 2 })
+                    assert.truthy(ok, log)
+                    for _, engine in ipairs({ "node", "chromium" }) do
+                        ok, log = browser_support.image(info, workspace, engine, name)
+                        assert.truthy(ok, log)
+                        assert.truthy(log:find("ok", 1, true), log)
+                    end
+                end)
+            end
+        end
+    end
+
+    it("runs all three production unwind-floor scenarios in both engines", function()
+        local info, why = browser_toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = browser_support.workspace()
+        local ok, log = browser_support.c_image(info, workspace, "unwind-floor",
+            browser_support.files.read(browser_support.fixture .. "/minicoro_floor.c"),
+            { purpose = "minicoro", assertions = 2 })
+        assert.truthy(ok, log)
+        for _, engine in ipairs({ "node", "chromium" }) do
+            ok, log = browser_support.image(info, workspace, engine, "unwind-floor")
+            assert.truthy(ok, log)
+            assert.truthy(log:find("ok", 1, true), log)
+        end
+    end)
+
+    it("rejects a real coroutine creation without Asyncify with its diagnostic", function()
+        local info, why = browser_toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+        workspace = browser_support.workspace()
+        -- A capability refusal is a normal nonzero C-program result, not an
+        -- assertion abort: broken Wasm cannot promise the final libc drain.
+        -- The diagnostic below must still originate in real mco_create.
+        local control = [[
+#include <assert.h>
+#include <stdio.h>
+#define MINICORO_IMPL
+#include "titan-runtime/minicoro.h"
+static void unused_entry(mco_coro *co) { (void)co; }
+int main(void) {
+  mco_coro *co = NULL;
+  mco_desc desc = mco_desc_init(unused_entry, 262144);
+  mco_result result = mco_create(&co, &desc);
+  assert(result == MCO_MAKE_CONTEXT_ERROR);
+  assert(co == NULL);
+  puts("minicoro no-Asyncify control: 1 creation case refused");
+  return 1;
+}
+]]
+        local ok, log = browser_support.c_image(info, workspace, "no-asyncify",
+            control, { purpose = "minicoro", assertions = 2, asyncify = false })
+        assert.truthy(ok, log)
+        for _, engine in ipairs({ "node", "chromium" }) do
+            local status
+            ok, log, status = browser_support.image(info, workspace, engine, "no-asyncify")
+            assert.is_false(ok)
+            assert.equal(1, status, log)
+            assert.truthy(log:find("ASYNCIFY is not enabled", 1, true), log)
+        end
     end)
 end)

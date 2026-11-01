@@ -16,14 +16,14 @@ Linux runs on pushes. Five job definitions produce six runner executions:
 `build-compiler` and `sanitizer` start independently; after `build-compiler`,
 two `test-linux-compiler` shard pairs, `native-coverage`, and the
 [`browser-toolchain`](#browser-toolchain-job) gate start in parallel.
-Preparation and the browser gate have 30-minute timeouts, compiler pairs 45
-minutes, native coverage 60 minutes, and the independent cold sanitizer build
-75 minutes.
+Preparation has a 30-minute timeout, compiler pairs 45 minutes, native
+coverage and the browser gate 60 minutes, and the independent cold sanitizer
+build 75 minutes.
 
 Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
-The native coverage and sanitizer jobs each use a four-vCPU runner with 16GB RAM
-and override both limits to four. Large instrumented test units in the sanitizer
-job exceed the smaller runner's 8GB RAM.
+The native coverage, sanitizer, and browser jobs each use a four-vCPU runner
+with 16GB RAM and override both limits to four. Large instrumented test units
+in the sanitizer job exceed the smaller runner's 8GB RAM.
 Under these caps, native Make prerequisites and the standard-library and
 native-test module objects overlap in one Make pool: every `titanc` recipe is a
 `+` recipe that shares it ([Make job pool and titanc
@@ -91,8 +91,8 @@ Each covered shard excludes explicit `#stress` cases, then runs its listed
 stress oracles separately without LuaCov. Keep a small covered companion over
 the same compiler paths. A shard pair merges stats only after both workers
 pass, generates its own report, and uploads directly with the `compiler`
-Codecov flag. The stdlib integration upload uses that same flag, so there is
-no full-tree merger job.
+Codecov flag. The stdlib integration and `browser-toolchain` uploads use that
+same flag, so there is no full-tree merger job.
 
 Local `rock-test` uses the same timing dataset and partition rule, per file and
 without LuaCov; see [Busted partitions](test-runner.md#busted-partitions).
@@ -175,54 +175,126 @@ Local reporting never uploads.
 ## `browser-toolchain` job
 
 `browser-toolchain` runs the [browser target](browser-target.md)'s
-real-toolchain gate on one two-vCPU runner, separately from the compiler
-shards and the stdlib build. It consumes the same prepared
-`titan-linux-prepared.tar.gz` artifact and `$GITHUB_PATH` setup as the
-compiler shards, so its validation prefix is the compiler SDK installed from
-this commit and nothing is rebuilt. That prepared prefix is SDK-only: it holds
-the installed compiler and `lib/titan/0.6/libtitan.a`, with no native
-`titan.so`/`titan.a` standard-library provider and no `lib/titan-browser`
-contents, so browser and isolation specs that exercise a warm native provider
-compile their own self-contained fixture provider instead of assuming an
-installed standard library. The checkout includes submodules, because the
+real-toolchain gate on one four-vCPU runner, separately from the compiler
+shards and from the stdlib and sanitizer jobs. It needs `build-compiler` and
+consumes the same prepared `titan-linux-prepared.tar.gz` artifact and
+`$GITHUB_PATH` setup as the compiler shards, so its validation prefix starts
+as the compiler SDK installed from this commit, with no native standard
+provider and no browser SDK. The checkout includes submodules, because the
 fork's installer reads the gitlinked revision to write the record; the
-workflow hardcodes no fork revision.
+workflow hardcodes no fork revision. Pins live in `TITAN_`-prefixed variables
+(`TITAN_EMSDK_VERSION`, `TITAN_EMSDK_ROOT`, `TITAN_CHROME_VERSION`,
+`TITAN_CHROME_SHA256`, `TITAN_CHROME_ROOT`), because `emsdk_env.sh` unsets
+every `EMSDK_*` variable it does not set itself, and the job sets
+`permissions.id-token: write` for its Codecov upload. The steps are:
 
 1. **Emscripten.** `ubicloud/cache@v4` restores `.emsdk` under the key
    `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
    (the installer, not the pin); `emsdk install 6.0.13` and `emsdk activate
    6.0.13` are idempotent, so a restored installation only re-verifies. The
    step sources `emsdk_env.sh` and requires `emcc --version` to report exactly
-   6.0.13. The pin and root use `TITAN_EMSDK_VERSION`/`TITAN_EMSDK_ROOT`,
-   because `emsdk_env.sh` unsets every `EMSDK_*` variable it does not set
-   itself.
-2. **Browser Lua.** `make -C lua-5.5.1 install-browser PREFIX="$PREFIX"`
-   installs the archive, record, and headers with the fork's own command. The
-   step asserts `lib/browser/liblua.a`, `liblua-config.txt`, and the core
-   headers, and asserts that `lib/titan-browser` is absent or empty, so the
-   gate proves the compile-only scope with an empty browser SDK.
-3. **Strict gate (installed profile).** With `TITAN_ROOT=$PREFIX`,
+   6.0.13.
+2. **Node 24.** The job selects the Node bundled with the pinned emsdk,
+   requires its `--version` to start with `v24.`, and exports it as
+   `TITAN_NODE` and on `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
+   only action runtimes, so it does not select this Node.
+3. **Chrome for Testing.** `ubicloud/cache@v4` restores the headless shell
+   under `ubuntu-24.04-<arch>-chrome-headless-shell-156.0.8078.80-<sha256>-v1`
+   (the ZIP digest is part of the cache key so re-pinning cannot restore an
+   old binary). A miss downloads the pinned linux64 `chrome-headless-shell`
+   ZIP, verifies its SHA-256 (Chrome for Testing publishes no digest file),
+   and extracts it with `scripts/browser_extract_zip.py` so recorded Unix file
+   modes (including `+x`) are preserved regardless of umask. The step installs
+   the Ubuntu runtime libraries only when `ldd` reports a missing one, fails
+   if any is still missing, and exports `TITAN_CHROME`. Local `act` runs have
+   no browser, so provisioning belongs inside the job; there is no npm,
+   Playwright, or Chromedriver.
+4. **User-namespace sandbox (`Allow Chrome's user-namespace sandbox on the CI
+   host`).** Hosted Ubuntu 24.04 enables
+   `kernel.apparmor_restrict_unprivileged_userns=1`, which kills Chrome's
+   user-namespace sandbox before CDP attaches (`CDP pipe closed before
+   shutdown`). The step logs `df -h /dev/shm` and
+   `/proc/sys/kernel/unprivileged_userns_clone` (value or `absent`) to
+   `$RUNNER_TEMP/browser-chrome-sandbox.log`, reads `sysctl -n
+   kernel.apparmor_restrict_unprivileged_userns` (recording `absent (host does
+   not restrict unprivileged user namespaces)` on container and `act` hosts
+   without the key), runs `sudo sysctl -w
+   kernel.apparmor_restrict_unprivileged_userns=0` when the value is not `0`
+   and requires the re-read value to be `0` (`cannot relax
+   kernel.apparmor_restrict_unprivileged_userns; Chrome's sandbox cannot
+   start`), and runs a sandboxed `$TITAN_CHROME --headless ... --dump-dom`
+   check under a temporary `--user-data-dir` requiring `id="sandbox"`. Chrome
+   keeps its sandbox; the job neither passes `--no-sandbox` nor sets
+   `TITAN_BROWSER_ROOT_NO_SANDBOX`.
+5. **Browser Lua.** `make lua-browser PREFIX="$PREFIX"` installs the archive,
+   record, and headers; the step asserts `liblua.a`, `liblua-config.txt`, and
+   core headers.
+6. **Native install without Emscripten.** After removing the prepared tree's
+   unregistered `bin/titanc`, `share/lua/5.5/titan-compiler`, and
+   `share/lua/5.5/c-parser` copies (as `native-coverage` does),
+   `"$PREFIX/bin/luarocks" make` runs with `EMSDK` unset and no `emcc` on
+   `PATH`, proving that the native build never needs the browser toolchain.
+7. **Browser SDK.** With emsdk sourced, the step asserts that
+   `lib/titan-browser` is absent or empty, runs `make browser-sdk
+   PREFIX="$PREFIX"`, and asserts the nine installed SDK files listed in the
+   [browser SDK layout](browser-target.md#the-browser-sdk) apart from the
+   LPegLabel archive.
+8. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
-   prefix's installed `"$PREFIX/bin/busted"` (without `--run=checkout`,
-   matching the compiler shards because the prepared prefix already installs
-   this commit's compiler) runs `spec/wasm_toolchain_spec.lua`,
-   `spec/coder/browser_toolchain_spec.lua`,
-   `spec/coder/browser_providers_spec.lua`, and
-   `spec/coder/browser_incremental_spec.lua`. A missing gate file fails with
-   `missing browser real-toolchain spec: <path>` before Busted starts.
+   prefix's installed `busted -c -o gtest -v` runs the eleven real-toolchain
+   files `spec/wasm_toolchain_spec.lua`, `spec/coder/browser_toolchain_spec.lua`,
+   `spec/coder/browser_providers_spec.lua`,
+   `spec/coder/browser_incremental_spec.lua`,
+   `spec/coder/browser_images_spec.lua`, `spec/coder/browser_protocol_spec.lua`,
+   `spec/browser_sdk_spec.lua`, `spec/coder/browser_entry_gate_spec.lua`,
+   `spec/coder/browser_fixtures_spec.lua`,
+   `spec/coder/browser_budgets_spec.lua`, and `spec/minicoro_spec.lua` under
+   LuaCov, with output copied to `$RUNNER_TEMP/browser-gate.log`. A missing
+   gate file fails with `missing browser real-toolchain spec: <path>` before
+   Busted starts. The entry-gate and budget specs build their own assertion-on
+   and assertion-off images, and the gate, fixture, budget, and minicoro specs
+   run both engines.
+9. **Browser compiler coverage.** `luacov "titan%-compiler/" "titanc$"` and
+   `prepare_codecov_report.lua` produce `luacov.report.out` and
+   `luacov.codecov.out`, and `codecov/codecov-action@v7` uploads
+   `./luacov.codecov.out` with `flags: compiler`, `name: browser`,
+   `use_oidc: true`, and `fail_ci_if_error: true`, so the real linking and
+   executing-protocol paths that are pending in the emsdk-free shards are
+   measured.
+10. **Runner images.** The installed `titanc` builds `runner_image` (a
+    `--test` image) and `runner_status` (a program) from `spec/browser` into
+    `out/browser/runner`.
+11. **Loader images.** For assertions 2 and 0, the job selects the `program`
+    profile through `driver.browser_link_options` and builds `loader_app` and
+    `fidelity` (programs with `--c-source spec/fixtures/browser_loader/loader.c`)
+    and `loader_names` (a `--test` image) into `out/browser/loader`. It also
+    builds one `fidelity` image with the `baseline` profile at `O2` and
+    assertions off, plus the harness-only `--cflag=-g2 --ldflag=-g2
+    --ldflag=-Os`, because Emscripten 6.0.13 minifies export names only at
+    `-O3` or a shrink level.
+12. **Loader suite.** The installed `titan-browser-run --timeout 300000
+    --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
+    workspace with relative image paths, runs under Node and then Chromium,
+    with output copied to `$RUNNER_TEMP/browser-loader.log`.
+13. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
+    runs against the minified image under both engines with the same timeout
+    and grace and output copied to `$RUNNER_TEMP/browser-guard.log`.
+14. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
+    `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
+    `TITAN_BROWSER_RUNNER` (the installed launcher), and
+    `TITAN_BROWSER_LOADER_IMAGE` (the assertions-2 `fidelity` image), with
+    output copied to `$RUNNER_TEMP/browser-runner.log`.
+15. **Failure logs.** On failure, `actions/upload-artifact` uploads the
+    `browser-*.log` files and `out/browser` for seven days.
 
-The job installs no apt packages and does not set `CC`; the gate's only host
-compilation is the native control build in the incremental spec, which uses
-the compiler's default `cc`. It runs no Node and produces no browser SDK.
-
-The same six browser spec files (`spec/browser_isolation_spec.lua`,
-`spec/browser_target_spec.lua`, `spec/wasm_toolchain_spec.lua`, and the three
-`spec/coder/browser_*_spec.lua` files) are ordinary rows of
-`spec/support/ci_compiler_test_groups.txt` and also run in the covered
-compiler shards against the same SDK-only prefix; there, without Emscripten,
-every real-toolchain case is pending and the synthesized cases run. #329
-extends this job with the browser SDK, the loader, the runner, and Node
-execution.
+The browser target's spec files (`spec/browser_isolation_spec.lua`,
+`spec/browser_target_spec.lua`, `spec/browser_sdk_spec.lua`,
+`spec/wasm_toolchain_spec.lua`, and the `spec/coder/browser_*_spec.lua` files)
+are also ordinary rows of `spec/support/ci_compiler_test_groups.txt` and run
+in the covered compiler shards against the SDK-only prefix. There, without
+Emscripten, Node, Chrome, or a browser SDK, every real-toolchain case is
+pending and the synthesized cases run; compiler shards never become browser
+SDK consumers.
 
 ## Cache ownership
 

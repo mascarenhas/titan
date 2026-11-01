@@ -436,6 +436,25 @@ was replaced by another target's activation raises `compiler caches now
 belong to target <identity>; create a new context` at every semantic entry
 point; see [Semantic-cache ownership](browser-target.md#semantic-cache-ownership).
 
+Semantic APIs never construct a context on the caller's behalf: an explicit
+constructor call is the only way to choose and activate an owner.
+`driver.initialize_platform(context)` (`platform initialization requires a
+resolver context`), `driver.configure_foreign_c(context)` (`foreign C
+configuration requires a resolver context`), `find_static_interface`,
+`find_dependency_interface`, `finalize_resolver_context`, `defaultloader`, and
+`tableloader` require a constructor-made context; a missing or never-activated
+one raises `compiler target context is not initialized`, and a stale one the
+ownership error above. The context owner closes it with
+`close_resolver_context` on every exit path; loaders only borrow it. Native
+host conveniences that need no semantic state stay contextless: native
+compiler argv and default flags and `shared_library_flags` detect the host
+platform once through a shared synchronous I/O strategy
+(`perf.initialize_native_platform`), and `validate_generated_objects` without a
+context performs file and digest checks only. None of them activates the
+semantic caches, creates a probe service, or invalidates a live browser
+context; given a context, each goes through that context's normal platform
+and target checks.
+
 `context.checked_source_modules` is an ordered dense list of modules actually
 parsed and checked by that context. Cached source entries and serialized
 interfaces are not appended. After each checked module is completely published
@@ -460,9 +479,13 @@ the argument and does nothing.
   static_archive, static_provider, layouts, layout_inventory }`; trusted
   host-inventory entries carry `{ kind = "embedded", type, filename,
   embedded_provider }`. Tests and long-lived tools reset this cache together
-  with `types.registry`. Both belong to one target identity at a time:
-  activating a context of another target replaces both tables and advances the
-  generation that every older context checks
+  with `types.registry`. Both belong to one target identity at a time. The
+  first activation in a process adopts the pair a host installed before it, so
+  an embedding host may install or restore its own `driver.imported` and
+  `types.registry` before constructing the context for the current owner;
+  only a later activation for a different target identity replaces both
+  tables and advances the generation that every older context checks. A host
+  must not install a pair across a target change
   ([Semantic-cache ownership](browser-target.md#semantic-cache-ownership)).
 * **`CIRCULAR_MARK`** — a unique sentinel stored before recursively checking a
   source module; encountering it reports `"circular reference to module"`.
@@ -473,11 +496,17 @@ the argument and does nothing.
   resolutions, native-binding constraints, and the finalized direct-name
   sets.
 
-The loader's `options` table also seeds the resolver context: when
-`options.context` is absent, `defaultloader` creates one from the same table.
-Loader-owned options are:
+The loader requires `options.context`, a constructor-made resolver context,
+and never creates one: construct the context from the invocation's
+context-owned settings, then pass it with the loader-owned settings.
+`driver.close_loader(loader)` (idempotent, including `close_loader(nil)`) only
+releases the loader's bookkeeping and never closes the caller's context or its
+temporary headers; `driver.with_loader(loader, body, ...)` releases it on
+return and on error and preserves nil-containing result tuples and non-string
+error objects. Loader-owned options are:
 
-* `context` — the shared [resolver context](#drivernew_resolver_contextoptions).
+* `context` — the shared [resolver context](#drivernew_resolver_contextoptions),
+  owned and closed by the caller.
 * `source_roots` — requested build roots, which are source-required (see
   [the selection logic](#source-vs-compiled-providers-the-selection-logic)).
   Under `--incremental`, requested roots are certified like any other source
@@ -660,6 +689,8 @@ It deliberately remains a flat one-string-per-module loader. Source folders,
 privacy blocks, and contributor enumeration belong only to
 `defaultloader`; neither tests nor embeddings acquire a synthetic source-unit
 AST shape.
+Like `defaultloader`, it borrows the caller's `options.context`, which it
+requires, and `driver.close_tableloader` only releases its bookkeeping.
 
 ## Language-server compiler API
 
@@ -1292,28 +1323,32 @@ its refreshed entry carries `c-header-origin-v1;unresolved` with reason
 `missing` or `unreadable`, and a resolved realpath change reports `provenance`.
 Malformed dependency shapes or unknown kinds return `nil, message`.
 
-The optional second argument may be a resolver context, an options table with
-`context`, or an options table with `io`. The first two forms borrow the
-caller's context; the last creates and closes a temporary resolver around that
-strategy. `options.header_validation` defaults to `context.header_validation`
-so all certifications in one resolver context share one validation pass per
-invocation, memoizing checks by `kind .. "\0" .. path` and sharing
-`context.file_digest`. Semantic hosts start a fresh `header_validation` table
-at each filesystem validation boundary. Every header read, `lstat`/`stat`,
-`realpath`, and `readable` check uses `context.io`.
+The optional second argument is either semantic or file-only. A resolver
+context, or an options table with `context`, borrows the caller's context
+after the generation check: every header read, `lstat`/`stat`, `realpath`, and
+`readable` check uses `context.io`, and `options.header_validation` defaults
+to `context.header_validation` so all certifications in one resolver context
+share one validation pass per invocation, memoizing checks by `kind .. "\0" ..
+path` and sharing `context.file_digest`. An omitted argument, or a table of
+file options (`io`, `cache_adapter`, `header_inputs`, `header_validation`),
+runs only file revalidation with that strategy (a fresh synchronous one by
+default), the supplied or default digest adapter, and observations from
+`header_inputs`. It never constructs a resolver, detects a target, creates a
+probe service, or owns source-header temporaries. Semantic hosts start a fresh
+`header_validation` table at each filesystem validation boundary.
 
 ### `driver.resolve_external_modules(requests, known_sources, options)`
 
 This metadata-only helper resolves already-known external dependency names
-without parsing source or retaining compiler entries. Its optional trailing
-argument has the same direct-context, `{ context = ... }`, `{ io = ... }`, or
-omitted forms as header restatting. A borrowed context remains caller-owned;
-an internally created context is closed on both success and failure. Source
-flat/folder stat and enumeration, compiled-provider occupancy, canonical roots,
-and static archive bytes all use that context's strategy. An embedded result
-reports `{ kind = "embedded", provider_file = <host executable> }` without
-opening that path. Existing two-argument callers therefore retain the
-synchronous default.
+without parsing source or retaining compiler entries. Its trailing argument
+is a constructor-made context or `{ context = context }`; the context stays
+caller-owned. An omitted argument, or a raw `{ io = ... }` table, raises
+`resolver options require an explicit context`, and a stale or never-activated
+borrowed context is rejected before any work. Source flat/folder stat and
+enumeration, compiled-provider occupancy, canonical roots, and static archive
+bytes all use that context's strategy. An embedded result reports
+`{ kind = "embedded", provider_file = <host executable> }` without opening
+that path.
 
 ## Compiling one module: `driver.compile`
 
@@ -1983,11 +2018,13 @@ original `modname:gsub("[.]", "/")` default for programmatic callers and
 self-describing providers. The optional entrypoint path and display name let
 `titanc` place synthetic runner and entrypoint files inside the target's
 `.titan-links/<key>/synthetic/` directory without changing the logical main
-identity. The optional `options` table carries `no_uv_bootstrap`,
+identity. The optional `options` table carries `context`, `no_uv_bootstrap`,
 `pretty_print`, `exe`, `final_link_flags` (the final-link certificate's linker
 dependency-report flag, appended only to the final Unix executable link),
+`dependency_output` (where a browser link writes its captured linker trace),
 `before_commit` (invalidating the link certificate record before mutating
-public outputs), `output_module`, `output_root`, `coverage_runtime`,
+public outputs), `after_publish` (committing the browser link certificate inside
+the image rollback window), `output_module`, `output_root`, `coverage_runtime`,
 `module_names`, `archive_entries`, and `archive_names`. On Windows,
 `compile_windows_program` stages both the
 provider `.dll` and launcher `.exe`, validates the staged DLL in a fresh child
@@ -1995,6 +2032,8 @@ process, and publishes them as one recoverable set via
 `windows_publication.publish_program` (committing the `.dll` before the `.exe`
 after `before_commit`); staging cleanup failures and stale-stage retirement
 are described in [Windows DLL publication](windows-build.md#windows-dll-publication).
+A browser `options.context` takes a separate path, described in [Browser
+images](#browser-images) below.
 Filesystem source descriptors cache:
 
 | Form for `foo.bar` | `program_output` |
@@ -2123,6 +2162,43 @@ of one of those initialized logical names calls its `luaopen_*` entry, recovers
 the canonical registry module value, and applies the normal `package.loaded`
 policy.
 
+### Browser images
+
+For a browser context, `driver.compile_program` neither checks the native
+runtime nor renders `entrypoint_template`. It writes
+`<mod>__entrypoint.c` (or the synthetic entrypoint path) from
+`driver.browser_entrypoint_contents(modname, program_name, options)` and
+passes it, with `libnames` as objects and `static_archives`, to
+`driver.compile_browser_image`; the default executable is the logical output
+path with `.mjs` appended. The details are in the browser-target chapter:
+
+* **The browser entrypoint** replaces `main(argc, argv)` with one exported
+  `titan_browser_entry(argc, argv, lengths)`, which admits one run, creates
+  the state outside protection, runs a worker under one `lua_pcall` with
+  `errorhandler`, reports an uncaught error in the standalone format,
+  closes the state, drains `stdout` and `stderr`, and reports the result
+  through the `titan_browser_complete` import. It never calls `exit`, and its
+  return value is admission only. The program worker opens the libraries,
+  installs the searcher, preloads `titan` and the main module, builds the
+  byte-string argument Array, and calls `main` directly or through the
+  bootstrap hook, as `pmain` does
+  ([The browser entrypoint](browser-target.md#the-browser-entrypoint)).
+  `driver.browser_c_image_contents(worker, options)` exposes the same
+  protected wrapper for C-only images.
+* **Linking** uses `browserlink.profile`, compiles the entrypoint with the
+  descriptor's prefix, links with `emcc` into a staging directory, checks the
+  final image's imports, and publishes `<stem>.wasm` and then `<stem>.mjs` as
+  one pair (running `after_publish` inside the rollback window and restoring
+  both predecessors on failure)
+  ([Program and test images](browser-target.md#program-and-test-images),
+  [The link profile](browser-target.md#the-link-profile)).
+* **The protocol runner.** Before a browser program or test links, `titanc`
+  calls `driver.run_standalone_archive_probe` with a browser context, which
+  links the same protocol checks as a browser C image, runs it with the SDK's
+  `titan-browser-run --engine node`, and requires exit 0
+  ([The executing protocol runner](browser-target.md#the-executing-protocol-runner)).
+  Library publication runs the same check on the staged archive.
+
 ## The `titanc` command line
 
 ```sh
@@ -2245,9 +2321,15 @@ marker. With `--output` it then loads the
 [persistent digest cache](incremental-compilation.md#persistent-digest-cache)
 unless the browser path already did; an installed compiler also loads the
 native SDK digest manifest, and a browser context loads only its descriptor's
-browser manifest. A browser `--test` without `-c` stops here, and a browser
-build whose plan has a `main` stops after planning, both with `browser program
-linking is not available yet`.
+browser manifest. A browser invocation has already rejected `--coverage`
+(before target validation) and owned link-profile options in the normalized
+compile and link extras (`browserlink.validate_extras`); before link
+certification, a browser link requires the SDK (`driver.require_browser_sdk`)
+and its link profile (`program` for programs and tests, `protocol` for
+libraries), and a library build also requires a working Node 24
+(`driver.browser_node_ready`). A browser program's output set is the `.mjs`
+and its sibling `.wasm` ([Program and test
+images](browser-target.md#program-and-test-images)).
 It runs `build.run`, whose coordinator-side pre-dispatch
 [output preflight](build-coordinator.md#pre-dispatch-output-preflight)
 rejects output collisions and graph-dependent option errors (`--exe` or
@@ -2355,7 +2437,7 @@ all-hit build shows `[total/total]`.
   libuv's reopen replaces that private descriptor and never fd 2; an exported
   `COLUMNS`; otherwise 80. `close()` closes the private handle. Widths are
   measured in terminal cells over visible text only, never escape sequences,
-  under a conservative rule (#324). An ASCII byte is one cell. Every other
+  under a conservative rule. An ASCII byte is one cell. Every other
   character is two cells: a lead byte followed by the continuation bytes it
   declares counts as one character. Any byte outside such a sequence (a stray
   continuation byte, an invalid lead, a cut-short sequence) is charged as one
@@ -2540,6 +2622,15 @@ headers. Reinstalling in the default system OpenSSL mode removes only the
 bundled OpenSSL headers so subsequent OpenSSL checks use the system headers.
 Checkout developer mode selects the corresponding local archive and headers so
 runtime edits can be tested before reinstalling.
+
+The browser target links a separate `libtitan.a` from the same four sources,
+installed by `make browser-sdk` in `<root>/lib/titan-browser/0.6/`. Under
+`TITAN_TARGET_BROWSER` the runtime compiles out `dlopen`/`dlsym`, executable
+discovery, the compiler-root query, the `SIGPIPE` guard, and libbacktrace, and
+the dynamic paths raise browser errors instead ([Runtime
+guards](browser-target.md#runtime-guards)). `titan.h` also supplies the
+default `TITAN_COROUTINE_STACK_SIZE` of 2 MiB that the browser target
+overrides.
 
 ### `titan.h`
 
@@ -2902,6 +2993,9 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
 | `TITAN_TARGET` | `titanc` | unset (empty means unset) | Source-selection target when `-T`/`--target` is absent; same vocabulary, with diagnostics naming `TITAN_TARGET=<value>`. Ignored by `--print-root`; never read by the driver library, build workers, or the language server. Make's native `titanc` recipes unset it. |
 | `EMSDK` | `browsertarget.lua` | unset (empty means unset) | Emscripten SDK root for the browser target: its `upstream/emscripten/{emcc,emar,emranlib}` are the only tools tried; otherwise `emcc` is found on `PATH`. |
+| `TITAN_NODE` | `titan-browser-run` (through the browser executing check and `make browser-sdk`) | unset | One Node 24 executable path (a bare name is looked up on `PATH`) for the browser runner; otherwise `node` on `PATH`. See [The runner](browser-target.md#the-runner). |
+| `TITAN_CHROME` | `titan-browser-run` | unset | Chrome or Chromium executable for `--engine chromium` and `--probe`, overridden by `--chrome`; otherwise the runner tries `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`, and `chrome-headless-shell` on `PATH`. |
+| `TITAN_BROWSER_ROOT_NO_SANDBOX` | `titan-browser-run` | unset | Exact value `1` adds `--no-sandbox` to Chromium, and only when the runner runs as root (root containers). |
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |
 | `TERM` | `titanc` (`progress.select`, `progress.colour`) | unset | `dumb` selects the plain progress form and disables colour. |
 | `NO_COLOR` | `titanc` (`progress.colour`) | unset | Non-empty disables progress colour only; the live region stays. |
@@ -2979,8 +3073,13 @@ transport](build-coordinator.md#build-worker-transport).
 ## Experimental Windows process transports
 
 `titan-compiler.platform` reads the Lua host separator without filesystem or
-process operations at import. `initialize_platform` retains lazy Unix `uname`
-through the injected strategy, while native Windows initializes as `Windows`
+process operations at import. On Unix, `initialize_platform` runs `uname` once
+through the injected strategy: a target-less or browser constructor does so
+eagerly, and a context constructed with an explicit host label does so only
+when a later step needs the platform. Contextless native helpers (compiler
+argv and default flags, `shared_library_flags`) run it once per process
+through a shared synchronous strategy, without a resolver context and without
+activating the semantic caches. Native Windows initializes as `Windows`
 without that subprocess. This host choice does not replace the generated
 object's authoritative target fingerprint.
 

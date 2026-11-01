@@ -14,6 +14,9 @@ local platform = require "titan-compiler.platform"
 local paths = require "titan-compiler.path"
 local source_inventory = require "spec.support.source_inventory"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
 local STDLIB_TYPES_FIXTURE =
@@ -3174,14 +3177,11 @@ int main(void) {
         local loader
         local completed, failure = xpcall(function()
             local filename = assert(compiler_io.new_sync():realpath("titan/path.titan"))
-            loader = driver.defaultloader({}, {
-                analysis_only = true,
-                source_roots = { ["titan.path"] = true },
-                source_overrides = { ["titan.path"] = {
-                    kind = "generated", main = filename, files = { filename },
-                    contents = { [filename] = read_file(filename) },
-                } },
-            })
+            loader = driver.defaultloader({}, resolver_options({ analysis_only = true, source_roots = { ["titan.path"] = true },
+            source_overrides = { ["titan.path"] = {
+                kind = "generated", main = filename, files = { filename },
+                contents = { [filename] = read_file(filename) },
+            } }, }))
             local loaded, module, errors = loader("titan.path")
             assert.truthy(loaded, module)
             assert.equal(0, #errors, table.concat(errors, "\n"))
@@ -5669,11 +5669,11 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(workflow:find(removed, 1, true), removed)
             end
             assert.falsy(workflow:find("awk", 1, true), workflow)
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 "codecov/codecov-action@v7"), workflow)
-            assert.equal(2, count_literal(workflow,
+            assert.equal(3, count_literal(workflow,
                 "id-token: write"), workflow)
-            assert.equal(2, count_literal(workflow,
+            assert.equal(3, count_literal(workflow,
                 'luacov "titan%-compiler/"'), workflow)
             assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
 
@@ -5798,7 +5798,7 @@ printf '%s\n' "${schedule[@]}"
                 "- name: Upload prepared Linux tree", pack_index, true))
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
-            assert.equal(8, count_literal(workflow,
+            assert.equal(9, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/restore@v4"), workflow)
@@ -5964,46 +5964,182 @@ printf '%s\n' "${schedule[@]}"
                 '"^titanc[.]lua$::titanc"', 1, true))
 
             for _, contract in ipairs({
-                "name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13)",
-                "needs: build-compiler", "runs-on: ubicloud-standard-2",
-                "timeout-minutes: 30",
+                "name: browser target real toolchain (ubuntu-24.04, " ..
+                    "emsdk 6.0.13, Node 24)",
+                "needs: build-compiler", "runs-on: ubicloud-standard-4",
+                "timeout-minutes: 60",
                 'TITAN_EMSDK_VERSION: "6.0.13"',
                 "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
                 "git clone --depth 1 https://github.com/emscripten-core/emsdk.git",
                 '"$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"',
                 '"$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"',
+                'TITAN_CHROME_VERSION: "156.0.8078.80"',
+                "547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4",
+                "chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-${{ env.TITAN_CHROME_SHA256 }}-v1",
+                "sha256sum -c --strict -",
+                "python3 scripts/browser_extract_zip.py",
+                "browser-chrome-sandbox.log",
+                "df -h /dev/shm",
+                'sudo sysctl -w "$key=0"',
+                'rm -f "$PREFIX/bin/titanc"',
+                'rm -rf "$PREFIX/share/lua/5.5/titan-compiler"',
+                "browser-loader.log",
+                "browser-guard.log",
                 "actions/download-artifact@v8",
                 "name: titan-linux-prepared.tar.gz",
                 'echo "$PWD/.lua/bin" >> "$GITHUB_PATH"',
-                'make -C lua-5.5.1 install-browser PREFIX="$PREFIX"',
+                'make lua-browser PREFIX="$PREFIX"',
+                '"$PREFIX/bin/luarocks" make',
+                'make browser-sdk PREFIX="$PREFIX"',
                 "TITAN_ROOT: ${{ github.workspace }}/.lua",
-                'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"',
                 'TITAN_PROBE_CACHE_DISABLE: "1"',
                 "spec/wasm_toolchain_spec.lua",
                 "spec/coder/browser_toolchain_spec.lua",
                 "spec/coder/browser_providers_spec.lua",
                 "spec/coder/browser_incremental_spec.lua",
+                "spec/coder/browser_images_spec.lua",
+                "spec/coder/browser_protocol_spec.lua",
+                "spec/browser_sdk_spec.lua",
+                "spec/coder/browser_entry_gate_spec.lua",
+                "spec/coder/browser_fixtures_spec.lua",
+                "spec/coder/browser_budgets_spec.lua",
+                "spec/minicoro_spec.lua",
+                "node --test spec/browser/runner.test.mjs",
+                "--js-test spec/browser/loader.test.mjs",
+                "if: failure()",
             }) do
                 assert.equal(1, count_literal(browser_job, contract), contract)
             end
+            local browser_node = named_step(browser_job,
+                "Select Node 24 from the pinned Emscripten SDK")
+            assert.truthy(browser_node:find('echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"',
+                1, true), browser_node)
+            assert.truthy(browser_node:find("version=$(", 1, true), browser_node)
             local browser_unpack_index = assert(browser_job:find(
                 "- name: Restore prepared Linux tree and environment", 1, true))
             local browser_toolchain_index = assert(browser_job:find(
                 "- name: Install Emscripten", browser_unpack_index, true))
+            local browser_node_index = assert(browser_job:find(
+                "- name: Select Node 24 from the pinned Emscripten SDK",
+                browser_toolchain_index, true))
+            local browser_chrome_index = assert(browser_job:find(
+                "- name: Install Chrome for Testing headless shell",
+                browser_node_index, true))
+            local browser_sandbox_index = assert(browser_job:find(
+                "- name: Allow Chrome's user-namespace sandbox on the CI host",
+                browser_chrome_index, true))
             local browser_lua_index = assert(browser_job:find(
                 "- name: Install the fork's browser Lua into the validation " ..
-                "prefix", browser_toolchain_index, true))
+                "prefix", browser_sandbox_index, true))
+            local browser_rocks_index = assert(browser_job:find(
+                "- name: Install the native runtime and compiler with LuaRocks",
+                browser_lua_index, true))
+            local browser_sdk_index = assert(browser_job:find(
+                "- name: Build and install the browser SDK",
+                browser_rocks_index, true))
             local browser_gate_index = assert(browser_job:find(
                 "- name: Run the browser real-toolchain gate",
-                browser_lua_index, true))
+                browser_sdk_index, true))
+            local browser_runner_index = assert(browser_job:find(
+                "- name: Run the browser runner supervisor suite",
+                browser_gate_index, true))
+            local browser_upload_index = assert(browser_job:find(
+                "- name: Upload browser failure logs",
+                browser_runner_index, true))
             assert.is_true(browser_unpack_index < browser_toolchain_index and
-                browser_toolchain_index < browser_lua_index and
-                browser_lua_index < browser_gate_index)
+                browser_toolchain_index < browser_node_index and
+                browser_node_index < browser_chrome_index and
+                browser_chrome_index < browser_sandbox_index and
+                browser_sandbox_index < browser_lua_index and
+                browser_lua_index < browser_rocks_index and
+                browser_rocks_index < browser_sdk_index and
+                browser_sdk_index < browser_gate_index and
+                browser_gate_index < browser_runner_index and
+                browser_runner_index < browser_upload_index)
             -- The gate runs the installed compiler of this commit, like every
-            -- other Linux job that consumes the prepared tree.
-            assert.truthy(named_step(browser_job,
-                "Run the browser real-toolchain gate"):find(
-                '"$PREFIX/bin/busted"', 1, true))
+            -- other Linux job that consumes the prepared tree, and it is the
+            -- only strict browser gate: the portable JS steps carry their own.
+            local browser_gate = named_step(browser_job,
+                "Run the browser real-toolchain gate")
+            assert.truthy(browser_gate:find('"$PREFIX/bin/busted"', 1, true),
+                browser_gate)
+            assert.truthy(browser_gate:find(
+                'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"', 1, true), browser_gate)
+            -- Emscripten must stay out of the ordinary native rock build, and
+            -- the unregistered preparation copies must not survive as backups.
+            local browser_rocks = named_step(browser_job,
+                "Install the native runtime and compiler with LuaRocks")
+            assert.truthy(browser_rocks:find('test -z "${EMSDK:-}"', 1, true),
+                browser_rocks)
+            assert.truthy(browser_rocks:find("! command -v emcc", 1, true),
+                browser_rocks)
+            assert.truthy(browser_rocks:find(
+                'rm -rf "$PREFIX/share/lua/5.5/c-parser"', 1, true),
+                browser_rocks)
+            -- A re-pinned ZIP digest must invalidate the restored browser.
+            local browser_chrome_cache = named_step(browser_job,
+                "Restore the pinned Chrome for Testing headless shell")
+            assert.truthy(browser_chrome_cache:find(
+                "${{ env.TITAN_CHROME_SHA256 }}", 1, true), browser_chrome_cache)
+            assert.falsy(browser_chrome_cache:find("restore-keys:", 1, true))
+            local browser_extract = named_step(browser_job,
+                "Install Chrome for Testing headless shell")
+            assert.truthy(browser_extract:find(
+                "scripts/browser_extract_zip.py", 1, true), browser_extract)
+            -- Chrome keeps its sandbox: the host restriction is relaxed instead,
+            -- the step is guarded when the sysctl is absent, and its state lands
+            -- in the failure artifact.
+            local browser_sandbox = named_step(browser_job,
+                "Allow Chrome's user-namespace sandbox on the CI host")
+            assert.truthy(browser_sandbox:find(
+                "key=kernel.apparmor_restrict_unprivileged_userns", 1, true),
+                browser_sandbox)
+            assert.truthy(browser_sandbox:find(
+                "clone=/proc/sys/kernel/unprivileged_userns_clone", 1, true),
+                browser_sandbox)
+            assert.truthy(browser_sandbox:find("df -h /dev/shm", 1, true),
+                browser_sandbox)
+            assert.truthy(browser_sandbox:find(
+                'sysctl -n "$key" 2>/dev/null', 1, true), browser_sandbox)
+            assert.truthy(browser_sandbox:find(
+                'if [ "$state" != "0" ]', 1, true), browser_sandbox)
+            assert.truthy(browser_sandbox:find(
+                "browser-chrome-sandbox.log", 1, true), browser_sandbox)
+            assert.truthy(browser_sandbox:find("--dump-dom", 1, true),
+                browser_sandbox)
+            assert.falsy(browser_job:find("--no-sandbox", 1, true), browser_job)
+            assert.falsy(browser_job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true),
+                browser_job)
+            local browser_loader = named_step(browser_job,
+                "Run the portable loader suite under Node and Chromium")
+            assert.truthy(browser_loader:find("for engine in node chromium",
+                1, true), browser_loader)
+            -- The browser job is the only lane that exercises real linking and
+            -- the executing protocol, so it publishes its own compiler coverage.
+            assert.truthy(browser_gate:find("-c -o gtest", 1, true), browser_gate)
+            local browser_coverage = named_step(browser_job,
+                "Upload browser coverage to Codecov")
+            assert.truthy(browser_coverage:find("name: browser", 1, true),
+                browser_coverage)
+            assert.truthy(browser_coverage:find("flags: compiler", 1, true),
+                browser_coverage)
+            assert.truthy(browser_coverage:find("use_oidc: true", 1, true),
+                browser_coverage)
+            local browser_coverage_index = assert(browser_job:find(
+                "- name: Upload browser coverage to Codecov",
+                browser_gate_index, true))
+            assert.is_true(browser_coverage_index <
+                assert(browser_job:find(
+                    "- name: Run the portable loader suite under Node and Chromium",
+                    browser_coverage_index, true)))
+            local browser_guard = named_step(browser_job,
+                "Run the optimized guard suite under Node and Chromium")
+            assert.truthy(browser_guard:find("optimized-guard.mjs", 1, true),
+                browser_guard)
+            local browser_guard_build = named_step(browser_job,
+                "Build the portable loader images for both assertion profiles")
+            assert.truthy(browser_guard_build:find("--ldflag=-Os", 1, true),
+                browser_guard_build)
 
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",

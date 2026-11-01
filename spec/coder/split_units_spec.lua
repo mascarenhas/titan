@@ -211,7 +211,9 @@ describe("split generated C translation units (S1)", function()
             cleanup_context = nil
             assert(driver.close_resolver_context(context))
         end
-        driver.configure_foreign_c()
+        h.with_resolver_context(nil, function(context)
+            return driver.configure_foreign_c(context)
+        end)
         if workspace then
             remove_tree(workspace)
             workspace = nil

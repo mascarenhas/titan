@@ -1586,6 +1586,9 @@ return {
                     extra_sections_before_linking = { wasm_custom("reloc.DATA", "\0\0") },
                 }), '"fixture with spaces": out-of-order Wasm section 0' },
                 { wasm_object(PAYLOAD, {
+                    extra_sections_before_data = { wasm_sec(14, "\0") },
+                }), '"fixture with spaces": unsupported Wasm section 14' },
+                { wasm_object(PAYLOAD, {
                     extra_sections_before_data = { wasm_sec(3, "\0"), wasm_sec(3, "\0") },
                 }), '"fixture with spaces": duplicate Wasm section 3' },
                 { wasm_object(PAYLOAD, {
@@ -1831,6 +1834,83 @@ return {
                 assert.is_nil(bad_obj, "sleb error case #" .. tostring(index))
                 assert.equal(scase[3], bad_err, "sleb error case #" .. tostring(index))
             end
+
+            -- OP328-M1: many DATA segments and DATA relocations must scan in
+            -- O((relocs + segments) log segments) time rather than quadratically.
+            local count = 16000
+            local bulk_segments = {}
+            local bulk_relocs = {}
+            local running_offset = #uleb(count + 1)
+            for i = 1, count do
+                local body_offset = running_offset + 5
+                bulk_segments[i] = {
+                    name = ".data.g",
+                    payload = "1234",
+                    mode = 0,
+                    offset = 0,
+                    align_exp = 2,
+                    flags = 0,
+                }
+                bulk_relocs[i] = {
+                    type = 5,
+                    offset = body_offset,
+                    symbol = 0,
+                    addend = 0,
+                }
+                running_offset = body_offset + 4
+            end
+            local meta_body_offset = running_offset + 4 + #uleb(#PAYLOAD)
+            bulk_segments[count + 1] = {
+                name = ".titan.meta",
+                payload = PAYLOAD,
+                mode = 0,
+                offset = 0,
+                align_exp = 0,
+                flags = 0,
+            }
+            local bulk_valid = wasm_object(nil, {
+                segments = bulk_segments,
+                relocations = {
+                    {
+                        name = "reloc.DATA",
+                        target = 1,
+                        entries = bulk_relocs,
+                    },
+                },
+            })
+            local start_clock = os.clock()
+            local bulk_obj = assert(scan(bulk_valid))
+            local elapsed_valid = os.clock() - start_clock
+            assert.equal("pkg.mod", bulk_obj.metadata.module)
+            assert.equal(count + 1, #bulk_obj.sections)
+            assert.is_true(elapsed_valid < 2.0,
+                "expected sub-linear scan per relocation, took " .. tostring(elapsed_valid) .. "s")
+
+            bulk_relocs[count + 1] = {
+                type = 5,
+                offset = meta_body_offset,
+                symbol = 0,
+                addend = 0,
+            }
+            local bulk_relocated = wasm_object(nil, {
+                segments = bulk_segments,
+                relocations = {
+                    {
+                        name = "reloc.DATA",
+                        target = 1,
+                        entries = bulk_relocs,
+                    },
+                },
+            })
+            start_clock = os.clock()
+            local rejected_bulk, rejected_bulk_err = scan(bulk_relocated)
+            local elapsed_rejected = os.clock() - start_clock
+            assert.is_nil(rejected_bulk)
+            assert.equal(
+                '"fixture with spaces": Wasm payload segment ".titan.meta" is targeted by a DATA relocation',
+                rejected_bulk_err)
+            assert.is_true(elapsed_rejected < 2.0,
+                "expected sub-linear rejection scan, took " .. tostring(elapsed_rejected) .. "s")
         end)
 
         it("reports Wasm fingerprint mismatches field by field and rejects mixed archives", function()
@@ -1923,6 +2003,103 @@ return {
             }))
             assert.is_nil(bitcode_member)
             assert.matches('archive member #2 .* name "lto.o": LLVM bitcode %(LTO%) object is not supported', bitcode_member_err)
+        end)
+
+        it("permits standalone -shared-mem SjLj feature differences only in non-threaded comparisons", function()
+            local function fp(features)
+                return { format = "wasm", word_size = 32, linking_version = 2, features = features }
+            end
+
+            -- Both operand orders and marker-only/empty boundary succeed in non-threaded comparisons.
+            for _, pair in ipairs({
+                { "+bulk-memory +sign-ext -shared-mem", "+bulk-memory +sign-ext" },
+                { "+bulk-memory +sign-ext", "+bulk-memory +sign-ext -shared-mem" },
+                { "-shared-mem", "" },
+                { "", "-shared-mem" },
+                { "-shared-mem", "-shared-mem" },
+            }) do
+                local ok, err = staticmetadata.fingerprint_matches(fp(pair[1]), fp(pair[2]))
+                assert.is_true(ok, err)
+            end
+
+            -- Lookalike feature names, duplicate/conflicting markers, threading/atomics tokens,
+            -- and unrelated feature additions/removals/sign changes all fail.
+            for _, pair in ipairs({
+                { "-shared-mem+atomics", "+atomics" },
+                { "+atomics", "-shared-mem+atomics" },
+                { "+bulk-memory -shared-memory", "+bulk-memory" },
+                { "+bulk-memory -shared-mem-ext", "+bulk-memory" },
+                { "+bulk-memory -shared-mem -shared-mem", "+bulk-memory" },
+                { "+bulk-memory +shared-mem -shared-mem", "+bulk-memory" },
+                { "+bulk-memory =shared-mem -shared-mem", "+bulk-memory" },
+                { "+atomics -shared-mem", "+atomics" },
+                { "+atomics", "+atomics -shared-mem" },
+                { "=atomics -shared-mem", "=atomics" },
+                { "-atomics -shared-mem", "-atomics" },
+                { "+shared-mem", "-shared-mem" },
+                { "=shared-mem", "-shared-mem" },
+                { "+bulk-memory -shared-mem", "+bulk-memory +sign-ext" },
+                { "-bulk-memory -shared-mem", "+bulk-memory" },
+                { " +bulk-memory -shared-mem", "+bulk-memory" },
+                { "+bulk-memory  -shared-mem", "+bulk-memory" },
+            }) do
+                local ok, err = staticmetadata.fingerprint_matches(fp(pair[1]), fp(pair[2]))
+                assert.is_false(ok, pair[1] .. " vs " .. pair[2])
+                assert.equal("Wasm features " .. pair[1] .. " does not match target " .. pair[2], err)
+            end
+
+            -- Targeted and untargeted mixed archives with -shared-mem and non--shared-mem members
+            -- retain raw per-member features while passing non-threaded compatibility checks.
+            local other_payload = assert(staticmetadata.render(
+                "pkg.other", ABI, 'Module("pkg.other",{}, {})'))
+            local sjlj_obj = wasm_object(PAYLOAD, {
+                features = {
+                    { "+", "bulk-memory" },
+                    { "+", "sign-ext" },
+                    { "-", "shared-mem" },
+                },
+            })
+            local plain_obj = wasm_object(other_payload, {
+                features = {
+                    { "+", "bulk-memory" },
+                    { "+", "sign-ext" },
+                },
+            })
+            local baseline = fp("+bulk-memory +sign-ext")
+            for _, member_order in ipairs({
+                { ar_member("sjlj.o/", sjlj_obj), ar_member("plain.o/", plain_obj) },
+                { ar_member("plain.o/", plain_obj), ar_member("sjlj.o/", sjlj_obj) },
+            }) do
+                local untargeted = assert(scan(archive(member_order)))
+                local targeted = assert(scan(archive(member_order), { target = baseline }))
+                assert.equal(2, #untargeted.members)
+                assert.equal(2, #targeted.members)
+            end
+            local parsed_mixed = assert(scan(archive({
+                ar_member("sjlj.o/", sjlj_obj),
+                ar_member("plain.o/", plain_obj),
+            }), { target = baseline }))
+            assert.equal("+bulk-memory +sign-ext -shared-mem", parsed_mixed.members[1].fingerprint.features)
+            assert.equal("+bulk-memory +sign-ext", parsed_mixed.members[2].fingerprint.features)
+
+            -- Mixed archive with +atomics and -shared-mem is rejected even untargeted.
+            local threaded_sjlj = wasm_object(PAYLOAD, {
+                features = {
+                    { "+", "atomics" },
+                    { "-", "shared-mem" },
+                },
+            })
+            local threaded_plain = wasm_object(other_payload, {
+                features = {
+                    { "+", "atomics" },
+                },
+            })
+            local rejected_ar, rejected_err = scan(archive({
+                ar_member("t1.o/", threaded_sjlj),
+                ar_member("t2.o/", threaded_plain),
+            }))
+            assert.is_nil(rejected_ar)
+            assert.matches('archive member #2 .* name "t2.o": target mismatch: Wasm features %+atomics does not match target %+atomics %-shared%-mem', rejected_err)
         end)
 
         it("classifies Wasm objects and archives and persists Wasm part fingerprints", function()

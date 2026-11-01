@@ -497,8 +497,9 @@ fallback](#the-titan-path).
   `TITAN_TARGET`; absent or empty selects the host. The host's own OS label
   (`linux`, `darwin`, or `windows`) and, on Linux and macOS hosts, `browser`
   are accepted; `native`, other OS labels, and unknown values are errors.
-  `browser` compiles objects and library archives with Emscripten and
-  requires `--output` ([Compiling for the browser target](browser-target.md)).
+  `browser` compiles objects, library archives, and `.mjs`/`.wasm` programs
+  and tests with Emscripten and requires `--output` ([Compiling for the
+  browser target](browser-target.md)).
   Each module source file `name.titan` may have variants
   `name.<label>.titan`, and the target selects one file per logical filename.
 * `-o/--output <directory>` creates the destination and missing parents, then

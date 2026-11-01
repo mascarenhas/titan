@@ -284,10 +284,12 @@ end
 function certificate.linker_backend(context, request)
     request = request or {}
     if browser_descriptor(context) then
+        local kind = request.kind or context.link_kind
+        local backend = (kind == "program" or kind == "test") and "wasm" or "archive"
         if request.uncacheable then
-            return "archive", request.uncacheable, "uncertified"
+            return backend, request.uncacheable, "uncertified"
         end
-        return "archive"
+        return backend
     end
     if request.uncacheable then return "none", request.uncacheable, "uncertified" end
     local report
@@ -709,8 +711,13 @@ function certificate.native_library_policy(context, request)
                 reason = "opaque linker input mechanism: " .. flag }
         end
     end
-    if browser_descriptor(context) then
+    if browser_descriptor(context) and backend == "archive" then
         return { cacheable = true, backend = "archive", files = {}, argv = {} }
+    end
+    if backend == "wasm" then
+        need(type(filename) == "string", "link dependency output path is required")
+        return { cacheable = true, backend = backend, dependency_file = filename,
+            capture_trace = true, argv = { "-Wl,--trace" } }
     end
     if backend == "gnu" or backend == "lld" then
         need(type(filename) == "string", "link dependency output path is required")
@@ -773,6 +780,48 @@ local function native_dependencies(context, policy)
         end
     elseif policy.backend == "gnu" then
         files = gnu_link_dependencies(bytes)
+    elseif policy.backend == "wasm" then
+        files = {}
+        need(not bytes:find("\0", 1, true), "NUL in Wasm linker input trace")
+        for line in (bytes .. "\n"):gmatch("([^\r\n]+)[\r\n]+") do
+            local filename = line
+            local stat = context.io:stat(filename)
+            if not stat and line:sub(-1) == ")" then
+                local candidates, offset = {}, 1
+                while true do
+                    local boundary = line:find("(", offset, true)
+                    if not boundary or boundary >= #line - 1 then break end
+                    candidates[#candidates + 1] = absolute(context, line:sub(1, boundary - 1))
+                    offset = boundary + 1
+                end
+                filename = nil
+                -- The archive path is a literal recipe input, not the first
+                -- or last parenthesis: both it and the member may contain '('.
+                for _, candidate in ipairs(candidates) do
+                    if policy.trace_inputs[candidate] and
+                       context.io:read_file(candidate, 7) == "!<arch>\n" then
+                        need(not filename, "ambiguous Wasm linker input trace: " .. line)
+                        filename = candidate
+                    end
+                end
+                if not filename then
+                    -- Implicit toolchain libraries are not recipe argv inputs.
+                    -- Accept only one regular archive at a literal boundary.
+                    for _, candidate in ipairs(candidates) do
+                        local info = context.io:stat(candidate)
+                        if info and info.kind == "file" and
+                           context.io:read_file(candidate, 7) == "!<arch>\n" then
+                            need(not filename, "ambiguous Wasm linker input trace: " .. line)
+                            filename = candidate
+                        end
+                    end
+                end
+                stat = filename and context.io:stat(filename)
+            end
+            need(stat and stat.kind == "file", "invalid Wasm linker input trace: " .. line)
+            files[#files + 1] = filename
+        end
+        need(#files > 0, "empty Wasm linker input trace")
     else
         files = need(depfile.parse(bytes))
     end
@@ -833,12 +882,19 @@ function certificate.prepare(context, spec)
     -- Staged object/synthetic paths reported by the linker are reconstructed
     -- from the recipe. Track real libraries, scripts and all other read files.
     for _, filename in ipairs(spec.dependency_excludes or {}) do policy.exclude[absolute(context, filename)] = true end
+    if policy.backend == "wasm" then
+        policy.trace_inputs = {}
+        for _, field in ipairs(FILE_FIELDS) do
+            for _, file in ipairs(input[field]) do policy.trace_inputs[file.path] = true end
+        end
+    end
     input.native_policy = { backend = policy.backend, cacheable = policy.cacheable,
         files = policy.files and certificate.files(context, policy.files) or nil }
     return { key = key, directory = directory, synthetic_directory = paths.join(directory, "synthetic"),
         record = paths.join(directory, "record"), input = incremental.digest(context, "final-link", input),
         recipe = input, outputs = outputs, native_policy = policy, cacheable = policy.cacheable,
-        dependency_argv = policy.argv }
+        dependency_argv = policy.argv,
+        dependency_output = policy.capture_trace and policy.dependency_file or nil }
 end
 
 function certificate.check(context, ticket)

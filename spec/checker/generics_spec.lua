@@ -4,6 +4,9 @@ local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 local driver = require "titan-compiler.driver"
 local checker = require "titan-compiler.checker"
+local _, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 local run_checker = h.run_checker
 local run_checker_modules = h.run_checker_modules
@@ -890,7 +893,7 @@ describe("generic declarations and explicit calls", function()
         local entries = {}
         local function check(modules)
             types.registry = {}
-            local loader = driver.tableloader(modules, entries, {}, { analysis_only = true })
+            local loader = driver.tableloader(modules, entries, {}, resolver_options({ analysis_only = true }))
             local ok, result, errors = loader("consumer")
             assert(driver.close_loader(loader))
             assert.is_true(ok, result)
@@ -3362,8 +3365,7 @@ describe("generic declarations and explicit calls", function()
                     function use(): integer return 42 end
                 ]],
             }
-            local loader = driver.tableloader(
-                modules, imported, nil, { interface = "source" })
+            local loader = driver.tableloader(modules, imported, nil, resolver_options({ interface = "source" }))
             driver.with_loader(loader, function(active_loader)
                 for _, name in ipairs({ "provider", "first", "second" }) do
                     local module, errors =
@@ -3491,18 +3493,18 @@ describe("analysis-only checked source ASTs", function()
         h.reset(true)
         local invalid = source:gsub('x = 1', 'x = "wrong"', 1)
         local entries = {}
-        local loader = driver.tableloader({ test = invalid }, entries, {}, { analysis_only = true })
+        local loader = driver.tableloader({ test = invalid }, entries, {}, resolver_options({ analysis_only = true }))
         local ok, result, errors = loader("test")
         assert.is_true(ok, tostring(result))
         assert.is_true(#errors > 0)
         assert.is_true(entries.test.ast._analysis_only)
         assert.is_true(driver.close_loader(loader))
-        loader = driver.tableloader({}, entries)
+        loader = driver.tableloader({}, entries, nil, resolver_options())
         local native_ok, native_error = loader("test")
         assert.is_false(native_ok)
         assert.matches("requires an analysis-only resolver", native_error, 1, true)
         assert.is_true(driver.close_loader(loader))
-        loader = driver.tableloader({ test = invalid }, entries)
+        loader = driver.tableloader({ test = invalid }, entries, nil, resolver_options())
         local checked, _, native_errors = loader("test")
         assert.is_true(checked)
         assert.same(errors, native_errors)
@@ -3513,20 +3515,19 @@ describe("analysis-only checked source ASTs", function()
     it("forwards analysis through tableloader and reparses cached analysis for native checking", function()
         h.reset(true)
         local entries = {}
-        local loader = driver.tableloader({ test = source }, entries, {},
-            { analysis_only = true, interface = "source" })
+        local loader = driver.tableloader({ test = source }, entries, {}, resolver_options({ analysis_only = true, interface = "source" }))
         local ok, result, errors = loader("test")
         assert.is_true(ok, tostring(result))
         assert.equal(0, #errors, table.concat(errors, "\n"))
         assert.is_true(driver.close_loader(loader))
         local analyzed = entries.test
         assert.is_true(analyzed.ast._analysis_only)
-        loader = driver.tableloader({}, entries)
+        loader = driver.tableloader({}, entries, nil, resolver_options())
         local native_ok, native_error = loader("test")
         assert.is_false(native_ok)
         assert.matches("requires an analysis-only resolver", native_error, 1, true)
         assert.is_true(driver.close_loader(loader))
-        loader = driver.tableloader({ test = source }, entries)
+        loader = driver.tableloader({ test = source }, entries, nil, resolver_options())
         ok, result, errors = loader("test")
         assert.is_true(ok, tostring(result))
         assert.equal(0, #errors, table.concat(errors, "\n"))

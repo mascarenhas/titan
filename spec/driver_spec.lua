@@ -21,6 +21,9 @@ local paths = require "titan-compiler.path"
 local version = require "titan-compiler.version"
 local incremental = require "titan-compiler.incremental"
 local browser_fixtures = require "spec.support.browser_fixtures"
+local new_context, close_contexts, resolver_options =
+    require("spec.support.resolver_contexts")(driver)
+after_each(close_contexts)
 
 describe("compiler-specific production debug defaults", function()
     local function fresh_driver(profile)
@@ -3658,52 +3661,39 @@ describe("loader resolver ownership", function()
         assert.equal(1, mixed.native_compile)
     end)
 
-    it("closes internally owned default and table resolvers exactly once",
-    function()
-        local original_close = driver.close_resolver_context
-        local close_calls = 0
-        driver.close_resolver_context = function(context)
-            assert.is_table(context)
+    it("leaves default and table contexts open until their caller closes them", function()
+        local options = resolver_options()
+        local context, close_calls = options.context, 0
+        context.probe_service = { close = function()
             close_calls = close_calls + 1
             return true
-        end
-
-        local ran, failure = pcall(function()
-            local default = driver.defaultloader({})
-            local first, second, third =
-                driver.with_loader(default, function(loader)
-                    assert.is_function(loader)
-                    return "done", nil, 3
-                end)
-            assert.equal("done", first)
-            assert.is_nil(second)
-            assert.equal(3, third)
-            assert.equal(1, close_calls)
-            assert.is_true(driver.close_loader(default))
-            assert.equal(1, close_calls)
-
-            local in_memory = driver.tableloader({}, {}, {})
-            local body_ok, body_error = pcall(
-                driver.with_loader, in_memory, function()
-                    error("injected loader body failure")
-                end)
-            assert.is_false(body_ok)
-            assert.matches("injected loader body failure",
-                tostring(body_error), 1, true)
-            assert.equal(2, close_calls)
-            assert.is_true(driver.close_tableloader(in_memory))
-            assert.equal(2, close_calls)
-
-            local borrowed_context = driver.new_resolver_context()
-            local borrowed = driver.defaultloader({}, {
-                context = borrowed_context,
-            })
-            assert.is_true(driver.close_loader(borrowed))
-            assert.equal(2, close_calls)
-            assert.is_true(original_close(borrowed_context))
+        end }
+        local default = driver.defaultloader({}, options)
+        local first, second, third = driver.with_loader(default, function(loader)
+            assert.is_function(loader)
+            return "done", nil, 3
         end)
-        driver.close_resolver_context = original_close
-        assert.truthy(ran, failure)
+        assert.equal("done", first)
+        assert.is_nil(second)
+        assert.equal(3, third)
+        assert.equal(0, close_calls)
+        assert.is_true(driver.close_loader(default))
+        assert.is_true(driver.close_loader(nil))
+        assert.equal(0, close_calls)
+
+        local in_memory = driver.tableloader({}, {}, {}, options)
+        local cancellation = { kind = "simulated cancellation" }
+        local body_ok, body_error = pcall(driver.with_loader, in_memory, function()
+            error(cancellation)
+        end)
+        assert.is_false(body_ok)
+        assert.equal(cancellation, body_error)
+        assert.is_true(driver.close_tableloader(in_memory))
+        assert.equal(0, close_calls)
+        assert.is_true(driver.close_resolver_context(context))
+        assert.equal(1, close_calls)
+        assert.is_true(driver.close_resolver_context(context))
+        assert.equal(1, close_calls)
     end)
 
     it("removes source-header temporaries with or without a probe service",
@@ -3798,48 +3788,81 @@ describe("loader resolver ownership", function()
         assert.is_nil(lstat_context.source_foreign_header_paths)
     end)
 
-    it("reports an owned resolver close failure after a successful body",
-    function()
-        local original_close = driver.close_resolver_context
-        driver.close_resolver_context = function()
+    it("reports a service close failure only to the explicit context owner", function()
+        local options = resolver_options()
+        local context, close_calls = options.context, 0
+        context.probe_service = { close = function()
+            close_calls = close_calls + 1
             return nil, "injected resolver close failure"
-        end
-        local loader = driver.defaultloader({})
-        local ok, err = pcall(
-            driver.with_loader, loader, function() return true end)
-        driver.close_resolver_context = original_close
-
-        assert.is_false(ok)
-        assert.matches("failed to close loader resolver context", err)
-        assert.matches("injected resolver close failure", err)
+        end }
+        local loader = driver.defaultloader({}, options)
+        assert.is_true(driver.with_loader(loader, function() return true end))
+        assert.equal(0, close_calls)
+        local closed, close_error = driver.close_resolver_context(context)
+        assert.is_nil(closed)
+        assert.equal("injected resolver close failure", close_error)
+        assert.equal(1, close_calls)
         assert.is_true(driver.close_loader(loader))
     end)
 
-    it("retries an owned resolver close after thrown cancellation", function()
-        local original_close = driver.close_resolver_context
+    it("retries a cancelled service close only when the explicit owner closes it", function()
+        local options = resolver_options()
+        local context, close_calls = options.context, 0
         local cancellation = { kind = "simulated cancellation" }
-        local close_calls = 0
-        driver.close_resolver_context = function(context)
-            assert.is_table(context)
+        local service = { close = function()
             close_calls = close_calls + 1
             if close_calls == 1 then error(cancellation) end
             return true
-        end
+        end }
+        context.probe_service = service
+        local loader = driver.defaultloader({}, options)
+        assert.is_true(driver.close_loader(loader))
+        assert.equal(0, close_calls)
+        local first_closed, reason = pcall(driver.close_resolver_context, context)
+        assert.is_false(first_closed)
+        assert.equal(cancellation, reason)
+        assert.equal(service, context.probe_service)
+        assert.equal(1, close_calls)
+        assert.is_true(driver.close_loader(loader))
+        assert.equal(1, close_calls)
+        assert.is_true(driver.close_resolver_context(context))
+        assert.is_nil(context.probe_service)
+        assert.equal(2, close_calls)
+        assert.is_true(driver.close_resolver_context(context))
+        assert.equal(2, close_calls)
+    end)
 
-        local ran, failure = pcall(function()
-            local loader = driver.defaultloader({})
-            local first_closed, reason = pcall(driver.close_loader, loader)
-            assert.is_false(first_closed)
-            assert.equal(cancellation, reason)
-            assert.equal(1, close_calls)
-
-            assert.is_true(driver.close_loader(loader))
-            assert.equal(2, close_calls)
-            assert.is_true(driver.close_loader(loader))
-            assert.equal(2, close_calls)
+    it("closes test-helper contexts on cancellation without taking borrowed ownership", function()
+        local helpers = require "spec.support.helpers"
+        local options, close_calls = { analysis_only = true }, 0
+        local cancellation = { kind = "simulated cancellation" }
+        local called, reason = pcall(helpers.with_resolver_context, options, function(context, supplied)
+            assert.equal(context, supplied.context)
+            context.probe_service = { close = function()
+                close_calls = close_calls + 1
+                return true
+            end }
+            error(cancellation)
         end)
-        driver.close_resolver_context = original_close
-        assert.truthy(ran, failure)
+        assert.is_false(called)
+        assert.equal(cancellation, reason)
+        assert.is_nil(options.context)
+        assert.equal(1, close_calls)
+
+        local borrowed = new_context()
+        borrowed.probe_service = { close = function()
+            close_calls = close_calls + 1
+            return true
+        end }
+        options.context = borrowed
+        assert.equal("kept", helpers.with_resolver_context(options, function(context)
+            assert.equal(borrowed, context)
+            return "kept"
+        end))
+        assert.equal(borrowed, options.context)
+        assert.equal(1, close_calls)
+        assert.is_true(driver.close_resolver_context(borrowed))
+        assert.equal(2, close_calls)
     end)
 end)
 
@@ -5193,17 +5216,14 @@ describe("compiler module loader", function()
         types.registry = {}
         local name = "source_manifest_generated"
         local filename = root .. "/" .. name .. ".titan"
-        local loader = driver.defaultloader({}, {
-            source_roots = { [name] = true },
-            source_overrides = {
-                [name] = {
-                    kind = "generated",
-                    main = filename,
-                    files = { filename },
-                    contents = { [filename] = contents },
-                },
+        local loader = driver.defaultloader({}, resolver_options({ source_roots = { [name] = true }, source_overrides = {
+            [name] = {
+                kind = "generated",
+                main = filename,
+                files = { filename },
+                contents = { [filename] = contents },
             },
-        })
+        }, }))
         local ok, result, errors = loader(name)
         assert.truthy(ok, tostring(result))
         assert.equal(0, #errors, table.concat(errors, "\n"))
@@ -5264,7 +5284,7 @@ describe("compiler module loader", function()
         driver.imported = {}
         types.registry = {}
         write_file(filename, "function answer(): integer return 42 end\n")
-        loader = driver.defaultloader({})
+        loader = driver.defaultloader({}, resolver_options())
         ok, modtype, errors = loader(name)
         assert.is_true(ok, tostring(modtype))
         assert.equal(0, #errors, table.concat(errors, "\n"))
@@ -5319,7 +5339,7 @@ describe("compiler module loader", function()
                 return "wrong type"
             end
         ]])
-        local loader = driver.defaultloader({})
+        local loader = driver.defaultloader({}, resolver_options())
         local ok, modtype, errors = loader(name)
         assert.is_true(ok, tostring(modtype))
         assert.equal(1, #errors, table.concat(errors, "\n"))
@@ -5395,8 +5415,8 @@ describe("compiler module loader", function()
             end
         end)
 
-        local function tracked_context()
-            local context = driver.new_resolver_context()
+        local function tracked_context(options)
+            local context = driver.new_resolver_context(options)
             contexts[#contexts + 1] = context
             return context
         end
@@ -5411,6 +5431,7 @@ describe("compiler module loader", function()
             if options.source_first == nil then
                 options.source_first = true
             end
+            options.context = options.context or tracked_context(options)
             local dependencies = {}
             local loader = driver.defaultloader(dependencies, options)
             loaders[#loaders + 1] = loader
@@ -9160,20 +9181,20 @@ end
         assert.has_error(function()
             driver.resolve_external_modules({}, {
                 ["invalid module"] = true,
-            })
+            }, new_context())
         end, "known_source_modules must contain valid module names mapped to true")
         assert.has_error(function()
-            driver.resolve_external_modules({ external_invalid = "yes" })
+            driver.resolve_external_modules({ external_invalid = "yes" }, {}, new_context())
         end, "external resolution requests must contain valid module names " ..
             "mapped to booleans")
 
         local missing = driver.resolve_external_modules({
             external_missing = false,
-        })
+        }, {}, new_context())
         assert.same({ kind = "missing" }, missing.external_missing)
         local source_missing = driver.resolve_external_modules({
             external_source_missing = true,
-        })
+        }, {}, new_context())
         assert.equal("error", source_missing.external_source_missing.kind)
         assert.matches("source module 'external_source_missing' not found",
             source_missing.external_source_missing.message, 1, true)
@@ -9185,7 +9206,7 @@ end
             "local child: integer = 2\n")
         local blocked = driver.resolve_external_modules({
             ["external_folder.child"] = true,
-        })
+        }, {}, new_context())
         assert.equal("error", blocked["external_folder.child"].kind)
         assert.matches("belongs to folder module 'external_folder'",
             blocked["external_folder.child"].message, 1, true)
@@ -9219,18 +9240,18 @@ end
             broken.external_broken.message, 1, true)
         assert.is_true(driver.close_resolver_context(provider_context))
 
-        local original_close = driver.close_resolver_context
-        driver.close_resolver_context = function()
+        local owned = new_context()
+        local close_calls = 0
+        owned.probe_service = { close = function()
+            close_calls = close_calls + 1
             return nil, "injected external close failure"
-        end
-        local called, close_failure = pcall(
-            driver.resolve_external_modules, {}, {}, {})
-        driver.close_resolver_context = original_close
-        assert.is_false(called)
-        assert.matches("failed to close external resolver context",
-            close_failure, 1, true)
-        assert.matches("injected external close failure",
-            close_failure, 1, true)
+        end }
+        assert.same({}, driver.resolve_external_modules({}, {}, owned))
+        assert.equal(0, close_calls)
+        local closed, close_failure = driver.close_resolver_context(owned)
+        assert.is_nil(closed)
+        assert.equal("injected external close failure", close_failure)
+        assert.equal(1, close_calls)
         assert.same({}, driver.imported)
     end)
 
@@ -9474,7 +9495,7 @@ end
         end
 
         local ok, modtype, errors =
-            driver.defaultloader({})("titan.timer")
+            driver.defaultloader({}, resolver_options())("titan.timer")
         assert.truthy(ok)
         assert.equal("Type.Module", modtype._tag)
         assert.equal(0, #errors)
@@ -9485,9 +9506,7 @@ end
         -- with the source root instead of silently treating compilation as a
         -- no-op.
         local deps = {}
-        ok, modtype, errors = driver.defaultloader(deps, {
-            source_roots = { ["titan.timer"] = true },
-        })("titan.timer")
+        ok, modtype, errors = driver.defaultloader(deps, resolver_options({ source_roots = { ["titan.timer"] = true },  }))("titan.timer")
         assert.truthy(ok)
         assert.equal("Type.Module", modtype._tag)
         assert.equal(0, #errors)
@@ -9525,9 +9544,7 @@ end
         write_file(binary .. provider_path("/pkg/folder.so"),
             "explicit source lookup must not inspect this provider\n")
 
-        local loader = driver.defaultloader({}, {
-            source_roots = { consumer = true },
-        })
+        local loader = driver.defaultloader({}, resolver_options({ source_roots = { consumer = true },  }))
         local ok, modtype, errors, info = loader("pkg.flat")
         assert.truthy(ok)
         assert.equal("pkg.flat", modtype.name)
@@ -9632,12 +9649,10 @@ end
             function answer(): string return provider.answer() end
         ]])
 
-        local loader = driver.defaultloader({}, {
-            source_roots = {
-                ordinary_root = true,
-                source_root = true,
-            },
-        })
+        local loader = driver.defaultloader({}, resolver_options({ source_roots = {
+            ordinary_root = true,
+            source_root = true,
+        },  }))
         local ok, result, errors = loader("ordinary_root")
         assert.truthy(ok, result)
         assert.equal(0, #errors, table.concat(errors, "\n"))
@@ -9787,7 +9802,7 @@ end
             cached = [[
                 function answer(): integer return 7 end
             ]],
-        }, imported)
+        }, imported, nil, resolver_options())
         loaded, result, errors = table_loader("cached")
         assert.truthy(loaded, tostring(result))
         assert.equal(0, #errors)
@@ -9822,9 +9837,7 @@ end
             function answer(): integer return 42 end
         ]])
 
-        local loader = driver.defaultloader({}, {
-            source_roots = { consumer = true },
-        })
+        local loader = driver.defaultloader({}, resolver_options({ source_roots = { consumer = true },  }))
         local ok, _, errors = loader("consumer")
         assert.truthy(ok)
         assert.equal(1, #errors)
@@ -10056,9 +10069,7 @@ end
             program_output = root .. "/generated-suite",
         }
         local deps = {}
-        local ok, modtype, errors = driver.defaultloader(deps, {
-            source_overrides = { generated = descriptor },
-        })("generated")
+        local ok, modtype, errors = driver.defaultloader(deps, resolver_options({ source_overrides = { generated = descriptor },  }))("generated")
         assert.truthy(ok)
         assert.equal("Type.Module", modtype._tag)
         assert.equal(0, #errors)
@@ -10092,27 +10103,24 @@ end
             },
         }
         local static_deps = {}
-        local loader = driver.defaultloader(static_deps, {
-            source_roots = { dirty = true },
-            source_overrides = { dirty = descriptor },
-            cached_interfaces = {
-                provider = {
-                    serialized = types.serialize(provider_type),
-                    filename = root .. "/provider.titan",
-                    source_files = {
-                        root .. "/provider.titan",
-                        root .. "/provider-part.titan",
-                    },
-                    dependencies = { "foundation" },
-                    c_header_dependencies = {{
-                        kind = "search",
-                        path = root .. "/provider.h",
-                        identity = version.C_HEADER_SEARCH_PROTOCOL ..
-                            ";exists=no;kind=missing;open=unreadable",
-                    }},
+        local loader = driver.defaultloader(static_deps, resolver_options({ source_roots = { dirty = true }, source_overrides = { dirty = descriptor },
+        cached_interfaces = {
+            provider = {
+                serialized = types.serialize(provider_type),
+                filename = root .. "/provider.titan",
+                source_files = {
+                    root .. "/provider.titan",
+                    root .. "/provider-part.titan",
                 },
+                dependencies = { "foundation" },
+                c_header_dependencies = {{
+                    kind = "search",
+                    path = root .. "/provider.h",
+                    identity = version.C_HEADER_SEARCH_PROTOCOL ..
+                        ";exists=no;kind=missing;open=unreadable",
+                }},
             },
-        })
+        }, }))
 
         local ok, modtype, errors = loader("dirty")
         assert.truthy(ok)
@@ -10150,27 +10158,24 @@ end
                     false, nil, nil), {}),
         })
         local filename = root .. "/provider-generated.titan"
-        local loader = driver.defaultloader({}, {
-            source_roots = { provider = true },
-            source_overrides = {
-                provider = {
-                    kind = "generated",
-                    main = filename,
-                    files = { filename },
-                    contents = {
-                        [filename] = [[
-                            function source_answer(): integer return 42 end
-                        ]],
-                    },
+        local loader = driver.defaultloader({}, resolver_options({ source_roots = { provider = true }, source_overrides = {
+            provider = {
+                kind = "generated",
+                main = filename,
+                files = { filename },
+                contents = {
+                    [filename] = [[
+                        function source_answer(): integer return 42 end
+                    ]],
                 },
             },
-            cached_interfaces = {
-                provider = {
-                    serialized = types.serialize(cached),
-                    filename = root .. "/cached-provider.titan",
-                },
+        },
+        cached_interfaces = {
+            provider = {
+                serialized = types.serialize(cached),
+                filename = root .. "/cached-provider.titan",
             },
-        })
+        }, }))
 
         local ok, modtype, errors = loader("provider")
         assert.truthy(ok)
@@ -10194,10 +10199,7 @@ end
                 ]],
             },
         }
-        local provider_loader = driver.defaultloader({}, {
-            source_roots = { provider = true },
-            source_overrides = { provider = provider_descriptor },
-        })
+        local provider_loader = driver.defaultloader({}, resolver_options({ source_roots = { provider = true }, source_overrides = { provider = provider_descriptor }, }))
         local provider_ok, _, provider_errors = provider_loader("provider")
         assert.truthy(provider_ok)
         assert.equal(0, #provider_errors,
@@ -10254,24 +10256,21 @@ end
             function public_answer(): integer return secret() end
         ]])
         local provider_filename = root .. "/provider-external.titan"
-        local provider_loader = driver.defaultloader({}, {
-            source_roots = { provider = true },
-            source_overrides = {
-                provider = {
-                    kind = "generated",
-                    main = provider_filename,
-                    files = { provider_filename },
-                    contents = {
-                        [provider_filename] = [[
-                            local external = import "external.titan"
-                            local function answer(): integer
-                                return external.secret()
-                            end
-                        ]],
-                    },
+        local provider_loader = driver.defaultloader({}, resolver_options({ source_roots = { provider = true }, source_overrides = {
+            provider = {
+                kind = "generated",
+                main = provider_filename,
+                files = { provider_filename },
+                contents = {
+                    [provider_filename] = [[
+                        local external = import "external.titan"
+                        local function answer(): integer
+                            return external.secret()
+                        end
+                    ]],
                 },
             },
-        })
+        }, }))
         local provider_ok, _, provider_errors = provider_loader("provider")
         assert.truthy(provider_ok)
         assert.equal(0, #provider_errors,
@@ -10539,7 +10538,7 @@ end
         local relative_public_header = provider_source_filename .. ".h"
         local public_header = provider_filename .. ".h"
         local previous_source_path = driver.TITAN_SOURCE_PATH
-        local provider_loader
+        local provider_loader, provider_context
         local consumer_loader
         local context
         local parsed_generated_headers = {}
@@ -10576,10 +10575,12 @@ end
             ]])
             driver.TITAN_SOURCE_PATH = relative_root
 
-            provider_loader = driver.defaultloader({}, {
+            local provider_options = resolver_options({
                 source_roots = { ["a.provider"] = true },
                 c_header_process_trace = trace_generated_header,
             })
+            provider_context = provider_options.context
+            provider_loader = driver.defaultloader({}, provider_options)
             local provider_ok, _, provider_errors, provider_info =
                 provider_loader("a.provider")
             assert.truthy(provider_ok)
@@ -10613,6 +10614,8 @@ end
             assert.equal(public_header,
                 cached_info.foreign_header_probe_identity)
             assert.is_true(driver.close_loader(provider_loader))
+            assert.is_true(driver.close_resolver_context(provider_context))
+            provider_context = nil
             provider_loader = nil
             assert.is_nil(lfs.symlinkattributes(old_header))
 
@@ -10687,6 +10690,7 @@ end
 
         if consumer_loader then pcall(driver.close_loader, consumer_loader) end
         if provider_loader then pcall(driver.close_loader, provider_loader) end
+        if provider_context then pcall(driver.close_resolver_context, provider_context) end
         if context then pcall(driver.close_resolver_context, context) end
         driver.TITAN_SOURCE_PATH = previous_source_path
         remove_tree(relative_root)
@@ -11063,7 +11067,7 @@ typedef double titan_driver_symlink_value;
             return nil, "undefined symbol: " .. symbol, "init"
         end
 
-        local ok, modtype, errors = driver.defaultloader({})("a.b.c")
+        local ok, modtype, errors = driver.defaultloader({}, resolver_options())("a.b.c")
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal(provider_path("a/b/c.so"), modtype.file)
@@ -11432,7 +11436,7 @@ typedef double titan_driver_symlink_value;
             return nil, "undefined symbol: " .. symbol, "init"
         end
 
-        local ok, modtype, errors = driver.defaultloader({})("a.b.c")
+        local ok, modtype, errors = driver.defaultloader({}, resolver_options())("a.b.c")
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal(provider_path("a/b.so"), modtype.file)
@@ -11458,7 +11462,7 @@ typedef double titan_driver_symlink_value;
             return nil, "undefined symbol: " .. symbol, "init"
         end
 
-        local ok, message = driver.defaultloader({})("titan.timer")
+        local ok, message = driver.defaultloader({}, resolver_options())("titan.timer")
         assert.falsy(ok)
         assert.match("claims module 'titan.timer'", message, 1, true)
         assert.match("titan_timer_types", message, 1, true)
@@ -11482,7 +11486,7 @@ typedef double titan_driver_symlink_value;
             return nil, "undefined symbol: " .. symbol, "init"
         end
 
-        local ok, message = driver.defaultloader({})("titan.timer")
+        local ok, message = driver.defaultloader({}, resolver_options())("titan.timer")
         assert.falsy(ok)
         assert.match("claims module 'titan.timer'", message, 1, true)
         assert.match("titan_timer_abi", message, 1, true)
@@ -11512,7 +11516,7 @@ typedef double titan_driver_symlink_value;
             error("unexpected metadata symbol " .. symbol)
         end
 
-        local ok, message = driver.defaultloader({})("titan.timer")
+        local ok, message = driver.defaultloader({}, resolver_options())("titan.timer")
         assert.falsy(ok)
         assert.match("ABI mismatch", message, 1, true)
         assert.match("but found stale", message, 1, true)
@@ -11592,7 +11596,7 @@ typedef double titan_driver_symlink_value;
                 error("unexpected metadata symbol " .. symbol)
             end
 
-            local ok, message = driver.defaultloader({})(case.name)
+            local ok, message = driver.defaultloader({}, resolver_options())(case.name)
             assert.falsy(ok)
             assert.match(case.expected, message, 1, true)
             if case.retains_claim then
@@ -11622,7 +11626,7 @@ typedef double titan_driver_symlink_value;
             error("unexpected metadata symbol " .. symbol)
         end
 
-        local ok, message = driver.defaultloader({})("titan.timer")
+        local ok, message = driver.defaultloader({}, resolver_options())("titan.timer")
         assert.falsy(ok)
         assert.match("returned type metadata for 'titan.other'", message,
             1, true)
@@ -11643,7 +11647,7 @@ typedef double titan_driver_symlink_value;
             return nil, "broken image", "open"
         end
 
-        local ok, message = driver.defaultloader({})("titan.timer")
+        local ok, message = driver.defaultloader({}, resolver_options())("titan.timer")
         assert.falsy(ok)
         assert.match("cannot inspect compiled module 'titan.timer'", message,
             1, true)
@@ -11670,7 +11674,7 @@ typedef double titan_driver_symlink_value;
             error("unexpected metadata symbol " .. symbol)
         end
 
-        local ok, modtype, errors = driver.defaultloader({})("dup.item")
+        local ok, modtype, errors = driver.defaultloader({}, resolver_options())("dup.item")
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal(provider_path("dup.so"), modtype.file)
@@ -11702,7 +11706,7 @@ typedef double titan_driver_symlink_value;
             return assert(functions[symbol], "unexpected metadata symbol")
         end
 
-        local loader = driver.defaultloader({})
+        local loader = driver.defaultloader({}, resolver_options())
         local left_ok, left, left_errors = loader("bundle.left")
         local right_ok, right, right_errors = loader("bundle.right")
         assert.truthy(left_ok)
@@ -11740,7 +11744,7 @@ typedef double titan_driver_symlink_value;
             return nil, "undefined symbol: " .. symbol, "init"
         end
 
-        local ok, modtype, errors = driver.defaultloader({})("titan.fallback")
+        local ok, modtype, errors = driver.defaultloader({}, resolver_options())("titan.fallback")
         assert.truthy(ok)
         assert.equal("titan.fallback", modtype.name)
         assert.equal(0, #errors)
@@ -11782,9 +11786,7 @@ typedef double titan_driver_symlink_value;
         write_file(folder .. "/ignored.lua", "return {}\n")
         assert(lfs.mkdir(folder .. "/nested.titan"))
 
-        local ok, modtype, errors = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })("titan.sample")
+        local ok, modtype, errors = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))("titan.sample")
 
         assert.truthy(ok)
         assert.equal("Type.Module", modtype._tag)
@@ -11839,9 +11841,7 @@ typedef double titan_driver_symlink_value;
             end
         ]])
 
-        local ok, modtype, errors = driver.defaultloader({}, {
-            source_roots = { ["titan.interfaces"] = true },
-        })("titan.interfaces")
+        local ok, modtype, errors = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.interfaces"] = true },  }))("titan.interfaces")
         assert.truthy(ok)
         assert.equal(0, #errors, table.concat(errors, "\n"))
         assert.equal("Type.Interface",
@@ -11884,11 +11884,9 @@ typedef double titan_driver_symlink_value;
             end
         ]])
 
-        local ok, _, errors = driver.defaultloader({}, {
-            source_roots = {
-                ["titan.interface_mismatch"] = true,
-            },
-        })("titan.interface_mismatch")
+        local ok, _, errors = driver.defaultloader({}, resolver_options({ source_roots = {
+            ["titan.interface_mismatch"] = true,
+        },  }))("titan.interface_mismatch")
         assert.truthy(ok)
         assert.equal(1, #errors)
         assert.match(bridge .. ":2:24: type error:", errors[1], 1, true)
@@ -11912,9 +11910,7 @@ typedef double titan_driver_symlink_value;
             "local from_folder: integer = 1\n")
 
         driver.TITAN_SOURCE_PATH = source .. ";" .. later
-        local loader = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })
+        local loader = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))
         local ok, _, errors = loader("titan.sample")
         assert.truthy(ok)
         assert.equal(0, #errors)
@@ -11926,9 +11922,7 @@ typedef double titan_driver_symlink_value;
         driver.imported = {}
         types.registry = {}
         driver.TITAN_SOURCE_PATH = later .. ";" .. source
-        loader = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })
+        loader = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))
         ok, _, errors = loader("titan.sample")
         assert.truthy(ok)
         assert.equal(0, #errors)
@@ -11947,9 +11941,7 @@ typedef double titan_driver_symlink_value;
         write_file(folder .. "/child.titan",
             "local constituent: integer = 1\n")
 
-        local child_loader = driver.defaultloader({}, {
-            source_roots = { ["titan.sample.child"] = true },
-        })
+        local child_loader = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample.child"] = true },  }))
         local ok, message = child_loader("titan.sample.child")
         assert.falsy(ok)
         assert.match("source module 'titan.sample.child' cannot be loaded directly",
@@ -11958,9 +11950,7 @@ typedef double titan_driver_symlink_value;
         assert.match("folder module 'titan.sample'", message, 1, true)
         assert.match(folder .. "/sample.titan", message, 1, true)
 
-        ok, message = driver.defaultloader({}, {
-            source_roots = { ["titan.sample.sample"] = true },
-        })("titan.sample.sample")
+        ok, message = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample.sample"] = true },  }))("titan.sample.sample")
         assert.falsy(ok)
         assert.match("source module 'titan.sample.sample' cannot be loaded directly",
             message, 1, true)
@@ -11971,9 +11961,7 @@ typedef double titan_driver_symlink_value;
                 return 2
             end
         ]])
-        ok, _, message = driver.defaultloader({}, {
-            source_roots = { ["titan.sample.child"] = true },
-        })("titan.sample.child")
+        ok, _, message = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample.child"] = true },  }))("titan.sample.child")
         assert.truthy(ok)
         assert.equal(0, #message)
         assert.equal(folder .. "/child/child.titan",
@@ -11999,9 +11987,7 @@ typedef double titan_driver_symlink_value;
         ]])
         driver.TITAN_SOURCE_PATH = source .. ";" .. later
 
-        local ok, message = driver.defaultloader({}, {
-            source_roots = { ["titan.sample.child"] = true },
-        })("titan.sample.child")
+        local ok, message = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample.child"] = true },  }))("titan.sample.child")
         assert.falsy(ok)
         assert.match(folder .. "/child.titan", message, 1, true)
         assert.not_match(later, message, 1, true)
@@ -12024,9 +12010,7 @@ typedef double titan_driver_symlink_value;
         ]])
         driver.TITAN_SOURCE_PATH = source .. ";" .. later
 
-        local ok, _, errors = driver.defaultloader({}, {
-            source_roots = { ["titan.sample.child"] = true },
-        })("titan.sample.child")
+        local ok, _, errors = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample.child"] = true },  }))("titan.sample.child")
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal(later .. "/titan/sample/child.titan",
@@ -12061,7 +12045,7 @@ typedef double titan_driver_symlink_value;
         end
 
         local ok, modtype, errors =
-            driver.defaultloader({})("titan.sample.child")
+            driver.defaultloader({}, resolver_options())("titan.sample.child")
         assert.truthy(ok)
         assert.equal("Type.Module", modtype._tag)
         assert.equal(0, #errors)
@@ -12083,9 +12067,7 @@ typedef double titan_driver_symlink_value;
             if path == folder then error("permission denied") end
             return real_dir(path)
         end
-        local called, ok, message = pcall(driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        }), "titan.sample")
+        local called, ok, message = pcall(driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  })), "titan.sample")
         lfs.dir = real_dir
 
         assert.truthy(called)
@@ -12137,9 +12119,7 @@ typedef double titan_driver_symlink_value;
         write_file(folder .. "/part.titan",
             "\ndo\n    local invalid: integer = 1\nend\n")
 
-        local ok, message = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })("titan.sample")
+        local ok, message = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))("titan.sample")
         assert.falsy(ok)
         assert.match(folder .. "/part.titan:2:1", message, 1, true)
         assert.match("module initializer is only allowed", message, 1, true)
@@ -12163,9 +12143,7 @@ catch
 end
 ]])
 
-        local called, ok, message = pcall(driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        }), "titan.sample")
+        local called, ok, message = pcall(driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  })), "titan.sample")
         assert.truthy(called)
         assert.falsy(ok)
         assert.match(folder .. "/part.titan:2:1", message, 1, true)
@@ -12193,9 +12171,7 @@ local function contributor_answer(): integer
 end
 ]])
 
-        local ok, _, errors = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })("titan.sample")
+        local ok, _, errors = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))("titan.sample")
         assert.truthy(ok)
         assert.equal(0, #errors)
         local combined = driver.imported["titan.sample"].ast
@@ -12214,9 +12190,7 @@ end
             "local owner: integer = 1\n")
         write_file(folder .. "/broken.titan", "function broken(\n")
 
-        local ok, message = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })("titan.sample")
+        local ok, message = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))("titan.sample")
         assert.falsy(ok)
         assert.match(folder .. "/broken.titan:2:1: syntax error:",
             message, 1, true)
@@ -12231,9 +12205,7 @@ end
         write_file(folder .. "/part.titan",
             "local invalid: integer = \"not an integer\"\n")
 
-        local ok, _, errors = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })("titan.sample")
+        local ok, _, errors = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))("titan.sample")
         assert.truthy(ok)
         assert.equal(1, #errors)
         assert.match(folder .. "/part.titan:1:1: type error:",
@@ -12262,9 +12234,7 @@ end
         ]])
 
         local static_deps = {}
-        local loader = driver.defaultloader(static_deps, {
-            source_roots = { ["titan.sample"] = true },
-        })
+        local loader = driver.defaultloader(static_deps, resolver_options({ source_roots = { ["titan.sample"] = true },  }))
         local ok, modtype, errors = loader("titan.sample")
         assert.truthy(ok)
         assert.equal(0, #errors)
@@ -12296,9 +12266,7 @@ end
         write_file(folder .. "/part.titan",
             "\nlocal self_part = import \"titan.sample\"\n")
 
-        local ok, _, errors = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })("titan.sample")
+        local ok, _, errors = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))("titan.sample")
         assert.truthy(ok)
         assert.equal(2, #errors)
         local all_errors = table.concat(errors, "\n")
@@ -12321,9 +12289,7 @@ end
         write_file(folder .. "/part.titan",
             "local sibling = import \"titan.sample.part\"\n")
 
-        local ok, _, errors = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })("titan.sample")
+        local ok, _, errors = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))("titan.sample")
         assert.truthy(ok)
         assert.equal(1, #errors)
         assert.match(folder .. "/part.titan:1:1", errors[1], 1, true)
@@ -12353,9 +12319,7 @@ end
             "",
         }, "\n"))
 
-        local ok, _, errors = driver.defaultloader({}, {
-            source_roots = { ["titan.sample"] = true },
-        })("titan.sample")
+        local ok, _, errors = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.sample"] = true },  }))("titan.sample")
         assert.truthy(ok)
         assert.equal(4, #errors)
         local all_errors = table.concat(errors, "\n")
@@ -12381,9 +12345,7 @@ end
         }
         local source_roots = {}
         for _, name in ipairs(malformed) do source_roots[name] = true end
-        local loader = driver.defaultloader({}, {
-            source_roots = source_roots,
-        })
+        local loader = driver.defaultloader({}, resolver_options({ source_roots = source_roots,  }))
 
         for _, name in ipairs(malformed) do
             local called, ok, message = pcall(loader, name)
@@ -12405,9 +12367,7 @@ end
         end
         titan._abivalue = titan._loadlib
 
-        local ok, message = driver.defaultloader({}, {
-            source_roots = { ["titan.timer"] = true },
-        })("titan.timer")
+        local ok, message = driver.defaultloader({}, resolver_options({ source_roots = { ["titan.timer"] = true },  }))("titan.timer")
 
         assert.falsy(ok)
         assert.equal("source module 'titan.timer' not found", message)
@@ -12424,7 +12384,7 @@ end
             return nil, "undefined symbol: " .. symbol, "init"
         end
 
-        local ok, message = driver.defaultloader({})("extension")
+        local ok, message = driver.defaultloader({}, resolver_options())("extension")
         assert.falsy(ok)
         assert.match("has no compatible Titan ABI marker", message)
         assert.same({ "extension_abi", "extension_types" }, symbols)
@@ -12436,7 +12396,7 @@ end
         local deps = {}
 
         local ok, loaded, errors =
-            driver.tableloader({}, imported, deps)("cached")
+            driver.tableloader({}, imported, deps, resolver_options())("cached")
 
         assert.truthy(ok)
         assert.equal(modtype, loaded)
@@ -12458,7 +12418,7 @@ end
             cached = [[
                 function answer(): string return "source" end
             ]],
-        }, imported)
+        }, imported, nil, resolver_options())
 
         local ok, result, errors = loader("cached")
         assert.truthy(ok, result)
@@ -13083,7 +13043,8 @@ describe("target-aware source resolver", function()
             return assert(saved_browser_target.import(browser_fixtures.descriptor(inputs.paths.root)))
         end }, { __index = saved_browser_target })
         driver.initialize_platform = function(ctx)
-            if ctx.target == "browser" and platform.windows then
+            if type(ctx) == "table" and ctx.io ~= nil and ctx._target_initializing and
+               ctx.target == "browser" and platform.windows then
                 ctx._platform_initialized, ctx.uname, ctx.is_darwin = true, "Linux", false
             end
             return saved_initialize_platform(ctx)
@@ -13096,6 +13057,25 @@ describe("target-aware source resolver", function()
         driver._browser_target, driver.initialize_platform =
             saved_browser_target, saved_initialize_platform
         fixtures.remove(root)
+    end)
+
+    it("keeps context validation ahead of the Windows browser host model", function()
+        local uninitialized = { io = compiler_io.new_sync(), target = "browser", _resolver_context = true }
+        local windows = platform.windows
+        local ok, failure = pcall(function()
+            platform.windows = true
+            assert.has_error(function() driver.initialize_platform() end,
+                "platform initialization requires a resolver context")
+            assert.has_error(function() driver.initialize_platform({}) end,
+                "platform initialization requires a resolver context")
+            assert.has_error(function() driver.initialize_platform(uninitialized) end,
+                "compiler target context is not initialized")
+        end)
+        platform.windows = windows
+        if not ok then error(failure, 0) end
+        assert.is_nil(uninitialized._platform_initialized)
+        assert.is_nil(uninitialized.uname)
+        assert.is_nil(uninitialized.is_darwin)
     end)
 
     it("selects every target row, including target-only modules and canonical paths", function()

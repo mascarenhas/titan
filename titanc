@@ -375,6 +375,9 @@ local target_value, target_origin = args.target, "--target"
 if target_value == nil then
     target_value, target_origin = platform.getenv("TITAN_TARGET"), "TITAN_TARGET"
 end
+if target_value == "browser" and args.coverage then
+    exit("--coverage is not supported for --target browser")
+end
 local target, target_error =
     driver.validate_target(resolver_context, target_value, target_origin)
 if not target then exit(target_error) end
@@ -406,6 +409,12 @@ local normalized_native, native_error = nativeinputs.normalize({
     cli = { ordered = native_cli, c_sources = args.c_source, exe = args.exe },
 })
 if not normalized_native then exit(native_error) end
+if target == "browser" then
+    for _, flags in ipairs({ normalized_native.compile_argv, normalized_native.link_argv }) do
+        local valid, err = driver.browserlink.validate_extras(flags)
+        if not valid then exit(err) end
+    end
+end
 driver.apply_native_inputs(normalized_native)
 local c_source_only = args.compile_only and #args.module == 0 and
     #args.test_dir == 0 and #args.c_source > 0
@@ -513,10 +522,6 @@ local function preflight_outputs(plan)
     })
 end
 
-if args.test and not args.compile_only and
-   driver.context_target(resolver_context) == "browser" then
-    exit("browser program linking is not available yet")
-end
 
 local loader
 if c_source_only then
@@ -608,9 +613,6 @@ if args.test then
 end
 local builds_program = main_module ~= nil or
     (args.test and not args.compile_only)
-if builds_program and driver.context_target(resolver_context) == "browser" then
-    exit("browser program linking is not available yet")
-end
 if args.exe and not builds_program then
     exit("--exe is only valid when compiling a standalone or test executable")
 end
@@ -694,7 +696,9 @@ if #extra_objects == 0 then extra_objects = nil end
 
 -- The final-link certificate gates every runner/entrypoint generation,
 -- archive probe, validation link and final link. A hit changes nothing.
+local browser_assets, browser_profile, browser_probe
 local link_ticket, program_path, windows_paths, coverage_runtime, dsymutil
+local link_record_committed
 -- The final link's output basename, reported as the progress step.
 local link_name
 if not args.compile_only and not args.print_ast then
@@ -702,9 +706,17 @@ if not args.compile_only and not args.print_ast then
     if not planned then exit(table.concat(plan_errors, "\n")) end
     local root = args.test and requested_modules[1] or main_module
     local outputs, kind = {}, "library"
+    resolver_context.link_kind = builds_program and (args.test and "test" or "program") or "library"
     if builds_program then
         kind = args.test and "test" or "program"
-        if platform.windows then
+        if driver.context_target(resolver_context) == "browser" then
+            local stem = driver.imported[root].program_output or
+                driver.generated_output_path(root:gsub("[.]", "/"), args.output)
+            local wasm
+            program_path, wasm = driver.browser_program_path(stem, args.exe)
+            if not program_path then exit(wasm) end
+            outputs = { { path = program_path }, { path = wasm } }
+        elseif platform.windows then
             local paths, path_error = driver.windows_program_paths(
                 args.test and test_runner.MODULE_NAME or main_module, args.exe,
                 args.test and requested_modules[1] or nil, args.output)
@@ -764,7 +776,26 @@ if not args.compile_only and not args.print_ast then
         archives[#archives + 1] = static_provider.archive
     end
     local runtime, runtime_flags = {}, {}
-    if driver.context_target(resolver_context) ~= "browser" then
+    if driver.context_target(resolver_context) == "browser" then
+        local err
+        browser_assets, err = driver.require_browser_sdk(resolver_context)
+        if not browser_assets then exit(err) end
+        if builds_program then
+            browser_profile, err = driver.browser_link_plan(resolver_context)
+        else
+            browser_profile, err = driver.browserlink.profile(resolver_context.target_descriptor,
+                { purpose = "protocol", assertions = 2 })
+            local ready
+            ready, err, browser_probe = driver.browser_node_ready(resolver_context, browser_assets)
+            if not ready then exit(err) end
+        end
+        if not browser_profile then exit(err) end
+        for _, key in ipairs({ "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+            runtime[#runtime + 1] = browser_assets[key]
+        end
+        runtime[#runtime + 1] = resolver_context.target_descriptor.paths.liblua
+        runtime[#runtime + 1] = resolver_context.target_descriptor.paths.lua_record
+    else
         for _, input in ipairs(driver.INSTALLED and
                 driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN) or
                 driver.source_link_inputs()) do
@@ -840,9 +871,9 @@ if not args.compile_only and not args.print_ast then
         policy = {
             uname = driver.UNAME or "", darwin = driver.IS_DARWIN == true,
             profile = driver.BUILD_PROFILE,
-            target = resolver_context.target_descriptor and
-                resolver_context.target_descriptor.identity or
-                (driver.TARGET_PROFILE and driver.TARGET_PROFILE.identity or ""),
+            browser_profile = browser_profile and browser_profile.identity_inputs or nil,
+            browser_probe = browser_probe,
+            target = driver.TARGET_PROFILE and driver.TARGET_PROFILE.identity or "",
         },
         bindings = resolver_context.native_bindings,
         environment = {
@@ -1125,7 +1156,11 @@ if main_module then
     local entrypoint_output = test_entrypoint_output or
         driver.generated_output_path(main_module:gsub("[.]", "/") .. "__entrypoint.c", args.output)
     local extra_outputs
-    if platform.windows then
+    if target == "browser" then
+        local browser_output, wasm = driver.browser_program_path(program_output, program_output)
+        if not browser_output then exit(wasm) end
+        extra_outputs = { wasm }
+    elseif platform.windows then
         local paths, path_error = windows_paths, nil
         if not paths then
             paths, path_error = driver.windows_program_paths(main_module,
@@ -1140,7 +1175,7 @@ if main_module then
     end
     local outputs_ok, outputs_err = driver.validate_program_output_paths(
         source_outputs, program_output, entrypoint_output, native_inputs,
-        extra_outputs, compile_plans.outputs)
+        extra_outputs, compile_plans.outputs, resolver_context)
     if not outputs_ok then table.insert(errors, outputs_err) end
 end
 
@@ -1272,9 +1307,16 @@ if main_module then
                 pretty_print = args.pretty_print,
                 exe = args.exe,
                 final_link_flags = link_ticket and link_ticket.dependency_argv,
+                dependency_output = link_ticket and link_ticket.dependency_output,
                 dsymutil = dsymutil,
                 before_commit = link_ticket and function()
                     return linkcertificate.invalidate(resolver_context, link_ticket)
+                end or nil,
+                after_publish = target == "browser" and link_ticket and function()
+                    local committed, why = linkcertificate.commit(resolver_context, link_ticket)
+                    if not committed then return nil, "cannot record final link: " .. tostring(why) end
+                    link_record_committed = true
+                    return true
                 end or nil,
                 output_module = args.test and requested_modules[1] or nil,
                 output_root = args.output,
@@ -1435,7 +1477,7 @@ end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 -- The success record is written last, after the complete output set.
-if link_ticket then
+if link_ticket and not link_record_committed then
     local called, committed, commit_error =
         pcall(linkcertificate.commit, resolver_context, link_ticket)
     if not called then
