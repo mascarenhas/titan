@@ -24,6 +24,13 @@ function occurrences(text, needle) { return text.split(needle).length - 1; }
 function frameCount(trace, suffix) {
   return trace.split("\n").filter(line => line.endsWith(suffix)).length;
 }
+function terminalMarker(trace, allowed) {
+  const found = trace.indexOf(truncated);
+  if (found < 0) return true;
+  if (!allowed || (found !== 0 && trace[found - 1] !== "\n")) return false;
+  const end = found + truncated.length;
+  return end === trace.length || (trace[end] === "\n" && end + 1 === trace.length);
+}
 
 export async function run(context) {
   const degraded = context.args.length === 1 && context.args[0] === "--degraded";
@@ -120,8 +127,14 @@ export async function run(context) {
     if (label.startsWith("depth_")) {
       const depth = Number(label.slice(6));
       const count = frameCount(trace, ": in trace_cases.recurse");
-      if (depth === 48) context.assert(count === 49 && !trace.includes(truncated), "ordinary deep trace was incomplete");
-      else if (webkit || firefox) {
+      if (depth === 48) {
+        context.assert(count === 49, "ordinary deep trace omitted/duplicated recursion frames");
+        for (const name of ["original_leaf", "recursive_trace", "test_recursion_beyond_ten"]) {
+          context.assert(frameCount(trace, ": in trace_cases." + name) === 1,
+            "ordinary deep trace omitted/duplicated " + name);
+        }
+        context.assert(terminalMarker(trace, webkit), "ordinary deep trace has invalid engine truncation");
+      } else if (webkit || firefox) {
         context.assert(count >= 40 && count < (webkit ? 100 : 128) && occurrences(trace, truncated) === 1,
           "engine-ceiling trace was not bounded/marked");
       } else if (depth === 460) {
@@ -160,7 +173,11 @@ export async function run(context) {
     const notice = values => { warnings += values.reduce((sum, value) => sum + occurrences(String(value), "Titan browser trace: "), 0); };
     console.warn = (...values) => { notice(values); originalWarn.apply(console, values); };
     console.error = (...values) => { notice(values); originalError.apply(console, values); };
-    const factory = async options => { module = await image.factory(options); return module; };
+    const factory = async options => {
+      module = await image.factory(options);
+      module['traceFixtureWebKit'] = webkit;
+      return module;
+    };
     const instance = context.create(factory, {
       locateFile(name) { located++; return image.locateFile(name); },
       stdout(chunk) { output += decoder.decode(chunk, {stream:true}); context.stdout(chunk); },

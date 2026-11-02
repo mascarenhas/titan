@@ -110,3 +110,10 @@ end
 local function count_frames(trace: string, suffix: string): integer
   return ffi.trace_fixture_count_frame_lines(trace, suffix)
 end
+
+local function ordinary_recursion_complete(trace: string): boolean
+  return count_frames(trace, ": in trace_cases.original_leaf") == 1 and
+         count_frames(trace, ": in trace_cases.recursive_trace") == 1 and
+         count_frames(trace, ": in trace_cases.test_recursion_beyond_ten") == 1 and
+         ffi.trace_fixture_ordinary_truncation(trace, truncated) ~= 0
+end

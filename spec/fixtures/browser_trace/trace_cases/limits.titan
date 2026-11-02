@@ -10,7 +10,7 @@ end
 function test_recursion_beyond_ten(_context: test.Context)
   local trace = recursive_trace(48)
   test.assert(count_frames(trace, ": in trace_cases.recurse") == 49, trace)
-  test.assert(not contains(trace, truncated), trace)
+  test.assert(ordinary_recursion_complete(trace), trace)
   emit("depth_48", trace)
 end
 
