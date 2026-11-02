@@ -41,13 +41,20 @@ export function knownTrap(error) {
 
 // One wrapper per imported factory, approved by Main as the §4 identity amendment.
 // The production loader remains unmodified; its abort callback always runs first.
-export function observeFactory(factory, control) {
-    return options => factory({
+export function observeFactory(factory, control, allowDegradedTrace = false) {
+    return options => Promise.resolve(factory({
         ...options,
         onAbort(value) {
             try { options.onAbort?.(value); }
             finally { control({ type: "abort", reason: reason(value) }); }
         },
+    })).then(module => {
+        if (module?.titanBrowserTrace?.state === "degraded" && !allowDegradedTrace) {
+            const message = "degraded browser trace: " + module.titanBrowserTrace.reason;
+            control({ type: "failure", category: "harness", reason: message });
+            throw new Error(message);
+        }
+        return module;
     });
 }
 
@@ -151,7 +158,7 @@ export async function startPage(config) {
         image(path) {
             if (!images.has(path)) images.set(path, import(url(path)).then(module => {
                 if (typeof module.default !== "function") throw new Error("image must export a default factory");
-                if (!wrappers.has(module.default)) wrappers.set(module.default, observeFactory(module.default, send));
+                if (!wrappers.has(module.default)) wrappers.set(module.default, observeFactory(module.default, send, config.allowDegradedTrace));
                 return Object.freeze({
                     factory: wrappers.get(module.default),
                     locateFile: name => new URL(name.split("/").map(encodeURIComponent).join("/"), url(path)).href,

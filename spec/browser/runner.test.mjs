@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { classify, knownTrap, observeFactory, relativePath } from "../../titan-runtime/browser/titan-browser-page.mjs";
+import {Monitor, within} from "../../titan-runtime/browser/titan-browser-run.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runner = resolve(process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run"));
@@ -683,4 +684,45 @@ test("exact-profile PID EPERM ignores only retired processes", { skip: !supporte
             await absent(cleanProfile(result));
         } finally { await cleanupTrackedRun(execution, files, directory); }
     });
+});
+
+test("degraded trace metadata fails runner unless explicitly allowed", {skip: !supported}, async () => {
+    const base = ["--engine", "node", "--grace", "0", "--root", root, "--js-test", fixture,
+        "--", "trace-policy"];
+    const strictResult = await run(base);
+    assert.equal(strictResult.status, 75, strictResult.stderr.toString());
+    assert.match(strictResult.stderr.toString(), /degraded browser trace: intentional missing map/);
+    const allowed = await run(["--allow-degraded-trace", ...base]);
+    assert.equal(allowed.status, 0, allowed.stderr.toString());
+});
+
+test("factory observer admits ready and fabricated metadata-free factories", async () => {
+    for (const module of [{titanBrowserTrace: {state: "ready"}}, {}]) {
+        const controls = [];
+        assert.equal(await observeFactory(async () => module, value => controls.push(value))({}), module);
+        assert.deepEqual(controls, []);
+    }
+});
+
+test("imported runner helpers leave CLI dormant and preserve supervisor behavior", async () => {
+    const monitor = new Monitor({timeout: 1000, grace: 0});
+    try {
+        monitor.control({type: "complete", kind: "returned", status: -1});
+        await monitor.done;
+        assert.equal(monitor.result(), 255);
+    } finally { monitor.stop(); }
+    assert.equal(within(root, root), true);
+    assert.equal(within(root, join(root, "spec/browser")), true);
+    assert.equal(within(root, root + "-sibling"), false);
+    assert.equal(within(root, dirname(root)), false);
+});
+
+test("direct invocation through a symlink still runs the runner CLI", {skip: !supported}, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "titan-runner-import-"));
+    try {
+        const link = join(directory, "runner.mjs");
+        await symlink(join(root, "titan-runtime/browser/titan-browser-run.mjs"), link);
+        const {stderr} = await exec(process.execPath, [link, "--version"]);
+        assert.match(stderr, /Titan 0[.]6[.]0 browser runner/);
+    } finally { await rm(directory, {recursive: true, force: true}); }
 });
