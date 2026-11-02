@@ -95,7 +95,7 @@ function test_direct_locations(_context: test.Context)
   frame(trace, "trace_cases.titan", 88, "trace_cases.direct_outer")
   ordered(trace, "in trace_cases.original_leaf", "in trace_cases.direct_middle")
   ordered(trace, "in trace_cases.direct_middle", "in trace_cases.direct_outer")
-  test.assert(count(trace, "in trace_cases.original_leaf\n") == 1)
+  test.assert(count_frames(trace, ": in trace_cases.original_leaf") == 1)
   emit("direct", trace)
 end
 
@@ -105,4 +105,8 @@ function test_selected_contributor_locations(_context: test.Context)
   frame(trace, "locations.browser.titan", 6, "trace_cases.selected_outer")
   ordered(trace, "in trace_cases.selected_leaf", "in trace_cases.selected_outer")
   emit("selected", trace)
+end
+
+local function count_frames(trace: string, suffix: string): integer
+  return ffi.trace_fixture_count_frame_lines(trace, suffix)
 end

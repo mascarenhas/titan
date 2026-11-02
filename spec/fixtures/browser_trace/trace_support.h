@@ -2,6 +2,7 @@
 #define TITAN_TRACE_FIXTURE_SUPPORT_H
 #include <lua.h>
 #include <stddef.h>
+#include "trace_frame_lines.h"
 int trace_fixture_load(lua_State *L, int which);
 int trace_fixture_bridge(lua_State *L);
 int trace_fixture_backtrace(lua_State *L);

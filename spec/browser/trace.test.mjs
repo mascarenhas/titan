@@ -21,6 +21,9 @@ function frames(output) {
   return found;
 }
 function occurrences(text, needle) { return text.split(needle).length - 1; }
+function frameCount(trace, suffix) {
+  return trace.split("\n").filter(line => line.endsWith(suffix)).length;
+}
 
 export async function run(context) {
   const degraded = context.args.length === 1 && context.args[0] === "--degraded";
@@ -63,7 +66,7 @@ export async function run(context) {
       for (const [line, symbol] of [[105, "titan_test_runner_ℳ_run_test_26_titan"],
                                     [179, "titan_test_runner_ℳ_main_titan"]]) {
         parentLines.add(exact(trace, "trace_cases__test_runner.titan", line, symbol));
-        context.assert(occurrences(trace + "\n", "in " + symbol + "\n") === 1,
+        context.assert(frameCount(trace, ": in " + symbol) === 1,
           "nested trace duplicated/omitted parent raw fallback " + symbol);
       }
       currentStateTrace = trace.split("\n").filter(line => !parentLines.has(line)).join("\n");
@@ -85,7 +88,7 @@ export async function run(context) {
       exact(trace, "trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf");
       exact(trace, "trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle");
       for (const name of ["uncaught_leaf", "uncaught_middle"]) {
-        context.assert(occurrences(trace + "\n", "in trace_uncaught." + name + "\n") === 1,
+        context.assert(frameCount(trace, ": in trace_uncaught." + name) === 1,
           "uncaught report duplicated/omitted " + name);
       }
       return;
@@ -111,12 +114,12 @@ export async function run(context) {
       " in anonymous function at (?:.*[/\\\\])?wrappers[.]titan:107$", "m").test(trace), "lambda execution/definition locations changed");
     if (label === "fresh") exact(trace, "errors.titan", 14, "trace_cases.fresh_raise");
     if (label === "literal") {
-      context.assert(occurrences(trace, "in trace_cases.literal_call\n") === 1 &&
-        !trace.includes("wrappers.titan:122\n"), "literal acquired a fabricated activation");
+      context.assert(frameCount(trace, ": in trace_cases.literal_call") === 1 &&
+        frameCount(trace, "wrappers.titan:122") === 0, "literal acquired a fabricated activation");
     }
     if (label.startsWith("depth_")) {
       const depth = Number(label.slice(6));
-      const count = occurrences(trace, "in trace_cases.recurse\n");
+      const count = frameCount(trace, ": in trace_cases.recurse");
       if (depth === 48) context.assert(count === 49 && !trace.includes(truncated), "ordinary deep trace was incomplete");
       else if (webkit || firefox) {
         context.assert(count >= 40 && count < (webkit ? 100 : 128) && occurrences(trace, truncated) === 1,
@@ -128,14 +131,14 @@ export async function run(context) {
       emit({depth, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
     if (label === "mixed_depth_75") {
-      const count = occurrences(trace, "in trace_cases.mixed_recurse\n");
+      const count = frameCount(trace, ": in trace_cases.mixed_recurse");
       context.assert(count <= 76, "mixed trace duplicated recursive frames");
       if (count < 76) context.assert(occurrences(trace, truncated) === 1, "mixed JS headroom cut was not marked");
       emit({mixedDepth: 75, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
     if (label === "append") {
       for (const name of ["original_leaf", "resumed_leaf", "append_middle", "append_outer", "test_coroutine_propagation_append"]) {
-        context.assert(occurrences(trace, "in trace_cases." + name + "\n") === 1,
+        context.assert(frameCount(trace, ": in trace_cases." + name) === 1,
           "coroutine append duplicated/omitted " + name);
       }
     }
