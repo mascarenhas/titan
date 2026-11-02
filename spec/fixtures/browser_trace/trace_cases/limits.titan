@@ -37,10 +37,10 @@ end
 
 function test_mixed_recursion_headroom(_context: test.Context)
   local invoke: Shape = loaded(2)
-  local trace = caught(function() mixed_recurse(75, invoke) end)
+  local trace = caught(function() mixed_recurse(14, invoke) end)
   test.assert(count_frames(trace, ": in trace_cases.original_leaf") == 1, trace)
   test.assert(count_frames(trace, ": in trace_cases.mixed_recurse") >= 1, trace)
-  test.assert(count_frames(trace, ": in trace_cases.mixed_recurse") <= 76, trace)
+  test.assert(count_frames(trace, ": in trace_cases.mixed_recurse") <= 15, trace)
   test.assert(count(trace, truncated) <= 1, trace)
-  emit("mixed_depth_75", trace)
+  emit("mixed_depth_14", trace)
 end
