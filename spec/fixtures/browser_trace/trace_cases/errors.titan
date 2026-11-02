@@ -1,0 +1,130 @@
+local saved_trace = ""
+
+local function bare_rethrow()
+  original_leaf()
+catch
+  saved_trace = traceback
+  raise
+end
+
+local function fresh_raise()
+  original_leaf()
+catch
+  saved_trace = traceback
+  raise error
+end
+
+function test_bare_rethrow(_context: test.Context)
+  local trace = caught(bare_rethrow)
+  test.assert(trace == saved_trace, "bare rethrow changed pinned trace")
+  test.assert(count(trace, "in trace_cases.original_leaf\n") == 1, trace)
+  emit("rethrow", trace)
+end
+
+function test_fresh_raise(_context: test.Context)
+  local trace = caught(fresh_raise)
+  test.assert(trace ~= saved_trace, "fresh raise retained pinned trace")
+  test.assert(not contains(trace, "in trace_cases.original_leaf"), trace)
+  frame(trace, "errors.titan", 14, "trace_cases.fresh_raise")
+  emit("fresh", trace)
+end
+
+function reraiser(payload: value)
+  raise payload
+end
+
+function test_public_backtrace_and_pin(_context: test.Context)
+  local invoke: Pin = loaded(3)
+  invoke(original_leaf, reraiser)
+end
+
+function test_caught_trace_clearing(_context: test.Context)
+  local trace = caught(original_leaf)
+  test.assert(contains(trace, "in trace_cases.original_leaf"), trace)
+  test.assert(ffi.trace_fixture_cleared(L) ~= 0, "handled catch retained public backtrace")
+  local again = caught(direct_outer)
+  test.assert(contains(again, "in trace_cases.direct_outer"), again)
+  test.assert(ffi.trace_fixture_cleared(L) ~= 0, "second catch retained trace/pin")
+end
+
+local function deferred_failure()
+  raise "trace-defer"
+end
+
+function test_defer_failure(_context: test.Context)
+  local log = ""
+  local seen = false
+  do
+    defer log = log .. "outer;"
+    defer do
+      defer log = log .. "inner;"
+      deferred_failure()
+    end
+    raise "trace-original"
+  catch
+    seen = true
+    test.assert(error == "trace-defer", "defer did not retain native precedence")
+    test.assert(log == "inner;outer;", "defer cleanup order/count changed")
+    frame(traceback, "errors.titan", 51, "trace_cases.deferred_failure")
+    emit("defer", traceback)
+  end
+  test.assert(seen and log == "inner;outer;")
+  emit("after_defer", caught(original_leaf))
+end
+
+function test_independent_lua_states(_context: test.Context)
+  test.assert(ffi.trace_fixture_states(L, 0) == 2,
+              "independent Lua state trace/pin isolation failed")
+  emit("after_states", caught(original_leaf))
+end
+
+local retained_owners: {coroutine.Coroutine} = {}
+function retain_for_state_close()
+  local child = coroutine.create(function(_: value): value
+    defer ffi.trace_fixture_record(1)
+    do
+      defer deferred_failure()
+      coroutine.yield("retained", "state-outer")
+      ffi.trace_fixture_record(2)
+    catch
+      ffi.trace_fixture_record(2)
+    end
+    return nil
+  end, "state-inner")
+  local parent = coroutine.create(function(_: value): value
+    defer ffi.trace_fixture_record(0)
+    child:resume(nil)
+    ffi.trace_fixture_record(2)
+    return nil
+  end, "state-outer")
+  test.assert(parent:resume(nil) == "retained")
+  retained_owners = {parent, child}
+end
+
+function test_state_close(_context: test.Context)
+  test.assert(ffi.trace_fixture_states(L, 1) == 2,
+              "state close lost/repeated cleanup or entered abandoned continuation")
+  emit("after_close", caught(original_leaf))
+end
+
+function test_merge_allocation_limit(_context: test.Context)
+  test.assert(ffi.trace_fixture_allocation(L, 0) == ffi.LUA_ERRMEM,
+              "merge allocation limit changed status or prevented following same-state capture")
+  emit("after_allocation_limit", caught(original_leaf))
+end
+
+function test_nested_capture(_context: test.Context)
+  test.assert(ffi.trace_fixture_allocation(L, 1) == ffi.LUA_OK,
+              "nested held-storage capture changed original payload/outer trace")
+  emit("after_nested", caught(original_leaf))
+end
+
+-- Real Titan runs on both sides of the long Lua chain keep an undrained outer
+-- native run live when the merge buffer grows and the nested attempt happens.
+function buffer_capture()
+  ffi.trace_fixture_handler(L)
+end
+
+function buffer_outer(action: function(integer): (), depth: integer)
+  action(depth)
+end

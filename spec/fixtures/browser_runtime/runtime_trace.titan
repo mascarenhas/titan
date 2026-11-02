@@ -32,16 +32,16 @@ end
 
 local function shape(trace: string)
   test.assert(ffi.strstr(trace, "browser-trace.lua:2: in") ~= nil,
-              "null backend omitted named Lua source/line: " .. trace)
-  test.assert(ffi.strstr(trace, "[C]: in") ~= nil,
-              "null backend hid C/Titan wrapper frames: " .. trace)
+              "backend omitted named Lua source/line: " .. trace)
+  test.assert(ffi.strstr(trace, "in runtime_trace.fail") ~= nil,
+              "backend omitted Titan display name: " .. trace)
   test.assert(ffi.strstr(trace, "(...tail calls...)") ~= nil,
-              "null backend omitted Lua tail-call marker: " .. trace)
+              "backend omitted Lua tail-call marker: " .. trace)
   test.assert(ffi.strstr(trace, "0x") == nil and ffi.strstr(trace, "wasm-function") == nil,
-              "null backend exposed native/engine addresses: " .. trace)
+              "backend exposed native/engine addresses: " .. trace)
 end
 
-function test_null_trace_shape(context: test.Context)
+function test_trace_shape(context: test.Context)
   local invoke: Shape = load(0)
   local caught = false
   do
@@ -64,25 +64,25 @@ catch
   raise
 end
 
-function test_null_bare_rethrow_preserves_trace(_context: test.Context)
+function test_bare_rethrow_preserves_trace(_context: test.Context)
   local caught = false
   do
     bare_rethrow()
   catch
     caught = true
     test.assert(error == "trace-original" and traceback == saved_trace,
-                "bare rethrow replaced original null trace")
+                "bare rethrow replaced original trace")
     shape(traceback)
   end
   test.assert(caught)
 end
 
-function test_null_pin_clear_and_fresh_raise(_context: test.Context)
+function test_pin_clear_and_fresh_raise(_context: test.Context)
   local invoke: Pin = load(1)
   invoke(fail, reraiser)
 end
 
-function test_null_coroutine_trace_appends(context: test.Context)
+function test_coroutine_trace_appends(context: test.Context)
   local invoke: Shape = load(0)
   local resume: Shape = load(2)
   local co = coroutine.create(function(_: value): value

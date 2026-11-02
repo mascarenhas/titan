@@ -1,0 +1,108 @@
+local test = import "test"
+local coroutine = import "coroutine"
+foreign import "../trace_support.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "string.h"
+
+local type Action = function(): ()
+local type Shape = function(Action): ()
+local type Mixed = function(function(Action): (), Action, value): ()
+local type Pin = function(Action, function(value): ()): ()
+local unavailable = "(native Titan frames unavailable: trace map not loaded)"
+local capture_failed = "(native Titan frames unavailable: capture failed)"
+local truncated = "(...native frames truncated...)"
+
+-- Loaded Lua closures are copied into traced Titan values before the saved
+-- stack top is restored. The helper owns the Lua text and genuine C bridge.
+local function loaded(which: integer): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 4) ~= 0)
+  test.assert(ffi.trace_fixture_load(L, which) == ffi.LUA_OK)
+  test.assert(ffi.lua_pcallk(L, 0, 1, 0, 0, nil) == ffi.LUA_OK)
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function bridge(): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0)
+  ffi.lua_pushcclosure(L, ffi.trace_fixture_bridge, 0)
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function contains(text: string, needle: string): boolean
+  return ffi.strstr(text, needle) ~= nil
+end
+
+local function count(text: string, needle: string): integer
+  return ffi.trace_fixture_count(text, needle)
+end
+
+local function ordered(text: string, first: string, second: string)
+  test.assert(ffi.trace_fixture_order(text, first, second) ~= 0,
+              "trace frames missing or reordered: " .. first .. " / " .. second .. "\n" .. text)
+end
+
+local function clean_shape(trace: string)
+  test.assert(#trace > 0, "empty trace")
+  local unwanted = {"stack traceback:", "\t", "titanentry", "_titan", "wasm-function", "0x", ":0: in", "titan-runtime/", "dynCall_", "trace_support.c:"}
+  for index = 1, #unwanted do
+    test.assert(not contains(trace, unwanted[index]), "trace exposed internal frame\n" .. trace) end
+end
+
+-- Native assertions admit the documented no-line renderer. The portable host
+-- gate independently requires exact execution lines on Node/Chromium/Firefox
+-- and forbids execution lines on WebKit for every emitted Titan frame.
+local function frame(trace: string, file: string, line: integer, name: string)
+  test.assert(contains(trace, file .. ":" .. line .. ": in " .. name) or
+              contains(trace, file .. ": in " .. name),
+              "missing source frame " .. file .. ":" .. line .. ": in " .. name .. "\n" .. trace)
+  clean_shape(trace)
+end
+
+local function emit(label: string, trace: string)
+  clean_shape(trace)
+  ffi.trace_fixture_emit(label, trace)
+end
+
+local function caught(action: Action): string
+  action()
+  raise "expected trace failure"
+  return ""
+catch
+  test.assert(error == "trace-original", "original payload changed")
+  return traceback
+end
+
+local function original_leaf()
+  raise "trace-original"
+end
+
+local function direct_middle()
+  original_leaf()
+end
+
+local function direct_outer()
+  direct_middle()
+end
+
+function test_direct_locations(_context: test.Context)
+  local trace = caught(direct_outer)
+  frame(trace, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  frame(trace, "trace_cases.titan", 84, "trace_cases.direct_middle")
+  frame(trace, "trace_cases.titan", 88, "trace_cases.direct_outer")
+  ordered(trace, "in trace_cases.original_leaf", "in trace_cases.direct_middle")
+  ordered(trace, "in trace_cases.direct_middle", "in trace_cases.direct_outer")
+  test.assert(count(trace, "in trace_cases.original_leaf\n") == 1)
+  emit("direct", trace)
+end
+
+function test_selected_contributor_locations(_context: test.Context)
+  local trace = caught(selected_outer)
+  frame(trace, "locations.browser.titan", 2, "trace_cases.selected_leaf")
+  frame(trace, "locations.browser.titan", 6, "trace_cases.selected_outer")
+  ordered(trace, "in trace_cases.selected_leaf", "in trace_cases.selected_outer")
+  emit("selected", trace)
+end

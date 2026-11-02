@@ -1,0 +1,89 @@
+function test_host_capture_ready(_context: test.Context)
+  local cleanup = 0
+  local trace = caught(function()
+    defer cleanup = cleanup + 1
+    direct_outer()
+  end)
+  test.assert(cleanup == 1 and not contains(trace, capture_failed) and not contains(trace, unavailable), trace)
+  frame(trace, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  emit("host_ready", trace)
+end
+
+function test_host_capture_failed(_context: test.Context)
+  local invoke: Shape = loaded(2)
+  local cleanup = 0
+  local trace = caught(function()
+    defer cleanup = cleanup + 1
+    invoke(original_leaf)
+  end)
+  test.assert(cleanup == 1, "capture failure omitted/repeated cleanup")
+  test.assert(count(trace, capture_failed) == 1 and not contains(trace, unavailable), trace)
+  test.assert(contains(trace, "trace-shape.lua:2: in"), trace)
+  emit("host_failed", trace)
+  ffi.trace_fixture_host_recover()
+  local recovered = caught(direct_outer)
+  test.assert(not contains(recovered, capture_failed), "following same-instance capture retained guard")
+  frame(recovered, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  emit("host_recovered", recovered)
+end
+
+function test_degraded_map(_context: test.Context)
+  local invoke: Shape = loaded(2)
+  local cleanup = 0
+  local trace = caught(function()
+    defer cleanup = cleanup + 1
+    invoke(original_leaf)
+  end)
+  test.assert(cleanup == 1, "degraded trace omitted/repeated cleanup")
+  test.assert(count(trace, unavailable) == 1 and not contains(trace, capture_failed), trace)
+  test.assert(contains(trace, "trace-shape.lua:2: in"), trace)
+  emit("degraded", trace)
+  local again = caught(function()
+    defer cleanup = cleanup + 1
+    invoke(original_leaf)
+  end)
+  test.assert(cleanup == 2, "later degraded capture changed cleanup")
+  test.assert(count(again, unavailable) == 1 and not contains(again, capture_failed), again)
+  emit("degraded_again", again)
+end
+
+function test_missing_symbols(_context: test.Context)
+  local cleanup = 0
+  local trace = caught(function()
+    defer cleanup = cleanup + 1
+    original_leaf()
+  end)
+  test.assert(cleanup == 1, "missing symbols changed cleanup")
+  test.assert(not contains(trace, unavailable) and not contains(trace, capture_failed), trace)
+  emit("missing_symbols", trace)
+end
+
+local function fallback_capacity(marker: string, label: string)
+  local invoke: Shape = loaded(6)
+  local cleanup = 0
+  local trace = caught(function()
+    defer cleanup = cleanup + 1
+    invoke(original_leaf)
+  end)
+  test.assert(cleanup == 1 and count(trace, marker) == 1 and count(trace, truncated) == 1, trace)
+  local recursive_frames = count(trace, "trace-fallback.lua:3: in")
+  test.assert(recursive_frames >= 450 and recursive_frames <= 512, trace)
+  test.assert(count(trace, "\n") <= 514, "Lua-only fallback exceeded capture capacity")
+  emit(label, trace)
+end
+
+function test_host_lua_fallback_capacity(_context: test.Context)
+  fallback_capacity(capture_failed, "lua_fallback_failed")
+  ffi.trace_fixture_host_recover()
+  local recovered = caught(direct_outer)
+  frame(recovered, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  emit("host_recovered", recovered)
+end
+
+function test_degraded_lua_capacity(_context: test.Context)
+  fallback_capacity(unavailable, "degraded_capacity")
+  local invoke: Shape = loaded(2)
+  local trace = caught(function() invoke(original_leaf) end)
+  test.assert(count(trace, unavailable) == 1 and not contains(trace, capture_failed), trace)
+  emit("degraded_again", trace)
+end
