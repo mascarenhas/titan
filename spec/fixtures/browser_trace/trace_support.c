@@ -88,6 +88,22 @@ int trace_fixture_order(const char *text, const char *first, const char *second)
   const char *a = strstr(text, first);
   return a && strstr(a + strlen(first), second) != NULL;
 }
+
+/* The independent capturing state has loaded trace_cases/test, not the parent
+ * synthetic runner. D15 preserves these two parent's raw-symbol fallbacks. */
+static int parent_runner_frame(const char *trace, int line, const char *symbol) {
+  char expected[256];
+  const char *found;
+  snprintf(expected, sizeof expected, "trace_cases__test_runner.titan:%d: in %s", line, symbol);
+  found = strstr(trace, expected);
+  if (!found) {
+    snprintf(expected, sizeof expected, "trace_cases__test_runner.titan: in %s", symbol);
+    found = strstr(trace, expected);
+  }
+  return found && (found == trace || found[-1] == '\n') &&
+    (found[strlen(expected)] == '\0' || found[strlen(expected)] == '\n') &&
+    trace_fixture_count(trace, symbol) == 1;
+}
 void trace_fixture_emit(const char *label, const char *trace) {
   printf("TRACE-BEGIN %s\n%s\nTRACE-END %s\n", label, trace, label);
   fflush(stdout);
@@ -325,8 +341,10 @@ int trace_fixture_allocation(lua_State *parent, int nested) {
     trace_fixture_backtrace(state);
     const char *outer = lua_tostring(state, -1);
     valid = valid && outer && strlen(outer) > (size_t)LUAL_BUFFERSIZE &&
-      strstr(outer, "in trace_cases.buffer_capture") &&
-      strstr(outer, "in trace_cases.buffer_outer") &&
+      trace_fixture_count(outer, "in trace_cases.buffer_capture") == 1 &&
+      trace_fixture_count(outer, "in trace_cases.buffer_outer") == 1 &&
+      parent_runner_frame(outer, 105, "titan_test_runner_ℳ_run_test_26_titan") &&
+      parent_runner_frame(outer, 179, "titan_test_runner_ℳ_main_titan") &&
       !strstr(outer, "(native Titan frames unavailable:");
     if (outer) trace_fixture_emit("nested_outer", outer);
     lua_pop(state, 1);
