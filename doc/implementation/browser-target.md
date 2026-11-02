@@ -242,8 +242,8 @@ native SDK's own files.
 
 `browserlink.require_sdk(context, descriptor, install)` checks, in the order
 `runtime`, `js_library`, `trace_library`, `loader`, `runner`, `runner_module`,
-`node_worker`, `page` (`TODO(confirm: exact position of trace_library in require_sdk order)`),
-that each asset is a regular file that `context.io` can open and read
+`node_worker`, `page`, that each asset is a regular file that `context.io` can
+open and read
 (a bounded read of at most one byte). It executes nothing, reads no manifest, and does
 not require `lpeglabel`, `provider`, or `sdk_digests`: the initial provider
 publication runs before either exists. The first missing asset returns:
@@ -727,24 +727,25 @@ flags into emcc. Coverage options without `--coverage` retain their ordinary
 `coverage options require --coverage` rejection.
 
 The [link profile](#the-link-profile) owns the image settings the runtime
-depends on. `browserlink.validate_extras(flags)` rejects, in the normalized
-compile and link extras (`titanc` checks both lists right after normalizing
-native inputs) and again in the final link extras, user flags that override the
-owned trace-preserving optimization, inlining, tail-call, debug, and
-source-map settings (`-O*`, `-finline*`/`-fno-inline*`,
-`-foptimize-sibling-calls`/`-fno-optimize-sibling-calls`, `-g*`,
-`-gsource-map*`; `TODO(confirm: exact owned trace flag patterns in browserlink.validate_extras)`),
-as well as every `-s`, `-D`, or `-U`
-spelling, joined or split and with or without a `NO_` prefix, of
-`SUPPORT_LONGJMP`, `ASYNCIFY` and every `ASYNCIFY_*` setting, `STACK_SIZE`,
-`INITIAL_MEMORY`, `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`,
-`EXIT_RUNTIME`, `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`,
-`FORCE_FILESYSTEM`, `FILESYSTEM`, `MINIMAL_RUNTIME`, `EXPORTED_FUNCTIONS`,
-`EXPORTED_RUNTIME_METHODS`, `INCOMING_MODULE_JS_API`, `ASSERTIONS`,
-`STACK_OVERFLOW_CHECK`, and the three target defines, plus `--no-entry` and
-`--js-library`, with `browser link profile owns option <flag>`. Other
-Emscripten settings pass through, so a later user flag can never weaken the
-profile.
+depends on. `browsertarget.trace_option(flag)` recognizes flags that would
+override the trace-preserving optimization, inlining, tail-call, frame-pointer,
+or debug settings: `^-O`, `^-g`, and (after normalizing a leading `-fno-` to
+`-f`) `^-finline`, `^-foptimize-sibling-calls`, or `^-fomit-frame-pointer`.
+`browsertarget.build` rejects `trace_option` in `inputs.compile_flags` unless
+`inputs.trace_control` is set (`browser target owns compile_flags option
+<flag>`), and `browserlink.validate_extras(flags, options)` rejects it in the
+normalized compile and link extras and final link extras unless
+`options.purpose` is `baseline`, `minicoro`, or `budget`, as well as every
+`-s`, `-D`, or `-U` spelling, joined or split and with or without a `NO_`
+prefix, of `SUPPORT_LONGJMP`, `ASYNCIFY` and every `ASYNCIFY_*` setting,
+`STACK_SIZE`, `INITIAL_MEMORY`, `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`,
+`ABORTING_MALLOC`, `EXIT_RUNTIME`, `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`,
+`ENVIRONMENT`, `FORCE_FILESYSTEM`, `FILESYSTEM`, `MINIMAL_RUNTIME`,
+`EXPORTED_FUNCTIONS`, `EXPORTED_RUNTIME_METHODS`, `INCOMING_MODULE_JS_API`,
+`ASSERTIONS`, `STACK_OVERFLOW_CHECK`, and the three target defines, plus
+`--no-entry` and `--js-library` (`--js-library=...` included), with `browser
+link profile owns option <flag>`. Other Emscripten settings pass through, so a
+later user flag can never weaken the profile.
 
 ## Semantic-cache ownership
 
@@ -1147,12 +1148,14 @@ and `dependency_output`) links one image:
    `validate_extras`;
 2. scan the runtime archive with the descriptor fingerprint and validate it
    structurally, as a provider;
-3. compute the 64-character lowercase hexadecimal image identity
+3. compute the 64-character lowercase hexadecimal image identity with
+   `browsertrace.identity(context, contents, compile, identity_flags, groups)`
    ([Source-map extensions and image identity](#source-map-extensions-and-image-identity))
    from the original entrypoint contents and the link's canonical input recipe,
-   inject `titan_browser_trace_image_id` and `titan_browser_trace_identity(void)`
-   into the synthetic entrypoint C source, and compile it with
-   `driver.generated_compile_prefix(context)` plus the plan's compile flags;
+   append `browsertrace.declaration(identity)` (`titan_browser_trace_image_id`
+   and `titan_browser_trace_identity(void)`) to the synthetic entrypoint C
+   source, and compile it with `driver.generated_compile_prefix(context)` plus
+   the plan's compile flags;
 4. link into a staging directory beside the destination, under the final
    basenames so that the generated `.mjs` and `.wasm` (`sourceMappingURL`)
    locate `<basename>.wasm` and `<basename>.wasm.map` by name:
@@ -1160,30 +1163,31 @@ and `dependency_output`) links one image:
    <extra objects> -Wl,--start-group libtitan.a <archives> liblua.a
    -Wl,--end-group <link extras> <final_link_flags>`, capturing the linker
    trace when `dependency_output` is set;
-5. require the staged `.mjs`, `.wasm`, and `.wasm.map` to be regular files,
-   read the staged Wasm, run `browserlink.image_inventory` (which reads the
-   final image's import and export sections and rejects any import named
-   `dlopen`, `dlsym`, `dlerror`, or `backtrace`, with or without a leading
-   underscore: `browser image imports forbidden symbol "<name>"`), and rewrite
-   the staged `.wasm.map` in place with `browsertrace` so that `x_titan_image`,
-   `x_titan_function_imports`, `x_titan_function_ranges`, and
-   `x_titan_function_names` are bound to the final post-Asyncify `.wasm`;
+5. require the staged `.mjs`, `.wasm`, and `.wasm.map` to be regular files
+   (`staged browser image '<path>' is not a regular file`), read the staged
+   Wasm, run `browserlink.image_inventory` (which shares
+   `staticmetadata.browser_trace_image` to inspect the final image's import and
+   export sections and rejects any import named `dlopen`, `dlsym`, `dlerror`,
+   or `backtrace`, with or without a leading underscore: `browser image imports
+   forbidden symbol "<name>"`), and rewrite the staged `.wasm.map` in place
+   with `browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)` so
+   that `x_titan_image`, `x_titan_function_imports`,
+   `x_titan_function_ranges`, and `x_titan_function_names` are bound to the
+   final post-Asyncify `.wasm`;
 6. run `before_commit` (which invalidates the link record);
-7. move any existing `.wasm.map` (`browser source map output '<path>' is not a
-   regular file`; `TODO(confirm: exact non-regular map diagnostic wording in driver.lua)`),
-   `.wasm` (`browser Wasm output '<path>' is not a regular file`), and, when
-   `after_publish` is set, `.mjs` (`browser module output '<path>' is not a
-   regular file`) aside, rename the staged `.wasm.map` and `.wasm` into place,
-   rename the staged `.mjs` over the destination, and run `after_publish`
-   (`titanc` commits the link certificate there). The `.mjs` rename (followed
-   by `after_publish` when present) is the commit point: if any rename or
-   `after_publish` fails, the new files are removed and all prior artifacts are
-   restored (`cannot restore browser module: <reason>; predecessor retained at
-   <path>`, `cannot restore Wasm: <reason>; predecessor retained at <path>`,
-   and `cannot restore browser source map: <reason>; predecessor retained at
-   <path>`; `TODO(confirm: exact map restore diagnostic in driver.lua)`). An
-   unextended `.wasm.map` is never visible at the published path. The backups
-   are removed after the commit.
+7. validate that any existing destination in `{ <stem>.wasm.map, <stem>.wasm,
+   <stem>.mjs }` is a regular file (`browser output '<path>' is not a regular
+   file`) and reserve a sibling `.old` backup path for each before touching any
+   predecessor; then in order `.wasm.map`, `.wasm`, `.mjs`, move any existing
+   predecessor to its backup and rename the staged artifact into place, and run
+   `after_publish` (`titanc` commits the link certificate there). The `.mjs`
+   rename (followed by `after_publish` when present) is the commit point: if
+   any backup rename, publication rename, or `after_publish` fails, rollback
+   walks the outputs in reverse order (`.mjs`, `.wasm`, `.wasm.map`), removes
+   published new files, and restores every backed-up predecessor (`cannot
+   restore browser artifact: <reason>; predecessor retained at <backup>` when
+   even restoration fails). An unextended `.wasm.map` is never visible at the
+   published path. The backups are removed after the commit.
 
 An image owns no DSO, debug bundle, or dSYM companion
 (`validate_program_output_paths` reserves the `.wasm` and `.wasm.map` siblings
@@ -1307,19 +1311,22 @@ defines it. Native builds change only by these guard lines.
 
 ### Source-map extensions and image identity
 
-Before compiling the per-link synthetic entrypoint, `browsertrace` computes a
-64-character lowercase hexadecimal SHA-256 identity using `incremental.digest`
-under domain `"browser-trace-image"` (`TODO(confirm: exact function name in browsertrace.lua)`).
-The hashed recipe is canonical and acyclic: the original entrypoint C source
-(before injecting the identity declaration), the browser target descriptor
-identity and toolchain, the effective entrypoint compile flags, the full
+Before compiling the per-link synthetic entrypoint,
+`browsertrace.identity(context, contents, compile_flags, link_flags, groups)`
+computes a 64-character lowercase hexadecimal SHA-256 identity using
+`incremental.digest` under domain `"browser-trace-image"`. The hashed recipe is
+canonical and acyclic: the original entrypoint C source (`contents`, before
+injecting the identity declaration), the browser target descriptor identity and
+exported `tools` table, the effective entrypoint compile flags, the full
 effective link flags (including user link extras and final dependency flags),
-and ordered path-plus-content-digest lists for all user objects, `--c-source`
-extra objects, provider archives, `libtitan.a`, `liblua.a` and its record, and
-both Titan JavaScript libraries (`titan-browser-library.js` and
-`titan-browser-trace.js`). No timestamps, random staging paths, inodes, process
-IDs, or pre-Asyncify Wasm digests enter the hash. The synthetic entrypoint then
-includes:
+and ordered `{ path, digest }` groups (normalized via
+`linkcertificate.canonical_path` and `incremental.file_digest`) for all user
+objects, provider archives, `--c-source` extra objects, resolved `-l` archives
+(`linkcertificate.browser_trace_libraries`), and the five runtime/Lua/JS-library
+inputs (`libtitan.a`, `liblua.a`, `liblua-config.txt`,
+`titan-browser-library.js`, and `titan-browser-trace.js`). No timestamps,
+random staging paths, inodes, process IDs, or pre-Asyncify Wasm digests enter
+the hash. `browsertrace.declaration(identity)` then appends:
 
 ```c
 static const char titan_browser_trace_image_id[] = "<64 lowercase hex>";
@@ -1334,16 +1341,21 @@ accessed in `titan-browser-trace.js` with a static property lookup
 preserves it. Calling it returns the Wasm memory address of the 65-byte
 NUL-terminated ASCII string.
 
-After `emcc` finishes linking and running Asyncify/optimization, `browsertrace`
-reads the final `.wasm` using the bounded section and LEB128 reader primitives
-in `staticmetadata.lua` (accepting valid bounded padded LEB128 encodings as
-#328 specifies, and rejecting duplicate relevant sections/subsections,
-overrunning lengths, invalid UTF-8, or mismatched function/code counts) and
-validates the emitted standard version 3 `.wasm.map` (rejecting invalid JSON,
-wrong `version` or core field types, unsupported indexed-map `sections`,
-malformed VLQ mappings, or out-of-range source/name indexes). It preserves all
-standard source-map fields, selected physical `.titan` filenames,
-`sourceMappingURL` relation, and unknown extensions, and adds four keys:
+After `emcc` finishes linking and running Asyncify/optimization,
+`browsertrace.rewrite(wasm, bytes, identity, origin)` calls
+`staticmetadata.browser_trace_image(wasm, origin)` (which reuses the bounded
+section and LEB128 reader primitives in `staticmetadata.lua`, accepting valid
+bounded padded LEB128 encodings as #328 specifies, and rejecting duplicate or
+out-of-order sections, duplicate `name` sections/subsections, overrunning
+lengths, invalid UTF-8, or mismatched function/code counts) and validates the
+emitted standard version 3 `.wasm.map` (rejecting invalid JSON, wrong `version`
+or core field types, unsupported indexed-map `sections`, pre-existing
+`x_titan_*` keys, malformed VLQ mappings, or out-of-range source/name indexes,
+while accepting `sourcesContent: []` or a `#sources`-matched array of
+strings/`null`). It splices the four extension keys directly before the root
+JSON object's closing `}`, preserving all standard source-map fields, selected
+physical `.titan` filenames, `sourceMappingURL` relation, and unknown
+extensions:
 
 ```json
 {
