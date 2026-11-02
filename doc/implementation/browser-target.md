@@ -1378,12 +1378,14 @@ standard source-map fields, selected physical `.titan` filenames,
 
 `titan-browser-trace.js` registers an `addOnPreRun` callback that adds the run
 dependency `titan-trace-map` before user code can start. It resolves
-`locateFile('<generated-wasm-basename>.map')` (fetching it in browsers and
-reading it from disk in Node), parses the JSON and `x_titan_*` extensions,
-verifies that `x_titan_image` equals the string at
-`wasmExports['titan_browser_trace_identity']()`, builds the typed-array lookup
-index ([Browser trace backend](error-handling.md#browser-trace-backend)),
-publishes a private result on `Module['titanBrowserTrace']`, and removes
+`locateFile('{{{ WASM_BINARY_FILE }}}.map')` (`fetch(path, {credentials:
+'same-origin'})` in browsers and `readBinary(path)` in Node), decodes the UTF-8
+bytes with `TextDecoder('utf-8', {fatal: true})`, validates the standard v3
+source map and `x_titan_*` extensions, verifies that `x_titan_image` equals
+`UTF8ToString(wasmExports['titan_browser_trace_identity']())`, builds the
+typed-array lookup index
+([Browser trace backend](error-handling.md#browser-trace-backend)), publishes a
+private result on `Module['titanBrowserTrace']`, and removes
 `titan-trace-map`:
 
 ```text
@@ -1392,16 +1394,18 @@ publishes a private result on `Module['titanBrowserTrace']`, and removes
 ```
 
 `mapBytes` is the UTF-8 byte length of the fetched `.wasm.map`,
-`loadMilliseconds` measures the elapsed time from request/read start through
-validated index readiness, and `indexBytes` is the sum of the retained typed
-arrays' `byteLength`s (not total JavaScript heap usage). When the map is
-missing, malformed, missing `x_titan_*` extensions, or mismatched with the
-instantiated `.wasm`, `state` is `'degraded'`, `reason` records the failure, and
-one console warning prefixed with `Titan browser trace: ` is emitted at load
-time. Ordinary web pages still run in degraded mode; `titan-browser-run` and
-`spec/browser/playwright-run.mjs` inspect `Module['titanBrowserTrace']` through
-their factory wrapper after initialization and fail the run as a harness error
-unless `--allow-degraded-trace` was passed.
+`loadMilliseconds` measures the elapsed time (`performance.now()`) from
+request/read start through validated index readiness, and `indexBytes` is the
+sum of the six retained typed arrays' `byteLength`s (`pcs`, `sources`, `lines`,
+`starts`, `ends`, and `first` — not total JavaScript heap usage; `0` when
+degraded). When the map is missing, malformed, missing `x_titan_*` extensions,
+or mismatched with the instantiated `.wasm`, `state` is `'degraded'`, `reason`
+records the failure, and one `console.warn('Titan browser trace: ' + reason)`
+is emitted at load time. Ordinary web pages still run in degraded mode;
+`titan-browser-run` and `spec/browser/playwright-run.mjs` inspect
+`Module['titanBrowserTrace']` through `observeFactory` after initialization and
+fail the run as a harness error (`degraded browser trace: <reason>`) unless
+`--allow-degraded-trace` was passed.
 
 Trace cost on the representative browser trace gate image (`TODO(confirm: fill in exact measured mapBytes, .wasm bytes, ratio, loadMilliseconds, and indexBytes across Node, Chromium, Firefox, and WebKit from integrator gate)`):
 
@@ -1824,12 +1828,13 @@ monotonic deadline.
 **Factory observation, trace readiness, and terminal cleanup.** Each image's
 factory is wrapped once (`observeFactory`, one cached wrapper per imported
 factory, so repeated `image()` calls return the same identity). After the inner
-factory resolves and before entry, the wrapper inspects
-`Module['titanBrowserTrace']`: when `state === 'degraded'` and
-`--allow-degraded-trace` was not enabled, the run fails as a harness failure
-(exit 75) even if the program or tests would otherwise pass, so missing or
-stale `.wasm.map` files fail in CI; fabricated transport test fixtures that do
-not link `titan-browser-trace.js` omit `titanBrowserTrace` and are unaffected.
+factory resolves and before entry, `observeFactory(factory, control,
+allowDegradedTrace)` inspects `module?.titanBrowserTrace`: when `state ===
+'degraded'` and `allowDegradedTrace` is false, it reports a `harness` failure
+control (`degraded browser trace: <reason>`) and throws, failing the run (exit
+75) even if the program or tests would otherwise pass, so missing or stale
+`.wasm.map` files fail in CI; fabricated transport test fixtures that do not
+link `titan-browser-trace.js` omit `titanBrowserTrace` and are unaffected.
 The wrapper also calls the loader's own `onAbort` first and sends an `abort`
 observation in `finally`, without exposing the Module. An observation is
 evidence, not shutdown: before completion the monitor records the reason,
