@@ -343,10 +343,11 @@ stack is captured, and parent coroutine traces come exclusively from
 
 Header flag `TRUNCATED` is set when more Wasm frames exist beyond `capacity`,
 when the synchronous stack reaches the effective `stackTraceLimit` (counting
-frame-shaped lines only — `at ` lines on V8 stacks and `@location` frame lines
-on SpiderMonkey/JSC stacks, so V8's `Error` title line never counts even if its
-message contains `@` or a Wasm-like token, and excluding Firefox's `async*`
-ancestry), or when a surveyed engine ceiling is reached:
+`at ` frame lines on V8-shaped stacks — so V8's `Error` title line never counts
+even when its message contains `@` — and `@`-containing frame lines on
+SpiderMonkey/JSC stacks, which have no title line and may include location-free
+builtin frames such as `forEach@[native code]`, while excluding Firefox's
+`async*` ancestry), or when a surveyed engine ceiling is reached:
 
 * **V8 (Node 24, Chromium, Chrome)** honors `Object.defineProperty` on
   `Error.stackTraceLimit` up to the 512-record capacity.
