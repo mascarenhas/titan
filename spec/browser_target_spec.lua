@@ -403,7 +403,7 @@ describe("browser target descriptor", function()
     end)
 
     for _, flag in ipairs({
-        "-O0", "-O3", "-Os", "-g", "-g0", "-gline-tables-only",
+        "-O0", "-O3", "-Os", "-g", "-g0", "-g2", "-gline-tables-only",
         "-finline-functions", "-fno-inline", "-fno-inline-functions",
         "-foptimize-sibling-calls", "-fno-optimize-sibling-calls",
         "-fomit-frame-pointer", "-fno-omit-frame-pointer",
