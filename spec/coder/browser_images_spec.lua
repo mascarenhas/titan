@@ -4,6 +4,7 @@ local driver = require "titan-compiler.driver"
 local linkcertificate = require "titan-compiler.linkcertificate"
 local fixtures = require "spec.support.browser_fixtures"
 local toolchain = require "spec.support.browser_toolchain"
+local staticmetadata = require "titan-compiler.staticmetadata"
 local compiler_io = require "titan-compiler.io"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
@@ -20,6 +21,33 @@ local function read(filename)
 end
 local function run(argv)
     return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
+end
+local function maximum_declared_locals(bytes)
+    local image = assert(staticmetadata.browser_trace_image(bytes))
+    local maximum = 0
+    for _, range in ipairs(image.function_ranges) do
+        local position = range[1]
+        local function u32()
+            local value, factor = 0, 1
+            for _ = 1, 5 do
+                assert.is_true(position < range[2], "truncated function local declaration")
+                local digit = bytes:byte(position + 1)
+                position = position + 1
+                value = value + (digit & 127) * factor
+                if digit < 128 then return value end
+                factor = factor * 128
+            end
+            error("overlong function local declaration")
+        end
+        local count = 0
+        for _ = 1, u32() do
+            count = count + u32()
+            assert.is_true(position < range[2], "missing function local type")
+            position = position + 1
+        end
+        maximum = math.max(maximum, count)
+    end
+    return maximum
 end
 
 local function cli(info, ...)
@@ -171,6 +199,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({}, profile.compile_flags)
         assert.same({
             "-O1", "-fno-inline", "-fno-optimize-sibling-calls", "-gsource-map", "-g2",
+            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals",
             "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
             "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
@@ -209,6 +238,25 @@ describe("browser image profile and SDK readiness", function()
         assert.is_nil(flags:find("--no-entry", 1, true))
         assert.is_nil(flags:find("--js-library", 1, true))
         assert.truthy(flags:find('-sEXPORTED_FUNCTIONS=["_main","_malloc","_free"]', 1, true))
+    end)
+
+    it("retains ordered local cleanup in every Titan-entry profile and its identity", function()
+        local cleanup = "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals"
+        for _, purpose in ipairs({ "program", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+            for _, assertions in ipairs({ 0, 2 }) do
+                local plan = assert(browserlink.profile(fixtures.descriptor(),
+                    { purpose = purpose, assertions = assertions }))
+                local count = 0
+                for _, flag in ipairs(plan.link_flags) do
+                    if flag == cleanup then count = count + 1 end
+                end
+                assert.equal(1, count)
+                assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+            end
+        end
+        local baseline = assert(browserlink.profile(fixtures.descriptor(),
+            { purpose = "baseline", assertions = 2, entry = "lua-main", asyncify = false }))
+        assert.is_nil(table.concat(baseline.link_flags, " "):find(cleanup, 1, true))
     end)
 
     it("preserves byte-oriented FS and TTY for every purpose including the interpreter baseline", function()
@@ -283,6 +331,19 @@ describe("browser image profile and SDK readiness", function()
         for _, purpose in ipairs({ "baseline", "minicoro", "budget" }) do
             assert.is_true(browserlink.validate_extras({ "-g2", "-Os" }, { purpose = purpose }))
         end
+        for _, purpose in ipairs({ "program", "protocol", "gate", "baseline", "minicoro", "budget" }) do
+            for _, flags in ipairs({
+                { "-sBINARYEN_EXTRA_PASSES=" },
+                { "-s", "BINARYEN_EXTRA_PASSES=coalesce-locals" },
+                { "-sNO_BINARYEN_EXTRA_PASSES=1" },
+                { "-DBINARYEN_EXTRA_PASSES=0" },
+                { "-U", "BINARYEN_EXTRA_PASSES" },
+            }) do
+                local ok, why = browserlink.validate_extras(flags, { purpose = purpose })
+                assert.is_nil(ok)
+                assert.equal("browser link profile owns option " .. flags[1], why)
+            end
+        end
         assert.same({ "out/app.mjs", "out/app.wasm" }, { driver.browser_program_path("out/app") })
         local filename, err = driver.browser_program_path("unused", "out/app.js")
         assert.is_nil(filename)
@@ -294,6 +355,25 @@ describe("real browser test image", function()
     after_each(function()
         if workspace then files.remove(workspace); workspace = nil end
     end)
+    it("instantiates coroutine cleanup images well below the engine local limit", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        local runtime = require "spec.fixtures.browser_runtime.support"
+        workspace = runtime.workspace()
+        for _, assertions in ipairs({ 0, 2 }) do
+            local root = workspace .. "/assertions-" .. assertions
+            local ok, log = runtime.cli(info, root, { purpose = "program", assertions = assertions }, {
+                "--test", "--exe", root .. "/public.mjs",
+                "--c-source", runtime.fixture .. "/close.c", "coroutine.tests", "gc.tests" })
+            assert.is_true(ok, log)
+            local maximum = maximum_declared_locals(read(root .. "/public.wasm"))
+            assert.is_true(maximum > 0 and maximum < 10000,
+                "coroutine image declares too many function locals: " .. maximum)
+            image_identity(info, root .. "/public.mjs", "unwind_common.titan")
+            io.stdout:write(string.format("\nCOROUTINE-LOCALS assertions=%d max-declared=%d\n", assertions, maximum))
+            io.stdout:flush()
+        end
+    end)
+
     it("raises the seven dynamic-provider guard diagnostics without native loader imports", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)

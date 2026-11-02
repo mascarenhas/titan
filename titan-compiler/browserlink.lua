@@ -100,6 +100,9 @@ function M.profile(descriptor, options)
     add("-fno-optimize-sibling-calls")
     add("-gsource-map")
     add("-g2")
+    if entry == "titan" then
+        add("-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals")
+    end
     add("-sASYNCIFY=" .. (asyncify and "1" or "0"))
     add("-sSUPPORT_LONGJMP=" .. descriptor.lua.record.sjlj)
     add("-sSTACK_SIZE=" .. budgets.stack_size)
@@ -148,7 +151,7 @@ local owned = { SUPPORT_LONGJMP = true, ASYNCIFY = true, STACK_SIZE = true,
     EXPORTED_FUNCTIONS = true, EXPORTED_RUNTIME_METHODS = true,
     INCOMING_MODULE_JS_API = true, ASSERTIONS = true, STACK_OVERFLOW_CHECK = true,
     TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
-    MCO_ASYNCFY_STACK_SIZE = true }
+    MCO_ASYNCFY_STACK_SIZE = true, BINARYEN_EXTRA_PASSES = true }
 function M.validate_extras(flags, options)
     for index, flag in ipairs(flags or {}) do
         local purpose = options and options.purpose
