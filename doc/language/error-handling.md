@@ -190,7 +190,8 @@ print(titan.backtrace())
 The trace is captured by Titan's error handler at the original failure
 site. It is one unified, innermost-to-outer traceback that interleaves
 compiled Titan frames with Lua frames. Titan frames use source names such
-as `m.func`, `m.Record:method`, `m.Record.static`, or
+as `m.func` (including source `foreign function` definitions with Titan
+bodies), `m.Record:method`, `m.Record.static`, or
 `anonymous function at m.titan:12`, and source lines are attributed to the
 Titan `.titan` call or raise site when debug information is available.
 The returned string is the raw frame list: it does not include the error
