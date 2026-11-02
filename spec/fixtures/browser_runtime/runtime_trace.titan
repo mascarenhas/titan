@@ -98,9 +98,8 @@ function test_coroutine_trace_appends(context: test.Context)
     shape(traceback)
     test.assert(ffi.strstr(traceback, "browser-resume.lua:2: in") ~= nil,
                 "coroutine propagation omitted caller Lua frames: " .. traceback)
-    local resumer_name = "in runtime_trace.test_coroutine_trace_appends\n"
-    local resumer = ffi.strstr(traceback, resumer_name)
-    test.assert(resumer ~= nil and ffi.strstr(resumer + 1, resumer_name) == nil,
+    test.assert(ffi.trace_fixture_count_frame_lines(
+                  traceback, ": in runtime_trace.test_coroutine_trace_appends") == 1,
                 "coroutine append omitted/duplicated its resumer frame: " .. traceback)
     test.assert(co:status() == "dead")
     context:log("TRACE coroutine_append=" .. traceback)

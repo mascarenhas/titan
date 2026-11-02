@@ -17,7 +17,7 @@ end
 function test_bare_rethrow(_context: test.Context)
   local trace = caught(bare_rethrow)
   test.assert(trace == saved_trace, "bare rethrow changed pinned trace")
-  test.assert(count(trace, "in trace_cases.original_leaf\n") == 1, trace)
+  test.assert(count_frames(trace, ": in trace_cases.original_leaf") == 1, trace)
   emit("rethrow", trace)
 end
 
