@@ -883,10 +883,11 @@ static size_t titan_trace_capture(lua_State *L, TitanTraceStorage *st) {
         int entry, titan;
         (void)titan_browser_trace_symbolize(record, base, sizeof(base),
             symbol, sizeof(symbol), &line);
-        if (strcmp(titan_basename(base), "titan.c") == 0 || titan_is_lua_source(base)) continue;
         entry = strstr(symbol, TITAN_ENTRY_TAG) != NULL;
         titan = entry || titan_browser_known_name(L, symbol);
         if (!titan) {
+            if (strcmp(titan_basename(base), "titan.c") == 0 ||
+                titan_is_lua_source(base)) continue;
             size_t length = strlen(base);
             titan = length >= 6 && strcmp(base + length - 6, ".titan") == 0;
         }

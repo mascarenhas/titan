@@ -139,11 +139,13 @@ addToLibrary({
     parse(stack, capacity, limit) {
       if (typeof stack !== 'string') throw 'stack is not text';
       var self = TitanBrowserTrace, records = [], frames = 0, engine = -1, truncated = false;
+      var v8 = /^[ \t]*at[ \t]/m.test(stack);
       for (var text of stack.split('\n')) {
         if (/^async\*/.test(text)) break; // SpiderMonkey's saved history is not active ancestry.
         if (!text.trim()) continue;
-        var frame = /^\s*at\s/.test(text) || text.includes('@');
-        if (!frame) continue; // V8's Error title is not a frame.
+        var frame = v8 ? /^[ \t]*at[ \t]/.test(text)
+          : /@(?:.*wasm-function\[\d+\](?::0x[0-9a-fA-F]+)?|.*:\d+(?::\d+)?)\s*$/.test(text);
+        if (!frame) continue; // Count frame shapes, never V8's Error title.
         ++frames;
         for (var kind = 0; kind < self.patterns.length; ++kind) {
           var match = self.patterns[kind].exec(text);
@@ -167,9 +169,12 @@ addToLibrary({
       try {
         HEAPU32[out >>> 2] = 0; HEAPU32[(out + 4) >>> 2] = 0;
         if (!self.index) return 1;
-        if (!self.u32(capacity) || capacity > 512) return 2;
+        // C owns the record capacity. Validate its declared storage against the
+        // current heap, rather than duplicating the private header's constant.
+        if (!self.u32(capacity) || capacity === 0 ||
+            capacity > Math.floor((HEAPU32.byteLength - (out >>> 0) - 8) / 12)) return 2;
         var limitDescriptor, prepareDescriptor, changedLimit = false, changedPrepare = false;
-        var failed = false, stack, limit = 640;
+        var failed = false, stack, limit = capacity + 128;
         try {
           limitDescriptor = Object.getOwnPropertyDescriptor(Error, 'stackTraceLimit');
           prepareDescriptor = Object.getOwnPropertyDescriptor(Error, 'prepareStackTrace');

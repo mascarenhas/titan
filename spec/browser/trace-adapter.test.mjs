@@ -72,7 +72,7 @@ function adapter({realError = false, data = map(), node = true, fetch: fetcher} 
     api.index = api.buildIndex(data, identity);
     return {context, api, library, heap, hooks, dependencies, warnings, reads,
         evaluate(code) { return vm.runInContext(code, context); },
-        capture() { return library.titan_browser_trace_capture(1024, 512); },
+        capture(capacity = 512) { return library.titan_browser_trace_capture(1024, capacity); },
         records() {
             const words = new Uint32Array(heap.buffer);
             return Array.from({length: words[256]}, (_, i) => Array.from(words.slice(258 + i * 3, 261 + i * 3)));
@@ -118,6 +118,33 @@ test('limit accounting includes JS frames, not titles or Firefox saved parents',
     const {api} = adapter();
     assert.equal(api.parse('Error\n    at host (image.js:1:2)\n    at leaf (wasm://wasm/image:wasm-function[1]:0x6e)', 512, 2).truncated, true);
     assert.equal(api.parse('host@image.js:1:2\nleaf@image.wasm:wasm-function[1]:0x6e\nasync*old@image.js:2:3\nleaf@image.wasm:wasm-function[1]:0x6e', 512, 3).truncated, false);
+});
+
+test('recorded V8 frame accounting ignores titles containing @ or apparent locations', () => {
+    const {api} = adapter();
+    const recorded = stacks['node-24.19.0-named-direct-raised-200.txt'];
+    for (const title of ['Error: contact a@b.com', 'Error: contact a@image.js:1:2',
+        'Error: contact a@image.wasm:wasm-function[1]:0x6e']) {
+        const stack = title + recorded.slice(recorded.indexOf('\n'));
+        assert.equal(api.parse(stack, 512, 58).truncated, false);
+        assert.equal(api.parse(stack, 512, 57).truncated, true);
+        assert.equal(api.parse(stack, 512, 58).records.length, 51);
+    }
+});
+
+test('capture uses the C-declared capacity rather than a duplicated fixed limit', () => {
+    const unit = adapter();
+    unit.context.stackText = 'Error\n' + Array.from({length: 513},
+        () => '    at leaf (wasm://wasm/image:wasm-function[1]:0x6e)').join('\n');
+    assert.equal(unit.capture(513), 0);
+    assert.equal(unit.records().length, 513);
+    assert.equal(unit.capture(256), 0);
+    assert.equal(unit.records().length, 256);
+    assert.equal(new Uint32Array(unit.heap.buffer)[257], 1);
+    for (const capacity of [0, -1, 1.5, 0x100000000, 1280]) {
+        assert.equal(unit.capture(capacity), 2, `invalid capacity ${capacity}`);
+        assert.equal(unit.records().length, 0);
+    }
 });
 
 test('validated lookup respects bodies, boundaries, gaps, indexes and no-PC identity', () => {
@@ -219,7 +246,7 @@ for (const operation of ['descriptor read', 'prepare descriptor read', 'limit re
         else if (operation === 'stack read') unit.context.stackReadFailure = true;
         else if (operation === 'parse') unit.context.stackText = {};
         else unit.evaluate(`globalThis.originalHeap = HEAPU32; globalThis.writes = 0;
-            globalThis.HEAPU32 = new Proxy(HEAPU32, {set(target, key, value) {
+            globalThis.HEAPU32 = new Proxy(HEAPU32, {get(target, key) { return Reflect.get(target, key, target); }, set(target, key, value) {
                 if (++writes === 3) throw 'storage write'; return Reflect.set(target, key, value);
             }});`);
         assert.equal(unit.capture(), 2);
@@ -358,4 +385,46 @@ test('pinned emcc empty sourcesContent table needs no source text', () => {
     const index = api.buildIndex(map({sourcesContent: []}), identity);
     assert.equal(index.bases[0], 'one.browser.titan');
     assert.throws(() => api.buildIndex(map({sourcesContent: ['only one source']}), identity));
+});
+
+test('C merge retains entry and known-name identity despite runtime/Lua basenames', {
+    skip: !process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE,
+}, async () => {
+    const image = resolve(process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE);
+    const directory = await mkdtemp(join(tmpdir(), 'titan-trace-filter-'));
+    try {
+        const index = map({sources: ['titan.c', 'lvm.c'],
+            mappings: [[100, 1, 0, 0], [10, -1, 0, 0], [10, 1, 0, 0],
+                [10, -1, 0, 0], [10, 0, 0, 0], [10, 1, 0, 0]]
+                .map(row => row.map(vlq).join('')).join(','),
+            x_titan_function_ranges: [[100, 110], [110, 120], [120, 130],
+                [130, 140], [140, 150], [150, 160]],
+            x_titan_function_names: [null, 'filter_inner_native', 'filter_inner_titanentry_lua',
+                'filter_outer_native', 'filter_outer_titanentry_lua', 'unregistered_titan', 'lua_helper']});
+        const mapPath = join(directory, 'filter.wasm.map');
+        await writeFile(mapPath, JSON.stringify(index));
+        const {default: factory} = await import(pathToFileURL(image).href);
+        const module = await factory({locateFile: name => name.endsWith('.map') ? mapPath : join(dirname(image), name)});
+        assert.equal(module.titanBrowserTrace.state, 'ready', module.titanBrowserTrace.reason);
+        const original = Object.getOwnPropertyDescriptor(globalThis, 'Error');
+        const captured = 'Error\n' + [
+            [1, 101], [5, 141], [2, 111], [3, 121], [6, 151], [4, 131],
+        ].map(([index, pc]) => `    at frame (wasm://wasm/image:wasm-function[${index}]:0x${pc.toString(16)})`).join('\n');
+        let pointer;
+        try {
+            Object.defineProperty(globalThis, 'Error', {...original,
+                value: function Error() { this.stack = captured; }});
+            pointer = module._trace_filter_case();
+        } finally { Object.defineProperty(globalThis, 'Error', original); }
+        assert.equal(module._trace_filter_status(), 2, 'original Lua error outcome is preserved');
+        const bytes = module.HEAPU8;
+        const trace = new TextDecoder().decode(bytes.subarray(pointer, bytes.indexOf(0, pointer)));
+        const inner = trace.indexOf('in filter.inner');
+        const between = trace.indexOf('filter-wrapper.lua:2:');
+        const outer = trace.indexOf('in filter.outer');
+        assert.ok(inner >= 0 && between > inner && outer > between, trace);
+        assert.equal(trace.match(/in filter[.]inner/g)?.length, 1, trace);
+        assert.equal(trace.match(/in filter[.]outer/g)?.length, 1, trace);
+        assert.doesNotMatch(trace, /titanentry|unregistered_titan|lua_helper/);
+    } finally { await rm(directory, {recursive: true, force: true}); }
 });

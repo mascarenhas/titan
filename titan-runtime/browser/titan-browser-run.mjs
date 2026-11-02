@@ -106,12 +106,12 @@ async function chromeInfo(override) {
     }
 }
 
-function within(root, path) {
+export function within(root, path) {
     const rel = relative(root, path);
     return rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel);
 }
 
-class Monitor {
+export class Monitor {
     constructor(options) {
         this.options = options;
         this.done = new Promise(resolve => { this.finish = resolve; });
@@ -564,5 +564,8 @@ async function main() {
     return monitor.result();
 }
 
-try { process.exitCode = await main(); }
-catch (error) { diagnostic(`harness failure: ${error.message}`); process.exitCode = 75; }
+const invokedPath = process.argv[1] && await realpath(process.argv[1]).catch(() => null);
+if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
+    try { process.exitCode = await main(); }
+    catch (error) { diagnostic(`harness failure: ${error.message}`); process.exitCode = 75; }
+}
