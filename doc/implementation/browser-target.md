@@ -1447,16 +1447,16 @@ profile `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2
 
 | Installation | Engine | `.wasm` bytes | `.wasm.map` bytes (`mapBytes`) | Map / Wasm | Eager map/index load (`loadMilliseconds`) | Retained typed-array index (`indexBytes`) |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Validation | Node 24.19.0 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 95.3 ms | 2,902,380 |
-| Production | Node 24.19.0 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 102.9 ms | 2,902,380 |
-| Validation | Host Chromium 156.0.8078.79 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 50.2 ms | 2,902,380 |
-| Production | Host Chromium 156.0.8078.79 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 89.9 ms | 2,902,380 |
-| Validation | Playwright Chromium 141.0.7390.37 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 97.8 ms | 2,902,380 |
-| Production | Playwright Chromium 141.0.7390.37 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 101.9 ms | 2,902,380 |
-| Validation | Playwright Firefox 142.0.1 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 91.0 ms | 2,902,380 |
-| Production | Playwright Firefox 142.0.1 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 99.0 ms | 2,902,380 |
-| Validation | Playwright WebKit 26.0 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 65.0 ms | 2,902,380 |
-| Production | Playwright WebKit 26.0 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 91.0 ms | 2,902,380 |
+| Validation | Node 24.19.0 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 96.3 ms | 2,902,884 |
+| Production | Node 24.19.0 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 95.2 ms | 2,902,884 |
+| Validation | Host Chromium 156.0.8078.79 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 61.1 ms | 2,902,884 |
+| Production | Host Chromium 156.0.8078.79 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 73.2 ms | 2,902,884 |
+| Validation | Playwright Chromium 141.0.7390.37 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 72.5 ms | 2,902,884 |
+| Production | Playwright Chromium 141.0.7390.37 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 102.4 ms | 2,902,884 |
+| Validation | Playwright Firefox 142.0.1 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 62.0 ms | 2,902,884 |
+| Production | Playwright Firefox 142.0.1 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 113.0 ms | 2,902,884 |
+| Validation | Playwright WebKit 26.0 | 5,126,536 | 1,227,298 | 23.94% (23.9401%) | 69.0 ms | 2,902,884 |
+| Production | Playwright WebKit 26.0 | 5,127,276 | 1,227,298 | 23.94% (23.9366%) | 63.0 ms | 2,902,884 |
 
 Each `loadMilliseconds` entry is one observed eager-load sample from the
 passing 72-row / 70-native-case gate run (spanning map read or loopback HTTP
