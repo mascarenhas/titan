@@ -629,11 +629,41 @@ assert(driver.close_resolver_context(context))
         files.mkdir(workspace .. "/src")
         files.write(workspace .. "/src/image_control.titan",
             read(repository .. "/spec/fixtures/browser_images/program.titan"))
-        local variant = { prefix = info.prefix,
-            compiler_setup = "require('titan-compiler.driver').browser_link_options=" ..
-                "{purpose='baseline',assertions=0,optimization='O2'};" }
-        local result = cli(variant, "--ldflag=-g2", "--ldflag=-Os", "image_control")
+        files.write(workspace .. "/src/control-helper.c", "int control_helper(void) { return 37; }\n")
+        local library_flag = "-L" .. workspace .. "/src"
+        local variant = { prefix = info.prefix, compiler_setup = string.format([[
+local driver = require "titan-compiler.driver"
+driver.browser_link_options = {purpose='baseline',assertions=0,optimization='O2'}
+local run_link = driver.run_link_command
+driver.run_link_command = function(argv, ...)
+    local protocol, library, demangle = false, nil, nil
+    for index, flag in ipairs(argv) do
+        if flag == "-sASSERTIONS=2" then protocol = true end
+        if flag == %q then library = index end
+        if flag == "-Wl,--no-demangle" then demangle = index end
+    end
+    if protocol then
+        for _, flag in ipairs(argv) do assert(flag ~= "-Os", "measurement override reached protocol link") end
+        assert(library and demangle and library < demangle, "protocol lost ordered nontrace link flags")
+        io.stdout:write("control protocol link\n")
+    end
+    return run_link(argv, ...)
+end
+local run_probe = driver.run_standalone_archive_probe
+driver.run_standalone_archive_probe = function(...)
+    local before = { table.unpack(driver.link_extra_flags()) }
+    local ok, why, code = run_probe(...)
+    local after = driver.link_extra_flags()
+    assert(#before == #after, "protocol changed outer link flags")
+    for index, flag in ipairs(before) do assert(flag == after[index], "protocol changed outer link flag order") end
+    return ok, why, code
+end
+]], library_flag) }
+        local result = cli(variant, "--incremental", "--c-source", workspace .. "/src/control-helper.c",
+            "--ldflag=-Os", "--ldflag=" .. library_flag, "--ldflag=-Wl,--no-demangle", "image_control")
         assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.truthy(result.output:find("control protocol link\n", 1, true),
+            "measurement control did not execute the real static-provider protocol link")
         local image = workspace .. "/out/image_control.mjs"
         local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/image_control.wasm")))
         for _, item in ipairs(inventory.exports) do

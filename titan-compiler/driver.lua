@@ -13418,6 +13418,17 @@ function driver.run_standalone_archive_probe(
         local ready
         ready, err = driver.browser_node_ready(context, assets)
         if not ready then return nil, err end
+        -- Measurement overrides belong to the published image, not this
+        -- fixed-profile protocol check. Validate them before making a copy.
+        local extra_flags = driver.link_extra_flags()
+        local valid
+        valid, err = driver.browserlink.validate_extras(extra_flags, driver.browser_link_options)
+        if not valid then return nil, err end
+        local protocol_flags = {}
+        local trace_option = require("titan-compiler.browsertarget").trace_option
+        for _, flag in ipairs(extra_flags) do
+            if not trace_option(flag) then protocol_flags[#protocol_flags + 1] = flag end
+        end
         local base
         base, err = create_compile_log()
         if not base then return nil, err end
@@ -13430,7 +13441,8 @@ function driver.run_standalone_archive_probe(
         local linked, term, code = driver.compile_browser_image(
             standalone_archive_probe_source(entries, module_names, true),
             source, image, libnames, static_archives, extra_objects, verbose,
-            { context = context, profile = { purpose = "protocol", assertions = 2 } })
+            { context = context, profile = { purpose = "protocol", assertions = 2 },
+              link_extra_flags = protocol_flags })
         if not linked then
             return nil, "selected static provider failed executable-context protocol linking (" ..
                 tostring(term) .. (code and (", exit " .. tostring(code)) or "") .. ")"
@@ -13662,14 +13674,15 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         plan, err = driver.browser_link_plan(context, options.purpose or "program")
     end
     if not plan then return nil, err end
+    local extra_flags = options.link_extra_flags or driver.link_extra_flags()
     local valid
-    valid, err = driver.browserlink.validate_extras(driver.link_extra_flags(),
+    valid, err = driver.browserlink.validate_extras(extra_flags,
         options.profile or driver.browser_link_options)
     if not valid then return nil, err end
     valid, err = driver.browserlink.validate_extras(options.final_link_flags,
         options.profile or driver.browser_link_options)
     if not valid then return nil, err end
-    local library_flags = { table.unpack(driver.link_extra_flags()) }
+    local library_flags = { table.unpack(extra_flags) }
     append_argv(library_flags, options.final_link_flags)
     local libraries
     libraries, err = require("titan-compiler.linkcertificate").browser_trace_libraries(
@@ -13711,7 +13724,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     append_argv(identity_flags, { "-Wl,--start-group", assets.runtime })
     append_argv(identity_flags, archives)
     append_argv(identity_flags, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
-    append_argv(identity_flags, driver.link_extra_flags())
+    append_argv(identity_flags, extra_flags)
     append_argv(identity_flags, options.final_link_flags)
     local called, identity = pcall(browsertrace.identity, context, contents, compile, identity_flags,
         { objects or {}, archives or {}, extra_objects or {}, libraries,
@@ -13742,7 +13755,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     append_argv(command, { "-Wl,--start-group", assets.runtime })
     append_argv(command, archives)
     append_argv(command, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
-    append_argv(command, driver.link_extra_flags())
+    append_argv(command, extra_flags)
     append_argv(command, options.final_link_flags)
     local linked, term, code
     if options.dependency_output then
