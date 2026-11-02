@@ -11,8 +11,12 @@
 EM_JS(int, trace_fixture_ordinary_truncation_allowed, (void), {
   return Module['traceFixtureWebKit'] === true;
 });
+EM_JS(int, trace_fixture_host_absent_limit, (void), {
+  return Module['traceFixtureAbsentLimit'] === true;
+});
 #else
 static int trace_fixture_ordinary_truncation_allowed(void) { return 0; }
+int trace_fixture_host_absent_limit(void) { return 0; }
 #endif
 
 int trace_fixture_ordinary_truncation(const char *trace, const char *marker) {
