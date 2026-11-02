@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { classify, knownTrap, observeFactory, relativePath } from "../../titan-runtime/browser/titan-browser-page.mjs";
 import {Monitor, within} from "../../titan-runtime/browser/titan-browser-run.mjs";
+import {create} from "../../titan-runtime/browser/titan-browser.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runner = resolve(process.env.TITAN_BROWSER_RUNNER ?? join(root, "titan-runtime/browser/titan-browser-run"));
@@ -725,4 +726,56 @@ test("direct invocation through a symlink still runs the runner CLI", {skip: !su
         const {stderr} = await exec(process.execPath, [link, "--version"]);
         assert.match(stderr, /Titan 0[.]6[.]0 browser runner/);
     } finally { await rm(directory, {recursive: true, force: true}); }
+});
+
+// Transport unit fixture: zero arguments need no Wasm allocator. The queued
+// safe point deliberately precedes the loader's ccall outcome continuation.
+function entryOutcomeFactory(entry) {
+    return options => {
+        options.titanBrowserAttach({safe: () => true, suspensionPending: false});
+        return {
+            HEAPU8: new Uint8Array(0),
+            ccall() {
+                queueMicrotask(() => options.titanBrowserSafePoint(false));
+                return entry(options);
+            },
+        };
+    };
+}
+
+for (const mode of ["synchronous throw", "promise rejection"]) {
+    test(`ccall ${mode} preserves RangeError before an earlier queued safe point`, {timeout: 1000}, async () => {
+        const cause = new RangeError("entry stack exhausted");
+        const instance = create(entryOutcomeFactory(() => {
+            if (mode === "synchronous throw") throw cause;
+            return Promise.reject(cause);
+        }));
+        try {
+            await assert.rejects(instance.run(), error =>
+                error.code === "TITAN_BROWSER_PROTOCOL" &&
+                error.message === cause.message && error.cause === cause);
+        } finally { await instance.dispose(); }
+    });
+}
+
+test("fulfilled ccall without completion still reports the protocol failure", {timeout: 1000}, async () => {
+    const instance = create(entryOutcomeFactory(() => Promise.resolve(0)));
+    try {
+        await assert.rejects(instance.run(), {
+            code: "TITAN_BROWSER_PROTOCOL",
+            message: "browser entry returned without completion or suspension",
+        });
+    } finally { await instance.dispose(); }
+});
+
+test("completion and quiescence still settle a pending internal ccall promise", {timeout: 1000}, async () => {
+    const instance = create(entryOutcomeFactory(options => {
+        options.titanBrowserComplete(0, 17, new Uint8Array(0), 1);
+        return new Promise(() => {});
+    }));
+    try {
+        assert.deepEqual(await instance.run(), {
+            kind: "returned", status: 17, bytes: new Uint8Array(0),
+        });
+    } finally { await instance.dispose(); }
 });
