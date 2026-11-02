@@ -13059,6 +13059,23 @@ describe("target-aware source resolver", function()
         fixtures.remove(root)
     end)
 
+    it("reserves the browser source map during pre-worker output planning", function()
+        put("app.titan", "function main(args: {string}): integer return #args end\n")
+        local ctx = context("browser")
+        local source = assert(driver.resolve_source(ctx, "app"))
+        local plan = { order = { "app" },
+            modules = { app = { kind = "source", source = source } } }
+        assert(driver.preflight_build_outputs(ctx, plan, { roots = { "app" }, c_parts = 1 }))
+        local reserved = false
+        for _, output in ipairs(plan.reservations) do
+            if output.owner == "browser source map" then
+                assert.matches("%.wasm%.map$", paths.to_slash(output.path))
+                reserved = true
+            end
+        end
+        assert.is_true(reserved, "preflight omitted the browser source map")
+    end)
+
     it("keeps context validation ahead of the Windows browser host model", function()
         local uninitialized = { io = compiler_io.new_sync(), target = "browser", _resolver_context = true }
         local windows = platform.windows

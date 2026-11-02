@@ -917,7 +917,7 @@ if not args.compile_only and not args.print_ast then
     -- Generated public headers are restored under the lock even when the
     -- final link hits; existing owned headers are preserved untouched.
     local headers_ready, headers_error = driver.prepare_foreign_headers(
-        module_order, driver.imported, args.verbose, args.pretty_print)
+        module_order, driver.imported, args.verbose, args.pretty_print, resolver_context)
     if not headers_ready then exit(headers_error) end
     local target = outputs[1].path
     if reporter then link_name = progress.basename(target) end
@@ -1027,7 +1027,7 @@ local header_plans = {}
 local header_plan_by_name = {}
 if #errors == 0 then
     local planned, header_err = driver.plan_foreign_headers(
-        linked_names, driver.imported, context)
+        linked_names, driver.imported, resolver_context)
     if not planned then
         table.insert(errors, header_err)
     else

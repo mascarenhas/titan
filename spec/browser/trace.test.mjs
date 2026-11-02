@@ -127,7 +127,7 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
       return;
     }
     if (missingSymbols) {
-      if (!webkit) context.assert(trace.includes("trace_cases.titan:80: in ?"), "missing-symbol PC lost valid source location");
+      exact(trace, "trace_cases.titan", 80, "?");
       return;
     }
     if (["direct", "host_ready", "host_recovered", "fiber_before", "fiber_after", "fiber_after_sleep"].includes(label)) {

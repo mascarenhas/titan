@@ -13018,6 +13018,7 @@ function driver.preflight_build_outputs(context, plan, options)
             if not image then return nil, wasm end
             output(image, "browser executable")
             output(wasm, "browser Wasm")
+            output(wasm .. ".map", "browser source map")
         elseif platform.windows then
             local paths, err = driver.windows_program_paths(
                 options.test and require("titan-compiler.test_runner").MODULE_NAME or main,

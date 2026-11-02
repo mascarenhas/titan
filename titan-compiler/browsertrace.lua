@@ -140,7 +140,8 @@ local function mappings(map)
     end
     while pos <= #bytes do
         if bytes:sub(pos, pos) == ";" then
-            generated, pos = 0, pos + 1
+            require_value(not bytes:find("[^;]", pos), "invalid generated source-map line")
+            break
         else
             local delta = vlq()
             require_value(delta >= 0 and generated <= U32 - delta, "nonmonotonic or overflowing generated offset")

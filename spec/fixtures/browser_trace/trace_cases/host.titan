@@ -64,6 +64,7 @@ function test_missing_symbols(_context: test.Context)
   end)
   test.assert(cleanup == 1, "missing symbols changed cleanup")
   test.assert(not contains(trace, unavailable) and not contains(trace, capture_failed), trace)
+  frame(trace, "trace_cases.titan", 80, "?")
   emit("missing_symbols", trace)
 end
 

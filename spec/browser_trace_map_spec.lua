@@ -7,7 +7,7 @@ local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local ID = string.rep("a", 64)
 local HEADER = "\0asm\1\0\0\0"
-local MAP = '{"version":3,"sources":["selected.browser.titan"],"names":["run"],"mappings":"AAAAA,E;AAAA","x_other":{"keep":[null,true,false,1.25e+2]}}\n'
+local MAP = '{"version":3,"sources":["selected.browser.titan"],"names":["run"],"mappings":"AAAAA,E","x_other":{"keep":[null,true,false,1.25e+2]}}\n'
 local function leb(value)
     local out = {}
     repeat
@@ -157,14 +157,19 @@ describe("browser final trace map", function()
         { "negative column", "AAAD", "location" }, { "name index", "AAAAC", "name index" },
         { "trailing comma", "AAAA,", "empty" }, { "empty segment", "AAAA,,AAAA", "empty" },
         { "empty before line", "AAAA,;", "empty" },
+        { "second generated line", "AAAA;AAAA", "generated source-map line" },
+        { "leading empty generated line", ";AAAA", "generated source-map line" },
     }) do
         it("rejects malformed mappings: " .. case[1], function()
             rejected(image(), MAP:gsub('"mappings":"[^"]*"', '"mappings":"' .. case[2] .. '"'), case[3])
         end)
     end
+    it("accepts empty trailing generated lines", function()
+        assert(trace.rewrite(image(), MAP:gsub('"mappings":"[^"]*"', '"mappings":"AAAA;;"'), ID))
+    end)
     it("accepts JSON escapes, paired surrogates and null or string source contents", function()
         for _, content in ipairs({ '', 'null', '"source\\ntext"' }) do
-            local map = '{"version":3,"sources":["\\ud835\\udc00\\/\\\\\\b\\f\\n\\r\\t\\\""],"names":[],"mappings":"AAAA;EAAA","sourcesContent":[' .. content .. ']}'
+            local map = '{"version":3,"sources":["\\ud835\\udc00\\/\\\\\\b\\f\\n\\r\\t\\\""],"names":[],"mappings":"AAAA,EAAA","sourcesContent":[' .. content .. ']}'
             assert(trace.rewrite(image(), map, ID))
         end
         rejected(image(), MAP, "identity", "UPPER")
