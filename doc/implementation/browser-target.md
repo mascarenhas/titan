@@ -1895,14 +1895,21 @@ host-test success (status 0), a thrown non-loader error is host-test failure
 harness failure.
 
 **Playwright supervisor (`spec/browser/playwright-run.mjs`).** To run the same
-portable `run(context)` host tests across Playwright-managed `chromium`,
-`firefox`, and `webkit` (`playwright@1.56.1`), `spec/browser/playwright-run.mjs`
-reuses `titan-browser-page.mjs`, the exported `within` and `Monitor` from
-`titan-browser-run.mjs`, the loopback root/SDK HTTP server, and the same
-completion, abort, and `--allow-degraded-trace` rules with an explicit
-`--engine chromium|firefox|webkit` (`context.engine` reflects the selected
-engine; `TODO(confirm: exact CLI flags of spec/browser/playwright-run.mjs)`).
-It is repository test infrastructure, not an installed SDK binary.
+portable `run(context)` host tests (or a standalone Titan image with `--image`)
+across Playwright-managed `chromium`, `firefox`, and `webkit`
+(`playwright@1.56.1`), `spec/browser/playwright-run.mjs` parses `--engine
+chromium|firefox|webkit [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
+[--allow-degraded-trace] [--image] FILE [-- ARG...]` (defaults: `timeout`
+300000 ms, `grace` 1500 ms, `sdk` `<repo>/titan-runtime/browser/`), loads
+`playwright` from `TITAN_PLAYWRIGHT_ROOT` and managed browsers from
+`PLAYWRIGHT_BROWSERS_PATH`, and reuses `titan-browser-page.mjs`, the exported
+`within` and `Monitor` from `titan-browser-run.mjs`, the loopback `/root/` and
+`/sdk/` HTTP server, `page.exposeBinding('__titanRunner', ...)` (with
+`page.requestGC()` for host-test collections), and bounded `browserServer`
+retirement (`browserServer.close()`, escalating to `browserServer.kill()`). Its
+diagnostics start with `titan-playwright-run: `, and its unit suite is
+`spec/browser/playwright-runner.test.mjs`. It is repository test
+infrastructure, not an installed SDK binary.
 
 ## The executing protocol runner
 
@@ -2201,7 +2208,8 @@ hosts`).
   (preRun/export readiness) and `filter.c` (entry/registered-name precedence
   before `titan.c`/`titan_is_lua_source` basename filtering) fixtures.
 * `spec/browser/build-trace.lua`, `spec/browser/trace.test.mjs`,
-  `spec/browser/playwright-run.mjs`, and `spec/fixtures/browser_trace/` — the
+  `spec/browser/playwright-run.mjs`, `spec/browser/playwright-runner.test.mjs`,
+  and `spec/fixtures/browser_trace/` — the
   staged multi-engine browser trace gate (34 discovered native cases in
   `trace_cases` plus `trace_uncaught`, staged into `assertions-2` and
   `assertions-0` with 72 positive `cases` rows and 8 intentional
