@@ -192,8 +192,11 @@ site. It is one unified, innermost-to-outer traceback that interleaves
 compiled Titan frames with Lua frames. Titan frames use source names such
 as `m.func` (including source `foreign function` definitions with Titan
 bodies), `m.Record:method`, `m.Record.static`, or
-`anonymous function at m.titan:12`, and source lines are attributed to the
-Titan `.titan` call or raise site when debug information is available.
+`anonymous function at m.titan:12` when the module has been initialized in the
+current Lua state (falling back to the raw C symbol if a trace taken in an
+independent child state sees outer native frames from a module initialized only
+in the parent state), and source lines are attributed to the Titan `.titan`
+call or raise site when debug information is available.
 The returned string is the raw frame list: it does not include the error
 message, a `stack traceback:` header, or tab indentation.
 

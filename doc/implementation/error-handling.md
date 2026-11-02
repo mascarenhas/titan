@@ -466,10 +466,14 @@ Compiled-module ABI versions remain unchanged.
 During the merge, `titan_trace_format_frame` formats a resolved record (`line >
 0`) as `<basename>:<line>: in <display name>` and an unlocated record (`line ==
 0`, including all WebKit Titan frames) as `<basename>: in <display name>`,
-looking up `<display name>` in `registry[TITAN_NAMES_KEY]` and falling back to
-the C symbol or `?` (and `?` when no declaring basename is known). When capture
-returned `MAP_UNAVAILABLE` or `CAPTURE_FAILED`, the trace emits one availability
-marker line — `(native Titan frames unavailable: trace map not loaded)` or
+calling `titan_qualified_name` to look up `<display name>` in the capturing
+state's `registry[TITAN_NAMES_KEY]` and falling back to the raw C symbol (for
+example, when a trace captured inside an independent auxiliary `lua_State` sees
+outer physical stack frames from a parent runner module that was not
+initialized in that auxiliary state) or `?` when no symbol or declaring
+basename is known. When capture returned `MAP_UNAVAILABLE` or
+`CAPTURE_FAILED`, the trace emits one availability marker line —
+`(native Titan frames unavailable: trace map not loaded)` or
 `(native Titan frames unavailable: capture failed)` — and when `TRUNCATED` is
 set (or bounded Lua-only fallback enumeration is cut short), it appends
 `(...native frames truncated...)` once at the end of the trace.
@@ -534,6 +538,12 @@ formats frames with those display names:
 * `<module>.<record>:<method>`
 * `<module>.<record>.<static>`
 * `anonymous function at <file>.titan:<definition-line>`
+
+Because `registry[TITAN_NAMES_KEY]` is per-`lua_State`, `titan_qualified_name`
+(`titan.c`) resolves display names only for modules initialized in the state
+capturing the trace; on both native and browser targets, a physical stack frame
+from a module initialized only in an outer `lua_State` falls back to its raw C
+symbol (or `?` when the symbol itself is unknown).
 
 ## Frontend representation
 

@@ -438,7 +438,10 @@ unified Titan/Lua contract as native builds:
 * Compiled Titan frames appear as `<basename>:<line>: in <display name>`,
   using the selected physical `.titan` filename (`name.browser.titan`
   included) and Titan display names (`m.func`, `m.Record:method`,
-  `m.Record.static`, or `anonymous function at m.titan:12`).
+  `m.Record.static`, or `anonymous function at m.titan:12`, falling back to the
+  C symbol name if a trace captured in an independent child Lua state includes
+  outer native frames from a module initialized only in the parent state, or
+  `?` when no symbol is known).
 * If a Titan frame's program counter has no line mapping inside its function
   body, the frame uses the no-line form `<basename>: in <display name>` (with
   the function's declaring `.titan` basename, or `?` when none is known), never
