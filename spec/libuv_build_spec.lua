@@ -6162,6 +6162,8 @@ printf '%s\n' "${schedule[@]}"
                 assert.truthy(trace_units:find(contract, 1, true),
                     "missing compiled trace unit contract " .. contract)
             end
+            assert.equal(2, count_literal(trace_units,
+                '-sASSERTIONS="$assertions"'), trace_units)
 
             for _, contract in ipairs({
                 "needs: build-compiler", "runs-on: ubicloud-standard-4",

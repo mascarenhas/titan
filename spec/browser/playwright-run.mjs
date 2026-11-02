@@ -4,6 +4,7 @@ import {readFile, realpath, stat} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {dirname, join, relative, resolve, sep} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
+// Shared supervision intentionally retains the titan-browser-run diagnostic prefix.
 import {Monitor, within} from '../../titan-runtime/browser/titan-browser-run.mjs';
 
 const playwrightVersion = '1.56.1';
