@@ -12,13 +12,15 @@ coverage reports upload from `out/coverage/report`.
 
 ## Linux job graph and concurrency
 
-Linux runs on pushes. Five job definitions produce six runner executions:
+Linux runs on pushes. Six job definitions produce seven runner executions
+(`TODO(confirm: exact job id and runner configuration in .github/workflows/ci.yml)`):
 `build-compiler` and `sanitizer` start independently; after `build-compiler`,
-two `test-linux-compiler` shard pairs, `native-coverage`, and the
-[`browser-toolchain`](#browser-toolchain-job) gate start in parallel.
-Preparation has a 30-minute timeout, compiler pairs 45 minutes, native
-coverage and the browser gate 60 minutes, and the independent cold sanitizer
-build 75 minutes.
+two `test-linux-compiler` shard pairs, `native-coverage`, the
+[`browser-toolchain`](#browser-toolchain-job) gate, and the
+[`browser-playwright`](#browser-playwright-job) multi-engine trace gate start in
+parallel. Preparation has a 30-minute timeout, compiler pairs 45 minutes,
+native coverage and the browser gates 60 minutes, and the independent cold
+sanitizer build 75 minutes.
 
 Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
 The native coverage, sanitizer, and browser jobs each use a four-vCPU runner
@@ -236,19 +238,22 @@ every `EMSDK_*` variable it does not set itself, and the job sets
    `PATH`, proving that the native build never needs the browser toolchain.
 7. **Browser SDK.** With emsdk sourced, the step asserts that
    `lib/titan-browser` is absent or empty, runs `make browser-sdk
-   PREFIX="$PREFIX"`, and asserts the nine installed SDK files listed in the
+   PREFIX="$PREFIX"`, and asserts the ten installed SDK files listed in the
    [browser SDK layout](browser-target.md#the-browser-sdk) apart from the
-   LPegLabel archive.
+   LPegLabel archive (`titan-browser-trace.js` included).
 8. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
-   prefix's installed `busted -c -o gtest -v` runs the eleven real-toolchain
+   prefix's installed `busted -c -o gtest -v` runs the thirteen real-toolchain
    files `spec/wasm_toolchain_spec.lua`, `spec/coder/browser_toolchain_spec.lua`,
    `spec/coder/browser_providers_spec.lua`,
    `spec/coder/browser_incremental_spec.lua`,
-   `spec/coder/browser_images_spec.lua`, `spec/coder/browser_protocol_spec.lua`,
+   `spec/coder/browser_images_spec.lua`, `spec/browser_trace_map_spec.lua`,
+   `spec/coder/browser_trace_entries_spec.lua`,
+   `spec/coder/browser_protocol_spec.lua`,
    `spec/browser_sdk_spec.lua`, `spec/coder/browser_entry_gate_spec.lua`,
    `spec/coder/browser_fixtures_spec.lua`,
-   `spec/coder/browser_budgets_spec.lua`, and `spec/minicoro_spec.lua` under
+   `spec/coder/browser_budgets_spec.lua`, and `spec/minicoro_spec.lua`
+   (`TODO(confirm: exact strict-gate spec list in ci.yml)`) under
    LuaCov, with output copied to `$RUNNER_TEMP/browser-gate.log`. A missing
    gate file fails with `missing browser real-toolchain spec: <path>` before
    Busted starts. The entry-gate and budget specs build their own assertion-on
@@ -279,22 +284,61 @@ every `EMSDK_*` variable it does not set itself, and the job sets
 13. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
     runs against the minified image under both engines with the same timeout
     and grace and output copied to `$RUNNER_TEMP/browser-guard.log`.
-14. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
-    `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
+14. **Runner and trace adapter suites.** `node --test spec/browser/runner.test.mjs`
+    runs with `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
     `TITAN_BROWSER_RUNNER` (the installed launcher), and
     `TITAN_BROWSER_LOADER_IMAGE` (the assertions-2 `fidelity` image), with
-    output copied to `$RUNNER_TEMP/browser-runner.log`.
+    output copied to `$RUNNER_TEMP/browser-runner.log`, and `node --test
+    spec/browser/trace-adapter.test.mjs` runs the stack-parser, `Error`
+    descriptor, and lookup-validation units (`TODO(confirm: exact trace-adapter and build-trace steps in browser-toolchain job)`).
 15. **Failure logs.** On failure, `actions/upload-artifact` uploads the
     `browser-*.log` files and `out/browser` for seven days.
 
 The browser target's spec files (`spec/browser_isolation_spec.lua`,
 `spec/browser_target_spec.lua`, `spec/browser_sdk_spec.lua`,
-`spec/wasm_toolchain_spec.lua`, and the `spec/coder/browser_*_spec.lua` files)
-are also ordinary rows of `spec/support/ci_compiler_test_groups.txt` and run
-in the covered compiler shards against the SDK-only prefix. There, without
+`spec/browser_trace_map_spec.lua`, `spec/wasm_toolchain_spec.lua`, and the
+`spec/coder/browser_*_spec.lua` files) are also ordinary rows of
+`spec/support/ci_compiler_test_groups.txt` and run in the covered compiler
+shards against the SDK-only prefix. There, without
 Emscripten, Node, Chrome, or a browser SDK, every real-toolchain case is
 pending and the synthesized cases run; compiler shards never become browser
 SDK consumers.
+
+## `browser-playwright` job
+
+`browser-playwright` (`TODO(confirm: exact job name, container/cache setup, and step sequence from Lead330)`)
+runs the multi-engine browser trace gate on Linux in a separate job from
+`browser-toolchain`. It depends on `build-compiler`, restores the prepared
+compiler artifact and the cached emsdk 6.0.13 installation, selects emsdk's
+bundled Node 24, builds `make lua-browser PREFIX="$PREFIX"`, installs the rock
+without Emscripten on `PATH`, and builds `make browser-sdk PREFIX="$PREFIX"` in
+its own isolated prefix.
+
+The job stages the complete trace gate once into an isolated output root (`lua
+-E spec/browser/build-trace.lua out/browser/trace`, producing `assertions-2`
+and `assertions-0` images, intentional missing/malformed/wrong-image map
+variants, `trace.test.mjs`, and `manifest.json`) and executes it with
+Playwright (`playwright@1.56.1`) through `spec/browser/playwright-run.mjs`:
+
+* **Chromium and Firefox** (`--engine chromium` and `--engine firefox`) run the
+  full file/line, contributor, wrapper-family, merge-order, descriptor-safety,
+  pin/rethrow/clear, coroutine-append, Firefox `async*` cutoff and 128-frame
+  ceiling, and merge-OOM guard-recovery gate across both `assertions-2` and
+  `assertions-0`.
+* **WebKit** (`--engine webkit`) runs the reduced-fidelity counterpart across
+  both assertion modes: function-level `<basename>: in <display name>` Titan
+  frames in merged order with Lua frames, 100-frame truncation markers, and
+  unchanged pin/rethrow/append and error recovery.
+* **Degraded-map and default-policy checks:** each engine runs the negative
+  `degradedCases` rows with `--allow-degraded-trace ... -- --degraded` (verifying
+  the single load warning and `(native Titan frames unavailable: trace map not
+  loaded)` marker) and separately verifies that running a degraded image
+  without `--allow-degraded-trace` fails the harness by default.
+
+Node continues to run through `titan-browser-run` in `browser-toolchain` (and
+in the Playwright job if configured; `TODO(confirm: whether Node trace gate runs in browser-toolchain, browser-playwright, or both)`).
+Each engine invocation uses isolated profile and output directories and records
+exact native case counts and failure logs.
 
 ## Cache ownership
 

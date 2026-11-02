@@ -207,6 +207,33 @@ stripping that debug information prevents native source attribution.
 On macOS, the build may need `dsymutil` output for fully symbolized
 standalone executables; the test suite and CI exercise that path.
 
+For the [browser target](browser-target.md#traces), a linked program or test
+image includes `<stem>.wasm.map` alongside `<stem>.mjs` and `<stem>.wasm`.
+When a web page or application loads the image (or when tests run it through
+`titan-browser-run`), the runtime eagerly loads and validates `<stem>.wasm.map`
+during module initialization before any Titan code runs, so capturing a
+traceback never fetches over the network or suspends on the error path. On
+Chromium, Firefox, and Node, browser tracebacks show the same unified
+Titan/Lua frame order, selected physical `.titan` filenames
+(`name.browser.titan` included), line numbers (`<basename>:<line>: in <display
+name>`), and Titan display names as native builds, with unchanged pin, bare
+`raise`, caught-trace clearing, and coroutine-append behavior. On WebKit and
+Safari, where JavaScriptCore reports WebAssembly frames by function index
+without bytecode offsets and caps `Object.defineProperty`-configured captures
+at 100 total frames, browser tracebacks have reduced fidelity: Titan frames
+appear in the same merged order and with the same display names, rendered in
+the no-line form `<basename>: in <display name>`. Firefox's SpiderMonkey caps
+synchronous `Error.stack` captures at 128 frames. When a trace is cut short by
+the 512-frame capture capacity, a host `Error.stackTraceLimit`, or the engine's
+capture ceiling, it ends with the frame line `(...native frames truncated...)`.
+A web server serving a browser image must serve `<stem>.wasm.map` next to
+`<stem>.wasm`; if the map is missing, malformed, or does not match the `.wasm`
+image, initialization logs one `Titan browser trace: ...` warning and each
+trace falls back to Lua frames plus `(native Titan frames unavailable: trace
+map not loaded)`. If stack capture itself fails or cannot safely neutralize a
+host `Error.prepareStackTrace`, the trace falls back to Lua frames plus
+`(native Titan frames unavailable: capture failed)`.
+
 ## Other run-time errors
 
 The explicit `raise` statement is only one source of run-time errors.

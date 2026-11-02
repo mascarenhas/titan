@@ -82,7 +82,7 @@ use the chapters below for the normative language reference.
 | [Output directories](output-directory.md) | `-o/--output` directory creation, `--exe` executable paths, `-I`/`-D`/`-L`/`-l`/`--cflag`/`--ldflag`/`--c-source`/`--print-c-objects` switches, reserved generated-C names and upgrading older (including moved) output trees, `.titan/`, `.native/`, and `.titan-links/` contents, the `.titan-target` one-target marker, `.titan-build.lock` coordination, coverage, and platform output layouts. |
 | [Folder modules](folder-modules.md) | Splitting one logical module across a canonical main and immediate contributors: shared scope, deterministic order, lookup privacy, initialization, and artifacts. |
 | [Target source selection](target-source-selection.md) | `name.<label>.titan` variants for `linux`, `darwin`, `windows`, `browser`, and the umbrella `native`: reserved spellings, per-target selection with absence-only fallback, target-only files, precedence, folder composition and the initializer rule, source imports, `-T`/`--target` and `TITAN_TARGET`, logical artifact names, incremental reuse, test roots, and editor behavior. |
-| [Compiling for the browser target](browser-target.md) | `--target browser`/`TITAN_TARGET=browser` on Linux and macOS: prerequisites (Emscripten 6.0.13, Node 24, Chrome or Chromium), `make lua-browser` and `make browser-sdk`, the bootstrap order, required `--output` with one target per output directory, objects, archive-only libraries with structural and executing checks, `.mjs`/`.wasm` programs and tests, the `titan-browser-run` runner and its exit statuses, status and output semantics, Lua-frame traces, the loader API and its sink contract, the browser Titan path, rejected flags, fixed limits, and the `test`/`coroutine`/`gc` standard library. |
+| [Compiling for the browser target](browser-target.md) | `--target browser`/`TITAN_TARGET=browser` on Linux and macOS: prerequisites (Emscripten 6.0.13, Node 24, Chrome or Chromium), `make lua-browser` and `make browser-sdk`, the bootstrap order, required `--output` with one target per output directory, objects, archive-only libraries with structural and executing checks, `.mjs`/`.wasm`/`.wasm.map` programs and tests, the `titan-browser-run` runner (`--allow-degraded-trace` included) and its exit statuses, status and output semantics, source-mapped unified Titan/Lua traces (full file/line on Chromium, Firefox, and Node; reduced function-level fidelity on WebKit/Safari; `.wasm.map` server deployment and degraded/truncation markers), the loader API and its sink contract, the browser Titan path, rejected flags, fixed limits, and the `test`/`coroutine`/`gc` standard library. |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, explicit non-raising transfer outcomes with owned traces, current coroutine identity, status, Lua interop, and unwinding of abandoned coroutines (`defer`, generic-`for` close functions, and Lua `<close>` run at collection and state close), cleanup that needs asynchronous I/O, and unwinding limits. |
@@ -240,9 +240,11 @@ remains rejected.
   Lua loads every standard module through its qualified `titan.*` name,
   leaving Lua's own standard modules unchanged.
 * **The browser target is young.** `titanc --target browser` builds
-  WebAssembly programs, tests, and libraries that run under Node and headless
-  Chromium, but its standard library provides only `test`, `coroutine`, and
-  `gc`, and its traces show Lua frames only
+  WebAssembly programs, tests, and libraries for web pages and Node, with
+  unified Titan/Lua tracebacks backed by `.wasm.map` (full file/line
+  attribution on Chromium, Firefox, and Node; function-level reduced fidelity
+  on WebKit and Safari), but its standard library currently provides only
+  `test`, `coroutine`, and `gc`
   ([browser target](browser-target.md#current-limits)).
 
 The [README roadmap](../../README.md) lists where the language is headed;

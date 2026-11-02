@@ -145,9 +145,9 @@ dynamic dispatch, or heap capture:
 | --- | --- | --- |
 | libbacktrace | the default (`TITAN_HAVE_LIBBACKTRACE`) | the merged trace above |
 | fallback | `TITAN_NO_LIBBACKTRACE` is defined | raw Lua lines, then raw native frames |
-| browser null | `TITAN_TARGET_BROWSER` is defined | the merged trace with no native frames |
+| browser | `TITAN_TARGET_BROWSER` is defined | the merged trace via `Error.stack` capture, `.wasm.map` symbolization, and registered entry wrappers |
 
-The browser define takes precedence: the null backend is selected by the
+The browser define takes precedence: the browser backend is selected by the
 target define, never by `TITAN_NO_LIBBACKTRACE`, and needs neither
 `backtrace.h` nor `execinfo.h`.
 
@@ -170,15 +170,19 @@ void titan_invalidate_backtrace_state(lua_State *L);  /* exported */
   CallInfo entry tests symbolize for the `titanentry` tag; formatting
   produces the qualified Titan names; invalidation clears the registry-owned
   state, as described above. The output is unchanged.
-* **Browser null.** `TitanTraceStorage` is a one-byte scalar, so the merge
-  puts no native frame array on the browser C stack. Capture returns zero
-  frames, no frame or `lua_CFunction` is an entry, formatting writes nothing,
-  and invalidation is a no-op. The merge therefore emits the CallInfo chain
-  only: each Lua activation as `src:line: in name` (or `src: in name` without
-  a current line), every C CallInfo, Titan entry wrappers included, as
-  `[C]: in <name>`, and `(...tail calls...)` markers. No compiled Titan
-  frame, native symbol, or address appears. A real browser backend with
-  source-map symbolization replaces it later.
+* **Browser.** `TitanTraceStorage` wraps a static image-local
+  `TitanBrowserTraceBuffer` (6152 bytes) guarded by a static in-use flag, so
+  the merge puts no 512 × 520-byte frame array on the browser or coroutine C
+  stack. Capture invokes the synchronous JavaScript adapter to read and parse
+  one `Error.stack` into compact 12-byte Wasm records and compacts them in
+  place using `.wasm.map` symbolization, the runtime/Lua source filters, and
+  `registry[TITAN_NAMES_KEY]`. `titan_trace_frame_is_entry` tests the compact
+  record's `ENTRY` flag; `titan_trace_cfunction_is_entry` looks up the light C
+  function in `registry[TITAN_ENTRIES_KEY]` without symbolizing a Wasm indirect
+  function-table index as a code PC; `titan_trace_format_frame` resolves one
+  record at a time into fixed caller buffers; and
+  `titan_invalidate_backtrace_state` is a no-op because static browser images
+  never `dlopen` providers.
 
 The fallback stays outside this interface so that its raw capture keeps its
 exact call depth: `errorhandler` itself calls `backtrace` (POSIX, then
@@ -193,6 +197,248 @@ tabs stripped) followed by the native frames.
 Pinning and clearing, `TITAN_BACKTRACE_KEY`, bare rethrow, fresh raise,
 coroutine trace append, and the standalone report format are the same for
 every backend; only the frames differ.
+
+#### Browser trace backend
+
+The browser backend (`titan-runtime/titan.c`, private header
+`titan-runtime/browser/titan-browser-trace.h`, and Emscripten library
+`titan-runtime/browser/titan-browser-trace.js`) gives browser builds the same
+unified trace merge as `libbacktrace` while keeping the native preprocessor
+branches and call depths unchanged.
+
+**Fixed C/JS adapter interface.** The runtime communicates with
+`titan-browser-trace.js` (pinned to Emscripten 6.0.13) through two synchronous
+imports and a fixed Wasm32 memory layout (`titan-browser-trace.h`, private to
+`titan-runtime/` and not an installed FFI header):
+
+```c
+#define TITAN_BROWSER_TRACE_CAPACITY 512u
+#define TITAN_BROWSER_TRACE_HEADROOM 128u
+#define TITAN_BROWSER_TRACE_FILE_BYTES 256u
+#define TITAN_BROWSER_TRACE_SYMBOL_BYTES 256u
+
+/* Three uint32 words, little-endian Wasm memory, stride 12 bytes. */
+typedef struct {
+    uint32_t pc;             /* absolute module byte offset, or 0 */
+    uint32_t function_index; /* module function index, or UINT32_MAX */
+    uint32_t flags;
+} TitanBrowserTraceRecord;
+
+typedef struct {
+    uint32_t count;          /* raw Wasm records, <= capacity */
+    uint32_t flags;          /* bit 0: capture truncated */
+    TitanBrowserTraceRecord records[TITAN_BROWSER_TRACE_CAPACITY];
+} TitanBrowserTraceBuffer;
+
+int titan_browser_trace_capture(TitanBrowserTraceBuffer *out, uint32_t capacity);
+int titan_browser_trace_symbolize(const TitanBrowserTraceRecord *record,
+    char *base, uint32_t base_bytes, char *symbol, uint32_t symbol_bytes,
+    uint32_t *line);
+```
+
+* `titan_browser_trace_capture` (import signature `iii`) initializes `count`
+  and `flags` before any work and returns `0` (`OK`), `1` (`MAP_UNAVAILABLE`,
+  the eager loader's degraded state), or `2` (`CAPTURE_FAILED`). On any error
+  it clears `count` and returns failure without letting a JavaScript exception
+  escape into Lua's error handler. Header `flags` bit 0 is `TRUNCATED`; all
+  other header bits are zero. Each written record represents one WebAssembly
+  activation on the current synchronous stack, innermost to outermost, with
+  record `flags` bit 0 (`HAS_PC`) and bit 1 (`HAS_FUNCTION_INDEX`) set
+  independently; JavaScript frames are never written to `records`.
+* `titan_browser_trace_symbolize` (import signature `iiiiiii`) writes
+  NUL-terminated UTF-8 strings into the caller-provided `base` and `symbol`
+  buffers (truncating cleanly on UTF-8 codepoint boundaries) and sets `*line =
+  0` before work. It returns `0` (`UNKNOWN`), `1` (`RESOLVED`, a validated
+  in-function mapped location with `*line > 0`), or `2`
+  (`SYMBOLIZATION_FAILED`). `UNKNOWN` may still supply a verified function
+  symbol and declaring `.titan` basename with `*line = 0` (for example on
+  WebKit, where frames carry a function index without a PC, or for an unmapped
+  instruction inside a known Titan function). It never calls `malloc` in Wasm
+  memory and never replaces the active Lua error.
+
+The adapter parses `Error.stack` directly; it does not use Emscripten's
+internal `emscripten_stack_snapshot`, `emscripten_stack_unwind_buffer`,
+`emscripten_pc_get_file` (which `malloc`s per call), `EM_LOG_C_STACK`, the
+instance-global `UNWIND_CACHE`, or the sanitizer-only `LOAD_SOURCE_MAP`
+support.
+
+**Off-stack storage, reentrancy guard, and protected merge.** Each Wasm
+instance is single-threaded and owns one static `TitanBrowserTraceBuffer` (6152
+bytes), one static in-use flag, and fixed per-frame formatting buffers.
+`errorhandler` checks `TITAN_TRACE_PINNED` before acquiring the buffer. If a
+genuine nested trace attempt occurs while the in-use guard is already held
+(for example across multiple Lua states in the same Wasm instance or during a
+custom error path), it neither resets the active buffer nor releases the outer
+attempt's guard; instead it takes the bounded Lua-only capture-failed fallback.
+Browser trace generation (buffer acquisition, capture, compaction, merge, and
+registry publication) runs inside `luaD_rawrunprotected` (`TODO(confirm: exact C
+helper name in titan.c)`): on every return status the runtime releases the
+in-use guard, restores `ci`, `allowhook`, and `errfunc` state following the
+`titan_unwind_clear_trace` pattern, and rethrows any non-OK status (such as
+`LUA_ERRMEM` raised while growing `luaL_Buffer`) with `luaD_throw`, preserving
+the native OOM outcome and leaving the buffer ready for the next capture. While
+JavaScript `Error` construction and stack-string parsing necessarily allocate
+in the JavaScript heap, C capture and symbolization perform no WebAssembly
+allocations.
+
+**Synchronous capture transaction and descriptor preservation.** Capture
+executes as one synchronous JavaScript transaction in `titan-browser-trace.js`:
+
+1. Read the own property descriptors of `Error.stackTraceLimit` and
+   `Error.prepareStackTrace` with `Object.getOwnPropertyDescriptor`, recording
+   when either property is absent. Never read either property through ordinary
+   property access and never invoke a getter or setter.
+2. Configure `Error.stackTraceLimit` to at least `640` (`512` Wasm records plus
+   `128` JS headroom) via `Object.defineProperty`, keeping a larger existing
+   finite numeric data-property value. A configurable descriptor (including an
+   accessor) is replaced without invoking it; a non-configurable, writable data
+   property has only its `value` updated; otherwise the descriptor is left
+   untouched and capture runs under the engine's current limit.
+3. Check `Error.prepareStackTrace`. If it is an accessor (even configurable) or
+   a non-configurable, non-writable data property whose value is not
+   `undefined`, reading `.stack` could execute host code: abort immediately
+   with `CAPTURE_FAILED` without constructing or reading an `Error.stack`.
+   Otherwise mask it via `Object.defineProperty` with a safe data descriptor
+   whose value is `undefined`, without altering non-configurable attributes.
+4. Construct one `new Error()` and read its `.stack` string once.
+5. In `finally`, restore both original own descriptors independently with
+   `Object.defineProperty`, or `delete` properties that were originally absent.
+   Any restoration failure is recorded as `CAPTURE_FAILED` and never thrown.
+
+**Engine stack formats, depth ceilings, and truncation.** The line parser
+accepts the WebAssembly frame spellings established by the six-engine survey
+([Browser target: stack survey](browser-target.md#webassembly-stack-survey)):
+
+```text
+V8 named:       at name (wasm://wasm/IMAGE:wasm-function[N]:0xPC)
+V8 stripped:    at http://HOST/IMAGE.wasm:wasm-function[N]:0xPC
+SpiderMonkey:   [name]@http://HOST/IMAGE.wasm:wasm-function[N]:0xPC
+JSC named:      name@IMAGE.wasm:wasm-function[N]
+JSC cold/none:  N@wasm-function[N]
+```
+
+The display prefix before `(` or `@` is never trusted for symbolization; the
+parser extracts the bracketed decimal function index `N` (never treating JSC's
+leading decimal number before `@` as a line) and, on V8 and SpiderMonkey, the
+hexadecimal module-relative byte offset `0xPC`. On Firefox, SpiderMonkey may
+append saved asynchronous ancestry after a frame line starting with `async*`
+(which can repeat earlier suspended Wasm activations after `emscripten_sleep`);
+the parser stops at the first `async*` boundary so only the current synchronous
+stack is captured, and parent coroutine traces come exclusively from
+`TITAN_TRACE_APPEND_KEY`.
+
+Header flag `TRUNCATED` is set when more Wasm frames exist beyond the 512-record
+buffer, when the synchronous stack reaches the effective `stackTraceLimit`
+(counting all synchronous frame lines, skipped JS wrappers included, and
+excluding V8's `Error` title line and Firefox's `async*` ancestry), or when a
+surveyed engine ceiling is reached:
+
+* **V8 (Node 24, Chromium, Chrome)** honors `Object.defineProperty` on
+  `Error.stackTraceLimit` up to the 512-record capacity.
+* **SpiderMonkey (Firefox)** enforces a 128-frame synchronous capture ceiling
+  regardless of `Error.stackTraceLimit`; captures reaching that ceiling set
+  `TRUNCATED`.
+* **JavaScriptCore (Playwright WebKit and Safari)** keeps a hidden 100-frame
+  capture limit that `Object.defineProperty` on `Error.stackTraceLimit` does not
+  raise; captures reaching 100 frames set `TRUNCATED`.
+
+When the C merge falls back to Lua-only `CallInfo` enumeration (under
+`MAP_UNAVAILABLE` or `CAPTURE_FAILED`), browser enumeration is likewise bounded
+at 512 `CallInfo` frames and emits the same truncation marker if cut short.
+
+**Eager map loader, extensions, and lookup validation.** During module startup,
+`titan-browser-trace.js` registers an `addOnPreRun` hook that adds the run
+dependency `titan-trace-map`, loads `locateFile('<generated-wasm-basename>.map')`
+(`fetch` in browsers, the generated runtime's filesystem reader in Node),
+validates the JSON structure and Titan's four `x_titan_*` extension keys
+([Browser target: source-map extensions](browser-target.md#source-map-extensions-and-image-identity)),
+compares `x_titan_image` against the instantiated Wasm export
+`wasmExports['titan_browser_trace_identity']()`, builds a compact typed-array
+index, publishes `Module['titanBrowserTrace']`, and removes `titan-trace-map`
+whether initialization succeeded (`state: 'ready'`) or degraded (`state:
+'degraded'`). On a degraded load it logs one console warning prefixed with
+`Titan browser trace: ` and never fetches or reparses on the error path.
+
+The in-memory index stores sorted typed arrays for generated PC offset, source
+index, and 1-based original line (retaining 1-field unmapped VLQ segments as
+explicit `source = -1, line = 0` markers), along with the defined functions'
+half-open code ranges `[start, end)`, the dense `x_titan_function_names` array,
+and each function's first valid in-function mapped `.titan` basename (with both
+`/` and `\` normalized to basenames). A line lookup succeeds (`RESOLVED`) only
+when:
+
+1. `pc` lies within `[start, end)` of a defined function body `j`;
+2. if `HAS_FUNCTION_INDEX` is set, `function_index` equals `imports + j`; and
+3. the greatest mapping segment with `offset <= pc` inside `[start, end)` exists
+   and is not an unmapped marker.
+
+Unlike Emscripten's stock `WasmSourceMap.normalizeOffset`, which extends the
+preceding segment across function boundaries and unmapped gaps, this check
+never attributes an unmapped `dynCall_*` wrapper or a no-debug Lua C function to
+an adjacent Titan function's lines, and never invents a line from a function
+index alone. If PC validation fails, symbolization still retains a verified
+function name and declaring basename with `line = 0` (`UNKNOWN`).
+
+**Per-frame classification, entry registration (`TITAN_ENTRIES_KEY`), and
+rendering.** After `titan_browser_trace_capture` returns, `titan_trace_capture`
+compacts the raw records in place:
+
+* **Entry sentinel:** the resolved C symbol contains `titanentry`
+  (`TITAN_ENTRY_TAG`). The record is kept with private record flag bit 2
+  (`ENTRY`) set, even when it has no mapped source line.
+* **Titan function frame:** the resolved basename ends in `.titan` (covering
+  `name.browser.titan` variants) or the C symbol is present in
+  `registry[TITAN_NAMES_KEY]`.
+* **Dropped:** `titan-runtime/*` files, Lua core/library files in
+  `titan_is_lua_source`, and unmapped non-Titan C/Lua/`dynCall_*` helpers.
+  Arbitrary C symbols are not classified as Titan frames merely because their
+  name contains `_titan`.
+
+On native targets, `titan_cfunction_is_entry` symbolizes a `CallInfo`'s
+`lua_CFunction` pointer through `libbacktrace`. In WebAssembly, a
+`lua_CFunction` pointer is an index into the indirect function table (`__indirect_function_table`),
+not a module code byte offset, and must never be cast to a PC or looked up in
+the source map. Instead, `titan.h` defines a browser-only registry key:
+
+```c
+#ifdef TITAN_TARGET_BROWSER
+#define TITAN_ENTRIES_KEY "0c6fbc42-27b4-497f-a6f3-3c9e1f4d7b20"
+#endif
+```
+
+For `--target browser`, each generated module's `_init` lazily creates
+`registry[TITAN_ENTRIES_KEY]` (and publishes `registry[TITAN_NAMES_KEY]` at the
+same early point, before dependency or user module initializers run) and
+registers every actually emitted `titanentry` wrapper deduplicated by C symbol:
+
+```c
+lua_pushcfunction(L, WRAPPER_SYMBOL);
+lua_pushboolean(L, 1);
+lua_rawset(L, -3); /* entries[light C function] = true */
+```
+
+The coder records every generated Lua-callable wrapper family (top-level
+`_titanentry_lua` and `_titanentry_strict`, nominal statics
+`_titanentry_luastatic` and `_titanentry_strictstatic`, methods
+`_titanentry_luamethod`, bound methods `_titanentry_boundlua` and
+`_titanentry_boundstrict`, Interface wrappers `_titanentry_interfacelua`,
+`_titanentry_interface_boundlua`, and `_titanentry_interface_boundstrict`,
+lambda Lua and strict entries, callable-adjustment strict adapters, and the
+tagged module initializer). At trace time `titan_trace_cfunction_is_entry`
+pushes `lua_tocfunction` as a light C function and performs a non-allocating
+`lua_rawget` in `registry[TITAN_ENTRIES_KEY]`. Native generated C is
+byte-for-byte unchanged, and compiled-module ABI versions remain unchanged.
+
+During the merge, `titan_trace_format_frame` formats a resolved record (`line >
+0`) as `<basename>:<line>: in <display name>` and an unlocated record (`line ==
+0`, including all WebKit Titan frames) as `<basename>: in <display name>`,
+looking up `<display name>` in `registry[TITAN_NAMES_KEY]` and falling back to
+the C symbol or `?` (and `?` when no declaring basename is known). When capture
+returned `MAP_UNAVAILABLE` or `CAPTURE_FAILED`, the trace emits one availability
+marker line — `(native Titan frames unavailable: trace map not loaded)` or
+`(native Titan frames unavailable: capture failed)` — and when `TRUNCATED` is
+set (or Lua-only fallback enumeration hits 512 frames), it appends
+`(...native frames truncated...)` once at the end of the trace.
 
 #### Backtrace state invalidation
 
@@ -628,14 +874,22 @@ from silently loading stale build artifacts.
   initializer suspended inside `require`; and `close.browser.titan` proves
   that the browser's `lua_close` unwinds a retained suspended chain in an
   independently initialized child state.
-* `spec/coder/browser_fixtures_spec.lua` and
-  `spec/fixtures/browser_runtime/null_trace.titan`: the browser null backend's
-  trace shape, bare rethrow, pin and clear with a fresh raise, and coroutine
-  trace append. `spec/coder/browser_images_spec.lua` builds `titan.c` natively
-  with `TITAN_NO_LIBBACKTRACE` and checks the fallback's capture depth, frame
-  order, count, and 255-frame truncation against an independent capture, and
-  compiles the null backend natively as a focused configuration; the
-  libbacktrace specs above are unchanged.
+* `spec/browser_trace_map_spec.lua`, `spec/coder/browser_trace_entries_spec.lua`,
+  `spec/browser/trace-adapter.test.mjs`, `spec/browser/build-trace.lua`,
+  `spec/browser/trace.test.mjs`, `spec/browser/playwright-run.mjs`, and
+  `spec/coder/browser_fixtures_spec.lua` (`spec/fixtures/browser_runtime/` and
+  `spec/fixtures/browser_trace/`): browser post-link source-map extensions and
+  structural validation, browser `_init` entry-wrapper registration across all
+  wrapper families with byte-identical native codegen, Node unit tests for the
+  V8/SpiderMonkey/JSC stack parsers, `Error` descriptor preservation, and
+  lookup validation, and the end-to-end browser trace gate (direct and
+  contributor locations, mixed Lua/Titan merge order, pin/rethrow/clear,
+  coroutine append across yield/resume, degraded/capture-failed/truncated
+  markers, and merge `LUA_ERRMEM` guard recovery) across Node, Chromium,
+  Firefox, and WebKit. `spec/coder/browser_images_spec.lua` also builds
+  `titan.c` natively with `TITAN_NO_LIBBACKTRACE` and checks the fallback's
+  capture depth, frame order, count, and 255-frame truncation against an
+  independent capture; the libbacktrace specs above are unchanged.
 * `spec/coder/stack_relocation_spec.lua`: stack relocation through protected
   recovery.
 * `spec/abi_spec.lua`: runtime/compiler ABI constants.
