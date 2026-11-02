@@ -1,6 +1,9 @@
 local function fiber_capture(label: string, action: Action)
   local trace = caught(action)
   test.assert(count(trace, "in titan.coroutine.coro_entry_trampoline\n") == 1, trace)
+  test.assert(not contains(trace, "in trace_cases.test_") and
+              not contains(trace, "in titan.test."),
+              "in-fiber trace included saved resumer/test-runner history\n" .. trace)
   if contains(label, "selected") then
     frame(trace, "locations.browser.titan", 2, "trace_cases.selected_leaf")
     frame(trace, "locations.browser.titan", 6, "trace_cases.selected_outer")
@@ -72,6 +75,7 @@ function test_coroutine_propagation_append(_context: test.Context)
     test.assert(count(traceback, "in trace_cases.resumed_leaf\n") == 1, traceback)
     test.assert(count(traceback, "in trace_cases.append_middle\n") == 1, traceback)
     test.assert(count(traceback, "in trace_cases.append_outer\n") == 1, traceback)
+    test.assert(count(traceback, "in trace_cases.test_coroutine_propagation_append\n") == 1, traceback)
     test.assert(count(traceback, "in titan.coroutine.coro_entry_trampoline\n") == 2, traceback)
     test.assert(contains(traceback, "trace-resume.lua:2: in"), traceback)
     emit("append", traceback)

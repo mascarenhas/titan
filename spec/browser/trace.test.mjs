@@ -66,6 +66,15 @@ export async function run(context) {
     }
     if (label === "host_failed" || label === "lua_fallback_failed" || label.startsWith("degraded")) return;
     context.assert(!trace.includes(unavailable) && !trace.includes(captureFailed), "positive trace degraded: " + label);
+    if (label === "uncaught") {
+      exact(trace, "trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf");
+      exact(trace, "trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle");
+      for (const name of ["uncaught_leaf", "uncaught_middle"]) {
+        context.assert(occurrences(trace + "\n", "in trace_uncaught." + name + "\n") === 1,
+          "uncaught report duplicated/omitted " + name);
+      }
+      return;
+    }
     if (missingSymbols) {
       if (!webkit) context.assert(trace.includes("trace_cases.titan:80: in ?"), "missing-symbol PC lost valid source location");
       return;
@@ -78,6 +87,10 @@ export async function run(context) {
     if (label === "selected" || label.startsWith("selected_fiber_")) {
       exact(trace, "locations.browser.titan", 2, "trace_cases.selected_leaf");
       exact(trace, "locations.browser.titan", 6, "trace_cases.selected_outer");
+    }
+    if (label.startsWith("fiber_") || label.startsWith("selected_fiber_")) {
+      context.assert(!trace.includes("in trace_cases.test_") && !trace.includes("in titan.test."),
+        "in-fiber trace included saved resumer/test-runner history: " + label + "\n" + trace);
     }
     if (label === "lambda") context.assert(new RegExp("^wrappers[.]titan:" + (webkit ? "" : "108:") +
       " in anonymous function at (?:.*[/\\\\])?wrappers[.]titan:107$", "m").test(trace), "lambda execution/definition locations changed");
@@ -101,12 +114,12 @@ export async function run(context) {
     }
     if (label === "mixed_depth_75") {
       const count = occurrences(trace, "in trace_cases.mixed_recurse\n");
-      context.assert(count <= 76, "mixed trace duplicated current/history frames");
+      context.assert(count <= 76, "mixed trace duplicated recursive frames");
       if (count < 76) context.assert(occurrences(trace, truncated) === 1, "mixed JS headroom cut was not marked");
       emit({mixedDepth: 75, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
     if (label === "append") {
-      for (const name of ["original_leaf", "resumed_leaf", "append_middle", "append_outer"]) {
+      for (const name of ["original_leaf", "resumed_leaf", "append_middle", "append_outer", "test_coroutine_propagation_append"]) {
         context.assert(occurrences(trace, "in trace_cases." + name + "\n") === 1,
           "coroutine append duplicated/omitted " + name);
       }
@@ -194,8 +207,7 @@ export async function run(context) {
       } else {
         context.assert(decoder.decode(result.bytes) === "trace-uncaught-original", "uncaught completion replaced original payload");
         const raw = stderr.split("\n").filter(line => line.startsWith("\t")).map(line => line.slice(1)).join("\n");
-        exact(raw, "trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf");
-        exact(raw, "trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle");
+        checkTrace("uncaught", raw, false);
         context.assert(occurrences(stderr, "TRACE uncaught cleanup=1") === 1, "uncaught cleanup repeated");
       }
       for (const required of row.stderrContains) context.assert(stderr.includes(required), "missing required stderr: " + required);
