@@ -429,7 +429,7 @@ local function emit_record(ctx, node, encode, decode)
     }
     local rooted = encodes_reflectively(owner.fields)
     return render([[
-        TITAN_MODULE_PRIVATE void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
+        ${DEFLINE}TITAN_MODULE_PRIVATE void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
             const TitanCodecPath *_path, int _depth) {
             TitanCodecPath _self;
             titan_codec_depth(L, _depth);
@@ -441,7 +441,7 @@ local function emit_record(ctx, node, encode, decode)
             $ENCODE_FIELDS
             $UNROOT
         }
-        TITAN_MODULE_PRIVATE void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
+        ${DEFLINE}TITAN_MODULE_PRIVATE void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
             const uint8_t *_data, size_t _length, int _depth) {
             TitanCodecField _fields[$CAPACITY];
             Udata *_rec;
@@ -452,6 +452,7 @@ local function emit_record(ctx, node, encode, decode)
             $DECODE_FIELDS
         }
     ]], {
+        DEFLINE = definitionline(ctx, node.loc),
         ENCODE = encode,
         DECODE = decode,
         CAPACITY = c_integer_literal(math.max(#owner.fields, 1)),
@@ -511,7 +512,7 @@ local function emit_union(ctx, node, encode, decode)
         })
     end
     return render([[
-        TITAN_MODULE_PRIVATE void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
+        ${DEFLINE}TITAN_MODULE_PRIVATE void $ENCODE(lua_State *L, TitanCodecState *_st, Udata *_rec,
             const TitanCodecPath *_path, int _depth) {
             TitanCodecPath _self;
             titan_codec_depth(L, _depth);
@@ -526,7 +527,7 @@ local function emit_union(ctx, node, encode, decode)
                     return;
             }
         }
-        TITAN_MODULE_PRIVATE void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
+        ${DEFLINE}TITAN_MODULE_PRIVATE void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
             const uint8_t *_data, size_t _length, int _depth) {
             TitanCodecField _variant;
             TitanCodecField _parts[$PART_CAPACITY];
@@ -549,6 +550,7 @@ local function emit_union(ctx, node, encode, decode)
             }
         }
     ]], {
+        DEFLINE = definitionline(ctx, node.loc),
         ENCODE = encode,
         DECODE = decode,
         UNIONTAG = coder._nominal_tag("_rec"),

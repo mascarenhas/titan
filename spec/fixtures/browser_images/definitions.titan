@@ -1,0 +1,56 @@
+foreign import "stdlib.h"
+
+local foreign function copied(n: int): int
+    return n + 1
+end
+local foreign function outlined(n: int): int
+    while n > 0 do n = n - 1 end
+    return n
+end
+local foreign function empty()
+end
+local function aggregate(): foreign div_t
+    return ffi.div(7, 2)
+end
+
+record Item
+    const value: integer
+end
+union Choice
+    none()
+    number(integer)
+end
+interface Dynamic
+    function read(n: value): value
+end
+interface Snapshot
+    value: integer
+    function read(n: value): value
+end
+function Item:read(n: integer): integer return self.value + n end
+local function Item:hidden(): integer return self.value end
+function Item.make(n: integer): Item return Item.new(n) end
+function Choice:read(n: integer): integer return n end
+function adjust(item: Item): Dynamic return item end
+function snapshot(item: Item): Snapshot return item end
+function use(item: Item, view: Dynamic): function (value): value
+    local bound = item:read
+    local private_bound = item:hidden
+    local interface_bound = view:read
+    local lambda = function(n: integer): integer return n end
+    local adjusted: function (value): value = lambda
+    bound(1)
+    private_bound()
+    interface_bound(1)
+    return adjusted
+end
+function captures(n: integer): function (): integer
+    return function(): integer
+        n = n + 1
+        return n
+    end
+end
+function array(): {integer} return {1, 2, 3} end
+do
+    array()
+end

@@ -43,7 +43,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
             .. types.tostring(typ.flexrettype) .. "'"
     end
     if unavailable_result then
-        return render([[
+        return definitionline(tlcontext, loc) .. render([[
     $STORAGE int $LUANAME(lua_State *L) {
         return luaL_error(L, "%s", $ERROR);
     }]], {
@@ -502,7 +502,7 @@ function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
         }
         ]], { NATIVE = options.native_carrier_entry or titan_entry })
     end
-    return render([[
+    return definitionline(tlcontext, loc) .. render([[
     $STORAGE int $LUANAME(lua_State *L) {
         StkId func = L->ci->func.p;
         $CARRIER
@@ -611,7 +611,7 @@ function coder._emit_callable_adapter(tlcontext, site)
         "callable adapter " .. tostring(site.index) .. " strict entry")
     local native_signature = coder._callable_adapter_signature(
         site.native, adapter.target, false)
-    local native_body = render([[
+    local native_body = definitionline(tlcontext, loc) .. render([[
         TITAN_MODULE_PRIVATE TITAN_NOINLINE $SIGNATURE {
             $LINE$GC_POLL
             $ROOT_PREAMBLE
@@ -1125,7 +1125,8 @@ function coder._code_foreign_function(tlcontext, node, inline, name)
     local body = coder._foreign_raw_block(ctx, node.block, false)
     local storage = inline and "static inline"
         or node.islocal and "TITAN_SOURCE_LOCAL" or ""
-    return storage .. " " .. signature .. " {\n" .. body .. "\n}"
+    return definitionline(tlcontext, node.loc)
+        .. storage .. " " .. signature .. " {\n" .. body .. "\n}"
 end
 
 -- Address-producing uses always name the one canonical hidden definition.
@@ -1141,7 +1142,8 @@ function coder._code_foreign_inline(tlcontext, node)
     for _, param in ipairs(node.params) do args[#args + 1] = param._foreign_cname end
     local prefix = types.resolve_c_typedef(node._type.ret)._tag == "Type.CVoid"
         and "" or "return "
-    return "static inline " .. signature .. " {\n    " .. prefix
+    return definitionline(tlcontext, node.loc)
+        .. "static inline " .. signature .. " {\n    " .. prefix
         .. coder._foreign_func_name(node._foreign_module, node.name)
         .. "(" .. table.concat(args, ", ") .. ");\n}"
 end
@@ -1317,7 +1319,7 @@ function codefuncdec(tlcontext, node)
     end
     local nativesig = cfunctiondecl(
         rettype, fname, table.concat(cparams, ", "), false)
-    node._body = render([[
+    node._body = definitionline(tlcontext, node.loc) .. render([[
     $ISLOCAL $SIGNATURE {
         $BODY
     }]], {
@@ -1407,7 +1409,7 @@ function codeinitializerdec(tlcontext, node)
             return;]])
     coder._record_private_symbol(tlcontext, fname,
         "module initializer body")
-    node._body = render([[
+    node._body = definitionline(tlcontext, node.loc) .. render([[
     TITAN_MODULE_PRIVATE void $NAME(lua_State *L, Udata *_mod, CClosure *_fn) {
         $BODY
     }]], {
@@ -1510,10 +1512,10 @@ function codemethodtrampoline(tlcontext, node)
     -- module that only has this module's `.so` reaches the native one for the
     -- fast path AND the Lua one (the closure's lua_CFunction) by dlsym.
     node._boundbody = render([[
-    $SIG {
+    ${DEFLINE}$SIG {
         $BODYCALL
     }
-    $STORAGE int $LUANAME(lua_State *L) {
+    ${DEFLINE}$STORAGE int $LUANAME(lua_State *L) {
         /* insert the captured receiver (self) as the first stack argument, then
            delegate to the method's Lua entry (which reuses all the boundary
            checks/coercions). upvalue[4] holds the record udata directly (the
@@ -1529,6 +1531,7 @@ function codemethodtrampoline(tlcontext, node)
         return $MLUA(L);
     }
     $STRICTBODY]], {
+        DEFLINE = definitionline(tlcontext, node.loc),
         SIG = nativesig,
         STORAGE = storage,
         BODYCALL = bodycall,
@@ -1913,7 +1916,7 @@ function codelambdadec(tlcontext, node)
         "anonymous function " .. tostring(node._lambda_index) .. " strict entry")
     local nativesig = cfunctiondecl(
         rettype, fname, table.concat(cparams, ", "), false)
-    node._body = render([[
+    node._body = definitionline(tlcontext, node.loc) .. render([[
     TITAN_MODULE_PRIVATE $RETENTION$SIGNATURE {
         $BODY
     }]], {

@@ -39,8 +39,14 @@ local function generate(target, parts, source, line_policy)
     assert.truthy(ast, err)
     local _, errors = checker.check("entries", ast, source or SOURCE, "entries.browser.titan")
     assert.equal(0, #errors, table.concat(errors, "\n"))
-    return coder.generate("entries", ast, {}, driver.TITAN_ABI_VERSION, line_policy ~= false,
-        { target = target, c_parts = parts or 1, split_threshold = 1 })
+    -- Stable planned outputs keep checking-header temporary paths out of byte
+    -- comparisons; these pure codegen cases do not write or compile the files.
+    ast._ffi_header_output = "/generated/entries.ffi.h"
+    ast._foreign_header_output = "/generated/entries.titan.h"
+    local generated = coder.generate("entries", ast, {}, driver.TITAN_ABI_VERSION, line_policy ~= false,
+        { target = target, c_parts = parts or 1, split_threshold = 1,
+            source_output_stem = "/generated/entries" })
+    return generated, ast
 end
 local function code(generated)
     local out = {}
@@ -57,6 +63,72 @@ local function entries(generated)
     return out
 end
 
+local DEFINITION_SOURCE = assert(require("titan-compiler.util").get_file_contents(
+    "spec/fixtures/browser_images/definitions.titan"))
+
+local function ordered_pairs(original, reverse)
+    return function(t)
+        local keys = {}
+        for key in original(t) do
+            if type(key) ~= "string" and type(key) ~= "number" then return original(t) end
+            keys[#keys + 1] = key
+        end
+        table.sort(keys, function(a, b)
+            local less = type(a) == type(b) and a < b or type(a) < type(b)
+            return reverse and a ~= b and not less or not reverse and less
+        end)
+        local index = 0
+        return function()
+            index = index + 1
+            local key = keys[index]
+            if key ~= nil then return key, t[key] end
+        end
+    end
+end
+
+local function native_variants(target)
+    local variants, original = {}, _G.pairs
+    local ok, err = xpcall(function()
+        for _, reverse in ipairs({ false, true }) do
+            -- Both legal traversal orders cover the pre-existing unordered
+            -- metatable emission without normalizing or deleting output bytes.
+            _G.pairs = ordered_pairs(original, reverse)
+            for _, parts in ipairs({ 1, 4 }) do
+                for _, located in ipairs({ false, true }) do
+                    local generated = generate(target, parts, DEFINITION_SOURCE, located)
+                    local bytes = {}
+                    for _, value in ipairs({
+                        generated.private_header or "", generated.foreign_header or "",
+                    }) do
+                        bytes[#bytes + 1] = #value .. ":" .. value
+                    end
+                    for _, part in ipairs(generated.parts) do
+                        bytes[#bytes + 1] = #part.code .. ":" .. part.code
+                    end
+                    variants[sha256.hex(table.concat(bytes))] = true
+                end
+            end
+        end
+    end, debug.traceback)
+    _G.pairs = original
+    assert.is_true(ok, err)
+    return variants
+end
+
+local function definitions(text)
+    local result = {}
+    text = "\n" .. text
+    for start, header, name in text:gmatch(
+        "\n()([^\n;{}]-([%a_\\][%w_\\]*)%s*%b()%s*){") do
+        if name ~= "if" and name ~= "for" and name ~= "while" and name ~= "switch" then
+            result[name] = {
+                stamp = text:sub(1, start - 1):match("#line ([^\n]+)\n[ \t]*$"),
+                header = header,
+            }
+        end
+    end
+    return result
+end
 describe("browser traceback entry generation", function()
     it("registers every actual Lua C wrapper once, including local and generated entries", function()
         local generated = generate("browser")
@@ -129,12 +201,131 @@ describe("browser traceback entry generation", function()
     end)
 
     it("keeps native output byte-identical across explicit targets and browser generation", function()
-        local original = generate(nil)
+        -- Captured from the pre-boundary compiler b8e12961, for both legal
+        -- metatable traversal orders, one/four parts, and line policy off/on.
+        -- Hash complete C/private-header/foreign-header bytes, not stripped C.
+        local expected = {
+            ["852f54e4c51e4fa013e620271203475effe4ab179a09fa031699af2025d0db5b"] = true,
+            ["1fc385fd730bd36d75e33fa6f5fa70328fd65e1e81528d7f557961ad09c0ad29"] = true,
+            ["534dbcc9f0f38c5d762cfdb62fde28bef4d76a545ddead1c5e8ea675631da133"] = true,
+            ["4b2eb9a74966144fb6db64917328df51304012ef2bcca9a08d43721d3d193340"] = true,
+            ["b04834d4dca27f3aeca5f0ac8b99ed5948f564202bcdc71de4aeda1de030f6c9"] = true,
+            ["3f02ae56ad5d2ea32a86a2c7f7341803d49ab6aa00e1ca7f335c171288a603d1"] = true,
+            ["f42b13c209b32cddec0fd52c5c6f34a850c1e9be8a0daa9f907ba1aa797964d5"] = true,
+            ["5052c0204e26cd906b3b7db2c845f78565ad7c0f414c738c18edd6881bc5d233"] = true,
+        }
+        assert.same(expected, native_variants(nil))
         generate("browser", 4)
-        local native = generate("linux")
-        assert.same(original, native)
-        assert.is_nil(code(native):find("TITAN_ENTRIES_KEY", 1, true))
-        assert.equal(sha256.hex(code(original)), sha256.hex(code(native)))
+        assert.same(expected, native_variants("linux"))
+    end)
+
+    for _, parts in ipairs({ 1, 4 }) do
+        it("owns every function signature and prologue in " .. parts .. "-part browser output", function()
+            local generated, ast = generate("browser", parts, DEFINITION_SOURCE)
+            local all, count = {}, 0
+            for _, part in ipairs(generated.parts) do
+                local filename = "/generated/entries"
+                    .. (part.index == 0 and "" or ".part" .. part.index) .. ".c"
+                assert.truthy(part.code:find('#define TITAN_GENERATED_C_FILE "' .. filename .. '"', 1, true))
+                for name, definition in pairs(definitions(part.code)) do
+                    assert.is_nil(all[name], "duplicate definition " .. name)
+                    all[name], count = definition, count + 1
+                end
+            end
+            for name, definition in pairs(definitions(generated.private_header or "")) do
+                all[name], count = definition, count + 1
+            end
+            for name, definition in pairs(definitions(generated.foreign_header)) do
+                all[name] = definition
+            end
+            assert.is_true(count > 100, "definition-family fixture lost generated functions")
+            local generated_names = {
+                titan_errfunc_is_errorhandler = true, titan_registry_get_string = true,
+                titan_registry_set_string = true, titan_ensure_stack = true,
+                entries_module_identity = true, entries_types = true, entries_layouts = true,
+                entries_abi = true, entries_abi_value = true, entries_compatibility = true,
+                entries_init = true, luaopen_entries = true,
+            }
+            for name, definition in pairs(all) do
+                local generated_only = generated_names[name]
+                    or name:find("array_writer_", 1, true) or name:find("native_symbol", 1, true)
+                    or name:find("preload", 1, true)
+                    or name == "entries_\\u2133_meta_index" or name == "entries_\\u2133_meta_newindex"
+                if generated_only then
+                    assert.equal("1 TITAN_GENERATED_C_FILE", definition.stamp, name)
+                else
+                    assert.match('^%d+ "entries[.]browser[.]titan"$', definition.stamp, name)
+                end
+            end
+            local checked, seen = 0, {}
+            local function check_ast(node)
+                if type(node) ~= "table" or seen[node] then return end
+                seen[node] = true
+                if node.loc then
+                    for _, key in ipairs({ "_body", "_luabody", "_strictbody", "_boundbody" }) do
+                        if type(node[key]) == "string" then
+                            for name in pairs(definitions(node[key])) do
+                                assert.equal(node.loc.line .. ' "' .. node.loc.filename .. '"',
+                                    assert(all[name], name).stamp, name)
+                                checked = checked + 1
+                            end
+                        end
+                    end
+                end
+                for _, value in pairs(node) do check_ast(value) end
+            end
+            check_ast(ast)
+            assert.is_true(checked > 30, "AST-owned definitions were not checked")
+            local transfers = 0
+            for native, id in code(generated):gmatch(
+                "{%s*titan_cast_func%(void %*, ([%w_\\]+)%),%s*[%w_\\]+,%s*%d+,%s*([%w_\\]+)_project,") do
+                assert.equal(assert(all[native], native).stamp, assert(all[id .. "_project"], id).stamp)
+                assert.equal(all[native].stamp, assert(all[id .. "_restore"], id).stamp)
+                transfers = transfers + 1
+            end
+            assert.is_true(transfers > 10, "transfer source and adjustment entries were not checked")
+            -- Each row is an independently emitted definition family. Requiring
+            -- a present match prevents a vacuous universal stamp assertion.
+            for _, family in ipairs({
+                "_aggregate_titan", "_aggregate_titanentry_lua", "_aggregate_titanentry_strict",
+                "_copied_titan", "_outlined_titan", "_empty_titan",
+                "_foreign_inline_copied", "_foreign_inline_outlined", "_foreign_inline_empty",
+                "_Item_\\u2131_read_titan", "_Item_\\u2131_make_titanentry_luastatic",
+                "_titanentry_boundlua", "_titanentry_boundstrict", "_boundmethod",
+                "_titanentry_interfacelua", "_interface_boundmethod",
+                "_titanentry_interface_boundlua", "_titanentry_interface_boundstrict",
+                "lambda_0", "lambda_1", "callable_adapter_", "interface_pair_",
+                "_fieldaccessor", "_payload_reader", "_codec_encode", "_codec_decode",
+                "_projection", "_construction", "_meta_call", "_meta_call_finish",
+                "_\\u2131_wrapper", "_\\u2131_allocate",
+                "_transfer_entry_", "array_writer_", "module_initializer",
+            }) do
+                local found
+                for name in pairs(all) do if name:find(family, 1, true) then found = true end end
+                assert.is_true(found, family)
+            end
+        end)
+    end
+
+    it("carries the browser boundary policy through immediate and graph foreign-header plans", function()
+        local native, ast = generate(nil, 1, DEFINITION_SOURCE)
+        local browser = driver.plan_foreign_header("entries", ast,
+            "/generated/entries.titan", false, { target = "browser" })
+        local graph = assert(driver.plan_foreign_headers({ "entries" }, {
+            entries = { ast = ast, filename = "/generated/entries.titan" },
+        }, { target = "browser" }))
+        assert.equal(browser.contents, graph[1].contents)
+        for _, text in ipairs({ browser.contents, graph[1].contents }) do
+            local count = 0
+            for name, definition in pairs(definitions(text)) do
+                count = count + 1
+                assert.match('^%d+ "entries[.]browser[.]titan"$', definition.stamp, name)
+            end
+            assert.equal(3, count)
+        end
+        local planned_native = driver.plan_foreign_header("entries", ast,
+            "/generated/entries.titan", false, { target = "linux" })
+        assert.equal(native.foreign_header, planned_native.contents)
     end)
 
     it("registers only its own wrappers and publishes names before importing a dependency", function()
