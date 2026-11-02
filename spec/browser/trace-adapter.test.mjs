@@ -132,6 +132,36 @@ test('recorded V8 frame accounting ignores titles containing @ or apparent locat
     }
 });
 
+for (const [engine, wasm, ceiling] of [
+    ['JSC', 'leaf@image.wasm:wasm-function[1]', 100],
+    ['SpiderMonkey', 'leaf@image.wasm:wasm-function[1]:0x6e', 128],
+]) for (const [form, frame] of [
+    ['URL without line', 'foo@http://host/app.js'],
+    ['debugger eval', '@debugger eval code'],
+    ['bare name', 'bareName@'],
+    ['named location without line', 'bareName@native'],
+    ['anonymous without location', '@'],
+]) for (const count of [ceiling - 1, ceiling]) {
+    test(`${engine} counts ${form} at synchronous ceiling boundary ${count}`, () => {
+        const {api} = adapter();
+        const stack = [wasm, ...Array(count - 1).fill(frame), '', '  '].join('\n');
+        const result = api.parse(stack, 512, 640);
+        assert.equal(result.records.length, 1, 'JS-only forms never become Wasm records');
+        assert.equal(result.truncated, count === ceiling);
+    });
+}
+
+for (const count of [127, 128]) test(`SpiderMonkey excludes no-location async ancestry after ${count} current frames`, () => {
+    const {api} = adapter();
+    const current = ['leaf@image.wasm:wasm-function[1]:0x6e',
+        ...Array(count - 1).fill('foo@http://host/app.js')];
+    const history = ['async*saved@debugger eval code', ...Array(100).fill('bareName@'),
+        'old@image.wasm:wasm-function[3]:0x91'];
+    const result = api.parse([...current, ...history].join('\n'), 512, 640);
+    assert.equal(result.records.length, 1, 'saved Wasm ancestry is excluded too');
+    assert.equal(result.truncated, count === 128, 'only synchronous frames reach the ceiling');
+});
+
 test('capture uses the C-declared capacity rather than a duplicated fixed limit', () => {
     const unit = adapter();
     unit.context.stackText = 'Error\n' + Array.from({length: 513},
