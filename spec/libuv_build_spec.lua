@@ -6148,6 +6148,21 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(browser_guard_build:find("--ldflag=-Os", 1, true),
                 browser_guard_build)
 
+            local trace_units = named_step(browser_job,
+                "Run the browser trace adapter and supervisor units")
+            for _, contract in ipairs({
+                'for assertions in 2 0; do',
+                'spec/fixtures/browser_trace_adapter/lifecycle.c',
+                'spec/fixtures/browser_trace_adapter/filter.c titan-runtime/titan.c',
+                'TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE="$output/lifecycle-$assertions.mjs"',
+                'TITAN_BROWSER_TRACE_FILTER_IMAGE="$output/filter-$assertions.mjs"',
+                'node --test spec/browser/trace-adapter.test.mjs',
+                'spec/browser/playwright-runner.test.mjs',
+            }) do
+                assert.truthy(trace_units:find(contract, 1, true),
+                    "missing compiled trace unit contract " .. contract)
+            end
+
             for _, contract in ipairs({
                 "needs: build-compiler", "runs-on: ubicloud-standard-4",
                 "profile: [validation, production]",

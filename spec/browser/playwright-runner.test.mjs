@@ -6,12 +6,13 @@ import {mkdtemp, mkdir, rm, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {assetPath, parseOptions, RunMonitor, within} from './playwright-run.mjs';
+import {assetPath, parseOptions} from './playwright-run.mjs';
+import {Monitor, within} from '../../titan-runtime/browser/titan-browser-run.mjs';
 
 const options = {timeout: 1000, grace: 0};
 
 function result(action) {
-  const monitor = new RunMonitor(options);
+  const monitor = new Monitor(options);
   try { action(monitor); return monitor.result(); }
   finally { monitor.stop(); }
 }
@@ -76,7 +77,7 @@ test('Playwright monitor keeps trap identity and late-failure arbitration', () =
 });
 
 test('Playwright monitor times out without completion and stops its timers', async () => {
-  const monitor = new RunMonitor({timeout: 10, grace: 0});
+  const monitor = new Monitor({timeout: 10, grace: 0});
   await monitor.done;
   assert.equal(monitor.result(), 72);
   monitor.stop();

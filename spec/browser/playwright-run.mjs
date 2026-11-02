@@ -2,8 +2,9 @@
 import {createServer} from 'node:http';
 import {readFile, realpath, stat} from 'node:fs/promises';
 import {createRequire} from 'node:module';
-import {dirname, isAbsolute, join, relative, resolve, sep} from 'node:path';
+import {dirname, join, relative, resolve, sep} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
+import {Monitor, within} from '../../titan-runtime/browser/titan-browser-run.mjs';
 
 const playwrightVersion = '1.56.1';
 const diagnostic = text => process.stderr.write(`titan-playwright-run: ${text}\n`);
@@ -49,74 +50,6 @@ export function parseOptions(argv) {
   return options;
 }
 
-export function within(root, file) {
-  const rel = relative(root, file);
-  return rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel);
-}
-
-// Keep the existing runner's completion/status arbitration, including its grace
-// period for late failures. The shared page supplies original trap identity.
-export class RunMonitor {
-  constructor(options) {
-    this.options = options;
-    this.done = new Promise(resolve => { this.finish = resolve; });
-    this.deadline = setTimeout(() => this.fail('timeout', `timed out after ${options.timeout} ms`), options.timeout);
-  }
-  fail(category, reason, knownTrap = false) {
-    if (this.stopped) return;
-    if (!this.failure || (category === 'trap' && knownTrap && this.failure.category === 'abort')) {
-      this.failure = {category, reason, late: !!this.completion};
-    }
-    this.finish();
-  }
-  control(message) {
-    if (!message || typeof message !== 'object' || Array.isArray(message)) {
-      return this.fail('harness', 'malformed control message');
-    }
-    if (message.type === 'abort') {
-      if (typeof message.reason !== 'string') return this.fail('harness', 'malformed abort observation');
-      this.abortReason ??= message.reason;
-      if (this.completion) this.fail('abort', this.abortReason);
-    } else if (message.type === 'failure') {
-      if (!['abort', 'trap', 'unhandled', 'sink', 'harness'].includes(message.category) || typeof message.reason !== 'string') {
-        return this.fail('harness', 'malformed failure control');
-      }
-      const originalTrap = message.category === 'trap' && message.knownTrap === true;
-      if (this.abortReason !== undefined && !this.completion && !originalTrap &&
-          ['abort', 'trap', 'harness'].includes(message.category)) {
-        if (message.terminal === true) this.fail('abort', this.abortReason);
-      } else this.fail(message.category, message.reason, originalTrap);
-    } else if (message.type === 'complete') {
-      if (this.completion) return this.fail('harness', 'duplicate completion');
-      if (!['returned', 'failed', 'host-test'].includes(message.kind) ||
-          !Number.isInteger(message.status) || message.status < -2147483648 || message.status > 2147483647 ||
-          (message.kind === 'host-test' && ![0, 1].includes(message.status))) {
-        return this.fail('harness', 'malformed completion control');
-      }
-      if (this.abortReason !== undefined) return this.fail('abort', this.abortReason);
-      this.completion = message;
-      clearTimeout(this.deadline);
-      this.grace = setTimeout(() => this.finish(), this.options.grace);
-    } else this.fail('harness', 'unknown control message');
-  }
-  stop() {
-    this.stopped = true;
-    clearTimeout(this.deadline);
-    clearTimeout(this.grace);
-  }
-  result() {
-    if (this.failure) {
-      const {category, reason, late} = this.failure;
-      diagnostic(`${late ? 'late ' : ''}${category} failure: ${reason}`);
-      if (late && ['abort', 'trap'].includes(category)) return 73;
-      return {abort: 70, trap: 71, timeout: 72, unhandled: 74, harness: 75, sink: 76}[category];
-    }
-    if (!this.completion) { diagnostic('harness failure: engine ended without completion'); return 75; }
-    if (this.completion.reason) diagnostic(`JS test failed: ${this.completion.reason}`);
-    return this.completion.status & 255;
-  }
-}
-
 export async function assetPath(root, encoded) {
   const parts = encoded.split('/').map(decodeURIComponent);
   if (parts.some(part => !part || part === '.' || part === '..' || /[/\\\0]/.test(part))) {
@@ -153,7 +86,7 @@ async function run(options) {
     throw new Error(`Playwright ${playwrightVersion} is required`);
   }
   const browserType = require('playwright')[options.engine];
-  const monitor = new RunMonitor(options);
+  const monitor = new Monitor(options);
   let server, browserServer, browser, page, html, ready = false, closing = false;
   const interrupt = signal => monitor.fail('harness', `interrupted by ${signal}`);
   const sigint = () => interrupt('SIGINT'), sigterm = () => interrupt('SIGTERM');
