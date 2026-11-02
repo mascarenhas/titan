@@ -389,8 +389,11 @@ populate six typed arrays without allocating one JS object per segment:
 (`Uint32Array`, retaining 1-field unmapped VLQ segments as explicit
 `source = -1, line = 0` markers), along with the defined functions' half-open
 code ranges `starts` and `ends` (`Uint32Array`) and each function's first valid
-in-function mapped source index `first` (`Int32Array`), plus the `names` and
-basename-normalized `bases` arrays. A line lookup (`lookup`) succeeds
+in-function mapped source index `first` (`Int32Array`, which browser
+[function-definition `#line` stamps](codegen-overview.md#mixed-source-line-attribution)
+keep on the function's own declaring `.titan` file rather than a preceding
+contributor's trailing `#line`), plus the `names` and basename-normalized
+`bases` arrays. A line lookup (`lookup`) succeeds
 (`RESOLVED`, `line > 0`) only when:
 
 1. `pc` lies within `[start, end)` of a defined function body `j`;

@@ -1706,8 +1706,13 @@ instead, and the first failure wins:
   completion kind <kind>` (`TITAN_BROWSER_PROTOCOL`) for a second or malformed
   completion, while an intact admitted run still finishes its cleanup;
 * `browser entry returned without completion or suspension`
-  (`TITAN_BROWSER_PROTOCOL`) when the entry has returned, nothing is pending,
-  and no completion arrived;
+  (`TITAN_BROWSER_PROTOCOL`) when `ccall` has fulfilled (`callFulfilled`),
+  nothing is pending, and no completion arrived — checking `callFulfilled`
+  ensures that an earlier queued safe point never masks a synchronous throw or
+  rejected `ccall` (such as an engine `RangeError: Maximum call stack size
+  exceeded` when deep mixed Lua/Titan recursion exhausts the engine's JS stack
+  before Lua's `LUAI_MAXCCALLS`), which instead rejects with the engine error
+  preserved as `cause`;
 * `cannot buffer browser <stream>` (`TITAN_BROWSER_PROTOCOL`) when an output
   buffer cannot grow;
 * `TITAN_BROWSER_TRAP` when an original trap was recorded, or a
@@ -2184,8 +2189,9 @@ hosts`).
   statuses, binary arguments, uncaught reports, protected initialization and
   allocation failures, the libc drain, the stdio-only filesystem regression,
   dynamic-loading guards, three-file preflight reservation and repeated-link
-  image identity, image inventories, measurement optimization, and the native
-  libbacktrace and fallback trace invariants.
+  image identity, contributor-prologue `.wasm.map` attribution, image
+  inventories, measurement optimization, and the native libbacktrace and
+  fallback trace invariants.
 * `spec/coder/browser_incremental_spec.lua` — browser object and three-file
   link certificates, shared-asset and `.wasm.map`-change invalidation,
   three-predecessor rollback across backup/publication/certificate boundaries,
@@ -2198,8 +2204,10 @@ hosts`).
 * `spec/coder/browser_trace_entries_spec.lua` — browser-only
   `registry[TITAN_ENTRIES_KEY]` registration across all `titanentry` wrapper
   families, split-unit deduplication, early `_init` ordering before
-  dependencies and user initializers, and byte-identical native code
-  generation.
+  dependencies and user initializers, browser function-definition `#line`
+  ownership (`_definitionline` and `TITAN_GENERATED_C_FILE` across 1-part,
+  4-part, and `.titan.h` foreign-header generation), and byte-identical native
+  code generation.
 * `spec/coder/browser_protocol_spec.lua` — the executing check, corrupted
   providers (exits 21 to 26) without publication, re-execution before
   identical-archive reuse, probe cleanup, and archive-only consumers on both

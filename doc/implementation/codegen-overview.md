@@ -202,6 +202,23 @@ changes as root nodes and nested bodies from different contributors are
 emitted, so compiler diagnostics, DWARF, and libbacktrace frames identify the
 actual source file and line.
 
+For the [browser target](browser-target.md), `coder._definitionline(tlcontext,
+loc)` (`coder/names.lua`) also stamps a `#line` directive immediately before
+the signature of every generated C function definition (including in generated
+`.titan.h` foreign headers). Source-owned definitions receive their real
+declaration or site location; source-less helpers (module protocol, metamethod,
+and init/opener functions, unlocated adapters, and the four inline helpers in
+`cpreamble.browser_prefix`) emit `#line 1 TITAN_GENERATED_C_FILE`, where each
+emitted browser part defines `TITAN_GENERATED_C_FILE` to its actual `<stem>.c`
+or `<stem>.partN.c` filename (and `.titan.h` defines it to `<stem>.titan.h`,
+avoiding Clang's `__BASE_FILE__`, which follows prior `#line` changes). This
+prevents a function prologue (such as `luaC_checkGC` or argument/root setup
+before the first statement's `#line`) from inheriting the preceding definition's
+trailing `#line` across folder contributors, and ensures each function's first
+in-body `.wasm.map` segment (`first[body]`) names its own declaring `.titan`
+file. For native targets `_definitionline` returns `""`, so native generated C
+and header bytes are unchanged.
+
 `emitline` returns nothing in two cases:
 
 - **Coverage generation.** Coverage uses scoped region metadata instead; see

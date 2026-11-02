@@ -685,6 +685,10 @@ About 5,400 live coroutines fit in 2 GiB.
   (`<basename>: in <display name>`, without line numbers, and a 100-frame
   capture limit), and Firefox caps synchronous stack captures at 128 frames
   (see [traces](#traces)).
+* Deep mixed Lua/Titan recursion can exhaust the engine's JavaScript call stack
+  before reaching Lua's C-stack limit, rejecting the run with the engine's
+  `RangeError: Maximum call stack size exceeded` as its `cause` instead of
+  raising a catchable Lua `C stack overflow` error.
 * A loader instance runs `main` once; sinks must be synchronous.
 * Only Linux and macOS hosts are supported; `Makefile.win` offers neither
   `lua-browser` nor `browser-sdk`.
