@@ -682,7 +682,7 @@ describe("browser target descriptor", function()
             if origin == "CLI" then subject.EMIT_LINE_DIRECTIVES = false end
             assert.is_false(subject.EMIT_LINE_DIRECTIVES)
             local native = subject.new_resolver_context({ target = files.host() })
-            assert.is_nil(subject.context_target_descriptor(native))
+            assert.is_true(subject.initialize_platform(native))
             assert(subject.close_resolver_context(native))
             local strategy = compiler_io.new_sync()
             local root, prefix = assert(strategy:cwd()), require("spec.support.installed_prefix").active()
