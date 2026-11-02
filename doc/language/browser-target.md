@@ -647,14 +647,15 @@ feature-changing flag; reinstalling browser Lua does not repair that mismatch.
 Titan also owns the trace-preserving optimization, debug, `#line`, and link
 settings that the runtime and traceback backend depend on: `-O1`,
 `-fno-inline`, `-fno-optimize-sibling-calls`, `-gline-tables-only` (for object
-compilation), `-gsource-map` and `-g2` (for linking), and source `#line`
-directives (`--no-line-directives` and `TITAN_NO_LINE_DIRECTIVES=1`),
-together with Asyncify, the longjmp mode, the stack and memory sizes, the
-program lifecycle and exports, the filesystem layer, assertions and stack
-checks, and the three target defines. Other Emscripten `-s` settings may be
-passed with `--ldflag`, but a compile or link flag that overrides or negates
-one of these owned settings is rejected, as are `--no-entry` and
-`--js-library`:
+compilation), `-gsource-map`, `-g2`, and
+`-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` (for linking), and
+source `#line` directives (`--no-line-directives` and
+`TITAN_NO_LINE_DIRECTIVES=1`), together with Asyncify, the longjmp mode, the
+stack and memory sizes, the program lifecycle and exports, the filesystem
+layer, assertions and stack checks, and the three target defines. Other
+Emscripten `-s` settings may be passed with `--ldflag`, but a compile or link
+flag that overrides or negates one of these owned settings is rejected, as are
+`--no-entry` and `--js-library`:
 
 ```text
 browser link profile owns option -sASYNCIFY=0
