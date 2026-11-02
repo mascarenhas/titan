@@ -226,7 +226,7 @@ imports and a fixed Wasm32 memory layout (`titan-browser-trace.h`, private to
 /* Three uint32 words, little-endian Wasm memory, stride 12 bytes. */
 typedef struct {
     uint32_t pc;             /* absolute module byte offset, or 0 */
-    uint32_t function_index; /* module function index, or UINT32_MAX */
+    uint32_t function_index; /* module function index */
     uint32_t flags;
 } TitanBrowserTraceRecord;
 

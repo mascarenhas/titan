@@ -151,7 +151,7 @@ root:
 | `libtitan-lpeglabel.a` | the PEG engine, for a later browser `peg` module |
 | `titan.a` | the browser standard library: `titan.test`, `titan.coroutine`, and `titan.gc` |
 | `titan-browser.mjs` | the [loader](#the-loader-api) |
-| `titan-browser-library.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that every browser image links (channels, admission, eager trace-map loading, and stack capture) |
+| `titan-browser-library.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, admission, eager trace-map loading, and stack capture) |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [runner](#running-with-titan-browser-run) |
 | `sdk-digests` | content digests of the browser SDK, written last |
 

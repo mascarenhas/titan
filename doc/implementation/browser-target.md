@@ -1935,7 +1935,8 @@ chromium|firefox|webkit [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
 `/sdk/` HTTP server, `page.exposeBinding('__titanRunner', ...)` (with
 `page.requestGC()` for host-test collections), and bounded `browserServer`
 retirement (`browserServer.close()`, escalating to `browserServer.kill()`). Its
-diagnostics start with `titan-playwright-run: `, and its unit suite is
+own diagnostics start with `titan-playwright-run: `, while the shared `Monitor`
+keeps the runner's `titan-browser-run: ` prefix; its unit suite is
 `spec/browser/playwright-runner.test.mjs`. It is repository test
 infrastructure, not an installed SDK binary.
 
@@ -2182,13 +2183,18 @@ hosts`).
   options, missing-SDK and `.mjs` diagnostics, program and test images with
   statuses, binary arguments, uncaught reports, protected initialization and
   allocation failures, the libc drain, the stdio-only filesystem regression,
-  dynamic-loading guards, three-file certificates and rollback, image
-  inventories, measurement optimization, and the native libbacktrace and
-  fallback trace invariants.
+  dynamic-loading guards, three-file preflight reservation and repeated-link
+  image identity, image inventories, measurement optimization, and the native
+  libbacktrace and fallback trace invariants.
+* `spec/coder/browser_incremental_spec.lua` — browser object and three-file
+  link certificates, shared-asset and `.wasm.map`-change invalidation,
+  three-predecessor rollback across backup/publication/certificate boundaries,
+  and certified `-L`/`-l` archive reuse versus uncertified `emcc`-only system
+  libraries.
 * `spec/browser_trace_map_spec.lua` — final-image Wasm section/range/name
   extraction, standard v3 `.wasm.map` validation, `x_titan_*` extension
-  rewriting, malformed/truncated Wasm and map rejection, three-file rollback,
-  and link-certificate invalidation when `.wasm.map` changes.
+  rewriting, `browsertrace.identity` recipe, `browser_trace_libraries`
+  resolution, and malformed/truncated Wasm and map rejection.
 * `spec/coder/browser_trace_entries_spec.lua` — browser-only
   `registry[TITAN_ENTRIES_KEY]` registration across all `titanentry` wrapper
   families, split-unit deduplication, early `_init` ordering before
