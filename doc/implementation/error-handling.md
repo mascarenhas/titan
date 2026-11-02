@@ -446,17 +446,21 @@ lua_pushboolean(L, 1);
 lua_rawset(L, -3); /* entries[light C function] = true */
 ```
 
-The coder records every generated Lua-callable wrapper family (top-level
-`_titanentry_lua` and `_titanentry_strict`, nominal statics
-`_titanentry_luastatic` and `_titanentry_strictstatic`, methods
+The coder records every generated `int(lua_State *)` Lua-callable `titanentry`
+wrapper family (top-level `_titanentry_lua` and `_titanentry_strict`, nominal
+statics `_titanentry_luastatic` and `_titanentry_strictstatic`, methods
 `_titanentry_luamethod`, bound methods `_titanentry_boundlua` and
 `_titanentry_boundstrict`, Interface wrappers `_titanentry_interfacelua`,
 `_titanentry_interface_boundlua`, and `_titanentry_interface_boundstrict`,
-lambda Lua and strict entries, callable-adjustment strict adapters, and the
-tagged module initializer). At trace time `titan_trace_cfunction_is_entry`
-pushes `lua_tocfunction` as a light C function and performs a non-allocating
-`lua_rawget` in `registry[TITAN_ENTRIES_KEY]`. Native generated C is
-byte-for-byte unchanged, and compiled-module ABI versions remain unchanged.
+lambda Lua and strict entries, and callable-adjustment strict adapters). The
+tagged module initializer (`void(lua_State *, Udata *, CClosure *)`, called
+directly while the `luaopen_*` `CallInfo` is active) is not a `lua_CFunction`
+and is not registered in `registry[TITAN_ENTRIES_KEY]`: its native frame
+remains an entry sentinel by its `titanentry` symbol name, and `luaopen_*`
+remains a genuine C `CallInfo`, matching native classification. At trace time
+`titan_trace_cfunction_is_entry` pushes `lua_tocfunction` as a light C function
+and performs a non-allocating `lua_rawget` in `registry[TITAN_ENTRIES_KEY]`.
+Compiled-module ABI versions remain unchanged.
 
 During the merge, `titan_trace_format_frame` formats a resolved record (`line >
 0`) as `<basename>:<line>: in <display name>` and an unlocated record (`line ==
@@ -516,10 +520,14 @@ debug filename no longer ends in `.titan`, so logical tracebacks may omit
 native Titan frames; an entry boundary can remain only as a hidden sentinel or
 render as `[C]`.
 
-libbacktrace reports C symbol names, which cannot contain Titan punctuation
-such as `.` or `:`. Each module `_init` contributes a mapping from native C
-symbol name to display name in a shared registry table under `TITAN_NAMES_KEY`.
-The runtime formats frames with those display names:
+libbacktrace and the browser trace backend report C symbol names, which cannot
+contain Titan punctuation such as `.` or `:`. Each module `_init` contributes a
+mapping from native C symbol name to display name in a shared registry table
+under `TITAN_NAMES_KEY` (including source `foreign function` definitions with
+Titan bodies on both native and browser targets, for both the out-of-line
+`_foreign_func_name` and any local `_foreign_inline_name` helper, with `#line`
+directives emitted on raw statements by `_foreign_raw_stat`). The runtime
+formats frames with those display names:
 
 * `<module>.<function>`
 * `<module>.<record>:<method>`

@@ -637,17 +637,20 @@ reported separately from Lua record errors. The diagnostic lists the supplied
 compile flags and the actual versus required target features. Remove the
 feature-changing flag; reinstalling browser Lua does not repair that mismatch.
 
-Titan also owns the trace-preserving optimization, debug, and link settings
-that the runtime and traceback backend depend on: `-O1`, `-fno-inline`,
-`-fno-optimize-sibling-calls`, `-g2`, and `-gsource-map`, together with
-Asyncify, the longjmp mode, the stack and memory sizes, the program lifecycle
-and exports, the filesystem layer, assertions and stack checks, and the three
-target defines. Other Emscripten `-s` settings may be passed with `--ldflag`,
-but a compile or link flag that overrides or negates one of these owned
-settings is rejected, as are `--no-entry` and `--js-library`:
+Titan also owns the trace-preserving optimization, debug, `#line`, and link
+settings that the runtime and traceback backend depend on: `-O1`,
+`-fno-inline`, `-fno-optimize-sibling-calls`, `-g2`, `-gsource-map`, and source
+`#line` directives (`--no-line-directives` and `TITAN_NO_LINE_DIRECTIVES=1`),
+together with Asyncify, the longjmp mode, the stack and memory sizes, the
+program lifecycle and exports, the filesystem layer, assertions and stack
+checks, and the three target defines. Other Emscripten `-s` settings may be
+passed with `--ldflag`, but a compile or link flag that overrides or negates
+one of these owned settings is rejected, as are `--no-entry` and
+`--js-library`:
 
 ```text
 browser link profile owns option -sASYNCIFY=0
+browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)
 ```
 
 ## Limits

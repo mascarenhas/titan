@@ -676,7 +676,10 @@ original, later lock boundary.
 1. discards the embedded interface provider, its rejection and overlap state,
    and the used embedded target-profile identity;
 2. rejects hosts other than Linux and macOS:
-   `browser builds are supported from Linux and macOS hosts (host is <host>)`;
+   `browser builds are supported from Linux and macOS hosts (host is <host>)`,
+   and rejects `driver.EMIT_LINE_DIRECTIVES == false` (`--no-line-directives`
+   or `TITAN_NO_LINE_DIRECTIVES=1`) with `browser target owns option
+   --no-line-directives (TITAN_NO_LINE_DIRECTIVES)`;
 3. unless a descriptor was already imported, validates `TITAN_EXTRA_CPPFLAGS`,
    `TITAN_EXTRA_CFLAGS`, `TITAN_EXTRA_LDFLAGS`, and the normalized `--cflag`
    and `--ldflag` lists, computes the paths and probe-cache directory, and
@@ -724,7 +727,10 @@ validation and tool discovery, output locking and marker publication, and
 `coverage.prepare`. This covers object-only, library, test, and authored-C-only
 builds; native gcov backend and report options cannot inject host coverage
 flags into emcc. Coverage options without `--coverage` retain their ordinary
-`coverage options require --coverage` rejection.
+`coverage options require --coverage` rejection. Disabling `#line` directives
+(`--no-line-directives` or `TITAN_NO_LINE_DIRECTIVES=1`) is likewise rejected
+at target initialization with `browser target owns option --no-line-directives
+(TITAN_NO_LINE_DIRECTIVES)`.
 
 The [link profile](#the-link-profile) owns the image settings the runtime
 depends on. `browsertarget.trace_option(flag)` recognizes flags that would
@@ -1321,12 +1327,16 @@ exported `tools` table, the effective entrypoint compile flags, the full
 effective link flags (including user link extras and final dependency flags),
 and ordered `{ path, digest }` groups (normalized via
 `linkcertificate.canonical_path` and `incremental.file_digest`) for all user
-objects, provider archives, `--c-source` extra objects, resolved `-l` archives
-(`linkcertificate.browser_trace_libraries`), and the five runtime/Lua/JS-library
-inputs (`libtitan.a`, `liblua.a`, `liblua-config.txt`,
-`titan-browser-library.js`, and `titan-browser-trace.js`). No timestamps,
-random staging paths, inodes, process IDs, or pre-Asyncify Wasm digests enter
-the hash. `browsertrace.declaration(identity)` then appends:
+objects, provider archives, `--c-source` extra objects, resolved `-L`/`-l`
+static archives (`linkcertificate.browser_trace_libraries`), and the five
+runtime/Lua/JS-library inputs (`libtitan.a`, `liblua.a`, `liblua-config.txt`,
+`titan-browser-library.js`, and `titan-browser-trace.js`). An `emcc`-only
+system or JavaScript library (such as `-lidbfs.js`) that the static archive
+resolver cannot inventory still links: its flag text remains in `link_flags`
+within `browsertrace.identity` while the CLI marks the native link policy
+uncacheable and withholds the link record and reuse. No timestamps, random
+staging paths, inodes, process IDs, or pre-Asyncify Wasm digests enter the
+hash. `browsertrace.declaration(identity)` then appends:
 
 ```c
 static const char titan_browser_trace_image_id[] = "<64 lowercase hex>";
