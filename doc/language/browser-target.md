@@ -462,7 +462,11 @@ JavaScriptCore's `Error.stack` reports WebAssembly frames by function index
 without a bytecode offset, browser traces provide reduced, function-level
 fidelity: Titan frames appear in the same merged order with Lua frames and with
 the same Titan display names, rendered in the no-line form
-`<basename>: in <display name>`, and captures are limited to 100 frames.
+`<basename>: in <display name>`, and captures are limited to 100 frames. Pages
+running in WebKit or Safari should not `delete Error.stackTraceLimit`: in
+JavaScriptCore, deleting that property makes `new Error().stack` return
+`undefined` for the rest of the realm even after the property is redefined, so
+subsequent traces fall back to Lua frames with the capture-failed marker below.
 
 **Depth limits and truncation.** V8 (Chromium, Chrome, and Node) captures up to
 the runtime's 512-frame WebAssembly capacity; Firefox's SpiderMonkey caps

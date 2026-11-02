@@ -356,7 +356,13 @@ builtin frames such as `forEach@[native code]`, while excluding Firefox's
   `TRUNCATED`.
 * **JavaScriptCore (Playwright WebKit and Safari)** keeps a hidden 100-frame
   capture limit that `Object.defineProperty` on `Error.stackTraceLimit` does not
-  raise; captures reaching 100 frames set `TRUNCATED`.
+  raise; captures reaching 100 frames set `TRUNCATED`. In addition, deleting
+  `Error.stackTraceLimit` in JavaScriptCore causes `new Error().stack` to
+  evaluate to `undefined` for the remainder of that realm even after the
+  property is redefined with `Object.defineProperty` (unlike V8 and
+  SpiderMonkey); `parse` rejects the non-string `.stack` as `CAPTURE_FAILED`, so
+  traces in a JSC realm where `Error.stackTraceLimit` was deleted take the
+  bounded Lua-only `(native Titan frames unavailable: capture failed)` fallback.
 
 When the C merge falls back to Lua-only `CallInfo` enumeration (`st.status !=
 0`, under `MAP_UNAVAILABLE` or `CAPTURE_FAILED`), browser enumeration in

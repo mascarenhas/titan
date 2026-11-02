@@ -1500,7 +1500,11 @@ The survey established six implementation facts:
    limit 1000). On JSC, `Object.defineProperty` updates the visible property
    value without updating JSC's hidden capture limit, which stays at 100 total
    frames (whereas direct `=` assignment updates the hidden state but cannot be
-   used or restored through descriptors without side effects). On Firefox,
+   used or restored through descriptors without side effects), and deleting
+   `Error.stackTraceLimit` makes `new Error().stack` return `undefined` for the
+   rest of that JSC realm even after `Object.defineProperty` redefines it (so
+   captures in a JSC realm where `Error.stackTraceLimit` was deleted return
+   `CAPTURE_FAILED`). On Firefox,
    neither `Object.defineProperty` nor `=` assignment raises synchronous capture
    past 128 frames. Both the 100-frame WebKit limit (D10) and the 128-frame
    Firefox synchronous ceiling (D11) are therefore documented engine truncation
