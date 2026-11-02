@@ -516,8 +516,8 @@ context-owned (`context.target_profile`), never stored in the frozen graph.
 `compile_flags` is, in order:
 
 1. `--std=c99`, `-O1`, `-fno-inline`, `-fno-optimize-sibling-calls`, `-Wall`,
-   `-Wno-unused-but-set-variable`, `-Wno-unused-function`, `-g2`, and
-   `-sSUPPORT_LONGJMP=emscripten`;
+   `-Wno-unused-but-set-variable`, `-Wno-unused-function`,
+   `-gline-tables-only`, and `-sSUPPORT_LONGJMP=emscripten`;
 2. the record's `lua_defines`, in record order;
 3. the ordered `target_defines`: `-DTITAN_TARGET_BROWSER=1`,
    `-DTITAN_COROUTINE_STACK_SIZE=262144`, and `-DMCO_ASYNCFY_STACK_SIZE=65536`
@@ -530,12 +530,18 @@ context-owned (`context.target_profile`), never stored in the frozen graph.
    ([The link profile](#the-link-profile)).
 
 There is no `-fPIC` and no LTO. Both `production` and `validation`
-installations share the trace-preserving compile flags `-O1 -fno-inline
--fno-optimize-sibling-calls -g2` (currently the candidate trace profile;
-`TODO(confirm: freeze as release trace profile after all #330 gates pass)`).
-Lua's own `-O2` and debug policy in `liblua.a` stay independent because Lua C
-frames are filtered out of Titan traces. The host descriptor emits no new
-define. Validation requires all three target defines in this order
+installations share the trace-preserving object compile flags `-O1 -fno-inline
+-fno-optimize-sibling-calls -gline-tables-only` (currently the candidate trace
+profile; `TODO(confirm: freeze as release trace profile after all #330 gates pass)`).
+Object compilation uses `-gline-tables-only` rather than `-g2` because
+Emscripten 6.0.13's `emcc` rewrites `-g2` to `-g0` on compile-only `-c`
+invocations (`tools/cmdline.py`), which strips DWARF line tables from `.o`
+files and leaves the final `.wasm.map` without `.titan` source attributions;
+`-gline-tables-only` preserves the object line tables while the final link
+passes `-gsource-map -g2` to emit the source map and retain the Wasm `name`
+section. Lua's own `-O2` and debug policy in `liblua.a` stay independent
+because Lua C frames are filtered out of Titan traces. The host descriptor
+emits no new define. Validation requires all three target defines in this order
 (`inconsistent browser target defines`) and requires each in
 `compile_flags` (`browser target descriptor is missing required compile flag
 "<flag>"`), so build, import, and fixtures agree. The target defines reach
