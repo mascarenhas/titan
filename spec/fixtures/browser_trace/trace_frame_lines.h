@@ -21,4 +21,16 @@ static inline int trace_fixture_count_frame_lines(const char *trace,
   }
   return count;
 }
+
+/* The first marker must occupy the complete last line. This also rejects a
+ * duplicate, a partial-line marker, and a marker between surviving frames. */
+static inline int trace_fixture_terminal_marker(const char *trace,
+                                                const char *marker,
+                                                int allowed) {
+  const char *found = strstr(trace, marker);
+  if (!found) return 1;
+  if (!allowed || (found != trace && found[-1] != '\n')) return 0;
+  const char *end = found + strlen(marker);
+  return *end == '\0' || (*end == '\n' && end[1] == '\0');
+}
 #endif
