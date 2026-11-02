@@ -5,7 +5,7 @@ WebAssembly with Emscripten for use in web pages and web applications. A
 program or test becomes three files that belong together — an ES module
 `app.mjs`, its WebAssembly binary `app.wasm`, and its extended source map
 `app.wasm.map` — that a page loads through the [loader API](#the-loader-api)
-and that command-line workflows and tests run with `titan-browser-run`:
+and that Titan's tests run with `titan-browser-run`:
 
 ```sh
 titanc --target browser -o out --exe out/app.mjs app
@@ -427,14 +427,10 @@ through unchanged. Standard input is always at end of file.
 
 When a web page or application initializes a browser image (or when tests run
 it through `titan-browser-run`), the runtime eagerly loads `<stem>.wasm.map`
-as an Emscripten run dependency before `main` or any module initializer runs:
-via `fetch` in browsers and from the filesystem in Node. It verifies that the
-map's embedded build identity (`x_titan_image`) matches the instantiated
-`.wasm` image and builds an in-memory lookup index from the map's segments,
-function body ranges (`x_titan_function_ranges`), and function names
-(`x_titan_function_names`). Raising an error or calling `titan.backtrace()`
-therefore never fetches over the network, awaits a Promise, or allocates
-WebAssembly heap memory.
+before `main` or any module initializer runs, verifies that its embedded build
+identity matches the instantiated `.wasm`, and builds an in-memory lookup
+index. Nothing is fetched or awaited when an error is raised or when
+`titan.backtrace()` is called.
 
 On **Chromium, Chrome, Firefox, and Node**, browser tracebacks have the same
 unified Titan/Lua contract as native builds:
@@ -455,33 +451,23 @@ unified Titan/Lua contract as native builds:
   inherits a Titan line.
 * `titan.backtrace()`, the `traceback` local in a `catch` block, bare `raise`
   re-throwing, caught-trace clearing, and coroutine trace propagation and
-  append behave exactly as on native hosts, including across coroutine yields
-  and resumptions.
+  append behave as on native hosts, including across coroutine yields and
+  resumptions.
 
-**WebKit and Safari reduced fidelity.** JavaScriptCore's `Error.stack` reports
-WebAssembly frames by function index (`name@module.wasm:wasm-function[N]` or
-`N@wasm-function[N]`) without a bytecode offset, and keeps a 100-frame capture
-limit when `Error.stackTraceLimit` is configured through
-`Object.defineProperty`. On WebKit and Safari, browser traces therefore provide
-documented reduced fidelity: Titan frames appear in the same merged order with
-Lua frames and with the same Titan display names, rendered in the no-line form
-`<basename>: in <display name>`, and captures that reach the 100-frame limit
-end with the truncation marker below.
+**WebKit and Safari reduced fidelity.** On WebKit and Safari, where
+JavaScriptCore's `Error.stack` reports WebAssembly frames by function index
+without a bytecode offset, browser traces provide reduced, function-level
+fidelity: Titan frames appear in the same merged order with Lua frames and with
+the same Titan display names, rendered in the no-line form
+`<basename>: in <display name>`, and captures are limited to 100 frames.
 
-**Depth limits and truncation.** Before reading `Error.stack`, the runtime
-temporarily raises `Error.stackTraceLimit` via `Object.defineProperty` to at
-least 640 frames (512 WebAssembly records plus 128 frames of headroom for
-interleaved JavaScript wrappers) when the property is configurable or writable
-data, and restores the exact original own descriptor afterward. V8 (Chromium,
-Chrome, and Node) honors the raised limit up to the 512-frame WebAssembly
-capture capacity. Firefox's SpiderMonkey enforces a 128-frame ceiling on
-synchronous `Error.stack` captures (and stops before saved `async*`
-asynchronous ancestry, which is not part of the active synchronous stack).
-WebKit and Safari enforce JavaScriptCore's 100-frame limit. When a trace is cut
-short by the 512-frame capacity, by a non-configurable or non-writable host
-`Error.stackTraceLimit`, by the engine's synchronous capture ceiling, or by the
-512-frame cap on Lua-only fallback enumeration, the trace appends one final
-frame line:
+**Depth limits and truncation.** V8 (Chromium, Chrome, and Node) captures up to
+the runtime's 512-frame WebAssembly capacity; Firefox's SpiderMonkey caps
+synchronous captures at 128 frames; and WebKit and Safari cap captures at 100
+frames. Any host `Error.stackTraceLimit` is preserved across the capture. When
+a trace is cut short by the 512-frame capacity, by a host
+`Error.stackTraceLimit` that cannot be raised, or by the engine's capture
+limit, the trace ends with one final frame line:
 
 ```text
 (...native frames truncated...)
@@ -489,12 +475,11 @@ frame line:
 
 **Deploying `.wasm.map` and degraded mode.** A web server serving a browser
 image must serve `<stem>.wasm.map` next to `<stem>.wasm` (or map both through
-`locateFile`). If `<stem>.wasm.map` cannot be loaded, is not valid source-map
-JSON with Titan's `x_titan_*` extensions, or does not match the instantiated
-`.wasm` image's identity, module initialization logs one console warning
-(`Titan browser trace: <reason>`) and the application still runs in degraded
-mode. Every trace generated by that instance contains the Lua frames plus one
-marker line:
+`locateFile`). If `<stem>.wasm.map` cannot be loaded, is malformed, or does not
+match the instantiated `.wasm` image, module initialization logs one console
+warning (`Titan browser trace: <reason>`) and the application still runs in
+degraded mode. Every trace generated by that instance contains the Lua frames
+plus one marker line:
 
 ```text
 (native Titan frames unavailable: trace map not loaded)
@@ -504,15 +489,12 @@ To catch deployment and staging mistakes in tests, `titan-browser-run` treats a
 degraded trace backend on a compiler-built image as a harness failure (exit 75)
 even if the program or tests pass, unless `--allow-degraded-trace` is supplied.
 
-**Host `Error` descriptors and capture failure.** The capture adapter inspects
-and restores the own property descriptors of `Error.stackTraceLimit` and
-`Error.prepareStackTrace` using `Object.getOwnPropertyDescriptor` and
-`Object.defineProperty`, never invoking getter or setter callbacks. If
-`Error.prepareStackTrace` is an accessor or a non-configurable, non-writable
-data property whose value is not `undefined` (so reading `.stack` could run
-arbitrary host code), or if an unexpected error or nested trace attempt occurs
-while a trace is already being built, the adapter does not read `.stack` and
-emits the bounded Lua-only trace with one marker line:
+**Host `Error.prepareStackTrace` and capture failure.** The runtime never calls
+a host `Error.prepareStackTrace` callback or invokes property getters or
+setters on `Error`. When `Error.prepareStackTrace` cannot be neutralized
+safely, or when an unexpected error or nested trace attempt occurs while a
+trace is already being built, the runtime skips reading `.stack` and emits the
+Lua-only trace with one marker line:
 
 ```text
 (native Titan frames unavailable: capture failed)
@@ -688,9 +670,10 @@ About 5,400 live coroutines fit in 2 GiB.
 * The browser standard library provides only `test`, `coroutine`, and `gc`.
   `async`, timers, files, networking, `lua`, `peg`, and the other standard
   modules are not available yet.
-* `titan-browser-run` drives Node 24 and headless Chrome or Chromium directly;
-  Playwright drives Chromium, Firefox, and WebKit in the repository's browser
-  trace suite.
+* Browser images run in Chromium and Chrome, Firefox, WebKit and Safari, and
+  Node 24 (`TODO(confirm: Firefox/WebKit execution after integrator Playwright gate)`);
+  `titan-browser-run` (the test runner) drives only Node 24 and headless Chrome
+  or Chromium.
 * On WebKit and Safari, traces have reduced, function-level fidelity
   (`<basename>: in <display name>`, without line numbers, and a 100-frame
   capture limit), and Firefox caps synchronous stack captures at 128 frames

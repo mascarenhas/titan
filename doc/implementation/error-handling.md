@@ -277,9 +277,10 @@ in-use guard, restores `ci`, `allowhook`, and `errfunc` state following the
 `titan_unwind_clear_trace` pattern, and rethrows any non-OK status (such as
 `LUA_ERRMEM` raised while growing `luaL_Buffer`) with `luaD_throw`, preserving
 the native OOM outcome and leaving the buffer ready for the next capture. While
-JavaScript `Error` construction and stack-string parsing necessarily allocate
-in the JavaScript heap, C capture and symbolization perform no WebAssembly
-allocations.
+JavaScript `Error` construction and stack-string parsing allocate in the
+JavaScript heap and growing `luaL_Buffer` during the merge uses Lua's protected
+allocator, C capture and per-frame symbolization write into preallocated scratch
+storage and never call `malloc`.
 
 **Synchronous capture transaction and descriptor preservation.** Capture
 executes as one synchronous JavaScript transaction in `titan-browser-trace.js`:
@@ -344,7 +345,8 @@ surveyed engine ceiling is reached:
 
 When the C merge falls back to Lua-only `CallInfo` enumeration (under
 `MAP_UNAVAILABLE` or `CAPTURE_FAILED`), browser enumeration is likewise bounded
-at 512 `CallInfo` frames and emits the same truncation marker if cut short.
+at 512 `CallInfo` frames (`TODO(confirm: whether R bounds Lua-only CallInfo fallback at 512 frames)`)
+and emits the same truncation marker if cut short.
 
 **Eager map loader, extensions, and lookup validation.** During module startup,
 `titan-browser-trace.js` registers an `addOnPreRun` hook that adds the run
@@ -437,7 +439,7 @@ the C symbol or `?` (and `?` when no declaring basename is known). When capture
 returned `MAP_UNAVAILABLE` or `CAPTURE_FAILED`, the trace emits one availability
 marker line — `(native Titan frames unavailable: trace map not loaded)` or
 `(native Titan frames unavailable: capture failed)` — and when `TRUNCATED` is
-set (or Lua-only fallback enumeration hits 512 frames), it appends
+set (or bounded Lua-only fallback enumeration is cut short), it appends
 `(...native frames truncated...)` once at the end of the trace.
 
 #### Backtrace state invalidation
