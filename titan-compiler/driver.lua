@@ -13666,7 +13666,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     valid, err = driver.browserlink.validate_extras(options.final_link_flags,
         options.profile or driver.browser_link_options)
     if not valid then return nil, err end
-    local library_flags = driver.link_extra_flags()
+    local library_flags = { table.unpack(driver.link_extra_flags()) }
     append_argv(library_flags, options.final_link_flags)
     local libraries
     libraries, err = require("titan-compiler.linkcertificate").browser_trace_libraries(

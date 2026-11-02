@@ -402,6 +402,22 @@ describe("browser target descriptor", function()
         end
     end)
 
+    for _, flag in ipairs({
+        "-O0", "-O3", "-Os", "-g", "-g0", "-gline-tables-only",
+        "-finline-functions", "-fno-inline", "-fno-inline-functions",
+        "-foptimize-sibling-calls", "-fno-optimize-sibling-calls",
+        "-fomit-frame-pointer", "-fno-omit-frame-pointer",
+    }) do
+        it("rejects the trace-owned compile option " .. flag .. " before tool discovery", function()
+            local context, inputs, calls = fake_context()
+            inputs.compile_flags = { flag }
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            assert.equal("browser target owns compile_flags option " .. flag, err)
+            assert.equal(0, #calls)
+        end)
+    end
+
     it("changes identity for record revision, effective flags, paths and profile facts", function()
         local baseline = fixtures.descriptor()
         for _, change in ipairs({
@@ -654,6 +670,41 @@ describe("browser target descriptor", function()
         assert.is_nil(subject.context_target_descriptor(context))
         assert(subject.close_resolver_context(context))
     end)
+
+    for _, origin in ipairs({ "CLI", "environment" }) do
+        it("rejects disabled browser line directives from " .. origin .. " while leaving native policy optional", function()
+            local getenv = platform.getenv
+            platform.getenv = function(name)
+                if name == "TITAN_NO_LINE_DIRECTIVES" then return origin == "environment" and "1" or "0" end
+                return getenv(name)
+            end
+            local subject = fresh_driver()
+            if origin == "CLI" then subject.EMIT_LINE_DIRECTIVES = false end
+            assert.is_false(subject.EMIT_LINE_DIRECTIVES)
+            local native = subject.new_resolver_context({ target = files.host() })
+            assert.is_nil(subject.context_target_descriptor(native))
+            assert(subject.close_resolver_context(native))
+            local strategy = compiler_io.new_sync()
+            local root, prefix = assert(strategy:cwd()), require("spec.support.installed_prefix").active()
+            workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+            local argv = { prefix .. "/bin/lua" .. (platform.windows and ".exe" or ""), "-E", "-e",
+                string.format("package.path=%q..package.path;", root .. "/?.lua;" .. root .. "/?/init.lua;"),
+                root .. "/titanc", "-q", "--target", "browser", "-c", "-o", workspace .. "/out" }
+            if origin == "CLI" then argv[#argv + 1] = "--no-line-directives" end
+            argv[#argv + 1] = "never_compiled"
+            local result = process.capture(argv, {
+                env = { TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_EXTRA_CPPFLAGS = "",
+                    TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "",
+                    TITAN_NO_LINE_DIRECTIVES = origin == "environment" and "1" or "0" },
+                stderr_to_stdout = true,
+            })
+            assert.is_true(result.started)
+            assert.is_false(result.ok)
+            assert.equal(1, result.status)
+            contains(result.output, "browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)")
+            assert.is_nil(result.output:find("stack traceback", 1, true))
+        end)
+    end
 
     it("rejects Windows and other unsupported hosts before tool discovery", function()
         local subject = fresh_driver()

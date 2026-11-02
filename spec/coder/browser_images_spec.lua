@@ -57,6 +57,33 @@ assert(driver.close_resolver_context(context))
     return output .. "/" .. name .. ".mjs"
 end
 
+local function image_identity(info, image)
+    local result = run({ info.node.path, "--input-type=module", "-e", [[
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const image = process.argv[1];
+const map = JSON.parse(await readFile(image.replace(/\.mjs$/, '.wasm.map'), 'utf8'));
+const factory = (await import(pathToFileURL(image).href)).default;
+const instance = await factory({ locateFile: name => resolve(dirname(image), name) });
+const pointer = instance._titan_browser_trace_identity();
+const bytes = instance.HEAPU8.subarray(pointer, pointer + 65);
+assert.equal(bytes.length, 65);
+assert.equal(bytes[64], 0);
+const identity = Buffer.from(bytes.subarray(0, 64)).toString('ascii');
+assert.match(identity, /^[0-9a-f]{64}$/);
+assert.equal(identity, map.x_titan_image);
+assert.ok(Number.isInteger(map.x_titan_function_imports));
+assert.ok(map.x_titan_function_ranges.length > 0);
+assert.equal(map.x_titan_function_names.length,
+    map.x_titan_function_imports + map.x_titan_function_ranges.length);
+process.stdout.write(identity);
+]], image })
+    assert.is_true(result.ok, result.output or result.diagnostic)
+    return result.output
+end
+
 local function native_trace()
     local prefix = require("spec.support.installed_prefix").active()
     local suffix = platform.windows and ".exe" or ""
@@ -457,6 +484,77 @@ process.stdout.write(names[0]);
                 workspace .. "/out/trace_names.mjs", "--", row[1] })
             assert.equal(row[2], result.status, result.output or result.diagnostic)
         end
+    end)
+
+    it("keeps final-link flags local and image identity stable across repeated in-process links", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src"); files.mkdir(workspace .. "/out")
+        local script = string.format([[
+local driver = require "titan-compiler.driver"
+local strategy = require("titan-compiler.io").new_sync()
+local real_run, links = strategy.run, 0
+function strategy:run(argv, options)
+    local count = 0
+    for _, flag in ipairs(argv) do
+        if flag == "-Wl,--trace" then count = count + 1 end
+    end
+    if count > 0 then
+        assert(count == 1, "final-link flag was duplicated")
+        links = links + 1
+    end
+    return real_run(self, argv, options)
+end
+driver.TITAN_SOURCE_PATH = %q
+local output = %q
+local context = driver.new_resolver_context({ target = "browser", output_root = output, io = strategy })
+driver.NATIVE_LINK_FLAGS = { "-Wl,--no-demangle" }
+local extras = driver.NATIVE_LINK_FLAGS
+local flags = { "-Wl,--trace" }
+local contents = driver.browser_c_image_contents("static int titan_browser_worker(lua_State *L) { (void)L; return 0; }")
+local previous
+for iteration = 1, 2 do
+    local ok, why, code = driver.compile_browser_image(contents,
+        output .. "/repeated.c", output .. "/repeated.mjs", {}, {}, {}, false,
+        { context = context, profile = { purpose = "protocol", assertions = 2 },
+          final_link_flags = flags, dependency_output = output .. "/dependencies" })
+    assert(ok, tostring(why) .. (code and (", exit " .. code) or ""))
+    assert(driver.NATIVE_LINK_FLAGS == extras and #extras == 1 and extras[1] == "-Wl,--no-demangle",
+        "image link changed global link extras")
+    assert(#flags == 1 and flags[1] == "-Wl,--trace", "image link changed final-link options")
+    local map = assert(strategy:read_file(output .. "/repeated.wasm.map"))
+    local identity = assert(map:match('"x_titan_image":"([0-9a-f]+)"'))
+    assert(not previous or identity == previous, "identical inputs changed image identity")
+    previous = identity
+end
+assert(links == 2, "both real links must receive the final-link flag")
+assert(driver.close_resolver_context(context))
+]], workspace .. "/src", workspace .. "/out")
+        local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
+            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+            info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
+                repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.match("^[0-9a-f]+$", image_identity(info, workspace .. "/out/repeated.mjs"))
+    end)
+
+    it("publishes a matching extended map and callable identity for a minified measurement control", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/image_control.titan",
+            read(repository .. "/spec/fixtures/browser_images/program.titan"))
+        local variant = { prefix = info.prefix,
+            compiler_setup = "require('titan-compiler.driver').browser_link_options=" ..
+                "{purpose='baseline',assertions=0,optimization='O2'};" }
+        local result = cli(variant, "--ldflag=-g2", "--ldflag=-Os", "image_control")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        local image = workspace .. "/out/image_control.mjs"
+        local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/image_control.wasm")))
+        for _, item in ipairs(inventory.exports) do
+            assert.not_equal("titan_browser_trace_identity", item.name, "control exports were not minified")
+        end
+        assert.match("^[0-9a-f]+$", image_identity(info, image))
     end)
 
     it("certifies optimization for FFI, generated workers and authored C together", function()
