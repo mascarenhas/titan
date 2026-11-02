@@ -13,6 +13,17 @@ local modules = { "bundle.first", "bundle.second" }
 local fixture, native_root, browser_root, provider_images
 local semantic_driver, semantic_contexts, saved_registry
 
+local function new_fixture()
+    local fixture = fixtures.new()
+    local run = fixture.run
+    function fixture:run(argv, environment, ...)
+        local env = { TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" }
+        for key, value in pairs(environment or {}) do env[key] = value end
+        return run(self, argv, env, ...)
+    end
+    return fixture
+end
+
 local function arguments(target, compile_only)
     local argv = { "--target", target, "--incremental", "--source-first",
         "--jobs", "1", "--c-parts", "1", "-v" }
@@ -26,7 +37,8 @@ local function compile(target, output, compile_only)
     -- This target's compile flags are selected by the compiler, never copied
     -- from host CC/CFLAGS. The fixture helper otherwise uses native defaults.
     return fixture:compile(arguments(target, compile_only), {
-        TITAN_EXTRA_CFLAGS = "-O0 -fno-lto", TITAN_EXTRA_LDFLAGS = "-fno-lto" })
+        TITAN_EXTRA_CFLAGS = target == "browser" and "" or "-O0 -fno-lto",
+        TITAN_EXTRA_LDFLAGS = target == "browser" and "" or "-fno-lto" })
 end
 
 local function compiled(target, output, compile_only)
@@ -86,7 +98,7 @@ end
 
 describe("browser incremental compilation", function()
     local function prepare_fixture()
-        fixture = fixtures.new()
+        fixture = new_fixture()
         fixtures.copy(repository .. "/spec/fixtures/browser_iso/bundle", fixture.source .. "/bundle")
         native_root, browser_root = fixture.root .. "/native-out", fixture.root .. "/browser-out"
     end
@@ -101,9 +113,37 @@ describe("browser incremental compilation", function()
         if owned_fixture then owned_fixture:close(images) end
     end)
 
+    it("links emcc system libraries with an identity but without certifying reuse", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        fixture = new_fixture()
+        fixtures.write(fixture.source .. "/system_main.titan",
+            "function main(args: {string}): integer return 0 end\n")
+        local arguments = { "--target", "browser", "--incremental", "-v",
+            "--ldflag=-lidbfs.js", "system_main" }
+        local image, map = fixture.output .. "/system_main.mjs", fixture.output .. "/system_main.wasm.map"
+        local identity
+        for _ = 1, 2 do
+            local result = fixture:compile(arguments)
+            assert.is_true(result.ok, result.output)
+            assert.matches("Titan link miss", result.output, 1, true)
+            assert.is_nil(result.output:find("Titan link hit", 1, true))
+            local current = assert(fixtures.read(map):match('"x_titan_image":"([0-9a-f]+)"'))
+            assert.equal(64, #current)
+            if identity then assert.equal(identity, current) end
+            identity = current
+            for directory in lfs.dir(fixture.output .. "/.titan-links") do
+                if directory ~= "." and directory ~= ".." then
+                    assert.is_nil(lfs.attributes(fixture.output .. "/.titan-links/" .. directory .. "/record"))
+                end
+            end
+        end
+        local result = fixture:run({ info.sdk_root .. "/titan-browser-run", "--engine", "node", "--grace", "0", image })
+        assert.is_true(result.ok, result.output)
+    end)
+
     it("certifies selected archive members and direct objects with parentheses in every path", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
-        fixture = fixtures.new()
+        fixture = new_fixture()
         local directory = fixture.root .. "/native(dir)"
         local archive, member, direct = directory .. "/lib(helper).a",
             directory .. "/helper(part).o", directory .. "/direct(part).o"
@@ -135,7 +175,7 @@ end
         payload()
         -- A known direct object is also a lexical prefix of the archive path.
         local arguments = { "--target", "browser", "--incremental", "-v", "pair_main",
-            "-X", archive, direct, prefix_object }
+            "-L", directory, "-l", ":lib(helper).a", "-X", direct, prefix_object }
         local result = fixture:compile(arguments)
         assert.is_true(result.ok, result.output)
         local record = record_path(fixture.output)
@@ -159,10 +199,11 @@ end
         assert.equal(7, ran.status)
     end)
 
-    for _, failure in ipairs({ "trace", "record" }) do
-        it("restores both predecessor image files after a " .. failure .. " certificate failure", function()
+    for _, failure in ipairs({ "trace", "record", "rename-1", "rename-2", "rename-3",
+            "rename-4", "rename-5", "rename-6", "map-missing", "map-malformed", "before-commit" }) do
+        it("restores all three predecessor image files after a " .. failure .. " certificate failure", function()
             local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
-            fixture = fixtures.new()
+            fixture = new_fixture()
             local source = fixture.source .. "/pair_main.titan"
             local arguments = { "--target", "browser", "--incremental", "-v", "pair_main" }
             fixtures.write(source, "function main(args: {string}): integer return 0 end\n")
@@ -171,9 +212,11 @@ end
             local mjs, wasm = fixture.output .. "/pair_main.mjs", fixture.output .. "/pair_main.wasm"
             local previous_mjs, previous_wasm = fixture.root .. "/before.mjs", fixture.root .. "/before.wasm"
             fixtures.copy(mjs, previous_mjs); fixtures.copy(wasm, previous_wasm)
+            local map, previous_map = wasm .. ".map", previous_wasm .. ".map"
+            fixtures.copy(map, previous_map)
             local record = record_path(fixture.output)
             fixtures.write(source, "function main(args: {string}): integer return 7 end\n")
-            local hook, log = fixture.root .. "/certificate-fault.lua", fixture.root .. "/certificate-observation"
+            local hook, log = fixture.root .. "/certificate-case.lua", fixture.root .. "/certificate-observation"
             fixtures.write(hook, string.format([[
 local certificate = require "titan-compiler.linkcertificate"
 local driver = require "titan-compiler.driver"
@@ -183,6 +226,7 @@ local commit = certificate.commit
 function certificate.commit(context, ticket)
     assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new mjs was not published")
     assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new wasm was not published")
+    assert(util.get_file_contents(%q, "rb") ~= util.get_file_contents(%q, "rb"), "new map was not published")
     local file = assert(io.open(%q, "wb"))
     assert(file:write("new pair observed\n")); assert(file:close())
     if %q == "trace" then
@@ -196,7 +240,60 @@ function certificate.commit(context, ticket)
     end
     return commit(context, ticket)
 end
-]], mjs, previous_mjs, wasm, previous_wasm, log, failure))
+local boundary = tonumber((%q):match("^rename%%-(%%d)$"))
+if boundary then
+    local io_module = require "titan-compiler.io"
+    local new_sync, renames = io_module.new_sync, 0
+    local finals = { [%q] = true, [%q] = true, [%q] = true }
+    local canonical = certificate.canonical_path
+    local path_context = { io = new_sync() }
+    local physical = {}
+    for filename in pairs(finals) do physical[canonical(path_context, filename)] = true end
+    function io_module.new_sync(...)
+        local strategy = new_sync(...)
+        local rename = strategy.rename
+        function strategy:rename(from, to)
+            if physical[canonical(path_context, from)] or physical[canonical(path_context, to)] then
+                renames = renames + 1
+                if renames == boundary then return nil, "injected browser artifact rename failure" end
+            end
+            return rename(self, from, to)
+        end
+        return strategy
+    end
+end
+local map_case = %q
+if map_case == "map-missing" or map_case == "map-malformed" then
+    local io_module = require "titan-compiler.io"
+    local new_sync = io_module.new_sync
+    function io_module.new_sync(...)
+        local strategy = new_sync(...)
+        local run = strategy.run
+        function strategy:run(argv, options)
+            local result = run(self, argv, options)
+            if result.ok then
+                for index, flag in ipairs(argv) do
+                    if flag == "-o" and argv[index + 1]:match("[.]mjs$") then
+                        local map = argv[index + 1]:gsub("[.]mjs$", ".wasm.map")
+                        if map_case == "map-missing" then assert(os.remove(map))
+                        else assert(self:write_file(map, "malformed source map")) end
+                    end
+                end
+            end
+            return result
+        end
+        return strategy
+    end
+elseif map_case == "before-commit" then
+    local invalidate, count = certificate.invalidate, 0
+    function certificate.invalidate(...)
+        count = count + 1
+        if count == 2 then return nil, "injected browser precommit failure" end
+        return invalidate(...)
+    end
+end
+]], mjs, previous_mjs, wasm, previous_wasm, map, previous_map, log, failure,
+                failure, mjs, wasm, map, failure))
             local setup = string.format("package.path=%q..package.path;",
                 fixture.frontend .. "/?.lua;" .. fixture.frontend .. "/?/init.lua;") ..
                 fixture.collector:init_code() .. ";\n" .. string.format("dofile(%q);", hook)
@@ -207,10 +304,19 @@ end
             fixture.collector:collect()
             assert.is_false(result.ok)
             assert.matches(failure == "trace" and "invalid Wasm linker input trace" or
-                "injected browser certificate write failure", result.output, 1, true)
-            assert.equal("new pair observed\n", fixtures.read(log))
+                failure == "record" and "injected browser certificate write failure" or
+                failure == "map-missing" and "is not a regular file" or
+                failure == "map-malformed" and "invalid JSON value" or
+                failure == "before-commit" and "injected browser precommit failure" or
+                "injected browser artifact rename failure", result.output, 1, true)
+            if failure == "trace" or failure == "record" then
+                assert.equal("new pair observed\n", fixtures.read(log))
+            else
+                assert.is_nil(lfs.attributes(log))
+            end
             assert.equal(fixtures.read(previous_mjs), fixtures.read(mjs))
             assert.equal(fixtures.read(previous_wasm), fixtures.read(wasm))
+            assert.equal(fixtures.read(previous_map), fixtures.read(map))
             assert.is_nil(lfs.attributes(record))
             for name in lfs.dir(fixture.output) do
                 assert.is_nil(name:find(".stage.tmp.", 1, true), name)
@@ -227,9 +333,9 @@ end
         end)
     end
 
-    it("certifies both image files, invalidates every shared asset and rolls back a failed pair commit", function()
+    it("certifies all three image files, invalidates every shared asset and rolls back a failed commit", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
-        fixture = fixtures.new()
+        fixture = new_fixture()
         local physical_output = fixture.root .. "/physical-out"
         fixtures.mkdir(physical_output)
         fixture.output = fixture.root .. "/output-alias"
@@ -240,7 +346,7 @@ end
         assert(lfs.link(info.prefix .. "/include", root .. "/include", true))
         local assets = browserlink.sdk_assets(driver.installed_paths(root, "browser"))
         local installed = browserlink.sdk_assets(driver.installed_paths(info.prefix, "browser"))
-        local keys = { "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }
+        local keys = { "runtime", "js_library", "trace_library", "loader", "runner", "runner_module", "node_worker", "page" }
         for _, key in ipairs(keys) do fixtures.copy(installed[key], assets[key]) end
         fixtures.write(fixture.source .. "/pair_main.titan",
             "function main(args: {string}): integer return 0 end\n")
@@ -253,21 +359,24 @@ end
         end
         assert.matches("Titan link miss", build(), 1, true)
         local mjs, wasm = fixture.output .. "/pair_main.mjs", fixture.output .. "/pair_main.wasm"
+        local map = wasm .. ".map"
         local record = record_path(fixture.output)
         local original = { mjs = fixtures.read(mjs), wasm = fixtures.read(wasm), record = fixtures.read(record) }
+        original.map = fixtures.read(map)
         local past = os.time() - 120
         assert(lfs.touch(mjs, past, past)); assert(lfs.touch(wasm, past, past))
         assert.matches("Titan link hit", build(), 1, true)
         assert.equal(past, lfs.attributes(mjs, "modification"))
         assert.equal(past, lfs.attributes(wasm, "modification"))
         assert.equal(original.record, fixtures.read(record))
-        for _, filename in ipairs({ mjs, wasm }) do
+        for _, filename in ipairs({ mjs, wasm, map }) do
             fixtures.write(filename, fixtures.read(filename) .. "corrupt")
             local output = build()
             assert.matches("Titan link miss", output, 1, true)
             assert.matches("Titan object hit pair_main", output, 1, true)
             assert.equal(original.mjs, fixtures.read(mjs))
             assert.equal(original.wasm, fixtures.read(wasm))
+            assert.equal(original.map, fixtures.read(map))
         end
         for _, key in ipairs(keys) do
             local bytes = fixtures.read(assets[key])
@@ -282,7 +391,7 @@ end
             assert.matches("Titan link miss", output, 1, true)
             assert.matches("Titan object hit pair_main", output, 1, true)
         end
-        local predecessor = { mjs = fixtures.read(mjs), wasm = fixtures.read(wasm) }
+        local predecessor = { mjs = fixtures.read(mjs), wasm = fixtures.read(wasm), map = fixtures.read(map) }
         fixtures.write(fixture.source .. "/pair_main.titan",
             "function main(args: {string}): integer return 7 end\n")
         local log = fixture.root .. "/renames"
@@ -329,6 +438,7 @@ end
         assert.equal("backup\nwasm\nmjs-failed\nwasm\n", fixtures.read(log))
         assert.equal(predecessor.mjs, fixtures.read(mjs))
         assert.equal(predecessor.wasm, fixtures.read(wasm))
+        assert.equal(predecessor.map, fixtures.read(map))
         assert.is_nil(lfs.attributes(record), "failed pair cannot retain a link hit record")
         for name in lfs.dir(fixture.output) do
             assert.is_nil(name:find(".stage.tmp.", 1, true), name)

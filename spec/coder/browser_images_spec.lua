@@ -57,14 +57,14 @@ assert(driver.close_resolver_context(context))
     return output .. "/" .. name .. ".mjs"
 end
 
-local function native_trace(null_backend)
+local function native_trace()
     local prefix = require("spec.support.installed_prefix").active()
     local suffix = platform.windows and ".exe" or ""
     local script = string.format([[
 local driver = require "titan-compiler.driver"
 local context = driver.new_resolver_context({ target = %q })
 assert(driver.configure_foreign_c(context))
-local runtime, fixture, output, prefix, null_backend = %q, %q, %q, %q, %s
+local runtime, fixture, output, prefix = %q, %q, %q, %q
 local function append(argv, extra)
     for _, argument in ipairs(extra) do argv[#argv + 1] = argument end
     return argv
@@ -76,11 +76,9 @@ local function command(argv)
 end
 local compile = assert(driver.generated_compile_prefix(context))
 append(compile, { "-DTITAN_NO_LIBBACKTRACE", "-c", runtime, "-o", output .. ".runtime.o" })
-if null_backend then compile[#compile + 1] = "-DTITAN_TARGET_BROWSER" end
 command(compile)
 compile = assert(driver.authored_c_compile_prefix(context))
 append(compile, { "-c", fixture, "-o", output .. ".fixture.o" })
-if null_backend then compile[#compile + 1] = "-DFIXTURE_NULL" end
 command(compile)
 local link = assert(driver.authored_c_compile_prefix(context))
 append(link, { "-o", output, output .. ".fixture.o", output .. ".runtime.o" })
@@ -91,7 +89,7 @@ io.write(command({ output }).output)
 assert(driver.close_resolver_context(context))
 ]], files.host(), repository .. "/titan-runtime/titan.c",
         repository .. "/spec/fixtures/browser_images/native-trace.c",
-        workspace .. "/trace" .. suffix, prefix, tostring(null_backend))
+        workspace .. "/trace" .. suffix, prefix)
     local result = process.capture({ prefix .. "/bin/lua" .. suffix, "-E", "-e",
         string.format("package.path=%q..package.path;", repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script },
         { env = { TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_BUILD_PROFILE = "validation",
@@ -111,7 +109,7 @@ describe("browser image profile and SDK readiness", function()
         for key in pairs(assets) do keys[#keys + 1] = key end
         table.sort(keys)
         assert.same({ "js_library", "loader", "lpeglabel", "node_worker", "page", "provider",
-            "runner", "runner_module", "runtime", "sdk_digests" }, keys)
+            "runner", "runner_module", "runtime", "sdk_digests", "trace_library" }, keys)
     end)
 
     it("requires only readable runtime and JS assets, in bootstrap order", function()
@@ -122,7 +120,7 @@ describe("browser image profile and SDK readiness", function()
             stat = function(_, filename) return present[filename] and { kind = "file" } end,
             read_file = function(_, filename) return present[filename] and "bytes" end,
         } }
-        for _, key in ipairs({ "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+        for _, key in ipairs({ "runtime", "js_library", "trace_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
@@ -140,19 +138,21 @@ describe("browser image profile and SDK readiness", function()
         local profile = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
         assert.same({}, profile.compile_flags)
         assert.same({
+            "-O1", "-fno-inline", "-fno-optimize-sibling-calls", "-gsource-map", "-g2",
             "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
             "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
             "-sFORCE_FILESYSTEM=1",
-            '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_malloc","_free"]',
+            '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]',
             '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
             "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
+            "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
             "-sASSERTIONS=2", "-sSTACK_OVERFLOW_CHECK=2",
         }, profile.link_flags)
         assert.equal(descriptor.identity, profile.identity_inputs.target_identity)
-        assert.equal("-O2", profile.identity_inputs.optimization)
+        assert.equal("-O1", profile.identity_inputs.optimization)
     end)
 
     it("keeps internal gate, budget and baseline variants constrained", function()
@@ -202,7 +202,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({ "-Wl,--trace" }, policy.argv)
     end)
 
-    it("owns only the browser pair at final validation even on a Darwin host", function()
+    it("owns the browser artifact triple at final validation even on a Darwin host", function()
         local root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
         local previous = driver.IS_DARWIN
         local cleanup <close> = setmetatable({}, { __close = function()
@@ -215,13 +215,15 @@ describe("browser image profile and SDK readiness", function()
         local dsym, entrypoint = executable .. ".dSYM", root .. "/entrypoint.c"
         files.write(dsym, "unrelated user file")
         local ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
-            { dsym }, { wasm }, {}, context)
+            { dsym }, { wasm, wasm .. ".map" }, {}, context)
         assert.is_true(ok, why)
         assert.equal("unrelated user file", read(dsym))
-        ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
-            { wasm }, { wasm }, {}, context)
-        assert.is_nil(ok)
-        assert.truthy(why:find("aliases input", 1, true), why)
+        for _, input in ipairs({ wasm, wasm .. ".map" }) do
+            ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
+                { input }, { wasm, wasm .. ".map" }, {}, context)
+            assert.is_nil(ok)
+            assert.truthy(why:find("aliases input", 1, true), why)
+        end
         ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
             {}, { wasm }, {}, { target = "macos" })
         assert.is_nil(ok)
@@ -243,6 +245,12 @@ describe("browser image profile and SDK readiness", function()
             assert.is_nil(browserlink.validate_extras(flags))
         end
         assert.is_true(browserlink.validate_extras({ "-lm", "-sWASM_BIGINT=1" }))
+        for _, flag in ipairs({ "-O3", "-g0", "-finline-functions", "-foptimize-sibling-calls" }) do
+            assert.is_nil(browserlink.validate_extras({ flag }))
+        end
+        for _, purpose in ipairs({ "baseline", "minicoro", "budget" }) do
+            assert.is_true(browserlink.validate_extras({ "-g2", "-Os" }, { purpose = purpose }))
+        end
         assert.same({ "out/app.mjs", "out/app.wasm" }, { driver.browser_program_path("out/app") })
         local filename, err = driver.browser_program_path("unused", "out/app.js")
         assert.is_nil(filename)
@@ -398,6 +406,59 @@ static int titan_browser_worker(lua_State *L) {
         assert.is_nil(lfs.attributes(workspace .. "/out/image_main.wasm"))
     end)
 
+    it("preflights direct C-image maps against code inputs before writing the entrypoint", function()
+        local info, why = toolchain.require({ sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local map, entrypoint, executable = workspace .. "/app.wasm.map",
+            workspace .. "/app.c", workspace .. "/app.mjs"
+        files.write(map, "authored input bytes")
+        local script = string.format([[
+local driver = require "titan-compiler.driver"
+local context = driver.new_resolver_context({ target = "browser", output_root = %q })
+local ok, why = driver.compile_browser_image("unused entrypoint", %q, %q, { %q }, {}, {}, false,
+    { context = context, profile = { purpose = "protocol", assertions = 2 } })
+assert(not ok and why:find("aliases input", 1, true), tostring(why))
+assert(driver.close_resolver_context(context))
+]], workspace, entrypoint, executable, map)
+        local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
+            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+            info.prefix .. "/bin/lua", "-E", "-e",
+            string.format("package.path=%q..package.path;", repository .. "/?.lua;" ..
+                repository .. "/?/init.lua;") .. script })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.equal("authored input bytes", read(map))
+        assert.is_nil(lfs.attributes(entrypoint))
+        assert.is_nil(lfs.attributes(executable))
+    end)
+
+    it("resolves a UTF-8 function name from the extended map through the instantiated names table", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        for _, extension in ipairs({ "titan", "c", "h" }) do
+            local destination = extension == "titan" and "trace_names.titan" or "trace-names." .. extension
+            files.write(workspace .. "/src/" .. destination,
+                read(repository .. "/spec/fixtures/browser_images/trace-names." .. extension))
+        end
+        local result = cli(info, "--c-source", workspace .. "/src/trace-names.c", "trace_names")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        result = run({ info.node.path, "-e", [[
+const map = JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8'));
+const names = map.x_titan_function_names.filter(name => typeof name === 'string' && name.endsWith('_labelled_titan'));
+if (names.length !== 1) throw new Error('expected one final labelled function name');
+process.stdout.write(names[0]);
+]], workspace .. "/out/trace_names.wasm.map" })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        local symbol = result.output
+        assert.truthy(symbol:find("ℳ", 1, true), symbol)
+        assert.is_nil(symbol:find("\\u2133", 1, true))
+        for _, row in ipairs({ { symbol, 0 }, { symbol .. "_absent", 17 } }) do
+            result = run({ info.sdk_root .. "/titan-browser-run", "--engine", "node", "--grace", "0",
+                workspace .. "/out/trace_names.mjs", "--", row[1] })
+            assert.equal(row[2], result.status, result.output or result.diagnostic)
+        end
+    end)
+
     it("certifies optimization for FFI, generated workers and authored C together", function()
         local info, why = toolchain.require(); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
@@ -458,6 +519,11 @@ end
         local exports = {}
         for _, item in ipairs(inventory.exports) do exports[item.name] = true end
         assert.is_true(exports.titan_browser_entry)
+        assert.is_true(exports.titan_browser_trace_identity)
+        local map = read(workspace .. "/out/image_case.wasm.map")
+        assert.truthy(map:find('"x_titan_image":"', 1, true))
+        assert.truthy(map:find('"x_titan_function_ranges":[[', 1, true))
+        assert.truthy(map:find('"x_titan_function_names":[', 1, true))
         assert.is_true(exports.malloc)
         assert.is_true(exports.free)
         assert.is_nil(exports.titan_browser_gate_guarded)
@@ -476,13 +542,8 @@ describe("native trace backend invariance", function()
 
     it("keeps direct fallback capture depth, frame order and the 255-frame truncation boundary", function()
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
-        local output = native_trace(false)
+        local output = native_trace()
         assert.match("fallback shallow=%d+ deep=255 long%-trace=%d+", output)
     end)
 
-    it("runs the focused native null backend with Lua frames and one-shot trace pinning", function()
-        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
-        local output = native_trace(true)
-        assert.match("null shallow=0 deep=0 long%-trace=%d+", output)
-    end)
 end)

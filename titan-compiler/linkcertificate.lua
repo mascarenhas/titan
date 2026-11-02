@@ -693,6 +693,29 @@ compiler_libraries = function(context, request)
     return files
 end
 
+-- Browser trace identity needs user-selected archives before the synthetic entry
+-- is compiled. Reuse the existing resolver and its diagnostics; other trailing
+-- options remain in the full ordered identity recipe, not a second flag parser.
+function certificate.browser_trace_libraries(context, compiler_argv, flags)
+    local argv, filtered = link_arguments(flags), {}
+    local index = 1
+    while index <= #argv do
+        local flag = argv[index]
+        if flag == "-L" or flag == "-l" then
+            filtered[#filtered + 1] = flag
+            index = index + 1
+            filtered[#filtered + 1] = argv[index]
+        elseif flag:sub(1, 2) == "-L" or flag:sub(1, 2) == "-l" then
+            filtered[#filtered + 1] = flag
+        end
+        index = index + 1
+    end
+    if #filtered == 0 then return {} end
+    return compiler_libraries(context, {
+        compiler_argv = compiler_argv, argv = filtered, static = true,
+    })
+end
+
 -- The supported-linker policy records successful read inputs. It deliberately
 -- does not rewalk earlier -L candidates on hits. Linkers without dependency
 -- output use the compiler's resolved library paths instead.

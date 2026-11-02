@@ -621,6 +621,11 @@ function register_trace_name(tlcontext, symbol, qualname)
     table.insert(tlcontext.names, { symbol, qualname })
 end
 
+-- Record actual Lua C entries at their emission sites, never inferred exports.
+function register_trace_entry(tlcontext, symbol)
+    if tlcontext.browser_trace then tlcontext.trace_entries[symbol] = true end
+end
+
 -- The qualified Titan name of an anonymous function, formatted at codegen from
 -- its DEFINITION location (the lambda's `loc`). The trace's leading
 -- `<file>:<current-line>` already shows the execution point; this names it.

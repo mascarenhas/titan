@@ -159,6 +159,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.same({
             runtime = expected_bin .. "/libtitan.a",
             js_library = expected_bin .. "/titan-browser-library.js",
+            trace_library = expected_bin .. "/titan-browser-trace.js",
             loader = expected_bin .. "/titan-browser.mjs",
             runner = expected_bin .. "/titan-browser-run",
             runner_module = expected_bin .. "/titan-browser-run.mjs",
@@ -187,7 +188,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             end,
         }
         local required_order = {
-            "runtime", "js_library", "loader", "runner",
+            "runtime", "js_library", "trace_library", "loader", "runner",
             "runner_module", "node_worker", "page",
         }
         for _, key in ipairs(required_order) do
@@ -242,6 +243,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             paths.join(browser_paths.include, "titan/ffi.h"),
             assets.runtime,
             assets.js_library,
+            assets.trace_library,
             assets.loader,
             assets.runner,
             assets.runner_module,
@@ -707,7 +709,7 @@ end
             expected_digest_files[#expected_digest_files + 1] = paths.join(browser_paths.include, rel)
         end
         for _, key in ipairs({
-            "runtime", "js_library", "loader", "runner",
+            "runtime", "js_library", "trace_library", "loader", "runner",
             "runner_module", "node_worker", "page", "lpeglabel", "provider",
         }) do
             expected_digest_files[#expected_digest_files + 1] = assets[key]
