@@ -1,0 +1,7 @@
+local function selected_leaf()
+  raise "default contributor selected instead of browser contributor"
+end
+
+local function selected_outer()
+  selected_leaf()
+end

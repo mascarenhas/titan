@@ -1,0 +1,18 @@
+foreign import "stdio.h"
+
+local function uncaught_leaf()
+  raise "trace-uncaught-original"
+end
+
+local function uncaught_middle()
+  uncaught_leaf()
+end
+
+function main(_args: {string}): integer
+  defer do
+    ffi.fputs("TRACE uncaught cleanup=1\n", ffi.stderr)
+    ffi.fflush(ffi.stderr)
+  end
+  uncaught_middle()
+  return 0
+end
