@@ -63,7 +63,8 @@ describe("browser real runtime entry gate", function()
             build(info, assertions, "entry_gate", "gate", true)
             build(info, assertions, "final_fiber", "final-fiber", false)
             receipt(info.sdk_root .. "/sdk-digests", "sdk-digests")
-            for _, name in ipairs({ "gate.mjs", "gate.wasm", "final-fiber.mjs", "final-fiber.wasm" }) do
+            for _, name in ipairs({ "gate.mjs", "gate.wasm", "gate.wasm.map",
+                    "final-fiber.mjs", "final-fiber.wasm", "final-fiber.wasm.map" }) do
                 receipt(workspace .. "/assertions-" .. assertions .. "/" .. name, name)
             end
             for _, name in ipairs({ "entry_gate.titan", "final_fiber.titan", "gate.c", "gate.h", "entry-gate.mjs" }) do

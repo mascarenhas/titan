@@ -1267,6 +1267,160 @@ local function check_wasm_payload_segment(segment, origin)
     end
 end
 
+-- Final linked images have neither linking metadata nor relocations. Keep the
+-- trace walk on the same bounded Reader/LEB primitives as object metadata.
+function staticmetadata.browser_trace_image(bytes, origin)
+    origin = origin or "browser Wasm image"
+    return guarded(function()
+        local reader = Reader.new(bytes, origin)
+        if reader.length > 0xffffffff then fail(origin, "final Wasm image exceeds u32 offsets") end
+        if reader:slice(0, 8, "Wasm header") ~= "\0asm\1\0\0\0" then
+            fail(origin, "invalid final Wasm header")
+        end
+        local result = { imports = {}, exports = {}, function_imports = 0,
+            function_ranges = {}, function_names = {} }
+        local seen, last_order, function_count, code_count = {}, 0, 0, 0
+        local names_seen, named = false, {}
+        local function text(pos, limit)
+            local value, next_pos = wasm_name(reader, pos, limit, origin,
+                "Wasm name is outside its section")
+            if not utf8.len(value) then fail(origin, "invalid UTF-8 Wasm name") end
+            return value, next_pos
+        end
+        local function limits(pos, limit)
+            local flags, next_pos = wasm_u32_leb(reader, pos, limit, origin)
+            if flags > 1 then fail(origin, "unsupported final Wasm limits") end
+            local ignored
+            ignored, next_pos = wasm_u32_leb(reader, next_pos, limit, origin)
+            if flags == 1 then
+                ignored, next_pos = wasm_u32_leb(reader, next_pos, limit, origin)
+            end
+            return next_pos
+        end
+        local offset = 8
+        while offset < reader.length do
+            local id = byte(bytes, offset + 1)
+            local size, pos = wasm_u32_leb(reader, offset + 1, reader.length, origin)
+            reader:range(pos, size, "final Wasm section")
+            local finish = pos + size
+            if id ~= 0 then
+                local order = WASM_SECTION_ORDER[id]
+                if not order then fail(origin, "unsupported final Wasm section " .. id) end
+                if seen[id] then fail(origin, "duplicate final Wasm section " .. id) end
+                if order < last_order then fail(origin, "out-of-order final Wasm section " .. id) end
+                seen[id], last_order = true, order
+            end
+            local relevant = id == 2 or id == 3 or id == 7 or id == 10
+            if id == 0 then
+                local name
+                name, pos = text(pos, finish)
+                if name == "name" then
+                    if names_seen then fail(origin, "duplicate Wasm name section") end
+                    names_seen = true
+                    local function_names_seen = false
+                    while pos < finish do
+                        local subsection = reader:uint(pos, 1, "little", "Wasm name subsection")
+                        local length
+                        length, pos = wasm_u32_leb(reader, pos + 1, finish, origin)
+                        if length > finish - pos then fail(origin, "Wasm name subsection is outside its section") end
+                        local stop = pos + length
+                        if subsection == 1 then
+                            if function_names_seen then fail(origin, "duplicate Wasm function name subsection") end
+                            function_names_seen = true
+                            local count
+                            count, pos = wasm_u32_leb(reader, pos, stop, origin)
+                            if count > stop - pos then fail(origin, "invalid Wasm function name count") end
+                            for _ = 1, count do
+                                local index, value
+                                index, pos = wasm_u32_leb(reader, pos, stop, origin)
+                                value, pos = text(pos, stop)
+                                if named[index] ~= nil then fail(origin, "duplicate Wasm function name index") end
+                                named[index] = value
+                            end
+                            if pos ~= stop then fail(origin, "trailing Wasm function name bytes") end
+                        end
+                        pos = stop
+                    end
+                end
+            elseif relevant then
+                local count
+                count, pos = wasm_u32_leb(reader, pos, finish, origin)
+                if count > finish - pos then fail(origin, "invalid final Wasm section count") end
+                if id == 2 then
+                    for _ = 1, count do
+                        local module, name
+                        module, pos = text(pos, finish)
+                        name, pos = text(pos, finish)
+                        if pos >= finish then fail(origin, "truncated Wasm import kind") end
+                        local kind = byte(bytes, pos + 1)
+                        pos = pos + 1
+                        result.imports[#result.imports + 1] = { module = module, name = name, kind = kind }
+                        if kind == 0 then
+                            local ignored
+                            ignored, pos = wasm_u32_leb(reader, pos, finish, origin)
+                            result.function_imports = result.function_imports + 1
+                        elseif kind == 1 or kind == 3 or kind == 4 then
+                            if pos >= finish then fail(origin, "truncated Wasm import type") end
+                            pos = pos + 1
+                            if kind == 1 then pos = limits(pos, finish)
+                            elseif kind == 3 then
+                                if pos >= finish or byte(bytes, pos + 1) > 1 then
+                                    fail(origin, "invalid Wasm global mutability")
+                                end
+                                pos = pos + 1
+                            else
+                                local ignored
+                                ignored, pos = wasm_u32_leb(reader, pos, finish, origin)
+                            end
+                        elseif kind == 2 then pos = limits(pos, finish)
+                        else fail(origin, "invalid Wasm import kind") end
+                    end
+                elseif id == 3 then
+                    function_count = count
+                    for _ = 1, count do
+                        local ignored
+                        ignored, pos = wasm_u32_leb(reader, pos, finish, origin)
+                    end
+                elseif id == 7 then
+                    local exports = {}
+                    for _ = 1, count do
+                        local name, index
+                        name, pos = text(pos, finish)
+                        if exports[name] then fail(origin, "duplicate Wasm export name") end
+                        exports[name] = true
+                        if pos >= finish then fail(origin, "truncated Wasm export kind") end
+                        local kind = byte(bytes, pos + 1)
+                        if kind > 4 then fail(origin, "invalid Wasm export kind") end
+                        index, pos = wasm_u32_leb(reader, pos + 1, finish, origin)
+                        result.exports[#result.exports + 1] = { name = name, kind = kind, index = index }
+                    end
+                else
+                    code_count = count
+                    for index = 1, count do
+                        local length
+                        length, pos = wasm_u32_leb(reader, pos, finish, origin)
+                        if length == 0 or length > finish - pos then
+                            fail(origin, "invalid final Wasm function body range")
+                        end
+                        result.function_ranges[index] = { pos, pos + length }
+                        pos = pos + length
+                    end
+                end
+                if pos ~= finish then fail(origin, "trailing final Wasm section bytes") end
+            end
+            offset = finish
+        end
+        if function_count ~= code_count then fail(origin, "Wasm function/code counts disagree") end
+        local total = result.function_imports + code_count
+        for index, name in pairs(named) do
+            if index >= total then fail(origin, "Wasm function name index is out of range") end
+            result.function_names[index + 1] = name
+        end
+        result.function_count = total
+        return result
+    end)
+end
+
 local function parse_wasm(bytes, origin, target, options)
     local reader = Reader.new(bytes, origin)
     reader:range(0, 8, "Wasm header")

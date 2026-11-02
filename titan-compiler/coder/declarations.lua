@@ -10,6 +10,7 @@ local _ENV = core
 function genluaentry(tlcontext, titan_name, titan_entry, typ, loc,
                      lua_name, options)
     options = options or {}
+    register_trace_entry(tlcontext, lua_name)
     local strict = options.strict == true
     local hidden = strict and 1 or 0
     local dynamic_plans = options.dynamic_plans
@@ -1092,7 +1093,7 @@ function coder._foreign_raw_stat(ctx, node)
         -- the nested until region, which may be bypassed by a body break.
         return require("titan-compiler.coverage_lines").region(code, "generated")
     end
-    return coverage_region(node, code, ctx)
+    return emitline(node) .. coverage_region(node, code, ctx)
 end
 
 function coder._foreign_function_signature(node, name)
@@ -1435,6 +1436,7 @@ function codemethodtrampoline(tlcontext, node)
     local nativename = bound_method_name(mtype)
     local luaname = bound_method_luaname(mtype)
     local strictname = coder._bound_method_strictname(mtype)
+    register_trace_entry(tlcontext, luaname)
     local mnative = method_name(mtype)
     local mlua = method_luaname(mtype)
     -- The bound trampoline forwards to the method; if its own native frame ever

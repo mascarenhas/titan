@@ -669,6 +669,9 @@ end
 -- Browser state is context-owned. Native process globals remain a host profile.
 function driver._finish_target_initialization(context)
     if context.target == "browser" then
+        if driver.EMIT_LINE_DIRECTIVES == false then
+            return nil, "browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)"
+        end
         -- Embedded inventories describe native host code and native C facts.
         -- Drop the complete state at the target boundary, before any browser
         -- descriptor/probe or resolver consumer can observe it.
@@ -721,6 +724,10 @@ function driver._finish_target_initialization(context)
             local descriptor, err = driver._browser_target.build(context, {
                 paths = paths, runtime_include = runtime_include, compile_flags = extras,
                 build_profile = driver.BUILD_PROFILE,
+                trace_control = driver.browser_link_options and
+                    (driver.browser_link_options.purpose == "baseline" or
+                     driver.browser_link_options.purpose == "minicoro" or
+                     driver.browser_link_options.purpose == "budget"),
                 probe_cache_directory = probe_cache_directory,
             })
             if not descriptor then return nil, err end
@@ -8809,6 +8816,7 @@ local function prepare_compile(
     local generated = coder.generate(
         modname, ast, static_deps, driver.TITAN_ABI_VERSION,
         driver.EMIT_LINE_DIRECTIVES, {
+            target = context and context.target,
             nominal_layouts = imported_layouts,
             coverage = options and options.coverage == true,
             coverage_backend = options and options.coverage_backend,
@@ -13414,7 +13422,7 @@ function driver.run_standalone_archive_probe(
         local source, image = base .. ".c", base .. ".mjs"
         local cleanup <close> = setmetatable({}, { __close = function()
             os.remove(source); os.remove(base .. ".o")
-            os.remove(image); os.remove(base .. ".wasm")
+            os.remove(image); os.remove(base .. ".wasm"); os.remove(base .. ".wasm.map")
         end })
         local linked, term, code = driver.compile_browser_image(
             standalone_archive_probe_source(entries, module_names, true),
@@ -13636,8 +13644,8 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     return true
 end
 
--- Browser images publish two files under their final basenames. The mjs
--- rename commits the pair; a failed commit restores the previous Wasm.
+-- Publish the extended map and Wasm before the mjs commit rename. Every
+-- predecessor survives a rename or certificate failure.
 function driver.compile_browser_image(contents, entrypoint, executable,
         objects, archives, extra_objects, verbose, options)
     options = options or {}
@@ -13652,8 +13660,20 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     end
     if not plan then return nil, err end
     local valid
-    valid, err = driver.browserlink.validate_extras(driver.link_extra_flags())
+    valid, err = driver.browserlink.validate_extras(driver.link_extra_flags(),
+        options.profile or driver.browser_link_options)
     if not valid then return nil, err end
+    valid, err = driver.browserlink.validate_extras(options.final_link_flags,
+        options.profile or driver.browser_link_options)
+    if not valid then return nil, err end
+    local library_flags = driver.link_extra_flags()
+    append_argv(library_flags, options.final_link_flags)
+    local libraries
+    libraries, err = require("titan-compiler.linkcertificate").browser_trace_libraries(
+        context, context.target_descriptor.tools.cc, library_flags)
+    -- emcc also understands system/JS libraries the static resolver cannot
+    -- inventory. Keep their flags in the identity; the CLI withholds reuse.
+    libraries = libraries or {}
     local runtime
     runtime, err = parsed_archive_input(assets.runtime, context.target_descriptor.fingerprint)
     if not runtime then return nil, err end
@@ -13662,17 +13682,44 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local wasm
     executable, wasm = driver.browser_program_path(executable, executable)
     if not executable then return nil, wasm end
+    local inputs = { assets.runtime, context.target_descriptor.paths.liblua,
+        context.target_descriptor.paths.lua_record, assets.js_library, assets.trace_library }
+    append_argv(inputs, objects)
+    append_argv(inputs, archives)
+    append_argv(inputs, extra_objects)
+    append_argv(inputs, libraries)
+    valid, err = driver.validate_program_output_paths({}, executable, entrypoint,
+        inputs, { wasm, wasm .. ".map" }, {}, context)
+    if not valid then return nil, err end
     valid, err = ensure_output_parent(executable)
     if not valid then return nil, err end
     valid, err = ensure_output_parent(entrypoint)
     if not valid then return nil, err end
-    valid, err = util.set_file_contents(entrypoint, contents)
-    if not valid then return nil, err end
+    local browsertrace = require "titan-compiler.browsertrace"
     local object = entrypoint:gsub("[.]c$", ".o")
     local compile
     compile, err = driver.generated_compile_prefix(context)
     if not compile then return nil, err end
     append_argv(compile, plan.compile_flags)
+    local identity_flags
+    identity_flags, err = compiler_argv(false, context)
+    if not identity_flags then return nil, err end
+    append_argv(identity_flags, plan.link_flags)
+    append_argv(identity_flags, { "-Wl,--start-group", assets.runtime })
+    append_argv(identity_flags, archives)
+    append_argv(identity_flags, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
+    append_argv(identity_flags, driver.link_extra_flags())
+    append_argv(identity_flags, options.final_link_flags)
+    local called, identity = pcall(browsertrace.identity, context, contents, compile, identity_flags,
+        { objects or {}, archives or {}, extra_objects or {}, libraries,
+          { assets.runtime, context.target_descriptor.paths.liblua,
+            context.target_descriptor.paths.lua_record, assets.js_library, assets.trace_library } })
+    if not called then
+        if type(identity) ~= "string" then error(identity, 0) end
+        return nil, identity
+    end
+    valid, err = util.set_file_contents(entrypoint, contents .. browsertrace.declaration(identity))
+    if not valid then return nil, err end
     append_argv(compile, { "-c", entrypoint, "-o", object })
     local compiled, term, code = run_argv(compile, verbose)
     if not compiled then return nil, term, code end
@@ -13680,6 +13727,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     if not staged then return nil, directory end
     local cleanup <close> = setmetatable({}, { __close = function() remove_path(directory) end })
     local staged_wasm = staged:gsub("[.]mjs$", ".wasm")
+    local staged_map, map = staged_wasm .. ".map", wasm .. ".map"
     local command
     command, err = compiler_argv(false, context)
     if not command then return nil, err end
@@ -13705,7 +13753,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         linked, term, code = driver.run_link_command(command, verbose, staged)
         if not linked then return nil, term, code end
     end
-    for _, filename in ipairs({ staged, staged_wasm }) do
+    for _, filename in ipairs({ staged, staged_wasm, staged_map }) do
         if lfs.symlinkattributes(filename, "mode") ~= "file" then
             return nil, "staged browser image '" .. filename .. "' is not a regular file"
         end
@@ -13716,57 +13764,57 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local inventory
     inventory, err = driver.browserlink.image_inventory(image_bytes)
     if not inventory then return nil, err end
+    local map_bytes
+    map_bytes, err = context.io:read_file(staged_map)
+    if not map_bytes then return nil, err end
+    map_bytes, err = browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)
+    if not map_bytes then return nil, err end
+    valid, err = context.io:write_file(staged_map, map_bytes)
+    if not valid then return nil, err end
     if options.before_commit then
         valid, err = options.before_commit()
         if not valid then return nil, err end
     end
-    local mjs_backup, mjs_backed, mjs_published
-    if options.after_publish then
-        local mode = lfs.symlinkattributes(executable, "mode")
-        if mode then
-            if mode ~= "file" then return nil, "browser module output '" .. executable .. "' is not a regular file" end
-            mjs_backup, err = driver.sibling_temporary_path(executable .. ".old")
-            if not mjs_backup then return nil, err end
-        end
-    end
-    local backup
-    local previous = lfs.symlinkattributes(wasm, "mode")
-    if previous then
-        if previous ~= "file" then return nil, "browser Wasm output '" .. wasm .. "' is not a regular file" end
-        backup, err = driver.sibling_temporary_path(wasm .. ".old")
-        if not backup then return nil, err end
-        valid, err = rename_output(wasm, backup)
-        if not valid then return nil, err end
-    end
+    local outputs = {
+        { source = staged_map, destination = map },
+        { source = staged_wasm, destination = wasm },
+        { source = staged, destination = executable },
+    }
     local function rollback(reason)
-        if mjs_published then remove_path(executable) end
-        if mjs_backed then
-            local restored, restore_error = rename_output(mjs_backup, executable)
-            if not restored then
-                reason = tostring(reason) .. "\ncannot restore browser module: " .. tostring(restore_error) ..
-                    "; predecessor retained at " .. mjs_backup
-            end
-        end
-        remove_path(wasm)
-        if backup then
-            local restored, restore_error = rename_output(backup, wasm)
-            if not restored then
-                reason = tostring(reason) .. "\ncannot restore Wasm: " .. tostring(restore_error) ..
-                    "; predecessor retained at " .. backup
+        for index = #outputs, 1, -1 do
+            local output = outputs[index]
+            if output.published then remove_path(output.destination) end
+            if output.backed then
+                local restored, restore_error = rename_output(output.backup, output.destination)
+                if not restored then
+                    reason = tostring(reason) .. "\ncannot restore browser artifact: " ..
+                        tostring(restore_error) .. "; predecessor retained at " .. output.backup
+                end
             end
         end
         return nil, reason
     end
-    valid, err = rename_output(staged_wasm, wasm)
-    if not valid then return rollback(err) end
-    if mjs_backup then
-        valid, err = rename_output(executable, mjs_backup)
-        if not valid then return rollback(err) end
-        mjs_backed = true
+    -- Reserve and validate all backup locations before touching any predecessor.
+    for _, output in ipairs(outputs) do
+        local mode = lfs.symlinkattributes(output.destination, "mode")
+        if mode then
+            if mode ~= "file" then
+                return nil, "browser output '" .. output.destination .. "' is not a regular file"
+            end
+            output.backup, err = driver.sibling_temporary_path(output.destination .. ".old")
+            if not output.backup then return nil, err end
+        end
     end
-    valid, err = rename_output(staged, executable)
-    if not valid then return rollback(err) end
-    mjs_published = true
+    for _, output in ipairs(outputs) do
+        if output.backup then
+            valid, err = rename_output(output.destination, output.backup)
+            if not valid then return rollback(err) end
+            output.backed = true
+        end
+        valid, err = rename_output(output.source, output.destination)
+        if not valid then return rollback(err) end
+        output.published = true
+    end
     if options.after_publish then
         local called, committed, commit_error = pcall(options.after_publish)
         if not called then
@@ -13776,13 +13824,11 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         end
         if not committed then return rollback(commit_error) end
     end
-    if mjs_backed then
-        valid, err = remove_path(mjs_backup)
-        if not valid then return nil, err end
-    end
-    if backup then
-        valid, err = remove_path(backup)
-        if not valid then return nil, err end
+    for _, output in ipairs(outputs) do
+        if output.backed then
+            valid, err = remove_path(output.backup)
+            if not valid then return nil, err end
+        end
     end
     return true
 end

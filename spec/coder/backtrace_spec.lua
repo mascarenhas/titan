@@ -75,6 +75,39 @@ describe("libbacktrace unified stack trace", function()
         assert.match("OK", out)
     end)
 
+    it("shows ordinary qualified names for public and local foreign Titan bodies", function()
+        local out = compile_and_run([[
+            foreign import "lauxlib.h"
+            foreign function public_failure(state: *lua_State): int
+                return ffi.luaL_error(state, "public foreign body")
+            end
+            local foreign function private_failure(state: *lua_State): int
+                return ffi.luaL_error(state, "private foreign body")
+            end
+            function public_case()
+                public_failure(L)
+            end
+            function private_case()
+                private_failure(L)
+            end
+        ]], [==[
+            local titan = require "titan"
+            for _, row in ipairs({
+                {test.public_case, "public", "test.public_failure"},
+                {test.private_case, "private", "test.private_failure"},
+            }) do
+                local ok, err = pcall(row[1])
+                assert(not ok and err:find(row[2] .. " foreign body", 1, true))
+                local trace = titan.backtrace()
+                assert(trace:find("in " .. row[3], 1, true), trace)
+                assert(not trace:find("_titan", 1, true), trace)
+                assert(not trace:find("titanentry", 1, true), trace)
+            end
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("attributes native frames to the .titan source via #line", function()
         -- With `#line`, the native frames symbolize to the ORIGINAL .titan file
         -- and line carried in the .so's DWARF, NOT the generated .c. The raise

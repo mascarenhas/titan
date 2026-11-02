@@ -847,6 +847,7 @@ function coder._code_interface_method_artifacts(
     local nativename = coder._interface_bound_method_name(method)
     local bound_luaname = coder._interface_bound_method_luaname(method)
     local strictname = coder._interface_bound_method_strictname(method)
+    register_trace_entry(tlcontext, bound_luaname)
     local payload_name = "_titan_interface_payload"
     local rettype = method.rettypes[1]
 

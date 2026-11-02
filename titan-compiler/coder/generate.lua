@@ -164,6 +164,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     coder._assert_erased_boundary(ast)
     local tlcontext = {
         module = modname,
+        browser_trace = options.target == "browser",
+        trace_entries = {},
         prefix = mangle_qn(modname) .. "_",
         static_deps = static_deps,
         external_slots = {},
@@ -416,6 +418,13 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelForeignFunc" then
+                local display = tlcontext.module .. "." .. node.name
+                register_trace_name(tlcontext,
+                    coder._foreign_func_name(modname, node.name), display)
+                if node.islocal then
+                    register_trace_name(tlcontext,
+                        coder._foreign_inline_name(modname, node.name), display)
+                end
                 if not ast._foreign_header_output then
                     table.insert(sigs,
                         (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
@@ -1013,10 +1022,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     if #tlcontext.names > 0 then
         local setnames = {}
         for _, pair in ipairs(tlcontext.names) do
-            table.insert(setnames, render([[
+            local statement = tlcontext.browser_trace and [[
+                lua_pushliteral(L, $SYM);
+                lua_pushliteral(L, $QUAL);
+                lua_rawset(L, -3);
+            ]] or [[
                 lua_pushliteral(L, $QUAL);
                 lua_setfield(L, -2, $SYM);
-            ]], {
+            ]]
+            table.insert(setnames, render(statement, {
                 SYM = c_string_literal(
                     coder._linkage_symbol_name(pair[1])),
                 QUAL = c_string_literal(pair[2]),
@@ -1036,6 +1050,48 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             NAMESKEY = "TITAN_NAMES_KEY",
             SETNAMES = table.concat(setnames, "\n"),
         })
+        if tlcontext.browser_trace then
+            initnames = render([[
+                lua_pushliteral(L, TITAN_NAMES_KEY);
+                lua_rawget(L, LUA_REGISTRYINDEX);
+                if(lua_isnil(L, -1)) {
+                    lua_pop(L, 1);
+                    lua_newtable(L);
+                    lua_pushliteral(L, TITAN_NAMES_KEY);
+                    lua_pushvalue(L, -2);
+                    lua_rawset(L, LUA_REGISTRYINDEX);
+                }
+                $SETNAMES
+                lua_pop(L, 1);
+            ]], { SETNAMES = table.concat(setnames, "\n") })
+        end
+    end
+    local earlytrace = ""
+    if tlcontext.browser_trace then
+        local symbols, entries = {}, {}
+        for symbol in pairs(tlcontext.trace_entries) do symbols[#symbols + 1] = symbol end
+        table.sort(symbols, util.bytewise_less)
+        for _, symbol in ipairs(symbols) do
+            entries[#entries + 1] = render([[
+                lua_pushcfunction(L, $SYMBOL);
+                lua_pushboolean(L, 1);
+                lua_rawset(L, -3);
+            ]], { SYMBOL = symbol })
+        end
+        earlytrace = render([[
+            lua_pushliteral(L, TITAN_ENTRIES_KEY);
+            lua_rawget(L, LUA_REGISTRYINDEX);
+            if(lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                lua_newtable(L);
+                lua_pushliteral(L, TITAN_ENTRIES_KEY);
+                lua_pushvalue(L, -2);
+                lua_rawset(L, LUA_REGISTRYINDEX);
+            }
+            $ENTRIES
+            lua_pop(L, 1);
+        ]], { ENTRIES = table.concat(entries, "\n") }) .. "\n" .. initnames
+        initnames = ""
     end
 
     -- Error recovery reads these constants without interning. Root each one in
@@ -1073,7 +1129,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         PRELOADNAME = preload_name,
         PRELOADMODNAME = c_string_literal(modname),
-        INITRECOVERYSTRINGS = table.concat(initrecoverystrings, "\n"),
+        INITRECOVERYSTRINGS = earlytrace ~= "" and
+            earlytrace .. "\n" .. table.concat(initrecoverystrings, "\n") or
+            table.concat(initrecoverystrings, "\n"),
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
         LOADGLOBALS = table.concat(loadglobals, "\n"),

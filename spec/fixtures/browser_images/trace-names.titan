@@ -1,0 +1,11 @@
+foreign import "trace-names.h"
+
+function labelled(): integer
+    return 1
+end
+
+function main(args: {string}): integer
+    if #args ~= 1 then return 18 end
+    labelled()
+    return ffi.trace_names_resolves(L, args[1], "trace_names.labelled")
+end

@@ -523,7 +523,7 @@ describe("browser target descriptor", function()
 
     it("names user flags in a probed feature mismatch without blaming the record", function()
         local context, inputs = fake_context()
-        inputs.compile_flags = { "-O1", "-msimd128" }
+        inputs.compile_flags = { "-DUSER_FEATURE=1", "-msimd128" }
         staticmetadata.classify_object = function()
             local fingerprint = fixtures.fingerprint()
             fingerprint.features = fingerprint.features .. " +simd128"
@@ -533,7 +533,7 @@ describe("browser target descriptor", function()
         assert.is_nil(descriptor)
         contains(err, "browser target compiler probe")
         contains(err, "+simd128")
-        contains(err, 'user compile flags: "-O1" "-msimd128"')
+        contains(err, 'user compile flags: "-DUSER_FEATURE=1" "-msimd128"')
         contains(err, "remove feature-changing flags")
         contains(err, "TITAN_EXTRA_CPPFLAGS/TITAN_EXTRA_CFLAGS/--cflag")
         assert.is_nil(err:find("browser Lua record", 1, true))
