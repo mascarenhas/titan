@@ -31,7 +31,7 @@ $SIGS
 -- opener under any name in the requesting state. Direct internal calls pass
 -- no loader data at all.
 postamble = [[
-int $LUAOPEN_NAME(lua_State *L) {
+${DEFLINE}int $LUAOPEN_NAME(lua_State *L) {
     int _file_load = lua_type(L, 2) == LUA_TSTRING;
     if (_file_load) {
         size_t _data_len;
@@ -56,13 +56,13 @@ int $LUAOPEN_NAME(lua_State *L) {
 ]]
 
 modabi = [[
-int $ABINAME(lua_State* L) {
+${DEFLINE}int $ABINAME(lua_State* L) {
     lua_pushliteral(L, TITAN_ABI_VERSION);
     return 1;
 }
 
 /* Native bootstrap query: callable before a Lua state or module exists. */
-const char *${ABINAME}_value(void) {
+${DEFLINE}const char *${ABINAME}_value(void) {
     return TITAN_ABI_VERSION;
 }
 ]]
@@ -72,11 +72,11 @@ int $LUAOPEN_NAME(lua_State *L);
 
 TITAN_MODULE_PRIVATE void $PRELOADNAME(lua_State *L);
 
-TITAN_MODULE_PRIVATE void $PRELOADNAME(lua_State *L) {
+${DEFLINE}TITAN_MODULE_PRIVATE void $PRELOADNAME(lua_State *L) {
     titan_module_preload(L, $PRELOADMODNAME, sizeof($PRELOADMODNAME) - 1,
         $LUAOPEN_NAME, $NATIVERESOLVER);
 }
-Udata *$INITNAME(lua_State *L) {
+${DEFLINE}Udata *$INITNAME(lua_State *L) {
     titan_ensure_stack(L, 10);
     lua_getfield(L, LUA_REGISTRYINDEX, $MODNAMESTR);
     if(lua_isnil(L, -1)) {
@@ -120,7 +120,7 @@ Udata *$INITNAME(lua_State *L) {
 ]]
 
 modtypes = [[
-int $TYPESNAME(lua_State* L) {
+${DEFLINE}int $TYPESNAME(lua_State* L) {
     lua_pushliteral(L, $TYPES);
     return 1;
 }
@@ -451,7 +451,7 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
             table.insert(sigs, render([[
                 TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write);
             ]], { ACCESSOR = accessor }))
-            table.insert(code, render([[
+            table.insert(code, definitionline(tlcontext, node.loc) .. render([[
                 TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write) {
                     (void)_mod; /* scalar fields need no cached identities */
                     if (write) {
@@ -496,7 +496,7 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
         NEWINDEXNAME = newindexname,
     }))
     table.insert(code, render([[
-            TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
+            ${DEFLINE}TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -525,7 +525,7 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
                     return luaL_error(L, "%s:%d:%d: field '%s' not found in record '%s'", $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
                 }
             }
-            TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
+            ${DEFLINE}TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
                 TValue *_recslot = s2v(L->ci->func.p + 1);
                 CClosure *_func = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -549,6 +549,7 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
                 }
             }
         ]], {
+            DEFLINE = definitionline(tlcontext, node.loc),
             INDEXNAME = coder._nominal_metamethod_name(
                 node._type.name, "index"),
             NEWINDEXNAME = coder._nominal_metamethod_name(
@@ -678,7 +679,7 @@ function coder._codeuniondec(ctx, sigs, code, initnominals, node)
         TITAN_MODULE_PRIVATE void $READER(lua_State *L, Udata *_union, lua_Integer part,
                                           TValue *tv);
     ]], { READER = payload_reader }))
-    table.insert(code, render([[
+    table.insert(code, definitionline(ctx, node.loc) .. render([[
         TITAN_MODULE_PRIVATE void $READER(lua_State *L, Udata *_union, lua_Integer part,
                                           TValue *tv) {
             switch ($TAG) {
@@ -729,7 +730,7 @@ function coder._codeuniondec(ctx, sigs, code, initnominals, node)
         NEWINDEXNAME = newindexname,
     }))
     table.insert(code, render([[
-        TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
             TValue *_unionslot = s2v(L->ci->func.p + 1);
             CClosure *_func = clCvalue(s2v(L->ci->func.p));
             Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -751,12 +752,13 @@ function coder._codeuniondec(ctx, sigs, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
 
-        TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
             return luaL_error(L,
                 "%s:%d:%d: cannot assign member '%s' in union '%s'",
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
     ]], {
+        DEFLINE = definitionline(ctx, node.loc),
         INDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(
@@ -938,7 +940,7 @@ function coder._code_interface_method_artifacts(
         STRICT_NAME = strictname,
     }))
     table.insert(code, render([[
-        $NATIVE_SIG {
+        ${DEFLINE}$NATIVE_SIG {
             (void)_mod; /* Interface owner; payload receives concrete owner. */
             if (TITAN_UNLIKELY(_fn == NULL || _fn->nupvalues < 6)) {
                 luaL_error(L, "invalid bound Interface method closure");
@@ -969,7 +971,7 @@ function coder._code_interface_method_artifacts(
             $NATIVE_CALL
         }
 
-        int $BOUND_LUA(lua_State *L) {
+        ${DEFLINE}int $BOUND_LUA(lua_State *L) {
             CClosure *_bound = clCvalue(s2v(L->ci->func.p));
             if (TITAN_UNLIKELY(_bound->nupvalues < 6)) {
                 return luaL_error(L,
@@ -984,6 +986,7 @@ function coder._code_interface_method_artifacts(
 
         $STRICT_BODY
     ]], {
+        DEFLINE = definitionline(tlcontext, method_node.loc),
         NATIVE_SIG = nativesig,
         METHOD_COUNT = c_integer_literal(#interface.methods),
         IFACE = c_string_literal(interface.name),
@@ -1040,7 +1043,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         table.insert(sigs, render([[
             TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write);
         ]], { ACCESSOR = accessor }))
-        table.insert(code, render([[
+        table.insert(code, definitionline(tlcontext, node.loc) .. render([[
             TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write) {
                 (void)_mod;
                 if (write) {
@@ -1094,7 +1097,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         NEWINDEXNAME = newindexname,
     }))
     table.insert(code, render([[
-        TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
             TValue *_interfaceslot = s2v(L->ci->func.p + 1);
             CClosure *_func = clCvalue(s2v(L->ci->func.p));
             Udata *_mod = uvalue(&_func->upvalue[1]);
@@ -1128,12 +1131,13 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
 
-        TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
             return luaL_error(L,
                 "%s:%d:%d: cannot assign member '%s' in interface '%s'",
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
     ]], {
+        DEFLINE = definitionline(tlcontext, node.loc),
         INDEXNAME = coder._nominal_metamethod_name(
             interface.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(

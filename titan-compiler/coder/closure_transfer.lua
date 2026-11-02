@@ -141,14 +141,14 @@ local function emit_source_entry(tlcontext, entry)
         ]], { COUNT = #entry.captures })
     end
     return render([[
-        TITAN_MODULE_PRIVATE void ${ID}_project(lua_State *L, CClosure *_fn) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE void ${ID}_project(lua_State *L, CClosure *_fn) {
             if (_fn->nupvalues != $NUP || _fn->f != $COERCIVE)
                 luaL_error(L, "closure does not match its transfer entry");
             Udata *_mod = uvalue(&_fn->upvalue[0]);
             (void)_mod;
             $PROJECT
         }
-        TITAN_MODULE_PRIVATE void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
             (void)_mod;
             _capture_base = lua_absindex(L, _capture_base);
             (void)_capture_base;
@@ -172,6 +172,7 @@ local function emit_source_entry(tlcontext, entry)
             lua_settop(L, _top + 1);
         }
     ]], {
+        DEFLINE = definitionline(tlcontext, entry.loc),
         ID = entry.id,
         PROJECT = table.concat(project, "\n"),
         CAPTURE = table.concat(restore, "\n"),
@@ -188,12 +189,12 @@ end
 
 local function emit_adapter_entry(tlcontext, entry)
     return render([[
-        TITAN_MODULE_PRIVATE void ${ID}_project(lua_State *L, CClosure *_fn) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE void ${ID}_project(lua_State *L, CClosure *_fn) {
             if (_fn->nupvalues < 6)
                 luaL_error(L, "invalid adjusted closure capture");
             lua_pushtvalue(L, _fn->upvalue[_fn->nupvalues - 2]);
         }
-        TITAN_MODULE_PRIVATE void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
             _capture_base = lua_absindex(L, _capture_base);
             TValue _source_value = lua_totvalue(L, _capture_base);
             CClosure *_source = ttisCclosure(&_source_value)
@@ -220,6 +221,7 @@ local function emit_adapter_entry(tlcontext, entry)
             luaC_checkGC(L);
         }
     ]], {
+        DEFLINE = definitionline(tlcontext, entry.loc),
         ID = entry.id,
         NATIVE = entry.native,
         STRICT = entry.strict,

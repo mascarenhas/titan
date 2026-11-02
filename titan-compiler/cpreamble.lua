@@ -49,9 +49,10 @@ end
 cpreamble.fixed_includes = cpreamble.includes(false)
 cpreamble.certification_includes = cpreamble.includes(true) .. "\n"
 
-cpreamble.fixed_prefix = cpreamble.fixed_includes .. [[
+local function fixed_prefix(defline)
+    return cpreamble.fixed_includes .. [[
 
-static TITAN_UNUSED inline int titan_errfunc_is_errorhandler(lua_State *L) {
+]] .. defline .. [[static TITAN_UNUSED inline int titan_errfunc_is_errorhandler(lua_State *L) {
     if (L->errfunc == 0) return 0;
     StkId errfunc = restorestack(L, L->errfunc);
     TValue *v = s2v(errfunc);
@@ -63,7 +64,7 @@ static TITAN_UNUSED inline int titan_errfunc_is_errorhandler(lua_State *L) {
  * The caller supplies an already-rooted key, including on low-memory recovery
  * paths where interning even a fixed key string could raise another error.
  */
-static TITAN_UNUSED inline lu_byte titan_registry_get_string(
+]] .. defline .. [[static TITAN_UNUSED inline lu_byte titan_registry_get_string(
         lua_State *L, TString *registry_key, TValue *result) {
     setnilvalue(result);
     lua_assert(ttistable(&G(L)->l_registry));
@@ -81,7 +82,7 @@ static TITAN_UNUSED inline lu_byte titan_registry_get_string(
  * Clearing an entry never allocates, even when the key is absent.
  * This helper never reads or changes L->top.
  */
-static TITAN_UNUSED inline void titan_registry_set_string(
+]] .. defline .. [[static TITAN_UNUSED inline void titan_registry_set_string(
         lua_State *L, TString *registry_key, const TValue *value) {
     TValue value_copy = *value;
     TValue key_value;
@@ -116,7 +117,7 @@ static TITAN_UNUSED inline void titan_registry_set_string(
  * current frame limit exactly as lua_checkstack would, without crossing the
  * public stack API.
 */
-static TITAN_UNUSED inline void titan_ensure_stack(lua_State *L, int slots) {
+]] .. defline .. [[static TITAN_UNUSED inline void titan_ensure_stack(lua_State *L, int slots) {
     luaD_checkstack(L, slots);
     if (L->ci->top.p < L->top.p + slots)
         L->ci->top.p = L->top.p + slots;
@@ -131,6 +132,10 @@ static TITAN_UNUSED inline void titan_ensure_stack(lua_State *L, int slots) {
 */
 #define titan_new_udata_object(L, size) \
     cast(Udata *, luaC_newobj((L), LUA_VUSERDATA, (size)))]]
+end
+
+cpreamble.fixed_prefix = fixed_prefix("")
+cpreamble.browser_prefix = fixed_prefix("#line 1 TITAN_GENERATED_C_FILE\n")
 
 cpreamble.after_foreign_imports = [[#if defined(__GNUC__) || defined(__clang__)
 #define TITAN_SOURCE_LOCAL __attribute__((visibility("hidden")))

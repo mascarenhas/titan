@@ -122,6 +122,19 @@ function emitline(node)
         .. c_string_literal(loc.filename) .. "\n"
 end
 
+-- Browser function-level lookup starts at the first mapped instruction, which
+-- can precede every user statement. Own the signature and prologue explicitly.
+-- The per-part macro resets source-less helpers to their generated C file.
+function definitionline(context, loc)
+    local tlcontext = context.tlcontext or context
+    if not tlcontext.browser_trace then return "" end
+    if loc and loc.line and loc.filename then
+        return "#line " .. tostring(loc.line) .. " "
+            .. c_string_literal(loc.filename) .. "\n"
+    end
+    return "#line 1 TITAN_GENERATED_C_FILE\n"
+end
+
 function coverage_region(node, code, ctx)
     if not coder._coverage_source_regions or code == ""
         or ctx and ctx._coverage_generated then return code end

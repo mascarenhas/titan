@@ -59,7 +59,7 @@ function coder._binary_exports(tlcontext, ast, code)
     local compatibility = require "titan-compiler.binarycompat"
     local metadata = compatibility.encode(compatibility.module(
         ast._declared_type or ast._type, tlcontext.binary_registry))
-    table.insert(code, render([[
+    table.insert(code, definitionline(tlcontext) .. render([[
         int $SYMBOL(lua_State *L) {
             static const char metadata[] = $METADATA;
             lua_pushlstring(L, metadata, sizeof(metadata) - 1);
@@ -160,7 +160,7 @@ function coder._binary_resolver(tlcontext, ast)
     local resolver = coder._private_symbol(tlcontext.module, "native_symbol")
     coder._record_private_symbol(tlcontext, resolver,
         "module native symbol resolver")
-    return render([[
+    return definitionline(tlcontext) .. render([[
         TITAN_MODULE_PRIVATE void *$NAME(const char *symbol) {
             if (strcmp(symbol, TITAN_TRANSFER_MANIFEST_SYMBOL) == 0)
                 return (void *)&$TRANSFER_MANIFEST;

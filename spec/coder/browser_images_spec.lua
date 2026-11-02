@@ -605,6 +605,78 @@ end
         assert.not_equal(identities.O1, identities.O2)
     end)
 
+    it("maps a selected contributor prologue to its own physical source", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.mkdir(workspace .. "/src/source_location")
+        files.write(workspace .. "/src/source_location/source_location.titan", [[
+local definitions = import "definitions.titan"
+function main(args: {string}): integer
+    return definitions.copied(0) + selected_leaf(#args)
+end
+]])
+        files.write(workspace .. "/src/source_location/member.browser.titan", [[
+local function selected_leaf(n: integer): integer
+    local rooted = {n}
+    return rooted[1]
+end
+]])
+        files.write(workspace .. "/src/definitions.titan",
+            read(repository .. "/spec/fixtures/browser_images/definitions.titan"))
+        local result = cli(info, "--exe", workspace .. "/out/contributor.mjs",
+            "--c-parts", "4", "source_location")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        local header = read(workspace .. "/out/definitions.titan.h")
+        for _, name in ipairs({ "copied", "outlined", "empty" }) do
+            local at = assert(header:find("foreign_inline_" .. name .. "(", 1, true))
+            local definition = assert(header:find("foreign_inline_" .. name .. "(", at + 1, true))
+            local before = header:sub(1, definition - 1)
+            assert.truthy(before:match('#line %d+ "[^\n]-definitions[.]titan"\n[^\n]*$'), name)
+        end
+        result = run({ info.node.path, "--input-type=module", "-e", [[
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const map = JSON.parse(await readFile(process.argv[1], 'utf8'));
+const indices = map.x_titan_function_names.flatMap((name, index) =>
+    typeof name === 'string' && name.endsWith('selected_leaf_titan') ? [index] : []);
+assert.equal(indices.length, 1, 'selected contributor function missing or ambiguous');
+const [start, end] = map.x_titan_function_ranges[indices[0] - map.x_titan_function_imports];
+const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function vlq(segment) {
+    const values = [];
+    let value = 0, shift = 0;
+    for (const character of segment) {
+        const digit = alphabet.indexOf(character);
+        assert.ok(digit >= 0);
+        value += (digit & 31) * 2 ** shift;
+        if (digit & 32) { shift += 5; continue; }
+        values.push(value & 1 ? -Math.floor(value / 2) : value / 2);
+        value = 0; shift = 0;
+    }
+    assert.equal(shift, 0);
+    return values;
+}
+assert.ok(!map.mappings.includes(';'), 'Wasm mappings must use one generated line');
+let pc = 0, source = 0, line = 0, found = false;
+for (const segment of map.mappings.split(',')) {
+    const fields = vlq(segment);
+    pc += fields[0];
+    if (fields.length === 1) continue;
+    source += fields[1]; line += fields[2];
+    if (pc < start) continue;
+    if (pc >= end) break;
+    assert.equal(map.sources[source].replaceAll('\\', '/').split('/').at(-1),
+        'member.browser.titan', 'the first prologue mapping borrowed the preceding contributor');
+    assert.ok(line >= 0);
+    found = true;
+    break;
+}
+assert.ok(found, 'selected function prologue has no mapped instruction');
+]], workspace .. "/out/contributor.wasm.map" })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+    end)
+
     it("links the normal CLI test runner and executes one selected case through the installed loader", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
