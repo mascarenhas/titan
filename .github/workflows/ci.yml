@@ -727,6 +727,8 @@ jobs:
       MAKEFLAGS: "-j4"
       TITAN_JOBS: "4"
       TITAN_BUILD_PROFILE: ${{ matrix.profile }}
+      CC: gcc-14
+      LUA_CC: gcc-14
       TITAN_EMSDK_VERSION: "6.0.13"
       TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
       PREFIX: ${{ github.workspace }}/.lua
@@ -744,17 +746,39 @@ jobs:
           submodules: true
 
       - name: Download prepared Linux tree
+        if: matrix.profile == 'validation'
         uses: actions/download-artifact@v8
         with:
           name: titan-linux-prepared.tar.gz
           path: ${{ runner.temp }}
 
       - name: Restore prepared Linux tree and environment
+        if: matrix.profile == 'validation'
         run: |
           tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" -C "$GITHUB_WORKSPACE"
           test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           .lua/bin/lua -v
+
+      - name: Install native compiler dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc-14 curl libreadline-dev
+
+      # Prepared compiler trees contain validation-built authored runtime
+      # objects. Make does not stamp their flags, so production starts cold
+      # rather than relabeling that SDK or deleting its outputs.
+      - name: Bootstrap an independent production prefix
+        if: matrix.profile == 'production'
+        run: |
+          set -euo pipefail
+          test ! -e .ci-prepared-workspace
+          make lua luarocks
+          export PATH="$PREFIX/bin:$PATH"
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          "$PREFIX/bin/lua" -v
+          "$PREFIX/bin/luarocks" make --only-deps
+          "$PREFIX/bin/luarocks" test --prepare
+          LIBBT_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ianlancetaylor/libbacktrace.git" \
+            make libbacktrace
 
       - name: Install the selected native compiler and SDK profile
         run: |
