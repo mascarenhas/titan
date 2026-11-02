@@ -173,6 +173,10 @@ TITAN_RUNTIME_FUNC TITAN_COLD l_noret titan_unwind_guard_failed(lua_State *L,
 ** A runtime/_init addition only: it does not by itself change the compiled
 ** module ABI. */
 #define TITAN_NAMES_KEY "a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"
+#ifdef TITAN_TARGET_BROWSER
+/* Light C-function keys, registered before browser module initialization. */
+#define TITAN_ENTRIES_KEY "0c6fbc42-27b4-497f-a6f3-3c9e1f4d7b20"
+#endif
 
 #define TITAN_LUAINTEGER_NBITS cast_int(sizeof(lua_Integer) * CHAR_BIT)
 

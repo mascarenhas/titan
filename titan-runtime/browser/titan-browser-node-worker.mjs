@@ -40,7 +40,7 @@ async function run(config) {
                 const file = await asset(path);
                 const module = await import(pathToFileURL(file).href);
                 if (typeof module.default !== "function") throw new Error("image must export a default factory");
-                if (!wrappers.has(module.default)) wrappers.set(module.default, observeFactory(module.default, control));
+                if (!wrappers.has(module.default)) wrappers.set(module.default, observeFactory(module.default, control, config.allowDegradedTrace));
                 return Object.freeze({
                     factory: wrappers.get(module.default),
                     locateFile: name => resolve(dirname(file), name),

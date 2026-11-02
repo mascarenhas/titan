@@ -37,7 +37,7 @@ async function bounded(promise, milliseconds) {
 }
 const usage = "usage: titan-browser-run [--engine node|chromium] [--timeout MS] [--grace MS]\n" +
     "                         [--chrome PATH] [--cdp pipe|port] [--root DIR]\n" +
-    "                         [--js-test] FILE [-- ARG...]\n";
+    "                         [--allow-degraded-trace] [--js-test] FILE [-- ARG...]\n";
 
 function parse(argv) {
     const options = { engine: "node", timeout: 30000, grace: 1500, cdp: "pipe", args: [], jsTest: false };
@@ -49,6 +49,7 @@ function parse(argv) {
         if (arg === "--version") { options.version = true; continue; }
         if (arg === "--probe") { options.probe = true; continue; }
         if (arg === "--js-test") { options.jsTest = true; continue; }
+        if (arg === "--allow-degraded-trace") { options.allowDegradedTrace = true; continue; }
         if (arg.startsWith("--") && values.has(arg.slice(2))) {
             if (++index === argv.length) throw new Error(`${arg} requires a value`);
             options[arg.slice(2)] = argv[index];
@@ -535,7 +536,8 @@ async function main() {
     if (!(await stat(root)).isDirectory() || !(await stat(file)).isFile() || !within(root, file)) throw new Error("FILE must be a regular file beneath --root");
     if (!file.endsWith(".mjs")) throw new Error("FILE must end in .mjs");
     const config = { engine: options.engine, root, file: relative(root, file).split(sep).join("/"), args: options.args,
-        jsTest: options.jsTest, loader: pathToFileURL(join(assets, "titan-browser.mjs")).href };
+        jsTest: options.jsTest, allowDegradedTrace: !!options.allowDegradedTrace,
+        loader: pathToFileURL(join(assets, "titan-browser.mjs")).href };
     const monitor = new Monitor(options);
     const engine = options.engine === "node" ? new NodeEngine(monitor) : new ChromiumEngine(monitor, options, chrome);
     const interrupted = signal => monitor.fail("harness", `interrupted by ${signal}`);

@@ -272,6 +272,7 @@ elseif action == "stage-runtime" then
 
     local browser_src = repo_root .. "/titan-runtime/browser"
     copy_file_atomic(browser_src .. "/titan-browser-library.js", assets.js_library, false)
+    copy_file_atomic(browser_src .. "/titan-browser-trace.js", assets.trace_library, false)
     copy_file_atomic(browser_src .. "/titan-browser.mjs", assets.loader, false)
     copy_file_atomic(browser_src .. "/titan-browser-run", assets.runner, true)
     copy_file_atomic(browser_src .. "/titan-browser-run.mjs", assets.runner_module, false)
@@ -340,7 +341,7 @@ elseif action == "finalize" then
         digest_inputs[#digest_inputs + 1] = paths.join(descriptor.paths.include, rel)
     end
     for _, key in ipairs({
-        "runtime", "js_library", "loader", "runner",
+        "runtime", "js_library", "trace_library", "loader", "runner",
         "runner_module", "node_worker", "page", "lpeglabel", "provider",
     }) do
         local asset_path = assets[key]

@@ -29,7 +29,7 @@ addToLibrary({
           (map.file !== undefined && typeof map.file !== 'string') ||
           (map.sourceRoot !== undefined && typeof map.sourceRoot !== 'string') ||
           (map.sourcesContent !== undefined && (!Array.isArray(map.sourcesContent) ||
-            map.sourcesContent.length !== map.sources.length ||
+            (map.sourcesContent.length !== 0 && map.sourcesContent.length !== map.sources.length) ||
             !map.sourcesContent.every(x => x === null || typeof x === 'string')))) {
         throw new Error('invalid standard trace map');
       }
@@ -137,7 +137,7 @@ addToLibrary({
     },
 
     parse(stack, capacity, limit) {
-      if (typeof stack !== 'string') throw new Error('stack is not text');
+      if (typeof stack !== 'string') throw 'stack is not text';
       var self = TitanBrowserTrace, records = [], frames = 0, engine = -1, truncated = false;
       for (var text of stack.split('\n')) {
         if (/^async\*/.test(text)) break; // SpiderMonkey's saved history is not active ancestry.
@@ -150,7 +150,7 @@ addToLibrary({
           if (!match) continue;
           if (engine < 0) engine = kind;
           var index = Number(match[1]), pc = match[2] === undefined ? 0 : Number.parseInt(match[2], 16);
-          if (!self.u32(index) || !self.u32(pc)) throw new Error('invalid Wasm frame');
+          if (!self.u32(index) || !self.u32(pc)) throw 'invalid Wasm frame';
           if (records.length < capacity) records.push([pc, index, match[2] === undefined ? 2 : 3]);
           else truncated = true;
           break;

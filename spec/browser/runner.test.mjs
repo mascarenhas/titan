@@ -684,3 +684,21 @@ test("exact-profile PID EPERM ignores only retired processes", { skip: !supporte
         } finally { await cleanupTrackedRun(execution, files, directory); }
     });
 });
+
+test("degraded trace metadata fails runner unless explicitly allowed", {skip: !supported}, async () => {
+    const base = ["--engine", "node", "--grace", "0", "--root", root, "--js-test", fixture,
+        "--", "trace-policy"];
+    const strictResult = await run(base);
+    assert.equal(strictResult.status, 75, strictResult.stderr.toString());
+    assert.match(strictResult.stderr.toString(), /degraded browser trace: intentional missing map/);
+    const allowed = await run(["--allow-degraded-trace", ...base]);
+    assert.equal(allowed.status, 0, allowed.stderr.toString());
+});
+
+test("factory observer admits ready and fabricated metadata-free factories", async () => {
+    for (const module of [{titanBrowserTrace: {state: "ready"}}, {}]) {
+        const controls = [];
+        assert.equal(await observeFactory(async () => module, value => controls.push(value))({}), module);
+        assert.deepEqual(controls, []);
+    }
+});
