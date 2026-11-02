@@ -130,11 +130,11 @@ export async function run(context) {
         "capacity trace was not bounded/marked");
       emit({depth, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
-    if (label === "mixed_depth_75") {
+    if (label === "mixed_depth_14") {
       const count = frameCount(trace, ": in trace_cases.mixed_recurse");
-      context.assert(count <= 76, "mixed trace duplicated recursive frames");
-      if (count < 76) context.assert(occurrences(trace, truncated) === 1, "mixed JS headroom cut was not marked");
-      emit({mixedDepth: 75, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
+      context.assert(count <= 15, "mixed trace duplicated recursive frames");
+      if (count < 15) context.assert(occurrences(trace, truncated) === 1, "mixed JS headroom cut was not marked");
+      emit({mixedDepth: 14, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
     if (label === "append") {
       for (const name of ["original_leaf", "resumed_leaf", "append_middle", "append_outer", "test_coroutine_propagation_append"]) {
