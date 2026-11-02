@@ -6195,6 +6195,25 @@ printf '%s\n' "${schedule[@]}"
                 assert.truthy(body:find("if: matrix.profile == 'validation'",
                     1, true), body)
             end
+            local fifo_make = named_step(playwright_job,
+                "Install FIFO-capable GNU Make for production builds")
+            for _, contract in ipairs({
+                "if: matrix.profile == 'production'",
+                'TITAN_MAKE_VERSION: "4.4.1"',
+                "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3",
+                "https://ftp.gnu.org/gnu/make/make-$TITAN_MAKE_VERSION.tar.gz",
+                "sha256sum -c --strict -",
+                'env -C "$source" ./configure --prefix="$make_prefix"',
+                'make -C "$source" install',
+                'echo "$make_prefix/bin" >> "$GITHUB_PATH"',
+                "MAKEFLAGS=-j4 --jobserver-style=fifo",
+            }) do
+                assert.truthy(fifo_make:find(contract, 1, true), contract)
+            end
+            assert.is_true(assert(playwright_job:find(
+                "- name: Install FIFO-capable GNU Make for production builds", 1, true)) <
+                assert(playwright_job:find(
+                "- name: Bootstrap an independent production prefix", 1, true)), playwright_job)
             local production_bootstrap = named_step(playwright_job,
                 "Bootstrap an independent production prefix")
             for _, contract in ipairs({
