@@ -334,11 +334,13 @@ runner with a 60-minute timeout after `build-compiler`:
 1. **Prefix preparation (`validation` versus `production`).** `validation`
    cells restore `titan-linux-prepared.tar.gz` into `$GITHUB_WORKSPACE/.lua`.
    Because the prepared compiler artifact holds validation-built runtime
-   objects whose flags Make does not stamp, `production` cells instead require
-   `.ci-prepared-workspace` and `$PREFIX` to be absent and bootstrap a cold
-   production prefix (`make lua luarocks`, `luarocks make --only-deps`,
-   `luarocks test --prepare`, and `make libbacktrace` with `CC=gcc-14` and
-   `TITAN_BUILD_PROFILE=production`).
+   objects whose flags Make does not stamp, `production` cells instead build and
+   install pinned GNU Make 4.4.1 (`MAKEFLAGS=-j4 --jobserver-style=fifo`, so
+   pipe-auth file-descriptor numbers cannot alias compiler output-lock leases in
+   nested native GCC LTO jobs), require `.ci-prepared-workspace` and `$PREFIX`
+   to be absent, and bootstrap a cold production prefix (`make lua luarocks`,
+   `luarocks make --only-deps`, `luarocks test --prepare`, and
+   `make libbacktrace` with `CC=gcc-14` and `TITAN_BUILD_PROFILE=production`).
 2. **Native and browser SDK installation.** Each cell runs `"$PREFIX/bin/luarocks"
    make` with `EMSDK` unset and no `emcc` on `PATH`, restores the cached
    `.emsdk` (`ubuntu-24.04-<arch>-emsdk-6.0.13-v1`), activates Emscripten 6.0.13

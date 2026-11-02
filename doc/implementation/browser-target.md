@@ -1368,7 +1368,8 @@ out-of-order sections, duplicate `name` sections/subsections, overrunning
 lengths, invalid UTF-8, or mismatched function/code counts) and validates the
 emitted standard version 3 `.wasm.map` (rejecting invalid JSON, wrong `version`
 or core field types, unsupported indexed-map `sections`, pre-existing
-`x_titan_*` keys, malformed VLQ mappings, or out-of-range source/name indexes,
+`x_titan_*` keys, multi-line `;` `mappings` with segments after the first
+generated line, malformed VLQ mappings, or out-of-range source/name indexes,
 while accepting `sourcesContent: []` or a `#sources`-matched array of
 strings/`null`). It splices the four extension keys directly before the root
 JSON object's closing `}`, preserving all standard source-map fields, selected
