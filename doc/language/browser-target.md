@@ -684,9 +684,8 @@ About 5,400 live coroutines fit in 2 GiB.
   `async`, timers, files, networking, `lua`, `peg`, and the other standard
   modules are not available yet.
 * Browser images run in Chromium and Chrome, Firefox, WebKit and Safari, and
-  Node 24 (`TODO(confirm: Firefox/WebKit execution after integrator Playwright gate)`);
-  `titan-browser-run` (the test runner) drives only Node 24 and headless Chrome
-  or Chromium.
+  Node 24; `titan-browser-run` (the test runner) drives only Node 24 and
+  headless Chrome or Chromium.
 * On WebKit and Safari, traces have reduced, function-level fidelity
   (`<basename>: in <display name>`, without line numbers, and a 100-frame
   capture limit), and Firefox caps synchronous stack captures at 128 frames

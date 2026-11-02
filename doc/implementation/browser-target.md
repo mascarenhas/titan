@@ -1437,13 +1437,34 @@ is emitted at load time. Ordinary web pages still run in degraded mode;
 fail the run as a harness error (`degraded browser trace: <reason>`) unless
 `--allow-degraded-trace` was passed.
 
-Trace cost on the representative browser trace gate image (`TODO(confirm: fill in exact measured mapBytes, .wasm bytes, ratio, loadMilliseconds, and indexBytes across Node, Chromium, Firefox, and WebKit from integrator gate)`):
+Observed trace cost on the representative compiled trace-gate image
+`out/browser/trace/assertions-2/runtime.mjs` (which links all 34 native trace
+fixture cases under the D14 object profile `-O1 -fno-inline
+-fno-optimize-sibling-calls -gline-tables-only` and the D18 Titan-entry link
+profile `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2
+-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals`):
 
-| Metric | Value |
-| --- | --- |
-| `.wasm` bytes / `.wasm.map` bytes (`mapBytes`) | `TODO(confirm)` |
-| Retained typed-array index (`indexBytes`) | `TODO(confirm)` |
-| Load and index time (`loadMilliseconds`, Node / Chromium / Firefox / WebKit) | `TODO(confirm)` |
+| Installation | Engine | `.wasm` bytes | `.wasm.map` bytes (`mapBytes`) | Map / Wasm | Eager map/index load (`loadMilliseconds`) | Retained typed-array index (`indexBytes`) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Validation | Node 24.19.0 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 95.3 ms | 2,902,380 |
+| Production | Node 24.19.0 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 102.9 ms | 2,902,380 |
+| Validation | Host Chromium 156.0.8078.79 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 50.2 ms | 2,902,380 |
+| Production | Host Chromium 156.0.8078.79 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 89.9 ms | 2,902,380 |
+| Validation | Playwright Chromium 141.0.7390.37 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 97.8 ms | 2,902,380 |
+| Production | Playwright Chromium 141.0.7390.37 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 101.9 ms | 2,902,380 |
+| Validation | Playwright Firefox 142.0.1 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 91.0 ms | 2,902,380 |
+| Production | Playwright Firefox 142.0.1 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 99.0 ms | 2,902,380 |
+| Validation | Playwright WebKit 26.0 | 5,126,029 | 1,227,112 | 23.94% (23.9388%) | 65.0 ms | 2,902,380 |
+| Production | Playwright WebKit 26.0 | 5,126,769 | 1,227,112 | 23.94% (23.9354%) | 91.0 ms | 2,902,380 |
+
+Each `loadMilliseconds` entry is one observed eager-load sample from the
+passing 72-row / 70-native-case gate run (spanning map read or loopback HTTP
+`fetch`, UTF-8 decoding, JSON parsing, `x_titan_image` verification, and
+typed-array index construction — not total image startup, a multi-run average,
+or a cold-network benchmark). `indexBytes` sums the six retained typed arrays
+only (`pcs`, `sources`, `lines`, `starts`, `ends`, and `first`); it excludes
+the retained `names` and `bases` JavaScript string arrays and temporary parsing
+allocations, so it is not total retained or peak JavaScript heap usage.
 
 ### WebAssembly stack survey
 
