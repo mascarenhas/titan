@@ -144,7 +144,7 @@ addToLibrary({
         if (/^async\*/.test(text)) break; // SpiderMonkey's saved history is not active ancestry.
         if (!text.trim()) continue;
         var frame = v8 ? /^[ \t]*at[ \t]/.test(text)
-          : /@(?:.*wasm-function\[\d+\](?::0x[0-9a-fA-F]+)?|.*:\d+(?::\d+)?)\s*$/.test(text);
+          : text.includes('@');
         if (!frame) continue; // Count frame shapes, never V8's Error title.
         ++frames;
         for (var kind = 0; kind < self.patterns.length; ++kind) {
