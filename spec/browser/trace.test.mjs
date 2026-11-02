@@ -51,9 +51,24 @@ export async function run(context) {
   function exact(trace, file, line, name) {
     const expected = `${file}:${webkit ? "" : line + ":"} in ${name}`;
     context.assert(trace.split("\n").includes(expected), "missing engine-specific frame " + expected + "\n" + trace);
+    return expected;
   }
   function checkTrace(label, trace, missingSymbols) {
-    context.assert(!/titanentry|_titan|wasm-function|\b0x[0-9a-f]|:0: in|dynCall_|trace_support\.c:/.test(trace),
+    let currentStateTrace = trace;
+    if (label === "nested_outer") {
+      // Only these parent-runner frames are absent from the capturing state's
+      // names table. D15 requires their exact raw fallbacks, not a blanket
+      // exception for nested traces or arbitrary mangled function names.
+      const parentLines = new Set();
+      for (const [line, symbol] of [[105, "titan_test_runner_ℳ_run_test_26_titan"],
+                                    [179, "titan_test_runner_ℳ_main_titan"]]) {
+        parentLines.add(exact(trace, "trace_cases__test_runner.titan", line, symbol));
+        context.assert(occurrences(trace + "\n", "in " + symbol + "\n") === 1,
+          "nested trace duplicated/omitted parent raw fallback " + symbol);
+      }
+      currentStateTrace = trace.split("\n").filter(line => !parentLines.has(line)).join("\n");
+    }
+    context.assert(!/titanentry|_titan|wasm-function|\b0x[0-9a-f]|:0: in|dynCall_|trace_support\.c:/.test(currentStateTrace),
       "trace exposed internal/false location: " + label + "\n" + trace);
     for (const line of trace.split("\n")) {
       const match = /^([^:\n]+\.titan)(?::([0-9]+))?: in /.exec(line);
