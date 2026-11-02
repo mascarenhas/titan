@@ -1154,8 +1154,8 @@ entrypoint](#the-browser-entrypoint) and calls `driver.compile_browser_image`.
 
 `driver.compile_browser_image(contents, entrypoint, executable, objects,
 archives, extra_objects, verbose, options)` (with `options.context` required,
-plus optional `profile`, `before_commit`, `after_publish`, `final_link_flags`,
-and `dependency_output`) links one image:
+plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
+`final_link_flags`, and `dependency_output`) links one image:
 
 1. require the SDK, select the plan (an explicit `options.profile`, otherwise
    `browser_link_plan`), and check the final link extras with
@@ -1992,9 +1992,13 @@ module, it:
    that `<prefix>_abi`, `<prefix>_types`, and `<prefix>_layouts` each return
    one string (21, 23, 25) equal to the embedded metadata (22, 24, 26), and
    returns 0 when all pass;
-3. links it in a temporary path under the output root with the `protocol`
-   profile, against `libnames` and `static_archives` (`selected static provider
-   failed executable-context protocol linking (<reason>[, exit <code>])`);
+3. validates `driver.link_extra_flags()` against `driver.browser_link_options`,
+   filters out `browsertarget.trace_option` flags (so a measurement build's
+   optimization or shrink extras such as `--ldflag=-Os` do not enter the fixed
+   `protocol` link while non-trace link extras keep their order), and links the
+   probe in a temporary path under the output root with the `protocol` profile
+   against `libnames` and `static_archives` (`selected static provider failed
+   executable-context protocol linking (<reason>[, exit <code>])`);
 4. runs `<runner> --engine node <probe>.mjs` and requires exit 0
    (`selected static provider failed executable-context protocol validation
    (browser runner exit <code>)`, with 75 when the runner could not start);

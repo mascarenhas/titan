@@ -274,9 +274,9 @@ every `EMSDK_*` variable it does not set itself, and the job sets
     and `loader_names` (a `--test` image) into `out/browser/loader`, asserting
     `.mjs`, `.wasm`, and `.wasm.map` for each. It also
     builds one `fidelity` image with the `baseline` profile at `O2` and
-    assertions off, plus the harness-only `--cflag=-g2 --ldflag=-g2
-    --ldflag=-Os`, because Emscripten 6.0.13 minifies export names only at
-    `-O3` or a shrink level.
+    assertions off, plus the harness-only `--ldflag=-Os` (the profile itself
+    supplies the debug flags), because Emscripten 6.0.13 minifies export names
+    only at `-O3` or a shrink level.
 12. **Loader suite.** The installed `titan-browser-run --timeout 300000
     --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
     workspace with relative image paths, runs under Node and then Chromium,
