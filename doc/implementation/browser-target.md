@@ -1736,7 +1736,11 @@ timeout is a positive and the grace a nonnegative safe integer. Misuse prints
 prints the usage and `--version` prints `titan-browser-run: Titan 0.6.0
 browser runner (Node 24)`, both to stderr with exit 0. `FILE` must be a
 regular `.mjs` file beneath the root, which defaults to its directory. Stdout
-carries only program bytes; every runner diagnostic goes to stderr.
+carries only program bytes; every runner diagnostic goes to stderr. The module
+exports `within(root, path)` and `Monitor` and guards its top-level `main()`
+with a `realpath(process.argv[1])` check so that importing it from tests or
+`spec/browser/playwright-run.mjs` does not run the CLI while direct invocation
+(including through a symlink) works normally.
 
 **Probe.** `--probe` (with an optional `--chrome`) needs no file, SDK, or
 browser launch. It prints exactly one LF-terminated JSON object:
@@ -1893,8 +1897,9 @@ harness failure.
 **Playwright supervisor (`spec/browser/playwright-run.mjs`).** To run the same
 portable `run(context)` host tests across Playwright-managed `chromium`,
 `firefox`, and `webkit` (`playwright@1.56.1`), `spec/browser/playwright-run.mjs`
-reuses `titan-browser-page.mjs`, the loopback root/SDK HTTP server, and the
-same completion, abort, and `--allow-degraded-trace` rules with an explicit
+reuses `titan-browser-page.mjs`, the exported `within` and `Monitor` from
+`titan-browser-run.mjs`, the loopback root/SDK HTTP server, and the same
+completion, abort, and `--allow-degraded-trace` rules with an explicit
 `--engine chromium|firefox|webkit` (`context.engine` reflects the selected
 engine; `TODO(confirm: exact CLI flags of spec/browser/playwright-run.mjs)`).
 It is repository test infrastructure, not an installed SDK binary.
@@ -2164,7 +2169,8 @@ hosts`).
 * `spec/coder/browser_entry_gate_spec.lua` — the [entry gate](#the-entry-gate-decision).
 * `spec/coder/browser_fixtures_spec.lua` — the coroutine and GC behavior in
   the owning `coroutine.tests` and `gc.tests` modules built for the browser,
-  and the real browser trace, pin, bare rethrow, and coroutine-append cases
+  and the real browser trace, pin, bare rethrow, and coroutine-append cases in
+  `spec/fixtures/browser_runtime/runtime_trace.titan` (`trace.c`, `trace.h`)
   under Node and Chromium.
 * `spec/coder/browser_budgets_spec.lua` — every [budget](#budgets) just below
   and just above its limit.
@@ -2178,25 +2184,34 @@ hosts`).
   dispose cycles, concurrent instances, lifecycle races, and the minified
   guard image (`optimized-guard.mjs`).
 * `spec/browser/runner.test.mjs` and `spec/browser/runner-fixtures.mjs` — the
-  runner's resolver, probe, CLI, status categories, grace, abort and cleanup
-  boundaries, process-group retirement, and path containment, over Node and
-  both Chromium transports.
+  runner's resolver, probe, CLI, `--allow-degraded-trace` and default
+  degraded-map harness failure, exported `within`/`Monitor` helpers and symlink
+  invocation, status categories, grace, abort and cleanup boundaries,
+  process-group retirement, and path containment, over Node and both Chromium
+  transports.
 * `spec/browser/trace-adapter.test.mjs` and
-  `spec/fixtures/browser_trace_adapter/` — Node unit tests for the V8,
-  SpiderMonkey, and JavaScriptCore stack parsers (built from the recorded survey
-  strings), `Error.stackTraceLimit` and `Error.prepareStackTrace` descriptor
-  preservation (absent, data, accessor, non-writable, and non-configurable
-  descriptors without invoking getters or setters), lookup boundary and gap
-  validation, and degraded/capture-failed fallbacks.
+  `spec/fixtures/browser_trace_adapter/{stacks.json,degraded.mjs,lifecycle.c,filter.c}`
+  — Node unit tests for the V8, SpiderMonkey, and JavaScriptCore stack parsers
+  (66 recorded survey samples, V8 title-line frame-shape filtering, and
+  caller-owned capacity bounds), `Error.stackTraceLimit` and
+  `Error.prepareStackTrace` descriptor preservation (absent, data, accessor,
+  non-writable, and non-configurable descriptors without invoking getters or
+  setters or constructing an `Error` on unsafe descriptors), lookup boundary,
+  gap, and empty-`sourcesContent` validation, and the compiled `lifecycle.c`
+  (preRun/export readiness) and `filter.c` (entry/registered-name precedence
+  before `titan.c`/`titan_is_lua_source` basename filtering) fixtures.
 * `spec/browser/build-trace.lua`, `spec/browser/trace.test.mjs`,
   `spec/browser/playwright-run.mjs`, and `spec/fixtures/browser_trace/` — the
-  staged multi-engine browser trace gate (`assertions-2` and `assertions-0`,
-  normal and `--allow-degraded-trace` manifest rows) covering direct and
-  `.browser.titan` contributor locations, deep recursion and engine truncation,
-  mixed `Lua -> Titan -> Lua -> Titan` merge order, all wrapper families, fresh
-  raise versus bare rethrow, coroutine append across yield/resume, adjacent
-  unmapped helpers, immediate literal calls, merge `LUA_ERRMEM` recovery, and
-  WebKit reduced-fidelity rendering across Node, Chromium, Firefox, and WebKit.
+  staged multi-engine browser trace gate (34 discovered native cases in
+  `trace_cases` plus `trace_uncaught`, staged into `assertions-2` and
+  `assertions-0` with 72 positive `cases` rows and 8 intentional
+  `degradedCases` rows in `manifest.json`) covering direct and `.browser.titan`
+  contributor locations, deep recursion and engine truncation, mixed
+  `Lua -> Titan -> Lua -> Titan` merge order, all wrapper families, fresh raise
+  versus bare rethrow, coroutine append across yield/resume, adjacent unmapped
+  helpers, immediate literal calls, held-storage nested capture, merge
+  `LUA_ERRMEM` recovery, and WebKit reduced-fidelity rendering across Node,
+  Chromium, Firefox, and WebKit.
 
 The Busted files need emcc 6.0.13 and the installed browser Lua; the image,
 protocol, SDK, gate, fixture, budget, and minicoro files also need Node 24, a
