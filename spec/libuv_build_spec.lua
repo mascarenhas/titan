@@ -5587,6 +5587,14 @@ printf '%s\n' "${schedule[@]}"
                     offset = first + #needle
                 end
             end
+            local function named_job(text, name)
+                local marker = "\n  " .. name .. ":"
+                local first = assert(text:find(marker, 1, true), name)
+                local start = first + #marker
+                local finish = text:find("\n  [%w_-]+:%s*\n", start)
+                    or (#text + 1)
+                return text:sub(start, finish - 1)
+            end
             local function named_step(job, name)
                 local marker = "\n      - name: " .. name
                 local first = assert(job:find(marker, 1, true), name)
@@ -5612,19 +5620,13 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(job:find("\n%s+token:", 1), job)
             end
 
-            local build_job = assert(linux_workflow:match(
-                "\n  build%-compiler:(.-)" ..
-                "\n  test%-linux%-compiler:"))
-            local compiler_job = assert(linux_workflow:match(
-                "\n  test%-linux%-compiler:(.-)\n  browser%-toolchain:"))
-            local browser_job = assert(linux_workflow:match(
-                "\n  browser%-toolchain:(.-)\n  native%-coverage:"))
-            local native_coverage_job = assert(linux_workflow:match(
-                "\n  native%-coverage:(.-)\n  sanitizer:"))
-            local macos_job = assert(macos_workflow:match(
-                "\n  test%-macos:(.*)"))
-            local sanitizer_job = assert(linux_workflow:match(
-                "\n  sanitizer:(.*)"))
+            local build_job = named_job(linux_workflow, "build-compiler")
+            local compiler_job = named_job(linux_workflow, "test-linux-compiler")
+            local browser_job = named_job(linux_workflow, "browser-toolchain")
+            local playwright_job = named_job(linux_workflow, "browser-playwright")
+            local native_coverage_job = named_job(linux_workflow, "native-coverage")
+            local macos_job = named_job(macos_workflow, "test-macos")
+            local sanitizer_job = named_job(linux_workflow, "sanitizer")
 
             assert.equal(1, count_literal(linux_workflow, "\n  push:"),
                 linux_workflow)
@@ -5633,17 +5635,17 @@ printf '%s\n' "${schedule[@]}"
             local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
             assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
                 macos_events)
-            assert.equal(5, count_literal(linux_workflow,
+            assert.equal(6, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
             assert.equal(1, count_literal(macos_workflow,
                 "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
-            assert.equal(5, count_literal(linux_workflow, "\n    runs-on:"),
+            assert.equal(6, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
             assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
                 macos_workflow)
             for _, job_name in ipairs({
                 "build-compiler", "test-linux-compiler", "browser-toolchain",
-                "native-coverage", "sanitizer",
+                "browser-playwright", "native-coverage", "sanitizer",
             }) do
                 assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -5798,7 +5800,7 @@ printf '%s\n' "${schedule[@]}"
                 "- name: Upload prepared Linux tree", pack_index, true))
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
-            assert.equal(9, count_literal(workflow,
+            assert.equal(11, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/restore@v4"), workflow)
@@ -5807,12 +5809,12 @@ printf '%s\n' "${schedule[@]}"
             assert.equal(4, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/2"), workflow)
             assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
-            assert.equal(5, count_literal(workflow,
+            assert.equal(6, count_literal(workflow,
                 "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
             -- Keep the existing regular cache identity when moving its owner.
             assert.truthy(native_coverage_job:find("-test-linux-stdlib-", 1, true))
             for _, job in ipairs({
-                build_job, compiler_job, browser_job, sanitizer_job,
+                build_job, compiler_job, browser_job, playwright_job, sanitizer_job,
             }) do
                 assert.falsy(job:find("-test-linux-stdlib-", 1, true))
             end
@@ -5991,7 +5993,6 @@ printf '%s\n' "${schedule[@]}"
                 'make lua-browser PREFIX="$PREFIX"',
                 '"$PREFIX/bin/luarocks" make',
                 'make browser-sdk PREFIX="$PREFIX"',
-                "TITAN_ROOT: ${{ github.workspace }}/.lua",
                 'TITAN_PROBE_CACHE_DISABLE: "1"',
                 "spec/wasm_toolchain_spec.lua",
                 "spec/coder/browser_toolchain_spec.lua",
@@ -6061,6 +6062,12 @@ printf '%s\n' "${schedule[@]}"
             -- only strict browser gate: the portable JS steps carry their own.
             local browser_gate = named_step(browser_job,
                 "Run the browser real-toolchain gate")
+            assert.equal(1, count_literal(browser_gate,
+                "TITAN_ROOT: ${{ github.workspace }}/.lua"), browser_gate)
+            local node_trace_gate = named_step(browser_job,
+                "Build and run the browser trace gate under Node")
+            assert.equal(1, count_literal(node_trace_gate,
+                "TITAN_ROOT: ${{ github.workspace }}/.lua"), node_trace_gate)
             assert.truthy(browser_gate:find('"$PREFIX/bin/busted"', 1, true),
                 browser_gate)
             assert.truthy(browser_gate:find(
@@ -6140,6 +6147,56 @@ printf '%s\n' "${schedule[@]}"
                 "Build the portable loader images for both assertion profiles")
             assert.truthy(browser_guard_build:find("--ldflag=-Os", 1, true),
                 browser_guard_build)
+
+            for _, contract in ipairs({
+                "needs: build-compiler", "runs-on: ubicloud-standard-4",
+                "profile: [validation, production]",
+                "engine: [chromium, firefox, webkit]",
+                'TITAN_PLAYWRIGHT_VERSION: "1.56.1"',
+                "PLAYWRIGHT_BROWSERS_PATH:",
+                "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
+                "playwright-${{ env.TITAN_PLAYWRIGHT_VERSION }}-${{ matrix.engine }}-v1",
+                "spec/browser/build-trace.lua",
+                "spec/browser/playwright-run.mjs",
+                "spec/browser/playwright-runner.test.mjs",
+                "--allow-degraded-trace",
+                "manifest.degradedCases",
+                "result.status !== 75",
+                "browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}",
+            }) do
+                assert.truthy(playwright_job:find(contract, 1, true), contract)
+            end
+            assert.falsy(browser_job:find("TITAN_PLAYWRIGHT_VERSION", 1, true),
+                browser_job)
+            assert.falsy(playwright_job:find("TITAN_CHROME_VERSION", 1, true),
+                playwright_job)
+            for _, step in ipairs({
+                "Download prepared Linux tree",
+                "Restore prepared Linux tree and environment",
+            }) do
+                local body = named_step(playwright_job, step)
+                assert.truthy(body:find("if: matrix.profile == 'validation'",
+                    1, true), body)
+            end
+            local production_bootstrap = named_step(playwright_job,
+                "Bootstrap an independent production prefix")
+            for _, contract in ipairs({
+                "if: matrix.profile == 'production'",
+                "test ! -e .ci-prepared-workspace",
+                'test ! -e "$PREFIX"',
+                "make lua luarocks",
+                '"$PREFIX/bin/luarocks" make --only-deps',
+                '"$PREFIX/bin/luarocks" test --prepare',
+                "make libbacktrace",
+            }) do
+                assert.truthy(production_bootstrap:find(contract, 1, true),
+                    contract)
+            end
+            assert.is_true(assert(playwright_job:find(
+                "- name: Bootstrap an independent production prefix", 1, true)) <
+                assert(playwright_job:find(
+                "- name: Install the selected native compiler and SDK profile",
+                1, true)), playwright_job)
 
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",

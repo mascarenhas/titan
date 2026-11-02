@@ -109,13 +109,19 @@ for (const engine of (process.env.TITAN_PLAYWRIGHT_TEST_ENGINES ?? '').split(','
       const args = [fileURLToPath(new URL('./playwright-run.mjs', import.meta.url)),
         '--engine', engine, '--root', repository, '--timeout', '15000', '--grace', '0',
         fileURLToPath(new URL(`../fixtures/browser_playwright/${name}.mjs`, import.meta.url))];
+      let output;
       try {
-        const output = await execute(process.execPath, args, {encoding: 'buffer', timeout: 30000});
-        return {...output, status: 0};
+        output = {...await execute(process.execPath, args, {encoding: 'buffer', timeout: 30000}), status: 0};
       } catch (error) {
         if (!Number.isInteger(error.code)) throw error;
-        return {stdout: error.stdout, stderr: error.stderr, status: error.code};
+        output = {stdout: error.stdout, stderr: error.stderr, status: error.code};
       }
+      const stderr = output.stderr.toString();
+      assert.doesNotMatch(stderr, /cleanup failed:/);
+      const leaders = [...stderr.matchAll(/\bpid ([1-9]\d*)\b/g)];
+      assert.equal(leaders.length, 1, stderr);
+      assert.throws(() => process.kill(Number(leaders[0][1]), 0), {code: 'ESRCH'});
+      return output;
     }
     const success = await fixture('context');
     assert.equal(success.status, 0, success.stderr.toString());

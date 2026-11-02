@@ -771,6 +771,7 @@ jobs:
         run: |
           set -euo pipefail
           test ! -e .ci-prepared-workspace
+          test ! -e "$PREFIX" && test ! -L "$PREFIX"
           make lua luarocks
           export PATH="$PREFIX/bin:$PATH"
           echo "$PREFIX/bin" >> "$GITHUB_PATH"
