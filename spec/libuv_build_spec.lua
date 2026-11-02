@@ -6206,7 +6206,7 @@ printf '%s\n' "${schedule[@]}"
                 'env -C "$source" ./configure --prefix="$make_prefix"',
                 'make -C "$source" install',
                 'echo "$make_prefix/bin" >> "$GITHUB_PATH"',
-                "MAKEFLAGS=-j4 --jobserver-style=fifo",
+                'echo "MAKEFLAGS=-j4 --jobserver-style=fifo" >> "$GITHUB_ENV"',
             }) do
                 assert.truthy(fifo_make:find(contract, 1, true), contract)
             end
