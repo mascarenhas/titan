@@ -486,8 +486,9 @@ function M.build(context, inputs)
         if not header_ok or not headers then
             return nil, mismatch(paths, record, "headers_sha256", "unavailable: " .. tostring(header_error or headers))
         elseif headers ~= record.headers_sha256 then return nil, mismatch(paths, record, "headers_sha256", headers) end
+        -- Emscripten -g2 preserves names but strips object line tables.
         local flags = { "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls",
-            "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function", "-g2",
+            "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function", "-gline-tables-only",
             "-sSUPPORT_LONGJMP=emscripten" }
         for _, define in ipairs(defines) do flags[#flags + 1] = define end
         local target_defines = { table.unpack(TARGET_DEFINES) }

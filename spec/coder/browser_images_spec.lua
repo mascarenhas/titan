@@ -57,7 +57,7 @@ assert(driver.close_resolver_context(context))
     return output .. "/" .. name .. ".mjs"
 end
 
-local function image_identity(info, image)
+local function image_identity(info, image, source)
     local result = run({ info.node.path, "--input-type=module", "-e", [[
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -65,6 +65,11 @@ import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 const image = process.argv[1];
 const map = JSON.parse(await readFile(image.replace(/\.mjs$/, '.wasm.map'), 'utf8'));
+const expectedSource = process.argv[2];
+if (expectedSource) {
+    assert.ok(map.sources.some(source => source.replaceAll('\\', '/').split('/').at(-1) === expectedSource),
+        'final source map omitted ' + expectedSource);
+}
 const factory = (await import(pathToFileURL(image).href)).default;
 const instance = await factory({ locateFile: name => resolve(dirname(image), name) });
 const pointer = instance._titan_browser_trace_identity();
@@ -79,7 +84,7 @@ assert.ok(map.x_titan_function_ranges.length > 0);
 assert.equal(map.x_titan_function_names.length,
     map.x_titan_function_imports + map.x_titan_function_ranges.length);
 process.stdout.write(identity);
-]], image })
+]], image, source or "" })
     assert.is_true(result.ok, result.output or result.diagnostic)
     return result.output
 end
@@ -554,7 +559,7 @@ assert(driver.close_resolver_context(context))
         for _, item in ipairs(inventory.exports) do
             assert.not_equal("titan_browser_trace_identity", item.name, "control exports were not minified")
         end
-        assert.match("^[0-9a-f]+$", image_identity(info, image))
+        assert.match("^[0-9a-f]+$", image_identity(info, image, "image_control.titan"))
     end)
 
     it("certifies optimization for FFI, generated workers and authored C together", function()
@@ -622,6 +627,7 @@ end
         assert.truthy(map:find('"x_titan_image":"', 1, true))
         assert.truthy(map:find('"x_titan_function_ranges":[[', 1, true))
         assert.truthy(map:find('"x_titan_function_names":[', 1, true))
+        image_identity(info, workspace .. "/out/image_case.mjs", "image_case.titan")
         assert.is_true(exports.malloc)
         assert.is_true(exports.free)
         assert.is_nil(exports.titan_browser_gate_guarded)
