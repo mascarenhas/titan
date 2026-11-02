@@ -438,10 +438,11 @@ unified Titan/Lua contract as native builds:
 * Compiled Titan frames appear as `<basename>:<line>: in <display name>`,
   using the selected physical `.titan` filename (`name.browser.titan`
   included) and Titan display names (`m.func`, `m.Record:method`,
-  `m.Record.static`, or `anonymous function at m.titan:12`, falling back to the
-  C symbol name if a trace captured in an independent child Lua state includes
-  outer native frames from a module initialized only in the parent state, or
-  `?` when no symbol is known).
+  `m.Record.static`, or `anonymous function at m.titan:12`).
+* If a trace captured in an independent child Lua state includes outer native
+  frames from a module initialized only in the parent state, those outer frames
+  fall back to their C symbol name (or `?` when no symbol is known), as on
+  native hosts.
 * If a Titan frame's program counter has no line mapping inside its function
   body, the frame uses the no-line form `<basename>: in <display name>` (with
   the function's declaring `.titan` basename, or `?` when none is known), never
@@ -668,7 +669,7 @@ A browser program runs with these fixed sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
-| Main C stack | 1 MiB | Lua recursion through C calls, such as nested `pcall`, stops first at Lua's own limit with the ordinary catchable `C stack overflow` error. Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
+| Main C stack | 1 MiB | Plain Lua recursion through C calls, such as nested `pcall`, stops first at Lua's own limit with the ordinary catchable `C stack overflow` error, whereas recursion that alternates between Lua and compiled Titan can exhaust the JavaScript engine's stack before that limit (see [current limits](#current-limits)). Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
 | Coroutine C stack | 256 KiB per coroutine (2 MiB natively) | The same inside a coroutine, at about a quarter of that depth. |
 | Saved call stack for a coroutine switch or a wait | 64 KiB, for the main context and for each coroutine | A switch or wait whose call stack does not fit traps with `unreachable` (runner exit 71). About 400 small C frames fit. |
 | Linear memory | 16 MiB initially, growing to at most 2 GiB | An allocation failure is Lua's ordinary out-of-memory error, and creating a coroutine fails with `could not create coroutine: Out of memory`. Both can be caught, and the instance stays usable. |

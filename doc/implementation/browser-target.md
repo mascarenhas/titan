@@ -1558,9 +1558,12 @@ blames `ASYNCIFY_STACK_SIZE` even when the cause is corruption, so a generic
 
 The recoverable limits are ordinary errors in every cell:
 
-* recursion through nested `pcall` in loaded Lua reaches Lua's own limit and
-  raises the catchable `C stack overflow` long before the 1 MiB stack is
-  exhausted;
+* plain recursion through nested `pcall` in loaded Lua reaches Lua's own limit
+  (`LUAI_MAXCCALLS`) and raises the catchable `C stack overflow` long before
+  the 1 MiB C stack is exhausted (whereas recursion that alternates between Lua
+  and compiled Titan adds Asyncify-instrumented Wasm and JS frames per boundary
+  and can exhaust the engine's JavaScript stack with `RangeError: Maximum call
+  stack size exceeded` before `LUAI_MAXCCALLS`; see [Settlement](#the-loader));
 * a forced `mco_create` failure raises exactly `could not create coroutine:
   Out of memory`, and a fresh coroutine can then be created and resumed; and
 * creating coroutines while a canary coroutine is parked grows memory through
