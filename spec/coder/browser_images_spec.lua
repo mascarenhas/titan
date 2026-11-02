@@ -627,8 +627,13 @@ assert(driver.close_resolver_context(context))
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
-        files.write(workspace .. "/src/image_control.titan",
-            read(repository .. "/spec/fixtures/browser_images/program.titan"))
+        files.write(workspace .. "/src/image_control.titan", [[
+local test = import "test"
+function main(args: {string}): integer
+    test.assert(#args >= 0)
+    return #args
+end
+]])
         files.write(workspace .. "/src/control-helper.c", "int control_helper(void) { return 37; }\n")
         local library_flag = "-L" .. workspace .. "/src"
         local variant = { prefix = info.prefix, compiler_setup = string.format([[
