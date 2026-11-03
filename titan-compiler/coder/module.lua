@@ -1316,7 +1316,7 @@ function coder.generate_ffi_header(modname, ast, source_header)
     return require("titan-compiler.ffiheaders").render(modname, ast, source_header)
 end
 
-function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
+local function render_foreign_header(modname, ast, tlcontext, header_paths)
     tlcontext = tlcontext or { module = modname }
     local has_foreign = false
     for _, node in ipairs(ast) do
@@ -1406,6 +1406,19 @@ function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
     -- live beside the canonical main source.
     return prefix .. "\n" .. table.concat(includes, "\n") .. "\n" .. body,
         { prefix = prefix, body = body, source_headers = source_headers }
+end
+
+-- Headers are rendered before (and, for restored plans, independently of) C
+-- generation, so the caller supplies the current line/coverage policy instead
+-- of relying on flags a previous generation happened to leave behind.
+function coder.generate_foreign_header(
+        modname, ast, tlcontext, header_paths, policy)
+    assert(type(policy) == "table"
+        and type(policy.line_directives) == "boolean"
+        and type(policy.coverage) == "boolean",
+        "foreign-header generation requires an explicit emission policy")
+    return coder.with_emission_policy(policy, render_foreign_header,
+        modname, ast, tlcontext, header_paths)
 end
 
 return core.coder

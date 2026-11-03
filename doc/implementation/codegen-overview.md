@@ -226,6 +226,17 @@ first body statement — the signature, the GC poll, variable anchors, stack
 reservation, and argument checks — therefore carries the definition's own
 location rather than another file's.
 
+Foreign and checking headers are rendered before C generation (and, for
+restored plans, independently of it), so they never inherit whatever a previous
+generation left behind. Every header render receives an explicit policy
+(`coder.emission_policy`, applied by `coder.with_emission_policy`); the driver
+derives it with `driver.header_policy(coverage)` from the same
+`EMIT_LINE_DIRECTIVES` option and per-module coverage selection that its C
+uses, for immediate and graph planning, the per-module worker, the CLI restore
+path, and checking headers (never coverage). A plan records its policy, and
+`coder.generate` rejects one rendered under a different policy instead of
+silently publishing inconsistent bytes.
+
 `emitline` and `definitionline` return nothing in two cases:
 
 - **Coverage generation.** Coverage uses scoped region metadata instead; see

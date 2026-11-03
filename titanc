@@ -598,6 +598,13 @@ if coverage_build then
     local selected, selection_error = coverage.select(coverage_build, driver.imported)
     if not selected then table.insert(errors, selection_error) end
 end
+-- Header planning happens before any C generation, so each module's header
+-- receives the line/coverage policy that its own C will use.
+local function header_policy(name)
+    local selected = coverage_build ~= nil and coverage_build.selected ~= nil
+        and coverage_build.selected[name] == true or false
+    return driver.header_policy(selected)
+end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 local test_program_output
@@ -917,7 +924,8 @@ if not args.compile_only and not args.print_ast then
     -- Generated public headers are restored under the lock even when the
     -- final link hits; existing owned headers are preserved untouched.
     local headers_ready, headers_error = driver.prepare_foreign_headers(
-        module_order, driver.imported, args.verbose, args.pretty_print, resolver_context)
+        module_order, driver.imported, args.verbose, args.pretty_print,
+        header_policy)
     if not headers_ready then exit(headers_error) end
     local target = outputs[1].path
     if reporter then link_name = progress.basename(target) end
@@ -1027,7 +1035,7 @@ local header_plans = {}
 local header_plan_by_name = {}
 if #errors == 0 then
     local planned, header_err =
-        driver.plan_foreign_headers(linked_names, driver.imported)
+        driver.plan_foreign_headers(linked_names, driver.imported, header_policy)
     if not planned then
         table.insert(errors, header_err)
     else

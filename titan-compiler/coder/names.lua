@@ -122,6 +122,49 @@ function emitline(node)
         .. c_string_literal(loc.filename) .. "\n"
 end
 
+-- The two flags that decide whether point stamps and scoped coverage markers
+-- are emitted. `coder.generate` derives them from its own options; every
+-- out-of-band render (foreign and checking headers, which happen before C
+-- generation or independently of it) must establish the same pair explicitly
+-- instead of inheriting whatever a previous generation left behind.
+function coder.emission_policy(line_directives, coverage)
+    return {
+        line_directives = line_directives ~= false,
+        coverage = coverage == true,
+    }
+end
+
+function coder.same_emission_policy(left, right)
+    return left ~= nil and right ~= nil
+        and left.line_directives == right.line_directives
+        and left.coverage == right.coverage
+end
+
+function coder.current_emission_policy()
+    return {
+        line_directives = coder._emit_line_directives and true or false,
+        coverage = coder._coverage_source_regions and true or false,
+    }
+end
+
+-- Run `fn` under `policy`, restoring the previous state whatever it returns or
+-- raises, so a header render can never leak flags into later work.
+function coder.with_emission_policy(policy, fn, ...)
+    assert(type(policy) == "table"
+        and type(policy.line_directives) == "boolean"
+        and type(policy.coverage) == "boolean",
+        "emission policy requires boolean line_directives and coverage flags")
+    local previous_directives = coder._emit_line_directives
+    local previous_coverage = coder._coverage_source_regions
+    coder._emit_line_directives = policy.line_directives
+    coder._coverage_source_regions = policy.coverage
+    local results = table.pack(pcall(fn, ...))
+    coder._emit_line_directives = previous_directives
+    coder._coverage_source_regions = previous_coverage
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 -- Definition stamps follow the policies of ordinary statement `#line`s:
 -- coverage carries ownership in scoped region metadata instead, and
 -- --no-line-directives removes every stamp. Both targets stamp identically.

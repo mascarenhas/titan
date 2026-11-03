@@ -394,3 +394,139 @@ describe("browser traceback entry generation", function()
         assert.truthy(text:find("lua_pop(L, 1);", assert(text:find("TITAN_ENTRIES_KEY", 1, true)), true))
     end)
 end)
+
+-- Foreign headers are rendered before (and, for restored plans, independently
+-- of) C generation, so their line/coverage policy is an explicit input of the
+-- plan. These cases drive the real driver planner/renderer without generating
+-- C first, which is where ambient coder state used to leak in.
+describe("foreign-header emission policy", function()
+    local FOREIGN = [[
+local foreign function copy(n: int): int return n end
+function get(): integer return 1 end
+]]
+    local function checked_ast()
+        h.reset(true)
+        local ast, err = parser.parse("entries.browser.titan", FOREIGN)
+        assert.truthy(ast, err)
+        local _, errors = checker.check("entries", ast, FOREIGN,
+            "entries.browser.titan")
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        return ast
+    end
+    local function planned(policy)
+        return assert(driver.plan_foreign_header("entries", checked_ast(),
+            "/generated/entries.titan", false, policy))
+    end
+    local function line_count(contents)
+        return select(2, (contents or ""):gsub("#line", ""))
+    end
+    local function stamps(contents)
+        local result = {}
+        for name, definition in pairs(definitions(contents or "")) do
+            result[name] = definition.stamp
+        end
+        return result
+    end
+    local function stamped_header(policy)
+        local plan = planned(policy)
+        local result = stamps(plan.contents)
+        assert.is_true(next(result) ~= nil, "fixture has no foreign definition")
+        for name in pairs(result) do
+            assert.is_not_nil(result[name], name)
+        end
+        return plan
+    end
+
+    it("plans each header under its own policy, before any C generation", function()
+        assert.same({ line_directives = true, coverage = false },
+            driver.header_policy(false))
+        assert.equal(2, line_count(stamped_header(
+            driver.header_policy(false)).contents))
+        local previous = driver.EMIT_LINE_DIRECTIVES
+        local tested, test_error = xpcall(function()
+            -- A fresh no-line invocation: the option alone decides the header.
+            driver.EMIT_LINE_DIRECTIVES = false
+            assert.same({ line_directives = false, coverage = false },
+                driver.header_policy(false))
+            local disabled = planned(driver.header_policy(false))
+            assert.equal(0, line_count(disabled.contents))
+            assert.same({}, stamps(disabled.contents))
+            -- C generation under the same policy accepts that plan and emits
+            -- no stamps of its own.
+            local generated = coder.generate("entries", checked_ast(), {},
+                driver.TITAN_ABI_VERSION, false, {
+                    source_output_stem = "/generated/entries",
+                    foreign_header_plan = disabled,
+                })
+            assert.is_nil(code(generated):find("#line", 1, true))
+            -- Turning the option back on needs no intervening generation: the
+            -- next header carries its own explicit enabled policy, and the
+            -- disabled one keeps its bytes.
+            driver.EMIT_LINE_DIRECTIVES = true
+            assert.equal(2, line_count(stamped_header(
+                driver.header_policy(false)).contents))
+            assert.equal(0, line_count(planned(
+                coder.emission_policy(false, false)).contents))
+        end, debug.traceback)
+        driver.EMIT_LINE_DIRECTIVES = previous
+        assert.is_true(tested, test_error)
+    end)
+
+    it("rejects a header plan rendered under another emission policy", function()
+        local disabled = planned(coder.emission_policy(false, false))
+        assert.equal(0, line_count(disabled.contents))
+        local ok, err = pcall(coder.generate, "entries", checked_ast(), {},
+            driver.TITAN_ABI_VERSION, true, {
+                source_output_stem = "/generated/entries",
+                foreign_header_plan = disabled,
+            })
+        assert.is_false(ok)
+        assert.truthy(tostring(err):find("different emission policy", 1, true),
+            tostring(err))
+    end)
+
+    for _, backend in ipairs({ "gcc-gcov", "llvm-gcov" }) do
+        it("renders a selected coverage relay with the coverage policy under "
+            .. backend, function()
+            local ast = checked_ast()
+            coder.prepare_coverage(ast, true)
+            local covered = assert(driver.plan_foreign_header("entries", ast,
+                "/generated/entries.titan", false, driver.header_policy(true)))
+            assert.equal(0, line_count(covered.contents))
+            assert.same({}, stamps(covered.contents))
+            local generated = coder.generate("entries", ast, {},
+                driver.TITAN_ABI_VERSION, true, {
+                    coverage = true,
+                    coverage_backend = backend,
+                    source_output_stem = "/generated/entries",
+                    foreign_header_plan = covered,
+                })
+            local text = code(generated)
+            assert.is_nil(text:find("#line ", 1, true))
+            assert.truthy(text:find("TITAN_COVERAGE_BEGIN", 1, true))
+            -- Coverage must not leave the coder suppressing later plans.
+            assert.equal(2, line_count(stamped_header(
+                driver.header_policy(false)).contents))
+        end)
+    end
+
+    it("applies per-module policies to one graph header plan", function()
+        local plain = checked_ast()
+        local covered = checked_ast()
+        coder.prepare_coverage(covered, true)
+        local plans = assert(driver.plan_foreign_headers({ "plain", "covered" }, {
+            plain = { ast = plain, filename = "/generated/plain.titan" },
+            covered = { ast = covered, filename = "/generated/covered.titan" },
+        }, function(name)
+            return driver.header_policy(name == "covered")
+        end))
+        local by_name = {}
+        for _, plan in ipairs(plans) do by_name[plan.modname] = plan end
+        assert.equal(2, line_count(by_name.plain.contents))
+        assert.is_true(next(stamps(by_name.plain.contents)) ~= nil)
+        assert.equal(0, line_count(by_name.covered.contents))
+        assert.same({}, stamps(by_name.covered.contents))
+        assert.same(driver.header_policy(false), by_name.plain.policy)
+        assert.same(driver.header_policy(true), by_name.covered.policy)
+    end)
+end)

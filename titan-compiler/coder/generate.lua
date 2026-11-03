@@ -1306,14 +1306,26 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         end
     end
 
+    -- A header rendered elsewhere must have used exactly this generation's
+    -- line/coverage policy; anything else is a lifecycle bug, not a byte to
+    -- silently accept. Locally prepared contents are re-rendered when their
+    -- recorded policy differs from the current one.
+    local current_policy = coder.current_emission_policy()
     local foreign_header
-    if options.foreign_header_plan then
-        foreign_header = options.foreign_header_plan.contents
+    local plan = options.foreign_header_plan
+    if plan then
+        foreign_header = plan.contents
+        if foreign_header ~= nil then
+            assert(coder.same_emission_policy(plan.policy, current_policy),
+                "foreign-header plan was rendered under a different emission policy")
+        end
     else
         foreign_header = ast._foreign_header_contents
-        if not ast._foreign_header_prepared then
+        if not ast._foreign_header_prepared
+            or not coder.same_emission_policy(
+                ast._foreign_header_policy, current_policy) then
             foreign_header = coder.generate_foreign_header(
-                modname, ast, tlcontext)
+                modname, ast, tlcontext, nil, current_policy)
         end
     end
     local private_header

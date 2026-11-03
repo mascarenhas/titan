@@ -27,6 +27,7 @@ function apply(f: function (integer): integer, n: integer): integer return f(n) 
 ]]
 local MAIN = [[
 local dependency = import "dependency"
+local foreign function relay(n: int): int return n end
 record Alpha
     value: integer
 end
@@ -54,7 +55,7 @@ function owned_values(n: integer): value
     return integer_dynamic
 end
 function use(reader: Reader, f: function (integer): integer): integer
-    return reader:read() + reader:peek() + f(2)
+    return reader:read() + reader:peek() + f(2) + relay(1)
 end
 do use(Alpha.make(1), dependency.accept); forward(Alpha.make(1), 3); owned_values(1) end
 ]]
@@ -74,10 +75,16 @@ local function generate()
     local ast = assert(imported.determinism.ast)
     ast._ffi_header_output = "/generated/determinism.ffi.h"
     ast._foreign_header_output = "/generated/determinism.titan.h"
+    -- Four parts keep a private header in the compared bytes, and the local
+    -- foreign body keeps a published foreign header there too.
     local generated = coder.generate("determinism", ast, { dependency = true },
         driver.TITAN_ABI_VERSION, true, {
+            c_parts = 4,
+            split_threshold = 1,
             source_output_stem = "/generated/determinism",
         })
+    assert(generated.private_header and generated.private_header ~= "")
+    assert(generated.foreign_header and generated.foreign_header ~= "")
     local texts = { generated.private_header or "", generated.foreign_header or "" }
     for _, part in ipairs(generated.parts) do texts[#texts + 1] = part.code end
     return table.concat(texts, "\n")
@@ -154,6 +161,8 @@ describe("generated C determinism", function()
             local text = outputs[1]
             for _, needle in ipairs({
                 "extern lua_Integer dependency_",
+                "#ifndef TITAN_GENERATED_PRIVATE_",
+                [[static inline int determinism_\u2119_foreign_inline_relay]],
                 "Titan record determinism.Alpha metatable",
                 "Titan interface determinism.Reader metatable",
                 'lua_pushliteral(L, "first");',
