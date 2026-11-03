@@ -85,14 +85,15 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
   // Test images and the validation profile stay exact.
   const orderedSubsequence = profile === "production" && row.program === true;
 
-  // Titan frames with the attribution the contract compares: file and
-  // execution line. WebKit's documented no-line form compares file only.
+  // Titan frames with the attribution the contract compares: file, execution
+  // line and name. WebKit's documented no-line form compares file only.
   function titanFrameLines(trace) {
     const frames = [];
     for (const line of trace.split("\n")) {
-      const match = /^([^:\n]+\.titan)(?::([0-9]+))?: in /.exec(line);
+      const match = /^([^:\n]+\.titan)(?::([0-9]+))?: in (.+)$/.exec(line);
       if (match) frames.push({file: match[1],
-        line: match[2] === undefined ? undefined : Number(match[2]), text: line});
+        line: match[2] === undefined ? undefined : Number(match[2]),
+        name: match[3], text: line});
     }
     return frames;
   }
@@ -153,15 +154,21 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
         ["trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle"],
         ["trace_uncaught.titan", 16, "trace_uncaught.main"],
       ];
-      const expectedPairs = uncaughtFrames.map(([file, line]) => [file, webkit ? undefined : line]);
       if (orderedSubsequence) {
         const shown = titanFrameLines(trace);
         let next = 0;
         for (const frame of shown) {
-          const index = expectedPairs.findIndex(([file, line], position) =>
-            position >= next && frame.file === file && frame.line === line);
+          const index = uncaughtFrames.findIndex(([file, line], position) =>
+            position >= next && frame.file === file && frame.line === (webkit ? undefined : line));
           context.assert(index >= 0,
             "program frame outside the exact expectation: " + frame.text + "\n" + trace);
+          // The surviving name is either the matched frame's own name or one
+          // of the enclosing callers it was inlined into, which are exactly
+          // the later expected frames (D32).
+          const enclosing = uncaughtFrames.slice(index).map(([, , name]) => name);
+          context.assert(enclosing.includes(frame.name),
+            "program frame name is not the matched frame or an enclosing caller: " +
+            frame.text + "\n" + trace);
           next = index + 1;
         }
         emit({programFrames: shown.map(frame => frame.text),

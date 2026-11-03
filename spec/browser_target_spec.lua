@@ -443,13 +443,39 @@ describe("browser target descriptor", function()
         local baseline = fixtures.descriptor()
         for _, change in ipairs({
             function(data) data.lua.record.fork_revision = string.rep("b", 40) end,
-            function(data) data.compile_flags[#data.compile_flags + 1] = "-O0" end,
+            function(data) data.compile_flags[#data.compile_flags + 1] = "-DCHANGED=1" end,
             function(data) data.include_dirs[1] = "/other/lua" end,
             function(data) data.probe_cache_directory = "/other/probes" end,
         }) do
             local data = fixtures.descriptor()
             change(data); fixtures.identify(data)
             assert.not_equal(baseline.identity, data.identity)
+        end
+        -- The build profile is part of the identity even where flags agree:
+        -- the two installations are separate targets (D26).
+        local production = fixtures.descriptor(nil, { build_profile = "production" })
+        assert.not_equal(baseline.identity, production.identity)
+        assert.equal("production", production.build_profile)
+    end)
+
+    it("refuses a descriptor whose flags belong to the other profile", function()
+        local data = fixtures.descriptor()
+        data.compile_flags[2] = "-O3"
+        fixtures.identify(data)
+        local imported, err = browser.import(data)
+        assert.is_nil(imported)
+        assert.equal("browser validation profile compile flags do not match its object profile", err)
+    end)
+
+    it("refuses a profile-owned option smuggled in after the profile flags", function()
+        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-foptimize-sibling-calls",
+            "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" }) do
+            local data = fixtures.descriptor()
+            data.compile_flags[#data.compile_flags + 1] = flag
+            fixtures.identify(data)
+            local imported, err = browser.import(data)
+            assert.is_nil(imported)
+            assert.equal('browser validation profile owns compile option "' .. flag .. '"', err)
         end
     end)
 
