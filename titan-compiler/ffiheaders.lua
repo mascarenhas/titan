@@ -54,6 +54,29 @@ function ffiheaders.relative(from, to)
     return table.concat(result, "/")
 end
 
+-- Canonical spelling of the emission policy that produced a header recipe.
+-- Shared by the recipe digest and the producer interface digest so both agree.
+function ffiheaders.policy_signature(policy)
+    if not policy then return "unrecorded" end
+    return (policy.line_directives and "line=1" or "line=0") .. ";"
+        .. (policy.coverage and "coverage=1" or "coverage=0")
+end
+
+-- Canonical identity of one foreign-header recipe: its rendered text, the
+-- source-header module list and the policy that produced it. Header paths are
+-- deliberately excluded; they are environment, not content.
+function ffiheaders.foreign_recipe_digest(recipe)
+    if not recipe then return nil end
+    local source_headers = recipe.source_headers or {}
+    return sha256.hex(table.concat({
+        "titan-foreign-header-recipe-v1",
+        ffiheaders.policy_signature(recipe.policy),
+        tostring(#recipe.prefix), recipe.prefix,
+        tostring(#recipe.body), recipe.body,
+        tostring(#source_headers), table.concat(source_headers, "\0"),
+    }, "\0"))
+end
+
 function ffiheaders.foreign_contents(recipe, ffi_header, source_header)
     local includes = { "#include " .. quote_header(ffi_header) }
     for _, modname in ipairs(recipe.source_headers) do

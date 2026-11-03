@@ -5,6 +5,9 @@ local driver = require "titan-compiler.driver"
 local parser = require "titan-compiler.parser"
 local checker = require "titan-compiler.checker"
 
+local compiler_io = require "titan-compiler.io"
+local lfs = require "lfs"
+
 local SOURCE = [[
 record Item
     value: integer
@@ -530,3 +533,207 @@ function get(): integer return 1 end
         assert.same(driver.header_policy(true), by_name.covered.policy)
     end)
 end)
+
+-- A published foreign-header plan is one immutable unit: policy, contents and
+-- the digest of the recipe that produced them. A build under another policy
+-- must republish the header (disk, recipe and C agreeing), in the same process
+-- and across processes; the recipe digest is the identity the incremental and
+-- certificate machinery compares.
+describe("published foreign-header plans", function()
+    local MODULE = "policy"
+    local FOREIGN = [[
+local foreign function copy(n: int): int return n end
+function get(): integer return copy(1) end
+]]
+    local COVERAGE_FLAGS = { "-O0", "-fno-lto", "--coverage",
+        "-fprofile-update=atomic" }
+
+    local function checked_ast()
+        h.reset(true)
+        local ast, err = parser.parse(MODULE .. ".titan", FOREIGN)
+        assert.truthy(ast, err)
+        local _, errors = checker.check(MODULE, ast, FOREIGN,
+            MODULE .. ".titan")
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        return ast
+    end
+    local function read(path)
+        local file = assert(io.open(path, "rb"))
+        local contents = file:read("*a")
+        file:close()
+        return contents
+    end
+    local function line_count(contents)
+        return select(2, (contents or ""):gsub("#line", ""))
+    end
+    local function build(dir, emit, coverage, entry)
+        local previous = driver.EMIT_LINE_DIRECTIVES
+        driver.EMIT_LINE_DIRECTIVES = emit
+        local ast = checked_ast()
+        local captured
+        local original = driver.plan_foreign_header
+        driver.plan_foreign_header = function(...)
+            local plan = original(...)
+            captured = plan
+            return plan
+        end
+        local ok, compiled, original_err = pcall(function()
+            local options = {}
+            if coverage then
+                options.coverage = true
+                options.coverage_backend = "gcc-gcov"
+                options.extra_compile_flags = COVERAGE_FLAGS
+            end
+            return driver.compile(MODULE, ast, dir .. "/" .. MODULE .. ".titan",
+                {}, false, options, entry)
+        end)
+        driver.plan_foreign_header = original
+        driver.EMIT_LINE_DIRECTIVES = previous
+        assert.is_true(ok, compiled)
+        assert.truthy(compiled, original_err)
+        local plan = assert(captured, "compile did not plan the foreign header")
+        return {
+            plan = plan,
+            header = read(dir .. "/" .. MODULE .. ".titan.h"),
+            c = read(dir .. "/" .. MODULE .. ".c"),
+        }
+    end
+    local function temporary_directory()
+        local path = assert(compiler_io.new_sync():tmpname())
+        os.remove(path)
+        assert(lfs.mkdir(path))
+        return path
+    end
+    local function remove_directory(path)
+        for entry in lfs.dir(path) do
+            if entry ~= "." and entry ~= ".." then
+                os.remove(path .. "/" .. entry)
+            end
+        end
+        assert(lfs.rmdir(path))
+    end
+    local function assert_policy(built, emit, coverage)
+        assert.same({ line_directives = emit, coverage = coverage },
+            built.plan.recipe.policy)
+        assert.equal(coder.foreign_header_digest(built.plan.recipe),
+            built.plan.digest)
+        local expected = emit and not coverage and 2 or 0
+        assert.equal(expected, line_count(built.header))
+        if coverage then
+            -- Converted coverage C opens with a generated-file anchor and
+            -- still names the Titan source; the header carries no stamps.
+            assert.truthy(built.c:match('^#line %d+ "[^"\n]*policy[.]c"'),
+                "coverage C is not the converted form")
+            assert.truthy(built.c:find('"' .. MODULE .. '.titan"', 1, true))
+        elseif emit then
+            assert.truthy(built.c:find("#define TITAN_GENERATED_C_FILE",
+                1, true))
+            assert.is_true(line_count(built.c) > 0)
+        else
+            assert.equal(0, line_count(built.c))
+            assert.is_nil(built.c:find("TITAN_GENERATED_C_FILE", 1, true))
+        end
+    end
+
+    it("republishes the header when the line-directive policy changes in one process", function()
+        local dir = temporary_directory()
+        local tested, test_error = xpcall(function()
+            -- One resolver entry reuses the module's published plan between
+            -- builds, so the policy check is exercised, not bypassed.
+            local entry = { kind = "source", filename = dir .. "/policy.titan",
+                source_files = { dir .. "/policy.titan" }, deps = {} }
+            local disabled = build(dir, false, false, entry)
+            assert_policy(disabled, false, false)
+            assert.equal(disabled.plan, entry.foreign_header_plan)
+            local enabled = build(dir, true, false, entry)
+            assert_policy(enabled, true, false)
+            assert.not_equal(disabled.plan.digest, enabled.plan.digest)
+            assert.equal(enabled.plan, entry.foreign_header_plan)
+            local again = build(dir, false, false, entry)
+            assert_policy(again, false, false)
+            assert.equal(disabled.plan.digest, again.plan.digest)
+        end, debug.traceback)
+        remove_directory(dir)
+        assert.is_true(tested, test_error)
+    end)
+
+    it("republishes the header when the coverage selection changes in one process", function()
+        local dir = temporary_directory()
+        local tested, test_error = xpcall(function()
+            local entry = { kind = "source", filename = dir .. "/policy.titan",
+                source_files = { dir .. "/policy.titan" }, deps = {} }
+            local covered = build(dir, true, true, entry)
+            assert_policy(covered, true, true)
+            local plain = build(dir, true, false, entry)
+            assert_policy(plain, true, false)
+            assert.not_equal(covered.plan.digest, plain.plan.digest)
+            assert.equal(plain.plan, entry.foreign_header_plan)
+            assert_policy(build(dir, true, true, entry), true, true)
+        end, debug.traceback)
+        remove_directory(dir)
+        assert.is_true(tested, test_error)
+    end)
+
+    it("republishes the header across processes under the current policy", function()
+        local dir = temporary_directory()
+        local script = dir .. "/build.lua"
+        local file = assert(io.open(script, "wb"))
+        assert(file:write(([[
+package.path = "./?.lua;./?/init.lua;" .. package.path
+local h = require "spec.support.helpers"
+local driver = require "titan-compiler.driver"
+local parser = require "titan-compiler.parser"
+local checker = require "titan-compiler.checker"
+local SOURCE = ]] .. string.format("%q", FOREIGN) .. [[
+h.reset(true)
+driver.EMIT_LINE_DIRECTIVES = arg[2] == "on"
+local ast = assert(parser.parse("policy.titan", SOURCE))
+local _, errors = checker.check("policy", ast, SOURCE, "policy.titan")
+assert(0 == #errors, table.concat(errors, "\n"))
+local ok, err = driver.compile("policy", ast, arg[1] .. "/policy.titan", {}, false, {})
+assert(ok, err)
+]])))
+        assert(file:close())
+        local LUA = require("spec.support.installed_prefix").active()
+            .. (require("titan-compiler.platform").windows and "/bin/lua.exe" or "/bin/lua")
+        local function child(emit)
+            local result = compiler_io.new_sync():run({
+                LUA, script, dir, emit and "on" or "off" })
+            assert.truthy(result.ok, result.output or result.diagnostic)
+            return read(dir .. "/policy.titan.h")
+        end
+        local tested, test_error = xpcall(function()
+            -- A fresh process publishes under the disabled policy; this process
+            -- then rebuilds under the enabled one.
+            assert.equal(0, line_count(child(false)))
+            local enabled = build(dir, true, false)
+            assert_policy(enabled, true, false)
+            -- A second fresh process rebuilds under the disabled policy again.
+            assert.equal(0, line_count(child(false)))
+            local disabled = build(dir, false, false)
+            assert_policy(disabled, false, false)
+        end, debug.traceback)
+        os.remove(script)
+        remove_directory(dir)
+        assert.is_true(tested, test_error)
+    end)
+
+    it("makes the emission policy part of the header recipe identity", function()
+        local prefix, body = "prefix", "body"
+        local headers = { "dependency" }
+        local function recipe(emit, coverage)
+            return { prefix = prefix, body = body, source_headers = headers,
+                policy = { line_directives = emit, coverage = coverage } }
+        end
+        local function digest(emit, coverage)
+            return coder.foreign_header_digest(recipe(emit, coverage))
+        end
+        -- Identical rendered text with a different policy is a different unit.
+        assert.equal(digest(true, false), digest(true, false))
+        assert.not_equal(digest(true, false), digest(false, false))
+        assert.not_equal(digest(true, false), digest(true, true))
+        assert.not_equal(digest(true, false), coder.foreign_header_digest(
+            { prefix = prefix, body = body, source_headers = headers }))
+    end)
+end)
+

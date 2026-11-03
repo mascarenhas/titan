@@ -1316,7 +1316,8 @@ function coder.generate_ffi_header(modname, ast, source_header)
     return require("titan-compiler.ffiheaders").render(modname, ast, source_header)
 end
 
-local function render_foreign_header(modname, ast, tlcontext, header_paths)
+local function render_foreign_header(modname, ast, tlcontext, header_paths,
+        policy)
     tlcontext = tlcontext or { module = modname }
     local has_foreign = false
     for _, node in ipairs(ast) do
@@ -1403,9 +1404,20 @@ local function render_foreign_header(modname, ast, tlcontext, header_paths)
     }, "\n")
     -- Persist the bodies independently from compiler-owned include paths.
     -- Checking uses logical module paths, while native folder-module headers
-    -- live beside the canonical main source.
+    -- live beside the canonical main source. The emission policy is part of
+    -- the recipe: it decides the rendered bodies, and a change must invalidate
+    -- an already prepared header through the certificate digests.
     return prefix .. "\n" .. table.concat(includes, "\n") .. "\n" .. body,
-        { prefix = prefix, body = body, source_headers = source_headers }
+        { prefix = prefix, body = body, source_headers = source_headers,
+          policy = { line_directives = policy.line_directives,
+              coverage = policy.coverage } }
+end
+
+-- Canonical identity of one foreign-header recipe (rendered text, source-header
+-- module list, emission policy); header paths are environment, not content.
+local ffiheaders = require "titan-compiler.ffiheaders"
+function coder.foreign_header_digest(recipe)
+    return ffiheaders.foreign_recipe_digest(recipe)
 end
 
 -- Headers are rendered before (and, for restored plans, independently of) C
@@ -1418,7 +1430,7 @@ function coder.generate_foreign_header(
         and type(policy.coverage) == "boolean",
         "foreign-header generation requires an explicit emission policy")
     return coder.with_emission_policy(policy, render_foreign_header,
-        modname, ast, tlcontext, header_paths)
+        modname, ast, tlcontext, header_paths, policy)
 end
 
 return core.coder

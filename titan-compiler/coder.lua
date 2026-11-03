@@ -36,6 +36,7 @@ return {
     with_emission_policy = implementation.with_emission_policy,
     generate_ffi_header = implementation.generate_ffi_header,
     generate_foreign_header = implementation.generate_foreign_header,
+    foreign_header_digest = implementation.foreign_header_digest,
     external_symbols = implementation.external_symbols,
     interface_external_symbols = implementation.interface_external_symbols,
     foreign_external_symbols = implementation.foreign_external_symbols,

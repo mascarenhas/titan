@@ -226,16 +226,25 @@ first body statement — the signature, the GC poll, variable anchors, stack
 reservation, and argument checks — therefore carries the definition's own
 location rather than another file's.
 
-Foreign and checking headers are rendered before C generation (and, for
-restored plans, independently of it), so they never inherit whatever a previous
-generation left behind. Every header render receives an explicit policy
-(`coder.emission_policy`, applied by `coder.with_emission_policy`); the driver
-derives it with `driver.header_policy(coverage)` from the same
-`EMIT_LINE_DIRECTIVES` option and per-module coverage selection that its C
-uses, for immediate and graph planning, the per-module worker, the CLI restore
-path, and checking headers (never coverage). A plan records its policy, and
-`coder.generate` rejects one rendered under a different policy instead of
-silently publishing inconsistent bytes.
+A foreign-header plan is one immutable published unit: `{policy, contents,
+recipe}` plus `digest`, the canonical identity of that recipe
+(`coder.foreign_header_digest`). Only the planning path produces and publishes
+it — disk bytes and recipe together — and nothing is cached on the AST, so no
+earlier build can leave a header behind to be relabelled. Every render receives
+an explicit policy (`coder.emission_policy`, applied by
+`coder.with_emission_policy`); the driver derives it with
+`driver.header_policy(coverage)` from the same `EMIT_LINE_DIRECTIVES` option and
+per-module coverage selection that its C uses, for immediate and graph
+planning, the per-module worker, the CLI restore path, and checking headers
+(never coverage). Plans that a direct compile must not reuse are simply not
+passed: `driver.compile` plans under its own policy, and `coder.generate`
+consumes a supplied plan verbatim or raises if its policy differs from the
+generation it is embedded in — it never re-renders or falls back.
+
+The policy is an input of the recipe digest, and of the producer interface
+digest (`incremental.producer_digests`), so changing the line-directive or
+coverage policy invalidates a prepared header through the ordinary incremental
+and certificate comparison instead of through ad-hoc invalidation.
 
 `emitline` and `definitionline` return nothing in two cases:
 
