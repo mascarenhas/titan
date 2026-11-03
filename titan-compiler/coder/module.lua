@@ -451,7 +451,7 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
             table.insert(sigs, render([[
                 TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write);
             ]], { ACCESSOR = accessor }))
-            table.insert(code, definitionline(tlcontext, node.loc) .. render([[
+            table.insert(code, definitionline(node.loc) .. render([[
                 TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write) {
                     (void)_mod; /* scalar fields need no cached identities */
                     if (write) {
@@ -549,7 +549,7 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
                 }
             }
         ]], {
-            DEFLINE = definitionline(tlcontext, node.loc),
+            DEFLINE = definitionline(node.loc),
             INDEXNAME = coder._nominal_metamethod_name(
                 node._type.name, "index"),
             NEWINDEXNAME = coder._nominal_metamethod_name(
@@ -679,7 +679,7 @@ function coder._codeuniondec(ctx, sigs, code, initnominals, node)
         TITAN_MODULE_PRIVATE void $READER(lua_State *L, Udata *_union, lua_Integer part,
                                           TValue *tv);
     ]], { READER = payload_reader }))
-    table.insert(code, definitionline(ctx, node.loc) .. render([[
+    table.insert(code, definitionline(node.loc) .. render([[
         TITAN_MODULE_PRIVATE void $READER(lua_State *L, Udata *_union, lua_Integer part,
                                           TValue *tv) {
             switch ($TAG) {
@@ -758,7 +758,7 @@ function coder._codeuniondec(ctx, sigs, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
     ]], {
-        DEFLINE = definitionline(ctx, node.loc),
+        DEFLINE = definitionline(node.loc),
         INDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(
@@ -986,7 +986,7 @@ function coder._code_interface_method_artifacts(
 
         $STRICT_BODY
     ]], {
-        DEFLINE = definitionline(tlcontext, method_node.loc),
+        DEFLINE = definitionline(method_node.loc),
         NATIVE_SIG = nativesig,
         METHOD_COUNT = c_integer_literal(#interface.methods),
         IFACE = c_string_literal(interface.name),
@@ -1043,7 +1043,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         table.insert(sigs, render([[
             TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write);
         ]], { ACCESSOR = accessor }))
-        table.insert(code, definitionline(tlcontext, node.loc) .. render([[
+        table.insert(code, definitionline(node.loc) .. render([[
             TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write) {
                 (void)_mod;
                 if (write) {
@@ -1137,7 +1137,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
     ]], {
-        DEFLINE = definitionline(tlcontext, node.loc),
+        DEFLINE = definitionline(node.loc),
         INDEXNAME = coder._nominal_metamethod_name(
             interface.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(

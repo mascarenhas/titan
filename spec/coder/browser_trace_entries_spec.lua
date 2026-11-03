@@ -4,7 +4,6 @@ local coder = require "titan-compiler.coder"
 local driver = require "titan-compiler.driver"
 local parser = require "titan-compiler.parser"
 local checker = require "titan-compiler.checker"
-local sha256 = require "titan-compiler.sha256"
 
 local SOURCE = [[
 record Item
@@ -100,6 +99,20 @@ local function definitions(text)
     end
     return result
 end
+local function definition_snapshot(generated)
+    local all = {}
+    local texts = {
+        generated.private_header or "", generated.foreign_header or "",
+    }
+    for _, part in ipairs(generated.parts) do texts[#texts + 1] = part.code end
+    for _, text in ipairs(texts) do
+        for name, definition in pairs(definitions(text)) do
+            assert.is_nil(all[name], "duplicate definition " .. name)
+            all[name] = definition.stamp
+        end
+    end
+    return all
+end
 local function native_variants(target)
     local variants, original = {}, _G.pairs
     local ok, err = xpcall(function()
@@ -114,15 +127,12 @@ local function native_variants(target)
                         generated.private_header or "", generated.foreign_header or "",
                     }
                     for _, part in ipairs(generated.parts) do texts[#texts + 1] = part.code end
-                    local bytes = {}
-                    for _, text in ipairs(texts) do
-                        assert.is_nil(text:find("TITAN_GENERATED_C_FILE", 1, true))
-                        for name, definition in pairs(definitions(text)) do
-                            assert.is_nil(definition.stamp, "native definition acquired a boundary stamp: " .. name)
-                        end
-                        bytes[#bytes + 1] = #text .. ":" .. text
-                    end
-                    variants[sha256.hex(table.concat(bytes))] = true
+                    local key = tostring(reverse) .. ":" .. parts .. ":" .. tostring(located)
+                    variants[key] = {
+                        bytes = table.concat(texts, "\0"),
+                        stamps = definition_snapshot(generated),
+                        located = located,
+                    }
                 end
             end
         end
@@ -203,16 +213,49 @@ describe("browser traceback entry generation", function()
         for symbol in pairs(entries(split)) do assert.truthy(symbol:find("titanentry", 1, true)) end
     end)
 
-    it("keeps native output byte-identical across explicit targets and browser generation", function()
-        -- Compare complete C/private-header/foreign-header bytes under the
-        -- current C declaration environment. In particular, libc's anonymous
-        -- div_t declaration site is not a portable cross-machine byte golden.
+    it("keeps native output identical across explicit targets and browser generation", function()
+        -- The complete C/private-header/foreign-header bytes stay a function of
+        -- the native inputs alone: no target spelling or prior browser
+        -- generation may leak state into them.
         local expected = native_variants(nil)
         local count = 0
         for _ in pairs(expected) do count = count + 1 end
         assert.equal(8, count, "native matrix lost a traversal, split or line-policy variant")
         generate("browser", 4)
-        assert.same(expected, native_variants("linux"))
+        local after = native_variants("linux")
+        for key, variant in pairs(expected) do
+            assert.equal(variant.bytes, assert(after[key], key).bytes, key)
+        end
+    end)
+
+    it("gives native function definitions the same stamps as the browser target", function()
+        for _, parts in ipairs({ 1, 4 }) do
+            local native = definition_snapshot(generate(nil, parts, DEFINITION_SOURCE))
+            local browser = definition_snapshot(generate("browser", parts, DEFINITION_SOURCE))
+            assert.same(browser, native)
+            local generated_stamps = 0
+            for name, stamp in pairs(native) do
+                assert.is_not_nil(stamp, name)
+                if stamp == "1 TITAN_GENERATED_C_FILE" then
+                    generated_stamps = generated_stamps + 1
+                end
+            end
+            assert.is_true(generated_stamps > 10,
+                "generated definitions lost their generated-C reset")
+        end
+    end)
+
+    it("removes every definition stamp when line directives are disabled", function()
+        local variants = native_variants(nil)
+        for key, variant in pairs(variants) do
+            if not variant.located then
+                assert.same({}, variant.stamps, key)
+                assert.is_nil(variant.bytes:find("#line", 1, true), key)
+                assert.is_nil(variant.bytes:find("TITAN_GENERATED_C_FILE", 1, true), key)
+            else
+                assert.is_true(next(variant.stamps) ~= nil, key)
+            end
+        end
     end)
 
     for _, parts in ipairs({ 1, 4 }) do
@@ -303,25 +346,21 @@ describe("browser traceback entry generation", function()
         end)
     end
 
-    it("carries the browser boundary policy through immediate and graph foreign-header plans", function()
+    it("stamps immediate and graph foreign-header plans identically on both targets", function()
         local native, ast = generate(nil, 1, DEFINITION_SOURCE)
-        local browser = driver.plan_foreign_header("entries", ast,
-            "/generated/entries.titan", false, { target = "browser" })
+        local immediate = driver.plan_foreign_header("entries", ast,
+            "/generated/entries.titan", false)
         local graph = assert(driver.plan_foreign_headers({ "entries" }, {
             entries = { ast = ast, filename = "/generated/entries.titan" },
-        }, { target = "browser" }))
-        assert.equal(browser.contents, graph[1].contents)
-        for _, text in ipairs({ browser.contents, graph[1].contents }) do
-            local count = 0
-            for name, definition in pairs(definitions(text)) do
-                count = count + 1
-                assert.match('^%d+ "entries[.]browser[.]titan"$', definition.stamp, name)
-            end
-            assert.equal(3, count)
+        }))
+        assert.equal(immediate.contents, graph[1].contents)
+        local count = 0
+        for name, definition in pairs(definitions(graph[1].contents)) do
+            count = count + 1
+            assert.match('^%d+ "entries[.]browser[.]titan"$', definition.stamp, name)
         end
-        local planned_native = driver.plan_foreign_header("entries", ast,
-            "/generated/entries.titan", false, { target = "linux" })
-        assert.equal(native.foreign_header, planned_native.contents)
+        assert.equal(3, count)
+        assert.equal(native.foreign_header, immediate.contents)
     end)
 
     it("registers only its own wrappers and publishes names before importing a dependency", function()
@@ -366,7 +405,7 @@ describe("browser traceback entry generation", function()
         assert.truthy(code(generated):find('member.browser.titan', 1, true))
     end)
 
-    it("changes foreign native bodies only by source line directives under the line policy", function()
+    it("changes native foreign bodies only by line controls under the line policy", function()
         local source = [[
             foreign function body(n: int): int
                 if n > 0 then return n end
@@ -377,8 +416,11 @@ describe("browser traceback entry generation", function()
         local unlocated = code(generate(nil, 1, source, false))
         assert.truthy(located:find('#line 2 "entries.browser.titan"', 1, true))
         assert.is_nil(unlocated:find("#line", 1, true))
+        assert.is_nil(unlocated:find("TITAN_GENERATED_C_FILE", 1, true))
         local function without_directives(text)
-            return (text:gsub("[ \t]*#line[^\n]*\n", ""):gsub("\n[ \t\n]*\n", "\n"))
+            return (text:gsub("[ \t]*#line[^\n]*\n", "")
+                :gsub('^#define[ \t]+TITAN_GENERATED_C_FILE[ \t]+"[^"\n]*"\n', "")
+                :gsub("\n[ \t\n]*\n", "\n"))
         end
         assert.equal(without_directives(unlocated), without_directives(located))
     end)

@@ -288,7 +288,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     table.insert(sigs, render([[
         TITAN_SOURCE_LOCAL const void *$IDENTITY(void);
     ]], { IDENTITY = source_identity }))
-    emit_item("pinned", definitionline(tlcontext) .. render([[
+    emit_item("pinned", definitionline() .. render([[
         TITAN_SOURCE_LOCAL const void *$IDENTITY(void) {
             static const char token = 0;
             return &token;
@@ -375,7 +375,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                     }
                 ]], { CALLNAME = callname,
                     CALLNAME_finish = callname_finish,
-                    DEFLINE = definitionline(tlcontext, node.loc) }))
+                    DEFLINE = definitionline(node.loc) }))
                 callmeta = render([[
                     lua_newtable(L);
                     lua_pushcfunction(L, $CALLNAME);
@@ -811,7 +811,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 return 1;
             }
          ]], {
-            DEFLINE = definitionline(tlcontext),
+            DEFLINE = definitionline(),
             INDEXNAME = coder._module_metamethod_name(modname, "index"),
             NEWINDEXNAME = coder._module_metamethod_name(
                 modname, "newindex"),
@@ -909,11 +909,11 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     }))
 
     emit_item("pinned", render(modtypes, {
-        DEFLINE = definitionline(tlcontext),
+        DEFLINE = definitionline(),
         TYPESNAME = tlcontext.prefix .. "types",
         TYPES = c_string_literal(serialized_type),
     }))
-    emit_item("pinned", definitionline(tlcontext) .. render([[
+    emit_item("pinned", definitionline() .. render([[
         int $TYPESNAME(lua_State *L) {
             static const char layouts[] = $TYPES;
             lua_pushlstring(L, layouts, sizeof(layouts) - 1);
@@ -925,7 +925,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     }))
 
     emit_item("pinned", render(modabi, {
-        DEFLINE = definitionline(tlcontext),
+        DEFLINE = definitionline(),
         ABINAME = tlcontext.prefix .. "abi",
     }))
 
@@ -1127,7 +1127,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         "module preload helper")
     local native_resolver = coder._private_symbol(modname, "native_symbol")
     emit_item("pinned", render(init, {
-        DEFLINE = definitionline(tlcontext),
+        DEFLINE = definitionline(),
         INITNAME = tlcontext.prefix .. 'init',
         NATIVETYPE = tlcontext.prefix .. 'native_data',
         NATIVERESOLVER = native_resolver,
@@ -1181,7 +1181,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     }))
 
     emit_item("pinned", render(postamble, {
-        DEFLINE = definitionline(tlcontext),
+        DEFLINE = definitionline(),
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         LOGICALNAME = c_string_literal(modname),
         INITNAME = tlcontext.prefix .. 'init',
@@ -1241,8 +1241,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         }, "\n")
 
     local preamble_substs = {
-        FIXEDPREFIX = tlcontext.browser_trace
-            and require("titan-compiler.cpreamble").browser_prefix
+        FIXEDPREFIX = definition_stamps()
+            and require("titan-compiler.cpreamble").definition_prefix
             or require("titan-compiler.cpreamble").fixed_prefix,
         AFTERFOREIGNIMPORTS =
             require("titan-compiler.cpreamble").after_foreign_imports
@@ -1318,7 +1318,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     local private_header
     local parts = {}
     local function generated_source_preamble(index)
-        if not tlcontext.browser_trace then return "" end
+        if not definition_stamps() then return "" end
         local stem = options.source_output_stem or modname:gsub("[.]", "/")
         local filename = stem
             .. (index == 0 and "" or ".part" .. tostring(index)) .. ".c"

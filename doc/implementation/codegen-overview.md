@@ -202,24 +202,31 @@ changes as root nodes and nested bodies from different contributors are
 emitted, so compiler diagnostics, DWARF, and libbacktrace frames identify the
 actual source file and line.
 
-For the [browser target](browser-target.md), `definitionline(tlcontext, loc)`
-(`coder/names.lua`, installed in the shared `coder.core` environment) also
-stamps a `#line` directive immediately before the signature of every generated
-C function definition (including in generated `.titan.h` foreign headers).
-Source-owned definitions receive their real declaration or site location;
-source-less helpers (module protocol, metamethod, and init/opener functions,
-unlocated adapters, and the four inline helpers in `cpreamble.browser_prefix`)
-emit `#line 1 TITAN_GENERATED_C_FILE`, where each emitted browser part defines
+`definitionline(loc)` (`coder/names.lua`, installed in the shared `coder.core`
+environment) additionally stamps a `#line` directive immediately before the
+signature of every generated C function definition, on **both** targets and in
+generated `.titan.h` foreign headers. Source-owned definitions receive their
+real declaration or site location; source-less helpers (module protocol,
+metamethod, and init/opener functions, unlocated adapters, and the four inline
+helpers in `cpreamble.definition_prefix`) emit
+`#line 1 TITAN_GENERATED_C_FILE`, where each emitted part defines
 `TITAN_GENERATED_C_FILE` to its actual `<stem>.c` or `<stem>.partN.c` filename
 (avoiding Clang's `__BASE_FILE__`, which follows prior `#line` changes). This
 prevents a function prologue (such as `luaC_checkGC` or argument/root setup
 before the first statement's `#line`) from inheriting the preceding definition's
-trailing `#line` across folder contributors, and ensures each function's first
-in-body `.wasm.map` segment (`first[body]`) names its own declaring `.titan`
-file. For native targets `definitionline` returns `""`, so native generated C
-and header bytes are unchanged.
+trailing `#line` across folder contributors, so DWARF, libbacktrace, and the
+browser `.wasm.map` function range's first in-body segment (`first[body]`) name
+the function's own declaring `.titan` file and definition line.
 
-`emitline` returns nothing in two cases:
+`definitionline` and the part preamble follow exactly the policies below:
+`definition_stamps()` is false under coverage generation and under a false
+line-directive policy, so those modes emit neither a definition stamp nor the
+`TITAN_GENERATED_C_FILE` macro. Within a definition, everything before the
+first body statement — the signature, the GC poll, variable anchors, stack
+reservation, and argument checks — therefore carries the definition's own
+location rather than another file's.
+
+`emitline` and `definitionline` return nothing in two cases:
 
 - **Coverage generation.** Coverage uses scoped region metadata instead; see
   [native coverage](native-coverage.md).

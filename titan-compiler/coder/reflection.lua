@@ -279,12 +279,12 @@ function coder._reflection_metadata(ctx, sigs, code, node)
         .. "(lua_State *L, Udata *_rec, lua_Integer index, TValue *output);\n"
         .. "TITAN_MODULE_PRIVATE void " .. constructor
         .. "(lua_State *L, Udata *_mod, lua_Integer tag, TValue *input, TValue *output);"
-    code[#code + 1] = definitionline(tlcontext, node.loc)
+    code[#code + 1] = definitionline(node.loc)
         .. "TITAN_MODULE_PRIVATE void " .. projector
         .. "(lua_State *L, Udata *_rec, lua_Integer index, TValue *output) {\n"
         .. "ptrdiff_t _saved = savestack(L, L->top.p); titan_ensure_stack(L, 2);\n"
         .. table.concat(cases, "\n") .. "\n*output = lua_totvalue(L, -1); L->top.p = restorestack(L, _saved);\n}"
-    code[#code + 1] = definitionline(tlcontext, node.loc)
+    code[#code + 1] = definitionline(node.loc)
         .. "TITAN_MODULE_PRIVATE void " .. constructor
         .. "(lua_State *L, Udata *_mod, lua_Integer tag, TValue *input, TValue *output) {\n"
         .. "(void)tag; (void)_mod; (void)input; (void)output;\n"

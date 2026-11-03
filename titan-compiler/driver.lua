@@ -4706,7 +4706,7 @@ local function prepare_source_checking_header(context, modname, ast)
     local filename, filename_err = ffiheaders.filename(context, logical_name)
     if not filename then return nil, filename_err end
     local contents = coder.generate_foreign_header(
-        modname, ast, { module = modname, browser_trace = context.target == "browser" }, {
+        modname, ast, { module = modname }, {
             ffi_header = ffiheaders.relative(logical_name, descriptor.logical_name),
             source_header = function(node)
                 local dependency = assert(node._ffi_header_descriptor)
@@ -7171,7 +7171,7 @@ function driver.compile_planned_module(context, modname, options)
     end
     coder.prepare_coverage(mod.ast, coverage_build ~= nil)
     local header_plans, header_error =
-        driver.plan_foreign_headers({ modname }, driver.imported, context)
+        driver.plan_foreign_headers({ modname }, driver.imported)
     if not header_plans then return nil, header_error end
     local request = {
         modname = modname,
@@ -8487,7 +8487,7 @@ function driver.ast_has_foreign_functions(ast)
     return false
 end
 
-function driver.plan_foreign_header(modname, ast, sourcef, defer_render, context)
+function driver.plan_foreign_header(modname, ast, sourcef, defer_render)
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
     local headername = driver.foreign_header_filename(sourcef)
     local has_foreign = driver.ast_has_foreign_functions(ast)
@@ -8499,8 +8499,7 @@ function driver.plan_foreign_header(modname, ast, sourcef, defer_render, context
     local contents, recipe
     if has_foreign and not defer_render then
         contents, recipe = coder.generate_foreign_header(
-            modname, ast, { module = modname,
-                browser_trace = context and context.target == "browser" })
+            modname, ast, { module = modname })
     end
     return {
         modname = modname,
@@ -8559,7 +8558,7 @@ function driver.write_foreign_header_plan(plan, verbose, pretty_print)
 end
 
 -- Implementation notes: doc/implementation/foreign-functions.md#final-planning-ownership-and-stale-cleanup
-function driver.plan_foreign_headers(names, imported, context)
+function driver.plan_foreign_headers(names, imported)
     local plans = {}
     local by_name = {}
     local occupied = {}
@@ -8610,7 +8609,7 @@ function driver.plan_foreign_headers(names, imported, context)
                 }
             else
                 plan = driver.plan_foreign_header(
-                    name, mod.ast, mod.native_output or mod.filename, true, context)
+                    name, mod.ast, mod.native_output or mod.filename, true)
             end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 local identity = physical_absolute_filename(entry.filename):lower()
@@ -8685,8 +8684,7 @@ function driver.plan_foreign_headers(names, imported, context)
                 plan.modname, plan.ast)
             if plan.has_foreign then
                 plan.contents, plan.recipe = coder.generate_foreign_header(
-                    plan.modname, plan.ast, { module = plan.modname,
-                        browser_trace = context and context.target == "browser" })
+                    plan.modname, plan.ast, { module = plan.modname })
             end
         end
         local ok, err = driver.validate_foreign_header_plan(plan)
@@ -8751,8 +8749,8 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
 end
 
 function driver.prepare_foreign_headers(
-        names, imported, verbose, pretty_print, context)
-    local plans, err = driver.plan_foreign_headers(names, imported, context)
+        names, imported, verbose, pretty_print)
+    local plans, err = driver.plan_foreign_headers(names, imported)
     if not plans then return nil, err end
     return driver.write_foreign_header_plans(plans, verbose, pretty_print)
 end
@@ -8796,7 +8794,7 @@ local function prepare_compile(
         (options.coverage == true or options.coverage_backend ~= nil))
     local owns_header_plan = header_plan == nil
     if not header_plan and (not ast._foreign_header_prepared or not ast._ffi_header_prepared) then
-        header_plan = driver.plan_foreign_header(modname, ast, sourcef, false, context)
+        header_plan = driver.plan_foreign_header(modname, ast, sourcef, false)
         local valid, err = driver.validate_foreign_header_plan(header_plan)
         if not valid then return nil, err end
     end

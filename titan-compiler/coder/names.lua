@@ -122,12 +122,18 @@ function emitline(node)
         .. c_string_literal(loc.filename) .. "\n"
 end
 
--- Browser function-level lookup starts at the first mapped instruction, which
--- can precede every user statement. Own the signature and prologue explicitly.
+-- Definition stamps follow the policies of ordinary statement `#line`s:
+-- coverage carries ownership in scoped region metadata instead, and
+-- --no-line-directives removes every stamp. Both targets stamp identically.
+function definition_stamps()
+    return coder._emit_line_directives and not coder._coverage_source_regions
+end
+
+-- Function-level lookup starts at the first mapped instruction, which can
+-- precede every user statement. Own the signature and prologue explicitly.
 -- The per-part macro resets source-less helpers to their generated C file.
-function definitionline(context, loc)
-    local tlcontext = context.tlcontext or context
-    if not tlcontext.browser_trace then return "" end
+function definitionline(loc)
+    if not definition_stamps() then return "" end
     if loc and loc.line and loc.filename then
         return "#line " .. tostring(loc.line) .. " "
             .. c_string_literal(loc.filename) .. "\n"

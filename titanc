@@ -1026,8 +1026,8 @@ end
 local header_plans = {}
 local header_plan_by_name = {}
 if #errors == 0 then
-    local planned, header_err = driver.plan_foreign_headers(
-        linked_names, driver.imported, resolver_context)
+    local planned, header_err =
+        driver.plan_foreign_headers(linked_names, driver.imported)
     if not planned then
         table.insert(errors, header_err)
     else
