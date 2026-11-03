@@ -143,7 +143,8 @@ end
 local function validate(data, context)
     if not fields(data, { "label", "triple", "memory_bits", "tools", "build_profile", "compile_flags",
             "include_dirs", "target_defines", "paths", "lua", "profile_data", "profile_identity",
-            "fingerprint", "output_policy", "provider_policy", "identity" }, { "probe_cache_directory" }) or
+            "fingerprint", "output_policy", "provider_policy", "identity" },
+            { "probe_cache_directory", "trace_control" }) or
         data.label ~= "browser" or data.triple ~= "wasm32-unknown-emscripten" or data.memory_bits ~= 32 or
         not M.valid_profile(data.build_profile) or not argv(data.compile_flags) or
         not argv(data.include_dirs) or not argv(data.target_defines) then
@@ -183,8 +184,13 @@ local function validate(data, context)
     end
     local supported, flag_error = M.validate_flags(data.compile_flags, "compile_flags")
     if not supported then return nil, flag_error end
+    if data.trace_control ~= nil and type(data.trace_control) ~= "boolean" then
+        return nil, "invalid browser target descriptor"
+    end
     -- Every consumer of the descriptor compiles, certifies and probes from
-    -- these flags, so they must be exactly one object profile (D26).
+    -- these flags, so they must be exactly one object profile (D26). A
+    -- trace-control measurement build (baseline, minicoro, budget) may add one
+    -- trailing level flag, the only owned option it may override.
     local owned_flags = M.object_flags(data.build_profile)
     for index, flag in ipairs(owned_flags) do
         if data.compile_flags[index] ~= flag then
@@ -192,11 +198,17 @@ local function validate(data, context)
                 " profile compile flags do not match its object profile"
         end
     end
+    local override
     for index = #owned_flags + 1, #data.compile_flags do
         local owned = M.owned_compile_option(data.compile_flags, index)
         if owned then
-            return nil, "browser " .. data.build_profile ..
-                " profile owns compile option " .. string.format("%q", owned)
+            if data.trace_control == true and override == nil and
+                data.compile_flags[index]:match("^%-O[0-3s]$") then
+                override = data.compile_flags[index]
+            else
+                return nil, "browser " .. data.build_profile ..
+                    " profile owns compile option " .. string.format("%q", owned)
+            end
         end
     end
     local seen, longjmp = {}, false
@@ -603,6 +615,7 @@ function M.build(context, inputs)
         end
         local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
             tools = tool, build_profile = build_profile, compile_flags = flags,
+            trace_control = inputs.trace_control == true,
             include_dirs = includes, target_defines = target_defines,
             paths = paths, lua = { path = paths.lua_record, record = record,
                 record_sha256 = sha256.hex_via(context.cache_adapter and context.cache_adapter.sha256_binary, bytes) },

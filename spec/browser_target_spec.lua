@@ -467,6 +467,32 @@ describe("browser target descriptor", function()
         assert.equal("browser validation profile compile flags do not match its object profile", err)
     end)
 
+    it("accepts exactly one certified measurement level for a trace-control build", function()
+        for _, level in ipairs({ "-O1", "-O2" }) do
+            local data = fixtures.descriptor(nil, { trace_control = true })
+            data.compile_flags[#data.compile_flags + 1] = level
+            fixtures.identify(data)
+            assert(browser.import(data))
+            -- The measurement override is descriptor data: it changes identity.
+            local plain = fixtures.descriptor()
+            assert.not_equal(plain.identity, data.identity)
+        end
+        local twice = fixtures.descriptor(nil, { trace_control = true })
+        twice.compile_flags[#twice.compile_flags + 1] = "-O2"
+        twice.compile_flags[#twice.compile_flags + 1] = "-O1"
+        fixtures.identify(twice)
+        local imported, err = browser.import(twice)
+        assert.is_nil(imported)
+        assert.equal('browser validation profile owns compile option "-O1"', err)
+        -- A non-level owned option needs no trace control and is refused.
+        local gated = fixtures.descriptor(nil, { trace_control = true })
+        gated.compile_flags[#gated.compile_flags + 1] = "-g2"
+        fixtures.identify(gated)
+        local denied, deny_error = browser.import(gated)
+        assert.is_nil(denied)
+        assert.equal('browser validation profile owns compile option "-g2"', deny_error)
+    end)
+
     it("refuses a profile-owned option smuggled in after the profile flags", function()
         for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-foptimize-sibling-calls",
             "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" }) do

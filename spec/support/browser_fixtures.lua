@@ -113,7 +113,7 @@ function M.descriptor(root, overrides)
     end
     for _, define in ipairs(M.target_defines) do flags[#flags + 1] = define end
     local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
-        build_profile = build_profile,
+        build_profile = build_profile, trace_control = (overrides and overrides.trace_control) or nil,
         tools = { cc = { tools .. "emcc" }, ar = { tools .. "emar" },
             ranlib = { tools .. "emranlib" }, version = "6.0.13", source = "EMSDK",
             location = tools:sub(1, -2), version_output = "emcc (Emscripten) 6.0.13\n" },
