@@ -21,6 +21,7 @@ local cases = {
   "test_locations_before_after_yield", "test_coroutine_propagation_append",
   "test_recursion_beyond_ten", "test_recursion_near_capacity",
   "test_recursion_capacity_truncation", "test_mixed_recursion_headroom",
+  "test_mixed_recursion_overflow", "test_pcall_recursion_overflow",
 }
 local special = { "test_host_capture_ready", "test_host_capture_failed", "test_host_lua_fallback_capacity",
   "test_degraded_map", "test_degraded_lua_capacity", "test_missing_symbols" }

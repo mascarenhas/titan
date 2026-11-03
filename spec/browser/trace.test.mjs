@@ -127,8 +127,8 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
       // names table. D15 requires their exact raw fallbacks, not a blanket
       // exception for nested traces or arbitrary mangled function names.
       const parentLines = new Set();
-      for (const [line, symbol] of [[105, "titan_test_runner_ℳ_run_test_26_titan"],
-                                    [179, "titan_test_runner_ℳ_main_titan"]]) {
+      for (const [line, symbol] of [[109, "titan_test_runner_ℳ_run_test_27_titan"],
+                                    [189, "titan_test_runner_ℳ_main_titan"]]) {
         parentLines.add(exact(trace, "trace_cases__test_runner.titan", line, symbol));
         context.assert(frameCount(trace, ": in " + symbol) === 1,
           "nested trace duplicated/omitted parent raw fallback " + symbol);
@@ -248,11 +248,24 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
         "capacity trace was not bounded/marked");
       emit({depth, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
-    if (label === "mixed_depth_14") {
+    if (label === "mixed_depth_90") {
       const count = frameCount(trace, ": in trace_cases.mixed_recurse");
-      context.assert(count <= 15, "mixed trace duplicated recursive frames");
-      if (count < 15) context.assert(occurrences(trace, truncated) === 1, "mixed JS headroom cut was not marked");
-      emit({mixedDepth: 14, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
+      context.assert(count <= 91, "mixed trace duplicated recursive frames");
+      if (count < 91) context.assert(occurrences(trace, truncated) === 1, "mixed JS headroom cut was not marked");
+      emit({mixedDepth: 90, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
+    }
+    if (label === "mixed_overflow" || label === "pcall_overflow") {
+      // Mirrors the native arms: the mixed chain keeps recursion activations,
+      // while the pcall chain unwinds them and keeps the protected chunk.
+      const mixed = label === "mixed_overflow";
+      const count = frameCount(trace, ": in trace_cases.mixed_overflow_step");
+      context.assert(!trace.includes(captureFailed) && !trace.includes(unavailable),
+        "overflow trace lost its capture: " + label);
+      if (mixed) context.assert(count >= 10, "overflow trace omitted the recursion: " + label);
+      else context.assert(trace.includes("trace-pcall.lua"),
+        "overflow trace omitted the protected call: " + label);
+      context.assert(occurrences(trace, truncated) <= 1, "overflow trace has duplicate truncation markers");
+      emit({overflow: label, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
     if (label === "append") {
       for (const name of ["original_leaf", "resumed_leaf", "append_middle", "append_outer", "test_coroutine_propagation_append"]) {

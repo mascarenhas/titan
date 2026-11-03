@@ -474,8 +474,9 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.is_true(changed_cfg.ok, changed_cfg.output)
         local updated_record = assert(strategy:read_file(record))
         contains(updated_record, "fork_revision=" .. fork_rev)
-        contains(updated_record, "lua_defines=-DLUA_USER_DEFAULT=1 -DLUA_USE_BROWSER -DLUA_USE_POSIX")
-        contains(updated_record, "cflags=-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER -sSUPPORT_LONGJMP=emscripten -DLUA_USER_DEFAULT=1")
+        contains(updated_record, "lua_defines=-DLUAI_MAXCCALLS=100 -DLUA_USER_DEFAULT=1 -DLUA_USE_BROWSER -DLUA_USE_POSIX")
+        contains(updated_record, "cflags=-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER " ..
+            "-DLUAI_MAXCCALLS=100 -sSUPPORT_LONGJMP=emscripten -DLUA_USER_DEFAULT=1")
     end)
 
     it("installs browser-sdk into an empty differing ROCKS_TREE, verifies archives/digests/stack size, and keeps compiler SDK emsdk-free", function()
