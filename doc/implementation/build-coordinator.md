@@ -446,14 +446,17 @@ read the regular `.titan-build.lock` file on `fd 3` as its token pipe and
 assert on EOF (`jobserver_info::get_token`). Before calling `uv.spawn`, the
 common `spawn` helper in `process.lua` (`process.start`, `process.run`,
 `process.capture`, `Batch:spawn`, `process.start_job`, and
-`process.start_worker`) calls `jobserver_stdio(stdio, options)`: when the
-effective POSIX `MAKEFLAGS` advertises a pipe authorization (`auth.kind ==
-"pipe"`), it inspects `auth.read` and `auth.write` with `uv.fs_fstat`. If both
-are open `fifo` descriptors, it appends them to `stdio` after the caller's
-control/lock entries (at child descriptors `read_fd = #stdio` and `write_fd =
-#stdio`) and rewrites every `--jobserver-auth=` and `--jobserver-fds=` option
-word before a standalone `--` in the child's `MAKEFLAGS` to
-`<read_fd>,<write_fd>` via `jobs.child_makeflags` (preserving backslash
+`process.start_worker`) tracks the explicit `stdio_count` extent (including
+ignored `nil` standard-input slots where Lua's `#stdio` sequence length is not
+the array extent) and calls `jobserver_stdio(stdio, stdio_count, options)`:
+when the effective POSIX `MAKEFLAGS` advertises a pipe authorization
+(`auth.kind == "pipe"`), it inspects `auth.read` and `auth.write` with
+`uv.fs_fstat`. If both are open `fifo` descriptors, it appends them to `stdio`
+at `stdio_count + 1` and `stdio_count + 2` (child descriptors `read_fd =
+stdio_count` and `write_fd = stdio_count + 1`) and rewrites every
+`--jobserver-auth=` and `--jobserver-fds=` option word before a standalone `--`
+in the child's `MAKEFLAGS` to `<read_fd>,<write_fd>` via `jobs.child_makeflags`
+(preserving backslash
 escapes, spacing, other flags, and variable assignments after `--`). If either
 advertised descriptor is closed, negative, or not a FIFO, `jobs.child_makeflags`
 rewrites the authorization to `-2,-2` without appending to `stdio`, so an
