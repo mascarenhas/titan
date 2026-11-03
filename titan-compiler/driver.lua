@@ -4794,12 +4794,26 @@ end
 -- Native flags a test owner's generated C is compiled with. Compilation and
 -- certification share this decision: an object compiled without them can
 -- never satisfy a `--test` build, whose runner relies on unoptimized sibling
--- calls for case locations.
-function driver.test_owner_flags(test_build, test_functions)
+-- calls for case locations. A browser test image under the production profile
+-- also turns inlining off (D25): its objects would otherwise lose the physical
+-- frames the exact trace gate asserts, which is the browser form of native
+-- `--test`'s frame preservation.
+function driver.test_owner_flags(test_build, test_functions, context)
     if test_build and type(test_functions) == "table" and
        #test_functions > 0 then
-        return { table.unpack(
-            require("titan-compiler.test_runner").TEST_COMPILE_FLAGS) }
+        local flags = {}
+        if context and context.target == "browser" then
+            -- The descriptor owns the profile, including in a build worker
+            -- that inherited it (D26).
+            local profile = context.target_descriptor and
+                context.target_descriptor.build_profile or driver.BUILD_PROFILE
+            if profile == "production" then flags[1] = "-fno-inline" end
+        end
+        for _, flag in ipairs(
+            require("titan-compiler.test_runner").TEST_COMPILE_FLAGS) do
+            flags[#flags + 1] = flag
+        end
+        return flags
     end
     return {}
 end
@@ -8907,7 +8921,7 @@ local function prepare_compile(
     local test_functions =
         require("titan-compiler.test_runner").function_names(ast)
     local test_flags = driver.test_owner_flags(
-        options and options.test, test_functions)
+        options and options.test, test_functions, context)
     local imports, deps, providers = {}, {}, {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelImport" then
@@ -13475,7 +13489,8 @@ function driver.run_standalone_archive_probe(
         -- fixed-profile protocol check. Validate them before making a copy.
         local extra_flags = driver.link_extra_flags()
         local valid
-        valid, err = driver.browserlink.validate_extras(extra_flags, driver.browser_link_options)
+        valid, err = driver.browserlink.validate_extras(extra_flags,
+            driver.browser_link_options, context.target_descriptor.build_profile)
         if not valid then return nil, err end
         local protocol_flags = {}
         local trace_option = require("titan-compiler.browsertarget").trace_option
@@ -13721,19 +13736,24 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local assets, err = driver.require_browser_sdk(context)
     if not assets then return nil, err end
     local plan
+    -- A `--test` image is a distinguishable link purpose: it keeps the frames
+    -- its exact trace gate asserts, where a program accepts inlining (D25).
+    local purpose = options.purpose or
+        (context.link_kind == "test" and "test" or "program")
     if options.profile then
         plan, err = driver.browserlink.profile(context.target_descriptor, options.profile)
     else
-        plan, err = driver.browser_link_plan(context, options.purpose or "program")
+        plan, err = driver.browser_link_plan(context, purpose)
     end
     if not plan then return nil, err end
+    local build_profile = context.target_descriptor.build_profile
     local extra_flags = options.link_extra_flags or driver.link_extra_flags()
     local valid
     valid, err = driver.browserlink.validate_extras(extra_flags,
-        options.profile or driver.browser_link_options)
+        options.profile or driver.browser_link_options, build_profile)
     if not valid then return nil, err end
     valid, err = driver.browserlink.validate_extras(options.final_link_flags,
-        options.profile or driver.browser_link_options)
+        options.profile or driver.browser_link_options, build_profile)
     if not valid then return nil, err end
     local library_flags = { table.unpack(extra_flags) }
     append_argv(library_flags, options.final_link_flags)

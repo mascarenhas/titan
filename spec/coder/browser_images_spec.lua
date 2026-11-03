@@ -214,6 +214,52 @@ describe("browser image profile and SDK readiness", function()
         }, profile.link_flags)
         assert.equal(descriptor.identity, profile.identity_inputs.target_identity)
         assert.equal("-O1", profile.identity_inputs.optimization)
+        assert.equal("validation", profile.identity_inputs.profile)
+    end)
+
+    it("gives production programs the descriptor level and no frame flags", function()
+        local descriptor = fixtures.descriptor(nil, { build_profile = "production" })
+        local profile = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
+        assert.same({}, profile.compile_flags)
+        assert.same({
+            "-O3", "-gsource-map", "-g2",
+            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals",
+            "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
+            "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
+            "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
+            "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
+            "-sFORCE_FILESYSTEM=1",
+            '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]',
+            '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
+            '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
+            "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
+            "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
+            "-sASSERTIONS=2", "-sSTACK_OVERFLOW_CHECK=2",
+        }, profile.link_flags)
+        assert.equal("-O3", profile.identity_inputs.optimization)
+        assert.equal("production", profile.identity_inputs.profile)
+    end)
+
+    it("keeps frames and skips Binaryen inlining in a production test image", function()
+        local descriptor = fixtures.descriptor(nil, { build_profile = "production" })
+        local profile = assert(browserlink.profile(descriptor, { purpose = "test", assertions = 2 }))
+        local flags = table.concat(profile.link_flags, " ")
+        assert.truthy(flags:find("-O3 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2 ", 1, true), flags)
+        assert.truthy(flags:find(
+            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals,--skip-pass=inlining-optimizing", 1, true), flags)
+        -- The validation profile never runs the level optimizer, so its test
+        -- images keep #330's frozen link flags exactly.
+        local frozen = assert(browserlink.profile(fixtures.descriptor(), { purpose = "test", assertions = 2 }))
+        local program = assert(browserlink.profile(fixtures.descriptor(), { purpose = "program", assertions = 2 }))
+        assert.same(program.link_flags, frozen.link_flags)
+        -- Harness purposes keep their frame-preserving link settings even when
+        -- the installation optimizes.
+        for _, purpose in ipairs({ "protocol", "gate", "minicoro", "budget", "baseline" }) do
+            local harness = assert(browserlink.profile(descriptor, { purpose = purpose, assertions = 2 }))
+            local text = table.concat(harness.link_flags, " ")
+            assert.truthy(text:find("-fno-inline -fno-optimize-sibling-calls", 1, true), purpose)
+            assert.is_nil(text:find("--skip-pass", 1, true), purpose)
+        end
     end)
 
     it("keeps internal gate, budget and baseline variants constrained", function()
@@ -242,7 +288,7 @@ describe("browser image profile and SDK readiness", function()
 
     it("retains ordered local cleanup in every Titan-entry profile and its identity", function()
         local cleanup = "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals"
-        for _, purpose in ipairs({ "program", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
             for _, assertions in ipairs({ 0, 2 }) do
                 local plan = assert(browserlink.profile(fixtures.descriptor(),
                     { purpose = purpose, assertions = assertions }))
@@ -260,7 +306,7 @@ describe("browser image profile and SDK readiness", function()
     end)
 
     it("preserves byte-oriented FS and TTY for every purpose including the interpreter baseline", function()
-        for _, purpose in ipairs({ "program", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
             for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
                 local plan = assert(browserlink.profile(fixtures.descriptor(),
                     { purpose = purpose, assertions = 2, entry = entry }))
@@ -331,7 +377,7 @@ describe("browser image profile and SDK readiness", function()
         for _, purpose in ipairs({ "baseline", "minicoro", "budget" }) do
             assert.is_true(browserlink.validate_extras({ "-g2", "-Os" }, { purpose = purpose }))
         end
-        for _, purpose in ipairs({ "program", "protocol", "gate", "baseline", "minicoro", "budget" }) do
+        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "baseline", "minicoro", "budget" }) do
             for _, flags in ipairs({
                 { "-sBINARYEN_EXTRA_PASSES=" },
                 { "-s", "BINARYEN_EXTRA_PASSES=coalesce-locals" },
@@ -343,6 +389,23 @@ describe("browser image profile and SDK readiness", function()
                 assert.is_nil(ok)
                 assert.equal("browser link profile owns option " .. flags[1], why)
             end
+        end
+        -- The real call path names the installation profile it protects.
+        for _, purpose in ipairs({ "program", "test", "gate" }) do
+            for _, profile in ipairs({ "production", "validation" }) do
+                for _, flag in ipairs({ "-O2", "-g2", "-fno-inline",
+                    "-fno-optimize-sibling-calls" }) do
+                    local ok, why = browserlink.validate_extras({ flag }, { purpose = purpose }, profile)
+                    assert.is_nil(ok)
+                    assert.equal("browser " .. profile .. " link profile owns option " .. flag, why)
+                end
+                local ok = browserlink.validate_extras({ "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" },
+                    { purpose = purpose }, profile)
+                assert.is_nil(ok)
+            end
+            -- Unrelated Emscripten settings still pass through.
+            assert.is_true(browserlink.validate_extras({ "-sWASM_BIGINT=1", "-lm" },
+                { purpose = purpose }, "production"))
         end
         assert.same({ "out/app.mjs", "out/app.wasm" }, { driver.browser_program_path("out/app") })
         local filename, err = driver.browser_program_path("unused", "out/app.js")
