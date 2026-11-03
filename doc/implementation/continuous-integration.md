@@ -268,11 +268,14 @@ every `EMSDK_*` variable it does not set itself, and the job sets
 10. **Runner images.** The installed `titanc` builds `runner_image` (a
     `--test` image) and `runner_status` (a program) from `spec/browser` into
     `out/browser/runner` and asserts `.mjs`, `.wasm`, and `.wasm.map` for each.
-11. **Loader images.** For assertions 2 and 0, the job selects the `program`
-    profile through `driver.browser_link_options` and builds `loader_app` and
-    `fidelity` (programs with `--c-source spec/fixtures/browser_loader/loader.c`)
-    and `loader_names` (a `--test` image) into `out/browser/loader`, asserting
-    `.mjs`, `.wasm`, and `.wasm.map` for each. It also
+11. **Loader images.** For assertions 2 and 0, the job sets
+    `driver.browser_link_options` and builds `loader_app` and `fidelity`
+    (programs with `--c-source spec/fixtures/browser_loader/loader.c`) with the
+    `program` purpose and `loader_names` (a `--test` image) with the `test`
+    purpose, because a contrary purpose is refused
+    ([internal selection](browser-target.md#the-link-profile)), into
+    `out/browser/loader`, asserting `.mjs`, `.wasm`, and `.wasm.map` for each.
+    It also
     builds one `fidelity` image with the `baseline` profile at `O2` and
     assertions off, plus the harness-only `--ldflag=-Os` (the profile itself
     supplies the debug flags), because Emscripten 6.0.13 minifies export names

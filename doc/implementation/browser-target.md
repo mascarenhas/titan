@@ -367,9 +367,9 @@ in this order; the first failure is reported:
 
 1. `inputs.build_profile` is `production` or `validation` (`invalid browser
    build profile "<value>"`), and the direct-API compile extras pass the
-   [unsupported-flag check](#unsupported-flags) and, unless
-   `inputs.trace_control` is set, contain no option the build profile owns
-   (`browser <profile> profile owns compile option "<flag>"`).
+   [unsupported-flag check](#unsupported-flags) and contain no option the
+   build profile owns, except the one level that a `trace_control` build may
+   add (`browser <profile> profile owns compile option "<flag>"`).
 2. `emcc`, `emar`, and `emranlib` are located and `emcc` reports 6.0.13 (see
    [Emscripten pin](#emscripten-pin-and-tool-location)).
 3. The record is read and parsed: banner and text encoding, then unknown and
@@ -756,12 +756,14 @@ profile's optimization, inlining, tail-call, frame-pointer, or debug settings:
 `^-O`, `^-g`, and (after normalizing a leading `-fno-` to `-f`) `^-finline`,
 `^-foptimize-sibling-calls`, or `^-fomit-frame-pointer`.
 `browsertarget.owned_compile_option(flags, index)` adds every
-`BINARYEN_EXTRA_PASSES` spelling: `-sBINARYEN_EXTRA_PASSES`,
-`-sBINARYEN_EXTRA_PASSES=...`, and the split `-s BINARYEN_EXTRA_PASSES=...`.
-`browsertarget.build` rejects an owned compile option in `inputs.compile_flags`
-unless `inputs.trace_control` is set (`browser <profile> profile owns compile
-option "<flag>"`), and the descriptor validator enforces the same rule on the
-finished flags ([Object flags](#object-flags)).
+`BINARYEN_EXTRA_PASSES` spelling: `-sBINARYEN_EXTRA_PASSES[=...]`, the split
+`-s BINARYEN_EXTRA_PASSES[=...]`, and the same two forms of
+`NO_BINARYEN_EXTRA_PASSES`. `browsertarget.build` rejects an owned compile
+option in `inputs.compile_flags` (`browser <profile> profile owns compile
+option "<flag>"`, quoting both words of a split spelling); the one exception is
+a single `-O0` to `-O3` or `-Os` level in a `trace_control` build. The
+descriptor validator enforces the same rule on the finished flags ([Object
+flags](#object-flags)).
 `browserlink.validate_extras(flags, options, build_profile)` rejects
 `trace_option` flags in the normalized compile and link extras and final link
 extras unless `options.purpose` is `baseline`, `minicoro`, or `budget`, as well
@@ -1156,15 +1158,25 @@ can grow memory instead of retaining an old view.
 **Internal selection.** `driver.browser_link_options` is a Lua field for
 in-process harnesses (`{purpose=..., assertions=..., ...}`), set before
 `titanc` runs in the same Lua process; there is no command-line option or
-environment variable. Target initialization validates it against the built
-descriptor; for `baseline`, `minicoro`, and `budget` it marks the descriptor
-`trace_control`, and an `optimization` override enters the descriptor's
-compile prefix ([the harness level hook](#the-harness-level-hook)).
-`driver.browser_link_plan(context, purpose)` returns the plan for those
-options when they are set, whatever `purpose` says, and otherwise for
-`{purpose=purpose or "program", assertions=2}`;
-`driver.compile_browser_image` passes `test` for a `--test` link
-(`context.link_kind == "test"`) and `program` otherwise.
+environment variable, and it must name a purpose. The image kind decides
+between `program` and `test`: `driver.browser_link_kind(context)` is `test`
+for a `--test` link (`context.link_kind == "test"`) and `program` otherwise.
+`driver.browser_link_purpose(context, purpose)` returns that kind when no
+purpose is given, passes a harness purpose (`protocol`, `gate`, `minicoro`,
+`budget`, or `baseline`) through, and refuses a `program` or `test` purpose
+that contradicts a known kind with `browser link purpose "<purpose>" does not
+match this <kind> image`, so a test image is never certified or linked with the
+program profile. Target initialization applies that check and validates the
+options against the built descriptor; for `baseline`, `minicoro`, and `budget`
+it marks the descriptor `trace_control`, and an `optimization` override enters
+the descriptor's compile prefix ([the harness level
+hook](#the-harness-level-hook)). `driver.browser_link_plan(context, purpose)`
+returns the plan for the harness options when they are set (`browser link
+profile options require a purpose` when they name none) and otherwise for
+`{purpose = <resolved kind>, assertions = 2}`. `titanc` certifies the final
+link with `browser_link_plan(context, kind)`, and
+`driver.compile_browser_image` resolves its purpose the same way, also
+checking the purpose of an explicit `options.profile`.
 
 ## Build profiles
 
@@ -1223,10 +1235,12 @@ everywhere except a production program:
 
 `-gsource-map -g2` and the rest of [the link profile](#the-link-profile)
 follow in every row, and the pass list is omitted for the `lua-main` entry. A
-validation test image's flags equal its program image's. A harness that sets
-`driver.browser_link_options` decides the purpose itself, which is why the
-trace gate's `build-trace.lua` selects `test` for its test image and `program`
-for its uncaught image.
+validation test image's flags equal its program image's. The image kind
+decides between `program` and `test`; a harness that sets
+`driver.browser_link_options` may choose one of the harness purposes instead,
+but a contrary `program` or `test` purpose is an error ([internal
+selection](#the-link-profile)). The trace gate's `build-trace.lua` therefore
+names `test` for its test image and `program` for its uncaught image.
 
 ### Binaryen pass order
 
@@ -1300,9 +1314,14 @@ trace gate's production program rows require the shown Titan frames to be an
 ordered subsequence of the row's exact frames, with the exact file and
 execution line (file only on WebKit), and each name to be the matched frame's
 or that of a later expected frame, the enclosing caller it was inlined into
-(D28, D32). Lua frames, markers, fallbacks, and merge order stay exact, and no
-`titanentry` symbol or mangled C name may appear. Test-image and validation
-rows stay byte-exact.
+(D28, D32). At least one Titan frame must appear, and the outermost must be the
+entry, `trace_uncaught.main`: the entry is called from C and cannot be inlined
+away. Every other line must be a `[C]` frame, a Lua frame, or a documented
+marker, so an unparsed line fails the row. Lua frames, markers, fallbacks, and
+merge order stay exact, and no `titanentry` symbol or mangled C name may
+appear. Test-image and validation rows stay byte-exact. The gate takes the
+installation profile from `manifest.json` and fails without a valid one, so a
+missing profile cannot weaken a production program row.
 
 ### Why the post-Asyncify cleanup is load-bearing
 
@@ -1335,16 +1354,18 @@ pass list.
 
 When `driver.browser_link_options.purpose` is `baseline`, `minicoro`, or
 `budget`, target initialization builds the descriptor with `trace_control =
-true` (D27 addendum). Only such a descriptor may carry owned options after the
-profile prefix, and the validator accepts exactly one trailing level flag
-(`-O0` to `-O3`, or `-Os`), the `optimization` override; every other owned
-option, including a second level or a `-sBINARYEN_EXTRA_PASSES` spelling, is
-still `browser <profile> profile owns compile option "<flag>"`.
-`trace_control` is descriptor data and enters the identity. The hook is
-reachable only through the Lua API: without it, `--cflag`, `--ldflag`, and the
-`TITAN_EXTRA_*` variables are refused as above, naming the profile. Its users
-are CI's baseline cell, `scripts/browser_baseline.lua`, and the measurement and
-budget specs. Production builds stay at `PRODUCTION_LEVEL`.
+true` (D27 addendum). Only such a descriptor may carry an owned option after
+the profile prefix: exactly one trailing level flag (`-O0` to `-O3`, or `-Os`),
+the `optimization` override. Both `browsertarget.build` and the validator
+refuse every other owned option, including a second level or any
+`BINARYEN_EXTRA_PASSES` spelling, with `browser <profile> profile owns compile
+option "<flag>"`. `trace_control` is descriptor data and enters the identity.
+The hook is reachable only through the Lua API, and its options must name a
+purpose ([internal selection](#the-link-profile)); without it, `--cflag`,
+`--ldflag`, and the `TITAN_EXTRA_*` variables are refused as above, naming the
+profile. Its users are CI's baseline cell, `scripts/browser_baseline.lua`, and
+the measurement and budget specs. Production builds stay at
+`PRODUCTION_LEVEL`.
 
 ### Measurements
 
@@ -1426,9 +1447,10 @@ archives, extra_objects, verbose, options)` (with `options.context` required,
 plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
 `final_link_flags`, and `dependency_output`) links one image:
 
-1. require the SDK, select the plan (an explicit `options.profile`, otherwise
-   `browser_link_plan` with `options.purpose`, else `test` for a `--test` link
-   or `program`), and check the link extras and final link flags with
+1. require the SDK, resolve the purpose with `driver.browser_link_purpose`
+   (the image kind unless a harness purpose was named), select the plan (an
+   explicit `options.profile`, whose purpose passes the same check, otherwise
+   `browser_link_plan`), and check the link extras and final link flags with
    `validate_extras` under the descriptor's `build_profile`;
 2. scan the runtime archive with the descriptor fingerprint and validate it
    structurally, as a provider;
@@ -2667,10 +2689,12 @@ hosts`).
 * `spec/browser_target_spec.lua` — the descriptor with hand-made records and
   fake tools: freezing, every record and tool diagnostic, the three target
   defines, flags, the two build profiles (the profile in the identity, the
-  other profile's flags refused, owned compile options refused naming the
-  profile, one certified harness level), paths, include-root resolution, the
-  probe-cache directory, worker import, the compiler-probe feature diagnostic,
-  the browser `--coverage` refusal, and the Windows host scope.
+  object profile built from the profile, the other profile's flags refused,
+  every owned compile option and `BINARYEN_EXTRA_PASSES` spelling refused
+  naming the profile, exactly one certified harness level), paths,
+  include-root resolution, the probe-cache directory, worker import, the
+  compiler-probe feature diagnostic, the browser `--coverage` refusal, and the
+  Windows host scope.
 * `spec/browser_isolation_spec.lua` — semantic-cache generations and guards,
   the native → browser → native sequence, output markers, toolchain-detail
   hashing, and unchanged native link records.
@@ -2680,9 +2704,10 @@ hosts`).
   (`spec/support/browser_process_audit.lua`).
 * `spec/coder/browser_images_spec.lua` — the link profile per build profile
   and purpose (production program levels without frame flags, production test
-  images with frame flags and both Binaryen skips, validation and harness
-  purposes unchanged) and its owned options named by profile, missing-SDK and
-  `.mjs` diagnostics, program and test images with
+  images with frame flags and both Binaryen skips, test owners' frame flags,
+  validation and harness purposes unchanged), the image-derived link purpose
+  and its refusals of a contrary or missing purpose, the owned options named
+  by profile, missing-SDK and `.mjs` diagnostics, program and test images with
   statuses, binary arguments, uncaught reports, protected initialization and
   allocation failures, the libc drain, the stdio-only filesystem regression,
   dynamic-loading guards, three-file preflight reservation and repeated-link
