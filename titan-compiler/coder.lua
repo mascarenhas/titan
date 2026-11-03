@@ -28,15 +28,8 @@ return {
     PRIVATE_HEADER_MARKER = implementation.PRIVATE_HEADER_MARKER,
     generate = implementation.generate,
     prepare_coverage = implementation.prepare_coverage,
-    -- Emission policy is an explicit input of out-of-band renders (foreign
-    -- headers), which happen before C generation.
-    emission_policy = implementation.emission_policy,
-    same_emission_policy = implementation.same_emission_policy,
-    current_emission_policy = implementation.current_emission_policy,
-    with_emission_policy = implementation.with_emission_policy,
     generate_ffi_header = implementation.generate_ffi_header,
     generate_foreign_header = implementation.generate_foreign_header,
-    foreign_header_digest = implementation.foreign_header_digest,
     external_symbols = implementation.external_symbols,
     interface_external_symbols = implementation.interface_external_symbols,
     foreign_external_symbols = implementation.foreign_external_symbols,

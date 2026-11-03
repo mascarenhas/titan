@@ -1310,13 +1310,13 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     -- used exactly this generation's line/coverage policy, and anything else is
     -- a programming error rather than a byte to silently fall back on. With no
     -- plan this generation owns the header for its own result.
-    local current_policy = coder.current_emission_policy()
+    local current_policy = coder._current_emission_policy()
     local foreign_header
     local plan = options.foreign_header_plan
     if plan then
         foreign_header = plan.contents
         if foreign_header ~= nil
-            and not coder.same_emission_policy(plan.policy, current_policy) then
+            and not coder._same_emission_policy(plan.policy, current_policy) then
             error("foreign-header plan was rendered under a different " ..
                 "emission policy", 0)
         end
