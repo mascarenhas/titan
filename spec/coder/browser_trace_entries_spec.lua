@@ -534,11 +534,11 @@ function get(): integer return 1 end
     end)
 end)
 
--- A published foreign-header plan is one immutable unit: policy, the identity
--- of the source it was rendered from, contents and the digest of the recipe
--- that produced them. A build under another policy, or over changed source,
--- must republish the header (disk, recipe and C agreeing), in the same process
--- and across processes.
+-- A published foreign-header plan is one immutable unit: policy, the checked
+-- module object it was rendered from, contents and the digest of the recipe
+-- that produced them. A build under another policy, or from a different checked
+-- module, must republish the header (disk, recipe and C agreeing), in the same
+-- process and across processes.
 describe("published foreign-header plans", function()
     local MODULE = "policy"
     local FOREIGN = [[
@@ -548,13 +548,6 @@ function get(): integer return copy(1) end
     local COVERAGE_FLAGS = { "-O0", "-fno-lto", "--coverage",
         "-fprofile-update=atomic" }
 
-    local function write_source(dir, source)
-        local path = dir .. "/" .. MODULE .. ".titan"
-        local file = assert(io.open(path, "wb"))
-        assert(file:write(source))
-        assert(file:close())
-        return path
-    end
     local function checked_ast(source, path)
         h.reset(true)
         local ast, err = parser.parse(path, source)
@@ -572,11 +565,11 @@ function get(): integer return copy(1) end
     local function line_count(contents)
         return select(2, (contents or ""):gsub("#line", ""))
     end
-    local function build(dir, emit, coverage, entry, source)
+    local function build(dir, emit, coverage, entry, source, checked)
         local previous = driver.EMIT_LINE_DIRECTIVES
         driver.EMIT_LINE_DIRECTIVES = emit
-        local path = write_source(dir, source or FOREIGN)
-        local ast = checked_ast(source or FOREIGN, path)
+        local path = dir .. "/" .. MODULE .. ".titan"
+        local ast = checked or checked_ast(source or FOREIGN, path)
         local captured
         local original = driver.plan_foreign_header
         driver.plan_foreign_header = function(...)
@@ -597,9 +590,12 @@ function get(): integer return copy(1) end
         driver.EMIT_LINE_DIRECTIVES = previous
         assert.is_true(ok, compiled)
         assert.truthy(compiled, original_err)
-        local plan = assert(captured, "compile did not plan the foreign header")
+        local plan = captured or (entry and entry.foreign_header_plan)
+        assert(plan, "compile neither planned nor reused a foreign header")
         return {
             plan = plan,
+            planned = captured ~= nil,
+            ast = ast,
             header = read(dir .. "/" .. MODULE .. ".titan.h"),
             c = read(dir .. "/" .. MODULE .. ".c"),
         }
@@ -724,7 +720,7 @@ assert(ok, err)
         assert.is_true(tested, test_error)
     end)
 
-    it("republishes when the foreign source changes under the same policy", function()
+    it("replans for a different checked module with the same filename", function()
         local dir = temporary_directory()
         local tested, test_error = xpcall(function()
             local entry = { kind = "source", filename = dir .. "/policy.titan",
@@ -733,30 +729,41 @@ assert(ok, err)
                 return (FOREIGN:gsub("return n end",
                     "return n + " .. value .. " end"))
             end
+            -- No source file is ever written: these are checked buffers that
+            -- happen to share one filename, as an editor or language server
+            -- supplies them.
             local first = build(dir, true, false, entry, body(1234))
+            assert.is_true(first.planned)
             assert.truthy(first.header:find("1234", 1, true))
             assert.equal(first.plan, entry.foreign_header_plan)
-            assert.is_not_nil(first.plan.source)
-            -- Same entry, same policy, changed body: the published header must
-            -- follow the new source instead of reusing the old plan.
+            assert.equal(first.ast, first.plan.ast)
+            -- The very same checked module object under the same policy reuses
+            -- the published unit instead of planning again.
+            local reused = build(dir, true, false, entry, nil, first.ast)
+            assert.is_false(reused.planned)
+            assert.equal(first.plan, reused.plan)
+            -- A different checked buffer under the same filename and policy is
+            -- a different input and must replan and republish.
             local second = build(dir, true, false, entry, body(5678))
+            assert.is_true(second.planned)
+            assert.not_equal(first.ast, second.ast)
+            assert.not_equal(first.plan, second.plan)
             assert.truthy(second.header:find("5678", 1, true))
             assert.is_nil(second.header:find("1234", 1, true))
-            assert.not_equal(first.plan.source, second.plan.source)
-            assert.not_equal(first.plan.digest, second.plan.digest)
             assert.equal(second.plan, entry.foreign_header_plan)
-            -- A changed foreign signature is a source change too.
+            -- A changed foreign signature is a different checked module too.
             local signature = (FOREIGN:gsub(
                 "copy%(n: int%): int return n end",
                 "copy(n: int, m: int): int return n + m end")
                 :gsub("copy%(1%)", "copy(1, 2)"))
             local third = build(dir, true, false, entry, signature)
+            assert.is_true(third.planned)
             assert.truthy(third.header:find(
                 [[\u2119_foreign_inline_copy(int _param_n, int _param_m)]],
                 1, true), third.header)
             assert.is_nil(third.header:find("5678", 1, true))
-            assert.not_equal(second.plan.source, third.plan.source)
             assert.equal(third.plan, entry.foreign_header_plan)
+            assert.is_nil(lfs.attributes(dir .. "/policy.titan", "mode"))
         end, debug.traceback)
         remove_directory(dir)
         assert.is_true(tested, test_error)

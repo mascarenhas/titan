@@ -247,10 +247,11 @@ policy change that leaves that text identical does not over-invalidate every
 consumer of a declaration-only header. A producer is invalidated through its
 own recorded configuration (which includes `emit_line_directives` and the
 native coverage policy) and a consumer through changed header text. A published
-plan also records the identity of the source files it was rendered from, so a
-compile reuses it only when both that identity and the policy match; changed
-foreign bodies or signatures therefore replan and republish instead of reusing
-the old header.
+plan also records the checked module object it was rendered from, and a compile
+reuses it only when that same object and the policy match. A different checked
+buffer — a changed foreign body or signature, or an unsaved/overridden source
+that happens to share a filename — always replans and republishes rather than
+reusing the old header; disk contents are never consulted.
 
 `emitline` and `definitionline` return nothing in two cases:
 
