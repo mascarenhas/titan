@@ -8494,7 +8494,9 @@ end
 -- derived from the current options, never ambient coder state left by another
 -- generation.
 function driver.header_policy(coverage)
-    return coder.emission_policy(driver.EMIT_LINE_DIRECTIVES, coverage)
+    -- Internal coder helper: the public facade exposes only supported APIs.
+    local internal = require("titan-compiler.coder.core").coder
+    return internal._emission_policy(driver.EMIT_LINE_DIRECTIVES, coverage)
 end
 
 function driver.plan_foreign_header(
@@ -8508,6 +8510,7 @@ function driver.plan_foreign_header(
     local absolute_ffi_header = normalized_absolute_filename(ffi_headername)
     ast._foreign_header_output = has_foreign and absolute_header or nil
     ast._ffi_header_output = absolute_ffi_header
+    local internal = require("titan-compiler.coder.core").coder
     local contents, recipe
     if has_foreign and not defer_render then
         contents, recipe = coder.generate_foreign_header(
@@ -8527,7 +8530,7 @@ function driver.plan_foreign_header(
         -- (which includes the policy) that produced them. Its `ast` reference is
         -- what a later compile compares by identity.
         policy = policy,
-        digest = coder.foreign_header_digest(recipe),
+        digest = internal._foreign_header_digest(recipe),
         ffi_header = {
             filename = ffi_headername,
             absolute = absolute_ffi_header,
@@ -8702,8 +8705,9 @@ function driver.plan_foreign_headers(names, imported, policy_for)
                     plan.ffi_header.absolute, function(name)
                         return assert(dependency_plan(name)).absolute
                     end)
-                plan.digest = coder.foreign_header_digest(
-                    plan.mod.object_metadata.foreign_header)
+                plan.digest = require("titan-compiler.coder.core").coder
+                    ._foreign_header_digest(
+                        plan.mod.object_metadata.foreign_header)
             end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 entry.preserve = entry.contents ~= nil and
@@ -8717,7 +8721,8 @@ function driver.plan_foreign_headers(names, imported, policy_for)
                 plan.contents, plan.recipe = coder.generate_foreign_header(
                     plan.modname, plan.ast, { module = plan.modname }, nil,
                     plan.policy)
-                plan.digest = coder.foreign_header_digest(plan.recipe)
+                plan.digest = require("titan-compiler.coder.core").coder
+                    ._foreign_header_digest(plan.recipe)
             end
         end
         local ok, err = driver.validate_foreign_header_plan(plan)
@@ -8835,7 +8840,8 @@ local function prepare_compile(
         local policy = driver.header_policy(options and options.coverage == true)
         local published = source_entry and source_entry.foreign_header_plan
         if published and published.ast ~= nil and published.ast == ast
-            and coder.same_emission_policy(published.policy, policy) then
+            and require("titan-compiler.coder.core").coder
+                ._same_emission_policy(published.policy, policy) then
             header_plan = published
             owns_header_plan = false
         else

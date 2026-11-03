@@ -1416,7 +1416,7 @@ end
 -- Canonical identity of one foreign-header recipe (rendered text, source-header
 -- module list, emission policy); header paths are environment, not content.
 local ffiheaders = require "titan-compiler.ffiheaders"
-function coder.foreign_header_digest(recipe)
+function coder._foreign_header_digest(recipe)
     return ffiheaders.foreign_recipe_digest(recipe)
 end
 
@@ -1429,7 +1429,7 @@ function coder.generate_foreign_header(
         and type(policy.line_directives) == "boolean"
         and type(policy.coverage) == "boolean",
         "foreign-header generation requires an explicit emission policy")
-    return coder.with_emission_policy(policy, render_foreign_header,
+    return coder._with_emission_policy(policy, render_foreign_header,
         modname, ast, tlcontext, header_paths, policy)
 end
 

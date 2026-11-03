@@ -228,11 +228,11 @@ location rather than another file's.
 
 A foreign-header plan is one immutable published unit: `{policy, contents,
 recipe}` plus `digest`, the canonical identity of that recipe
-(`coder.foreign_header_digest`). Only the planning path produces and publishes
+(`coder._foreign_header_digest`, internal). Only the planning path produces and publishes
 it — disk bytes and recipe together — and nothing is cached on the AST, so no
 earlier build can leave a header behind to be relabelled. Every render receives
-an explicit policy (`coder.emission_policy`, applied by
-`coder.with_emission_policy`); the driver derives it with
+an explicit policy (`coder._emission_policy`, applied by
+`coder._with_emission_policy`; both are internal helpers, not public facade APIs); the driver derives it with
 `driver.header_policy(coverage)` from the same `EMIT_LINE_DIRECTIVES` option and
 per-module coverage selection that its C uses, for immediate and graph
 planning, the per-module worker, the CLI restore path, and checking headers

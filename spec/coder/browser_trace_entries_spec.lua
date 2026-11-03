@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
+local coder_internal = require("titan-compiler.coder.core").coder
 local driver = require "titan-compiler.driver"
 local parser = require "titan-compiler.parser"
 local checker = require "titan-compiler.checker"
@@ -469,14 +470,14 @@ function get(): integer return 1 end
             assert.equal(2, line_count(stamped_header(
                 driver.header_policy(false)).contents))
             assert.equal(0, line_count(planned(
-                coder.emission_policy(false, false)).contents))
+                coder_internal._emission_policy(false, false)).contents))
         end, debug.traceback)
         driver.EMIT_LINE_DIRECTIVES = previous
         assert.is_true(tested, test_error)
     end)
 
     it("rejects a header plan rendered under another emission policy", function()
-        local disabled = planned(coder.emission_policy(false, false))
+        local disabled = planned(coder_internal._emission_policy(false, false))
         assert.equal(0, line_count(disabled.contents))
         local ok, err = pcall(coder.generate, "entries", checked_ast(), {},
             driver.TITAN_ABI_VERSION, true, {
@@ -617,7 +618,7 @@ function get(): integer return copy(1) end
     local function assert_policy(built, emit, coverage)
         assert.same({ line_directives = emit, coverage = coverage },
             built.plan.recipe.policy)
-        assert.equal(coder.foreign_header_digest(built.plan.recipe),
+        assert.equal(coder_internal._foreign_header_digest(built.plan.recipe),
             built.plan.digest)
         local expected = emit and not coverage and 2 or 0
         assert.equal(expected, line_count(built.header))
@@ -777,13 +778,13 @@ assert(ok, err)
                 policy = { line_directives = emit, coverage = coverage } }
         end
         local function digest(emit, coverage)
-            return coder.foreign_header_digest(recipe(emit, coverage))
+            return coder_internal._foreign_header_digest(recipe(emit, coverage))
         end
         -- Identical rendered text with a different policy is a different unit.
         assert.equal(digest(true, false), digest(true, false))
         assert.not_equal(digest(true, false), digest(false, false))
         assert.not_equal(digest(true, false), digest(true, true))
-        assert.not_equal(digest(true, false), coder.foreign_header_digest(
+        assert.not_equal(digest(true, false), coder_internal._foreign_header_digest(
             { prefix = prefix, body = body, source_headers = headers }))
     end)
 end)

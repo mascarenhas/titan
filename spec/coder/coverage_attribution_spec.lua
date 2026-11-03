@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local checker = require "titan-compiler.checker"
 local coder = require "titan-compiler.coder"
+local coder_internal = require("titan-compiler.coder.core").coder
 local driver = require "titan-compiler.driver"
 local lines = require "titan-compiler.coverage_lines"
 local h = require "spec.support.helpers"
@@ -210,7 +211,7 @@ function use(input: integer): integer
   return plus(input)
 end
 ]])
-        local policy = coder.emission_policy(true, false)
+        local policy = coder_internal._emission_policy(true, false)
         local ordinary = coder.generate_foreign_header(MODULE, ast, nil, nil, policy)
         assert.truthy(ordinary:find("static inline", 1, true))
         assert.truthy(ordinary:find("%+"))
