@@ -789,7 +789,9 @@ if not args.compile_only and not args.print_ast then
         browser_assets, err = driver.require_browser_sdk(resolver_context)
         if not browser_assets then exit(err) end
         if builds_program then
-            browser_profile, err = driver.browser_link_plan(resolver_context)
+            -- The final-link certificate must certify the profile this image
+            -- will actually be linked with, so pass the resolved image kind.
+            browser_profile, err = driver.browser_link_plan(resolver_context, kind)
         else
             browser_profile, err = driver.browserlink.profile(resolver_context.target_descriptor,
                 { purpose = "protocol", assertions = 2 })

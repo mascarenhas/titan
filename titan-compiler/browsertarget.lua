@@ -292,16 +292,16 @@ function M.trace_option(flag)
 end
 
 -- A compile-side spelling the build profile owns: the optimization, debug and
--- frame choices, and the post-Asyncify pass list. `-s BINARYEN_EXTRA_PASSES`
--- is the two-token spelling Emscripten also accepts.
+-- frame choices, and the post-Asyncify pass list. Both `-sKEY[=VALUE]` and the
+-- two-token `-s KEY[=VALUE]` spellings count, and `-sNO_...`/`-U...` spellings
+-- of an owned key are the same setting, as in the link-extras check.
 function M.owned_compile_option(flags, index)
     local flag = flags[index]
     if M.trace_option(flag) then return flag end
-    if flag == "-sBINARYEN_EXTRA_PASSES" or flag:match("^%-sBINARYEN_EXTRA_PASSES=") then
-        return flag
-    end
-    if flag == "-s" and (flags[index + 1] or ""):match("^BINARYEN_EXTRA_PASSES=") then
-        return flag .. " " .. flags[index + 1]
+    local setting = flag:match("^%-s(.+)$") or (flag == "-s" and flags[index + 1])
+    local key = setting and setting:match("^([%w_]+)")
+    if key and key:gsub("^NO_", "") == "BINARYEN_EXTRA_PASSES" then
+        return flag == "-s" and (flag .. " " .. (flags[index + 1] or "")) or flag
     end
     return nil
 end
@@ -543,11 +543,20 @@ function M.build(context, inputs)
         end
         local valid, flag_error = M.validate_flags(inputs.compile_flags, "compile_flags")
         if not valid then return nil, flag_error end
-        for index, flag in ipairs(inputs.compile_flags or {}) do
-            local owned = not inputs.trace_control and M.owned_compile_option(inputs.compile_flags, index)
+        local extras = inputs.compile_flags or {}
+        local override
+        for index = 1, #extras do
+            local owned = M.owned_compile_option(extras, index)
             if owned then
-                return nil, "browser " .. build_profile ..
-                    " profile owns compile option " .. string.format("%q", owned)
+                -- A trace-control measurement build may append exactly one
+                -- level; nothing else the profile owns may be overridden.
+                if inputs.trace_control == true and override == nil and
+                        owned:match("^%-O[0-3s]$") then
+                    override = owned
+                else
+                    return nil, "browser " .. build_profile ..
+                        " profile owns compile option " .. string.format("%q", owned)
+                end
             end
         end
         local paths = inputs.paths

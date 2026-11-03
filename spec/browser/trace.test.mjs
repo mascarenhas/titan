@@ -75,7 +75,11 @@ export async function run(context) {
 }
 
 export async function executeRow(context, row, degraded, recordCost, isolated = false,
-    profile = "validation") {
+    profile) {
+  // The installation profile is required: a missing or unknown value must not
+  // silently weaken a production program row into the exact contract.
+  context.assert(profile === "production" || profile === "validation",
+    "invalid trace manifest profile");
   const emit = record => context.stdout(encoder.encode(JSON.stringify({engine: context.engine, ...record}) + "\n"));
   const webkit = context.engine === "webkit";
   const firefox = context.engine === "firefox";
@@ -96,6 +100,14 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
         name: match[3], text: line});
     }
     return frames;
+  }
+
+  // Lines the program-row grammar accepts besides Titan frames: `[C]` frames,
+  // Lua frames from the fixture's loaded-Lua shapes, and the documented
+  // truncation marker. Anything else must be a parsed Titan frame.
+  function acceptedNonTitan(line) {
+    return line.startsWith("[C]:") || /^[^:\n]+\.lua(?::[0-9]+)?: in /.test(line) ||
+      line === unavailable || line === captureFailed || line === truncated;
   }
 
   function exactFrame(file, line, name) {
@@ -156,6 +168,17 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
       ];
       if (orderedSubsequence) {
         const shown = titanFrameLines(trace);
+        const lines = trace.split("\n").filter(line => line.length > 0);
+        const titanTexts = new Set(shown.map(frame => frame.text));
+        const unexplained = lines.filter(line => !titanTexts.has(line) && !acceptedNonTitan(line));
+        context.assert(unexplained.length === 0,
+          "program trace has unparsed lines: " + unexplained.join(" | ") + "\n" + trace);
+        // The program entry is called from C and cannot be inlined away, so a
+        // production program row always shows at least one Titan frame and the
+        // outermost of them is the entry frame.
+        context.assert(shown.length > 0, "program trace showed no Titan frame:\n" + trace);
+        context.assert(shown.at(-1).name === "trace_uncaught.main",
+          "program trace omitted the entry frame trace_uncaught.main:\n" + trace);
         let next = 0;
         for (const frame of shown) {
           const index = uncaughtFrames.findIndex(([file, line], position) =>
