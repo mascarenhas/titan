@@ -787,29 +787,6 @@ jobs:
       - name: Install native compiler dependencies
         run: sudo apt-get update && sudo apt-get install -y gcc-14 curl libreadline-dev
 
-      # Pipe-auth fd numbers can alias compiler output-lock leases in nested
-      # native jobs. FIFO auth keeps GCC LTO on the same four-job server.
-      - name: Install FIFO-capable GNU Make for production builds
-        if: matrix.profile == 'production'
-        env:
-          TITAN_MAKE_VERSION: "4.4.1"
-          TITAN_MAKE_SHA256: "dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3"
-        run: |
-          set -euo pipefail
-          source="$RUNNER_TEMP/titan-make-$TITAN_MAKE_VERSION"
-          make_prefix="$RUNNER_TEMP/titan-make-prefix-$TITAN_MAKE_VERSION"
-          archive="$RUNNER_TEMP/titan-make-$TITAN_MAKE_VERSION.tar.gz"
-          curl -fL "https://ftp.gnu.org/gnu/make/make-$TITAN_MAKE_VERSION.tar.gz" -o "$archive"
-          echo "$TITAN_MAKE_SHA256  $archive" | sha256sum -c --strict -
-          mkdir -p "$source" "$make_prefix"
-          tar -xzf "$archive" -C "$source" --strip-components=1
-          env -C "$source" ./configure --prefix="$make_prefix" --disable-nls
-          make -C "$source" -j4
-          make -C "$source" install
-          "$make_prefix/bin/make" --version
-          echo "$make_prefix/bin" >> "$GITHUB_PATH"
-          echo "MAKEFLAGS=-j4 --jobserver-style=fifo" >> "$GITHUB_ENV"
-
       # Prepared compiler trees contain validation-built authored runtime
       # objects. Make does not stamp their flags, so production starts cold
       # rather than relabeling that SDK or deleting its outputs.
