@@ -28,6 +28,16 @@ export async function run(context) {
         context.stdout(new TextEncoder().encode(JSON.stringify(context.args.slice(1))));
         return;
     }
+    if (mode === "trace-policy") {
+        const image = await context.image("spec/fixtures/browser_trace_adapter/degraded.mjs");
+        try {
+            const module = await image.factory({});
+            context.assert(module.titanBrowserTrace.state === "degraded");
+        } catch {
+            // Swallowing the rejection must not erase the observer's failure.
+        }
+        return;
+    }
     if (mode === "trap") { wasmAction()(); return; }
     if (mode === "late-trap") { setTimeout(wasmAction(), 40); return; }
     if (mode === "timeout") {

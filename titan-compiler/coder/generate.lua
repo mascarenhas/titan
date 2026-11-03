@@ -164,6 +164,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     coder._assert_erased_boundary(ast)
     local tlcontext = {
         module = modname,
+        browser_trace = options.target == "browser",
+        trace_entries = {},
         prefix = mangle_qn(modname) .. "_",
         static_deps = static_deps,
         external_slots = {},
@@ -286,7 +288,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     table.insert(sigs, render([[
         TITAN_SOURCE_LOCAL const void *$IDENTITY(void);
     ]], { IDENTITY = source_identity }))
-    emit_item("pinned", render([[
+    emit_item("pinned", definitionline() .. render([[
         TITAN_SOURCE_LOCAL const void *$IDENTITY(void) {
             static const char token = 0;
             return &token;
@@ -355,13 +357,13 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 ]], { CALLNAME = callname,
                     CALLNAME_finish = callname_finish }))
                 emit_item("callable", render([[
-                    TITAN_MODULE_PRIVATE int $CALLNAME_finish(lua_State *L, int status,
+                    ${DEFLINE}TITAN_MODULE_PRIVATE int $CALLNAME_finish(lua_State *L, int status,
                                                               lua_KContext context) {
                         (void)status;
                         (void)context;
                         return lua_gettop(L);
                     }
-                    TITAN_MODULE_PRIVATE int $CALLNAME(lua_State *L) {
+                    ${DEFLINE}TITAN_MODULE_PRIVATE int $CALLNAME(lua_State *L) {
                         /* Replace the namespace receiver with its constructor;
                            every argument and result retains ordinary Lua call
                            adjustment, including nils and flexible results. */
@@ -372,7 +374,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                         return lua_gettop(L);
                     }
                 ]], { CALLNAME = callname,
-                    CALLNAME_finish = callname_finish }))
+                    CALLNAME_finish = callname_finish,
+                    DEFLINE = definitionline(node.loc) }))
                 callmeta = render([[
                     lua_newtable(L);
                     lua_pushcfunction(L, $CALLNAME);
@@ -416,6 +419,13 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         if not node._ignore then
             local tag = node._tag
             if tag == "Ast.TopLevelForeignFunc" then
+                local display = tlcontext.module .. "." .. node.name
+                register_trace_name(tlcontext,
+                    coder._foreign_func_name(modname, node.name), display)
+                if node.islocal then
+                    register_trace_name(tlcontext,
+                        coder._foreign_inline_name(modname, node.name), display)
+                end
                 if not ast._foreign_header_output then
                     table.insert(sigs,
                         (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
@@ -764,7 +774,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             NEWINDEXNAME = newindexname,
         }))
         emit_item("callable", render([[
-            TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
+            ${DEFLINE}TITAN_MODULE_PRIVATE int $INDEXNAME(lua_State *L) {
                 CClosure *_me = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_me->upvalue[0]);
                 TValue _indexv;
@@ -780,7 +790,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 return 1;
             }
 
-            TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
+            ${DEFLINE}TITAN_MODULE_PRIVATE int $NEWINDEXNAME(lua_State *L) {
                 CClosure *_me = clCvalue(s2v(L->ci->func.p));
                 Udata *_mod = uvalue(&_me->upvalue[0]);
                 TValue *_value = s2v(L->ci->func.p + 3);
@@ -801,6 +811,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 return 1;
             }
          ]], {
+            DEFLINE = definitionline(),
             INDEXNAME = coder._module_metamethod_name(modname, "index"),
             NEWINDEXNAME = coder._module_metamethod_name(
                 modname, "newindex"),
@@ -898,10 +909,11 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     }))
 
     emit_item("pinned", render(modtypes, {
+        DEFLINE = definitionline(),
         TYPESNAME = tlcontext.prefix .. "types",
         TYPES = c_string_literal(serialized_type),
     }))
-    emit_item("pinned", render([[
+    emit_item("pinned", definitionline() .. render([[
         int $TYPESNAME(lua_State *L) {
             static const char layouts[] = $TYPES;
             lua_pushlstring(L, layouts, sizeof(layouts) - 1);
@@ -913,6 +925,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     }))
 
     emit_item("pinned", render(modabi, {
+        DEFLINE = definitionline(),
         ABINAME = tlcontext.prefix .. "abi",
     }))
 
@@ -926,7 +939,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     if #binding_defs > 0 then
         emit_item("pinned", table.concat(binding_defs, "\n"))
     end
-    for _, entry in pairs(tlcontext.owned_c_metatables) do
+    for _, key in ipairs(coder._sorted_keys(tlcontext.owned_c_metatables)) do
+        local entry = tlcontext.owned_c_metatables[key]
         table.insert(initrecs, render([[
             luaL_getmetatable(L, $NAME);
             if (lua_isnil(L, -1)) {
@@ -1013,10 +1027,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     if #tlcontext.names > 0 then
         local setnames = {}
         for _, pair in ipairs(tlcontext.names) do
-            table.insert(setnames, render([[
+            local statement = tlcontext.browser_trace and [[
+                lua_pushliteral(L, $SYM);
+                lua_pushliteral(L, $QUAL);
+                lua_rawset(L, -3);
+            ]] or [[
                 lua_pushliteral(L, $QUAL);
                 lua_setfield(L, -2, $SYM);
-            ]], {
+            ]]
+            table.insert(setnames, render(statement, {
                 SYM = c_string_literal(
                     coder._linkage_symbol_name(pair[1])),
                 QUAL = c_string_literal(pair[2]),
@@ -1036,6 +1055,48 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             NAMESKEY = "TITAN_NAMES_KEY",
             SETNAMES = table.concat(setnames, "\n"),
         })
+        if tlcontext.browser_trace then
+            initnames = render([[
+                lua_pushliteral(L, TITAN_NAMES_KEY);
+                lua_rawget(L, LUA_REGISTRYINDEX);
+                if(lua_isnil(L, -1)) {
+                    lua_pop(L, 1);
+                    lua_newtable(L);
+                    lua_pushliteral(L, TITAN_NAMES_KEY);
+                    lua_pushvalue(L, -2);
+                    lua_rawset(L, LUA_REGISTRYINDEX);
+                }
+                $SETNAMES
+                lua_pop(L, 1);
+            ]], { SETNAMES = table.concat(setnames, "\n") })
+        end
+    end
+    local earlytrace = ""
+    if tlcontext.browser_trace then
+        local symbols, entries = {}, {}
+        for symbol in pairs(tlcontext.trace_entries) do symbols[#symbols + 1] = symbol end
+        table.sort(symbols, util.bytewise_less)
+        for _, symbol in ipairs(symbols) do
+            entries[#entries + 1] = render([[
+                lua_pushcfunction(L, $SYMBOL);
+                lua_pushboolean(L, 1);
+                lua_rawset(L, -3);
+            ]], { SYMBOL = symbol })
+        end
+        earlytrace = render([[
+            lua_pushliteral(L, TITAN_ENTRIES_KEY);
+            lua_rawget(L, LUA_REGISTRYINDEX);
+            if(lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                lua_newtable(L);
+                lua_pushliteral(L, TITAN_ENTRIES_KEY);
+                lua_pushvalue(L, -2);
+                lua_rawset(L, LUA_REGISTRYINDEX);
+            }
+            $ENTRIES
+            lua_pop(L, 1);
+        ]], { ENTRIES = table.concat(entries, "\n") }) .. "\n" .. initnames
+        initnames = ""
     end
 
     -- Error recovery reads these constants without interning. Root each one in
@@ -1067,13 +1128,16 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         "module preload helper")
     local native_resolver = coder._private_symbol(modname, "native_symbol")
     emit_item("pinned", render(init, {
+        DEFLINE = definitionline(),
         INITNAME = tlcontext.prefix .. 'init',
         NATIVETYPE = tlcontext.prefix .. 'native_data',
         NATIVERESOLVER = native_resolver,
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         PRELOADNAME = preload_name,
         PRELOADMODNAME = c_string_literal(modname),
-        INITRECOVERYSTRINGS = table.concat(initrecoverystrings, "\n"),
+        INITRECOVERYSTRINGS = earlytrace ~= "" and
+            earlytrace .. "\n" .. table.concat(initrecoverystrings, "\n") or
+            table.concat(initrecoverystrings, "\n"),
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
         LOADGLOBALS = table.concat(loadglobals, "\n"),
@@ -1118,6 +1182,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     }))
 
     emit_item("pinned", render(postamble, {
+        DEFLINE = definitionline(),
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         LOGICALNAME = c_string_literal(modname),
         INITNAME = tlcontext.prefix .. 'init',
@@ -1177,8 +1242,9 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         }, "\n")
 
     local preamble_substs = {
-        FIXEDPREFIX =
-            require("titan-compiler.cpreamble").fixed_prefix,
+        FIXEDPREFIX = definition_stamps()
+            and require("titan-compiler.cpreamble").definition_prefix
+            or require("titan-compiler.cpreamble").fixed_prefix,
         AFTERFOREIGNIMPORTS =
             require("titan-compiler.cpreamble").after_foreign_imports
             .. "\n" .. coder._native_option_declarations(),
@@ -1240,18 +1306,34 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         end
     end
 
+    -- A published header plan is consumed, never re-rendered: it must have
+    -- used exactly this generation's line/coverage policy, and anything else is
+    -- a programming error rather than a byte to silently fall back on. With no
+    -- plan this generation owns the header for its own result.
+    local current_policy = coder._current_emission_policy()
     local foreign_header
-    if options.foreign_header_plan then
-        foreign_header = options.foreign_header_plan.contents
-    else
-        foreign_header = ast._foreign_header_contents
-        if not ast._foreign_header_prepared then
-            foreign_header = coder.generate_foreign_header(
-                modname, ast, tlcontext)
+    local plan = options.foreign_header_plan
+    if plan then
+        foreign_header = plan.contents
+        if foreign_header ~= nil
+            and not coder._same_emission_policy(plan.policy, current_policy) then
+            error("foreign-header plan was rendered under a different " ..
+                "emission policy", 0)
         end
+    else
+        foreign_header = coder.generate_foreign_header(
+            modname, ast, tlcontext, nil, current_policy)
     end
     local private_header
     local parts = {}
+    local function generated_source_preamble(index)
+        if not definition_stamps() then return "" end
+        local stem = options.source_output_stem or modname:gsub("[.]", "/")
+        local filename = stem
+            .. (index == 0 and "" or ".part" .. tostring(index)) .. ".c"
+        return "#define TITAN_GENERATED_C_FILE "
+            .. c_string_literal(filename) .. "\n"
+    end
     if part_count == 1 then
         local texts = {}
         for _, item in ipairs(items) do
@@ -1262,7 +1344,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             rendered_preamble .. "\n\n" .. table.concat(texts, "\n\n"))
         parts[1] = {
             index = 0,
-            code = source,
+            code = generated_source_preamble(0) .. source,
             code_bytes = total_code_bytes,
         }
     else
@@ -1337,7 +1419,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 local idx = #parts
                 parts[idx + 1] = {
                     index = idx,
-                    code = normalize_line_directives(table.concat(texts, "\n\n")),
+                    code = generated_source_preamble(idx)
+                        .. normalize_line_directives(table.concat(texts, "\n\n")),
                     code_bytes = part_loads[p],
                 }
             end

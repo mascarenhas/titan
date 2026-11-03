@@ -74,6 +74,7 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
   let admitted = false;
   let active = false;
   let called = false;
+  let callFulfilled = false;
   let settled = false;
   let fatal = false;
   let abortSeen = false;
@@ -145,7 +146,9 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
     if (!bridge?.safe() || fatal) return;
     out.deliver();
     err.deliver();
-    if (called && !completion && !pending) {
+    // An export's queued safe point can beat ccall's rejection handler.
+    // Only fulfillment proves that an acknowledgement is missing.
+    if (callFulfilled && !completion && !pending) {
       fail(failure('PROTOCOL', 'browser entry returned without completion or suspension'), true);
     }
     finish();
@@ -277,7 +280,10 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
       // The call's value is admission, never Titan's status. Some fiber-last
       // paths do not settle this internal Promise: completion + actual stack
       // quiescence own settlement and disposal, not Emscripten keepalive state.
-      Promise.resolve(call).then(() => safePoint(bridge?.suspensionPending), cause => {
+      Promise.resolve(call).then(() => {
+        callFulfilled = true;
+        safePoint(bridge?.suspensionPending);
+      }, cause => {
         engineFailure(cause);
       });
     }).catch(cause => {

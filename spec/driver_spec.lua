@@ -4092,7 +4092,6 @@ describe("generated C formatting", function()
         assert.is_nil(ok)
         assert.matches("injected stage rename failure", err, 1, true)
         assert.equal(old, assert(original_get_file_contents(header)))
-        assert.is_nil(plan.ast._foreign_header_prepared)
         remove_tree(root)
     end)
 
@@ -4120,8 +4119,6 @@ describe("generated C formatting", function()
         assert.equal("second header formatting failed", err)
         assert.equal(old_header, assert(util.get_file_contents(header)))
         assert.equal(old_ffi, assert(util.get_file_contents(ffi_header)))
-        assert.is_nil(plan.ast._ffi_header_prepared)
-        assert.is_nil(plan.ast._foreign_header_prepared)
         for _, path in ipairs(calls) do assert.is_nil(lfs.symlinkattributes(path)) end
         remove_tree(root)
     end)
@@ -4152,7 +4149,6 @@ describe("generated C formatting", function()
         assert.is_nil(ok)
         assert.matches("injected formatter failure", err, 1, true)
         assert.equal(old, assert(util.get_file_contents(header)))
-        assert.is_nil(plan.ast._foreign_header_prepared)
         assert.equal(1, #calls)
         assert.is_nil(lfs.symlinkattributes(calls[1]))
 
@@ -4167,7 +4163,6 @@ describe("generated C formatting", function()
         assert.is_true(driver.write_foreign_header_plan(plan, nil, true))
         assert.equal(new .. "/* formatted */\n",
             assert(util.get_file_contents(header)))
-        assert.is_true(plan.ast._foreign_header_prepared)
         remove_tree(root)
     end)
 end)
@@ -4258,16 +4253,14 @@ describe("source foreign-header planning", function()
         assert.truthy(plans[2].contents:find(import._foreign_header, 1, true))
         assert.truthy(plans[2].ffi_header.contents:find(import._ffi_header, 1, true))
         assert.is_true(driver.write_foreign_header_plans(plans))
-        assert.equal(plans[1].contents,
-            producer_ast._foreign_header_contents)
-        assert.equal(plans[2].contents,
-            consumer_ast._foreign_header_contents)
+        assert.is_not_nil(plans[1].policy)
+        assert.is_not_nil(plans[2].policy)
         assert.equal("file", lfs.attributes(root .. "/producer.titan.h", "mode"))
         assert.equal("file", lfs.attributes(root .. "/consumer.titan.h", "mode"))
         assert.equal("file", lfs.attributes(root .. "/producer.ffi.h", "mode"))
         assert.equal("file", lfs.attributes(root .. "/consumer.ffi.h", "mode"))
-        assert.equal(plans[1].ffi_header.contents, producer_ast._ffi_header_contents)
-        assert.is_true(consumer_ast._ffi_header_prepared)
+        assert.equal(plans[1].ffi_header.contents,
+            assert(util.get_file_contents(root .. "/producer.ffi.h")))
 
         producer_ast[1]._ignore = true
         consumer_ast[2]._ignore = true
@@ -5508,6 +5501,11 @@ describe("compiler module loader", function()
             local source_cert = entry.source_certificate or
                 incremental.source_certificate(context, source_desc)
             local layouts = empty_layouts(entry.type.name)
+            local foreign_header
+            if entry.ast then
+                foreign_header = driver.plan_foreign_header(entry.type.name,
+                    entry.ast, entry.native_output or entry.filename, false).recipe
+            end
             local native = {
                 has_main = false,
                 imports = imports,
@@ -5516,7 +5514,7 @@ describe("compiler module loader", function()
                 native_references = {},
                 external_symbols = {},
                 layouts = layouts,
-                foreign_header = entry.ast and entry.ast._foreign_header_recipe,
+                foreign_header = foreign_header,
                 parts_version = 1,
                 parts = {
                     { index = 0, c_suffix = ".c", object_suffix = ".o" },
@@ -13057,6 +13055,23 @@ describe("target-aware source resolver", function()
         driver._browser_target, driver.initialize_platform =
             saved_browser_target, saved_initialize_platform
         fixtures.remove(root)
+    end)
+
+    it("reserves the browser source map during pre-worker output planning", function()
+        put("app.titan", "function main(args: {string}): integer return #args end\n")
+        local ctx = context("browser")
+        local source = assert(driver.resolve_source(ctx, "app"))
+        local plan = { order = { "app" },
+            modules = { app = { kind = "source", source = source } } }
+        assert(driver.preflight_build_outputs(ctx, plan, { roots = { "app" }, c_parts = 1 }))
+        local reserved = false
+        for _, output in ipairs(plan.reservations) do
+            if output.owner == "browser source map" then
+                assert.matches("%.wasm%.map$", paths.to_slash(output.path))
+                reserved = true
+            end
+        end
+        assert.is_true(reserved, "preflight omitted the browser source map")
     end)
 
     it("keeps context validation ahead of the Windows browser host model", function()

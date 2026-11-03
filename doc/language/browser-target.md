@@ -1,34 +1,136 @@
 # Compiling for the browser target
 
 `titanc --target browser` compiles Titan programs, tests, and libraries to
-WebAssembly with Emscripten. A program or test becomes a pair of files, an ES
-module `app.mjs` and its `app.wasm`, that runs under Node and in headless
-Chrome or Chromium:
+WebAssembly with Emscripten, to run inside web pages and web applications. A
+program becomes three files that belong together: an ES module, its
+WebAssembly binary, and its extended source map. A page runs the program
+through Titan's JavaScript [loader](#the-loader-api). For testing, the
+command-line runner [`titan-browser-run`](#testing-with-titan-browser-run)
+runs the same files under Node and headless Chrome.
 
-```sh
-titanc --target browser -o out --exe out/app.mjs app
-titan-browser-run out/app.mjs -- first second
+## A first web page
+
+This walk-through builds a small Titan program, embeds it in a web page, and
+opens the page in a browser. It assumes that the toolchain from
+[prerequisites](#prerequisites) is installed, with Emscripten active in the
+shell, and that `PREFIX` names the Titan installation that holds the browser
+SDK.
+
+The program, `hello.titan`, prints a greeting and three counting lines:
+
+```titan
+foreign import "stdio.h"
+
+local function greeting(name: string): string
+  return "Hello, " .. name .. ", from Titan!"
+end
+
+function main(args: {string}): integer
+  ffi.puts(greeting(args[1] or "web page"))
+  for count = 1, 3 do
+    ffi.puts("Titan counts " .. count)
+  end
+  return 0
+end
 ```
 
-The first command builds `out/app.mjs` and `out/app.wasm` from the module
-`app`, which defines `main`. The second runs the program under Node with the
-arguments `first` and `second`, copies its output byte for byte, and exits with
-its status. A library build without `main` produces a WebAssembly archive, and
-`-c` compiles objects only:
+The browser standard library has no `io` module yet (see [current
+limits](#current-limits)), so the program writes its lines with C's `puts`
+through the [C FFI](ffi.md). Whatever a program writes to standard output or
+standard error reaches the page through the loader's output sinks.
+
+Build it for the browser:
 
 ```sh
-titanc --target browser --output out-browser -c app.widgets
-titanc --target browser --output out-browser app.widgets
+titanc --target browser -o out hello
 ```
 
-Source files for the browser use the `browser` label described in [target
-source selection](target-source-selection.md): `name.browser.titan` is
-selected before `name.titan`, and `name.native.titan` or an OS variant is
-never selected.
+This writes `out/hello.mjs`, `out/hello.wasm`, and `out/hello.wasm.map`: the
+ES module, its WebAssembly binary, and its source map, next to the compiler's
+intermediate files. Copy the three files into a folder `site/` that will hold
+the page:
 
-The browser standard library currently provides `test`, `coroutine`, and
-`gc`. Programs therefore cannot yet use `async`, timers, files, or the other
-standard modules; see [current limits](#current-limits).
+```sh
+mkdir -p site
+cp out/hello.mjs out/hello.wasm out/hello.wasm.map site/
+```
+
+The page runs the program through the loader `titan-browser.mjs`, which ships
+in the browser SDK. The page needs a copy of the loader next to the program,
+so copy it from the SDK directory:
+
+```sh
+cp "$PREFIX/lib/titan-browser/0.6/titan-browser.mjs" site/
+```
+
+Then write the page, `site/index.html`:
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Hello from Titan</title>
+</head>
+<body>
+  <pre id="output"></pre>
+  <script type="module">
+    import { create } from "./titan-browser.mjs";
+    import hello from "./hello.mjs";
+
+    const output = document.getElementById("output");
+    const text = new TextDecoder();
+    function show(chunk) {
+      output.textContent += text.decode(chunk, { stream: true });
+    }
+
+    const instance = create(hello, { stdout: show, stderr: show });
+    try {
+      const result = await instance.run(["browser"]);
+      output.textContent += `(${result.kind}, status ${result.status})\n`;
+    } finally {
+      await instance.dispose();
+    }
+  </script>
+</body>
+</html>
+```
+
+The module script imports `create` from the loader and the program's factory,
+which is the default export of `hello.mjs`. `create(hello, {stdout, stderr})`
+makes an instance with two output sinks. Each sink receives the program's
+output as `Uint8Array` chunks; this page decodes them as UTF-8 and appends the
+text to the `<pre>` element. `run(["browser"])` runs `main` with
+`args[1] == "browser"` and resolves to the result, here a `returned` run with
+status 0. `dispose()` then releases the instance. The [loader
+API](#the-loader-api) describes every option and result.
+
+Browsers do not load module scripts or WebAssembly into a page opened from a
+`file://` URL, so serve the folder over HTTP. Any static web server works if it
+sends `.mjs` files with a JavaScript content type, such as `text/javascript`,
+which browsers require for module scripts. It should also send `.wasm` files
+as `application/wasm`; with another type the program still runs, but the
+browser console shows `wasm streaming compile failed` and the browser compiles
+the binary only after downloading all of it. Python's built-in server is one
+example:
+
+```sh
+python3 -m http.server 8000 --bind 127.0.0.1 --directory site
+```
+
+Open <http://127.0.0.1:8000/>. The page shows:
+
+```text
+Hello, browser, from Titan!
+Titan counts 1
+Titan counts 2
+Titan counts 3
+(returned, status 0)
+```
+
+To deploy the page, serve `hello.mjs`, `hello.wasm`, `hello.wasm.map`, and
+`titan-browser.mjs` together with it. The source map is what lets errors
+report Titan source files and lines (see [traces](#traces)).
 
 ## Prerequisites
 
@@ -48,18 +150,21 @@ You need:
   source ./emsdk_env.sh
   ```
 
-* **Node 24.** It runs browser programs and tests, and it runs the check that
-  Titan performs before it publishes a browser library (see [library
-  archives](#library-archives)). emsdk 6.0.13 ships a Node 24 under
-  `$EMSDK/node/`. Titan uses the executable named by `TITAN_NODE` when that
-  variable is set, and otherwise the `node` on `PATH`; another major version
-  is rejected.
-* **Chrome or Chromium**, only for running programs in a browser engine. Any
-  Chrome, Chromium, or Chrome for Testing build that runs headless works,
-  including the smaller Chrome for Testing *headless shell*. Set `TITAN_CHROME`
-  to its executable, or put it on `PATH` as `google-chrome`,
-  `google-chrome-stable`, `chromium`, `chromium-browser`, or
-  `chrome-headless-shell`.
+* **Node 24.** `titanc` uses it for the check that it performs before it
+  publishes a browser library or links browser archives into a program (see
+  [library archives](#library-archives)), and `titan-browser-run` uses it to
+  run programs and tests from the command line. emsdk 6.0.13 ships a Node 24
+  under `$EMSDK/node/`. Titan uses the executable named by `TITAN_NODE` when
+  that variable is set, and otherwise the `node` on `PATH`; another major
+  version is rejected.
+* **Chrome or Chromium**, only for running programs and tests in a browser
+  engine with `titan-browser-run`. Any Chrome, Chromium, or Chrome for Testing
+  build that runs headless works, including the smaller Chrome for Testing
+  *headless shell*. Set `TITAN_CHROME` to its executable, or put it on `PATH`
+  as `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`,
+  or `chrome-headless-shell`. A web page itself needs no particular browser;
+  see [current limits](#current-limits) for the engines that run browser
+  images.
 * **The browser build of Titan's Lua fork** and **the browser SDK**, both
   installed into the same prefix as Titan; the next two sections install them.
 
@@ -147,9 +252,9 @@ root:
 | `libtitan.a` | the browser runtime archive |
 | `libtitan-lpeglabel.a` | the PEG engine, for a later browser `peg` module |
 | `titan.a` | the browser standard library: `titan.test`, `titan.coroutine`, and `titan.gc` |
-| `titan-browser.mjs` | the [loader](#the-loader-api) |
-| `titan-browser-library.js` | the Emscripten JavaScript library that every browser image links |
-| `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [runner](#running-with-titan-browser-run) |
+| `titan-browser.mjs` | the [loader](#the-loader-api), which pages copy next to their programs |
+| `titan-browser-library.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, admission, eager trace-map loading, and stack capture) |
+| `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
 The directory is a sibling of the native `lib/titan/0.6/`, never inside it,
@@ -198,6 +303,11 @@ for the complete vocabulary. Only the `titanc` command reads `TITAN_TARGET`;
 the compiler library and the language server do not. Editors analyze the host
 target only.
 
+Source files for the browser use the `browser` label described in [target
+source selection](target-source-selection.md): `name.browser.titan` is
+selected before `name.titan`, and `name.native.titan` or an OS variant is
+never selected.
+
 ## One target per output directory
 
 The browser target always needs an output directory:
@@ -234,11 +344,74 @@ among the other compiler-owned files.
 
 ## What you can build
 
-### Objects
+A browser build links a program (the module `app` defines `main`) or a test
+image (`--test`), publishes a library archive (no `main`), or compiles objects
+only (`-c`):
 
-`-c` compiles each Titan module to a WebAssembly object with its metadata, and
-`--c-source FILE` compiles C helpers with the same Emscripten settings.
-`--incremental` reuses unchanged objects exactly as for native builds.
+```sh
+titanc --target browser -o out --exe out/app.mjs app
+titanc --target browser --test -o out --exe out/app_tests.mjs app.calc_test
+titanc --target browser --output out-browser app.widgets
+titanc --target browser --output out-browser -c app.widgets
+```
+
+### Programs
+
+A build whose root module defines `main` links a program. The result is always
+three files that belong together: the ES module, its WebAssembly binary, and
+its extended source map, all with the same stem. Without `--exe`, the program
+uses the native program's path below the output directory with `.mjs` added, so
+`titanc --target browser -o out app` writes `out/app.mjs`, `out/app.wasm`, and
+`out/app.wasm.map`. An explicit `--exe` must end in `.mjs`:
+
+```text
+browser executable output "out/app" must end in .mjs
+```
+
+Titan publishes the three files together: a failed link leaves the previous
+files in place, so a partial or unextended map is never published.
+`--incremental` reuses an unchanged set without relinking. When a web server
+serves the program to a browser page, it must serve `app.wasm.map` alongside
+`app.wasm` so that the runtime can load the trace map during module
+initialization (see [traces](#traces)).
+
+`main` has the same signature as for a native program:
+
+```titan
+foreign import "stdio.h"
+
+function main(args: {string}): integer
+  local greeting = "hello, " .. (args[1] or "browser") .. "\n"
+  ffi.fwrite(greeting, 1, #greeting, ffi.stdout)
+  return 0
+end
+```
+
+`args[1]` is the first program argument; there is no program name at index 0.
+Arguments are byte strings; through the [loader API](#the-loader-api) they may
+contain any byte, including NUL.
+
+Building never runs the program. A link that selects browser archives, such
+as the standard library's `titan.a`, first checks them under Node as described
+for [library archives](#library-archives), so linking also needs Node 24.
+
+### Tests
+
+`--test` builds the native test runner for the browser:
+
+```sh
+titanc --target browser --test -o out --exe out/app_tests.mjs app.calc_test
+titan-browser-run out/app_tests.mjs
+titan-browser-run out/app_tests.mjs -- --filter='zero$' --verbose
+```
+
+Discovery, case names, filtering, and output are those of the [native test
+runner](standard-library-test.md#running-and-filtering); pass its options
+after `--`. Without `--exe`, the test image takes the first root's program
+path with `.mjs` added. As with native tests, a run that selects no case exits
+0, so a script that must prove something ran should check the reported case
+count. [Testing with `titan-browser-run`](#testing-with-titan-browser-run)
+describes the runner.
 
 ### Library archives
 
@@ -277,61 +450,109 @@ A consumer can build against a published browser archive without the
 library's source, from the SDK directory or the browser Titan path described
 [below](#dependencies-and-the-browser-titan-path).
 
-### Programs
+### Objects
 
-A build whose root module defines `main` links a program. The result is always
-two files that belong together: the ES module and its WebAssembly binary with
-the same stem. Without `--exe`, the program uses the native program's path
-below the output directory with `.mjs` added, so `titanc --target browser -o
-out app` writes `out/app.mjs` and `out/app.wasm`. An explicit `--exe` must end
-in `.mjs`:
+`-c` compiles each Titan module to a WebAssembly object with its metadata, and
+`--c-source FILE` compiles C helpers with the same Emscripten settings.
+`--incremental` reuses unchanged objects exactly as for native builds.
 
-```text
-browser executable output "out/app" must end in .mjs
+## The loader API
+
+A web page or application runs a browser program through the loader
+`titan-browser.mjs` from the browser SDK, as in [the first web
+page](#a-first-web-page), and `titan-browser-run` uses the same loader. It
+works in the browser and in Node 24, where a script can import it straight
+from the SDK directory:
+
+```javascript
+import factory from "./out/app.mjs";
+import { create } from "/home/me/.local/titan/lib/titan-browser/0.6/titan-browser.mjs";
+
+const instance = create(factory, {
+  stdout: chunk => { process.stdout.write(chunk); },
+  stderr: chunk => { process.stderr.write(chunk); },
+});
+try {
+  const result = await instance.run(["first", new Uint8Array([0, 255])]);
+  console.error(result.kind, result.status);
+} finally {
+  await instance.dispose();
+}
 ```
 
-Titan publishes the two files together: a failed link leaves
-the previous pair in place. `--incremental` reuses an unchanged pair without
-relinking.
+`create(factory, options)` takes the default export of a generated `.mjs` and
+returns an instance with three methods:
 
-`main` has the same signature as for a native program:
+* `initialize()` instantiates the WebAssembly module and returns a Promise.
+  It runs no Titan code, and calling it again returns the same Promise. `run`
+  calls it when needed.
+* `run(args)` runs `main` once with `args`, an Array of strings, which are
+  encoded as UTF-8, and `Uint8Array` values, which are copied as they are. The
+  Promise resolves to `{kind, status, bytes}`: `kind` is `"returned"` or
+  `"failed"`, `status` is the signed 32-bit status, and `bytes` is a
+  `Uint8Array` with the error message of a failed run (empty for a returned
+  run). A nonzero status or a failed run is a result, not a rejection.
+* `dispose()` releases the instance and returns a Promise. It waits for a run
+  in progress to finish; it does not cancel it.
 
-```titan
-foreign import "stdio.h"
+The options are `stdout` and `stderr`, the output sinks, and `locateFile`. A
+missing sink discards that stream. Emscripten and the trace loader use
+`locateFile` to find `<stem>.wasm` and `<stem>.wasm.map`; by default the
+`.wasm` and `.wasm.map` beside the `.mjs` are used. A page that serves them
+from elsewhere passes `locateFile(name, directory)`, which receives the file
+name (`<stem>.wasm` or `<stem>.wasm.map`) and the directory of the `.mjs`,
+and returns the URL to load, for example
+`locateFile: name => "/assets/wasm/" + name`.
 
-function main(args: {string}): integer
-  local greeting = "hello, " .. (args[1] or "browser") .. "\n"
-  ffi.fwrite(greeting, 1, #greeting, ffi.stdout)
-  return 0
-end
-```
+**One run per instance.** An instance runs `main` at most once. Create a new
+instance for another run; independent instances can run at the same time in
+one JavaScript realm, and a disposed instance can be collected.
 
-`args[1]` is the first program argument; there is no program name at index 0.
-Arguments are byte strings; through the [loader API](#the-loader-api) they may
-contain any byte, including NUL.
+**Sinks.** A sink is a synchronous function that receives each chunk of its
+stream as a fresh `Uint8Array`, which it may keep or modify. The loader calls
+sinks only when no WebAssembly code is running: when the run returns to
+JavaScript, while it waits on an asynchronous operation, and at completion.
+Chunks of one stream arrive in order; there is no ordering between the two
+streams. A sink must return `undefined`. If a sink throws or returns anything
+else, including a Promise, the loader stops calling it, lets the program
+finish its Lua cleanup when the instance is still intact, and rejects the run
+once with that failure; no unhandled rejection remains.
 
-Building never runs the program. A link that selects browser archives, such
-as the standard library's `titan.a`, first checks them under Node as described
-for [library archives](#library-archives), so linking also needs Node 24.
+**Errors.** A rejected Promise carries an `Error` whose `name` is
+`TitanBrowserError`, with a `code`, a fixed message, and, where there is one,
+the original error as `cause`:
 
-### Tests
+| `code` | Message | When |
+| --- | --- | --- |
+| `TITAN_BROWSER_REENTRY` | `browser instance is suspended; reentry is not allowed` | `run` while the instance's run is still active, including while it waits |
+| `TITAN_BROWSER_STATE` | `browser instance has already run or is disposed` | `run` after the instance has run, failed, or been disposed |
+| `TITAN_BROWSER_SINK` | `browser stdout sink failed`, `browser stderr sink failed`, `browser stdout sink must return undefined`, `browser stderr sink must return undefined` | a sink failed; `stream` names it |
+| `TITAN_BROWSER_ABORT` | the engine's abort reason | the WebAssembly module aborted |
+| `TITAN_BROWSER_TRAP` | the trap's message | the WebAssembly module trapped |
+| `TITAN_BROWSER_PROTOCOL` | for example `browser entry returned without completion or suspension` | the image broke the loader's protocol |
 
-`--test` builds the native test runner for the browser:
+After an abort or a trap the instance is unusable, and `dispose()` releases it
+without running more WebAssembly code. Invalid arguments to `create` and
+`run` throw or reject with a `TypeError`.
+
+## Testing with `titan-browser-run`
+
+`titan-browser-run` is the test runner for browser images. It runs a program
+or test image from the command line, under Node 24 or in headless Chrome or
+Chromium, through the same loader that a page uses, and turns the result into
+an exit status, so that test suites and continuous integration can check
+browser builds. Web pages do not use it.
 
 ```sh
-titanc --target browser --test -o out --exe out/app_tests.mjs app.calc_test
-titan-browser-run out/app_tests.mjs
-titan-browser-run out/app_tests.mjs -- --filter='zero$' --verbose
+titanc --target browser -o out --exe out/app.mjs app
+titan-browser-run out/app.mjs -- first second
 ```
 
-Discovery, case names, filtering, and output are those of the [native test
-runner](standard-library-test.md#running-and-filtering); pass its options
-after `--`. Without `--exe`, the test image takes the first root's program
-path with `.mjs` added. As with native tests, a run that selects no case exits
-0, so a script that must prove something ran should check the reported case
-count.
-
-## Running with `titan-browser-run`
+The first command builds `out/app.mjs`, `out/app.wasm`, and `out/app.wasm.map`
+from the module `app`, which defines `main`. The second runs the program under
+Node with the arguments `first` and `second`, copies its output byte for byte,
+and exits with its status. A test image built with `--test` runs the same way
+(see [tests](#tests)).
 
 `titan-browser-run` is installed in the SDK directory,
 `PREFIX/lib/titan-browser/0.6/titan-browser-run`. Put that directory on `PATH`
@@ -340,7 +561,7 @@ or call it by path:
 ```text
 titan-browser-run [--engine node|chromium] [--timeout MS] [--grace MS]
                   [--chrome PATH] [--cdp pipe|port] [--root DIR]
-                  [--js-test] FILE [-- ARG...]
+                  [--allow-degraded-trace] [--js-test] FILE [-- ARG...]
 ```
 
 `FILE` is the program's `.mjs`. Everything after `--` is passed to `main`
@@ -356,7 +577,8 @@ stdout and stderr exactly, and writes its own messages, all starting with
 | `--grace MS` | Time to keep watching after the program completes, to catch late traps and aborts; default 1500. |
 | `--chrome PATH` | The Chrome or Chromium executable; overrides `TITAN_CHROME`. |
 | `--cdp pipe\|port` | How the tool controls Chromium: a private pipe (the default) or a loopback DevTools port. |
-| `--root DIR` | The directory served to the engine; defaults to `FILE`'s directory, and must contain `FILE` and its `.wasm`. |
+| `--root DIR` | The directory served to the engine; defaults to `FILE`'s directory, and must contain `FILE`, its `.wasm`, and (unless `--allow-degraded-trace` is set) its `.wasm.map`. |
+| `--allow-degraded-trace` | Allow a run whose trace map is missing, malformed, or mismatched to proceed in degraded trace mode instead of failing as a harness error (used by tests of missing or invalid maps). |
 | `--js-test` | Run `FILE` as a JavaScript test module instead of a program (used by Titan's own tests). |
 | `--help`, `--version` | Print usage or the version to stderr and exit 0. |
 | `--probe` | Print one line of JSON describing the Node and Chrome that the tool would use, without running anything. |
@@ -381,7 +603,7 @@ honors only for the root user.
 | 72 | The `--timeout` limit expired, including a program that never stops computing. |
 | 73 | A trap or abort happened during the grace period after completion; it overrides the earlier result. |
 | 74 | An unhandled Promise rejection, before completion or during the grace period. |
-| 75 | The tool itself failed: Node or Chrome missing, an unreadable or invalid image, an engine that exited early, or a failed cleanup. |
+| 75 | The tool itself failed: Node or Chrome missing, an unreadable or invalid image, a degraded trace backend without `--allow-degraded-trace`, an engine that exited early, or a failed cleanup. |
 | 76 | A loader output sink failed. The runner's own sinks do not fail, so in practice this comes from the sinks of a `--js-test` module. |
 
 A program's own status can coincide with 70 to 76. The stderr message tells
@@ -418,85 +640,92 @@ through unchanged. Standard input is always at end of file.
 
 ### Traces
 
-A browser trace currently shows Lua frames only. Each Lua function appears as
-`source:line: in name`, every C function, including the entry of each compiled
-Titan function that Lua called, as `[C]: in name`, and Lua tail calls as
-`(...tail calls...)`. Compiled Titan frames, Titan source lines, and native
-addresses do not appear. `titan.backtrace()`, the `traceback` local in a
-`catch`, bare `raise`, and coroutine traces follow the same rules as natively;
-only the frames they contain differ. A browser trace backend that reports
-Titan frames through source maps is planned.
+When a web page or application initializes a browser image (or when tests run
+it through `titan-browser-run`), the runtime eagerly loads `<stem>.wasm.map`
+before `main` or any module initializer runs, verifies that its embedded build
+identity matches the instantiated `.wasm`, and builds an in-memory lookup
+index. Nothing is fetched or awaited when an error is raised or when
+`titan.backtrace()` is called.
 
-## The loader API
+On **Chromium, Chrome, Firefox, and Node**, browser tracebacks have the same
+unified Titan/Lua contract as native builds:
 
-The runner uses the loader `titan-browser.mjs` from the SDK directory, and
-JavaScript code can use it directly. It works in Node 24 and in the browser:
+* Compiled Titan frames appear as `<basename>:<line>: in <display name>`,
+  using the selected physical `.titan` filename (`name.browser.titan`
+  included) and Titan display names (`m.func`, `m.Record:method`,
+  `m.Record.static`, or `anonymous function at m.titan:12`).
+* If a trace captured in an independent child Lua state includes outer native
+  frames from a module initialized only in the parent state, those outer frames
+  fall back to their C symbol name (or `?` when no symbol is known), as on
+  native hosts.
+* If a Titan frame's program counter has no line mapping inside its function
+  body, the frame uses the no-line form `<basename>: in <display name>` (with
+  the function's declaring `.titan` basename, or `?` when none is known), never
+  a synthetic `:0:` line.
+* Lua frames (`source:line: in name` or `source: in name`), genuine Lua C
+  functions (`[C]: in name`), and `(...tail calls...)` interleave with
+  compiled Titan runs in innermost-to-outer call order. Entry wrappers,
+  runtime frames, Lua core/library C frames, and unmapped helper exports are
+  filtered out, and an unmapped helper adjacent to a Titan function never
+  inherits a Titan line.
+* `titan.backtrace()`, the `traceback` local in a `catch` block, bare `raise`
+  re-throwing, caught-trace clearing, and coroutine trace propagation and
+  append behave as on native hosts, including across coroutine yields and
+  resumptions.
 
-```javascript
-import factory from "./out/app.mjs";
-import { create } from "/home/me/.local/titan/lib/titan-browser/0.6/titan-browser.mjs";
+**WebKit and Safari reduced fidelity.** On WebKit and Safari, where
+JavaScriptCore's `Error.stack` reports WebAssembly frames by function index
+without a bytecode offset, browser traces provide reduced, function-level
+fidelity: Titan frames appear in the same merged order with Lua frames and with
+the same Titan display names, rendered in the no-line form
+`<basename>: in <display name>`, and captures are limited to 100 frames. Pages
+running in WebKit or Safari should not `delete Error.stackTraceLimit`: in
+JavaScriptCore, deleting that property makes `new Error().stack` return
+`undefined` for the rest of the realm even after the property is redefined, so
+subsequent traces fall back to Lua frames with the capture-failed marker below.
 
-const instance = create(factory, {
-  stdout: chunk => { process.stdout.write(chunk); },
-  stderr: chunk => { process.stderr.write(chunk); },
-});
-try {
-  const result = await instance.run(["first", new Uint8Array([0, 255])]);
-  console.error(result.kind, result.status);
-} finally {
-  await instance.dispose();
-}
+**Depth limits and truncation.** V8 (Chromium, Chrome, and Node) captures up to
+the runtime's 512-frame WebAssembly capacity; Firefox's SpiderMonkey caps
+synchronous captures at 128 frames; and WebKit and Safari cap captures at 100
+frames. Any host `Error.stackTraceLimit` is preserved across the capture. When
+a trace is cut short by the 512-frame capacity, by a host
+`Error.stackTraceLimit` that cannot be raised, or by the engine's capture
+limit, the trace ends with one final frame line:
+
+```text
+(...native frames truncated...)
 ```
 
-`create(factory, options)` takes the default export of a generated `.mjs` and
-returns an instance with three methods:
+**Deploying `.wasm.map` and degraded mode.** A web server serving a browser
+image must serve `<stem>.wasm.map` next to `<stem>.wasm` (or map both through
+`locateFile`). If `<stem>.wasm.map` cannot be loaded, is malformed, or does not
+match the instantiated `.wasm` image, module initialization logs one console
+warning (`Titan browser trace: <reason>`) and the application still runs in
+degraded mode. Every trace generated by that instance contains the Lua frames
+plus one marker line:
 
-* `initialize()` instantiates the WebAssembly module and returns a Promise.
-  It runs no Titan code, and calling it again returns the same Promise. `run`
-  calls it when needed.
-* `run(args)` runs `main` once with `args`, an Array of strings, which are
-  encoded as UTF-8, and `Uint8Array` values, which are copied as they are. The
-  Promise resolves to `{kind, status, bytes}`: `kind` is `"returned"` or
-  `"failed"`, `status` is the signed 32-bit status, and `bytes` is a
-  `Uint8Array` with the error message of a failed run (empty for a returned
-  run). A nonzero status or a failed run is a result, not a rejection.
-* `dispose()` releases the instance and returns a Promise. It waits for a run
-  in progress to finish; it does not cancel it.
+```text
+(native Titan frames unavailable: trace map not loaded)
+```
 
-The options are `stdout` and `stderr`, the output sinks, and `locateFile`,
-which Emscripten uses to find the `.wasm`; by default the `.wasm` beside the
-`.mjs` is used. A missing sink discards that stream.
+To catch deployment and staging mistakes in tests, `titan-browser-run` treats a
+degraded trace backend on a compiler-built image as a harness failure (exit 75)
+even if the program or tests pass, unless `--allow-degraded-trace` is supplied.
 
-**One run per instance.** An instance runs `main` at most once. Create a new
-instance for another run; independent instances can run at the same time in
-one JavaScript realm, and a disposed instance can be collected.
+**Host `Error.prepareStackTrace` and capture failure.** The runtime never calls
+a host `Error.prepareStackTrace` callback or invokes property getters or
+setters on `Error`. When `Error.prepareStackTrace` cannot be neutralized
+safely, or when an unexpected error or nested trace attempt occurs while a
+trace is already being built, the runtime skips reading `.stack` and emits the
+Lua-only trace with one marker line:
 
-**Sinks.** A sink is a synchronous function that receives each chunk of its
-stream as a fresh `Uint8Array`, which it may keep or modify. The loader calls
-sinks only when no WebAssembly code is running: when the run returns to
-JavaScript, while it waits on an asynchronous operation, and at completion.
-Chunks of one stream arrive in order; there is no ordering between the two
-streams. A sink must return `undefined`. If a sink throws or returns anything
-else, including a Promise, the loader stops calling it, lets the program
-finish its Lua cleanup when the instance is still intact, and rejects the run
-once with that failure; no unhandled rejection remains.
+```text
+(native Titan frames unavailable: capture failed)
+```
 
-**Errors.** A rejected Promise carries an `Error` whose `name` is
-`TitanBrowserError`, with a `code`, a fixed message, and, where there is one,
-the original error as `cause`:
-
-| `code` | Message | When |
-| --- | --- | --- |
-| `TITAN_BROWSER_REENTRY` | `browser instance is suspended; reentry is not allowed` | `run` while the instance's run is still active, including while it waits |
-| `TITAN_BROWSER_STATE` | `browser instance has already run or is disposed` | `run` after the instance has run, failed, or been disposed |
-| `TITAN_BROWSER_SINK` | `browser stdout sink failed`, `browser stderr sink failed`, `browser stdout sink must return undefined`, `browser stderr sink must return undefined` | a sink failed; `stream` names it |
-| `TITAN_BROWSER_ABORT` | the engine's abort reason | the WebAssembly module aborted |
-| `TITAN_BROWSER_TRAP` | the trap's message | the WebAssembly module trapped |
-| `TITAN_BROWSER_PROTOCOL` | for example `browser entry returned without completion or suspension` | the image broke the loader's protocol |
-
-After an abort or a trap the instance is unusable, and `dispose()` releases it
-without running more WebAssembly code. Invalid arguments to `create` and
-`run` throw or reject with a `TypeError`.
+The availability and truncation markers are ordinary frame lines without an
+error message, header, or tab indentation, and remain part of a pinned trace on
+bare `raise`.
 
 ## Dependencies and the browser Titan path
 
@@ -559,15 +788,22 @@ reported separately from Lua record errors. The diagnostic lists the supplied
 compile flags and the actual versus required target features. Remove the
 feature-changing flag; reinstalling browser Lua does not repair that mismatch.
 
-Titan also owns the link settings that the runtime depends on: Asyncify, the
-longjmp mode, the stack and memory sizes, the program lifecycle and exports,
-the filesystem layer, assertions and stack checks, and the three target
-defines. Other Emscripten `-s` settings may be passed with `--ldflag`, but a
-compile or link flag that sets, unsets, or negates one of these is rejected,
-as are `--no-entry` and `--js-library`:
+Titan also owns the trace-preserving optimization, debug, `#line`, and link
+settings that the runtime and traceback backend depend on: `-O1`,
+`-fno-inline`, `-fno-optimize-sibling-calls`, `-gline-tables-only` (for object
+compilation), `-gsource-map`, `-g2`, and
+`-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` (for linking), and
+source `#line` directives (`--no-line-directives` and
+`TITAN_NO_LINE_DIRECTIVES=1`), together with Asyncify, the longjmp mode, the
+stack and memory sizes, the program lifecycle and exports, the filesystem
+layer, assertions and stack checks, and the three target defines. Other
+Emscripten `-s` settings may be passed with `--ldflag`, but a compile or link
+flag that overrides or negates one of these owned settings is rejected, as are
+`--no-entry` and `--js-library`:
 
 ```text
 browser link profile owns option -sASYNCIFY=0
+browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)
 ```
 
 ## Limits
@@ -576,7 +812,7 @@ A browser program runs with these fixed sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
-| Main C stack | 1 MiB | Lua recursion through C calls, such as nested `pcall`, stops first at Lua's own limit with the ordinary catchable `C stack overflow` error. Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
+| Main C stack | 1 MiB | Plain Lua recursion through C calls, such as nested `pcall`, stops first at Lua's own limit with the ordinary catchable `C stack overflow` error, whereas recursion that alternates between Lua and compiled Titan can exhaust the JavaScript engine's stack before that limit (see [current limits](#current-limits)). Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
 | Coroutine C stack | 256 KiB per coroutine (2 MiB natively) | The same inside a coroutine, at about a quarter of that depth. |
 | Saved call stack for a coroutine switch or a wait | 64 KiB, for the main context and for each coroutine | A switch or wait whose call stack does not fit traps with `unreachable` (runner exit 71). About 400 small C frames fit. |
 | Linear memory | 16 MiB initially, growing to at most 2 GiB | An allocation failure is Lua's ordinary out-of-memory error, and creating a coroutine fails with `could not create coroutine: Out of memory`. Both can be caught, and the instance stays usable. |
@@ -588,11 +824,20 @@ About 5,400 live coroutines fit in 2 GiB.
 ## Current limits
 
 * The browser standard library provides only `test`, `coroutine`, and `gc`.
-  `async`, timers, files, networking, `lua`, `peg`, and the other standard
-  modules are not available yet.
-* Programs run under Node and headless Chrome or Chromium only. Firefox and
-  WebKit are not supported yet.
-* Traces show Lua frames only (see [traces](#traces)).
+  `async`, timers, files, networking, `io`, `lua`, `peg`, and the other
+  standard modules are not available yet; programs write output through C's
+  `stdio.h`, as in [the first web page](#a-first-web-page).
+* Browser images run in Chromium and Chrome, Firefox, WebKit and Safari, and
+  Node 24; `titan-browser-run` (the test runner) drives only Node 24 and
+  headless Chrome or Chromium.
+* On WebKit and Safari, traces have reduced, function-level fidelity
+  (`<basename>: in <display name>`, without line numbers, and a 100-frame
+  capture limit), and Firefox caps synchronous stack captures at 128 frames
+  (see [traces](#traces)).
+* Deep mixed Lua/Titan recursion can exhaust the engine's JavaScript call stack
+  before reaching Lua's C-stack limit, rejecting the run with the engine's
+  `RangeError: Maximum call stack size exceeded` as its `cause` instead of
+  raising a catchable Lua `C stack overflow` error.
 * A loader instance runs `main` once; sinks must be synchronous.
 * Only Linux and macOS hosts are supported; `Makefile.win` offers neither
   `lua-browser` nor `browser-sdk`.

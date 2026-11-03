@@ -3,7 +3,7 @@ local toolchain = require "spec.support.browser_toolchain"
 local support = require "spec.fixtures.browser_runtime.support"
 local workspace
 
-describe("browser coroutine GC and null-trace fixtures", function()
+describe("browser coroutine GC and trace fixtures", function()
     after_each(function()
         if workspace then support.files.remove(workspace); workspace = nil end
     end)
@@ -35,12 +35,12 @@ describe("browser coroutine GC and null-trace fixtures", function()
         end
     end)
 
-    it("preserves null trace shape pin clear bare rethrow fresh raise and coroutine append", function()
+    it("preserves trace shape pin clear bare rethrow fresh raise and coroutine append", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = support.workspace()
         local ok, log = support.cli(info, workspace, { purpose = "program", assertions = 2 }, {
             "--test", "--exe", workspace .. "/trace.mjs",
-            "--c-source", support.fixture .. "/trace.c", "null_trace" })
+            "--c-source", support.fixture .. "/trace.c", "runtime_trace" })
         assert.is_true(ok, log)
         for _, engine in ipairs({ "node", "chromium" }) do
             ok, log = support.image(info, workspace, engine, "trace")

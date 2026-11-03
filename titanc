@@ -411,7 +411,7 @@ local normalized_native, native_error = nativeinputs.normalize({
 if not normalized_native then exit(native_error) end
 if target == "browser" then
     for _, flags in ipairs({ normalized_native.compile_argv, normalized_native.link_argv }) do
-        local valid, err = driver.browserlink.validate_extras(flags)
+        local valid, err = driver.browserlink.validate_extras(flags, driver.browser_link_options)
         if not valid then exit(err) end
     end
 end
@@ -598,6 +598,13 @@ if coverage_build then
     local selected, selection_error = coverage.select(coverage_build, driver.imported)
     if not selected then table.insert(errors, selection_error) end
 end
+-- Header planning happens before any C generation, so each module's header
+-- receives the line/coverage policy that its own C will use.
+local function header_policy(name)
+    local selected = coverage_build ~= nil and coverage_build.selected ~= nil
+        and coverage_build.selected[name] == true or false
+    return driver.header_policy(selected)
+end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 local test_program_output
@@ -696,7 +703,7 @@ if #extra_objects == 0 then extra_objects = nil end
 
 -- The final-link certificate gates every runner/entrypoint generation,
 -- archive probe, validation link and final link. A hit changes nothing.
-local browser_assets, browser_profile, browser_probe
+local browser_assets, browser_profile, browser_probe, browser_library_error
 local link_ticket, program_path, windows_paths, coverage_runtime, dsymutil
 local link_record_committed
 -- The final link's output basename, reported as the progress step.
@@ -715,7 +722,7 @@ if not args.compile_only and not args.print_ast then
             local wasm
             program_path, wasm = driver.browser_program_path(stem, args.exe)
             if not program_path then exit(wasm) end
-            outputs = { { path = program_path }, { path = wasm } }
+            outputs = { { path = program_path }, { path = wasm }, { path = wasm .. ".map" } }
         elseif platform.windows then
             local paths, path_error = driver.windows_program_paths(
                 args.test and test_runner.MODULE_NAME or main_module, args.exe,
@@ -790,11 +797,15 @@ if not args.compile_only and not args.print_ast then
             if not ready then exit(err) end
         end
         if not browser_profile then exit(err) end
-        for _, key in ipairs({ "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+        for _, key in ipairs({ "runtime", "js_library", "trace_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
             runtime[#runtime + 1] = browser_assets[key]
         end
         runtime[#runtime + 1] = resolver_context.target_descriptor.paths.liblua
         runtime[#runtime + 1] = resolver_context.target_descriptor.paths.lua_record
+        local libraries
+        libraries, browser_library_error = linkcertificate.browser_trace_libraries(
+            resolver_context, resolver_context.target_descriptor.tools.cc, driver.link_extra_flags())
+        for _, filename in ipairs(libraries or {}) do runtime[#runtime + 1] = filename end
     else
         for _, input in ipairs(driver.INSTALLED and
                 driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN) or
@@ -890,6 +901,7 @@ if not args.compile_only and not args.print_ast then
         native_libraries = {
             backend = backend,
             compiler_argv = compile_prefix,
+            uncacheable = browser_library_error,
         },
     }
     local prepared, ticket = pcall(linkcertificate.prepare, resolver_context, spec)
@@ -912,7 +924,8 @@ if not args.compile_only and not args.print_ast then
     -- Generated public headers are restored under the lock even when the
     -- final link hits; existing owned headers are preserved untouched.
     local headers_ready, headers_error = driver.prepare_foreign_headers(
-        module_order, driver.imported, args.verbose, args.pretty_print)
+        module_order, driver.imported, args.verbose, args.pretty_print,
+        header_policy)
     if not headers_ready then exit(headers_error) end
     local target = outputs[1].path
     if reporter then link_name = progress.basename(target) end
@@ -1021,8 +1034,8 @@ end
 local header_plans = {}
 local header_plan_by_name = {}
 if #errors == 0 then
-    local planned, header_err = driver.plan_foreign_headers(
-        linked_names, driver.imported)
+    local planned, header_err =
+        driver.plan_foreign_headers(linked_names, driver.imported, header_policy)
     if not planned then
         table.insert(errors, header_err)
     else
@@ -1159,7 +1172,7 @@ if main_module then
     if target == "browser" then
         local browser_output, wasm = driver.browser_program_path(program_output, program_output)
         if not browser_output then exit(wasm) end
-        extra_outputs = { wasm }
+        extra_outputs = { wasm, wasm .. ".map" }
     elseif platform.windows then
         local paths, path_error = windows_paths, nil
         if not paths then

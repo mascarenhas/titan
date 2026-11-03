@@ -348,6 +348,7 @@ local browser_sdk_owned = {
     "titan.a",
     "titan-browser.mjs",
     "titan-browser-library.js",
+    "titan-browser-trace.js",
     "titan-browser-run",
     "titan-browser-run.mjs",
     "titan-browser-node-worker.mjs",

@@ -6,12 +6,10 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "titan.h"
-#if !defined(FIXTURE_NULL)
 #if defined(_WIN32)
 #include <windows.h>
 #else
 #include <execinfo.h>
-#endif
 #endif
 
 #if defined(_MSC_VER)
@@ -61,12 +59,10 @@ NOINLINE int fixture_trace_leaf(lua_State *L, int depth) {
     const char *trace, *first_native;
     size_t length, count, expected_count = 0;
     int top = lua_gettop(L);
-#if !defined(FIXTURE_NULL)
 #if defined(_WIN32)
     expected_count = CaptureStackBackTrace(0, 512, expected, NULL);
 #else
     expected_count = (size_t)backtrace(expected, 512);
-#endif
 #endif
     lua_pushliteral(L, "trace fixture error");
     assert(errorhandler(L) == 1);
@@ -78,13 +74,6 @@ NOINLINE int fixture_trace_leaf(lua_State *L, int depth) {
     assert(strstr(trace, "stack traceback:") == NULL);
     if (length > longest_trace) longest_trace = length;
     count = native_frames(trace, actual, &first_native);
-#if defined(FIXTURE_NULL)
-    (void)expected;
-    (void)expected_count;
-    assert(count == 0);
-    assert(first_native == NULL);
-    assert(strstr(trace, "native-trace-fixture.lua:") != NULL);
-#else
     assert(expected_count >= 3);
     assert(count == (expected_count + 1 < 255 ? expected_count + 1 : 255));
     assert(first_native != NULL && strstr(trace, name_prefix) < first_native);
@@ -95,7 +84,6 @@ NOINLINE int fixture_trace_leaf(lua_State *L, int depth) {
     assert(strstr(first_native, "errorhandler+") != NULL);
     assert(strstr(first_native, "fixture_trace_leaf+") != NULL);
     assert(strstr(first_native, "fixture_trace_parent+") != NULL);
-#endif
 #endif
     if (depth < 100) shallow_count = count; else deep_count = count;
 
@@ -121,7 +109,7 @@ NOINLINE int fixture_trace_parent(lua_State *L, int remaining, int depth) {
     return result;
 }
 
-static int probe(lua_State *L) {
+static int capture_case(lua_State *L) {
     int depth = (int)luaL_checkinteger(L, 1);
     lua_pushnil(L);
     lua_setfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY);
@@ -135,11 +123,11 @@ int main(void) {
     luaL_openlibs(L);
     memset(long_name, 'n', sizeof(long_name) - 1);
     memset(name_prefix, 'n', sizeof(name_prefix) - 1);
-    lua_pushcfunction(L, probe);
-    lua_setglobal(L, "trace_probe");
+    lua_pushcfunction(L, capture_case);
+    lua_setglobal(L, "trace_case");
     snprintf(script, sizeof(script),
         "local function %s(n, depth) if n > 0 then return 1 + %s(n - 1, depth) "
-        "else trace_probe(depth); return 0 end end; %s(40, 3); %s(40, 300)",
+        "else trace_case(depth); return 0 end end; %s(40, 3); %s(40, 300)",
         long_name, long_name, long_name, long_name);
     assert(luaL_loadbuffer(L, script, strlen(script), "@native-trace-fixture.lua") == LUA_OK);
     assert(lua_pcall(L, 0, 0, 0) == LUA_OK);
@@ -148,13 +136,9 @@ int main(void) {
     assert(errorhandler(L) == 1);
     lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY);
     assert(strstr(lua_tostring(L, -1), name_prefix) == NULL);
-#if defined(FIXTURE_NULL)
-    printf("null shallow=%zu deep=%zu long-trace=%zu\n", shallow_count, deep_count, longest_trace);
-#else
     assert(shallow_count > 3 && shallow_count < 255);
     assert(deep_count == 255);
     printf("fallback shallow=%zu deep=%zu long-trace=%zu\n", shallow_count, deep_count, longest_trace);
-#endif
     lua_close(L);
     return 0;
 }

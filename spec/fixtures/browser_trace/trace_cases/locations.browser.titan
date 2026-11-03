@@ -1,0 +1,7 @@
+local function selected_leaf()
+  raise "trace-original"
+end
+
+local function selected_outer()
+  selected_leaf()
+end

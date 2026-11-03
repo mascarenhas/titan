@@ -1975,7 +1975,7 @@ function coder._emit_interface_adapter(
             ptrdiff_t _base_off = savestack(L, _base);
         ]]
     end
-    local body = render([[
+    local body = definitionline(pair.loc) .. render([[
         TITAN_MODULE_PRIVATE TITAN_NOINLINE $SIGNATURE {
             (void)_fn;
             $GC_POLL
@@ -2375,7 +2375,7 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
             "TITAN_MODULE_PRIVATE int $NAME(lua_State *L);", {
                 NAME = pair.wrapper_id,
             })
-        pair.wrapper_body = render([[
+        pair.wrapper_body = definitionline(pair.loc) .. render([[
             TITAN_MODULE_PRIVATE int $NAME(lua_State *L) {
                 StkId _titan_interface_func = L->ci->func.p;
                 CClosure *_titan_interface_witness =
@@ -2448,7 +2448,7 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
         WRAPPER = pair.wrapper_id,
     })
     pair.wrapper_body = render([[
-        TITAN_MODULE_PRIVATE Udata *$ALLOCATOR(
+        ${DEFLINE}TITAN_MODULE_PRIVATE Udata *$ALLOCATOR(
                 lua_State *L, Udata *_mod,
                 Udata *_titan_interface_concrete) {
             $RESERVE
@@ -2460,7 +2460,7 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
             return _titan_interface_result_value;
         }
 
-        TITAN_MODULE_PRIVATE int $WRAPPER(lua_State *L) {
+        ${DEFLINE}TITAN_MODULE_PRIVATE int $WRAPPER(lua_State *L) {
             StkId _titan_interface_func = L->ci->func.p;
             CClosure *_titan_interface_witness =
                 clCvalue(s2v(_titan_interface_func));
@@ -2478,6 +2478,7 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
             return 1;
         }
     ]], {
+        DEFLINE = definitionline(pair.loc),
         ALLOCATOR = pair.allocator_id,
         WRAPPER = pair.wrapper_id,
         RESERVE = reserve,

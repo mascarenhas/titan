@@ -541,7 +541,7 @@ static void titan_bt_addframe(luaL_Buffer *buf, int *wrote_any,
 ** without libbacktrace (e.g. musl/Alpine). Define TITAN_NO_LIBBACKTRACE to
 ** force the fallback. */
 #if defined(TITAN_TARGET_BROWSER)
-/* The browser null backend takes precedence over the native fallback. */
+#include "browser/titan-browser-trace.h"
 #elif !defined(TITAN_NO_LIBBACKTRACE)
 #include "backtrace.h"
 #define TITAN_HAVE_LIBBACKTRACE 1
@@ -652,6 +652,9 @@ void titan_invalidate_backtrace_state(lua_State *L) {
     lua_settop(L, top);
 }
 
+#endif
+
+#if defined(TITAN_HAVE_LIBBACKTRACE) || defined(TITAN_TARGET_BROWSER)
 static const char *titan_basename(const char *path) {
     const char *slash = path ? strrchr(path, '/') : NULL;
 #if defined(_WIN32)
@@ -697,6 +700,9 @@ static int titan_is_lua_source(const char *base) {
     return 0;
 }
 
+#endif
+
+#ifdef TITAN_HAVE_LIBBACKTRACE
 /* One captured native frame that survived filtering: either a Titan native
 ** function (a `.titan`-attributed frame) or a Titan entry-wrapper boundary
 ** (`is_entry`). The interpreter, libraries, runtime and unsymbolized frames are
@@ -766,6 +772,9 @@ static size_t titan_trace_capture(lua_State *L, TitanTraceStorage *st) {
 }
 
 
+#endif
+
+#if defined(TITAN_HAVE_LIBBACKTRACE) || defined(TITAN_TARGET_BROWSER)
 /* Look up `sym` (a native frame's mangled C symbol) in registry[TITAN_NAMES_KEY]
 ** and copy the qualified Titan source name into `out`, returning it; if the
 ** sub-table or the key is absent, copy the raw `sym` and return that (fallback).
@@ -788,6 +797,9 @@ static const char *titan_qualified_name(lua_State *L, const char *sym,
     lua_settop(L, top);                         /* restore: stack-neutral */
     return out;
 }
+#endif
+
+#ifdef TITAN_HAVE_LIBBACKTRACE
 
 /* Format one surviving native Titan FUNCTION frame (never an entry-wrapper
 ** boundary — those are suppressed by the caller) as a trace line, substituting
@@ -834,22 +846,90 @@ static void titan_trace_format_frame(lua_State *L, const TitanTraceStorage *st,
     titan_format_native(L, out, size, &st->frames[i]);
 }
 #elif defined(TITAN_TARGET_BROWSER)
-typedef unsigned char TitanTraceStorage;
-static size_t titan_trace_capture(lua_State *L, TitanTraceStorage *storage) {
-    (void)L; (void)storage;
-    return 0;
+typedef struct {
+    int status;
+    int truncated;
+} TitanTraceStorage;
+
+static TitanBrowserTraceBuffer titan_browser_trace_buffer;
+static int titan_browser_trace_in_use;
+
+static int titan_browser_known_name(lua_State *L, const char *symbol) {
+    int top = lua_gettop(L), known = 0;
+    lua_pushliteral(L, TITAN_NAMES_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (lua_istable(L, -1)) {
+        lua_pushstring(L, symbol);
+        lua_rawget(L, -2);
+        known = lua_type(L, -1) == LUA_TSTRING;
+    }
+    lua_settop(L, top);
+    return known;
 }
+
+static size_t titan_trace_capture(lua_State *L, TitanTraceStorage *st) {
+    uint32_t i, count = 0;
+    if (st->status == 2) return 0; /* nested attempt: never touch owned storage */
+    st->status = titan_browser_trace_capture(&titan_browser_trace_buffer,
+        TITAN_BROWSER_TRACE_CAPACITY);
+    if (st->status != 0) return 0;
+    st->truncated = (titan_browser_trace_buffer.flags &
+        TITAN_BROWSER_TRACE_TRUNCATED) != 0;
+    for (i = 0; i < titan_browser_trace_buffer.count; i++) {
+        TitanBrowserTraceRecord *record = &titan_browser_trace_buffer.records[i];
+        char base[TITAN_BROWSER_TRACE_FILE_BYTES];
+        char symbol[TITAN_BROWSER_TRACE_SYMBOL_BYTES];
+        uint32_t line;
+        int entry, titan;
+        (void)titan_browser_trace_symbolize(record, base, sizeof(base),
+            symbol, sizeof(symbol), &line);
+        entry = strstr(symbol, TITAN_ENTRY_TAG) != NULL;
+        titan = entry || titan_browser_known_name(L, symbol);
+        if (!titan) {
+            if (strcmp(titan_basename(base), "titan.c") == 0 ||
+                titan_is_lua_source(base)) continue;
+            size_t length = strlen(base);
+            titan = length >= 6 && strcmp(base + length - 6, ".titan") == 0;
+        }
+        if (!titan) continue;
+        if (entry) record->flags |= TITAN_BROWSER_TRACE_ENTRY;
+        titan_browser_trace_buffer.records[count++] = *record;
+    }
+    return count;
+}
+
 static int titan_trace_frame_is_entry(const TitanTraceStorage *st, size_t i) {
-    (void)st; (void)i;
-    return 0;
+    (void)st;
+    return (titan_browser_trace_buffer.records[i].flags &
+        TITAN_BROWSER_TRACE_ENTRY) != 0;
 }
+
 static void titan_trace_format_frame(lua_State *L, const TitanTraceStorage *st,
                                       size_t i, char *out, size_t size) {
-    (void)L; (void)st; (void)i; (void)out; (void)size;
+    char base[TITAN_BROWSER_TRACE_FILE_BYTES];
+    char symbol[TITAN_BROWSER_TRACE_SYMBOL_BYTES], name[256];
+    uint32_t line;
+    (void)st;
+    (void)titan_browser_trace_symbolize(&titan_browser_trace_buffer.records[i],
+        base, sizeof(base), symbol, sizeof(symbol), &line);
+    titan_qualified_name(L, symbol, name, sizeof(name));
+    if (line > 0)
+        snprintf(out, size, "%s:%u: in %s", base, (unsigned)line, name);
+    else
+        snprintf(out, size, "%s: in %s", base, name);
 }
+
 static int titan_trace_cfunction_is_entry(lua_State *L, lua_CFunction fn) {
-    (void)L; (void)fn;
-    return 0;
+    int top = lua_gettop(L), entry = 0;
+    lua_pushliteral(L, TITAN_ENTRIES_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (lua_istable(L, -1)) {
+        lua_pushcfunction(L, fn);
+        lua_rawget(L, -2);
+        entry = lua_toboolean(L, -1);
+    }
+    lua_settop(L, top);
+    return entry;
 }
 #endif
 
@@ -907,12 +987,16 @@ static int titan_drain_native_run(lua_State *L, luaL_Buffer *buf,
 ** registry[TITAN_NAMES_KEY] (titan_format_native), falling back to the raw
 ** symbol if absent.
 */
-static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf) {
+static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf
+#ifdef TITAN_TARGET_BROWSER
+    , int capture_status
+#endif
+) {
 #ifdef TITAN_HAVE_LIBBACKTRACE
     titan_native_frame frames[TITAN_MAX_NATIVE];
     TitanTraceStorage st = { frames, 0, TITAN_MAX_NATIVE };
 #else
-    TitanTraceStorage st = 0;
+    TitanTraceStorage st = { capture_status, 0 };
 #endif
     size_t ni = 0;       /* next un-emitted native frame index */
     size_t n;
@@ -930,6 +1014,12 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf) {
         titan_drain_native_run(L, buf, &st, n, &ni, &wrote_any);
 
     while (lua_getstack(L, level++, &ar)) {
+#ifdef TITAN_TARGET_BROWSER
+        if (st.status != 0 && level > (int)TITAN_BROWSER_TRACE_CAPACITY + 1) {
+            st.truncated = 1;
+            break;
+        }
+#endif
         lua_CFunction cfunc = NULL;
         int is_titan_entry = 0;
         lua_getinfo(L, "Slntf", &ar);           /* pushes function */
@@ -981,6 +1071,14 @@ static void titan_push_unified_trace(lua_State *L, luaL_Buffer *buf) {
         }
         ni++;
     }
+#ifdef TITAN_TARGET_BROWSER
+    if (st.status != 0)
+        titan_bt_addframe(buf, &wrote_any, st.status == 1
+            ? "(native Titan frames unavailable: trace map not loaded)"
+            : "(native Titan frames unavailable: capture failed)");
+    if (st.truncated)
+        titan_bt_addframe(buf, &wrote_any, "(...native frames truncated...)");
+#endif
 }
 #endif
 #ifndef TITAN_HAVE_LIBBACKTRACE
@@ -1197,6 +1295,20 @@ static int titan_trace_pinned(lua_State *L) {
   return pinned;
 }
 
+#ifdef TITAN_TARGET_BROWSER
+/* The entire allocating merge/publication is protected, not only JS capture.
+** Independent states share storage but a nested attempt owns none of it. */
+static void titan_browser_trace_generate(lua_State *L, void *ud) {
+    luaL_Buffer buf;
+    int capture_status = *(int *)ud;
+    lua_pushliteral(L, TITAN_BACKTRACE_KEY);
+    luaL_buffinit(L, &buf);
+    titan_push_unified_trace(L, &buf, capture_status);
+    luaL_pushresult(&buf);
+    lua_rawset(L, LUA_REGISTRYINDEX);
+}
+#endif
+
 /* Implementation notes: doc/implementation/error-handling.md#runtime-trace-model */
 int errorhandler(lua_State *L) {
   int top = lua_gettop(L);
@@ -1208,6 +1320,25 @@ int errorhandler(lua_State *L) {
     return 1;  /* keep existing TITAN_BACKTRACE_KEY slot; error obj stays on top */
   }
 
+#ifdef TITAN_TARGET_BROWSER
+  {
+    CallInfo *ci = L->ci;
+    lu_byte allowhook = L->allowhook;
+    ptrdiff_t errfunc = L->errfunc;
+    int nested = titan_browser_trace_in_use;
+    int capture_status = nested ? 2 : 0;
+    TStatus status;
+    if (!nested) titan_browser_trace_in_use = 1;
+    status = luaD_rawrunprotected(L, titan_browser_trace_generate, &capture_status);
+    if (!nested) titan_browser_trace_in_use = 0;
+    L->ci = ci;
+    L->allowhook = allowhook;
+    L->errfunc = errfunc;
+    if (status != LUA_OK) luaD_throw(L, status);
+    lua_settop(L, top);
+    return 1;
+  }
+#else
   /* Regenerate the raw traceback slot. luaL_Buffer lives on the stack from
   ** luaL_buffinit on and must stay at the top while in use, so push everything
   ** else first. */
@@ -1260,6 +1391,7 @@ int errorhandler(lua_State *L) {
   lua_rawset(L, LUA_REGISTRYINDEX);
   lua_settop(L, top);
   return 1;
+#endif
 }
 
 /*

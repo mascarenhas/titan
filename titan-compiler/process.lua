@@ -4,6 +4,7 @@
 -- native jobs the coordinator runs for them. Importing it does not load
 -- native code.
 -- Implementation notes: doc/implementation/driver.md#build-worker-transport
+local jobs = require "titan-compiler.jobs"
 local platform = require "titan-compiler.platform"
 
 local process = {}
@@ -41,19 +42,22 @@ local function library()
 end
 process.library = library
 
--- Captured commands and native jobs run with the deterministic C locale;
--- `overrides` adds or (with false) removes variables. Windows names are
--- case-insensitive.
-local function environment(overrides)
+-- Captured commands and native jobs use the C locale unless their caller
+-- explicitly inherits the environment. Jobserver remapping changes only its
+-- authorization in that case. Windows names are case-insensitive.
+local function environment(overrides, inherited, makeflags)
     local values, result = {}, {}
     local function key(name) return platform.windows and name:upper() or name end
     for name, value in pairs(uv.os_environ()) do
         values[key(name)] = name .. "=" .. value
     end
-    for name, value in pairs(overrides or {}) do
-        values[key(name)] = value ~= false and name .. "=" .. value or nil
+    if not inherited then
+        for name, value in pairs(overrides or {}) do
+            values[key(name)] = value ~= false and name .. "=" .. value or nil
+        end
+        values.LANG, values.LC_ALL = "LANG=C", "LC_ALL=C"
     end
-    values.LANG, values.LC_ALL = "LANG=C", "LC_ALL=C"
+    if makeflags then values.MAKEFLAGS = "MAKEFLAGS=" .. makeflags end
     for _, value in pairs(values) do result[#result + 1] = value end
     table.sort(result)
     return result
@@ -80,23 +84,52 @@ local function contain_native_processes()
     return true
 end
 
--- `options.inherit_environment` passes the parent's environment unchanged.
-local function spawn(argv, stdio, options, completed)
+-- Worker control pipes and output-lock leases have fixed stdio positions.
+-- Append a usable parent jobserver pipe after them and advertise its actual
+-- child descriptors, rather than letting old fd numbers identify those locks
+-- or control pipes. An unusable authorization must not become usable merely
+-- because uv.spawn assigned another open file to its old descriptor numbers.
+-- Counts include ignored slots; Lua's sequence length is not a stdio extent.
+local function jobserver_stdio(stdio, stdio_count, options)
+    if platform.windows then return end
+    local makeflags = platform.getenv("MAKEFLAGS")
+    if options and not options.inherit_environment and options.env and
+       options.env.MAKEFLAGS ~= nil then
+        makeflags = options.env.MAKEFLAGS
+    end
+    local auth = jobs.make_policy(makeflags).auth
+    if not auth or auth.kind ~= "pipe" then return end
+    local read_fd, write_fd = -2, -2
+    local read_stat = auth.read >= 0 and uv.fs_fstat(auth.read)
+    local write_stat = auth.write >= 0 and uv.fs_fstat(auth.write)
+    if read_stat and write_stat and
+       read_stat.type == "fifo" and write_stat.type == "fifo" then
+        read_fd, write_fd = stdio_count, stdio_count + 1
+        stdio[stdio_count + 1], stdio[stdio_count + 2] = auth.read, auth.write
+    end
+    return jobs.child_makeflags(makeflags, read_fd, write_fd)
+end
+
+-- Inherited environments change only if pipe-jobserver descriptors move.
+local function spawn(argv, stdio, stdio_count, options, completed)
     local ready, containment_error = contain_native_processes()
     if not ready then return nil, containment_error end
     -- Synchronous/captured commands inherit held POSIX output-lock leases.
     -- Workers and dispatched native jobs already lay out their descriptors.
-    for index, descriptor in ipairs(options and options.inherit or {}) do
-        stdio[3 + index] = descriptor
+    for _, descriptor in ipairs(options and options.inherit or {}) do
+        stdio_count = stdio_count + 1
+        stdio[stdio_count] = descriptor
     end
+    local makeflags = jobserver_stdio(stdio, stdio_count, options)
+    local inherited = options and options.inherit_environment
     local child = setmetatable({}, Process)
     local arguments = {}
     for index = 2, #argv do arguments[#arguments + 1] = argv[index] end
     local handle, err = uv.spawn(argv[1], {
         args = arguments, stdio = stdio,
         cwd = options and options.cwd,
-        env = not (options and options.inherit_environment) and
-            environment(options and options.env) or nil,
+        env = (not inherited or makeflags) and
+            environment(options and options.env, inherited, makeflags) or nil,
     }, function(code, signal)
         child.code, child.signal = code, signal
         child.handle:close(function() child.closed = true end)
@@ -123,7 +156,7 @@ Process.close = Process.wait
 -- The returned process's :close()/:wait() reaps it with os.execute status.
 function process.start(argv, options)
     library()
-    return spawn(argv, { 0, 1, 2 }, options)
+    return spawn(argv, { 0, 1, 2 }, 3, options)
 end
 
 -- Run `argv` directly with the C locale and wait for it, sharing the
@@ -168,7 +201,7 @@ end
 function Batch:spawn(argv, stdout_path, stderr_path, completion_index)
     local stdout, stderr = open_logs(stdout_path, stderr_path)
     if not stdout then return nil, stderr end
-    local child, err = spawn(argv, { nil, stdout, stderr }, nil, function()
+    local child, err = spawn(argv, { nil, stdout, stderr }, 3, nil, function()
         self.pending = self.pending - 1
         self.ready[#self.ready + 1] = completion_index
     end)
@@ -219,7 +252,7 @@ function process.capture(argv, options)
     local child
     if opened then
         child, err = spawn(argv, { 0, fds.write,
-            options.stderr_to_stdout == false and 2 or fds.write }, options)
+            options.stderr_to_stdout == false and 2 or fds.write }, 3, options)
     end
     uv.fs_close(fds.write)
     if not child then
@@ -249,11 +282,12 @@ function process.start_job(argv, stdout_path, stderr_path, completed, options)
     library()
     local stdout, stderr = open_logs(stdout_path, stderr_path)
     if not stdout then return nil, stderr end
-    local stdio = { nil, stdout, stderr }
-    for index, descriptor in ipairs(options and options.inherit or {}) do
-        stdio[3 + index] = descriptor
+    local stdio, stdio_count = { nil, stdout, stderr }, 3
+    for _, descriptor in ipairs(options and options.inherit or {}) do
+        stdio_count = stdio_count + 1
+        stdio[stdio_count] = descriptor
     end
-    local child, err = spawn(argv, stdio, nil,
+    local child, err = spawn(argv, stdio, stdio_count, nil,
         function(code, signal) completed(exit_status(code, signal)) end)
     close_logs(stdout, stderr)
     if not child then
@@ -379,12 +413,13 @@ function process.start_worker(argv, options, handlers)
     end
     -- Standard input is an empty pipe whose writer closes at once, so the
     -- array has no hole before the inherited descriptors.
-    local stdio = { worker.stdin_pipe, worker.stdout_pipe, worker.stderr_pipe,
-        worker.request_pipe, worker.control }
-    for index, descriptor in ipairs(options.inherit or {}) do
-        stdio[5 + index] = descriptor
+    local stdio, stdio_count = { worker.stdin_pipe, worker.stdout_pipe, worker.stderr_pipe,
+        worker.request_pipe, worker.control }, 5
+    for _, descriptor in ipairs(options.inherit or {}) do
+        stdio_count = stdio_count + 1
+        stdio[stdio_count] = descriptor
     end
-    local child, err = spawn(argv, stdio,
+    local child, err = spawn(argv, stdio, stdio_count,
         { cwd = options.cwd, inherit_environment = true },
         function(code, signal)
             worker.exited, worker.code, worker.signal = true, code, signal

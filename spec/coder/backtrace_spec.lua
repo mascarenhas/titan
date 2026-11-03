@@ -75,6 +75,39 @@ describe("libbacktrace unified stack trace", function()
         assert.match("OK", out)
     end)
 
+    it("shows ordinary qualified names for public and local foreign Titan bodies", function()
+        local out = compile_and_run([[
+            foreign import "lauxlib.h"
+            foreign function public_failure(state: *lua_State): int
+                return ffi.luaL_error(state, "public foreign body")
+            end
+            local foreign function private_failure(state: *lua_State): int
+                return ffi.luaL_error(state, "private foreign body")
+            end
+            function public_case()
+                public_failure(L)
+            end
+            function private_case()
+                private_failure(L)
+            end
+        ]], [==[
+            local titan = require "titan"
+            for _, row in ipairs({
+                {test.public_case, "public", "test.public_failure"},
+                {test.private_case, "private", "test.private_failure"},
+            }) do
+                local ok, err = pcall(row[1])
+                assert(not ok and err:find(row[2] .. " foreign body", 1, true))
+                local trace = titan.backtrace()
+                assert(trace:find("in " .. row[3], 1, true), trace)
+                assert(not trace:find("_titan", 1, true), trace)
+                assert(not trace:find("titanentry", 1, true), trace)
+            end
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("attributes native frames to the .titan source via #line", function()
         -- With `#line`, the native frames symbolize to the ORIGINAL .titan file
         -- and line carried in the .so's DWARF, NOT the generated .c. The raise
@@ -383,6 +416,87 @@ describe("libbacktrace unified stack trace", function()
             print("OK")
         ]==])
         assert.match("OK", out)
+    end)
+end)
+
+-- A native function's prologue executes before the first statement's `#line`.
+-- The definition stamp keeps it on the declaring contributor instead of the
+-- preceding definition's trailing directive.
+describe("native function-definition line attribution", function()
+    after_each(clean)
+
+    local function command(argv)
+        local result = require("titan-compiler.io").new_sync():run(argv)
+        if not result.ok then
+            return nil, result.output or result.diagnostic or result.why
+        end
+        return result.output or ""
+    end
+
+    local function symbolizer(name)
+        return command({ name, "--version" }) ~= nil
+    end
+
+    local function line_of(source, needle)
+        local position = assert(source:find(needle, 1, true))
+        local _, lines = source:sub(1, position - 1):gsub("\n", "\n")
+        return lines + 1
+    end
+
+    it("attributes a contributor prologue to its own file and definition line", function()
+        if platform.windows then
+            pending("native definition line tables need an ELF/Mach-O symbolizer")
+            return
+        end
+        local addr2line = symbolizer("addr2line") and "addr2line"
+            or symbolizer("llvm-addr2line") and "llvm-addr2line" or nil
+        if not addr2line or not symbolizer("nm") then
+            pending("no native symbolizer and symbol table reader on this host")
+            return
+        end
+        -- `secondary_owner` is emitted after a definition from another
+        -- contributor. Without a definition-level `#line` its prologue would
+        -- inherit the preceding definition's trailing directive and symbolize
+        -- to `main.titan`, so the prologue address names the wrong source.
+        local MAIN = [[
+function primary_owner(): integer
+    return 1
+end
+do primary_owner() end
+]]
+        local MEMBER = [[
+-- A contributor definition that owns its prologue.
+function secondary_owner(): integer
+    local value: integer = 2
+    return value
+end
+]]
+        h.reset(true)
+        local ast = assert(h.parse(MAIN, "main.titan"))
+        table.insert(ast, #ast, assert(h.parse(MEMBER, "member.titan"))[1])
+        local _, errors = require("titan-compiler.checker").check(
+            "prologue", ast, MAIN, "main.titan")
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local ok, err, _, _, objects = require("titan-compiler.driver").compile(
+            "prologue", ast, "main.titan", {}, h.verbose)
+        assert.truthy(ok, err)
+        local object = assert(objects and objects[1], "no compiled object")
+        -- The native Titan body, not one of its entry wrappers.
+        local symbols = assert(command({ "nm", "-a", "--defined-only", object }))
+        local address
+        for line in symbols:gmatch("[^\n]+") do
+            local value, name = line:match("^(%x+)%s+%a%s+(.+)$")
+            if name and name:match("secondary_owner_titan$") then
+                address = value
+            end
+        end
+        address = assert(address, "missing native body symbol\n" .. symbols)
+        local resolved = assert(command({ addr2line, "-e", object, "0x" .. address }))
+        local filename, line = resolved:match("([^\n:]+):(%d+)")
+        assert.equal("member.titan", filename and filename:match("[^/\\]+$"),
+            resolved)
+        assert.equal(line_of(MEMBER, "function secondary_owner"), tonumber(line),
+            resolved)
     end)
 end)
 

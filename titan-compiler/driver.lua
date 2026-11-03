@@ -669,6 +669,9 @@ end
 -- Browser state is context-owned. Native process globals remain a host profile.
 function driver._finish_target_initialization(context)
     if context.target == "browser" then
+        if driver.EMIT_LINE_DIRECTIVES == false then
+            return nil, "browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)"
+        end
         -- Embedded inventories describe native host code and native C facts.
         -- Drop the complete state at the target boundary, before any browser
         -- descriptor/probe or resolver consumer can observe it.
@@ -721,6 +724,10 @@ function driver._finish_target_initialization(context)
             local descriptor, err = driver._browser_target.build(context, {
                 paths = paths, runtime_include = runtime_include, compile_flags = extras,
                 build_profile = driver.BUILD_PROFILE,
+                trace_control = driver.browser_link_options and
+                    (driver.browser_link_options.purpose == "baseline" or
+                     driver.browser_link_options.purpose == "minicoro" or
+                     driver.browser_link_options.purpose == "budget"),
                 probe_cache_directory = probe_cache_directory,
             })
             if not descriptor then return nil, err end
@@ -4706,7 +4713,7 @@ local function prepare_source_checking_header(context, modname, ast)
                 return ffiheaders.relative(logical_name,
                     dependency.logical_name:gsub("[.]ffi[.]h$", ".titan.h"))
             end,
-        })
+        }, driver.header_policy(false))
     ffiheaders.remember_file(context, filename)
     local wrote, write_err = context.io:write_file(filename, contents)
     if not wrote then return nil, write_err end
@@ -7163,8 +7170,10 @@ function driver.compile_planned_module(context, modname, options)
         extra_flags = coverage.compile_flags(coverage_build, modname) or {}
     end
     coder.prepare_coverage(mod.ast, coverage_build ~= nil)
-    local header_plans, header_error =
-        driver.plan_foreign_headers({ modname }, driver.imported)
+    local header_plans, header_error = driver.plan_foreign_headers(
+        { modname }, driver.imported,
+        function(name) return driver.header_policy(
+            name == modname and coverage_selected) end)
     if not header_plans then return nil, header_error end
     local request = {
         modname = modname,
@@ -8480,8 +8489,20 @@ function driver.ast_has_foreign_functions(ast)
     return false
 end
 
-function driver.plan_foreign_header(modname, ast, sourcef, defer_render)
+-- Foreign headers are rendered before, and for restored plans independently
+-- of, C generation. Their line/coverage policy is therefore an explicit input
+-- derived from the current options, never ambient coder state left by another
+-- generation.
+function driver.header_policy(coverage)
+    -- Internal coder helper: the public facade exposes only supported APIs.
+    local internal = require("titan-compiler.coder.core").coder
+    return internal._emission_policy(driver.EMIT_LINE_DIRECTIVES, coverage)
+end
+
+function driver.plan_foreign_header(
+        modname, ast, sourcef, defer_render, policy)
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
+    policy = policy or driver.header_policy(false)
     local headername = driver.foreign_header_filename(sourcef)
     local has_foreign = driver.ast_has_foreign_functions(ast)
     local absolute_header = normalized_absolute_filename(headername)
@@ -8489,10 +8510,11 @@ function driver.plan_foreign_header(modname, ast, sourcef, defer_render)
     local absolute_ffi_header = normalized_absolute_filename(ffi_headername)
     ast._foreign_header_output = has_foreign and absolute_header or nil
     ast._ffi_header_output = absolute_ffi_header
+    local internal = require("titan-compiler.coder.core").coder
     local contents, recipe
     if has_foreign and not defer_render then
         contents, recipe = coder.generate_foreign_header(
-            modname, ast, { module = modname })
+            modname, ast, { module = modname }, nil, policy)
     end
     return {
         modname = modname,
@@ -8503,6 +8525,12 @@ function driver.plan_foreign_header(modname, ast, sourcef, defer_render)
         has_foreign = has_foreign,
         contents = contents,
         recipe = recipe,
+        -- The plan is one immutable published unit: policy, the checked module
+        -- object it was rendered from, contents and the digest of the recipe
+        -- (which includes the policy) that produced them. Its `ast` reference is
+        -- what a later compile compares by identity.
+        policy = policy,
+        digest = internal._foreign_header_digest(recipe),
         ffi_header = {
             filename = ffi_headername,
             absolute = absolute_ffi_header,
@@ -8551,7 +8579,12 @@ function driver.write_foreign_header_plan(plan, verbose, pretty_print)
 end
 
 -- Implementation notes: doc/implementation/foreign-functions.md#final-planning-ownership-and-stale-cleanup
-function driver.plan_foreign_headers(names, imported)
+-- `policy_for(modname)` supplies the emission policy of each module's header;
+-- the CLI and the per-module worker derive it from the same coverage selection
+-- and line-directive option used for that module's C, so a header can never be
+-- planned under a policy another generation left behind.
+function driver.plan_foreign_headers(names, imported, policy_for)
+    policy_for = policy_for or function() return driver.header_policy(false) end
     local plans = {}
     local by_name = {}
     local occupied = {}
@@ -8593,6 +8626,10 @@ function driver.plan_foreign_headers(names, imported)
                     filename = headername,
                     absolute = normalized_absolute_filename(headername),
                     marker = driver.FOREIGN_HEADER_MARKER,
+                    -- Restored bytes are compiler-owned and carry the policy
+                    -- their record was built under; the record identity owns
+                    -- invalidation, so the plan states the current expectation.
+                    policy = policy_for(name),
                     has_foreign = mod.object_metadata.foreign_header ~= nil,
                     ffi_header = {
                         filename = ffi_headername,
@@ -8602,7 +8639,8 @@ function driver.plan_foreign_headers(names, imported)
                 }
             else
                 plan = driver.plan_foreign_header(
-                    name, mod.ast, mod.native_output or mod.filename, true)
+                    name, mod.ast, mod.native_output or mod.filename, true,
+                    policy_for(name))
             end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 local identity = physical_absolute_filename(entry.filename):lower()
@@ -8667,6 +8705,9 @@ function driver.plan_foreign_headers(names, imported)
                     plan.ffi_header.absolute, function(name)
                         return assert(dependency_plan(name)).absolute
                     end)
+                plan.digest = require("titan-compiler.coder.core").coder
+                    ._foreign_header_digest(
+                        plan.mod.object_metadata.foreign_header)
             end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 entry.preserve = entry.contents ~= nil and
@@ -8676,8 +8717,12 @@ function driver.plan_foreign_headers(names, imported)
             plan.ffi_header.contents = coder.generate_ffi_header(
                 plan.modname, plan.ast)
             if plan.has_foreign then
+                plan.policy = plan.policy or policy_for(plan.modname)
                 plan.contents, plan.recipe = coder.generate_foreign_header(
-                    plan.modname, plan.ast, { module = plan.modname })
+                    plan.modname, plan.ast, { module = plan.modname }, nil,
+                    plan.policy)
+                plan.digest = require("titan-compiler.coder.core").coder
+                    ._foreign_header_digest(plan.recipe)
             end
         end
         local ok, err = driver.validate_foreign_header_plan(plan)
@@ -8727,25 +8772,23 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
             if not ok then return abandon(err) end
         end
     end
-    for _, plan in ipairs(plans or {}) do
-        if plan.ast then
-            plan.ast._foreign_header_contents = plan.contents
-            plan.ast._foreign_header_recipe = plan.recipe
-            plan.ast._foreign_header_prepared = true
-            if plan.ffi_header then
-                plan.ast._ffi_header_contents = plan.ffi_header.contents
-                plan.ast._ffi_header_prepared = true
-            end
-        end
-    end
     return true
 end
 
 function driver.prepare_foreign_headers(
-        names, imported, verbose, pretty_print)
-    local plans, err = driver.plan_foreign_headers(names, imported)
+        names, imported, verbose, pretty_print, policy_for)
+    local plans, err = driver.plan_foreign_headers(names, imported, policy_for)
     if not plans then return nil, err end
-    return driver.write_foreign_header_plans(plans, verbose, pretty_print)
+    local written, write_error =
+        driver.write_foreign_header_plans(plans, verbose, pretty_print)
+    if not written then return nil, write_error end
+    -- The plan is the published unit; later compiles reuse it only when its
+    -- recorded policy matches, so nothing has to be cached on the AST.
+    for _, plan in ipairs(plans) do
+        local entry = imported[plan.modname]
+        if entry then entry.foreign_header_plan = plan end
+    end
+    return true
 end
 
 driver.GENERATED_C_MARKER = "/* Generated by Titan: module C translation unit. */"
@@ -8785,14 +8828,28 @@ local function prepare_compile(
     local priv_header_path = stem .. ".priv.h"
     coder.prepare_coverage(ast, options and
         (options.coverage == true or options.coverage_backend ~= nil))
+    -- A caller-supplied plan is the published unit for this build. Otherwise
+    -- reuse this module's published plan only when it was rendered from this
+    -- very checked module object and its emission policy matches; any other
+    -- case plans and publishes afresh. Planning is cheap, so conservative
+    -- replanning is preferred over trusting bytes we cannot prove current — a
+    -- same-named source can be a different checked buffer (overridden or
+    -- unsaved editor content) that no disk comparison would distinguish.
     local owns_header_plan = header_plan == nil
-    if not header_plan and (not ast._foreign_header_prepared or not ast._ffi_header_prepared) then
-        header_plan = driver.plan_foreign_header(modname, ast, sourcef)
-        local valid, err = driver.validate_foreign_header_plan(header_plan)
-        if not valid then return nil, err end
-    end
-    if header_plan then
-        ast._foreign_header_recipe = header_plan.recipe
+    if not header_plan then
+        local policy = driver.header_policy(options and options.coverage == true)
+        local published = source_entry and source_entry.foreign_header_plan
+        if published and published.ast ~= nil and published.ast == ast
+            and require("titan-compiler.coder.core").coder
+                ._same_emission_policy(published.policy, policy) then
+            header_plan = published
+            owns_header_plan = false
+        else
+            header_plan = driver.plan_foreign_header(modname, ast, sourcef,
+                false, policy)
+            local valid, err = driver.validate_foreign_header_plan(header_plan)
+            if not valid then return nil, err end
+        end
     end
     local imported_layouts = options and options.nominal_layouts
     if not imported_layouts then
@@ -8809,12 +8866,14 @@ local function prepare_compile(
     local generated = coder.generate(
         modname, ast, static_deps, driver.TITAN_ABI_VERSION,
         driver.EMIT_LINE_DIRECTIVES, {
+            target = context and context.target,
             nominal_layouts = imported_layouts,
             coverage = options and options.coverage == true,
             coverage_backend = options and options.coverage_backend,
             c_parts = effective_c_parts,
             split_threshold = split_threshold,
             private_header_output = normalized_absolute_filename(priv_header_path),
+            source_output_stem = normalized_absolute_filename(stem),
             foreign_header_plan = header_plan,
         })
     local generated_parts = assert(generated and generated.parts)
@@ -8836,7 +8895,8 @@ local function prepare_compile(
             certify = false
         else
             local digests, digest_error = incremental.producer_digests(
-                context, source_entry, encoded_layouts, ast._foreign_header_recipe)
+                context, source_entry, encoded_layouts,
+                header_plan and header_plan.recipe)
             if not digests then
                 return nil, "cannot certify object for module '" .. modname ..
                     "': " .. tostring(digest_error)
@@ -8886,7 +8946,7 @@ local function prepare_compile(
         external_symbols = coder.external_symbols(modname, ast),
         private_symbols = private_symbols,
         native_references = native_references,
-        foreign_header = ast._foreign_header_recipe,
+        foreign_header = header_plan and header_plan.recipe,
         layouts = encoded_layouts,
         parts_version = 1,
         c_parts = effective_c_parts,
@@ -9072,6 +9132,9 @@ local function prepare_compile(
             local ok, err = driver.write_foreign_header_plan(
                 header_plan, verbose, options and options.pretty_print)
             if not ok then return nil, err end
+        end
+        if header_plan and source_entry then
+            source_entry.foreign_header_plan = header_plan
         end
 
         -- Invalidate the primary commit marker first, then remove prior
@@ -13007,6 +13070,7 @@ function driver.preflight_build_outputs(context, plan, options)
             if not image then return nil, wasm end
             output(image, "browser executable")
             output(wasm, "browser Wasm")
+            output(wasm .. ".map", "browser source map")
         elseif platform.windows then
             local paths, err = driver.windows_program_paths(
                 options.test and require("titan-compiler.test_runner").MODULE_NAME or main,
@@ -13407,6 +13471,17 @@ function driver.run_standalone_archive_probe(
         local ready
         ready, err = driver.browser_node_ready(context, assets)
         if not ready then return nil, err end
+        -- Measurement overrides belong to the published image, not this
+        -- fixed-profile protocol check. Validate them before making a copy.
+        local extra_flags = driver.link_extra_flags()
+        local valid
+        valid, err = driver.browserlink.validate_extras(extra_flags, driver.browser_link_options)
+        if not valid then return nil, err end
+        local protocol_flags = {}
+        local trace_option = require("titan-compiler.browsertarget").trace_option
+        for _, flag in ipairs(extra_flags) do
+            if not trace_option(flag) then protocol_flags[#protocol_flags + 1] = flag end
+        end
         local base
         base, err = create_compile_log()
         if not base then return nil, err end
@@ -13414,12 +13489,13 @@ function driver.run_standalone_archive_probe(
         local source, image = base .. ".c", base .. ".mjs"
         local cleanup <close> = setmetatable({}, { __close = function()
             os.remove(source); os.remove(base .. ".o")
-            os.remove(image); os.remove(base .. ".wasm")
+            os.remove(image); os.remove(base .. ".wasm"); os.remove(base .. ".wasm.map")
         end })
         local linked, term, code = driver.compile_browser_image(
             standalone_archive_probe_source(entries, module_names, true),
             source, image, libnames, static_archives, extra_objects, verbose,
-            { context = context, profile = { purpose = "protocol", assertions = 2 } })
+            { context = context, profile = { purpose = "protocol", assertions = 2 },
+              link_extra_flags = protocol_flags })
         if not linked then
             return nil, "selected static provider failed executable-context protocol linking (" ..
                 tostring(term) .. (code and (", exit " .. tostring(code)) or "") .. ")"
@@ -13636,8 +13712,8 @@ __declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
     return true
 end
 
--- Browser images publish two files under their final basenames. The mjs
--- rename commits the pair; a failed commit restores the previous Wasm.
+-- Publish the extended map and Wasm before the mjs commit rename. Every
+-- predecessor survives a rename or certificate failure.
 function driver.compile_browser_image(contents, entrypoint, executable,
         objects, archives, extra_objects, verbose, options)
     options = options or {}
@@ -13651,9 +13727,22 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         plan, err = driver.browser_link_plan(context, options.purpose or "program")
     end
     if not plan then return nil, err end
+    local extra_flags = options.link_extra_flags or driver.link_extra_flags()
     local valid
-    valid, err = driver.browserlink.validate_extras(driver.link_extra_flags())
+    valid, err = driver.browserlink.validate_extras(extra_flags,
+        options.profile or driver.browser_link_options)
     if not valid then return nil, err end
+    valid, err = driver.browserlink.validate_extras(options.final_link_flags,
+        options.profile or driver.browser_link_options)
+    if not valid then return nil, err end
+    local library_flags = { table.unpack(extra_flags) }
+    append_argv(library_flags, options.final_link_flags)
+    local libraries
+    libraries, err = require("titan-compiler.linkcertificate").browser_trace_libraries(
+        context, context.target_descriptor.tools.cc, library_flags)
+    -- emcc also understands system/JS libraries the static resolver cannot
+    -- inventory. Keep their flags in the identity; the CLI withholds reuse.
+    libraries = libraries or {}
     local runtime
     runtime, err = parsed_archive_input(assets.runtime, context.target_descriptor.fingerprint)
     if not runtime then return nil, err end
@@ -13662,17 +13751,44 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local wasm
     executable, wasm = driver.browser_program_path(executable, executable)
     if not executable then return nil, wasm end
+    local inputs = { assets.runtime, context.target_descriptor.paths.liblua,
+        context.target_descriptor.paths.lua_record, assets.js_library, assets.trace_library }
+    append_argv(inputs, objects)
+    append_argv(inputs, archives)
+    append_argv(inputs, extra_objects)
+    append_argv(inputs, libraries)
+    valid, err = driver.validate_program_output_paths({}, executable, entrypoint,
+        inputs, { wasm, wasm .. ".map" }, {}, context)
+    if not valid then return nil, err end
     valid, err = ensure_output_parent(executable)
     if not valid then return nil, err end
     valid, err = ensure_output_parent(entrypoint)
     if not valid then return nil, err end
-    valid, err = util.set_file_contents(entrypoint, contents)
-    if not valid then return nil, err end
+    local browsertrace = require "titan-compiler.browsertrace"
     local object = entrypoint:gsub("[.]c$", ".o")
     local compile
     compile, err = driver.generated_compile_prefix(context)
     if not compile then return nil, err end
     append_argv(compile, plan.compile_flags)
+    local identity_flags
+    identity_flags, err = compiler_argv(false, context)
+    if not identity_flags then return nil, err end
+    append_argv(identity_flags, plan.link_flags)
+    append_argv(identity_flags, { "-Wl,--start-group", assets.runtime })
+    append_argv(identity_flags, archives)
+    append_argv(identity_flags, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
+    append_argv(identity_flags, extra_flags)
+    append_argv(identity_flags, options.final_link_flags)
+    local called, identity = pcall(browsertrace.identity, context, contents, compile, identity_flags,
+        { objects or {}, archives or {}, extra_objects or {}, libraries,
+          { assets.runtime, context.target_descriptor.paths.liblua,
+            context.target_descriptor.paths.lua_record, assets.js_library, assets.trace_library } })
+    if not called then
+        if type(identity) ~= "string" then error(identity, 0) end
+        return nil, identity
+    end
+    valid, err = util.set_file_contents(entrypoint, contents .. browsertrace.declaration(identity))
+    if not valid then return nil, err end
     append_argv(compile, { "-c", entrypoint, "-o", object })
     local compiled, term, code = run_argv(compile, verbose)
     if not compiled then return nil, term, code end
@@ -13680,6 +13796,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     if not staged then return nil, directory end
     local cleanup <close> = setmetatable({}, { __close = function() remove_path(directory) end })
     local staged_wasm = staged:gsub("[.]mjs$", ".wasm")
+    local staged_map, map = staged_wasm .. ".map", wasm .. ".map"
     local command
     command, err = compiler_argv(false, context)
     if not command then return nil, err end
@@ -13691,7 +13808,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     append_argv(command, { "-Wl,--start-group", assets.runtime })
     append_argv(command, archives)
     append_argv(command, { context.target_descriptor.paths.liblua, "-Wl,--end-group" })
-    append_argv(command, driver.link_extra_flags())
+    append_argv(command, extra_flags)
     append_argv(command, options.final_link_flags)
     local linked, term, code
     if options.dependency_output then
@@ -13705,7 +13822,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         linked, term, code = driver.run_link_command(command, verbose, staged)
         if not linked then return nil, term, code end
     end
-    for _, filename in ipairs({ staged, staged_wasm }) do
+    for _, filename in ipairs({ staged, staged_wasm, staged_map }) do
         if lfs.symlinkattributes(filename, "mode") ~= "file" then
             return nil, "staged browser image '" .. filename .. "' is not a regular file"
         end
@@ -13716,57 +13833,57 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local inventory
     inventory, err = driver.browserlink.image_inventory(image_bytes)
     if not inventory then return nil, err end
+    local map_bytes
+    map_bytes, err = context.io:read_file(staged_map)
+    if not map_bytes then return nil, err end
+    map_bytes, err = browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)
+    if not map_bytes then return nil, err end
+    valid, err = context.io:write_file(staged_map, map_bytes)
+    if not valid then return nil, err end
     if options.before_commit then
         valid, err = options.before_commit()
         if not valid then return nil, err end
     end
-    local mjs_backup, mjs_backed, mjs_published
-    if options.after_publish then
-        local mode = lfs.symlinkattributes(executable, "mode")
-        if mode then
-            if mode ~= "file" then return nil, "browser module output '" .. executable .. "' is not a regular file" end
-            mjs_backup, err = driver.sibling_temporary_path(executable .. ".old")
-            if not mjs_backup then return nil, err end
-        end
-    end
-    local backup
-    local previous = lfs.symlinkattributes(wasm, "mode")
-    if previous then
-        if previous ~= "file" then return nil, "browser Wasm output '" .. wasm .. "' is not a regular file" end
-        backup, err = driver.sibling_temporary_path(wasm .. ".old")
-        if not backup then return nil, err end
-        valid, err = rename_output(wasm, backup)
-        if not valid then return nil, err end
-    end
+    local outputs = {
+        { source = staged_map, destination = map },
+        { source = staged_wasm, destination = wasm },
+        { source = staged, destination = executable },
+    }
     local function rollback(reason)
-        if mjs_published then remove_path(executable) end
-        if mjs_backed then
-            local restored, restore_error = rename_output(mjs_backup, executable)
-            if not restored then
-                reason = tostring(reason) .. "\ncannot restore browser module: " .. tostring(restore_error) ..
-                    "; predecessor retained at " .. mjs_backup
-            end
-        end
-        remove_path(wasm)
-        if backup then
-            local restored, restore_error = rename_output(backup, wasm)
-            if not restored then
-                reason = tostring(reason) .. "\ncannot restore Wasm: " .. tostring(restore_error) ..
-                    "; predecessor retained at " .. backup
+        for index = #outputs, 1, -1 do
+            local output = outputs[index]
+            if output.published then remove_path(output.destination) end
+            if output.backed then
+                local restored, restore_error = rename_output(output.backup, output.destination)
+                if not restored then
+                    reason = tostring(reason) .. "\ncannot restore browser artifact: " ..
+                        tostring(restore_error) .. "; predecessor retained at " .. output.backup
+                end
             end
         end
         return nil, reason
     end
-    valid, err = rename_output(staged_wasm, wasm)
-    if not valid then return rollback(err) end
-    if mjs_backup then
-        valid, err = rename_output(executable, mjs_backup)
-        if not valid then return rollback(err) end
-        mjs_backed = true
+    -- Reserve and validate all backup locations before touching any predecessor.
+    for _, output in ipairs(outputs) do
+        local mode = lfs.symlinkattributes(output.destination, "mode")
+        if mode then
+            if mode ~= "file" then
+                return nil, "browser output '" .. output.destination .. "' is not a regular file"
+            end
+            output.backup, err = driver.sibling_temporary_path(output.destination .. ".old")
+            if not output.backup then return nil, err end
+        end
     end
-    valid, err = rename_output(staged, executable)
-    if not valid then return rollback(err) end
-    mjs_published = true
+    for _, output in ipairs(outputs) do
+        if output.backup then
+            valid, err = rename_output(output.destination, output.backup)
+            if not valid then return rollback(err) end
+            output.backed = true
+        end
+        valid, err = rename_output(output.source, output.destination)
+        if not valid then return rollback(err) end
+        output.published = true
+    end
     if options.after_publish then
         local called, committed, commit_error = pcall(options.after_publish)
         if not called then
@@ -13776,13 +13893,11 @@ function driver.compile_browser_image(contents, entrypoint, executable,
         end
         if not committed then return rollback(commit_error) end
     end
-    if mjs_backed then
-        valid, err = remove_path(mjs_backup)
-        if not valid then return nil, err end
-    end
-    if backup then
-        valid, err = remove_path(backup)
-        if not valid then return nil, err end
+    for _, output in ipairs(outputs) do
+        if output.backed then
+            valid, err = remove_path(output.backup)
+            if not valid then return nil, err end
+        end
     end
     return true
 end

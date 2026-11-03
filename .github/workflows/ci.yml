@@ -480,7 +480,8 @@ jobs:
           test -z "$(ls -A "$PREFIX/lib/titan-browser" 2>/dev/null || true)"
           make browser-sdk PREFIX="$PREFIX"
           for installed in libtitan.a titan.a titan-browser.mjs \
-              titan-browser-library.js titan-browser-run titan-browser-run.mjs \
+              titan-browser-library.js titan-browser-trace.js \
+              titan-browser-run titan-browser-run.mjs \
               titan-browser-node-worker.mjs titan-browser-page.mjs sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
@@ -503,6 +504,8 @@ jobs:
             spec/browser_sdk_spec.lua
             spec/coder/browser_entry_gate_spec.lua
             spec/coder/browser_fixtures_spec.lua
+            spec/browser_trace_map_spec.lua
+            spec/coder/browser_trace_entries_spec.lua
             spec/coder/browser_budgets_spec.lua
             spec/minicoro_spec.lua
           )
@@ -553,6 +556,7 @@ jobs:
           for image in runner_image runner_status; do
             test -f "$output/$image.mjs"
             test -f "$output/$image.wasm"
+            test -f "$output/$image.wasm.map"
           done
 
       # The loader suite takes image paths relative to --root, so every fixture
@@ -580,6 +584,7 @@ jobs:
             for image in loader_app fidelity loader_names; do
               test -f "$output/$image.mjs"
               test -f "$output/$image.wasm"
+              test -f "$output/$image.wasm.map"
             done
           done
           # One image at the allowed measurement profile proves the guard
@@ -587,17 +592,18 @@ jobs:
           optimized="$root/optimized"
           mkdir -p "$optimized"
           # Emscripten 6.0.13 only reaches its static export minifier at OPT>=3
-          # or SHRINK>=1, so the approved harness link adds a shrink/debug
-          # reduction here; the profile itself stays O2.
+          # or SHRINK>=1, so the approved harness link adds a shrink override;
+          # debug flags are supplied by the profile, which stays O2.
           TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e \
             "package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='baseline',optimization='O2',assertions=0}" \
             "$GITHUB_WORKSPACE/titanc" -q --target browser --incremental --no-uv-bootstrap \
-            --cflag=-g2 --ldflag=-g2 --ldflag=-Os \
+            --ldflag=-Os \
             --tree spec/fixtures/browser_loader -o "$optimized" \
             --exe "$optimized/fidelity.mjs" \
             --c-source spec/fixtures/browser_loader/loader.c fidelity
           test -f "$optimized/fidelity.mjs"
           test -f "$optimized/fidelity.wasm"
+          test -f "$optimized/fidelity.wasm.map"
 
       - name: Run the portable loader suite under Node and Chromium
         run: |
@@ -647,6 +653,72 @@ jobs:
           node --test spec/browser/runner.test.mjs \
             2>&1 | tee "$RUNNER_TEMP/browser-runner.log"
 
+      - name: Run the browser trace adapter and supervisor units
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          output="$GITHUB_WORKSPACE/out/browser/trace-adapter"
+          mkdir -p "$output"
+          trace_flags=(-std=c99 -O1 -fno-inline -fno-optimize-sibling-calls
+            -gsource-map -g2 -sMODULARIZE=1 -sEXPORT_ES6=1
+            -sENVIRONMENT=web,node -sALLOW_MEMORY_GROWTH=1 --no-entry
+            --js-library titan-runtime/browser/titan-browser-trace.js)
+          for assertions in 2 0; do
+            emcc "${trace_flags[@]}" -sASSERTIONS="$assertions" \
+              -sEXPORTED_FUNCTIONS='["_trace_capture_once","_titan_browser_trace_identity"]' \
+              -Ititan-runtime/browser spec/fixtures/browser_trace_adapter/lifecycle.c \
+              -o "$output/lifecycle-$assertions.mjs"
+            emcc "${trace_flags[@]}" -sASSERTIONS="$assertions" \
+              -Wall -Wno-unused-function -DTITAN_TARGET_BROWSER=1 \
+              -DTITAN_COROUTINE_STACK_SIZE=262144 -DMCO_ASYNCFY_STACK_SIZE=65536 \
+              -DLUA_USE_BROWSER -DLUA_USE_POSIX -sSUPPORT_LONGJMP=emscripten \
+              -sEXPORTED_FUNCTIONS='["_trace_filter_case","_trace_filter_status","_titan_browser_trace_identity"]' \
+              -sEXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
+              -I"$PREFIX/lib/browser/include" -Ititan-runtime -I"$PREFIX/include" \
+              spec/fixtures/browser_trace_adapter/filter.c titan-runtime/titan.c \
+              "$PREFIX/lib/browser/liblua.a" -o "$output/filter-$assertions.mjs"
+            TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE="$output/lifecycle-$assertions.mjs" \
+              TITAN_BROWSER_TRACE_FILTER_IMAGE="$output/filter-$assertions.mjs" \
+              node --test spec/browser/trace-adapter.test.mjs \
+              spec/browser/playwright-runner.test.mjs \
+              2>&1 | tee -a "$RUNNER_TEMP/browser-trace-units.log"
+          done
+
+      - name: Build and run the browser trace gate under Node
+        env:
+          TITAN_ROOT: ${{ github.workspace }}/.lua
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          output="$GITHUB_WORKSPACE/out/browser/trace-node"
+          runner="$PREFIX/lib/titan-browser/0.6/titan-browser-run"
+          lua -E spec/browser/build-trace.lua "$output" \
+            2>&1 | tee "$RUNNER_TEMP/browser-trace-build.log"
+          "$runner" --engine node --timeout 300000 --grace 2000 \
+            --root "$output" --js-test "$output/trace.test.mjs" \
+            2>&1 | tee "$RUNNER_TEMP/browser-trace-node.log"
+          TITAN_TRACE_OUTPUT="$output" TITAN_TRACE_RUNNER="$runner" \
+            node --input-type=module <<'JS' \
+            2>&1 | tee "$RUNNER_TEMP/browser-trace-node-policy.log"
+          import {readFileSync} from 'node:fs';
+          import {spawnSync} from 'node:child_process';
+          import {resolve} from 'node:path';
+          const root = process.env.TITAN_TRACE_OUTPUT;
+          const manifest = JSON.parse(readFileSync(resolve(root, 'manifest.json'), 'utf8'));
+          if (!manifest.degradedCases?.length) throw new Error('missing degraded trace cases');
+          for (const row of manifest.degradedCases) {
+            const result = spawnSync(process.env.TITAN_TRACE_RUNNER,
+              ['--engine', 'node', '--timeout', '60000', '--root', root,
+               resolve(root, row.image)], {stdio: 'inherit', timeout: 90000});
+            if (result.error || result.status !== 75)
+              throw new Error(`${row.name}: degraded trace was not a harness failure (${result.status})`);
+          }
+          JS
+          "$runner" --engine node --timeout 300000 --grace 2000 \
+            --allow-degraded-trace --root "$output" \
+            --js-test "$output/trace.test.mjs" -- --degraded \
+            2>&1 | tee "$RUNNER_TEMP/browser-trace-node-degraded.log"
+
       - name: Upload browser failure logs
         if: failure()
         uses: actions/upload-artifact@v7
@@ -656,6 +728,204 @@ jobs:
             ${{ runner.temp }}/browser-*.log
             out/browser
           if-no-files-found: warn
+          retention-days: 7
+
+  # The same native Titan fixture images run in all three managed engines.
+  # Each matrix cell owns its prefix, browser installation and output tree;
+  # assertions 2 and 0 are both built by the portable trace-gate builder.
+  browser-playwright:
+    name: browser traces (${{ matrix.profile }}, ${{ matrix.engine }}, Playwright 1.56.1)
+    needs: build-compiler
+    if: github.event_name == 'push'
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [validation, production]
+        engine: [chromium, firefox, webkit]
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      MAKEFLAGS: "-j4"
+      TITAN_JOBS: "4"
+      TITAN_BUILD_PROFILE: ${{ matrix.profile }}
+      CC: gcc-14
+      LUA_CC: gcc-14
+      TITAN_EMSDK_VERSION: "6.0.13"
+      TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
+      PREFIX: ${{ github.workspace }}/.lua
+      TITAN_PREFIX: ${{ github.workspace }}/.lua
+      TITAN_ROOT: ${{ github.workspace }}/.lua
+      TITAN_PLAYWRIGHT_VERSION: "1.56.1"
+      TITAN_PLAYWRIGHT_ROOT: ${{ github.workspace }}/out/playwright-tools
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+      TITAN_TRACE_ENGINE: ${{ matrix.engine }}
+      TITAN_TRACE_OUTPUT: ${{ github.workspace }}/out/browser/trace-${{ matrix.profile }}-${{ matrix.engine }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Download prepared Linux tree
+        if: matrix.profile == 'validation'
+        uses: actions/download-artifact@v8
+        with:
+          name: titan-linux-prepared.tar.gz
+          path: ${{ runner.temp }}
+
+      - name: Restore prepared Linux tree and environment
+        if: matrix.profile == 'validation'
+        run: |
+          tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" -C "$GITHUB_WORKSPACE"
+          test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
+          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
+          .lua/bin/lua -v
+
+      - name: Install native compiler dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc-14 curl libreadline-dev
+
+      # Prepared compiler trees contain validation-built authored runtime
+      # objects. Make does not stamp their flags, so production starts cold
+      # rather than relabeling that SDK or deleting its outputs.
+      - name: Bootstrap an independent production prefix
+        if: matrix.profile == 'production'
+        run: |
+          set -euo pipefail
+          test ! -e .ci-prepared-workspace
+          test ! -e "$PREFIX" && test ! -L "$PREFIX"
+          make lua luarocks
+          export PATH="$PREFIX/bin:$PATH"
+          echo "$PREFIX/bin" >> "$GITHUB_PATH"
+          "$PREFIX/bin/lua" -v
+          "$PREFIX/bin/luarocks" make --only-deps
+          "$PREFIX/bin/luarocks" test --prepare
+          LIBBT_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ianlancetaylor/libbacktrace.git" \
+            make libbacktrace
+
+      - name: Install the selected native compiler and SDK profile
+        run: |
+          test -z "${EMSDK:-}"
+          ! command -v emcc >/dev/null 2>&1
+          rm -f "$PREFIX/bin/titanc"
+          rm -rf "$PREFIX/share/lua/5.5/titan-compiler"
+          rm -rf "$PREFIX/share/lua/5.5/c-parser"
+          "$PREFIX/bin/luarocks" make
+
+      - name: Restore the pinned Emscripten SDK
+        uses: ubicloud/cache@v4
+        with:
+          path: ${{ github.workspace }}/.emsdk
+          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
+
+      - name: Install Emscripten and select its Node 24
+        run: |
+          set -euo pipefail
+          if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
+            git -C "$GITHUB_WORKSPACE" clone --depth 1 \
+              https://github.com/emscripten-core/emsdk.git "$TITAN_EMSDK_ROOT"
+          fi
+          "$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"
+          "$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          emcc --version
+          emcc --version | grep -q " $TITAN_EMSDK_VERSION "
+          node_bin="$EMSDK_NODE"
+          test -x "$node_bin"
+          case $("$node_bin" --version) in
+            v24.*) ;;
+            *) echo "pinned emsdk must supply Node 24" >&2; exit 1 ;;
+          esac
+          echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"
+          echo "${node_bin%/node}" >> "$GITHUB_PATH"
+          "$node_bin" --version
+
+      - name: Install browser Lua and SDK
+        run: |
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          make lua-browser PREFIX="$PREFIX"
+          make browser-sdk PREFIX="$PREFIX"
+          test -f "$PREFIX/lib/titan-browser/0.6/titan-browser-trace.js"
+
+      - name: Restore Playwright-managed browsers
+        uses: ubicloud/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ubuntu-24.04-${{ runner.arch }}-playwright-${{ env.TITAN_PLAYWRIGHT_VERSION }}-${{ matrix.engine }}-v1
+
+      - name: Install the pinned Playwright engine and runtime dependencies
+        run: |
+          set -euo pipefail
+          npm install --prefix "$TITAN_PLAYWRIGHT_ROOT" --no-save \
+            --package-lock=false --no-audit --no-fund \
+            "playwright@$TITAN_PLAYWRIGHT_VERSION"
+          node "$TITAN_PLAYWRIGHT_ROOT/node_modules/playwright/cli.js" \
+            install --with-deps "$TITAN_TRACE_ENGINE"
+
+      - name: Exercise the Playwright supervisor on this managed engine
+        run: |
+          set -euo pipefail
+          TITAN_PLAYWRIGHT_TEST_ENGINES="$TITAN_TRACE_ENGINE" \
+            node --test spec/browser/playwright-runner.test.mjs \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-supervisor.log"
+
+      - name: Build the portable trace gate for both assertion modes
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          lua -E spec/browser/build-trace.lua "$TITAN_TRACE_OUTPUT" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-build.log"
+
+      - name: Run full Chromium and Firefox or reduced-fidelity WebKit traces
+        run: |
+          set -euo pipefail
+          node spec/browser/playwright-run.mjs \
+            --engine "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 \
+            --sdk "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT" \
+            "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-trace.log"
+
+      - name: Require explicit degraded-mode opt-in and preserve original failures
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS' \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-policy.log"
+          import {readFileSync} from 'node:fs';
+          import {spawnSync} from 'node:child_process';
+          import {resolve} from 'node:path';
+          const root = process.env.TITAN_TRACE_OUTPUT;
+          const manifest = JSON.parse(readFileSync(resolve(root, 'manifest.json'), 'utf8'));
+          if (!manifest.degradedCases?.length) throw new Error('missing degraded trace cases');
+          for (const row of manifest.degradedCases) {
+            const result = spawnSync(process.execPath,
+              ['spec/browser/playwright-run.mjs', '--engine', process.env.TITAN_TRACE_ENGINE,
+               '--timeout', '60000', '--sdk', resolve(process.env.PREFIX, 'lib/titan-browser/0.6'),
+               '--root', root, '--image', resolve(root, row.image)],
+              {stdio: 'inherit', timeout: 90000});
+            if (result.error || result.status !== 75)
+              throw new Error(`${row.name}: degraded trace was not a harness failure (${result.status})`);
+          }
+          JS
+          node spec/browser/playwright-run.mjs \
+            --engine "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 \
+            --allow-degraded-trace --sdk "$PREFIX/lib/titan-browser/0.6" \
+            --root "$TITAN_TRACE_OUTPUT" \
+            "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-degraded.log"
+
+      - name: Upload Playwright trace receipts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}
+          path: |
+            ${{ runner.temp }}/browser-playwright-*.log
+            ${{ env.TITAN_TRACE_OUTPUT }}
+          if-no-files-found: error
           retention-days: 7
 
   native-coverage:

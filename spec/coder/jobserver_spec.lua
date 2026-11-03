@@ -110,6 +110,14 @@ describe("make jobserver policy", function()
             jobs.make_policy([[-j2 --jobserver-auth=fifo:/tmp/a\ b]]).auth)
     end)
 
+    it("rewrites pipe authorizations without rewriting escaped words or assignments", function()
+        local flags = [[s -j4  --jobserver-auth=3,4 --jobserver-fds=5,6 -- NAME=a\ b VALUE=--jobserver-auth=7,8]]
+        local child = jobs.child_makeflags(flags, 9, 10)
+        assert.equal([[s -j4  --jobserver-auth=9,10 --jobserver-fds=9,10 -- NAME=a\ b VALUE=--jobserver-auth=7,8]], child)
+        assert.same({ kind = "pipe", read = 9, write = 10, text = "9,10" },
+            jobs.make_policy(child).auth)
+    end)
+
     it("treats only an explicit -j1 without a server as serial", function()
         assert.is_true(jobs.make_policy("s -j1").serial)
         assert.is_false(jobs.make_policy("s -j").serial)
@@ -121,6 +129,39 @@ describe("make jobserver policy", function()
         assert.is_false(policy.serial)
         assert.is_nil(policy.auth)
     end)
+end)
+
+describe("native process jobserver inheritance", function()
+    if not LINUX then return end
+
+    for _, kind in ipairs({ "pipe", "fifo" }) do
+        it("preserves the real Make " .. kind .. " pool through locks and worker control pipes", function()
+            local version = make_version()
+            if not version or (kind == "fifo" and version < 404) then
+                pending("requested GNU Make jobserver transport unavailable")
+                return
+            end
+            local workspace = assert(compiler_io.new_sync():tmpname())
+            os.remove(workspace)
+            assert(lfs.mkdir(workspace))
+            local ran, failure = xpcall(function()
+                local bootstrap = string.format("package.path=%q; package.cpath=%q;", package.path, package.cpath)
+                local recipe = table.concat({
+                    quote(LUA), "-E -e", quote(bootstrap),
+                    quote(FIXTURE .. "/jobserver_process.lua"),
+                    "parent", quote(ROOT), quote(workspace), kind,
+                }, " ")
+                write_file(workspace .. "/Makefile", "all:\n\t+" .. recipe .. "\n")
+                local style = version >= 404 and "--jobserver-style=" .. kind or ""
+                local ok, output = shell(CLEAN_MAKE_ENV .. " " .. quote(TIMEOUT) ..
+                    " 30 make --no-print-directory -C " .. quote(workspace) .. " -j3 " .. style)
+                assert.truthy(ok, output)
+                assert.truthy(output:find("all native jobserver transports completed", 1, true), output)
+            end, debug.traceback)
+            remove_tree(workspace)
+            assert.is_true(ran, failure)
+        end)
+    end
 end)
 
 describe("jobserver slots", function()

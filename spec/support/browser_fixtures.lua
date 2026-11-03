@@ -92,8 +92,9 @@ function M.descriptor(root, overrides)
     local record, record_text = M.record()
     local profile = M.profile_data()
     local tools = (platform.windows and "C:" or "") .. "/emsdk/upstream/emscripten/"
-    local flags = { "--std=c99", "-O2", "-Wall", "-Wno-unused-but-set-variable",
-        "-Wno-unused-function", "-gline-tables-only", "-sSUPPORT_LONGJMP=emscripten",
+    local flags = { "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls",
+        "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function", "-gline-tables-only",
+        "-sSUPPORT_LONGJMP=emscripten",
         "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(M.target_defines) }
     local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
         tools = { cc = { tools .. "emcc" }, ar = { tools .. "emar" },

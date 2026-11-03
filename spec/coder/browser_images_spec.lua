@@ -4,6 +4,7 @@ local driver = require "titan-compiler.driver"
 local linkcertificate = require "titan-compiler.linkcertificate"
 local fixtures = require "spec.support.browser_fixtures"
 local toolchain = require "spec.support.browser_toolchain"
+local staticmetadata = require "titan-compiler.staticmetadata"
 local compiler_io = require "titan-compiler.io"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
@@ -20,6 +21,33 @@ local function read(filename)
 end
 local function run(argv)
     return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
+end
+local function maximum_declared_locals(bytes)
+    local image = assert(staticmetadata.browser_trace_image(bytes))
+    local maximum = 0
+    for _, range in ipairs(image.function_ranges) do
+        local position = range[1]
+        local function u32()
+            local value, factor = 0, 1
+            for _ = 1, 5 do
+                assert.is_true(position < range[2], "truncated function local declaration")
+                local digit = bytes:byte(position + 1)
+                position = position + 1
+                value = value + (digit & 127) * factor
+                if digit < 128 then return value end
+                factor = factor * 128
+            end
+            error("overlong function local declaration")
+        end
+        local count = 0
+        for _ = 1, u32() do
+            count = count + u32()
+            assert.is_true(position < range[2], "missing function local type")
+            position = position + 1
+        end
+        maximum = math.max(maximum, count)
+    end
+    return maximum
 end
 
 local function cli(info, ...)
@@ -57,14 +85,46 @@ assert(driver.close_resolver_context(context))
     return output .. "/" .. name .. ".mjs"
 end
 
-local function native_trace(null_backend)
+local function image_identity(info, image, source)
+    local result = run({ info.node.path, "--input-type=module", "-e", [[
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const image = process.argv[1];
+const map = JSON.parse(await readFile(image.replace(/\.mjs$/, '.wasm.map'), 'utf8'));
+const expectedSource = process.argv[2];
+if (expectedSource) {
+    assert.ok(map.sources.some(source => source.replaceAll('\\', '/').split('/').at(-1) === expectedSource),
+        'final source map omitted ' + expectedSource);
+}
+const factory = (await import(pathToFileURL(image).href)).default;
+const instance = await factory({ locateFile: name => resolve(dirname(image), name) });
+const pointer = instance._titan_browser_trace_identity();
+const bytes = instance.HEAPU8.subarray(pointer, pointer + 65);
+assert.equal(bytes.length, 65);
+assert.equal(bytes[64], 0);
+const identity = Buffer.from(bytes.subarray(0, 64)).toString('ascii');
+assert.match(identity, /^[0-9a-f]{64}$/);
+assert.equal(identity, map.x_titan_image);
+assert.ok(Number.isInteger(map.x_titan_function_imports));
+assert.ok(map.x_titan_function_ranges.length > 0);
+assert.equal(map.x_titan_function_names.length,
+    map.x_titan_function_imports + map.x_titan_function_ranges.length);
+process.stdout.write(identity);
+]], image, source or "" })
+    assert.is_true(result.ok, result.output or result.diagnostic)
+    return result.output
+end
+
+local function native_trace()
     local prefix = require("spec.support.installed_prefix").active()
     local suffix = platform.windows and ".exe" or ""
     local script = string.format([[
 local driver = require "titan-compiler.driver"
 local context = driver.new_resolver_context({ target = %q })
 assert(driver.configure_foreign_c(context))
-local runtime, fixture, output, prefix, null_backend = %q, %q, %q, %q, %s
+local runtime, fixture, output, prefix = %q, %q, %q, %q
 local function append(argv, extra)
     for _, argument in ipairs(extra) do argv[#argv + 1] = argument end
     return argv
@@ -76,11 +136,9 @@ local function command(argv)
 end
 local compile = assert(driver.generated_compile_prefix(context))
 append(compile, { "-DTITAN_NO_LIBBACKTRACE", "-c", runtime, "-o", output .. ".runtime.o" })
-if null_backend then compile[#compile + 1] = "-DTITAN_TARGET_BROWSER" end
 command(compile)
 compile = assert(driver.authored_c_compile_prefix(context))
 append(compile, { "-c", fixture, "-o", output .. ".fixture.o" })
-if null_backend then compile[#compile + 1] = "-DFIXTURE_NULL" end
 command(compile)
 local link = assert(driver.authored_c_compile_prefix(context))
 append(link, { "-o", output, output .. ".fixture.o", output .. ".runtime.o" })
@@ -91,7 +149,7 @@ io.write(command({ output }).output)
 assert(driver.close_resolver_context(context))
 ]], files.host(), repository .. "/titan-runtime/titan.c",
         repository .. "/spec/fixtures/browser_images/native-trace.c",
-        workspace .. "/trace" .. suffix, prefix, tostring(null_backend))
+        workspace .. "/trace" .. suffix, prefix)
     local result = process.capture({ prefix .. "/bin/lua" .. suffix, "-E", "-e",
         string.format("package.path=%q..package.path;", repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script },
         { env = { TITAN_ROOT = prefix, TITAN_TARGET = "", TITAN_BUILD_PROFILE = "validation",
@@ -111,7 +169,7 @@ describe("browser image profile and SDK readiness", function()
         for key in pairs(assets) do keys[#keys + 1] = key end
         table.sort(keys)
         assert.same({ "js_library", "loader", "lpeglabel", "node_worker", "page", "provider",
-            "runner", "runner_module", "runtime", "sdk_digests" }, keys)
+            "runner", "runner_module", "runtime", "sdk_digests", "trace_library" }, keys)
     end)
 
     it("requires only readable runtime and JS assets, in bootstrap order", function()
@@ -122,7 +180,7 @@ describe("browser image profile and SDK readiness", function()
             stat = function(_, filename) return present[filename] and { kind = "file" } end,
             read_file = function(_, filename) return present[filename] and "bytes" end,
         } }
-        for _, key in ipairs({ "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+        for _, key in ipairs({ "runtime", "js_library", "trace_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
@@ -140,19 +198,22 @@ describe("browser image profile and SDK readiness", function()
         local profile = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
         assert.same({}, profile.compile_flags)
         assert.same({
+            "-O1", "-fno-inline", "-fno-optimize-sibling-calls", "-gsource-map", "-g2",
+            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals",
             "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
             "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
             "-sFORCE_FILESYSTEM=1",
-            '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_malloc","_free"]',
+            '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]',
             '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
             "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
+            "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
             "-sASSERTIONS=2", "-sSTACK_OVERFLOW_CHECK=2",
         }, profile.link_flags)
         assert.equal(descriptor.identity, profile.identity_inputs.target_identity)
-        assert.equal("-O2", profile.identity_inputs.optimization)
+        assert.equal("-O1", profile.identity_inputs.optimization)
     end)
 
     it("keeps internal gate, budget and baseline variants constrained", function()
@@ -179,6 +240,25 @@ describe("browser image profile and SDK readiness", function()
         assert.truthy(flags:find('-sEXPORTED_FUNCTIONS=["_main","_malloc","_free"]', 1, true))
     end)
 
+    it("retains ordered local cleanup in every Titan-entry profile and its identity", function()
+        local cleanup = "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals"
+        for _, purpose in ipairs({ "program", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+            for _, assertions in ipairs({ 0, 2 }) do
+                local plan = assert(browserlink.profile(fixtures.descriptor(),
+                    { purpose = purpose, assertions = assertions }))
+                local count = 0
+                for _, flag in ipairs(plan.link_flags) do
+                    if flag == cleanup then count = count + 1 end
+                end
+                assert.equal(1, count)
+                assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+            end
+        end
+        local baseline = assert(browserlink.profile(fixtures.descriptor(),
+            { purpose = "baseline", assertions = 2, entry = "lua-main", asyncify = false }))
+        assert.is_nil(table.concat(baseline.link_flags, " "):find(cleanup, 1, true))
+    end)
+
     it("preserves byte-oriented FS and TTY for every purpose including the interpreter baseline", function()
         for _, purpose in ipairs({ "program", "protocol", "gate", "minicoro", "budget", "baseline" }) do
             for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
@@ -202,7 +282,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({ "-Wl,--trace" }, policy.argv)
     end)
 
-    it("owns only the browser pair at final validation even on a Darwin host", function()
+    it("owns the browser artifact triple at final validation even on a Darwin host", function()
         local root = temporary.name(); assert(os.remove(root)); files.mkdir(root)
         local previous = driver.IS_DARWIN
         local cleanup <close> = setmetatable({}, { __close = function()
@@ -215,13 +295,15 @@ describe("browser image profile and SDK readiness", function()
         local dsym, entrypoint = executable .. ".dSYM", root .. "/entrypoint.c"
         files.write(dsym, "unrelated user file")
         local ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
-            { dsym }, { wasm }, {}, context)
+            { dsym }, { wasm, wasm .. ".map" }, {}, context)
         assert.is_true(ok, why)
         assert.equal("unrelated user file", read(dsym))
-        ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
-            { wasm }, { wasm }, {}, context)
-        assert.is_nil(ok)
-        assert.truthy(why:find("aliases input", 1, true), why)
+        for _, input in ipairs({ wasm, wasm .. ".map" }) do
+            ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
+                { input }, { wasm, wasm .. ".map" }, {}, context)
+            assert.is_nil(ok)
+            assert.truthy(why:find("aliases input", 1, true), why)
+        end
         ok, why = driver.validate_program_output_paths({}, executable, entrypoint,
             {}, { wasm }, {}, { target = "macos" })
         assert.is_nil(ok)
@@ -243,6 +325,25 @@ describe("browser image profile and SDK readiness", function()
             assert.is_nil(browserlink.validate_extras(flags))
         end
         assert.is_true(browserlink.validate_extras({ "-lm", "-sWASM_BIGINT=1" }))
+        for _, flag in ipairs({ "-O3", "-g0", "-finline-functions", "-foptimize-sibling-calls" }) do
+            assert.is_nil(browserlink.validate_extras({ flag }))
+        end
+        for _, purpose in ipairs({ "baseline", "minicoro", "budget" }) do
+            assert.is_true(browserlink.validate_extras({ "-g2", "-Os" }, { purpose = purpose }))
+        end
+        for _, purpose in ipairs({ "program", "protocol", "gate", "baseline", "minicoro", "budget" }) do
+            for _, flags in ipairs({
+                { "-sBINARYEN_EXTRA_PASSES=" },
+                { "-s", "BINARYEN_EXTRA_PASSES=coalesce-locals" },
+                { "-sNO_BINARYEN_EXTRA_PASSES=1" },
+                { "-DBINARYEN_EXTRA_PASSES=0" },
+                { "-U", "BINARYEN_EXTRA_PASSES" },
+            }) do
+                local ok, why = browserlink.validate_extras(flags, { purpose = purpose })
+                assert.is_nil(ok)
+                assert.equal("browser link profile owns option " .. flags[1], why)
+            end
+        end
         assert.same({ "out/app.mjs", "out/app.wasm" }, { driver.browser_program_path("out/app") })
         local filename, err = driver.browser_program_path("unused", "out/app.js")
         assert.is_nil(filename)
@@ -254,6 +355,25 @@ describe("real browser test image", function()
     after_each(function()
         if workspace then files.remove(workspace); workspace = nil end
     end)
+    it("instantiates coroutine cleanup images well below the engine local limit", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        local runtime = require "spec.fixtures.browser_runtime.support"
+        workspace = runtime.workspace()
+        for _, assertions in ipairs({ 0, 2 }) do
+            local root = workspace .. "/assertions-" .. assertions
+            local ok, log = runtime.cli(info, root, { purpose = "program", assertions = assertions }, {
+                "--test", "--exe", root .. "/public.mjs",
+                "--c-source", runtime.fixture .. "/close.c", "coroutine.tests", "gc.tests" })
+            assert.is_true(ok, log)
+            local maximum = maximum_declared_locals(read(root .. "/public.wasm"))
+            assert.is_true(maximum > 0 and maximum < 10000,
+                "coroutine image declares too many function locals: " .. maximum)
+            image_identity(info, root .. "/public.mjs", "unwind_common.titan")
+            io.stdout:write(string.format("\nCOROUTINE-LOCALS assertions=%d max-declared=%d\n", assertions, maximum))
+            io.stdout:flush()
+        end
+    end)
+
     it("raises the seven dynamic-provider guard diagnostics without native loader imports", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
@@ -398,6 +518,165 @@ static int titan_browser_worker(lua_State *L) {
         assert.is_nil(lfs.attributes(workspace .. "/out/image_main.wasm"))
     end)
 
+    it("preflights direct C-image maps against code inputs before writing the entrypoint", function()
+        local info, why = toolchain.require({ sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local map, entrypoint, executable = workspace .. "/app.wasm.map",
+            workspace .. "/app.c", workspace .. "/app.mjs"
+        files.write(map, "authored input bytes")
+        local script = string.format([[
+local driver = require "titan-compiler.driver"
+local context = driver.new_resolver_context({ target = "browser", output_root = %q })
+local ok, why = driver.compile_browser_image("unused entrypoint", %q, %q, { %q }, {}, {}, false,
+    { context = context, profile = { purpose = "protocol", assertions = 2 } })
+assert(not ok and why:find("aliases input", 1, true), tostring(why))
+assert(driver.close_resolver_context(context))
+]], workspace, entrypoint, executable, map)
+        local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
+            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+            info.prefix .. "/bin/lua", "-E", "-e",
+            string.format("package.path=%q..package.path;", repository .. "/?.lua;" ..
+                repository .. "/?/init.lua;") .. script })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.equal("authored input bytes", read(map))
+        assert.is_nil(lfs.attributes(entrypoint))
+        assert.is_nil(lfs.attributes(executable))
+    end)
+
+    it("resolves a UTF-8 function name from the extended map through the instantiated names table", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        for _, extension in ipairs({ "titan", "c", "h" }) do
+            local destination = extension == "titan" and "trace_names.titan" or "trace-names." .. extension
+            files.write(workspace .. "/src/" .. destination,
+                read(repository .. "/spec/fixtures/browser_images/trace-names." .. extension))
+        end
+        local result = cli(info, "--c-source", workspace .. "/src/trace-names.c", "trace_names")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        result = run({ info.node.path, "-e", [[
+const map = JSON.parse(require('node:fs').readFileSync(process.argv[1], 'utf8'));
+const names = map.x_titan_function_names.filter(name => typeof name === 'string' && name.endsWith('_labelled_titan'));
+if (names.length !== 1) throw new Error('expected one final labelled function name');
+process.stdout.write(names[0]);
+]], workspace .. "/out/trace_names.wasm.map" })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        local symbol = result.output
+        assert.truthy(symbol:find("ℳ", 1, true), symbol)
+        assert.is_nil(symbol:find("\\u2133", 1, true))
+        for _, row in ipairs({ { symbol, 0 }, { symbol .. "_absent", 17 } }) do
+            result = run({ info.sdk_root .. "/titan-browser-run", "--engine", "node", "--grace", "0",
+                workspace .. "/out/trace_names.mjs", "--", row[1] })
+            assert.equal(row[2], result.status, result.output or result.diagnostic)
+        end
+    end)
+
+    it("keeps final-link flags local and image identity stable across repeated in-process links", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src"); files.mkdir(workspace .. "/out")
+        local script = string.format([[
+local driver = require "titan-compiler.driver"
+local strategy = require("titan-compiler.io").new_sync()
+local real_run, links = strategy.run, 0
+function strategy:run(argv, options)
+    local count = 0
+    for _, flag in ipairs(argv) do
+        if flag == "-Wl,--trace" then count = count + 1 end
+    end
+    if count > 0 then
+        assert(count == 1, "final-link flag was duplicated")
+        links = links + 1
+    end
+    return real_run(self, argv, options)
+end
+driver.TITAN_SOURCE_PATH = %q
+local output = %q
+local context = driver.new_resolver_context({ target = "browser", output_root = output, io = strategy })
+driver.NATIVE_LINK_FLAGS = { "-Wl,--no-demangle" }
+local extras = driver.NATIVE_LINK_FLAGS
+local flags = { "-Wl,--trace" }
+local contents = driver.browser_c_image_contents("static int titan_browser_worker(lua_State *L) { (void)L; return 0; }")
+local previous
+for iteration = 1, 2 do
+    local ok, why, code = driver.compile_browser_image(contents,
+        output .. "/repeated.c", output .. "/repeated.mjs", {}, {}, {}, false,
+        { context = context, profile = { purpose = "protocol", assertions = 2 },
+          final_link_flags = flags, dependency_output = output .. "/dependencies" })
+    assert(ok, tostring(why) .. (code and (", exit " .. code) or ""))
+    assert(driver.NATIVE_LINK_FLAGS == extras and #extras == 1 and extras[1] == "-Wl,--no-demangle",
+        "image link changed global link extras")
+    assert(#flags == 1 and flags[1] == "-Wl,--trace", "image link changed final-link options")
+    local map = assert(strategy:read_file(output .. "/repeated.wasm.map"))
+    local identity = assert(map:match('"x_titan_image":"([0-9a-f]+)"'))
+    assert(not previous or identity == previous, "identical inputs changed image identity")
+    previous = identity
+end
+assert(links == 2, "both real links must receive the final-link flag")
+assert(driver.close_resolver_context(context))
+]], workspace .. "/src", workspace .. "/out")
+        local result = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
+            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+            info.prefix .. "/bin/lua", "-E", "-e", string.format("package.path=%q..package.path;",
+                repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. script })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.match("^[0-9a-f]+$", image_identity(info, workspace .. "/out/repeated.mjs"))
+    end)
+
+    it("publishes a matching extended map and callable identity for a minified measurement control", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/image_control.titan", [[
+local test = import "test"
+function main(args: {string}): integer
+    test.assert(#args >= 0)
+    return #args
+end
+]])
+        files.write(workspace .. "/src/control-helper.c", "int control_helper(void) { return 37; }\n")
+        local library_flag = "-L" .. workspace .. "/src"
+        local variant = { prefix = info.prefix, compiler_setup = string.format([[
+local driver = require "titan-compiler.driver"
+driver.browser_link_options = {purpose='baseline',assertions=0,optimization='O2'}
+local run_link = driver.run_link_command
+driver.run_link_command = function(argv, ...)
+    local protocol, library, demangle = false, nil, nil
+    for index, flag in ipairs(argv) do
+        if flag == "-sASSERTIONS=2" then protocol = true end
+        if flag == %q then library = index end
+        if flag == "-Wl,--no-demangle" then demangle = index end
+    end
+    if protocol then
+        for _, flag in ipairs(argv) do assert(flag ~= "-Os", "measurement override reached protocol link") end
+        assert(library and demangle and library < demangle, "protocol lost ordered nontrace link flags")
+        io.stdout:write("control protocol link\n")
+    end
+    return run_link(argv, ...)
+end
+local run_probe = driver.run_standalone_archive_probe
+driver.run_standalone_archive_probe = function(...)
+    local before = { table.unpack(driver.link_extra_flags()) }
+    local ok, why, code = run_probe(...)
+    local after = driver.link_extra_flags()
+    assert(#before == #after, "protocol changed outer link flags")
+    for index, flag in ipairs(before) do assert(flag == after[index], "protocol changed outer link flag order") end
+    return ok, why, code
+end
+]], library_flag) }
+        local result = cli(variant, "--incremental", "--c-source", workspace .. "/src/control-helper.c",
+            "--ldflag=-Os", "--ldflag=" .. library_flag, "--ldflag=-Wl,--no-demangle", "image_control")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.truthy(result.output:find("control protocol link\n", 1, true),
+            "measurement control did not execute the real static-provider protocol link")
+        local image = workspace .. "/out/image_control.mjs"
+        local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/image_control.wasm")))
+        for _, item in ipairs(inventory.exports) do
+            assert.not_equal("titan_browser_trace_identity", item.name, "control exports were not minified")
+        end
+        assert.match("^[0-9a-f]+$", image_identity(info, image, "image_control.titan"))
+    end)
+
     it("certifies optimization for FFI, generated workers and authored C together", function()
         local info, why = toolchain.require(); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
@@ -441,6 +720,78 @@ end
         assert.not_equal(identities.O1, identities.O2)
     end)
 
+    it("maps a selected contributor prologue to its own physical source", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.mkdir(workspace .. "/src/source_location")
+        files.write(workspace .. "/src/source_location/source_location.titan", [[
+local definitions = import "definitions.titan"
+function main(args: {string}): integer
+    return definitions.copied(0) + selected_leaf(#args)
+end
+]])
+        files.write(workspace .. "/src/source_location/member.browser.titan", [[
+local function selected_leaf(n: integer): integer
+    local rooted = {n}
+    return rooted[1]
+end
+]])
+        files.write(workspace .. "/src/definitions.titan",
+            read(repository .. "/spec/fixtures/browser_images/definitions.titan"))
+        local result = cli(info, "--exe", workspace .. "/out/contributor.mjs",
+            "--c-parts", "4", "source_location")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        local header = read(workspace .. "/out/definitions.titan.h")
+        for _, name in ipairs({ "copied", "outlined", "empty" }) do
+            local at = assert(header:find("foreign_inline_" .. name .. "(", 1, true))
+            local definition = assert(header:find("foreign_inline_" .. name .. "(", at + 1, true))
+            local before = header:sub(1, definition - 1)
+            assert.truthy(before:match('#line %d+ "[^\n]-definitions[.]titan"\n[^\n]*$'), name)
+        end
+        result = run({ info.node.path, "--input-type=module", "-e", [[
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+const map = JSON.parse(await readFile(process.argv[1], 'utf8'));
+const indices = map.x_titan_function_names.flatMap((name, index) =>
+    typeof name === 'string' && name.endsWith('selected_leaf_titan') ? [index] : []);
+assert.equal(indices.length, 1, 'selected contributor function missing or ambiguous');
+const [start, end] = map.x_titan_function_ranges[indices[0] - map.x_titan_function_imports];
+const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function vlq(segment) {
+    const values = [];
+    let value = 0, shift = 0;
+    for (const character of segment) {
+        const digit = alphabet.indexOf(character);
+        assert.ok(digit >= 0);
+        value += (digit & 31) * 2 ** shift;
+        if (digit & 32) { shift += 5; continue; }
+        values.push(value & 1 ? -Math.floor(value / 2) : value / 2);
+        value = 0; shift = 0;
+    }
+    assert.equal(shift, 0);
+    return values;
+}
+assert.ok(!map.mappings.includes(';'), 'Wasm mappings must use one generated line');
+let pc = 0, source = 0, line = 0, found = false;
+for (const segment of map.mappings.split(',')) {
+    const fields = vlq(segment);
+    pc += fields[0];
+    if (fields.length === 1) continue;
+    source += fields[1]; line += fields[2];
+    if (pc < start) continue;
+    if (pc >= end) break;
+    assert.equal(map.sources[source].replaceAll('\\', '/').split('/').at(-1),
+        'member.browser.titan', 'the first prologue mapping borrowed the preceding contributor');
+    assert.ok(line >= 0);
+    found = true;
+    break;
+}
+assert.ok(found, 'selected function prologue has no mapped instruction');
+]], workspace .. "/out/contributor.wasm.map" })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+    end)
+
     it("links the normal CLI test runner and executes one selected case through the installed loader", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
@@ -458,6 +809,12 @@ end
         local exports = {}
         for _, item in ipairs(inventory.exports) do exports[item.name] = true end
         assert.is_true(exports.titan_browser_entry)
+        assert.is_true(exports.titan_browser_trace_identity)
+        local map = read(workspace .. "/out/image_case.wasm.map")
+        assert.truthy(map:find('"x_titan_image":"', 1, true))
+        assert.truthy(map:find('"x_titan_function_ranges":[[', 1, true))
+        assert.truthy(map:find('"x_titan_function_names":[', 1, true))
+        image_identity(info, workspace .. "/out/image_case.mjs", "image_case.titan")
         assert.is_true(exports.malloc)
         assert.is_true(exports.free)
         assert.is_nil(exports.titan_browser_gate_guarded)
@@ -476,13 +833,8 @@ describe("native trace backend invariance", function()
 
     it("keeps direct fallback capture depth, frame order and the 255-frame truncation boundary", function()
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
-        local output = native_trace(false)
+        local output = native_trace()
         assert.match("fallback shallow=%d+ deep=255 long%-trace=%d+", output)
     end)
 
-    it("runs the focused native null backend with Lua frames and one-shot trace pinning", function()
-        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
-        local output = native_trace(true)
-        assert.match("null shallow=0 deep=0 long%-trace=%d+", output)
-    end)
 end)

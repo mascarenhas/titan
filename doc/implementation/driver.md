@@ -1821,6 +1821,18 @@ shared by live worker frontends and coordinator-launched native jobs via
 `jobs.use_remote(session)`; see [Slot ledger and jobserver
 rules](build-coordinator.md#slot-ledger-and-jobserver-rules).
 
+When `process.lua` spawns a POSIX child (`process.start`, `process.run`,
+`process.capture`, `Batch:spawn`, `process.start_job`, or
+`process.start_worker`) under an advertised pipe jobserver
+(`--jobserver-auth=R,W` or `--jobserver-fds=R,W`), `jobserver_stdio` appends a
+valid open pipe pair (`uv.fs_fstat` type `"fifo"`) after the child's fixed
+control/lock descriptors in `stdio` and rewrites the child's `MAKEFLAGS`
+through `jobs.child_makeflags` to those new descriptor numbers (or to `-2,-2`
+when the advertised descriptors are closed or not FIFOs), so inherited
+`.titan-build.lock` files or worker control pipes at `fd 3`/`fd 4` never alias
+the jobserver descriptors passed to a child tool such as GCC's `lto1`
+([Worker launch and descriptor layout](build-coordinator.md#worker-launch-and-descriptor-layout)).
+
 On POSIX, a parallel batch installs a temporary INT/TERM/HUP action (`_signal_guard`)
 that only records the first signal in a `sig_atomic_t` and writes a wake byte;
 ignored signals stay ignored. The batch checks for a recorded signal before

@@ -1,0 +1,141 @@
+function apply(action: Action)
+  action()
+end
+
+function test_mixed_merge_order(_context: test.Context)
+  local invoke: Mixed = loaded(0)
+  local trace = caught(function() invoke(apply, original_leaf, bridge()) end)
+  test.assert(count_frames(trace, ": in trace_cases.original_leaf") == 1, trace)
+  test.assert(count_frames(trace, ": in trace_cases.apply") == 2, trace)
+  test.assert(count_frames(trace, "[C]: in field 'bridge'") == 1, trace)
+  ordered(trace, "in trace_cases.original_leaf", "trace-mixed.lua:2: in")
+  ordered(trace, "trace-mixed.lua:2: in", "trace-mixed.lua:5: in")
+  ordered(trace, "trace-mixed.lua:5: in", "trace-mixed.lua:9: in")
+  emit("mixed", trace)
+end
+
+function test_lua_tail_call_marker(_context: test.Context)
+  local invoke: Shape = loaded(1)
+  local trace = caught(function() invoke(original_leaf) end)
+  test.assert(count(trace, "(...tail calls...)") == 1, trace)
+  frame(trace, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  emit("tail", trace)
+end
+
+record Receiver
+  message: string
+end
+
+function Receiver:fail()
+  raise self.message
+end
+
+function Receiver.static_fail()
+  original_leaf()
+end
+
+interface Failing
+  function fail()
+end
+
+local function method_call(receiver: Receiver)
+  local invoke: function(Receiver): () = loaded(5)
+  invoke(receiver)
+end
+
+local function interface_call(receiver: Failing)
+  local invoke: function(Failing): () = loaded(5)
+  invoke(receiver)
+end
+
+function test_method_entry(_context: test.Context)
+  local receiver = Receiver.new("trace-original")
+  local invoke: Shape = loaded(2)
+  local trace = caught(function() invoke(function() method_call(receiver) end) end)
+  test.assert(count_frames(trace, ": in trace_cases.Receiver:fail") == 1, trace)
+  ordered(trace, "in trace_cases.Receiver:fail", "in trace_cases.method_call")
+  emit("method", trace)
+end
+
+function test_bound_method_entry(_context: test.Context)
+  local receiver = Receiver.new("trace-original")
+  local method = receiver:fail
+  local invoke: Shape = loaded(2)
+  local trace = caught(function() invoke(method) end)
+  test.assert(count_frames(trace, ": in trace_cases.Receiver:fail") == 1, trace)
+  emit("bound_method", trace)
+end
+
+function test_interface_entry(_context: test.Context)
+  local receiver: Failing = Receiver.new("trace-original")
+  local trace = caught(function() interface_call(receiver) end)
+  test.assert(count_frames(trace, ": in trace_cases.Receiver:fail") == 1, trace)
+  emit("interface", trace)
+end
+
+function test_bound_interface_entry(_context: test.Context)
+  local receiver: Failing = Receiver.new("trace-original")
+  local method = receiver:fail
+  local invoke: Shape = loaded(2)
+  local trace = caught(function() invoke(method) end)
+  test.assert(count_frames(trace, ": in trace_cases.Receiver:fail") == 1, trace)
+  emit("bound_interface", trace)
+end
+
+function test_static_entry(_context: test.Context)
+  local invoke: Shape = loaded(2)
+  local trace = caught(function() invoke(Receiver.static_fail) end)
+  test.assert(count_frames(trace, ": in trace_cases.Receiver.static_fail") == 1, trace)
+  ordered(trace, "in trace_cases.original_leaf", "in trace_cases.Receiver.static_fail")
+  emit("static", trace)
+end
+
+local function adjusted_failure(): integer
+  original_leaf()
+  return 7
+end
+
+function test_callable_adjustment_entry(_context: test.Context)
+  local invoke: Shape = loaded(2)
+  local adjusted: Action = adjusted_failure
+  local trace = caught(function() invoke(adjusted) end)
+  test.assert(count_frames(trace, ": in trace_cases.adjusted_failure") == 1, trace)
+  emit("adjusted", trace)
+end
+
+local function lambda_call()
+  local action = function()
+    raise "trace-original"
+  end
+  local invoke: Shape = loaded(2)
+  invoke(action)
+end
+
+function test_lambda_entry(_context: test.Context)
+  local trace = caught(lambda_call)
+  frame(trace, "wrappers.titan", 108, "anonymous function at ")
+  test.assert(count_frames(trace, "wrappers.titan:107") == 1, trace)
+  emit("lambda", trace)
+end
+
+local function literal_call()
+  (function()
+    raise "trace-original"
+  end)()
+end
+
+function test_immediate_literal_single_frame(_context: test.Context)
+  local trace = caught(literal_call)
+  test.assert(count_frames(trace, ": in trace_cases.literal_call") == 1, trace)
+  test.assert(count_frames(trace, "wrappers.titan:122") == 0, trace)
+  emit("literal", trace)
+end
+
+function test_unmapped_adjacent_c_function(_context: test.Context)
+  local invoke: Mixed = loaded(0)
+  local trace = caught(function() invoke(apply, original_leaf, bridge()) end)
+  test.assert(count_frames(trace, "[C]: in field 'bridge'") == 1, trace)
+  test.assert(not contains(trace, "in trace_fixture_bridge"), trace)
+  test.assert(not contains(trace, "trace_support.c:"), trace)
+  emit("unmapped", trace)
+end

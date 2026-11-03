@@ -438,10 +438,10 @@ the test suite, see the [repository workflow](../implementation/repository-workf
 
 The [browser target](browser-target.md) needs Emscripten 6.0.13, Node 24, a
 browser build of the Lua fork, and the browser SDK, all in the same prefix as
-Titan; running programs in a browser engine also needs Chrome or Chromium. The
-rock's installation needs none of them: `luarocks install titan` and
-`luarocks make` never run Emscripten. Only Linux and macOS hosts are
-supported.
+Titan; running programs and tests in headless Chrome with `titan-browser-run`
+also needs Chrome or Chromium. The rock's installation needs none of them:
+`luarocks install titan` and `luarocks make` never run Emscripten. Only Linux
+and macOS hosts are supported.
 
 With Emscripten active (`source <emsdk>/emsdk_env.sh`), after `luarocks make`
 and from the checkout, install the browser Lua and then the browser SDK:
@@ -533,8 +533,8 @@ record `lib/browser/liblua-config.txt`. `make browser-sdk` adds
 `lib/titan-browser/0.6/`: the browser runtime `libtitan.a`, the browser PEG
 engine `libtitan-lpeglabel.a`, the browser standard library `titan.a` (the
 `test`, `coroutine`, and `gc` modules), the loader `titan-browser.mjs` and its
-Emscripten library `titan-browser-library.js`, the runner
-`titan-browser-run` with its three `.mjs` modules, and `sdk-digests`. That
+Emscripten libraries `titan-browser-library.js` and `titan-browser-trace.js`,
+the runner `titan-browser-run` with its three `.mjs` modules, and `sdk-digests`. That
 directory is never inside `lib/titan/0.6/`, and native builds never search
 it. See [the browser SDK](browser-target.md#installing-the-browser-sdk).
 

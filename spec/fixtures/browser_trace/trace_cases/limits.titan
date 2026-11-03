@@ -1,0 +1,46 @@
+local function recurse(depth: integer)
+  if depth == 0 then original_leaf()
+  else recurse(depth - 1) end
+end
+
+local function recursive_trace(depth: integer): string
+  return caught(function() recurse(depth) end)
+end
+
+function test_recursion_beyond_ten(_context: test.Context)
+  local trace = recursive_trace(48)
+  test.assert(count_frames(trace, ": in trace_cases.recurse") == 49, trace)
+  test.assert(ordinary_recursion_complete(trace), trace)
+  emit("depth_48", trace)
+end
+
+function test_recursion_near_capacity(_context: test.Context)
+  local trace = recursive_trace(460)
+  test.assert(count_frames(trace, ": in trace_cases.recurse") >= 40, trace)
+  test.assert(count_frames(trace, ": in trace_cases.recurse") <= 461, trace)
+  test.assert(count(trace, truncated) <= 1, trace)
+  emit("depth_460", trace)
+end
+
+function test_recursion_capacity_truncation(_context: test.Context)
+  local trace = recursive_trace(560)
+  test.assert(count_frames(trace, ": in trace_cases.recurse") >= 40, trace)
+  test.assert(count_frames(trace, ": in trace_cases.recurse") < 512, trace)
+  test.assert(count(trace, truncated) == 1, trace)
+  emit("depth_560", trace)
+end
+
+local function mixed_recurse(depth: integer, invoke: Shape)
+  if depth == 0 then original_leaf() end
+  invoke(function() mixed_recurse(depth - 1, invoke) end)
+end
+
+function test_mixed_recursion_headroom(_context: test.Context)
+  local invoke: Shape = loaded(2)
+  local trace = caught(function() mixed_recurse(14, invoke) end)
+  test.assert(count_frames(trace, ": in trace_cases.original_leaf") == 1, trace)
+  test.assert(count_frames(trace, ": in trace_cases.mixed_recurse") >= 1, trace)
+  test.assert(count_frames(trace, ": in trace_cases.mixed_recurse") <= 15, trace)
+  test.assert(count(trace, truncated) <= 1, trace)
+  emit("mixed_depth_14", trace)
+end

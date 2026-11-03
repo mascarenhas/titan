@@ -111,7 +111,7 @@ local function prepare(info)
     assert(lfs.link(info.prefix .. "/include", prefix .. "/include", true))
     local source = browserlink.sdk_assets(fixtures.paths(info.prefix))
     local destination = browserlink.sdk_assets(fixtures.paths(prefix))
-    for _, key in ipairs({ "runtime", "js_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+    for _, key in ipairs({ "runtime", "js_library", "trace_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
         files.copy(source[key], destination[key])
     end
     -- The source launcher is executable; binary copying alone does not retain it.
@@ -142,6 +142,7 @@ local function no_staged_images(directory)
             assert.is_nil(lfs.symlinkattributes(filename), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]c$", ".o"))), filename)
             assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm"))), filename)
+            assert.is_nil(lfs.symlinkattributes((filename:gsub("[.]mjs$", ".wasm.map"))), filename)
         end
     end
     if lfs.symlinkattributes(directory, "mode") ~= "directory" then return end
@@ -150,6 +151,7 @@ local function no_staged_images(directory)
             assert.is_nil(entry:find(".stage.tmp.", 1, true), entry)
             assert.is_nil(entry:match("[.]mjs$"), entry)
             assert.is_nil(entry:match("[.]wasm$"), entry)
+            assert.is_nil(entry:match("[.]wasm[.]map$"), entry)
             no_staged_images(directory .. "/" .. entry)
         end
     end

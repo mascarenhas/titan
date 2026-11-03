@@ -2,10 +2,10 @@ import {encode, expectedBytes, join, reentry, rejection} from './checks.mjs';
 
 // Link fidelity with the unchanged baseline profile: optimization=O2,
 // assertions=0, Asyncify enabled, exact production C/runtime exports.
-// Harness-only --cflag=-g2 --ldflag=-g2 --ldflag=-Os reduces full validation
-// DWARF and enables SHRINK_LEVEL=1: pinned will_metadce needs shrink >=1 or
-// optimization >=3, so -O2 alone does not minify even with -g0. Compile/profile
-// optimization stays O2; no production profile is changed.
+// Harness-only --ldflag=-Os enables SHRINK_LEVEL=1; the profile supplies debug
+// flags. Pinned will_metadce needs shrink >=1 or optimization >=3, so -O2 alone
+// does not minify. Compile/profile optimization stays O2; no production profile
+// is changed.
 export async function run(context) {
   context.assert(context.args.length > 0, 'pass an optimized fidelity.mjs image');
   for (const path of context.args) {

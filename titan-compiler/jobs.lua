@@ -79,25 +79,29 @@ end
 -- MAKEFLAGS words, honoring GNU Make's backslash escapes. Option words end at
 -- the standalone "--" that precedes command-line variable assignments.
 local function makeflags_words(makeflags)
-    local words, current, escaped = {}, {}, false
-    for index = 1, #makeflags do
-        local char = makeflags:sub(index, index)
-        if escaped then
-            current[#current + 1] = char
-            escaped = false
-        elseif char == "\\" then
-            escaped = true
-        elseif char:match("%s") then
-            if #current ~= 0 then
-                words[#words + 1] = table.concat(current)
-                current = {}
-            end
-        else
-            current[#current + 1] = char
+    local index = 1
+    return function()
+        while index <= #makeflags and makeflags:sub(index, index):match("%s") do
+            index = index + 1
         end
+        if index > #makeflags then return end
+        local first, current, escaped = index, {}, false
+        while index <= #makeflags do
+            local char = makeflags:sub(index, index)
+            if escaped then
+                current[#current + 1] = char
+                escaped = false
+            elseif char == "\\" then
+                escaped = true
+            elseif char:match("%s") then
+                break
+            else
+                current[#current + 1] = char
+            end
+            index = index + 1
+        end
+        return table.concat(current), first, index - 1
     end
-    if #current ~= 0 then words[#words + 1] = table.concat(current) end
-    return words
 end
 
 local function descriptor(text)
@@ -112,7 +116,7 @@ function jobs.make_policy(makeflags)
     local policy = { serial = false }
     if type(makeflags) ~= "string" then return policy end
     local job_word
-    for _, word in ipairs(makeflags_words(makeflags)) do
+    for word in makeflags_words(makeflags) do
         if word == "--" then break end
         local value = word:match("^%-%-jobserver%-auth=(.*)$") or
             word:match("^%-%-jobserver%-fds=(.*)$")
@@ -135,6 +139,24 @@ function jobs.make_policy(makeflags)
     end
     policy.serial = policy.auth == nil and job_word == "-j1"
     return policy
+end
+
+-- Keep every advertised authorization consistent after uv.spawn renumbers
+-- the pipe. Preserve escaped words, spacing and assignments after "--".
+function jobs.child_makeflags(makeflags, read_fd, write_fd)
+    local chunks, next_byte = {}, 1
+    for word, first, last in makeflags_words(makeflags) do
+        if word == "--" then break end
+        local prefix = word:match("^(%-%-jobserver%-auth=)") or
+            word:match("^(%-%-jobserver%-fds=)")
+        if prefix then
+            chunks[#chunks + 1] = makeflags:sub(next_byte, first - 1)
+            chunks[#chunks + 1] = prefix .. read_fd .. "," .. write_fd
+            next_byte = last + 1
+        end
+    end
+    chunks[#chunks + 1] = makeflags:sub(next_byte)
+    return table.concat(chunks)
 end
 
 local REQUIRED_SUPPORT = {

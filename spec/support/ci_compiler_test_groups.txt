@@ -25,12 +25,15 @@
 # Issue 329 browser image/runner rows use the same unmeasured 1.000 weight: their
 # real cases need emsdk plus the browser SDK, Chrome and Node, so they pend in
 # the default lane and stay in the ordinary compiler partitions.
+# Issue 330 trace map/entry rows use the same unmeasured 1.000 planning weight;
+# no local or CI covered duration is claimed for these inventory additions.
 compiler spec/abi_spec.lua 0.201 2.926
 retained spec/asan_generated_c_context_spec.lua 0.587 -
 compiler spec/binary_compatibility_spec.lua 0.017 0.107
 compiler spec/browser_isolation_spec.lua 1.000 -
 compiler spec/browser_target_spec.lua 1.000 -
 compiler spec/browser_sdk_spec.lua 1.000 -
+compiler spec/browser_trace_map_spec.lua 1.000 -
 compiler spec/cdeclarator_spec.lua 0.017 0.058
 compiler spec/cdefines_spec.lua 0.050 0.054
 compiler spec/cdriver_spec.lua 9.809 171.200
@@ -95,6 +98,7 @@ compiler spec/coder/browser_incremental_spec.lua 1.000 -
 compiler spec/coder/browser_protocol_spec.lua 1.000 -
 compiler spec/coder/browser_providers_spec.lua 1.000 -
 compiler spec/coder/browser_toolchain_spec.lua 1.000 -
+compiler spec/coder/browser_trace_entries_spec.lua 1.000 -
 compiler spec/coder/build_scheduler_spec.lua 1.000 -
 compiler spec/coder/c_ffi_allocation_constructors_spec.lua 5.677 9.360
 compiler spec/coder/c_ffi_operators_spec.lua 3.534 12.153
@@ -108,6 +112,7 @@ compiler spec/coder/closure_adjustment_wrappers_spec.lua 5.706 15.454
 compiler spec/coder/closure_transfer_spec.lua 1.137 0.000
 compiler spec/coder/closures_spec.lua 9.812 18.381
 compiler spec/coder/coder_spec.lua 41.556 94.307
+compiler spec/coder/codegen_determinism_spec.lua 1.000 -
 stdlib spec/coder/compiler_build_scenarios_spec.lua 1.000 115.379
 compiler spec/coder/const_values_spec.lua 1.177 6.224
 compiler spec/coder/contextual_value_calls_spec.lua 2.592 7.007

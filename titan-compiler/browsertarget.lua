@@ -223,6 +223,15 @@ local UNSUPPORTED = { ["-fPIC"] = true, ["-fpic"] = true, ["-fPIE"] = true,
     ["-rdynamic"] = true, ["-pthread"] = true, ["-ffat-lto-objects"] = true,
     ["-m32"] = true, ["-m64"] = true, ["-fwasm-exceptions"] = true }
 
+-- These choices preserve physical trace frames in every supported installation.
+-- Internal descriptors contain them; trailing user options may not override them.
+function M.trace_option(flag)
+    local positive = flag:gsub("^%-fno%-", "-f")
+    return flag:match("^%-O") or flag:match("^%-g") or
+        positive:match("^%-finline") or positive:match("^%-foptimize%-sibling%-calls") or
+        positive:match("^%-fomit%-frame%-pointer")
+end
+
 function M.validate_flags(flags, origin)
     if flags ~= nil and not argv(flags) then
         return nil, "invalid browser " .. origin .. " flags: expected a dense array of strings"
@@ -455,6 +464,11 @@ function M.build(context, inputs)
     local ok, descriptor, failure = pcall(function()
         local valid, flag_error = M.validate_flags(inputs.compile_flags, "compile_flags")
         if not valid then return nil, flag_error end
+        for _, flag in ipairs(inputs.compile_flags or {}) do
+            if not inputs.trace_control and M.trace_option(flag) then
+                return nil, "browser target owns compile_flags option " .. flag
+            end
+        end
         local paths = inputs.paths
         local tool, tool_error = tools(context)
         if not tool then return nil, tool_error end
@@ -472,7 +486,8 @@ function M.build(context, inputs)
         if not header_ok or not headers then
             return nil, mismatch(paths, record, "headers_sha256", "unavailable: " .. tostring(header_error or headers))
         elseif headers ~= record.headers_sha256 then return nil, mismatch(paths, record, "headers_sha256", headers) end
-        local flags = { "--std=c99", inputs.build_profile == "validation" and "-O0" or "-O2",
+        -- Emscripten -g2 preserves names but strips object line tables.
+        local flags = { "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls",
             "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function", "-gline-tables-only",
             "-sSUPPORT_LONGJMP=emscripten" }
         for _, define in ipairs(defines) do flags[#flags + 1] = define end
