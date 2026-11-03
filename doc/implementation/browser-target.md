@@ -1089,8 +1089,8 @@ flag list.
 
 | Flags | Purpose |
 | --- | --- |
-| `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2` | the candidate Titan-entry trace link profile (`TODO(confirm: release trace profile freeze after integrator gates)`); measurement purposes (`minicoro`, `budget`, `baseline`) apply an explicit `-O1` or `-O2` `optimization` override when selected |
-| `-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` | coalesces post-Asyncify temporaries for Titan-entry images (`entry == "titan"`, omitted for `lua-main`): at link `-O1`, `emcc` runs no default Binaryen optimization passes, so Asyncify inflated large coroutine functions (`coroutine_tests_ℳ_unwind_innermost_frame_titan`, from 1,072 to 126,402 locals) past V8's 50,000-local WebAssembly validation limit (`local count too large`). Running `simplify-locals,reorder-locals` keeps the function at 1,396 locals (module maximum 3,431) without inlining or dropping physical frames or line mappings |
+| `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2` | the trace-preserving base of the candidate Titan-entry link profile (with the Binaryen local-cleanup pass below; `TODO(confirm: release trace profile freeze after integrator gates)`); measurement purposes (`minicoro`, `budget`, `baseline`) apply an explicit `-O1` or `-O2` `optimization` override when selected |
+| `-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` | part of the candidate Titan-entry link profile (`entry == "titan"`, omitted for `lua-main`): coalesces post-Asyncify temporaries because at link `-O1`, `emcc` runs no default Binaryen optimization passes, and Asyncify inflated large coroutine functions (`coroutine_tests_ℳ_unwind_innermost_frame_titan`, from 1,072 to 126,402 locals) past V8's 50,000-local WebAssembly validation limit (`local count too large`). Running `simplify-locals,reorder-locals` keeps the function at 1,396 locals (module maximum 3,431) without inlining or dropping physical frames or line mappings |
 | `-sASYNCIFY=1` | minicoro's Emscripten fiber backend refuses to create fibers without Asyncify, and Asyncify carries the outer suspension. Indirect calls keep the default conservative instrumentation: closures and the module ABI call through function pointers, so there are no `ASYNCIFY_IGNORE_INDIRECT`, `ASYNCIFY_ONLY`, or `ASYNCIFY_REMOVE` lists. `-sASYNCIFY=0` only for a control. |
 | `-sSUPPORT_LONGJMP=<sjlj>` | the record's verified longjmp mode, `emscripten`, matching `liblua.a` and `titan.h` |
 | `-sSTACK_SIZE=1048576`, `-sASYNCIFY_STACK_SIZE=65536` | the main C stack and the outer Asyncify data budget ([Budgets](#budgets)); the second only with Asyncify |
@@ -2240,9 +2240,9 @@ hosts`).
   `registry[TITAN_ENTRIES_KEY]` registration across all `titanentry` wrapper
   families, split-unit deduplication, early `_init` ordering before
   dependencies and user initializers, browser function-definition `#line`
-  ownership (`_definitionline` and `TITAN_GENERATED_C_FILE` across 1-part,
-  4-part, and `.titan.h` foreign-header generation), and byte-identical native
-  code generation.
+  ownership (`definitionline` across 1-part, 4-part, and `.titan.h`
+  foreign-header generation, and `TITAN_GENERATED_C_FILE` across 1-part and
+  4-part C outputs), and byte-identical native code generation.
 * `spec/coder/browser_protocol_spec.lua` — the executing check, corrupted
   providers (exits 21 to 26) without publication, re-execution before
   identical-archive reuse, probe cleanup, and archive-only consumers on both
