@@ -246,7 +246,8 @@ describe("browser image profile and SDK readiness", function()
         local flags = table.concat(profile.link_flags, " ")
         assert.truthy(flags:find("-O3 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2 ", 1, true), flags)
         assert.truthy(flags:find(
-            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals,--skip-pass=inlining-optimizing", 1, true), flags)
+            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals," ..
+            "--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination", 1, true), flags)
         -- The validation profile never runs the level optimizer, so its test
         -- images keep #330's frozen link flags exactly.
         local frozen = assert(browserlink.profile(fixtures.descriptor(), { purpose = "test", assertions = 2 }))

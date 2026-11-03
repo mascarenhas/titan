@@ -85,8 +85,16 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
   // Test images and the validation profile stay exact.
   const orderedSubsequence = profile === "production" && row.program === true;
 
+  // Titan frames with the attribution the contract compares: file and
+  // execution line. WebKit's documented no-line form compares file only.
   function titanFrameLines(trace) {
-    return trace.split("\n").filter(line => /^[^:\n]+\.titan(?::[0-9]+)?: in /.test(line));
+    const frames = [];
+    for (const line of trace.split("\n")) {
+      const match = /^([^:\n]+\.titan)(?::([0-9]+))?: in /.exec(line);
+      if (match) frames.push({file: match[1],
+        line: match[2] === undefined ? undefined : Number(match[2]), text: line});
+    }
+    return frames;
   }
 
   function exactFrame(file, line, name) {
@@ -136,22 +144,30 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
     if (label === "host_failed" || label === "lua_fallback_failed" || label.startsWith("degraded")) return;
     context.assert(!trace.includes(unavailable) && !trace.includes(captureFailed), "positive trace degraded: " + label);
     if (label === "uncaught") {
-      const expected = [
-        exactFrame("trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf"),
-        exactFrame("trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle"),
+      // The row's exact frames, as the validation profile renders them. A
+      // production program image may keep fewer of them, in this order, and
+      // an inlined callee keeps its own physical line under the surviving
+      // enclosing function's name, exactly as native production does (D28).
+      const uncaughtFrames = [
+        ["trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf"],
+        ["trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle"],
+        ["trace_uncaught.titan", 16, "trace_uncaught.main"],
       ];
+      const expectedPairs = uncaughtFrames.map(([file, line]) => [file, webkit ? undefined : line]);
       if (orderedSubsequence) {
         const shown = titanFrameLines(trace);
         let next = 0;
-        for (const line of shown) {
-          const index = expected.indexOf(line, next);
+        for (const frame of shown) {
+          const index = expectedPairs.findIndex(([file, line], position) =>
+            position >= next && frame.file === file && frame.line === line);
           context.assert(index >= 0,
-            "program frame outside the exact expectation: " + line + "\n" + trace);
+            "program frame outside the exact expectation: " + frame.text + "\n" + trace);
           next = index + 1;
         }
-        emit({programFrames: shown, expectedFrames: expected});
+        emit({programFrames: shown.map(frame => frame.text),
+          expectedFrames: uncaughtFrames.map(([file, line, name]) => exactFrame(file, line, name))});
       } else {
-        for (const line of expected) exactLine(trace, line);
+        for (const [file, line, name] of uncaughtFrames.slice(0, 2)) exact(trace, file, line, name);
         for (const name of ["uncaught_leaf", "uncaught_middle"]) {
           context.assert(frameCount(trace, ": in trace_uncaught." + name) === 1,
             "uncaught report duplicated/omitted " + name);

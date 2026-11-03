@@ -111,11 +111,18 @@ function M.profile(descriptor, options)
     add("-gsource-map")
     add("-g2")
     -- D18's post-Asyncify local cleanup stays in every Titan-entry profile.
-    -- A production test image also skips the level pipeline's inlining pass,
-    -- which runs before --asyncify (D25); the skip composes in this list.
+    -- A production test image also skips the two level-pipeline transforms
+    -- that rewrite function identity, both of which run before --asyncify:
+    -- `inlining-optimizing` and `duplicate-function-elimination`. The second
+    -- is measured: with only inlining skipped, Binaryen still folded
+    -- byte-identical bodies, so `locations.browser.titan`'s selected_leaf and
+    -- selected_outer became original_leaf and direct_middle (issue C's
+    -- identical-function-folding risk) and four fixtures lost their frames.
+    -- Object-level `-fno-inline` alone does not prevent that folding.
     local passes = "simplify-locals,reorder-locals"
     if profile == "production" and purpose == "test" then
-        passes = passes .. ",--skip-pass=inlining-optimizing"
+        passes = passes .. ",--skip-pass=inlining-optimizing" ..
+            ",--skip-pass=duplicate-function-elimination"
     end
     if entry == "titan" then
         add("-sBINARYEN_EXTRA_PASSES=" .. passes)
