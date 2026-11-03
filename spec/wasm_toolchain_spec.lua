@@ -161,7 +161,7 @@ static const unsigned char wasm_probe_bytes[] = {
         local clang_obj = track_file(root .. "/wasm_alpha.clang.o")
 
         run_tool(strategy, info.tools.cc, {
-            "--std=c99", "-O2", "-DLUA_USE_POSIX", "-DLUA_USE_BROWSER",
+            "--std=c99", "-O2", table.unpack(toolchain.lua_defines(info)),
             "-sSUPPORT_LONGJMP=emscripten",
             include_root, include_runtime, include_lua,
             "-c", c_path, "-o", emcc_obj,
@@ -288,7 +288,7 @@ int *p = &foo;
         local include_runtime = "-I" .. info.prefix .. "/include"
         local include_lua = "-I" .. info.prefix .. "/lib/browser/include"
         local common_flags = {
-            "--std=c99", "-O2", "-DLUA_USE_POSIX", "-DLUA_USE_BROWSER",
+            "--std=c99", "-O2", table.unpack(toolchain.lua_defines(info)),
             "-sSUPPORT_LONGJMP=emscripten",
             include_root, include_runtime, include_lua,
         }

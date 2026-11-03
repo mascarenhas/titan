@@ -152,7 +152,7 @@ end
         local dependency = workspace .. "/headers.d"
         local command = { table.unpack(info.tools.cc) }
         for _, argument in ipairs({ "--std=c99", "-O0", "-sSUPPORT_LONGJMP=emscripten",
-                "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", "-DTITAN_TARGET_BROWSER=1",
+                table.unpack(toolchain.lua_defines(info)), "-DTITAN_TARGET_BROWSER=1",
                 "-I", info.prefix .. "/lib/browser/include", "-I", info.prefix .. "/include",
                 "-MD", "-MF", dependency, "-c", workspace .. "/out/object_fixture.c",
                 "-o", workspace .. "/header-check.o" }) do command[#command + 1] = argument end

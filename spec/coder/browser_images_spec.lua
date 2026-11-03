@@ -494,6 +494,9 @@ describe("real browser test image", function()
         end
     end)
 
+    -- Production-only by construction: it asserts the production object and
+    -- link profile from a real production installation. CI runs it in the
+    -- production `browser-playwright` cell, never in a validation install.
     it("keeps frame flags on test owners only and links a production test image as a test image", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         if driver.BUILD_PROFILE ~= "production" then
