@@ -89,7 +89,8 @@ end
 -- child descriptors, rather than letting old fd numbers identify those locks
 -- or control pipes. An unusable authorization must not become usable merely
 -- because uv.spawn assigned another open file to its old descriptor numbers.
-local function jobserver_stdio(stdio, options)
+-- Counts include ignored slots; Lua's sequence length is not a stdio extent.
+local function jobserver_stdio(stdio, stdio_count, options)
     if platform.windows then return end
     local makeflags = platform.getenv("MAKEFLAGS")
     if options and not options.inherit_environment and options.env and
@@ -103,24 +104,23 @@ local function jobserver_stdio(stdio, options)
     local write_stat = auth.write >= 0 and uv.fs_fstat(auth.write)
     if read_stat and write_stat and
        read_stat.type == "fifo" and write_stat.type == "fifo" then
-        read_fd = #stdio
-        stdio[read_fd + 1] = auth.read
-        write_fd = #stdio
-        stdio[write_fd + 1] = auth.write
+        read_fd, write_fd = stdio_count, stdio_count + 1
+        stdio[stdio_count + 1], stdio[stdio_count + 2] = auth.read, auth.write
     end
     return jobs.child_makeflags(makeflags, read_fd, write_fd)
 end
 
 -- Inherited environments change only if pipe-jobserver descriptors move.
-local function spawn(argv, stdio, options, completed)
+local function spawn(argv, stdio, stdio_count, options, completed)
     local ready, containment_error = contain_native_processes()
     if not ready then return nil, containment_error end
     -- Synchronous/captured commands inherit held POSIX output-lock leases.
     -- Workers and dispatched native jobs already lay out their descriptors.
-    for index, descriptor in ipairs(options and options.inherit or {}) do
-        stdio[3 + index] = descriptor
+    for _, descriptor in ipairs(options and options.inherit or {}) do
+        stdio_count = stdio_count + 1
+        stdio[stdio_count] = descriptor
     end
-    local makeflags = jobserver_stdio(stdio, options)
+    local makeflags = jobserver_stdio(stdio, stdio_count, options)
     local inherited = options and options.inherit_environment
     local child = setmetatable({}, Process)
     local arguments = {}
@@ -156,7 +156,7 @@ Process.close = Process.wait
 -- The returned process's :close()/:wait() reaps it with os.execute status.
 function process.start(argv, options)
     library()
-    return spawn(argv, { 0, 1, 2 }, options)
+    return spawn(argv, { 0, 1, 2 }, 3, options)
 end
 
 -- Run `argv` directly with the C locale and wait for it, sharing the
@@ -201,7 +201,7 @@ end
 function Batch:spawn(argv, stdout_path, stderr_path, completion_index)
     local stdout, stderr = open_logs(stdout_path, stderr_path)
     if not stdout then return nil, stderr end
-    local child, err = spawn(argv, { nil, stdout, stderr }, nil, function()
+    local child, err = spawn(argv, { nil, stdout, stderr }, 3, nil, function()
         self.pending = self.pending - 1
         self.ready[#self.ready + 1] = completion_index
     end)
@@ -252,7 +252,7 @@ function process.capture(argv, options)
     local child
     if opened then
         child, err = spawn(argv, { 0, fds.write,
-            options.stderr_to_stdout == false and 2 or fds.write }, options)
+            options.stderr_to_stdout == false and 2 or fds.write }, 3, options)
     end
     uv.fs_close(fds.write)
     if not child then
@@ -282,11 +282,12 @@ function process.start_job(argv, stdout_path, stderr_path, completed, options)
     library()
     local stdout, stderr = open_logs(stdout_path, stderr_path)
     if not stdout then return nil, stderr end
-    local stdio = { nil, stdout, stderr }
-    for index, descriptor in ipairs(options and options.inherit or {}) do
-        stdio[3 + index] = descriptor
+    local stdio, stdio_count = { nil, stdout, stderr }, 3
+    for _, descriptor in ipairs(options and options.inherit or {}) do
+        stdio_count = stdio_count + 1
+        stdio[stdio_count] = descriptor
     end
-    local child, err = spawn(argv, stdio, nil,
+    local child, err = spawn(argv, stdio, stdio_count, nil,
         function(code, signal) completed(exit_status(code, signal)) end)
     close_logs(stdout, stderr)
     if not child then
@@ -412,12 +413,13 @@ function process.start_worker(argv, options, handlers)
     end
     -- Standard input is an empty pipe whose writer closes at once, so the
     -- array has no hole before the inherited descriptors.
-    local stdio = { worker.stdin_pipe, worker.stdout_pipe, worker.stderr_pipe,
-        worker.request_pipe, worker.control }
-    for index, descriptor in ipairs(options.inherit or {}) do
-        stdio[5 + index] = descriptor
+    local stdio, stdio_count = { worker.stdin_pipe, worker.stdout_pipe, worker.stderr_pipe,
+        worker.request_pipe, worker.control }, 5
+    for _, descriptor in ipairs(options.inherit or {}) do
+        stdio_count = stdio_count + 1
+        stdio[stdio_count] = descriptor
     end
-    local child, err = spawn(argv, stdio,
+    local child, err = spawn(argv, stdio, stdio_count,
         { cwd = options.cwd, inherit_environment = true },
         function(code, signal)
             worker.exited, worker.code, worker.signal = true, code, signal

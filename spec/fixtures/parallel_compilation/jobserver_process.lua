@@ -12,10 +12,18 @@ local function identity(stat)
     return tostring(stat.dev) .. ":" .. tostring(stat.ino)
 end
 
+local function read_file(path)
+    local file = assert(io.open(path, "r"))
+    local contents = assert(file:read("a"))
+    assert(file:close())
+    return contents
+end
+
 local function inspect(expected_read, expected_write)
     local auth = assert(jobs.make_policy(os.getenv("MAKEFLAGS")).auth)
     assert(auth.kind == kind, "unexpected jobserver transport")
     if kind == "pipe" then
+        assert(auth.read >= 3 and auth.write >= 3, "jobserver replaced a standard stream")
         local read_stat, write_stat = assert(uv.fs_fstat(auth.read)), assert(uv.fs_fstat(auth.write))
         assert(read_stat.type == "fifo" and write_stat.type == "fifo", "jobserver descriptors are not pipes")
         assert(identity(read_stat) == expected_read, "jobserver read pipe changed")
@@ -45,6 +53,7 @@ if mode == "child" then
         end
     end
     io.write("jobserver child completed\n")
+    if arg[7] == "unleased" then io.stderr:write("jobserver child stderr completed\n") end
 elseif mode == "worker" then
     local control = assert(process.open_control(3, 4))
     local request = assert(process.decode_record(assert(control:receive())))
@@ -78,16 +87,19 @@ elseif mode == "parent" then
     local inherited = process.capture(argv, { inherit = leases, inherit_environment = true })
     assert(inherited.ok, inherited.diagnostic)
     local stdout, stderr = workspace .. "/job.out", workspace .. "/job.err"
+    local unleased_argv = command("child", expected_read, expected_write)
+    local unleased = assert(process.start_job(unleased_argv, stdout, stderr, function() end))
+    assert(unleased:wait(), read_file(stderr))
+    assert(read_file(stdout) == "jobserver child completed\n", "native job lost standard output")
+    assert(read_file(stderr) == "jobserver child stderr completed\n", "native job lost standard error")
     local child = assert(process.start_job(argv, stdout, stderr, function() end, { inherit = leases }))
-    local ok = child:wait()
-    if not ok then
-        local file = assert(io.open(stderr, "r"))
-        error(file:read("a"))
-    end
+    assert(child:wait(), read_file(stderr))
     local batch = assert(process.new_batch())
-    assert(batch:spawn(command("child", expected_read, expected_write), stdout, stderr, 1))
+    assert(batch:spawn(unleased_argv, stdout, stderr, 1))
     assert(batch:wait() == 1)
     assert(batch.children[1]:wait())
+    assert(read_file(stdout) == "jobserver child completed\n", "batch job lost standard output")
+    assert(read_file(stderr) == "jobserver child stderr completed\n", "batch job lost standard error")
     assert(batch:close())
     local settled, response, worker_error, exit_code = false
     local worker = assert(process.start_worker(command("worker", expected_read, expected_write),
