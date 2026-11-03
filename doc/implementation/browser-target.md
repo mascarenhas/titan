@@ -530,9 +530,15 @@ context-owned (`context.target_profile`), never stored in the frozen graph.
    ([The link profile](#the-link-profile)).
 
 There is no `-fPIC` and no LTO. Both `production` and `validation`
-installations share the trace-preserving object compile flags `-O1 -fno-inline
--fno-optimize-sibling-calls -gline-tables-only` (currently the candidate trace
-profile; `TODO(confirm: freeze as release trace profile after all #330 gates pass)`).
+installations share the frozen release trace object profile `-O1 -fno-inline
+-fno-optimize-sibling-calls -gline-tables-only` (frozen for #330 with
+Emscripten 6.0.13 alongside the final Titan-entry link profile `-O1 -fno-inline
+-fno-optimize-sibling-calls -gsource-map -g2
+-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals`, the retained Wasm
+`name` section, and the unchanged Asyncify, SjLj, budget, and assertions `0`/`2`
+settings; the `baseline`/`O2`/`-Os` measurement controls are not part of the
+frozen release profile, and raising optimization later requires the same trace
+gates to pass).
 Object compilation uses `-gline-tables-only` rather than `-g2` because
 Emscripten 6.0.13's `emcc` rewrites `-g2` to `-g0` on compile-only `-c`
 invocations (`tools/cmdline.py`), which strips DWARF line tables from `.o`
@@ -1089,8 +1095,8 @@ flag list.
 
 | Flags | Purpose |
 | --- | --- |
-| `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2` | the trace-preserving base of the candidate Titan-entry link profile (with the Binaryen local-cleanup pass below; `TODO(confirm: release trace profile freeze after integrator gates)`); measurement purposes (`minicoro`, `budget`, `baseline`) apply an explicit `-O1` or `-O2` `optimization` override when selected |
-| `-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` | part of the candidate Titan-entry link profile (`entry == "titan"`, omitted for `lua-main`): coalesces post-Asyncify temporaries because at link `-O1`, `emcc` runs no default Binaryen optimization passes, and Asyncify inflated large coroutine functions (`coroutine_tests_ℳ_unwind_innermost_frame_titan`, from 1,072 to 126,402 locals) past V8's 50,000-local WebAssembly validation limit (`local count too large`). Running `simplify-locals,reorder-locals` keeps the function at 1,396 locals (module maximum 3,431) without inlining or dropping physical frames or line mappings |
+| `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2` | the trace-preserving base of the frozen release Titan-entry link profile (frozen for #330 with the Binaryen local-cleanup pass below, Emscripten 6.0.13, the retained `name` section, and the unchanged Asyncify/SjLj, budget, and assertions `0`/`2` settings; raising optimization later requires the same trace gates to pass); measurement purposes (`minicoro`, `budget`, `baseline`) apply an explicit `-O1` or `-O2` `optimization` override when selected and are not part of the frozen release profile |
+| `-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` | part of the frozen release Titan-entry link profile (`entry == "titan"`, omitted for `lua-main`): coalesces post-Asyncify temporaries because at link `-O1`, `emcc` runs no default Binaryen optimization passes, and Asyncify inflated large coroutine functions (`coroutine_tests_ℳ_unwind_innermost_frame_titan`, from 1,072 to 126,402 locals) past V8's 50,000-local WebAssembly validation limit (`local count too large`). Running `simplify-locals,reorder-locals` keeps the function at 1,396 locals (module maximum 3,431) without inlining or dropping physical frames or line mappings |
 | `-sASYNCIFY=1` | minicoro's Emscripten fiber backend refuses to create fibers without Asyncify, and Asyncify carries the outer suspension. Indirect calls keep the default conservative instrumentation: closures and the module ABI call through function pointers, so there are no `ASYNCIFY_IGNORE_INDIRECT`, `ASYNCIFY_ONLY`, or `ASYNCIFY_REMOVE` lists. `-sASYNCIFY=0` only for a control. |
 | `-sSUPPORT_LONGJMP=<sjlj>` | the record's verified longjmp mode, `emscripten`, matching `liblua.a` and `titan.h` |
 | `-sSTACK_SIZE=1048576`, `-sASYNCIFY_STACK_SIZE=65536` | the main C stack and the outer Asyncify data budget ([Budgets](#budgets)); the second only with Asyncify |
