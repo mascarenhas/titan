@@ -22,8 +22,9 @@ local TARGET_DEFINES = {
 -- One object profile per build profile (D26). `production` optimizes as native
 -- production does and accepts the frames inlining costs, keeping the object
 -- line tables the trace contract needs. `validation` freezes #330's exact
--- physical-frame profile. The production level is one named constant: the
--- milestone sets it from measurement (D27).
+-- physical-frame profile. The production level is one named constant, chosen
+-- by measurement (D34; the numbers are in the implementation manual's
+-- measurements section).
 local PRODUCTION_LEVEL = "-O3"
 local PROFILES = {
     validation = { level = "-O1", frames = { "-fno-inline", "-fno-optimize-sibling-calls" } },
@@ -136,6 +137,28 @@ end
 
 local validate_record
 
+-- Everything after a profile's owned compile prefix is refused when it is
+-- owned, except one trailing level flag in a trace-control measurement build.
+-- The admitted set is `-O0`…`-O3` and `-Os`, not only the `optimization`
+-- override's `-O1`/`-O2`: a harness may also pass its measurement level through
+-- `--cflag`, which `browserlink.validate_extras` admits for the `baseline`,
+-- `minicoro` and `budget` purposes.
+local function check_owned_tail(flags, first, trace_control, build_profile)
+    local override
+    for index = first, #flags do
+        local owned = M.owned_compile_option(flags, index)
+        if owned then
+            if trace_control and override == nil and owned:match("^%-O[0-3s]$") then
+                override = owned
+            else
+                return nil, "browser " .. build_profile ..
+                    " profile owns compile option " .. string.format("%q", owned)
+            end
+        end
+    end
+    return true
+end
+
 local function descriptor_identity(data, context)
     return "browser:sha256:" .. incremental.digest(context or {}, "browser-target", data)
 end
@@ -198,19 +221,9 @@ local function validate(data, context)
                 " profile compile flags do not match its object profile"
         end
     end
-    local override
-    for index = #owned_flags + 1, #data.compile_flags do
-        local owned = M.owned_compile_option(data.compile_flags, index)
-        if owned then
-            if data.trace_control == true and override == nil and
-                data.compile_flags[index]:match("^%-O[0-3s]$") then
-                override = data.compile_flags[index]
-            else
-                return nil, "browser " .. data.build_profile ..
-                    " profile owns compile option " .. string.format("%q", owned)
-            end
-        end
-    end
+    local tail, tail_error = check_owned_tail(data.compile_flags,
+        #owned_flags + 1, data.trace_control == true, data.build_profile)
+    if not tail then return nil, tail_error end
     local seen, longjmp = {}, false
     for index, flag in ipairs(data.compile_flags) do
         seen[flag] = true
@@ -282,8 +295,9 @@ local UNSUPPORTED = { ["-fPIC"] = true, ["-fpic"] = true, ["-fPIE"] = true,
     ["-rdynamic"] = true, ["-pthread"] = true, ["-ffat-lto-objects"] = true,
     ["-m32"] = true, ["-m64"] = true, ["-fwasm-exceptions"] = true }
 
--- These choices preserve physical trace frames in every supported installation.
--- Internal descriptors contain them; trailing user options may not override them.
+-- Optimization, inlining, sibling-call, frame-pointer and debug choices belong
+-- to the build profile; internal descriptors contain them and trailing user
+-- options may not override them.
 function M.trace_option(flag)
     local positive = flag:gsub("^%-fno%-", "-f")
     return flag:match("^%-O") or flag:match("^%-g") or
@@ -543,22 +557,11 @@ function M.build(context, inputs)
         end
         local valid, flag_error = M.validate_flags(inputs.compile_flags, "compile_flags")
         if not valid then return nil, flag_error end
-        local extras = inputs.compile_flags or {}
-        local override
-        for index = 1, #extras do
-            local owned = M.owned_compile_option(extras, index)
-            if owned then
-                -- A trace-control measurement build may append exactly one
-                -- level; nothing else the profile owns may be overridden.
-                if inputs.trace_control == true and override == nil and
-                        owned:match("^%-O[0-3s]$") then
-                    override = owned
-                else
-                    return nil, "browser " .. build_profile ..
-                        " profile owns compile option " .. string.format("%q", owned)
-                end
-            end
-        end
+        -- The same owned-tail rule the descriptor validator applies, checked
+        -- here before any tool discovery or probe.
+        local tail, tail_error = check_owned_tail(inputs.compile_flags or {}, 1,
+            inputs.trace_control == true, build_profile)
+        if not tail then return nil, tail_error end
         local paths = inputs.paths
         local tool, tool_error = tools(context)
         if not tool then return nil, tool_error end

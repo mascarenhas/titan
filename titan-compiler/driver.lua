@@ -732,12 +732,12 @@ function driver._finish_target_initialization(context)
             })
             if not descriptor then return nil, err end
             if driver.browser_link_options then
-                -- A harness may preset the link options before the image kind
-                -- is known; certify that its purpose cannot contradict the
-                -- image this context will link.
-                local purpose, purpose_error = driver.browser_link_purpose(context,
-                    driver.browser_link_options.purpose)
-                if not purpose then return nil, purpose_error end
+                -- The image kind is not known yet (the driver learns it when
+                -- it links), so only the options' shape is checked here; the
+                -- kind check happens in browser_link_plan.
+                if driver.browser_link_options.purpose == nil then
+                    return nil, "browser link profile options require a purpose"
+                end
                 local plan, profile_error = driver.browserlink.profile(descriptor, driver.browser_link_options)
                 if not plan then return nil, profile_error end
             end

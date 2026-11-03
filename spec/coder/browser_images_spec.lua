@@ -420,6 +420,20 @@ describe("browser image profile and SDK readiness", function()
         assert.equal("/* user header */", read(header))
     end)
 
+    it("refuses a preset link profile that names no purpose", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/plain.titan",
+            "function answer(): integer\n    return 1\nend\n")
+        local result = cli({ prefix = info.prefix,
+            compiler_setup = "require('titan-compiler.driver').browser_link_options={assertions=2};" },
+            "-c", "plain")
+        assert.is_false(result.ok, "a purposeless preset was accepted")
+        local log = result.output or result.diagnostic or ""
+        assert.truthy(log:find("browser link profile options require a purpose", 1, true), log)
+    end)
+
     it("rejects trailing attempts to override profile-owned settings", function()
         for _, flags in ipairs({ { "-sASYNCIFY=0" }, { "-s", "ASYNCIFY_IGNORE_INDIRECT=1" },
             { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "-UTITAN_TARGET_BROWSER" }, { "-sNO_ASYNCIFY=1" },
@@ -447,6 +461,14 @@ describe("browser image profile and SDK readiness", function()
                 assert.equal("browser link profile owns option " .. flags[1], why)
             end
         end
+        -- Compile extras are reported by the compile diagnostic, link extras by
+        -- the link one (OG-L4): the same option, one owner, one message.
+        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-DTITAN_TARGET_BROWSER=1" }) do
+            local ok, why = browserlink.validate_extras({ flag }, { purpose = "gate" }, "production", "compile")
+            assert.is_nil(ok)
+            assert.equal('browser production profile owns compile option "' .. flag .. '"', why)
+        end
+        assert.is_nil(browserlink.validate_extras({ "-O2" }, { purpose = "gate" }, "production"))
         -- The real call path names the installation profile it protects.
         for _, purpose in ipairs({ "program", "test", "gate" }) do
             for _, profile in ipairs({ "production", "validation" }) do
