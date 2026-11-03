@@ -40,6 +40,22 @@ static const char tail_source[] =
   "local function tail(action) return middle(action) end\n"
   "return function(action)\n  local result = tail(action)\n  return result\nend\n";
 static const char shape_source[] = "return function(action)\n  action()\nend\n";
+/* #343 Scope G: the nested-protected-call construct the browser C-call limit is
+ * sized against, at exactly one `getCcalls` count per level (`pcall` is the
+ * only C boundary on the path). `bound` is supplied by the caller so it can sit
+ * above the limit and below every engine's stack ceiling; reaching it raises
+ * the caller's own action, which is how a missing limit shows up as an
+ * assertion instead of an engine failure. The error is re-raised unchanged so
+ * the caller sees Lua's own message. */
+static const char pcall_source[] =
+  "return function(apply, bound)\n"
+  "  local function descend(n)\n"
+  "    if n == 0 then return apply() end\n"
+  "    local ok, err = pcall(descend, n - 1)\n"
+  "    if not ok then error(err, 0) end\n"
+  "  end\n"
+  "  descend(bound)\n"
+  "end\n";
 static const char method_source[] = "return function(receiver)\n  receiver:fail()\nend\n";
 static const char fallback_source[] =
   "local function descend(n, action)\n"
@@ -74,6 +90,7 @@ int trace_fixture_load(lua_State *L, int which) {
   if (which == 0) { source = mixed_source; name = "@trace-mixed.lua"; }
   else if (which == 1) { source = tail_source; name = "@trace-tail.lua"; }
   else if (which == 3) { source = pin_source; name = "@trace-pin.lua"; }
+  else if (which == 7) { source = pcall_source; name = "@trace-pcall.lua"; }
   else if (which == 5) { source = method_source; name = "@trace-method.lua"; }
   else if (which == 6) { source = fallback_source; name = "@trace-fallback.lua"; }
   else { source = shape_source; name = which == 4 ? "@trace-resume.lua" : "@trace-shape.lua"; }
@@ -358,8 +375,8 @@ int trace_fixture_allocation(lua_State *parent, int nested) {
     valid = valid && outer && strlen(outer) > (size_t)LUAL_BUFFERSIZE &&
       trace_fixture_count_frame_lines(outer, ": in trace_cases.buffer_capture") == 1 &&
       trace_fixture_count_frame_lines(outer, ": in trace_cases.buffer_outer") == 1 &&
-      parent_runner_frame(outer, 105, ": in titan_test_runner_ℳ_run_test_26_titan") &&
-      parent_runner_frame(outer, 179, ": in titan_test_runner_ℳ_main_titan") &&
+      parent_runner_frame(outer, 109, ": in titan_test_runner_ℳ_run_test_27_titan") &&
+      parent_runner_frame(outer, 189, ": in titan_test_runner_ℳ_main_titan") &&
       !strstr(outer, "(native Titan frames unavailable:");
     if (outer) trace_fixture_emit("nested_outer", outer);
     lua_pop(state, 1);

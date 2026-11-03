@@ -35,12 +35,75 @@ local function mixed_recurse(depth: integer, invoke: Shape)
   invoke(function() mixed_recurse(depth - 1, invoke) end)
 end
 
+-- #343: with the browser C-call limit at 100 an interleaved level costs one
+-- count and the deepest reachable level is 95, so 90 is the headroom row.
 function test_mixed_recursion_headroom(_context: test.Context)
   local invoke: Shape = loaded(2)
-  local trace = caught(function() mixed_recurse(14, invoke) end)
+  local trace = caught(function() mixed_recurse(90, invoke) end)
   test.assert(count_frames(trace, ": in trace_cases.original_leaf") == 1, trace)
   test.assert(count_frames(trace, ": in trace_cases.mixed_recurse") >= 1, trace)
-  test.assert(count_frames(trace, ": in trace_cases.mixed_recurse") <= 15, trace)
+  test.assert(count_frames(trace, ": in trace_cases.mixed_recurse") <= 91, trace)
   test.assert(count(trace, truncated) <= 1, trace)
-  emit("mixed_depth_14", trace)
+  emit("mixed_depth_90", trace)
+end
+
+-- Mixed recursion past the limit must end in Lua's catchable "C stack
+-- overflow", with the trace captured, and the program must keep running.
+-- The bound sits above the limit (the deepest reachable level is 95) and below
+-- every engine's stack ceiling, so a limit that failed to trip raises the base
+-- case's error and fails the assertion instead of crashing the engine.
+local function overflow_leaf()
+  raise "expected C stack overflow"
+end
+
+local function mixed_overflow_step(depth: integer, invoke: Shape)
+  if depth == 0 then overflow_leaf() end
+  invoke(function() mixed_overflow_step(depth - 1, invoke) end)
+end
+
+-- A protected call per level, entirely in Lua: `pcall` is the only C boundary
+-- on the path, so each level costs exactly one `getCcalls` count -- the shape
+-- the browser limit is sized against.
+local function pcall_overflow_step(bound: integer, invoke: function(Action, integer): ())
+  invoke(overflow_leaf, bound)
+end
+
+local function caught_overflow(action: Action): (string, string)
+  action()
+  raise "expected C stack overflow"
+  return "", ""
+catch
+  -- Lua's limit raises a string, and so does the base case; the downcast makes
+  -- a non-string error a failure of this case rather than a silent mismatch.
+  return traceback, error as string
+end
+
+local function bounded_overflow(invoke: Shape): (string, string)
+  return caught_overflow(function() mixed_overflow_step(150, invoke) end)
+end
+
+function test_mixed_recursion_overflow(_context: test.Context)
+  local invoke: Shape = loaded(2)
+  local trace, message = bounded_overflow(invoke)
+  test.assert(message == "C stack overflow", message .. "\n" .. trace)
+  test.assert(not contains(trace, capture_failed), trace)
+  -- Firefox and WebKit capture only 128 and 100 engine frames and an
+  -- interleaved level costs about three, so the floor stays well below both
+  -- (Firefox retains 19 activations at the headroom depth).
+  test.assert(count_frames(trace, ": in trace_cases.mixed_overflow_step") >= 10, trace)
+  test.assert(count(trace, truncated) <= 1, trace)
+  emit("mixed_overflow", trace)
+end
+
+function test_pcall_recursion_overflow(_context: test.Context)
+  local invoke: function(Action, integer): () = loaded(7)
+  local trace, message = caught_overflow(function() pcall_overflow_step(150, invoke) end)
+  test.assert(message == "C stack overflow", message .. "\n" .. trace)
+  test.assert(not contains(trace, capture_failed), trace)
+  -- The protected call itself must be on the error path, not just the outer
+  -- frames: pcall unwinds each level, so the deep activations are not retained
+  -- but the pcall-bearing chunk is.
+  test.assert(contains(trace, "trace-pcall.lua"), trace)
+  test.assert(count(trace, truncated) <= 1, trace)
+  emit("pcall_overflow", trace)
 end
