@@ -4706,14 +4706,14 @@ local function prepare_source_checking_header(context, modname, ast)
     local filename, filename_err = ffiheaders.filename(context, logical_name)
     if not filename then return nil, filename_err end
     local contents = coder.generate_foreign_header(
-        modname, ast, { module = modname, browser_trace = context.target == "browser" }, {
+        modname, ast, { module = modname }, {
             ffi_header = ffiheaders.relative(logical_name, descriptor.logical_name),
             source_header = function(node)
                 local dependency = assert(node._ffi_header_descriptor)
                 return ffiheaders.relative(logical_name,
                     dependency.logical_name:gsub("[.]ffi[.]h$", ".titan.h"))
             end,
-        })
+        }, driver.header_policy(false))
     ffiheaders.remember_file(context, filename)
     local wrote, write_err = context.io:write_file(filename, contents)
     if not wrote then return nil, write_err end
@@ -7170,8 +7170,10 @@ function driver.compile_planned_module(context, modname, options)
         extra_flags = coverage.compile_flags(coverage_build, modname) or {}
     end
     coder.prepare_coverage(mod.ast, coverage_build ~= nil)
-    local header_plans, header_error =
-        driver.plan_foreign_headers({ modname }, driver.imported, context)
+    local header_plans, header_error = driver.plan_foreign_headers(
+        { modname }, driver.imported,
+        function(name) return driver.header_policy(
+            name == modname and coverage_selected) end)
     if not header_plans then return nil, header_error end
     local request = {
         modname = modname,
@@ -8487,8 +8489,18 @@ function driver.ast_has_foreign_functions(ast)
     return false
 end
 
-function driver.plan_foreign_header(modname, ast, sourcef, defer_render, context)
+-- Foreign headers are rendered before, and for restored plans independently
+-- of, C generation. Their line/coverage policy is therefore an explicit input
+-- derived from the current options, never ambient coder state left by another
+-- generation.
+function driver.header_policy(coverage)
+    return coder.emission_policy(driver.EMIT_LINE_DIRECTIVES, coverage)
+end
+
+function driver.plan_foreign_header(
+        modname, ast, sourcef, defer_render, policy)
     sourcef = sourcef or modname:gsub("[.]", "/") .. ".titan"
+    policy = policy or driver.header_policy(false)
     local headername = driver.foreign_header_filename(sourcef)
     local has_foreign = driver.ast_has_foreign_functions(ast)
     local absolute_header = normalized_absolute_filename(headername)
@@ -8499,8 +8511,7 @@ function driver.plan_foreign_header(modname, ast, sourcef, defer_render, context
     local contents, recipe
     if has_foreign and not defer_render then
         contents, recipe = coder.generate_foreign_header(
-            modname, ast, { module = modname,
-                browser_trace = context and context.target == "browser" })
+            modname, ast, { module = modname }, nil, policy)
     end
     return {
         modname = modname,
@@ -8511,6 +8522,12 @@ function driver.plan_foreign_header(modname, ast, sourcef, defer_render, context
         has_foreign = has_foreign,
         contents = contents,
         recipe = recipe,
+        -- The plan is one immutable published unit: policy, the checked module
+        -- object it was rendered from, contents and the digest of the recipe
+        -- (which includes the policy) that produced them. Its `ast` reference is
+        -- what a later compile compares by identity.
+        policy = policy,
+        digest = coder.foreign_header_digest(recipe),
         ffi_header = {
             filename = ffi_headername,
             absolute = absolute_ffi_header,
@@ -8559,7 +8576,12 @@ function driver.write_foreign_header_plan(plan, verbose, pretty_print)
 end
 
 -- Implementation notes: doc/implementation/foreign-functions.md#final-planning-ownership-and-stale-cleanup
-function driver.plan_foreign_headers(names, imported, context)
+-- `policy_for(modname)` supplies the emission policy of each module's header;
+-- the CLI and the per-module worker derive it from the same coverage selection
+-- and line-directive option used for that module's C, so a header can never be
+-- planned under a policy another generation left behind.
+function driver.plan_foreign_headers(names, imported, policy_for)
+    policy_for = policy_for or function() return driver.header_policy(false) end
     local plans = {}
     local by_name = {}
     local occupied = {}
@@ -8601,6 +8623,10 @@ function driver.plan_foreign_headers(names, imported, context)
                     filename = headername,
                     absolute = normalized_absolute_filename(headername),
                     marker = driver.FOREIGN_HEADER_MARKER,
+                    -- Restored bytes are compiler-owned and carry the policy
+                    -- their record was built under; the record identity owns
+                    -- invalidation, so the plan states the current expectation.
+                    policy = policy_for(name),
                     has_foreign = mod.object_metadata.foreign_header ~= nil,
                     ffi_header = {
                         filename = ffi_headername,
@@ -8610,7 +8636,8 @@ function driver.plan_foreign_headers(names, imported, context)
                 }
             else
                 plan = driver.plan_foreign_header(
-                    name, mod.ast, mod.native_output or mod.filename, true, context)
+                    name, mod.ast, mod.native_output or mod.filename, true,
+                    policy_for(name))
             end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 local identity = physical_absolute_filename(entry.filename):lower()
@@ -8675,6 +8702,8 @@ function driver.plan_foreign_headers(names, imported, context)
                     plan.ffi_header.absolute, function(name)
                         return assert(dependency_plan(name)).absolute
                     end)
+                plan.digest = coder.foreign_header_digest(
+                    plan.mod.object_metadata.foreign_header)
             end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 entry.preserve = entry.contents ~= nil and
@@ -8684,9 +8713,11 @@ function driver.plan_foreign_headers(names, imported, context)
             plan.ffi_header.contents = coder.generate_ffi_header(
                 plan.modname, plan.ast)
             if plan.has_foreign then
+                plan.policy = plan.policy or policy_for(plan.modname)
                 plan.contents, plan.recipe = coder.generate_foreign_header(
-                    plan.modname, plan.ast, { module = plan.modname,
-                        browser_trace = context and context.target == "browser" })
+                    plan.modname, plan.ast, { module = plan.modname }, nil,
+                    plan.policy)
+                plan.digest = coder.foreign_header_digest(plan.recipe)
             end
         end
         local ok, err = driver.validate_foreign_header_plan(plan)
@@ -8736,25 +8767,23 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
             if not ok then return abandon(err) end
         end
     end
-    for _, plan in ipairs(plans or {}) do
-        if plan.ast then
-            plan.ast._foreign_header_contents = plan.contents
-            plan.ast._foreign_header_recipe = plan.recipe
-            plan.ast._foreign_header_prepared = true
-            if plan.ffi_header then
-                plan.ast._ffi_header_contents = plan.ffi_header.contents
-                plan.ast._ffi_header_prepared = true
-            end
-        end
-    end
     return true
 end
 
 function driver.prepare_foreign_headers(
-        names, imported, verbose, pretty_print, context)
-    local plans, err = driver.plan_foreign_headers(names, imported, context)
+        names, imported, verbose, pretty_print, policy_for)
+    local plans, err = driver.plan_foreign_headers(names, imported, policy_for)
     if not plans then return nil, err end
-    return driver.write_foreign_header_plans(plans, verbose, pretty_print)
+    local written, write_error =
+        driver.write_foreign_header_plans(plans, verbose, pretty_print)
+    if not written then return nil, write_error end
+    -- The plan is the published unit; later compiles reuse it only when its
+    -- recorded policy matches, so nothing has to be cached on the AST.
+    for _, plan in ipairs(plans) do
+        local entry = imported[plan.modname]
+        if entry then entry.foreign_header_plan = plan end
+    end
+    return true
 end
 
 driver.GENERATED_C_MARKER = "/* Generated by Titan: module C translation unit. */"
@@ -8794,14 +8823,27 @@ local function prepare_compile(
     local priv_header_path = stem .. ".priv.h"
     coder.prepare_coverage(ast, options and
         (options.coverage == true or options.coverage_backend ~= nil))
+    -- A caller-supplied plan is the published unit for this build. Otherwise
+    -- reuse this module's published plan only when it was rendered from this
+    -- very checked module object and its emission policy matches; any other
+    -- case plans and publishes afresh. Planning is cheap, so conservative
+    -- replanning is preferred over trusting bytes we cannot prove current — a
+    -- same-named source can be a different checked buffer (overridden or
+    -- unsaved editor content) that no disk comparison would distinguish.
     local owns_header_plan = header_plan == nil
-    if not header_plan and (not ast._foreign_header_prepared or not ast._ffi_header_prepared) then
-        header_plan = driver.plan_foreign_header(modname, ast, sourcef, false, context)
-        local valid, err = driver.validate_foreign_header_plan(header_plan)
-        if not valid then return nil, err end
-    end
-    if header_plan then
-        ast._foreign_header_recipe = header_plan.recipe
+    if not header_plan then
+        local policy = driver.header_policy(options and options.coverage == true)
+        local published = source_entry and source_entry.foreign_header_plan
+        if published and published.ast ~= nil and published.ast == ast
+            and coder.same_emission_policy(published.policy, policy) then
+            header_plan = published
+            owns_header_plan = false
+        else
+            header_plan = driver.plan_foreign_header(modname, ast, sourcef,
+                false, policy)
+            local valid, err = driver.validate_foreign_header_plan(header_plan)
+            if not valid then return nil, err end
+        end
     end
     local imported_layouts = options and options.nominal_layouts
     if not imported_layouts then
@@ -8847,7 +8889,8 @@ local function prepare_compile(
             certify = false
         else
             local digests, digest_error = incremental.producer_digests(
-                context, source_entry, encoded_layouts, ast._foreign_header_recipe)
+                context, source_entry, encoded_layouts,
+                header_plan and header_plan.recipe)
             if not digests then
                 return nil, "cannot certify object for module '" .. modname ..
                     "': " .. tostring(digest_error)
@@ -8897,7 +8940,7 @@ local function prepare_compile(
         external_symbols = coder.external_symbols(modname, ast),
         private_symbols = private_symbols,
         native_references = native_references,
-        foreign_header = ast._foreign_header_recipe,
+        foreign_header = header_plan and header_plan.recipe,
         layouts = encoded_layouts,
         parts_version = 1,
         c_parts = effective_c_parts,
@@ -9083,6 +9126,9 @@ local function prepare_compile(
             local ok, err = driver.write_foreign_header_plan(
                 header_plan, verbose, options and options.pretty_print)
             if not ok then return nil, err end
+        end
+        if header_plan and source_entry then
+            source_entry.foreign_header_plan = header_plan
         end
 
         -- Invalidate the primary commit marker first, then remove prior

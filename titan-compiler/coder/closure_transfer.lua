@@ -172,7 +172,7 @@ local function emit_source_entry(tlcontext, entry)
             lua_settop(L, _top + 1);
         }
     ]], {
-        DEFLINE = definitionline(tlcontext, entry.loc),
+        DEFLINE = definitionline(entry.loc),
         ID = entry.id,
         PROJECT = table.concat(project, "\n"),
         CAPTURE = table.concat(restore, "\n"),
@@ -221,7 +221,7 @@ local function emit_adapter_entry(tlcontext, entry)
             luaC_checkGC(L);
         }
     ]], {
-        DEFLINE = definitionline(tlcontext, entry.loc),
+        DEFLINE = definitionline(entry.loc),
         ID = entry.id,
         NATIVE = entry.native,
         STRICT = entry.strict,

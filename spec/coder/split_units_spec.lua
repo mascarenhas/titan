@@ -598,7 +598,9 @@ do base_offset = 10 end
                 local filename = out .. "/" .. name
                 local contents = read_file(filename)
                 assert.equal(marker, contents:sub(1, #marker), filename)
+                -- Pre-marker compilers also had no generated-C filename macro.
                 contents = contents:gsub("^[^\n]*\n", "", 1)
+                    :gsub('^#define[ \t]+TITAN_GENERATED_C_FILE[ \t]+"[^"\n]*"\n', "", 1)
                 if anchor_lines then
                     contents = assert(coverage_lines.convert(contents, filename))
                 end
@@ -607,7 +609,13 @@ do base_offset = 10 end
             return names
         end
         local function private_include(filename)
-            return assert(read_file(filename):match('^[^\n]*\n?#include "([^"\n]*)"'))
+            local contents = read_file(filename)
+            if contents:sub(1, #marker) == marker then
+                contents = contents:gsub("^[^\n]*\n", "", 1)
+            end
+            contents = contents:gsub(
+                '^#define[ \t]+TITAN_GENERATED_C_FILE[ \t]+"[^"\n]*"\n', "", 1)
+            return assert(contents:match('^#include "([^"\n]*)"'))
         end
         local revision = 0
         local function rebuild(out, parts, names)

@@ -2032,7 +2032,7 @@ function coder._emit_array_writers(tlcontext, sigs, code, initfuncs)
         ]], {
             NAME = entry.name,
         }))
-        table.insert(code, definitionline(tlcontext) .. render([[
+        table.insert(code, definitionline() .. render([[
             TITAN_MODULE_PRIVATE int $NAME(lua_State *L) {
                 StkId func = L->ci->func.p;
                 if (TITAN_UNLIKELY(L->top.p - func - 1 < 1)) {

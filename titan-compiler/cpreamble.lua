@@ -135,7 +135,10 @@ local function fixed_prefix(defline)
 end
 
 cpreamble.fixed_prefix = fixed_prefix("")
-cpreamble.browser_prefix = fixed_prefix("#line 1 TITAN_GENERATED_C_FILE\n")
+-- Every emitted translation unit defines TITAN_GENERATED_C_FILE to its own
+-- generated filename, so the shared fixed-prefix helpers name the generated C
+-- rather than inheriting the preceding definition's `#line`.
+cpreamble.definition_prefix = fixed_prefix("#line 1 TITAN_GENERATED_C_FILE\n")
 
 cpreamble.after_foreign_imports = [[#if defined(__GNUC__) || defined(__clang__)
 #define TITAN_SOURCE_LOCAL __attribute__((visibility("hidden")))

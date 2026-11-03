@@ -452,7 +452,7 @@ local function emit_record(ctx, node, encode, decode)
             $DECODE_FIELDS
         }
     ]], {
-        DEFLINE = definitionline(ctx, node.loc),
+        DEFLINE = definitionline(node.loc),
         ENCODE = encode,
         DECODE = decode,
         CAPACITY = c_integer_literal(math.max(#owner.fields, 1)),
@@ -550,7 +550,7 @@ local function emit_union(ctx, node, encode, decode)
             }
         }
     ]], {
-        DEFLINE = definitionline(ctx, node.loc),
+        DEFLINE = definitionline(node.loc),
         ENCODE = encode,
         DECODE = decode,
         UNIONTAG = coder._nominal_tag("_rec"),

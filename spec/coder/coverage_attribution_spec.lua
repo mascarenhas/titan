@@ -210,11 +210,12 @@ function use(input: integer): integer
   return plus(input)
 end
 ]])
-        local ordinary = coder.generate_foreign_header(MODULE, ast)
+        local policy = coder.emission_policy(true, false)
+        local ordinary = coder.generate_foreign_header(MODULE, ast, nil, nil, policy)
         assert.truthy(ordinary:find("static inline", 1, true))
         assert.truthy(ordinary:find("%+"))
         coder.prepare_coverage(ast, true)
-        local header = coder.generate_foreign_header(MODULE, ast)
+        local header = coder.generate_foreign_header(MODULE, ast, nil, nil, policy)
         -- An inline direct-call relay may remain, but the authored arithmetic
         -- must move into the instrumented producer body.
         assert.is_nil(header:find("%+"))
@@ -225,7 +226,7 @@ end
         assert.truthy(code, err)
         assert.is_true(anchors[FILENAME][2])
         coder.prepare_coverage(ast, false)
-        local restored = coder.generate_foreign_header(MODULE, ast)
+        local restored = coder.generate_foreign_header(MODULE, ast, nil, nil, policy)
         assert.equal(ordinary, restored)
         assert.is_nil(restored:find("TITAN_COVERAGE_", 1, true))
     end)

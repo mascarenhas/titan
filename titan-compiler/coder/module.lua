@@ -299,7 +299,8 @@ function init_data_from_other_modules(tlcontext, includes, binding_defs, loadmod
             SYMBOL = c_string_literal(coder._linkage_symbol_name(name)),
         }))
     end
-    for _, func in pairs(tlcontext.functions) do
+    for _, key in ipairs(coder._sorted_keys(tlcontext.functions)) do
+        local func = tlcontext.functions[key]
         local dynamic = static_deps[func.module] ~= true
         bind(func.module, func.mangled,
             function_sig(func.mangled, func.type, dynamic),
@@ -354,20 +355,23 @@ function init_data_from_other_modules(tlcontext, includes, binding_defs, loadmod
                 .. "' has a different native binding in this consumer image"),
         }))
     end
-    for name, info in pairs(tlcontext.bound_luas) do
+    for _, name in ipairs(coder._sorted_keys(tlcontext.bound_luas)) do
+        local info = tlcontext.bound_luas[name]
         local declaration = static_deps[info.module] == true
             and ("int " .. name .. "(lua_State *L)")
             or ("int (*" .. name .. ")(lua_State *L)")
         bind(info.module, name, declaration, "int (*)(lua_State *L)")
     end
-    for name, info in pairs(tlcontext.bound_stricts) do
+    for _, name in ipairs(coder._sorted_keys(tlcontext.bound_stricts)) do
+        local info = tlcontext.bound_stricts[name]
         local declaration = static_deps[info.module] == true
             and ("int " .. name .. "(lua_State *L)")
             or ("int (*" .. name .. ")(lua_State *L)")
         bind(info.module, name, declaration, "int (*)(lua_State *L)")
     end
 
-    for fqtn, entry in pairs(tlcontext.metatables) do
+    for _, fqtn in ipairs(coder._sorted_keys(tlcontext.metatables)) do
+        local entry = tlcontext.metatables[fqtn]
         table.insert(initmetas, render([[
             luaL_getmetatable(L, "Titan $KIND $TYPE metatable");
             setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
@@ -380,7 +384,8 @@ function init_data_from_other_modules(tlcontext, includes, binding_defs, loadmod
         }))
     end
 
-    for module, upvalue in pairs(tlcontext.modules) do
+    for _, module in ipairs(coder._sorted_keys(tlcontext.modules)) do
+        local upvalue = tlcontext.modules[module]
         table.insert(initmetas, render([[
             lua_getfield(L, LUA_REGISTRYINDEX, "Titan module $MODULE");
             setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
@@ -451,7 +456,7 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
             table.insert(sigs, render([[
                 TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write);
             ]], { ACCESSOR = accessor }))
-            table.insert(code, definitionline(tlcontext, node.loc) .. render([[
+            table.insert(code, definitionline(node.loc) .. render([[
                 TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_rec, TValue *tv, int write) {
                     (void)_mod; /* scalar fields need no cached identities */
                     if (write) {
@@ -468,7 +473,8 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
             }))
         end
     end
-    for name, method in pairs(node._type.methods) do
+    for _, name in ipairs(coder._sorted_keys(node._type.methods)) do
+        local method = node._type.methods[name]
         if not method.islocal then
             table.insert(fieldmap, render([[
                 lua_pushliteral(L, $NAME);
@@ -549,7 +555,7 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
                 }
             }
         ]], {
-            DEFLINE = definitionline(tlcontext, node.loc),
+            DEFLINE = definitionline(node.loc),
             INDEXNAME = coder._nominal_metamethod_name(
                 node._type.name, "index"),
             NEWINDEXNAME = coder._nominal_metamethod_name(
@@ -679,7 +685,7 @@ function coder._codeuniondec(ctx, sigs, code, initnominals, node)
         TITAN_MODULE_PRIVATE void $READER(lua_State *L, Udata *_union, lua_Integer part,
                                           TValue *tv);
     ]], { READER = payload_reader }))
-    table.insert(code, definitionline(ctx, node.loc) .. render([[
+    table.insert(code, definitionline(node.loc) .. render([[
         TITAN_MODULE_PRIVATE void $READER(lua_State *L, Udata *_union, lua_Integer part,
                                           TValue *tv) {
             switch ($TAG) {
@@ -758,7 +764,7 @@ function coder._codeuniondec(ctx, sigs, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
     ]], {
-        DEFLINE = definitionline(ctx, node.loc),
+        DEFLINE = definitionline(node.loc),
         INDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(
@@ -986,7 +992,7 @@ function coder._code_interface_method_artifacts(
 
         $STRICT_BODY
     ]], {
-        DEFLINE = definitionline(tlcontext, method_node.loc),
+        DEFLINE = definitionline(method_node.loc),
         NATIVE_SIG = nativesig,
         METHOD_COUNT = c_integer_literal(#interface.methods),
         IFACE = c_string_literal(interface.name),
@@ -1043,7 +1049,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         table.insert(sigs, render([[
             TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write);
         ]], { ACCESSOR = accessor }))
-        table.insert(code, definitionline(tlcontext, node.loc) .. render([[
+        table.insert(code, definitionline(node.loc) .. render([[
             TITAN_MODULE_PRIVATE void $ACCESSOR(lua_State *L, Udata *_mod, Udata *_interface, TValue *tv, int write) {
                 (void)_mod;
                 if (write) {
@@ -1137,7 +1143,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
                 $FILE, $LINE, $COL, lua_tostring(L, 2), $FQTN);
         }
     ]], {
-        DEFLINE = definitionline(tlcontext, node.loc),
+        DEFLINE = definitionline(node.loc),
         INDEXNAME = coder._nominal_metamethod_name(
             interface.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(
@@ -1310,7 +1316,8 @@ function coder.generate_ffi_header(modname, ast, source_header)
     return require("titan-compiler.ffiheaders").render(modname, ast, source_header)
 end
 
-function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
+local function render_foreign_header(modname, ast, tlcontext, header_paths,
+        policy)
     tlcontext = tlcontext or { module = modname }
     local has_foreign = false
     for _, node in ipairs(ast) do
@@ -1397,9 +1404,33 @@ function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
     }, "\n")
     -- Persist the bodies independently from compiler-owned include paths.
     -- Checking uses logical module paths, while native folder-module headers
-    -- live beside the canonical main source.
+    -- live beside the canonical main source. The emission policy is part of
+    -- the recipe: it decides the rendered bodies, and a change must invalidate
+    -- an already prepared header through the certificate digests.
     return prefix .. "\n" .. table.concat(includes, "\n") .. "\n" .. body,
-        { prefix = prefix, body = body, source_headers = source_headers }
+        { prefix = prefix, body = body, source_headers = source_headers,
+          policy = { line_directives = policy.line_directives,
+              coverage = policy.coverage } }
+end
+
+-- Canonical identity of one foreign-header recipe (rendered text, source-header
+-- module list, emission policy); header paths are environment, not content.
+local ffiheaders = require "titan-compiler.ffiheaders"
+function coder.foreign_header_digest(recipe)
+    return ffiheaders.foreign_recipe_digest(recipe)
+end
+
+-- Headers are rendered before (and, for restored plans, independently of) C
+-- generation, so the caller supplies the current line/coverage policy instead
+-- of relying on flags a previous generation happened to leave behind.
+function coder.generate_foreign_header(
+        modname, ast, tlcontext, header_paths, policy)
+    assert(type(policy) == "table"
+        and type(policy.line_directives) == "boolean"
+        and type(policy.coverage) == "boolean",
+        "foreign-header generation requires an explicit emission policy")
+    return coder.with_emission_policy(policy, render_foreign_header,
+        modname, ast, tlcontext, header_paths, policy)
 end
 
 return core.coder

@@ -395,7 +395,7 @@ populate six typed arrays without allocating one JS object per segment:
 (`Uint32Array`, retaining 1-field unmapped VLQ segments as explicit
 `source = -1, line = 0` markers), along with the defined functions' half-open
 code ranges `starts` and `ends` (`Uint32Array`) and each function's first valid
-in-function mapped source index `first` (`Int32Array`, which browser
+in-function mapped source index `first` (`Int32Array`, which
 [function-definition `#line` stamps](codegen-overview.md#mixed-source-line-attribution)
 keep on the function's own declaring `.titan` file rather than a preceding
 contributor's trailing `#line`), plus the `names` and basename-normalized
@@ -526,8 +526,13 @@ snapshot outside that boundary.
 ### Source lines and display names
 
 Native frames point back to Titan source through the `#line` directives
-described in [mixed-source line attribution](codegen-overview.md#mixed-source-line-attribution);
-the debug-information level that keeps those line records is chosen by
+described in [mixed-source line attribution](codegen-overview.md#mixed-source-line-attribution).
+Those include the [function-definition
+stamps](codegen-overview.md#mixed-source-line-attribution) that own a
+function's signature, GC poll, stack reservation, and argument setup before its
+first statement, so a frame whose program counter is still in that prologue
+names the function's own declaring `.titan` file and definition line. The
+debug-information level that keeps those line records is chosen by
 [`driver.compile`](driver.md#compiling-one-module-drivercompile). The trace
 builder never inspects variable locations. With line directives disabled, the
 debug filename no longer ends in `.titan`, so logical tracebacks may omit

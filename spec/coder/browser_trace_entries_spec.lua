@@ -4,7 +4,9 @@ local coder = require "titan-compiler.coder"
 local driver = require "titan-compiler.driver"
 local parser = require "titan-compiler.parser"
 local checker = require "titan-compiler.checker"
-local sha256 = require "titan-compiler.sha256"
+
+local compiler_io = require "titan-compiler.io"
+local lfs = require "lfs"
 
 local SOURCE = [[
 record Item
@@ -66,26 +68,6 @@ end
 local DEFINITION_SOURCE = assert(require("titan-compiler.util").get_file_contents(
     "spec/fixtures/browser_images/definitions.titan"))
 
-local function ordered_pairs(original, reverse)
-    return function(t)
-        local keys = {}
-        for key in original(t) do
-            if type(key) ~= "string" and type(key) ~= "number" then return original(t) end
-            keys[#keys + 1] = key
-        end
-        table.sort(keys, function(a, b)
-            local less = type(a) == type(b) and a < b or type(a) < type(b)
-            return reverse and a ~= b and not less or not reverse and less
-        end)
-        local index = 0
-        return function()
-            index = index + 1
-            local key = keys[index]
-            if key ~= nil then return key, t[key] end
-        end
-    end
-end
-
 local function definitions(text)
     local result = {}
     text = "\n" .. text
@@ -100,36 +82,27 @@ local function definitions(text)
     end
     return result
 end
-local function native_variants(target)
-    local variants, original = {}, _G.pairs
-    local ok, err = xpcall(function()
-        for _, reverse in ipairs({ false, true }) do
-            -- Both legal traversal orders cover the pre-existing unordered
-            -- metatable emission without normalizing or deleting output bytes.
-            _G.pairs = ordered_pairs(original, reverse)
-            for _, parts in ipairs({ 1, 4 }) do
-                for _, located in ipairs({ false, true }) do
-                    local generated = generate(target, parts, DEFINITION_SOURCE, located)
-                    local texts = {
-                        generated.private_header or "", generated.foreign_header or "",
-                    }
-                    for _, part in ipairs(generated.parts) do texts[#texts + 1] = part.code end
-                    local bytes = {}
-                    for _, text in ipairs(texts) do
-                        assert.is_nil(text:find("TITAN_GENERATED_C_FILE", 1, true))
-                        for name, definition in pairs(definitions(text)) do
-                            assert.is_nil(definition.stamp, "native definition acquired a boundary stamp: " .. name)
-                        end
-                        bytes[#bytes + 1] = #text .. ":" .. text
-                    end
-                    variants[sha256.hex(table.concat(bytes))] = true
-                end
-            end
+local function definition_snapshot(generated)
+    local all = {}
+    local texts = {
+        generated.private_header or "", generated.foreign_header or "",
+    }
+    for _, part in ipairs(generated.parts) do texts[#texts + 1] = part.code end
+    for _, text in ipairs(texts) do
+        for name, definition in pairs(definitions(text)) do
+            assert.is_nil(all[name], "duplicate definition " .. name)
+            all[name] = definition.stamp
         end
-    end, debug.traceback)
-    _G.pairs = original
-    assert.is_true(ok, err)
-    return variants
+    end
+    return all
+end
+local function native_output(target, parts, located)
+    local generated = generate(target, parts, DEFINITION_SOURCE, located)
+    local texts = {
+        generated.private_header or "", generated.foreign_header or "",
+    }
+    for _, part in ipairs(generated.parts) do texts[#texts + 1] = part.code end
+    return table.concat(texts, "\0"), generated
 end
 
 describe("browser traceback entry generation", function()
@@ -204,16 +177,52 @@ describe("browser traceback entry generation", function()
     end)
 
     it("keeps native output byte-identical across explicit targets and browser generation", function()
-        -- Compare complete C/private-header/foreign-header bytes under the
-        -- current C declaration environment. In particular, libc's anonymous
-        -- div_t declaration site is not a portable cross-machine byte golden.
-        local expected = native_variants(nil)
-        local count = 0
-        for _ in pairs(expected) do count = count + 1 end
-        assert.equal(8, count, "native matrix lost a traversal, split or line-policy variant")
+        -- The complete C/private-header/foreign-header bytes stay a function of
+        -- the native inputs alone: no target spelling or prior browser
+        -- generation may leak state into them.
+        local native = {}
+        for _, parts in ipairs({ 1, 4 }) do
+            for _, located in ipairs({ false, true }) do
+                local key = parts .. ":" .. tostring(located)
+                native[key] = assert(native_output(nil, parts, located))
+                assert.equal(native[key], (native_output("linux", parts, located)))
+            end
+        end
         generate("browser", 4)
-        assert.same(expected, native_variants("linux"))
+        for _, parts in ipairs({ 1, 4 }) do
+            for _, located in ipairs({ false, true }) do
+                local key = parts .. ":" .. tostring(located)
+                assert.equal(native[key], (native_output("linux", parts, located)), key)
+            end
+        end
     end)
+
+    it("gives native function definitions the same stamps as the browser target", function()
+        for _, parts in ipairs({ 1, 4 }) do
+            local native = definition_snapshot(generate(nil, parts, DEFINITION_SOURCE))
+            local browser = definition_snapshot(generate("browser", parts, DEFINITION_SOURCE))
+            assert.same(browser, native)
+            local generated_stamps = 0
+            for name, stamp in pairs(native) do
+                assert.is_not_nil(stamp, name)
+                if stamp == "1 TITAN_GENERATED_C_FILE" then
+                    generated_stamps = generated_stamps + 1
+                end
+            end
+            assert.is_true(generated_stamps > 10,
+                "generated definitions lost their generated-C reset")
+        end
+    end)
+
+    it("removes every definition stamp when line directives are disabled", function()
+        for _, parts in ipairs({ 1, 4 }) do
+            local text = assert(native_output(nil, parts, false))
+            assert.is_nil(text:find("#line", 1, true), parts)
+            assert.is_nil(text:find("TITAN_GENERATED_C_FILE", 1, true), parts)
+            assert.same({}, definition_snapshot(generate(nil, parts, DEFINITION_SOURCE, false)))
+        end
+    end)
+
 
     for _, parts in ipairs({ 1, 4 }) do
         it("owns every function signature and prologue in " .. parts .. "-part browser output", function()
@@ -303,25 +312,21 @@ describe("browser traceback entry generation", function()
         end)
     end
 
-    it("carries the browser boundary policy through immediate and graph foreign-header plans", function()
+    it("stamps immediate and graph foreign-header plans identically on both targets", function()
         local native, ast = generate(nil, 1, DEFINITION_SOURCE)
-        local browser = driver.plan_foreign_header("entries", ast,
-            "/generated/entries.titan", false, { target = "browser" })
+        local immediate = driver.plan_foreign_header("entries", ast,
+            "/generated/entries.titan", false)
         local graph = assert(driver.plan_foreign_headers({ "entries" }, {
             entries = { ast = ast, filename = "/generated/entries.titan" },
-        }, { target = "browser" }))
-        assert.equal(browser.contents, graph[1].contents)
-        for _, text in ipairs({ browser.contents, graph[1].contents }) do
-            local count = 0
-            for name, definition in pairs(definitions(text)) do
-                count = count + 1
-                assert.match('^%d+ "entries[.]browser[.]titan"$', definition.stamp, name)
-            end
-            assert.equal(3, count)
+        }))
+        assert.equal(immediate.contents, graph[1].contents)
+        local count = 0
+        for name, definition in pairs(definitions(graph[1].contents)) do
+            count = count + 1
+            assert.match('^%d+ "entries[.]browser[.]titan"$', definition.stamp, name)
         end
-        local planned_native = driver.plan_foreign_header("entries", ast,
-            "/generated/entries.titan", false, { target = "linux" })
-        assert.equal(native.foreign_header, planned_native.contents)
+        assert.equal(3, count)
+        assert.equal(native.foreign_header, immediate.contents)
     end)
 
     it("registers only its own wrappers and publishes names before importing a dependency", function()
@@ -366,7 +371,7 @@ describe("browser traceback entry generation", function()
         assert.truthy(code(generated):find('member.browser.titan', 1, true))
     end)
 
-    it("changes foreign native bodies only by source line directives under the line policy", function()
+    it("changes native foreign bodies only by line controls under the line policy", function()
         local source = [[
             foreign function body(n: int): int
                 if n > 0 then return n end
@@ -377,8 +382,11 @@ describe("browser traceback entry generation", function()
         local unlocated = code(generate(nil, 1, source, false))
         assert.truthy(located:find('#line 2 "entries.browser.titan"', 1, true))
         assert.is_nil(unlocated:find("#line", 1, true))
+        assert.is_nil(unlocated:find("TITAN_GENERATED_C_FILE", 1, true))
         local function without_directives(text)
-            return (text:gsub("[ \t]*#line[^\n]*\n", ""):gsub("\n[ \t\n]*\n", "\n"))
+            return (text:gsub("[ \t]*#line[^\n]*\n", "")
+                :gsub('^#define[ \t]+TITAN_GENERATED_C_FILE[ \t]+"[^"\n]*"\n', "")
+                :gsub("\n[ \t\n]*\n", "\n"))
         end
         assert.equal(without_directives(unlocated), without_directives(located))
     end)
@@ -389,3 +397,394 @@ describe("browser traceback entry generation", function()
         assert.truthy(text:find("lua_pop(L, 1);", assert(text:find("TITAN_ENTRIES_KEY", 1, true)), true))
     end)
 end)
+
+-- Foreign headers are rendered before (and, for restored plans, independently
+-- of) C generation, so their line/coverage policy is an explicit input of the
+-- plan. These cases drive the real driver planner/renderer without generating
+-- C first, which is where ambient coder state used to leak in.
+describe("foreign-header emission policy", function()
+    local FOREIGN = [[
+local foreign function copy(n: int): int return n end
+function get(): integer return 1 end
+]]
+    local function checked_ast()
+        h.reset(true)
+        local ast, err = parser.parse("entries.browser.titan", FOREIGN)
+        assert.truthy(ast, err)
+        local _, errors = checker.check("entries", ast, FOREIGN,
+            "entries.browser.titan")
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        return ast
+    end
+    local function planned(policy)
+        return assert(driver.plan_foreign_header("entries", checked_ast(),
+            "/generated/entries.titan", false, policy))
+    end
+    local function line_count(contents)
+        return select(2, (contents or ""):gsub("#line", ""))
+    end
+    local function stamps(contents)
+        local result = {}
+        for name, definition in pairs(definitions(contents or "")) do
+            result[name] = definition.stamp
+        end
+        return result
+    end
+    local function stamped_header(policy)
+        local plan = planned(policy)
+        local result = stamps(plan.contents)
+        assert.is_true(next(result) ~= nil, "fixture has no foreign definition")
+        for name in pairs(result) do
+            assert.is_not_nil(result[name], name)
+        end
+        return plan
+    end
+
+    it("plans each header under its own policy, before any C generation", function()
+        assert.same({ line_directives = true, coverage = false },
+            driver.header_policy(false))
+        assert.equal(2, line_count(stamped_header(
+            driver.header_policy(false)).contents))
+        local previous = driver.EMIT_LINE_DIRECTIVES
+        local tested, test_error = xpcall(function()
+            -- A fresh no-line invocation: the option alone decides the header.
+            driver.EMIT_LINE_DIRECTIVES = false
+            assert.same({ line_directives = false, coverage = false },
+                driver.header_policy(false))
+            local disabled = planned(driver.header_policy(false))
+            assert.equal(0, line_count(disabled.contents))
+            assert.same({}, stamps(disabled.contents))
+            -- C generation under the same policy accepts that plan and emits
+            -- no stamps of its own.
+            local generated = coder.generate("entries", checked_ast(), {},
+                driver.TITAN_ABI_VERSION, false, {
+                    source_output_stem = "/generated/entries",
+                    foreign_header_plan = disabled,
+                })
+            assert.is_nil(code(generated):find("#line", 1, true))
+            -- Turning the option back on needs no intervening generation: the
+            -- next header carries its own explicit enabled policy, and the
+            -- disabled one keeps its bytes.
+            driver.EMIT_LINE_DIRECTIVES = true
+            assert.equal(2, line_count(stamped_header(
+                driver.header_policy(false)).contents))
+            assert.equal(0, line_count(planned(
+                coder.emission_policy(false, false)).contents))
+        end, debug.traceback)
+        driver.EMIT_LINE_DIRECTIVES = previous
+        assert.is_true(tested, test_error)
+    end)
+
+    it("rejects a header plan rendered under another emission policy", function()
+        local disabled = planned(coder.emission_policy(false, false))
+        assert.equal(0, line_count(disabled.contents))
+        local ok, err = pcall(coder.generate, "entries", checked_ast(), {},
+            driver.TITAN_ABI_VERSION, true, {
+                source_output_stem = "/generated/entries",
+                foreign_header_plan = disabled,
+            })
+        assert.is_false(ok)
+        assert.truthy(tostring(err):find("different emission policy", 1, true),
+            tostring(err))
+    end)
+
+    for _, backend in ipairs({ "gcc-gcov", "llvm-gcov" }) do
+        it("renders a selected coverage relay with the coverage policy under "
+            .. backend, function()
+            local ast = checked_ast()
+            coder.prepare_coverage(ast, true)
+            local covered = assert(driver.plan_foreign_header("entries", ast,
+                "/generated/entries.titan", false, driver.header_policy(true)))
+            assert.equal(0, line_count(covered.contents))
+            assert.same({}, stamps(covered.contents))
+            local generated = coder.generate("entries", ast, {},
+                driver.TITAN_ABI_VERSION, true, {
+                    coverage = true,
+                    coverage_backend = backend,
+                    source_output_stem = "/generated/entries",
+                    foreign_header_plan = covered,
+                })
+            local text = code(generated)
+            assert.is_nil(text:find("#line ", 1, true))
+            assert.truthy(text:find("TITAN_COVERAGE_BEGIN", 1, true))
+            -- Coverage must not leave the coder suppressing later plans.
+            assert.equal(2, line_count(stamped_header(
+                driver.header_policy(false)).contents))
+        end)
+    end
+
+    it("applies per-module policies to one graph header plan", function()
+        local plain = checked_ast()
+        local covered = checked_ast()
+        coder.prepare_coverage(covered, true)
+        local plans = assert(driver.plan_foreign_headers({ "plain", "covered" }, {
+            plain = { ast = plain, filename = "/generated/plain.titan" },
+            covered = { ast = covered, filename = "/generated/covered.titan" },
+        }, function(name)
+            return driver.header_policy(name == "covered")
+        end))
+        local by_name = {}
+        for _, plan in ipairs(plans) do by_name[plan.modname] = plan end
+        assert.equal(2, line_count(by_name.plain.contents))
+        assert.is_true(next(stamps(by_name.plain.contents)) ~= nil)
+        assert.equal(0, line_count(by_name.covered.contents))
+        assert.same({}, stamps(by_name.covered.contents))
+        assert.same(driver.header_policy(false), by_name.plain.policy)
+        assert.same(driver.header_policy(true), by_name.covered.policy)
+    end)
+end)
+
+-- A published foreign-header plan is one immutable unit: policy, the checked
+-- module object it was rendered from, contents and the digest of the recipe
+-- that produced them. A build under another policy, or from a different checked
+-- module, must republish the header (disk, recipe and C agreeing), in the same
+-- process and across processes.
+describe("published foreign-header plans", function()
+    local MODULE = "policy"
+    local FOREIGN = [[
+local foreign function copy(n: int): int return n end
+function get(): integer return copy(1) end
+]]
+    local COVERAGE_FLAGS = { "-O0", "-fno-lto", "--coverage",
+        "-fprofile-update=atomic" }
+
+    local function checked_ast(source, path)
+        h.reset(true)
+        local ast, err = parser.parse(path, source)
+        assert.truthy(ast, err)
+        local _, errors = checker.check(MODULE, ast, source, path)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        return ast
+    end
+    local function read(path)
+        local file = assert(io.open(path, "rb"))
+        local contents = file:read("*a")
+        file:close()
+        return contents
+    end
+    local function line_count(contents)
+        return select(2, (contents or ""):gsub("#line", ""))
+    end
+    local function build(dir, emit, coverage, entry, source, checked)
+        local previous = driver.EMIT_LINE_DIRECTIVES
+        driver.EMIT_LINE_DIRECTIVES = emit
+        local path = dir .. "/" .. MODULE .. ".titan"
+        local ast = checked or checked_ast(source or FOREIGN, path)
+        local captured
+        local original = driver.plan_foreign_header
+        driver.plan_foreign_header = function(...)
+            local plan = original(...)
+            captured = plan
+            return plan
+        end
+        local ok, compiled, original_err = pcall(function()
+            local options = {}
+            if coverage then
+                options.coverage = true
+                options.coverage_backend = "gcc-gcov"
+                options.extra_compile_flags = COVERAGE_FLAGS
+            end
+            return driver.compile(MODULE, ast, path, {}, false, options, entry)
+        end)
+        driver.plan_foreign_header = original
+        driver.EMIT_LINE_DIRECTIVES = previous
+        assert.is_true(ok, compiled)
+        assert.truthy(compiled, original_err)
+        local plan = captured or (entry and entry.foreign_header_plan)
+        assert(plan, "compile neither planned nor reused a foreign header")
+        return {
+            plan = plan,
+            planned = captured ~= nil,
+            ast = ast,
+            header = read(dir .. "/" .. MODULE .. ".titan.h"),
+            c = read(dir .. "/" .. MODULE .. ".c"),
+        }
+    end
+    local function temporary_directory()
+        local path = assert(compiler_io.new_sync():tmpname())
+        os.remove(path)
+        assert(lfs.mkdir(path))
+        return path
+    end
+    local function remove_directory(path)
+        for entry in lfs.dir(path) do
+            if entry ~= "." and entry ~= ".." then
+                os.remove(path .. "/" .. entry)
+            end
+        end
+        assert(lfs.rmdir(path))
+    end
+    local function assert_policy(built, emit, coverage)
+        assert.same({ line_directives = emit, coverage = coverage },
+            built.plan.recipe.policy)
+        assert.equal(coder.foreign_header_digest(built.plan.recipe),
+            built.plan.digest)
+        local expected = emit and not coverage and 2 or 0
+        assert.equal(expected, line_count(built.header))
+        if coverage then
+            -- Converted coverage C opens with a generated-file anchor and
+            -- still names the Titan source; the header carries no stamps.
+            assert.truthy(built.c:match('^#line %d+ "[^"\n]*policy[.]c"'),
+                "coverage C is not the converted form")
+            assert.truthy(built.c:find(MODULE .. ".titan", 1, true))
+        elseif emit then
+            assert.truthy(built.c:find("#define TITAN_GENERATED_C_FILE",
+                1, true))
+            assert.is_true(line_count(built.c) > 0)
+        else
+            assert.equal(0, line_count(built.c))
+            assert.is_nil(built.c:find("TITAN_GENERATED_C_FILE", 1, true))
+        end
+    end
+
+    it("republishes the header when the line-directive policy changes in one process", function()
+        local dir = temporary_directory()
+        local tested, test_error = xpcall(function()
+            -- One resolver entry reuses the module's published plan between
+            -- builds, so the policy check is exercised, not bypassed.
+            local entry = { kind = "source", filename = dir .. "/policy.titan",
+                source_files = { dir .. "/policy.titan" }, deps = {} }
+            local disabled = build(dir, false, false, entry)
+            assert_policy(disabled, false, false)
+            assert.equal(disabled.plan, entry.foreign_header_plan)
+            local enabled = build(dir, true, false, entry)
+            assert_policy(enabled, true, false)
+            assert.not_equal(disabled.plan.digest, enabled.plan.digest)
+            assert.equal(enabled.plan, entry.foreign_header_plan)
+            local again = build(dir, false, false, entry)
+            assert_policy(again, false, false)
+            assert.equal(disabled.plan.digest, again.plan.digest)
+        end, debug.traceback)
+        remove_directory(dir)
+        assert.is_true(tested, test_error)
+    end)
+
+    it("republishes the header when the coverage selection changes in one process", function()
+        local dir = temporary_directory()
+        local tested, test_error = xpcall(function()
+            local entry = { kind = "source", filename = dir .. "/policy.titan",
+                source_files = { dir .. "/policy.titan" }, deps = {} }
+            local covered = build(dir, true, true, entry)
+            assert_policy(covered, true, true)
+            local plain = build(dir, true, false, entry)
+            assert_policy(plain, true, false)
+            assert.not_equal(covered.plan.digest, plain.plan.digest)
+            assert.equal(plain.plan, entry.foreign_header_plan)
+            assert_policy(build(dir, true, true, entry), true, true)
+        end, debug.traceback)
+        remove_directory(dir)
+        assert.is_true(tested, test_error)
+    end)
+
+    it("republishes the header across processes under the current policy", function()
+        local dir = temporary_directory()
+        local script = dir .. "/build.lua"
+        local file = assert(io.open(script, "wb"))
+        assert(file:write(([[
+package.path = "./?.lua;./?/init.lua;" .. package.path
+local h = require "spec.support.helpers"
+local driver = require "titan-compiler.driver"
+local parser = require "titan-compiler.parser"
+local checker = require "titan-compiler.checker"
+local SOURCE = ]] .. string.format("%q", FOREIGN) .. [[
+h.reset(true)
+driver.EMIT_LINE_DIRECTIVES = arg[2] == "on"
+local ast = assert(parser.parse("policy.titan", SOURCE))
+local _, errors = checker.check("policy", ast, SOURCE, "policy.titan")
+assert(0 == #errors, table.concat(errors, "\n"))
+local ok, err = driver.compile("policy", ast, arg[1] .. "/policy.titan", {}, false, {})
+assert(ok, err)
+]])))
+        assert(file:close())
+        local LUA = require("spec.support.installed_prefix").active()
+            .. (require("titan-compiler.platform").windows and "/bin/lua.exe" or "/bin/lua")
+        local function child(emit)
+            local result = compiler_io.new_sync():run({
+                LUA, script, dir, emit and "on" or "off" })
+            assert.truthy(result.ok, result.output or result.diagnostic)
+            return read(dir .. "/policy.titan.h")
+        end
+        local tested, test_error = xpcall(function()
+            -- A fresh process publishes under the disabled policy; this process
+            -- then rebuilds under the enabled one.
+            assert.equal(0, line_count(child(false)))
+            local enabled = build(dir, true, false)
+            assert_policy(enabled, true, false)
+            -- A second fresh process rebuilds under the disabled policy again.
+            assert.equal(0, line_count(child(false)))
+            local disabled = build(dir, false, false)
+            assert_policy(disabled, false, false)
+        end, debug.traceback)
+        os.remove(script)
+        remove_directory(dir)
+        assert.is_true(tested, test_error)
+    end)
+
+    it("replans for a different checked module with the same filename", function()
+        local dir = temporary_directory()
+        local tested, test_error = xpcall(function()
+            local entry = { kind = "source", filename = dir .. "/policy.titan",
+                source_files = { dir .. "/policy.titan" }, deps = {} }
+            local function body(value)
+                return (FOREIGN:gsub("return n end",
+                    "return n + " .. value .. " end"))
+            end
+            -- No source file is ever written: these are checked buffers that
+            -- happen to share one filename, as an editor or language server
+            -- supplies them.
+            local first = build(dir, true, false, entry, body(1234))
+            assert.is_true(first.planned)
+            assert.truthy(first.header:find("1234", 1, true))
+            assert.equal(first.plan, entry.foreign_header_plan)
+            assert.equal(first.ast, first.plan.ast)
+            -- The very same checked module object under the same policy reuses
+            -- the published unit instead of planning again.
+            local reused = build(dir, true, false, entry, nil, first.ast)
+            assert.is_false(reused.planned)
+            assert.equal(first.plan, reused.plan)
+            -- A different checked buffer under the same filename and policy is
+            -- a different input and must replan and republish.
+            local second = build(dir, true, false, entry, body(5678))
+            assert.is_true(second.planned)
+            assert.not_equal(first.ast, second.ast)
+            assert.not_equal(first.plan, second.plan)
+            assert.truthy(second.header:find("5678", 1, true))
+            assert.is_nil(second.header:find("1234", 1, true))
+            assert.equal(second.plan, entry.foreign_header_plan)
+            -- A changed foreign signature is a different checked module too.
+            local signature = (FOREIGN:gsub(
+                "copy%(n: int%): int return n end",
+                "copy(n: int, m: int): int return n + m end")
+                :gsub("copy%(1%)", "copy(1, 2)"))
+            local third = build(dir, true, false, entry, signature)
+            assert.is_true(third.planned)
+            assert.truthy(third.header:find(
+                [[\u2119_foreign_inline_copy(int _param_n, int _param_m)]],
+                1, true), third.header)
+            assert.is_nil(third.header:find("5678", 1, true))
+            assert.equal(third.plan, entry.foreign_header_plan)
+            assert.is_nil(lfs.attributes(dir .. "/policy.titan", "mode"))
+        end, debug.traceback)
+        remove_directory(dir)
+        assert.is_true(tested, test_error)
+    end)
+
+    it("makes the emission policy part of the header recipe identity", function()
+        local prefix, body = "prefix", "body"
+        local headers = { "dependency" }
+        local function recipe(emit, coverage)
+            return { prefix = prefix, body = body, source_headers = headers,
+                policy = { line_directives = emit, coverage = coverage } }
+        end
+        local function digest(emit, coverage)
+            return coder.foreign_header_digest(recipe(emit, coverage))
+        end
+        -- Identical rendered text with a different policy is a different unit.
+        assert.equal(digest(true, false), digest(true, false))
+        assert.not_equal(digest(true, false), digest(false, false))
+        assert.not_equal(digest(true, false), digest(true, true))
+        assert.not_equal(digest(true, false), coder.foreign_header_digest(
+            { prefix = prefix, body = body, source_headers = headers }))
+    end)
+end)
+

@@ -1975,7 +1975,7 @@ function coder._emit_interface_adapter(
             ptrdiff_t _base_off = savestack(L, _base);
         ]]
     end
-    local body = definitionline(tlcontext, pair.loc) .. render([[
+    local body = definitionline(pair.loc) .. render([[
         TITAN_MODULE_PRIVATE TITAN_NOINLINE $SIGNATURE {
             (void)_fn;
             $GC_POLL
@@ -2375,7 +2375,7 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
             "TITAN_MODULE_PRIVATE int $NAME(lua_State *L);", {
                 NAME = pair.wrapper_id,
             })
-        pair.wrapper_body = definitionline(tlcontext, pair.loc) .. render([[
+        pair.wrapper_body = definitionline(pair.loc) .. render([[
             TITAN_MODULE_PRIVATE int $NAME(lua_State *L) {
                 StkId _titan_interface_func = L->ci->func.p;
                 CClosure *_titan_interface_witness =
@@ -2478,7 +2478,7 @@ function coder._prepare_interface_pair_wrapper(tlcontext, pair)
             return 1;
         }
     ]], {
-        DEFLINE = definitionline(tlcontext, pair.loc),
+        DEFLINE = definitionline(pair.loc),
         ALLOCATOR = pair.allocator_id,
         WRAPPER = pair.wrapper_id,
         RESERVE = reserve,

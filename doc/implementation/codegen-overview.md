@@ -202,24 +202,58 @@ changes as root nodes and nested bodies from different contributors are
 emitted, so compiler diagnostics, DWARF, and libbacktrace frames identify the
 actual source file and line.
 
-For the [browser target](browser-target.md), `definitionline(tlcontext, loc)`
-(`coder/names.lua`, installed in the shared `coder.core` environment) also
-stamps a `#line` directive immediately before the signature of every generated
-C function definition (including in generated `.titan.h` foreign headers).
-Source-owned definitions receive their real declaration or site location;
-source-less helpers (module protocol, metamethod, and init/opener functions,
-unlocated adapters, and the four inline helpers in `cpreamble.browser_prefix`)
-emit `#line 1 TITAN_GENERATED_C_FILE`, where each emitted browser part defines
+`definitionline(loc)` (`coder/names.lua`, installed in the shared `coder.core`
+environment) additionally stamps a `#line` directive immediately before the
+signature of every generated C function definition, on **both** targets and in
+generated `.titan.h` foreign headers. Source-owned definitions receive their
+real declaration or site location; source-less helpers (module protocol,
+metamethod, and init/opener functions, unlocated adapters, and the four inline
+helpers in `cpreamble.definition_prefix`) emit
+`#line 1 TITAN_GENERATED_C_FILE`, where each emitted part defines
 `TITAN_GENERATED_C_FILE` to its actual `<stem>.c` or `<stem>.partN.c` filename
 (avoiding Clang's `__BASE_FILE__`, which follows prior `#line` changes). This
 prevents a function prologue (such as `luaC_checkGC` or argument/root setup
 before the first statement's `#line`) from inheriting the preceding definition's
-trailing `#line` across folder contributors, and ensures each function's first
-in-body `.wasm.map` segment (`first[body]`) names its own declaring `.titan`
-file. For native targets `definitionline` returns `""`, so native generated C
-and header bytes are unchanged.
+trailing `#line` across folder contributors, so DWARF, libbacktrace, and the
+browser `.wasm.map` function range's first in-body segment (`first[body]`) name
+the function's own declaring `.titan` file and definition line.
 
-`emitline` returns nothing in two cases:
+`definitionline` and the part preamble follow exactly the policies below:
+`definition_stamps()` is false under coverage generation and under a false
+line-directive policy, so those modes emit neither a definition stamp nor the
+`TITAN_GENERATED_C_FILE` macro. Within a definition, everything before the
+first body statement — the signature, the GC poll, variable anchors, stack
+reservation, and argument checks — therefore carries the definition's own
+location rather than another file's.
+
+A foreign-header plan is one immutable published unit: `{policy, contents,
+recipe}` plus `digest`, the canonical identity of that recipe
+(`coder.foreign_header_digest`). Only the planning path produces and publishes
+it — disk bytes and recipe together — and nothing is cached on the AST, so no
+earlier build can leave a header behind to be relabelled. Every render receives
+an explicit policy (`coder.emission_policy`, applied by
+`coder.with_emission_policy`); the driver derives it with
+`driver.header_policy(coverage)` from the same `EMIT_LINE_DIRECTIVES` option and
+per-module coverage selection that its C uses, for immediate and graph
+planning, the per-module worker, the CLI restore path, and checking headers
+(never coverage). Plans that a direct compile must not reuse are simply not
+passed: `driver.compile` plans under its own policy, and `coder.generate`
+consumes a supplied plan verbatim or raises if its policy differs from the
+generation it is embedded in — it never re-renders or falls back.
+
+The policy is part of the header recipe digest, not of the producer interface
+digest: the interface digest keeps hashing the rendered header text only, so a
+policy change that leaves that text identical does not over-invalidate every
+consumer of a declaration-only header. A producer is invalidated through its
+own recorded configuration (which includes `emit_line_directives` and the
+native coverage policy) and a consumer through changed header text. A published
+plan also records the checked module object it was rendered from, and a compile
+reuses it only when that same object and the policy match. A different checked
+buffer — a changed foreign body or signature, or an unsaved/overridden source
+that happens to share a filename — always replans and republishes rather than
+reusing the old header; disk contents are never consulted.
+
+`emitline` and `definitionline` return nothing in two cases:
 
 - **Coverage generation.** Coverage uses scoped region metadata instead; see
   [native coverage](native-coverage.md).
@@ -233,6 +267,22 @@ The cost of disabling directives is deliberate. Traceback reconstruction uses
 Titan-attributed debug filenames to keep ordinary native Titan frames, so this
 mode can drop them from logical traces even though the symbol-to-display-name
 registry is unchanged.
+
+### Deterministic emission order
+
+Generated C is a function of its inputs alone: the same module always yields
+byte-identical part files, private headers, and foreign headers. Lua randomizes
+its string hash seed per process, so no emitter walks a string-keyed registry
+directly. `coder._sorted_keys` supplies the bytewise-sorted key order for the
+emission sites whose order reaches generated C: the per-record and per-Interface
+method maps, nominal and owned-C metatable recovery blocks, static-dependency
+`extern` declarations and their binding code, and bound method/function
+entries. Registries that carry a source order keep it — declarations, fields,
+union parts, and the discovered adapter/Array-writer lists. Sorted emission
+does not change any emitted declaration or statement, only the order of
+independent groups, and `spec/coder/codegen_determinism_spec.lua` generates one
+module with every such registry in separate processes and requires byte
+equality.
 
 A trimmed but real example of an unsplit module (elisions marked `...`). This
 module:

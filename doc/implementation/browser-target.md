@@ -2245,10 +2245,12 @@ hosts`).
 * `spec/coder/browser_trace_entries_spec.lua` — browser-only
   `registry[TITAN_ENTRIES_KEY]` registration across all `titanentry` wrapper
   families, split-unit deduplication, early `_init` ordering before
-  dependencies and user initializers, browser function-definition `#line`
-  ownership (`definitionline` across 1-part, 4-part, and `.titan.h`
-  foreign-header generation, and `TITAN_GENERATED_C_FILE` across 1-part and
-  4-part C outputs), and byte-identical native code generation.
+  dependencies and user initializers, function-definition `#line` ownership on
+  both targets (`definitionline` across 1-part, 4-part, immediate and graph
+  `.titan.h` foreign-header generation, and `TITAN_GENERATED_C_FILE` across
+  1-part and 4-part C outputs), the absent stamps and macro under
+  `--no-line-directives`, and native output that no target spelling or prior
+  browser generation changes.
 * `spec/coder/browser_protocol_spec.lua` — the executing check, corrupted
   providers (exits 21 to 26) without publication, re-execution before
   identical-archive reuse, probe cleanup, and archive-only consumers on both

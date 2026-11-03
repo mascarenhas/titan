@@ -112,6 +112,7 @@ compiler spec/coder/closure_adjustment_wrappers_spec.lua 5.706 15.454
 compiler spec/coder/closure_transfer_spec.lua 1.137 0.000
 compiler spec/coder/closures_spec.lua 9.812 18.381
 compiler spec/coder/coder_spec.lua 41.556 94.307
+compiler spec/coder/codegen_determinism_spec.lua 1.000 -
 stdlib spec/coder/compiler_build_scenarios_spec.lua 1.000 115.379
 compiler spec/coder/const_values_spec.lua 1.177 6.224
 compiler spec/coder/contextual_value_calls_spec.lua 2.592 7.007
