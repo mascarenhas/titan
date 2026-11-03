@@ -293,8 +293,8 @@ end
 
 -- A compile-side spelling the build profile owns: the optimization, debug and
 -- frame choices, and the post-Asyncify pass list. Both `-sKEY[=VALUE]` and the
--- two-token `-s KEY[=VALUE]` spellings count, and `-sNO_...`/`-U...` spellings
--- of an owned key are the same setting, as in the link-extras check.
+-- two-token `-s KEY[=VALUE]` spellings count, with or without a value, and
+-- `-sNO_KEY...` is the same setting.
 function M.owned_compile_option(flags, index)
     local flag = flags[index]
     if M.trace_option(flag) then return flag end

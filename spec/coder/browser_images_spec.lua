@@ -344,15 +344,27 @@ describe("browser image profile and SDK readiness", function()
         assert.equal("budget", assert(driver.browser_link_plan(test_context)).identity_inputs.purpose)
         assert.equal("budget", assert(driver.browser_link_plan(
             { target = "browser", link_kind = "program" })).identity_inputs.purpose)
-        -- A program purpose may never certify or link a test image, or the reverse.
-        driver.browser_link_options = { purpose = "program", assertions = 2 }
-        local refused, err = driver.browser_link_plan(test_context)
-        assert.is_nil(refused)
-        assert.equal('browser link purpose "program" does not match this test image', err)
-        driver.browser_link_options = { purpose = "test", assertions = 2 }
-        local reversed, reverse_error = driver.browser_link_plan({ target = "browser", link_kind = "program" })
-        assert.is_nil(reversed)
-        assert.equal('browser link purpose "test" does not match this program image', reverse_error)
+        -- A program purpose may never certify or link a test image, or the reverse,
+        -- whether the caller passes the kind explicitly (titanc's certificate call
+        -- and compile_browser_image's shape) or lets it be derived.
+        local program_context = { target = "browser", link_kind = "program" }
+        for _, call in ipairs({ { test_context }, { test_context, "test" } }) do
+            driver.browser_link_options = { purpose = "program", assertions = 2 }
+            local refused, err = driver.browser_link_plan(call[1], call[2])
+            assert.is_nil(refused)
+            assert.equal('browser link purpose "program" does not match this test image', err)
+        end
+        for _, call in ipairs({ { program_context }, { program_context, "program" } }) do
+            driver.browser_link_options = { purpose = "test", assertions = 2 }
+            local refused, err = driver.browser_link_plan(call[1], call[2])
+            assert.is_nil(refused)
+            assert.equal('browser link purpose "test" does not match this program image', err)
+        end
+        -- An agreeing preset still certifies and links, through both shapes.
+        for _, call in ipairs({ { test_context }, { test_context, "test" } }) do
+            driver.browser_link_options = { purpose = "test", assertions = 2 }
+            assert.equal("test", assert(driver.browser_link_plan(call[1], call[2])).identity_inputs.purpose)
+        end
         -- A preset harness table must name its profile; inheriting the kind
         -- would silently give a measurement build an image's flags.
         driver.browser_link_options = { assertions = 2 }

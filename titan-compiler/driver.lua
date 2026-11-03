@@ -789,9 +789,11 @@ function driver.browser_link_plan(context, purpose)
     local descriptor, err = driver.context_target_descriptor(context)
     if not descriptor then return nil, err end
     local options = driver.browser_link_options
+    -- The requested purpose and the preset are both checked, because the
+    -- preset is what the link and its certificate consume: a caller passing
+    -- the image kind must not hide a contrary preset purpose.
     local resolved
-    resolved, err = driver.browser_link_purpose(context, purpose or
-        (options and options.purpose))
+    resolved, err = driver.browser_link_purpose(context, purpose)
     if not resolved then return nil, err end
     if options == nil then
         options = { purpose = resolved, assertions = 2 }
@@ -800,6 +802,10 @@ function driver.browser_link_plan(context, purpose)
         -- inheriting the image kind would silently give a measurement build a
         -- program or test image's flags.
         return nil, "browser link profile options require a purpose"
+    else
+        local preset
+        preset, err = driver.browser_link_purpose(context, options.purpose)
+        if not preset then return nil, err end
     end
     return driver.browserlink.profile(descriptor, options)
 end
