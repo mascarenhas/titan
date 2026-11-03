@@ -39,17 +39,21 @@ limits](#current-limits)), so the program writes its lines with C's `puts`
 through the [C FFI](ffi.md). Whatever a program writes to standard output or
 standard error reaches the page through the loader's output sinks.
 
-Build it for the browser, placing the program in a folder `site/` that will
-hold the page:
+Build it for the browser:
 
 ```sh
-titanc --target browser -o out --exe site/hello.mjs hello
+titanc --target browser -o out hello
 ```
 
-This writes `site/hello.mjs`, `site/hello.wasm`, and `site/hello.wasm.map`:
-the ES module, its WebAssembly binary, and its source map. The compiler's
-intermediate files stay in `out/`. `titanc` also keeps its empty lock file
-`.titan-build.lock` in `site/`; the page does not use it.
+This writes `out/hello.mjs`, `out/hello.wasm`, and `out/hello.wasm.map`: the
+ES module, its WebAssembly binary, and its source map, next to the compiler's
+intermediate files. Copy the three files into a folder `site/` that will hold
+the page:
+
+```sh
+mkdir -p site
+cp out/hello.mjs out/hello.wasm out/hello.wasm.map site/
+```
 
 The page runs the program through the loader `titan-browser.mjs`, which ships
 in the browser SDK. The page needs a copy of the loader next to the program,
