@@ -342,6 +342,53 @@ use a browser output directory as a native source root. See [output
 directories](output-directory.md#the-target-marker) for the marker's place
 among the other compiler-owned files.
 
+## Build profiles
+
+The browser target follows the same `TITAN_BUILD_PROFILE` as native builds
+([native build profiles](build-profiles.md)): `production`, the default, or
+`validation`. The profile decides how much the C compiler and Emscripten's
+WebAssembly optimizer may restructure the code, and therefore which frames a
+[trace](#traces) shows:
+
+| Profile | Object compilation | Link | Frames in traces |
+| --- | --- | --- | --- |
+| `production` | `-O3`, without `-fno-inline` or `-fno-optimize-sibling-calls`, so functions can be inlined | `-O3`, which also runs Emscripten's WebAssembly optimizer, including its own inlining | the frames that survive optimization, as in a native production build |
+| `validation` | `-O1 -fno-inline -fno-optimize-sibling-calls` | `-O1`, without the WebAssembly optimizer | every frame |
+
+In both profiles, objects keep their line tables (`-gline-tables-only`), the
+link writes the source map and keeps the WebAssembly `name` section
+(`-gsource-map -g2`), and Titan extends the map as described in
+[traces](#traces). Every Titan frame that a trace shows is therefore
+attributed to its `.titan` file and line as that section describes, and a
+deployed program needs its `<stem>.wasm.map` next to `<stem>.wasm`, in either
+profile. Production images are smaller and faster; the [implementation
+manual](../implementation/browser-target.md#measurements) records the
+measurements, and [traces](#traces) shows what an optimized trace looks like.
+
+**Test images keep their frames.** Under `production`, `titanc --test`
+compiles each test module (a module that declares discovered `test_`
+functions) with `-fno-inline -fno-optimize-sibling-calls`, and links the image
+without the WebAssembly optimizer's inlining and without its merging of
+identical functions, which would otherwise report one function's frame under
+another function's name. The frames of a test module, and the
+[`location`](standard-library-test.md#location-and-failure-traces) results
+built on them, are therefore exact under both profiles. This is the browser
+form of native `--test`'s frame preservation
+([compilation](standard-library-test.md#source-first-resolution-and-runner-generation)).
+Other modules keep the profile's own flags: production dependencies compiled
+from source, the generated runner, and the SDK's `titan.test`. A function
+inlined inside one of those modules can still be missing from a test's trace.
+
+**The SDK and output directories.** `make browser-sdk` compiles the browser
+runtime and standard library under the `TITAN_BUILD_PROFILE` in effect when it
+runs (`production` unless set), and every browser build links those archives
+as installed, as native builds link the installed standard provider. Install
+the SDK under the profile you build with, in a separate prefix for each
+profile as for native builds. The profile is part of the browser target's
+configuration, so objects and images built under one profile are never reused
+by a build under the other; keep one output directory for each, such as
+`out-browser/` and `out-browser-validation/`.
+
 ## What you can build
 
 A browser build links a program (the module `app` defines `main`) or a test
@@ -412,6 +459,9 @@ path with `.mjs` added. As with native tests, a run that selects no case exits
 0, so a script that must prove something ran should check the reported case
 count. [Testing with `titan-browser-run`](#testing-with-titan-browser-run)
 describes the runner.
+
+Under the default `production` profile, a test image still keeps the frames
+of its test modules; see [build profiles](#build-profiles).
 
 ### Library archives
 
@@ -673,6 +723,65 @@ unified Titan/Lua contract as native builds:
   append behave as on native hosts, including across coroutine yields and
   resumptions.
 
+**Optimized frames.** As in a native production build, a `production` image
+has no frame for a function that the optimizer inlined into its caller. A
+frame that does appear is still exact, and an inlined function's line is
+reported under the name of the function that absorbed it. Titan's own trace
+fixture `trace_uncaught.titan` shows the difference:
+
+```titan
+foreign import "stdio.h"
+
+local function uncaught_leaf()
+  raise "trace-uncaught-original"
+end
+
+local function uncaught_middle()
+  uncaught_leaf()
+end
+
+function main(_args: {string}): integer
+  defer do
+    ffi.fputs("TRACE uncaught cleanup=1\n", ffi.stderr)
+    ffi.fflush(ffi.stderr)
+  end
+  uncaught_middle()
+  return 0
+end
+```
+
+Built with `validation`, it writes this to stderr:
+
+```text
+TRACE uncaught cleanup=1
+trace_uncaught: trace-uncaught-original
+stack traceback:
+	trace_uncaught.titan:4: in trace_uncaught.uncaught_leaf
+	trace_uncaught.titan:8: in trace_uncaught.uncaught_middle
+	trace_uncaught.titan:16: in trace_uncaught.main
+	[C]: in ?
+```
+
+Built with `production`, where `uncaught_middle` was inlined into `main`, it
+writes:
+
+```text
+TRACE uncaught cleanup=1
+trace_uncaught: trace-uncaught-original
+stack traceback:
+	trace_uncaught.titan:4: in trace_uncaught.uncaught_leaf
+	trace_uncaught.titan:8: in trace_uncaught.main
+	[C]: in ?
+```
+
+Line 8, the call inside `uncaught_middle`, now appears under `main`, and
+`main`'s own line 16 is gone. Whatever a production trace shows keeps its
+exact file and line (or the no-line form on WebKit and Safari, below), Lua
+frames and the markers below keep their places and order, and internal entry
+wrappers and C symbol names never appear. Build with `validation` when a trace
+must show every frame; [test images](#build-profiles) keep the frames of their
+test modules under both profiles.
+
 **WebKit and Safari reduced fidelity.** On WebKit and Safari, where
 JavaScriptCore's `Error.stack` reports WebAssembly frames by function index
 without a bytecode offset, browser traces provide reduced, function-level
@@ -788,23 +897,33 @@ reported separately from Lua record errors. The diagnostic lists the supplied
 compile flags and the actual versus required target features. Remove the
 feature-changing flag; reinstalling browser Lua does not repair that mismatch.
 
-Titan also owns the trace-preserving optimization, debug, `#line`, and link
-settings that the runtime and traceback backend depend on: `-O1`,
-`-fno-inline`, `-fno-optimize-sibling-calls`, `-gline-tables-only` (for object
-compilation), `-gsource-map`, `-g2`, and
-`-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` (for linking), and
-source `#line` directives (`--no-line-directives` and
-`TITAN_NO_LINE_DIRECTIVES=1`), together with Asyncify, the longjmp mode, the
-stack and memory sizes, the program lifecycle and exports, the filesystem
-layer, assertions and stack checks, and the three target defines. Other
-Emscripten `-s` settings may be passed with `--ldflag`, but a compile or link
-flag that overrides or negates one of these owned settings is rejected, as are
-`--no-entry` and `--js-library`:
+Titan also owns the settings that the runtime and the traceback backend depend
+on. The [build profile](#build-profiles) owns the optimization level, inlining,
+sibling-call optimization, and frame pointers: every `-O` level, every `-g`
+flag, `-finline...`, `-foptimize-sibling-calls`, `-fomit-frame-pointer`, and
+their `-fno-` forms. Titan also owns `-gline-tables-only` (for object
+compilation), `-gsource-map`, `-g2`, and the WebAssembly optimizer's pass list
+`-sBINARYEN_EXTRA_PASSES` (for linking), and source `#line` directives
+(`--no-line-directives` and `TITAN_NO_LINE_DIRECTIVES=1`), together with
+Asyncify, the longjmp mode, the stack and memory sizes, the program lifecycle
+and exports, the filesystem layer, assertions and stack checks, and the three
+target defines. Other Emscripten `-s` settings, such as `-sWASM_BIGINT=1`, may
+be passed with `--ldflag`, but a compile or link flag that overrides or
+negates one of these owned settings is rejected, as are `--no-entry` and
+`--js-library`. The message names the build profile:
 
 ```text
-browser link profile owns option -sASYNCIFY=0
+browser production link profile owns option -O2
+browser production link profile owns option -fno-inline
+browser production link profile owns option -sBINARYEN_EXTRA_PASSES=--coalesce-locals
+browser production link profile owns option -sASYNCIFY=0
 browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)
 ```
+
+`titanc` checks `--cflag`, `--ldflag`, and the `TITAN_EXTRA_*` variables
+against the same owned set, so a compile flag such as `--cflag=-O2` is also
+reported as owned by the link profile. A `validation` build reports `browser
+validation link profile owns option ...`.
 
 ## Limits
 
@@ -812,7 +931,7 @@ A browser program runs with these fixed sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
-| Main C stack | 1 MiB | Plain Lua recursion through C calls, such as nested `pcall`, stops first at Lua's own limit with the ordinary catchable `C stack overflow` error, whereas recursion that alternates between Lua and compiled Titan can exhaust the JavaScript engine's stack before that limit (see [current limits](#current-limits)). Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
+| Main C stack | 1 MiB | Recursion through Lua's C API, such as nested `pcall` or recursion that alternates between Lua and compiled Titan, stops first at [Lua's C-call limit](#luas-c-call-limit) with the ordinary catchable `C stack overflow` error. Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
 | Coroutine C stack | 256 KiB per coroutine (2 MiB natively) | The same inside a coroutine, at about a quarter of that depth. |
 | Saved call stack for a coroutine switch or a wait | 64 KiB, for the main context and for each coroutine | A switch or wait whose call stack does not fit traps with `unreachable` (runner exit 71). About 400 small C frames fit. |
 | Linear memory | 16 MiB initially, growing to at most 2 GiB | An allocation failure is Lua's ordinary out-of-memory error, and creating a coroutine fails with `could not create coroutine: Out of memory`. Both can be caught, and the instance stays usable. |
@@ -820,6 +939,51 @@ A browser program runs with these fixed sizes:
 Coroutine stacks are allocated in full when a coroutine is created, and memory
 that the program has grown never shrinks, although freed blocks are reused.
 About 5,400 live coroutines fit in 2 GiB.
+
+### Lua's C-call limit
+
+Lua counts nested calls through its C API and stops them with its ordinary
+`C stack overflow` error when the count reaches its limit, `LUAI_MAXCCALLS`.
+The browser build of Lua sets that limit to 100; native builds keep Lua's 200.
+A JavaScript engine's stack is much smaller than a native C stack, and each
+level of such recursion costs it several WebAssembly and JavaScript frames.
+With Lua's default of 200, nested `pcall` came within a few levels of running
+V8's stack out first, which ends the run with an uncatchable `RangeError:
+Maximum call stack size exceeded` instead of a Lua error. At 100, the engine
+has about twice the room it needs even in the tightest case measured, nested
+`pcall` and coroutine resumes on V8 under `validation`, and Titan's tests
+check that mixed recursion and nested `pcall` past the limit raise the
+catchable error on Node, Chromium, Firefox, and WebKit under both build
+profiles. The [implementation
+manual](../implementation/browser-target.md#the-browser-c-call-limit) records
+the measurements.
+
+The error is an ordinary catchable error: a `catch` block receives
+`C stack overflow` with a trace, and the program continues. Each of these
+costs one count per nesting level, and they all share the limit:
+
+* mixed recursion, where Titan calls a Lua function that calls back into
+  Titan;
+* nested `pcall`, metamethods that run other metamethods (an `__index`
+  function chain, a recursing `__tostring`), `table.sort` comparators that
+  sort again, and `string.gsub` replacement functions that call `gsub` again;
+* coroutines: a coroutine resumed from Lua (`coroutine.resume` or a
+  `coroutine.wrap` function) starts from its resumer's count, so a chain of
+  coroutines that resume coroutines spends it too, and a resume at the limit
+  fails with `C stack overflow`;
+* parsing: Lua source that a program loads at run time and that nests
+  expressions, table constructors, or function bodies about 100 levels deep
+  fails to load with `C stack overflow`, where a native build accepts about
+  200 levels.
+
+Two more effects appear only close to the limit:
+
+* Titan's error handler and its trace capture can use the last two counts, so
+  an error raised within two counts of the limit can be reported as
+  `C stack overflow` instead of with its own message.
+* Within two counts of the limit, the collector postpones pending finalizers
+  (`__gc` metamethods, including [`gc.finalizable`](standard-library-gc.md#finalizers)
+  callbacks) until the calls unwind.
 
 ## Current limits
 
@@ -834,10 +998,12 @@ About 5,400 live coroutines fit in 2 GiB.
   (`<basename>: in <display name>`, without line numbers, and a 100-frame
   capture limit), and Firefox caps synchronous stack captures at 128 frames
   (see [traces](#traces)).
-* Deep mixed Lua/Titan recursion can exhaust the engine's JavaScript call stack
-  before reaching Lua's C-stack limit, rejecting the run with the engine's
-  `RangeError: Maximum call stack size exceeded` as its `cause` instead of
-  raising a catchable Lua `C stack overflow` error.
+* Lua's C-call limit is 100 instead of native Lua's 200, which also bounds
+  nested `pcall`, metamethod, coroutine-resume, and parser depth (see [Lua's
+  C-call limit](#luas-c-call-limit)). Deep mixed Lua/Titan recursion raises
+  the catchable `C stack overflow` error before it can exhaust the engine's
+  JavaScript stack, as measured on Node, Chromium, Firefox, and WebKit under
+  both build profiles.
 * A loader instance runs `main` once; sinks must be synchronous.
 * Only Linux and macOS hosts are supported; `Makefile.win` offers neither
   `lua-browser` nor `browser-sdk`.
@@ -846,6 +1012,7 @@ About 5,400 live coroutines fit in 2 GiB.
   supported for the browser target.
 
 See [the browser target](../implementation/browser-target.md) in the
-implementation manual for the descriptor, the SDK, the link profile, the
+implementation manual for the descriptor, the SDK, the build profiles and
+their measurements, the link profile, the browser C-call limit, the
 entrypoint, the loader and runner mechanics, and the evidence behind the
 design.

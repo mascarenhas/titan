@@ -369,7 +369,10 @@ runner with a 60-minute timeout after `build-compiler`:
    pin/rethrow/clear, coroutine-append, Firefox `async*` cutoff and 128-frame
    ceiling, held-storage nested capture, and merge-OOM guard-recovery checks on
    `chromium` and `firefox`, and the reduced-fidelity no-line / 100-frame
-   counterpart on `webkit`.
+   counterpart on `webkit`. The gate reads the installation profile from
+   `manifest.json`: every row is exact except a `production` cell's uncaught
+   program rows, which use the [ordered-subsequence
+   contract](browser-target.md#test-images) for inlined frames.
 6. **Degraded-mode policy and fallback checks.** Every row in
    `manifest.degradedCases` is first run with `playwright-run.mjs ... --image
    <row.image>` without `--allow-degraded-trace` and must fail with exit status

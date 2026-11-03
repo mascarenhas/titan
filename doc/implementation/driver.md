@@ -1525,7 +1525,9 @@ native_references, objects`.
    A later `-g` in `TITAN_EXTRA_CFLAGS` restores debugger information; use the
    same override in `TITAN_EXTRA_LDFLAGS` for LTO links.
    Native test functions additionally receive
-   `-fno-optimize-sibling-calls` to retain their tail frames. Sanitizer CI
+   `-fno-optimize-sibling-calls` to retain their tail frames; a browser
+   `production` test owner also receives `-fno-inline`
+   ([browser test images](browser-target.md#test-images)). Sanitizer CI
    explicitly disables LTO so saved object functions can be compared with
    the generated-C diagnostic shadow.
 8. **Publish** (`publish_compiled_object`). For a direct in-process compile,
@@ -1622,7 +1624,7 @@ discovery:
 | --- | --- |
 | `driver.incremental_configuration(context)` | Installs `context.incremental_options` and computes/memoizes the invocation's `{ digest, compiler, preamble, toolchain, options }` certificate (`nil, err` on failure). |
 | `driver.restore_source_object(context, modname, source, record, options?)` | Restores an accepted `.titan.source` record into `driver.imported` and `types.registry` without parsing or checking (`options.published` suppresses the `-v` hit line). |
-| `driver.test_owner_flags(test_build, test_functions)` | Returns `test_runner.TEST_COMPILE_FLAGS` (`{"-fno-optimize-sibling-calls"}`) when `test_build` is true and `test_functions` is nonempty, else `{}`; shared by compilation and `codegen-options` certification. |
+| `driver.test_owner_flags(test_build, test_functions, context?)` | Returns `test_runner.TEST_COMPILE_FLAGS` (`{"-fno-optimize-sibling-calls"}`), preceded by `-fno-inline` for a browser `context` whose descriptor profile is `production`, when `test_build` is true and `test_functions` is nonempty, else `{}`; shared by compilation and `codegen-options` certification. |
 | `driver.resolve_source(context, modname, source_path?)` | Runs the tagged source resolver over `source_path` (default `driver.TITAN_SOURCE_PATH`), returning a `flat`, `folder`, or `blocked` descriptor, `nil` on a clean miss, or `nil, err`. Used by `titan-compiler/testroots.lua`. |
 | `driver.resolution_plan(context)` | Closes a `plan_mode` loader and returns the authoritative `plan` (`modules`, topological/bytewise `order`, `archives`, `linked`, `provider_file`, `digest`, `update`, `accepted`). `archives[path]` holds the coordinator's metadata scan of each selected static archive (per carried module its canonical payload and origin, plus the precise pre-scan observation), or nothing when that observation was coarse. |
 | `driver.plan_descriptor(plan, modname)` | Projects `plan` into the closed `titan-build-worker-v1` table sent to `modname`'s worker, carrying accepted dependency `.o` paths, exact selected binary providers, and the data-only archive metadata scans (`archives`). |
@@ -3000,7 +3002,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_EXTRA_CPPFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Preprocessing words for foreign-import probes, C probes, generated modules, `--c-source` nodes, runtime, and entrypoints (followed by CLI `-I`/`-D`). |
 | `TITAN_EXTRA_CFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Compilation-only words after `TITAN_EXTRA_CPPFLAGS` (followed by CLI `--cflag`); never used by final links. |
 | `TITAN_EXTRA_LDFLAGS` | `driver.lua`, `nativeinputs.lua` | empty | Ordered linker inputs appended to final provider and program links (followed by CLI `-L`, `-l`/`--link`, and `--ldflag`). |
-| `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; any other value is a toolchain error. |
+| `TITAN_BUILD_PROFILE` | `driver.lua` | `production` | `validation` selects `-O0 -fno-lto -g`; for `--target browser` it also selects the browser object and link profile ([browser build profiles](browser-target.md#build-profiles)); any other value is a toolchain error. |
 | `TITAN_NO_LINE_DIRECTIVES` | `driver.lua` | unset | Exact value `1` disables generated `#line` directives, like `--no-line-directives`. |
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
 | `TITAN_TARGET` | `titanc` | unset (empty means unset) | Source-selection target when `-T`/`--target` is absent; same vocabulary, with diagnostics naming `TITAN_TARGET=<value>`. Ignored by `--print-root`; never read by the driver library, build workers, or the language server. Make's native `titanc` recipes unset it. |

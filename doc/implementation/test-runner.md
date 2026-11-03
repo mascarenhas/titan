@@ -52,10 +52,13 @@ owners to this source-only path. No test-support source is installed with the
 SDK or copied into a test build.
 
 Ordinary production module code generation is independent of `--test`.
-`driver.test_owner_flags(test_build, test_functions)` enables
+`driver.test_owner_flags(test_build, test_functions, context)` enables
 `test_runner.TEST_COMPILE_FLAGS` (`-fno-optimize-sibling-calls`) and records
 `codegen.test_flags = true` in the module certificate only when `test_build` is
-true and the module declares discovered `test_` functions. Because a module
+true and the module declares discovered `test_` functions. For a browser
+context whose descriptor profile is `production`, it puts `-fno-inline` before
+those flags ([browser test images](browser-target.md#test-images)); the
+descriptor identity carries the profile. Because a module
 with no `test_` functions records `test_flags = false` in both application and
 `--test` builds, application and test executables sharing an output tree reuse
 unchanged certified production objects without recompiling them. Direct private
@@ -221,8 +224,14 @@ Generated-parent creation never replaces an occupied path.
 and checks the same test owners, renders the same synthetic runner with its
 public `titan.test` import, and links it through the [browser
 entrypoint](browser-target.md#the-browser-entrypoint) into `out/tests.mjs`
-and `out/tests.wasm`. Without `--exe` the image takes the first root's
-`program_output` path with `.mjs` appended; an explicit `--exe` must end in
+and `out/tests.wasm` with the link profile's `test` purpose. Under the
+`production` build profile, test owners get `-fno-inline` as well as the
+native test flag, and the link skips Binaryen's `inlining-optimizing` and
+`duplicate-function-elimination` passes, so the test owners keep the exact
+frames the browser trace gate asserts ([browser test
+images](browser-target.md#test-images)). Without `--exe` the image takes the
+first root's `program_output` path with `.mjs` appended; an explicit `--exe`
+must end in
 `.mjs`. `titan.test` comes from the browser standard provider `titan.a` in the
 SDK, so the link first runs the [executing protocol
 check](browser-target.md#the-executing-protocol-runner) under Node. `titanc`
