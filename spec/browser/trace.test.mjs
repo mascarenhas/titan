@@ -37,6 +37,8 @@ export async function run(context) {
   context.assert(degraded || context.args.length === 0, "trace gate accepts only --degraded");
   const manifest = JSON.parse(decoder.decode(await context.bytes("manifest.json")));
   context.assert(Array.isArray(manifest.cases) && Array.isArray(manifest.degradedCases), "invalid trace manifest lists");
+  context.assert(manifest.profile === "production" || manifest.profile === "validation",
+    "invalid trace manifest profile");
   const names = new Set();
   for (const row of [...manifest.cases, ...manifest.degradedCases]) {
     context.assert(typeof row.name === "string" && !names.has(row.name), "duplicate/invalid manifest name");
@@ -47,7 +49,8 @@ export async function run(context) {
     context.assert(["returned", "failed"].includes(row.kind) && Number.isInteger(row.status) &&
       row.status >= -2147483648 && row.status <= 2147483647, "invalid manifest outcome");
     context.assert(Number.isInteger(row.testCount) && row.testCount >= 0 && Array.isArray(row.stderrContains) &&
-      row.stderrContains.every(value => typeof value === "string"), "invalid manifest assertions");
+      row.stderrContains.every(value => typeof value === "string") && typeof row.program === "boolean",
+      "invalid manifest assertions");
   }
   const selected = degraded ? manifest.degradedCases : manifest.cases;
   context.assert(selected.length > 0, "empty trace gate");
@@ -60,8 +63,8 @@ export async function run(context) {
   let recordCost = !degraded;
   for (const row of selected) {
     nativeExecutions += webkit && row.name.endsWith(".host_limit_absent")
-      ? await executeIsolatedRow(context, row, degraded, recordCost)
-      : await executeRow(context, row, degraded, recordCost);
+      ? await executeIsolatedRow(context, row, degraded, recordCost, manifest.profile)
+      : await executeRow(context, row, degraded, recordCost, false, manifest.profile);
     recordCost = false;
     await context.tick();
     await context.gc();
@@ -71,15 +74,30 @@ export async function run(context) {
     fidelity:webkit ? "function-level/no-line; 100-frame engine ceiling" : firefox ? "file/line; 128-frame engine ceiling" : "file/line; 512-record capacity"});
 }
 
-export async function executeRow(context, row, degraded, recordCost, isolated = false) {
+export async function executeRow(context, row, degraded, recordCost, isolated = false,
+    profile = "validation") {
   const emit = record => context.stdout(encoder.encode(JSON.stringify({engine: context.engine, ...record}) + "\n"));
   const webkit = context.engine === "webkit";
   const firefox = context.engine === "firefox";
+  // A production program image inlines, as native production does, so its
+  // Titan frames may be absent; whatever survives must still be an ordered
+  // subsequence of the exact expectation with the exact file and line (D28).
+  // Test images and the validation profile stay exact.
+  const orderedSubsequence = profile === "production" && row.program === true;
 
-  function exact(trace, file, line, name) {
-    const expected = `${file}:${webkit ? "" : line + ":"} in ${name}`;
+  function titanFrameLines(trace) {
+    return trace.split("\n").filter(line => /^[^:\n]+\.titan(?::[0-9]+)?: in /.test(line));
+  }
+
+  function exactFrame(file, line, name) {
+    return `${file}:${webkit ? "" : line + ":"} in ${name}`;
+  }
+  function exactLine(trace, expected) {
     context.assert(trace.split("\n").includes(expected), "missing engine-specific frame " + expected + "\n" + trace);
     return expected;
+  }
+  function exact(trace, file, line, name) {
+    return exactLine(trace, exactFrame(file, line, name));
   }
   function checkTrace(label, trace, missingSymbols) {
     let currentStateTrace = trace;
@@ -118,11 +136,26 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
     if (label === "host_failed" || label === "lua_fallback_failed" || label.startsWith("degraded")) return;
     context.assert(!trace.includes(unavailable) && !trace.includes(captureFailed), "positive trace degraded: " + label);
     if (label === "uncaught") {
-      exact(trace, "trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf");
-      exact(trace, "trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle");
-      for (const name of ["uncaught_leaf", "uncaught_middle"]) {
-        context.assert(frameCount(trace, ": in trace_uncaught." + name) === 1,
-          "uncaught report duplicated/omitted " + name);
+      const expected = [
+        exactFrame("trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf"),
+        exactFrame("trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle"),
+      ];
+      if (orderedSubsequence) {
+        const shown = titanFrameLines(trace);
+        let next = 0;
+        for (const line of shown) {
+          const index = expected.indexOf(line, next);
+          context.assert(index >= 0,
+            "program frame outside the exact expectation: " + line + "\n" + trace);
+          next = index + 1;
+        }
+        emit({programFrames: shown, expectedFrames: expected});
+      } else {
+        for (const line of expected) exactLine(trace, line);
+        for (const name of ["uncaught_leaf", "uncaught_middle"]) {
+          context.assert(frameCount(trace, ": in trace_uncaught." + name) === 1,
+            "uncaught report duplicated/omitted " + name);
+        }
       }
       return;
     }
@@ -294,7 +327,7 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
   return nativeExecutions;
 }
 
-async function executeIsolatedRow(context, row, degraded, recordCost) {
+async function executeIsolatedRow(context, row, degraded, recordCost, profile) {
   const originalConstructor = own(globalThis, "Error");
   const originalLimit = own(Error, "stackTraceLimit");
   const originalPrepare = own(Error, "prepareStackTrace");
@@ -316,7 +349,7 @@ async function executeIsolatedRow(context, row, degraded, recordCost) {
         event.preventDefault();
         reject(event.reason);
       });
-      child.traceFixtureRealm = {engine:context.engine, row, degraded, recordCost, resolve, reject,
+      child.traceFixtureRealm = {engine:context.engine, row, degraded, recordCost, profile, resolve, reject,
         root:new URL("./", import.meta.url).href,
         sdk:new URL("/sdk/titan-browser.mjs", import.meta.url).href,
         page:new URL("/sdk/titan-browser-page.mjs", import.meta.url).href,
@@ -363,5 +396,5 @@ export async function runInRealm(bridge) {
       if (!response.ok) throw new Error(`cannot read isolated asset ${path}: HTTP ${response.status}`);
       return new Uint8Array(await response.arrayBuffer());
     }});
-  return executeRow(context, bridge.row, bridge.degraded, bridge.recordCost, true);
+  return executeRow(context, bridge.row, bridge.degraded, bridge.recordCost, true, bridge.profile);
 }
