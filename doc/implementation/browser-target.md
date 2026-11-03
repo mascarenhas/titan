@@ -2585,11 +2585,19 @@ The size and speed baseline is a measurement, not a gate. It feeds the later
 release-profile and packaging work. `scripts/browser_baseline.lua` builds the
 micro-benchmark program (`spec/fixtures/browser_baseline/`) through the
 `baseline` profile (`entry = "titan"`) and the fork's Lua interpreter (`entry
-= "lua-main"`, built from `lua-5.5.1/src/*.c` with the profile's flags) at
-`-O1` and `-O2`, each with and without Asyncify (the Asyncify-off controls
-create no coroutine of either kind and never suspend), in separate output
-trees, and runs each image three times per engine; every published value below
-is the median of the three raw repeats (`format = "titan-browser-baseline-2"`).
+= "lua-main"`, built from `lua-5.5.1/src/*.c` with the profile's flags and the
+installed record's `lua_defines`, which the cell's receipt records as
+`defines`) at `-O1` and `-O2`, each with and without Asyncify (the
+Asyncify-off controls create no coroutine of either kind and never suspend),
+in separate output trees, and runs each image three times per engine; every
+published value below is the median of the three raw repeats (`format =
+"titan-browser-baseline-2"`). One description of each cell's link options
+(`purpose = "baseline"`, assertions 2, and the cell's optimization, Asyncify
+setting, and entry) feeds the plan, the receipt, and the child build:
+`plan_for` installs it as `driver.browser_link_options` while it builds the
+descriptor and restores the previous value afterwards, so the plan's descriptor
+certifies the same `trace_control` and measurement level as the child
+`titanc`, which receives the same options through its preamble.
 Toolchain: Emscripten 6.0.13, Node 24.19.0, Google Chrome for Testing
 156.0.8078.80 headless shell, fork commit `4f740a4b`, all with
 `-sFORCE_FILESYSTEM=1`.
@@ -2713,7 +2721,11 @@ hosts`).
   dynamic-loading guards, three-file preflight reservation and repeated-link
   image identity, contributor-prologue `.wasm.map` attribution, image
   inventories, measurement optimization, and the native libbacktrace and
-  fallback trace invariants.
+  fallback trace invariants. Its production-only pin (`keeps frame flags on
+  test owners only and links a production test image as a test image`) is
+  pending in a validation installation and runs in the production Chromium
+  [`browser-playwright`](continuous-integration.md#browser-playwright-job)
+  cell.
 * `spec/coder/browser_incremental_spec.lua` — browser object and three-file
   link certificates, shared-asset and `.wasm.map`-change invalidation,
   three-predecessor rollback across backup/publication/certificate boundaries,
@@ -2796,8 +2808,13 @@ The Busted files need emcc 6.0.13 and the installed browser Lua; the image,
 protocol, SDK, gate, fixture, budget, and minicoro files also need Node 24, a
 headless Chromium, and an installed browser SDK, which
 `spec/support/browser_toolchain.lua` discovers through `require({node=true,
-chrome=true, sdk=true})` and the runner's `--probe`. Each real case is pending
-when a capability is absent; `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` turns absence
-into a failure, and a present but malformed SDK or probe result always fails.
+chrome=true, sdk=true})` and the runner's `--probe`. Its
+`lua_defines(info)` reads the installed record's `lua_defines`, so specs that
+compile C against the browser Lua archive (`spec/wasm_toolchain_spec.lua` and
+`spec/coder/browser_toolchain_spec.lua`) use exactly the archive's macros,
+including `LUAI_MAXCCALLS`; a record without them fails. Each real case is
+pending when a capability is absent; `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` turns
+absence into a failure, and a present but malformed SDK or probe result always
+fails.
 The Linux CI job that runs them is described in
 [Continuous integration](continuous-integration.md#browser-toolchain-job).
