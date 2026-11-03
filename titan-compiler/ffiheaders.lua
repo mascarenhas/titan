@@ -55,7 +55,9 @@ function ffiheaders.relative(from, to)
 end
 
 -- Canonical spelling of the emission policy that produced a header recipe.
--- Shared by the recipe digest and the producer interface digest so both agree.
+-- It is an input of that recipe's digest only: the producer interface digest
+-- keeps hashing the rendered helper text, and a producer's own policy is
+-- validated by its recorded configuration/codegen certificate.
 function ffiheaders.policy_signature(policy)
     if not policy then return "unrecorded" end
     return (policy.line_directives and "line=1" or "line=0") .. ";"

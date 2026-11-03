@@ -241,10 +241,16 @@ passed: `driver.compile` plans under its own policy, and `coder.generate`
 consumes a supplied plan verbatim or raises if its policy differs from the
 generation it is embedded in — it never re-renders or falls back.
 
-The policy is an input of the recipe digest, and of the producer interface
-digest (`incremental.producer_digests`), so changing the line-directive or
-coverage policy invalidates a prepared header through the ordinary incremental
-and certificate comparison instead of through ad-hoc invalidation.
+The policy is part of the header recipe digest, not of the producer interface
+digest: the interface digest keeps hashing the rendered header text only, so a
+policy change that leaves that text identical does not over-invalidate every
+consumer of a declaration-only header. A producer is invalidated through its
+own recorded configuration (which includes `emit_line_directives` and the
+native coverage policy) and a consumer through changed header text. A published
+plan also records the identity of the source files it was rendered from, so a
+compile reuses it only when both that identity and the policy match; changed
+foreign bodies or signatures therefore replan and republish instead of reusing
+the old header.
 
 `emitline` and `definitionline` return nothing in two cases:
 

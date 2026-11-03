@@ -8489,6 +8489,33 @@ function driver.ast_has_foreign_functions(ast)
     return false
 end
 
+-- Identity of the source bytes a foreign header is derived from: every
+-- physical source of the checked module, in a stable order. Planning records it
+-- in the plan so a compile can only reuse a published header whose inputs are
+-- unchanged; a matching policy alone is not enough, because the same policy on
+-- a changed foreign body yields different header bytes.
+function driver.foreign_header_source_identity(ast)
+    local files, seen = {}, {}
+    for _, node in ipairs(ast or {}) do
+        local loc = node.loc
+        if not node._ignore and loc and loc.filename and not seen[loc.filename] then
+            seen[loc.filename] = true
+            files[#files + 1] = loc.filename
+        end
+    end
+    if #files == 0 then return nil end
+    table.sort(files, util.bytewise_less)
+    local parts = { "titan-foreign-header-source-v1" }
+    for _, filename in ipairs(files) do
+        local contents = util.get_file_contents(filename, "rb")
+        if type(contents) ~= "string" then return nil end
+        parts[#parts + 1] = filename
+        parts[#parts + 1] = tostring(#contents)
+        parts[#parts + 1] = contents
+    end
+    return sha256.hex(table.concat(parts, "\0"))
+end
+
 -- Foreign headers are rendered before, and for restored plans independently
 -- of, C generation. Their line/coverage policy is therefore an explicit input
 -- derived from the current options, never ambient coder state left by another
@@ -8522,9 +8549,11 @@ function driver.plan_foreign_header(
         has_foreign = has_foreign,
         contents = contents,
         recipe = recipe,
-        -- The plan is one immutable published unit: policy, contents and the
-        -- digest of the recipe (which includes the policy) that produced them.
+        -- The plan is one immutable published unit: policy, the identity of
+        -- the inputs it was rendered from, contents and the digest of the
+        -- recipe (which includes the policy) that produced them.
         policy = policy,
+        source = driver.foreign_header_source_identity(ast),
         digest = coder.foreign_header_digest(recipe),
         ffi_header = {
             filename = ffi_headername,
@@ -8716,6 +8745,8 @@ function driver.plan_foreign_headers(names, imported, policy_for)
                     plan.modname, plan.ast, { module = plan.modname }, nil,
                     plan.policy)
                 plan.digest = coder.foreign_header_digest(plan.recipe)
+                plan.source =
+                    driver.foreign_header_source_identity(plan.ast)
             end
         end
         local ok, err = driver.validate_foreign_header_plan(plan)
@@ -8822,14 +8853,17 @@ local function prepare_compile(
     coder.prepare_coverage(ast, options and
         (options.coverage == true or options.coverage_backend ~= nil))
     -- A caller-supplied plan is the published unit for this build. Otherwise
-    -- reuse this module's published plan only when its recorded policy is
-    -- exactly this build's policy; any other case plans and publishes afresh,
-    -- so a stale header can never be relabelled.
+    -- reuse this module's published plan only when both its recorded emission
+    -- policy and the identity of the source it was rendered from match this
+    -- compile; any other case plans and publishes afresh, so a stale header can
+    -- never be relabelled or served across a source change.
     local owns_header_plan = header_plan == nil
     if not header_plan then
         local policy = driver.header_policy(options and options.coverage == true)
         local published = source_entry and source_entry.foreign_header_plan
-        if published
+        local source = driver.foreign_header_source_identity(ast)
+        if published and published.source ~= nil and source ~= nil
+            and published.source == source
             and coder.same_emission_policy(published.policy, policy) then
             header_plan = published
             owns_header_plan = false

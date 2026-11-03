@@ -534,11 +534,11 @@ function get(): integer return 1 end
     end)
 end)
 
--- A published foreign-header plan is one immutable unit: policy, contents and
--- the digest of the recipe that produced them. A build under another policy
+-- A published foreign-header plan is one immutable unit: policy, the identity
+-- of the source it was rendered from, contents and the digest of the recipe
+-- that produced them. A build under another policy, or over changed source,
 -- must republish the header (disk, recipe and C agreeing), in the same process
--- and across processes; the recipe digest is the identity the incremental and
--- certificate machinery compares.
+-- and across processes.
 describe("published foreign-header plans", function()
     local MODULE = "policy"
     local FOREIGN = [[
@@ -548,12 +548,18 @@ function get(): integer return copy(1) end
     local COVERAGE_FLAGS = { "-O0", "-fno-lto", "--coverage",
         "-fprofile-update=atomic" }
 
-    local function checked_ast()
+    local function write_source(dir, source)
+        local path = dir .. "/" .. MODULE .. ".titan"
+        local file = assert(io.open(path, "wb"))
+        assert(file:write(source))
+        assert(file:close())
+        return path
+    end
+    local function checked_ast(source, path)
         h.reset(true)
-        local ast, err = parser.parse(MODULE .. ".titan", FOREIGN)
+        local ast, err = parser.parse(path, source)
         assert.truthy(ast, err)
-        local _, errors = checker.check(MODULE, ast, FOREIGN,
-            MODULE .. ".titan")
+        local _, errors = checker.check(MODULE, ast, source, path)
         assert.equal(0, #errors, table.concat(errors, "\n"))
         return ast
     end
@@ -566,10 +572,11 @@ function get(): integer return copy(1) end
     local function line_count(contents)
         return select(2, (contents or ""):gsub("#line", ""))
     end
-    local function build(dir, emit, coverage, entry)
+    local function build(dir, emit, coverage, entry, source)
         local previous = driver.EMIT_LINE_DIRECTIVES
         driver.EMIT_LINE_DIRECTIVES = emit
-        local ast = checked_ast()
+        local path = write_source(dir, source or FOREIGN)
+        local ast = checked_ast(source or FOREIGN, path)
         local captured
         local original = driver.plan_foreign_header
         driver.plan_foreign_header = function(...)
@@ -584,8 +591,7 @@ function get(): integer return copy(1) end
                 options.coverage_backend = "gcc-gcov"
                 options.extra_compile_flags = COVERAGE_FLAGS
             end
-            return driver.compile(MODULE, ast, dir .. "/" .. MODULE .. ".titan",
-                {}, false, options, entry)
+            return driver.compile(MODULE, ast, path, {}, false, options, entry)
         end)
         driver.plan_foreign_header = original
         driver.EMIT_LINE_DIRECTIVES = previous
@@ -624,7 +630,7 @@ function get(): integer return copy(1) end
             -- still names the Titan source; the header carries no stamps.
             assert.truthy(built.c:match('^#line %d+ "[^"\n]*policy[.]c"'),
                 "coverage C is not the converted form")
-            assert.truthy(built.c:find('"' .. MODULE .. '.titan"', 1, true))
+            assert.truthy(built.c:find(MODULE .. ".titan", 1, true))
         elseif emit then
             assert.truthy(built.c:find("#define TITAN_GENERATED_C_FILE",
                 1, true))
@@ -714,6 +720,44 @@ assert(ok, err)
             assert_policy(disabled, false, false)
         end, debug.traceback)
         os.remove(script)
+        remove_directory(dir)
+        assert.is_true(tested, test_error)
+    end)
+
+    it("republishes when the foreign source changes under the same policy", function()
+        local dir = temporary_directory()
+        local tested, test_error = xpcall(function()
+            local entry = { kind = "source", filename = dir .. "/policy.titan",
+                source_files = { dir .. "/policy.titan" }, deps = {} }
+            local function body(value)
+                return (FOREIGN:gsub("return n end",
+                    "return n + " .. value .. " end"))
+            end
+            local first = build(dir, true, false, entry, body(1234))
+            assert.truthy(first.header:find("1234", 1, true))
+            assert.equal(first.plan, entry.foreign_header_plan)
+            assert.is_not_nil(first.plan.source)
+            -- Same entry, same policy, changed body: the published header must
+            -- follow the new source instead of reusing the old plan.
+            local second = build(dir, true, false, entry, body(5678))
+            assert.truthy(second.header:find("5678", 1, true))
+            assert.is_nil(second.header:find("1234", 1, true))
+            assert.not_equal(first.plan.source, second.plan.source)
+            assert.not_equal(first.plan.digest, second.plan.digest)
+            assert.equal(second.plan, entry.foreign_header_plan)
+            -- A changed foreign signature is a source change too.
+            local signature = (FOREIGN:gsub(
+                "copy%(n: int%): int return n end",
+                "copy(n: int, m: int): int return n + m end")
+                :gsub("copy%(1%)", "copy(1, 2)"))
+            local third = build(dir, true, false, entry, signature)
+            assert.truthy(third.header:find(
+                [[\u2119_foreign_inline_copy(int _param_n, int _param_m)]],
+                1, true), third.header)
+            assert.is_nil(third.header:find("5678", 1, true))
+            assert.not_equal(second.plan.source, third.plan.source)
+            assert.equal(third.plan, entry.foreign_header_plan)
+        end, debug.traceback)
         remove_directory(dir)
         assert.is_true(tested, test_error)
     end)
