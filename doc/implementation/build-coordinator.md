@@ -411,7 +411,8 @@ that the coordinator loaded. The child's descriptors are:
 * `fd 4`: a private pipe (`worker.control`) carrying worker-to-coordinator
   records, written by the worker's `control.pipe`; and
 * `fds 5, 6, ...` (POSIX only): the open `.titan-build.lock` descriptors from
-  `locks:descriptors()`.
+  `locks:descriptors()`, followed by any inherited parent pipe-jobserver read
+  and write descriptors appended by `jobserver_stdio` (below).
 
 Each direction has its own pipe. On Windows, synchronous pipe handles
 serialize I/O on one file object, so a single duplex pipe could let a pending
@@ -428,12 +429,37 @@ closes both.
 standard streams and returns its `Process` immediately (or `nil, error`);
 `:wait()`/`:close()` reap it with `os.execute`-shaped results. Synchronous
 `process.run` is `start` followed by `wait`, and `process.capture` collects
-output through a pipe. All three accept the same `options.inherit` list and
-place those POSIX lock descriptors at `fd 3` and up, so a native tool started
-outside the dispatched job batches keeps the output-tree lock alive while it
-runs. Workers and
-dispatched native jobs keep their own layouts, and every launch passes the
-same Windows process-tree guard.
+output through a pipe. All three, together with `process.start_job`, accept the
+same `options.inherit` list and place those POSIX lock descriptors at `fd 3`
+and up, so a native tool started inside or outside the dispatched job batches
+keeps the output-tree lock alive while it runs. Workers and dispatched native
+jobs keep their own fixed positions for control pipes and lock leases, and
+every launch passes the same Windows process-tree guard.
+
+**Pipe-jobserver descriptor remapping (`jobserver_stdio` and
+`jobs.child_makeflags`).** Under a POSIX pipe jobserver (such as GNU Make 4.3's
+`--jobserver-auth=3,4` or legacy `--jobserver-fds=R,W`), worker control pipes
+and inherited `.titan-build.lock` descriptors occupy `fd 3` and up in the
+child's `uv.spawn` `stdio` array. Without remapping, a child compiler or linker
+(for example GCC's `lto1` jobserver client during a `-flto=auto` link) would
+read the regular `.titan-build.lock` file on `fd 3` as its token pipe and
+assert on EOF (`jobserver_info::get_token`). Before calling `uv.spawn`, the
+common `spawn` helper in `process.lua` (`process.start`, `process.run`,
+`process.capture`, `Batch:spawn`, `process.start_job`, and
+`process.start_worker`) calls `jobserver_stdio(stdio, options)`: when the
+effective POSIX `MAKEFLAGS` advertises a pipe authorization (`auth.kind ==
+"pipe"`), it inspects `auth.read` and `auth.write` with `uv.fs_fstat`. If both
+are open `fifo` descriptors, it appends them to `stdio` after the caller's
+control/lock entries (at child descriptors `read_fd = #stdio` and `write_fd =
+#stdio`) and rewrites every `--jobserver-auth=` and `--jobserver-fds=` option
+word before a standalone `--` in the child's `MAKEFLAGS` to
+`<read_fd>,<write_fd>` via `jobs.child_makeflags` (preserving backslash
+escapes, spacing, other flags, and variable assignments after `--`). If either
+advertised descriptor is closed, negative, or not a FIFO, `jobs.child_makeflags`
+rewrites the authorization to `-2,-2` without appending to `stdio`, so an
+unusable authorization never becomes accidentally backed by a lock file or
+control pipe at its old descriptor numbers. FIFO jobservers (`fifo:PATH`) and
+Windows spawns leave `stdio` and `MAKEFLAGS` unchanged.
 
 While the scheduler loop runs on POSIX, `titan._sigpipe_ignore()`
 (`ltitanlib.c`) sets `SIGPIPE` to `SIG_IGN` and restores the exact prior
