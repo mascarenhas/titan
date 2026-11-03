@@ -241,6 +241,22 @@ Titan-attributed debug filenames to keep ordinary native Titan frames, so this
 mode can drop them from logical traces even though the symbol-to-display-name
 registry is unchanged.
 
+### Deterministic emission order
+
+Generated C is a function of its inputs alone: the same module always yields
+byte-identical part files, private headers, and foreign headers. Lua randomizes
+its string hash seed per process, so no emitter walks a string-keyed registry
+directly. `coder._sorted_keys` supplies the bytewise-sorted key order for the
+emission sites whose order reaches generated C: the per-record and per-Interface
+method maps, nominal and owned-C metatable recovery blocks, static-dependency
+`extern` declarations and their binding code, and bound method/function
+entries. Registries that carry a source order keep it — declarations, fields,
+union parts, and the discovered adapter/Array-writer lists. Sorted emission
+does not change any emitted declaration or statement, only the order of
+independent groups, and `spec/coder/codegen_determinism_spec.lua` generates one
+module with every such registry in separate processes and requires byte
+equality.
+
 A trimmed but real example of an unsplit module (elisions marked `...`). This
 module:
 

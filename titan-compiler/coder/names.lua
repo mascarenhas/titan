@@ -412,6 +412,16 @@ function coder._foreign_reference_name(reference, ctx, direct)
     return "(" .. reference.name .. ")"
 end
 
+-- Deterministic emission order for string-keyed registries. Lua randomizes the
+-- table hash seed per process, so iterating such a registry directly makes
+-- generated C vary between identical builds; every emitter sorts its keys.
+function coder._sorted_keys(map)
+    local keys = {}
+    for key in pairs(map) do keys[#keys + 1] = key end
+    table.sort(keys, util.bytewise_less)
+    return keys
+end
+
 function coder._sorted_foreign_imports(tlcontext)
     local names, imports = {}, {}
     for name in pairs(tlcontext.foreign_functions or {}) do

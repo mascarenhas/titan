@@ -939,7 +939,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     if #binding_defs > 0 then
         emit_item("pinned", table.concat(binding_defs, "\n"))
     end
-    for _, entry in pairs(tlcontext.owned_c_metatables) do
+    for _, key in ipairs(coder._sorted_keys(tlcontext.owned_c_metatables)) do
+        local entry = tlcontext.owned_c_metatables[key]
         table.insert(initrecs, render([[
             luaL_getmetatable(L, $NAME);
             if (lua_isnil(L, -1)) {

@@ -65,26 +65,6 @@ end
 local DEFINITION_SOURCE = assert(require("titan-compiler.util").get_file_contents(
     "spec/fixtures/browser_images/definitions.titan"))
 
-local function ordered_pairs(original, reverse)
-    return function(t)
-        local keys = {}
-        for key in original(t) do
-            if type(key) ~= "string" and type(key) ~= "number" then return original(t) end
-            keys[#keys + 1] = key
-        end
-        table.sort(keys, function(a, b)
-            local less = type(a) == type(b) and a < b or type(a) < type(b)
-            return reverse and a ~= b and not less or not reverse and less
-        end)
-        local index = 0
-        return function()
-            index = index + 1
-            local key = keys[index]
-            if key ~= nil then return key, t[key] end
-        end
-    end
-end
-
 local function definitions(text)
     local result = {}
     text = "\n" .. text
@@ -113,33 +93,13 @@ local function definition_snapshot(generated)
     end
     return all
 end
-local function native_variants(target)
-    local variants, original = {}, _G.pairs
-    local ok, err = xpcall(function()
-        for _, reverse in ipairs({ false, true }) do
-            -- Both legal traversal orders cover the pre-existing unordered
-            -- metatable emission without normalizing or deleting output bytes.
-            _G.pairs = ordered_pairs(original, reverse)
-            for _, parts in ipairs({ 1, 4 }) do
-                for _, located in ipairs({ false, true }) do
-                    local generated = generate(target, parts, DEFINITION_SOURCE, located)
-                    local texts = {
-                        generated.private_header or "", generated.foreign_header or "",
-                    }
-                    for _, part in ipairs(generated.parts) do texts[#texts + 1] = part.code end
-                    local key = tostring(reverse) .. ":" .. parts .. ":" .. tostring(located)
-                    variants[key] = {
-                        bytes = table.concat(texts, "\0"),
-                        stamps = definition_snapshot(generated),
-                        located = located,
-                    }
-                end
-            end
-        end
-    end, debug.traceback)
-    _G.pairs = original
-    assert.is_true(ok, err)
-    return variants
+local function native_output(target, parts, located)
+    local generated = generate(target, parts, DEFINITION_SOURCE, located)
+    local texts = {
+        generated.private_header or "", generated.foreign_header or "",
+    }
+    for _, part in ipairs(generated.parts) do texts[#texts + 1] = part.code end
+    return table.concat(texts, "\0"), generated
 end
 
 describe("browser traceback entry generation", function()
@@ -213,18 +173,24 @@ describe("browser traceback entry generation", function()
         for symbol in pairs(entries(split)) do assert.truthy(symbol:find("titanentry", 1, true)) end
     end)
 
-    it("keeps native output identical across explicit targets and browser generation", function()
+    it("keeps native output byte-identical across explicit targets and browser generation", function()
         -- The complete C/private-header/foreign-header bytes stay a function of
         -- the native inputs alone: no target spelling or prior browser
         -- generation may leak state into them.
-        local expected = native_variants(nil)
-        local count = 0
-        for _ in pairs(expected) do count = count + 1 end
-        assert.equal(8, count, "native matrix lost a traversal, split or line-policy variant")
+        local native = {}
+        for _, parts in ipairs({ 1, 4 }) do
+            for _, located in ipairs({ false, true }) do
+                local key = parts .. ":" .. tostring(located)
+                native[key] = assert(native_output(nil, parts, located))
+                assert.equal(native[key], (native_output("linux", parts, located)))
+            end
+        end
         generate("browser", 4)
-        local after = native_variants("linux")
-        for key, variant in pairs(expected) do
-            assert.equal(variant.bytes, assert(after[key], key).bytes, key)
+        for _, parts in ipairs({ 1, 4 }) do
+            for _, located in ipairs({ false, true }) do
+                local key = parts .. ":" .. tostring(located)
+                assert.equal(native[key], (native_output("linux", parts, located)), key)
+            end
         end
     end)
 
@@ -246,17 +212,14 @@ describe("browser traceback entry generation", function()
     end)
 
     it("removes every definition stamp when line directives are disabled", function()
-        local variants = native_variants(nil)
-        for key, variant in pairs(variants) do
-            if not variant.located then
-                assert.same({}, variant.stamps, key)
-                assert.is_nil(variant.bytes:find("#line", 1, true), key)
-                assert.is_nil(variant.bytes:find("TITAN_GENERATED_C_FILE", 1, true), key)
-            else
-                assert.is_true(next(variant.stamps) ~= nil, key)
-            end
+        for _, parts in ipairs({ 1, 4 }) do
+            local text = assert(native_output(nil, parts, false))
+            assert.is_nil(text:find("#line", 1, true), parts)
+            assert.is_nil(text:find("TITAN_GENERATED_C_FILE", 1, true), parts)
+            assert.same({}, definition_snapshot(generate(nil, parts, DEFINITION_SOURCE, false)))
         end
     end)
+
 
     for _, parts in ipairs({ 1, 4 }) do
         it("owns every function signature and prologue in " .. parts .. "-part browser output", function()

@@ -299,7 +299,8 @@ function init_data_from_other_modules(tlcontext, includes, binding_defs, loadmod
             SYMBOL = c_string_literal(coder._linkage_symbol_name(name)),
         }))
     end
-    for _, func in pairs(tlcontext.functions) do
+    for _, key in ipairs(coder._sorted_keys(tlcontext.functions)) do
+        local func = tlcontext.functions[key]
         local dynamic = static_deps[func.module] ~= true
         bind(func.module, func.mangled,
             function_sig(func.mangled, func.type, dynamic),
@@ -354,20 +355,23 @@ function init_data_from_other_modules(tlcontext, includes, binding_defs, loadmod
                 .. "' has a different native binding in this consumer image"),
         }))
     end
-    for name, info in pairs(tlcontext.bound_luas) do
+    for _, name in ipairs(coder._sorted_keys(tlcontext.bound_luas)) do
+        local info = tlcontext.bound_luas[name]
         local declaration = static_deps[info.module] == true
             and ("int " .. name .. "(lua_State *L)")
             or ("int (*" .. name .. ")(lua_State *L)")
         bind(info.module, name, declaration, "int (*)(lua_State *L)")
     end
-    for name, info in pairs(tlcontext.bound_stricts) do
+    for _, name in ipairs(coder._sorted_keys(tlcontext.bound_stricts)) do
+        local info = tlcontext.bound_stricts[name]
         local declaration = static_deps[info.module] == true
             and ("int " .. name .. "(lua_State *L)")
             or ("int (*" .. name .. ")(lua_State *L)")
         bind(info.module, name, declaration, "int (*)(lua_State *L)")
     end
 
-    for fqtn, entry in pairs(tlcontext.metatables) do
+    for _, fqtn in ipairs(coder._sorted_keys(tlcontext.metatables)) do
+        local entry = tlcontext.metatables[fqtn]
         table.insert(initmetas, render([[
             luaL_getmetatable(L, "Titan $KIND $TYPE metatable");
             setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
@@ -380,7 +384,8 @@ function init_data_from_other_modules(tlcontext, includes, binding_defs, loadmod
         }))
     end
 
-    for module, upvalue in pairs(tlcontext.modules) do
+    for _, module in ipairs(coder._sorted_keys(tlcontext.modules)) do
+        local upvalue = tlcontext.modules[module]
         table.insert(initmetas, render([[
             lua_getfield(L, LUA_REGISTRYINDEX, "Titan module $MODULE");
             setobj2t(L, &_mod->uv[$INDEX].uv, s2v(L->top.p - 1));
@@ -468,7 +473,8 @@ function coderecorddec(ctx, sigs, code, initrecs, node)
             }))
         end
     end
-    for name, method in pairs(node._type.methods) do
+    for _, name in ipairs(coder._sorted_keys(node._type.methods)) do
+        local method = node._type.methods[name]
         if not method.islocal then
             table.insert(fieldmap, render([[
                 lua_pushliteral(L, $NAME);
