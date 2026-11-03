@@ -19,7 +19,37 @@ local TARGET_DEFINES = {
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
     "-DMCO_ASYNCFY_STACK_SIZE=65536",
 }
+-- One object profile per build profile (D26). `production` optimizes as native
+-- production does and accepts the frames inlining costs, keeping the object
+-- line tables the trace contract needs. `validation` freezes #330's exact
+-- physical-frame profile. The production level is one named constant: the
+-- milestone sets it from measurement (D27).
+local PRODUCTION_LEVEL = "-O3"
+local PROFILES = {
+    validation = { level = "-O1", frames = { "-fno-inline", "-fno-optimize-sibling-calls" } },
+    production = { level = PRODUCTION_LEVEL, frames = {} },
+}
 local proxy_data = setmetatable({}, { __mode = "k" })
+
+function M.valid_profile(build_profile)
+    return PROFILES[build_profile] ~= nil
+end
+
+-- The owned object compile flags of one build profile. Every consumer compiles
+-- from the descriptor, so this list is the single source of the object profile.
+-- Emscripten -g2 preserves names but strips object line tables (D14).
+function M.object_flags(build_profile)
+    local profile = PROFILES[build_profile]
+    if not profile then return nil end
+    local flags = { "--std=c99", profile.level }
+    for _, flag in ipairs(profile.frames) do flags[#flags + 1] = flag end
+    flags[#flags + 1] = "-Wall"
+    flags[#flags + 1] = "-Wno-unused-but-set-variable"
+    flags[#flags + 1] = "-Wno-unused-function"
+    flags[#flags + 1] = "-gline-tables-only"
+    flags[#flags + 1] = "-sSUPPORT_LONGJMP=emscripten"
+    return flags
+end
 
 local function hex(value, length)
     return type(value) == "string" and #value == length and not value:find("[^0-9a-f]")
@@ -111,11 +141,12 @@ local function descriptor_identity(data, context)
 end
 
 local function validate(data, context)
-    if not fields(data, { "label", "triple", "memory_bits", "tools", "compile_flags",
+    if not fields(data, { "label", "triple", "memory_bits", "tools", "build_profile", "compile_flags",
             "include_dirs", "target_defines", "paths", "lua", "profile_data", "profile_identity",
             "fingerprint", "output_policy", "provider_policy", "identity" }, { "probe_cache_directory" }) or
         data.label ~= "browser" or data.triple ~= "wasm32-unknown-emscripten" or data.memory_bits ~= 32 or
-        not argv(data.compile_flags) or not argv(data.include_dirs) or not argv(data.target_defines) then
+        not M.valid_profile(data.build_profile) or not argv(data.compile_flags) or
+        not argv(data.include_dirs) or not argv(data.target_defines) then
         return nil, "invalid browser target descriptor"
     end
     local tools = data.tools
@@ -152,6 +183,22 @@ local function validate(data, context)
     end
     local supported, flag_error = M.validate_flags(data.compile_flags, "compile_flags")
     if not supported then return nil, flag_error end
+    -- Every consumer of the descriptor compiles, certifies and probes from
+    -- these flags, so they must be exactly one object profile (D26).
+    local owned_flags = M.object_flags(data.build_profile)
+    for index, flag in ipairs(owned_flags) do
+        if data.compile_flags[index] ~= flag then
+            return nil, "browser " .. data.build_profile ..
+                " profile compile flags do not match its object profile"
+        end
+    end
+    for index = #owned_flags + 1, #data.compile_flags do
+        local owned = M.owned_compile_option(data.compile_flags, index)
+        if owned then
+            return nil, "browser " .. data.build_profile ..
+                " profile owns compile option " .. string.format("%q", owned)
+        end
+    end
     local seen, longjmp = {}, false
     for index, flag in ipairs(data.compile_flags) do
         seen[flag] = true
@@ -230,6 +277,21 @@ function M.trace_option(flag)
     return flag:match("^%-O") or flag:match("^%-g") or
         positive:match("^%-finline") or positive:match("^%-foptimize%-sibling%-calls") or
         positive:match("^%-fomit%-frame%-pointer")
+end
+
+-- A compile-side spelling the build profile owns: the optimization, debug and
+-- frame choices, and the post-Asyncify pass list. `-s BINARYEN_EXTRA_PASSES`
+-- is the two-token spelling Emscripten also accepts.
+function M.owned_compile_option(flags, index)
+    local flag = flags[index]
+    if M.trace_option(flag) then return flag end
+    if flag == "-sBINARYEN_EXTRA_PASSES" or flag:match("^%-sBINARYEN_EXTRA_PASSES=") then
+        return flag
+    end
+    if flag == "-s" and (flags[index + 1] or ""):match("^BINARYEN_EXTRA_PASSES=") then
+        return flag .. " " .. flags[index + 1]
+    end
+    return nil
 end
 
 function M.validate_flags(flags, origin)
@@ -462,11 +524,18 @@ end
 
 function M.build(context, inputs)
     local ok, descriptor, failure = pcall(function()
+        local build_profile = inputs.build_profile
+        if not M.valid_profile(build_profile) then
+            return nil, "invalid browser build profile " ..
+                string.format("%q", tostring(build_profile))
+        end
         local valid, flag_error = M.validate_flags(inputs.compile_flags, "compile_flags")
         if not valid then return nil, flag_error end
-        for _, flag in ipairs(inputs.compile_flags or {}) do
-            if not inputs.trace_control and M.trace_option(flag) then
-                return nil, "browser target owns compile_flags option " .. flag
+        for index, flag in ipairs(inputs.compile_flags or {}) do
+            local owned = not inputs.trace_control and M.owned_compile_option(inputs.compile_flags, index)
+            if owned then
+                return nil, "browser " .. build_profile ..
+                    " profile owns compile option " .. string.format("%q", owned)
             end
         end
         local paths = inputs.paths
@@ -487,9 +556,7 @@ function M.build(context, inputs)
             return nil, mismatch(paths, record, "headers_sha256", "unavailable: " .. tostring(header_error or headers))
         elseif headers ~= record.headers_sha256 then return nil, mismatch(paths, record, "headers_sha256", headers) end
         -- Emscripten -g2 preserves names but strips object line tables.
-        local flags = { "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls",
-            "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function", "-gline-tables-only",
-            "-sSUPPORT_LONGJMP=emscripten" }
+        local flags = M.object_flags(build_profile)
         for _, define in ipairs(defines) do flags[#flags + 1] = define end
         local target_defines = { table.unpack(TARGET_DEFINES) }
         for _, define in ipairs(target_defines) do flags[#flags + 1] = define end
@@ -535,7 +602,8 @@ function M.build(context, inputs)
             return nil, diagnostic
         end
         local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
-            tools = tool, compile_flags = flags, include_dirs = includes, target_defines = target_defines,
+            tools = tool, build_profile = build_profile, compile_flags = flags,
+            include_dirs = includes, target_defines = target_defines,
             paths = paths, lua = { path = paths.lua_record, record = record,
                 record_sha256 = sha256.hex_via(context.cache_adapter and context.cache_adapter.sha256_binary, bytes) },
             profile_data = assert(csemantics.export_profile(profile)), profile_identity = profile.identity,

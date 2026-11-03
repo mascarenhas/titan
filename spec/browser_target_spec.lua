@@ -86,6 +86,7 @@ local function fake_context(options)
     end
     return { io = strategy, extra_ffi_include_dirs = {} },
         { paths = paths, runtime_include = paths.include,
+            build_profile = options.build_profile or "validation",
             probe_cache_directory = FAKE_ROOT .. "/probes/browser-6.0.13/" .. cprobe_cache.VERSION },
         calls, files, record
 end
@@ -407,16 +408,36 @@ describe("browser target descriptor", function()
         "-finline-functions", "-fno-inline", "-fno-inline-functions",
         "-foptimize-sibling-calls", "-fno-optimize-sibling-calls",
         "-fomit-frame-pointer", "-fno-omit-frame-pointer",
+        "-sBINARYEN_EXTRA_PASSES=--coalesce-locals", "-sBINARYEN_EXTRA_PASSES",
     }) do
-        it("rejects the trace-owned compile option " .. flag .. " before tool discovery", function()
+        it("rejects the profile-owned compile option " .. flag .. " before tool discovery", function()
             local context, inputs, calls = fake_context()
             inputs.compile_flags = { flag }
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor)
-            assert.equal("browser target owns compile_flags option " .. flag, err)
+            assert.equal('browser validation profile owns compile option "' .. flag .. '"', err)
             assert.equal(0, #calls)
         end)
     end
+
+    it("rejects the two-token Binaryen extras spelling naming the profile", function()
+        local context, inputs, calls = fake_context()
+        inputs.build_profile = "production"
+        inputs.compile_flags = { "-s", "BINARYEN_EXTRA_PASSES=--coalesce-locals" }
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        assert.equal('browser production profile owns compile option "-s BINARYEN_EXTRA_PASSES=--coalesce-locals"', err)
+        assert.equal(0, #calls)
+    end)
+
+    it("rejects an unknown build profile", function()
+        local context, inputs, calls = fake_context()
+        inputs.build_profile = "release"
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        assert.equal('invalid browser build profile "release"', err)
+        assert.equal(0, #calls)
+    end)
 
     it("changes identity for record revision, effective flags, paths and profile facts", function()
         local baseline = fixtures.descriptor()
