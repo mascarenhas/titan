@@ -1,17 +1,20 @@
 # Compiling for the browser target
 
 `titanc --target browser` compiles Titan programs, tests, and libraries to
-WebAssembly with Emscripten. A program or test becomes a pair of files, an ES
-module `app.mjs` and its `app.wasm`, that runs under Node and in headless
-Chrome or Chromium:
+WebAssembly with Emscripten for use in web pages and web applications. A
+program or test becomes three files that belong together — an ES module
+`app.mjs`, its WebAssembly binary `app.wasm`, and its extended source map
+`app.wasm.map` — that a page loads through the [loader API](#the-loader-api)
+and that Titan's tests run with `titan-browser-run`:
 
 ```sh
 titanc --target browser -o out --exe out/app.mjs app
 titan-browser-run out/app.mjs -- first second
 ```
 
-The first command builds `out/app.mjs` and `out/app.wasm` from the module
-`app`, which defines `main`. The second runs the program under Node with the
+The first command builds `out/app.mjs`, `out/app.wasm`, and `out/app.wasm.map`
+from the module `app`, which defines `main`. The second runs the program under
+Node with the
 arguments `first` and `second`, copies its output byte for byte, and exits with
 its status. A library build without `main` produces a WebAssembly archive, and
 `-c` compiles objects only:
@@ -148,7 +151,7 @@ root:
 | `libtitan-lpeglabel.a` | the PEG engine, for a later browser `peg` module |
 | `titan.a` | the browser standard library: `titan.test`, `titan.coroutine`, and `titan.gc` |
 | `titan-browser.mjs` | the [loader](#the-loader-api) |
-| `titan-browser-library.js` | the Emscripten JavaScript library that every browser image links |
+| `titan-browser-library.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, admission, eager trace-map loading, and stack capture) |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [runner](#running-with-titan-browser-run) |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
@@ -280,19 +283,22 @@ library's source, from the SDK directory or the browser Titan path described
 ### Programs
 
 A build whose root module defines `main` links a program. The result is always
-two files that belong together: the ES module and its WebAssembly binary with
-the same stem. Without `--exe`, the program uses the native program's path
-below the output directory with `.mjs` added, so `titanc --target browser -o
-out app` writes `out/app.mjs` and `out/app.wasm`. An explicit `--exe` must end
-in `.mjs`:
+three files that belong together: the ES module, its WebAssembly binary, and
+its extended source map, all with the same stem. Without `--exe`, the program
+uses the native program's path below the output directory with `.mjs` added, so
+`titanc --target browser -o out app` writes `out/app.mjs`, `out/app.wasm`, and
+`out/app.wasm.map`. An explicit `--exe` must end in `.mjs`:
 
 ```text
 browser executable output "out/app" must end in .mjs
 ```
 
-Titan publishes the two files together: a failed link leaves
-the previous pair in place. `--incremental` reuses an unchanged pair without
-relinking.
+Titan publishes the three files together: a failed link leaves the previous
+files in place, so a partial or unextended map is never published.
+`--incremental` reuses an unchanged set without relinking. When a web server
+serves the program to a browser page, it must serve `app.wasm.map` alongside
+`app.wasm` so that the runtime can load the trace map during module
+initialization (see [traces](#traces)).
 
 `main` has the same signature as for a native program:
 
@@ -340,7 +346,7 @@ or call it by path:
 ```text
 titan-browser-run [--engine node|chromium] [--timeout MS] [--grace MS]
                   [--chrome PATH] [--cdp pipe|port] [--root DIR]
-                  [--js-test] FILE [-- ARG...]
+                  [--allow-degraded-trace] [--js-test] FILE [-- ARG...]
 ```
 
 `FILE` is the program's `.mjs`. Everything after `--` is passed to `main`
@@ -356,7 +362,8 @@ stdout and stderr exactly, and writes its own messages, all starting with
 | `--grace MS` | Time to keep watching after the program completes, to catch late traps and aborts; default 1500. |
 | `--chrome PATH` | The Chrome or Chromium executable; overrides `TITAN_CHROME`. |
 | `--cdp pipe\|port` | How the tool controls Chromium: a private pipe (the default) or a loopback DevTools port. |
-| `--root DIR` | The directory served to the engine; defaults to `FILE`'s directory, and must contain `FILE` and its `.wasm`. |
+| `--root DIR` | The directory served to the engine; defaults to `FILE`'s directory, and must contain `FILE`, its `.wasm`, and (unless `--allow-degraded-trace` is set) its `.wasm.map`. |
+| `--allow-degraded-trace` | Allow a run whose trace map is missing, malformed, or mismatched to proceed in degraded trace mode instead of failing as a harness error (used by tests of missing or invalid maps). |
 | `--js-test` | Run `FILE` as a JavaScript test module instead of a program (used by Titan's own tests). |
 | `--help`, `--version` | Print usage or the version to stderr and exit 0. |
 | `--probe` | Print one line of JSON describing the Node and Chrome that the tool would use, without running anything. |
@@ -381,7 +388,7 @@ honors only for the root user.
 | 72 | The `--timeout` limit expired, including a program that never stops computing. |
 | 73 | A trap or abort happened during the grace period after completion; it overrides the earlier result. |
 | 74 | An unhandled Promise rejection, before completion or during the grace period. |
-| 75 | The tool itself failed: Node or Chrome missing, an unreadable or invalid image, an engine that exited early, or a failed cleanup. |
+| 75 | The tool itself failed: Node or Chrome missing, an unreadable or invalid image, a degraded trace backend without `--allow-degraded-trace`, an engine that exited early, or a failed cleanup. |
 | 76 | A loader output sink failed. The runner's own sinks do not fail, so in practice this comes from the sinks of a `--js-test` module. |
 
 A program's own status can coincide with 70 to 76. The stderr message tells
@@ -418,14 +425,92 @@ through unchanged. Standard input is always at end of file.
 
 ### Traces
 
-A browser trace currently shows Lua frames only. Each Lua function appears as
-`source:line: in name`, every C function, including the entry of each compiled
-Titan function that Lua called, as `[C]: in name`, and Lua tail calls as
-`(...tail calls...)`. Compiled Titan frames, Titan source lines, and native
-addresses do not appear. `titan.backtrace()`, the `traceback` local in a
-`catch`, bare `raise`, and coroutine traces follow the same rules as natively;
-only the frames they contain differ. A browser trace backend that reports
-Titan frames through source maps is planned.
+When a web page or application initializes a browser image (or when tests run
+it through `titan-browser-run`), the runtime eagerly loads `<stem>.wasm.map`
+before `main` or any module initializer runs, verifies that its embedded build
+identity matches the instantiated `.wasm`, and builds an in-memory lookup
+index. Nothing is fetched or awaited when an error is raised or when
+`titan.backtrace()` is called.
+
+On **Chromium, Chrome, Firefox, and Node**, browser tracebacks have the same
+unified Titan/Lua contract as native builds:
+
+* Compiled Titan frames appear as `<basename>:<line>: in <display name>`,
+  using the selected physical `.titan` filename (`name.browser.titan`
+  included) and Titan display names (`m.func`, `m.Record:method`,
+  `m.Record.static`, or `anonymous function at m.titan:12`).
+* If a trace captured in an independent child Lua state includes outer native
+  frames from a module initialized only in the parent state, those outer frames
+  fall back to their C symbol name (or `?` when no symbol is known), as on
+  native hosts.
+* If a Titan frame's program counter has no line mapping inside its function
+  body, the frame uses the no-line form `<basename>: in <display name>` (with
+  the function's declaring `.titan` basename, or `?` when none is known), never
+  a synthetic `:0:` line.
+* Lua frames (`source:line: in name` or `source: in name`), genuine Lua C
+  functions (`[C]: in name`), and `(...tail calls...)` interleave with
+  compiled Titan runs in innermost-to-outer call order. Entry wrappers,
+  runtime frames, Lua core/library C frames, and unmapped helper exports are
+  filtered out, and an unmapped helper adjacent to a Titan function never
+  inherits a Titan line.
+* `titan.backtrace()`, the `traceback` local in a `catch` block, bare `raise`
+  re-throwing, caught-trace clearing, and coroutine trace propagation and
+  append behave as on native hosts, including across coroutine yields and
+  resumptions.
+
+**WebKit and Safari reduced fidelity.** On WebKit and Safari, where
+JavaScriptCore's `Error.stack` reports WebAssembly frames by function index
+without a bytecode offset, browser traces provide reduced, function-level
+fidelity: Titan frames appear in the same merged order with Lua frames and with
+the same Titan display names, rendered in the no-line form
+`<basename>: in <display name>`, and captures are limited to 100 frames. Pages
+running in WebKit or Safari should not `delete Error.stackTraceLimit`: in
+JavaScriptCore, deleting that property makes `new Error().stack` return
+`undefined` for the rest of the realm even after the property is redefined, so
+subsequent traces fall back to Lua frames with the capture-failed marker below.
+
+**Depth limits and truncation.** V8 (Chromium, Chrome, and Node) captures up to
+the runtime's 512-frame WebAssembly capacity; Firefox's SpiderMonkey caps
+synchronous captures at 128 frames; and WebKit and Safari cap captures at 100
+frames. Any host `Error.stackTraceLimit` is preserved across the capture. When
+a trace is cut short by the 512-frame capacity, by a host
+`Error.stackTraceLimit` that cannot be raised, or by the engine's capture
+limit, the trace ends with one final frame line:
+
+```text
+(...native frames truncated...)
+```
+
+**Deploying `.wasm.map` and degraded mode.** A web server serving a browser
+image must serve `<stem>.wasm.map` next to `<stem>.wasm` (or map both through
+`locateFile`). If `<stem>.wasm.map` cannot be loaded, is malformed, or does not
+match the instantiated `.wasm` image, module initialization logs one console
+warning (`Titan browser trace: <reason>`) and the application still runs in
+degraded mode. Every trace generated by that instance contains the Lua frames
+plus one marker line:
+
+```text
+(native Titan frames unavailable: trace map not loaded)
+```
+
+To catch deployment and staging mistakes in tests, `titan-browser-run` treats a
+degraded trace backend on a compiler-built image as a harness failure (exit 75)
+even if the program or tests pass, unless `--allow-degraded-trace` is supplied.
+
+**Host `Error.prepareStackTrace` and capture failure.** The runtime never calls
+a host `Error.prepareStackTrace` callback or invokes property getters or
+setters on `Error`. When `Error.prepareStackTrace` cannot be neutralized
+safely, or when an unexpected error or nested trace attempt occurs while a
+trace is already being built, the runtime skips reading `.stack` and emits the
+Lua-only trace with one marker line:
+
+```text
+(native Titan frames unavailable: capture failed)
+```
+
+The availability and truncation markers are ordinary frame lines without an
+error message, header, or tab indentation, and remain part of a pinned trace on
+bare `raise`.
 
 ## The loader API
 
@@ -464,8 +549,9 @@ returns an instance with three methods:
   in progress to finish; it does not cancel it.
 
 The options are `stdout` and `stderr`, the output sinks, and `locateFile`,
-which Emscripten uses to find the `.wasm`; by default the `.wasm` beside the
-`.mjs` is used. A missing sink discards that stream.
+which Emscripten and the trace loader use to find `<stem>.wasm` and
+`<stem>.wasm.map`; by default the `.wasm` and `.wasm.map` beside the `.mjs` are
+used. A missing sink discards that stream.
 
 **One run per instance.** An instance runs `main` at most once. Create a new
 instance for another run; independent instances can run at the same time in
@@ -559,15 +645,22 @@ reported separately from Lua record errors. The diagnostic lists the supplied
 compile flags and the actual versus required target features. Remove the
 feature-changing flag; reinstalling browser Lua does not repair that mismatch.
 
-Titan also owns the link settings that the runtime depends on: Asyncify, the
-longjmp mode, the stack and memory sizes, the program lifecycle and exports,
-the filesystem layer, assertions and stack checks, and the three target
-defines. Other Emscripten `-s` settings may be passed with `--ldflag`, but a
-compile or link flag that sets, unsets, or negates one of these is rejected,
-as are `--no-entry` and `--js-library`:
+Titan also owns the trace-preserving optimization, debug, `#line`, and link
+settings that the runtime and traceback backend depend on: `-O1`,
+`-fno-inline`, `-fno-optimize-sibling-calls`, `-gline-tables-only` (for object
+compilation), `-gsource-map`, `-g2`, and
+`-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` (for linking), and
+source `#line` directives (`--no-line-directives` and
+`TITAN_NO_LINE_DIRECTIVES=1`), together with Asyncify, the longjmp mode, the
+stack and memory sizes, the program lifecycle and exports, the filesystem
+layer, assertions and stack checks, and the three target defines. Other
+Emscripten `-s` settings may be passed with `--ldflag`, but a compile or link
+flag that overrides or negates one of these owned settings is rejected, as are
+`--no-entry` and `--js-library`:
 
 ```text
 browser link profile owns option -sASYNCIFY=0
+browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)
 ```
 
 ## Limits
@@ -576,7 +669,7 @@ A browser program runs with these fixed sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
-| Main C stack | 1 MiB | Lua recursion through C calls, such as nested `pcall`, stops first at Lua's own limit with the ordinary catchable `C stack overflow` error. Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
+| Main C stack | 1 MiB | Plain Lua recursion through C calls, such as nested `pcall`, stops first at Lua's own limit with the ordinary catchable `C stack overflow` error, whereas recursion that alternates between Lua and compiled Titan can exhaust the JavaScript engine's stack before that limit (see [current limits](#current-limits)). Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
 | Coroutine C stack | 256 KiB per coroutine (2 MiB natively) | The same inside a coroutine, at about a quarter of that depth. |
 | Saved call stack for a coroutine switch or a wait | 64 KiB, for the main context and for each coroutine | A switch or wait whose call stack does not fit traps with `unreachable` (runner exit 71). About 400 small C frames fit. |
 | Linear memory | 16 MiB initially, growing to at most 2 GiB | An allocation failure is Lua's ordinary out-of-memory error, and creating a coroutine fails with `could not create coroutine: Out of memory`. Both can be caught, and the instance stays usable. |
@@ -590,9 +683,17 @@ About 5,400 live coroutines fit in 2 GiB.
 * The browser standard library provides only `test`, `coroutine`, and `gc`.
   `async`, timers, files, networking, `lua`, `peg`, and the other standard
   modules are not available yet.
-* Programs run under Node and headless Chrome or Chromium only. Firefox and
-  WebKit are not supported yet.
-* Traces show Lua frames only (see [traces](#traces)).
+* Browser images run in Chromium and Chrome, Firefox, WebKit and Safari, and
+  Node 24; `titan-browser-run` (the test runner) drives only Node 24 and
+  headless Chrome or Chromium.
+* On WebKit and Safari, traces have reduced, function-level fidelity
+  (`<basename>: in <display name>`, without line numbers, and a 100-frame
+  capture limit), and Firefox caps synchronous stack captures at 128 frames
+  (see [traces](#traces)).
+* Deep mixed Lua/Titan recursion can exhaust the engine's JavaScript call stack
+  before reaching Lua's C-stack limit, rejecting the run with the engine's
+  `RangeError: Maximum call stack size exceeded` as its `cause` instead of
+  raising a catchable Lua `C stack overflow` error.
 * A loader instance runs `main` once; sinks must be synchronous.
 * Only Linux and macOS hosts are supported; `Makefile.win` offers neither
   `lua-browser` nor `browser-sdk`.

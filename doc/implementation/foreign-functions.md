@@ -269,8 +269,13 @@ Raw field and bracket expressions render C `.`/`->`/`[]` operations directly.
 They deliberately omit the ordinary `codeforeigncall`,
 `codecfunctionptrcall`, and `codecindex_parts` guards that require an implicit
 Lua state. String literals are emitted as C string literals with static
-storage, and nil is `NULL`. No `luaC_checkGC`, stack rebase, anchoring, or trace
-registration appears in a foreign body.
+storage, and nil is `NULL`. `_foreign_raw_stat` stamps `#line` source
+directives (`emitline(node) .. coverage_region(node, code, ctx)`) on raw
+statements, and `coder.generate` registers `<module>.<name>` in
+`registry[TITAN_NAMES_KEY]` for both `_foreign_func_name` and any local
+`_foreign_inline_name` helper so foreign-body frames carry their `.titan`
+location and display name in tracebacks. No `luaC_checkGC`, stack rebase, or
+GC anchoring appears in a foreign body.
 
 ## Generated `*.titan.h` planning
 

@@ -319,7 +319,10 @@ Foreign functions share the top-level native-entry family with ordinary
 functions. There is no universal `titan_` prefix and no separate hexadecimal
 source-private scheme. A foreign function has only the native C entry; it has
 no Lua or strict entry and no module-state closure slot. Generated C retains
-the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`.
+the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`. In a
+Titan traceback, an active source foreign function appears under its display
+name `<module>.<name>` with its `.titan` file and line (or the no-line form on
+reduced-fidelity targets), like an ordinary top-level Titan function.
 
 The callable hierarchy, source-defined standard-library callbacks, generic
 interface metadata, and affected public standard-library signatures are all
