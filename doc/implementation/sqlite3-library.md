@@ -1,7 +1,7 @@
 # SQLite standard-library implementation
 
 The [public contract](../language/standard-library-sqlite3.md) belongs to the
-folder module `titan.sqlite3`. `sqlite3.titan` owns Connection/Statement/Cursor
+folder module `titan.sqlite3`. `sqlite3.native.titan` owns Connection/Statement/Cursor
 state and submission, `bindings.titan` owns reflection input validation and
 owned output decoding, `row.titan` owns synchronous row mapping, and
 `worker.titan` contains restricted source foreign functions. `native.h`
@@ -134,7 +134,7 @@ A detached source has no handle, so its state-close finalizer releases nothing.
 
 Public ordinary work goes through `async.run_foreign`, submitted by
 `Connection:run_worker`. The local cleanup adapter `Connection:run_cleanup`
-(`sqlite3.titan`) uses public `uv.work_t` and `uv.queue_work` inside
+(`sqlite3.native.titan`) uses public `uv.work_t` and `uv.queue_work` inside
 `async.await_cleanup_with`. Its `CleanupWork` context
 records the completion and operation number, and passes the owned packet as
 `uv.queue_work`'s `argument_owner`, which retains it through worker completion

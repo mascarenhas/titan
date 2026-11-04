@@ -1,6 +1,6 @@
 # Filesystem-library implementation
 
-`titan/fs.titan` owns high-level File and Watcher policy through ordinary
+`titan/fs.native.titan` owns high-level File and Watcher policy through ordinary
 compiled imports of public `titan.async`, `titan.uv`, and `titan.string`. Its
 only native include is `fs_platform.h`, which defines the path separator
 `TITAN_FS_DIRSEP` and has no libuv storage, callback, or scheduler dependency;

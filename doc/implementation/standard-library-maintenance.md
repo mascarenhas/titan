@@ -63,7 +63,7 @@ shortcuts when libuv provides it. See [foreign functions](foreign-functions.md)
 and [libuv extension rules](libuv-extension-guide.md).
 
 Foreign workers consume stable native callback data rather than the hosting
-state's Titan/Lua objects. In `titan/uv/uv.titan`, `uv_work_t.data` points to
+state's Titan/Lua objects. In `titan/uv/uv.native.titan`, `uv_work_t.data` points to
 the embedded C `titan_uv_work_data` (`titan/uv/work-data.h`) that `queue_work`
 fills and that stays unchanged while work is pending; public
 `work_t:get_data`/`set_data` accesses a separate traced value. Keep those roles

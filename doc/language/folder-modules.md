@@ -252,7 +252,7 @@ Titan dogfoods this layout in its public low-level libuv binding:
 
 ```
 titan/uv/
-  uv.titan          # shared state, core owners, loop/handle/request operations
+  uv.native.titan   # shared state, core owners, loop/handle/request operations
   callbacks.titan   # public callback aliases
   constants.titan   # native constants and tagged alternatives
   data.titan        # copied native value records

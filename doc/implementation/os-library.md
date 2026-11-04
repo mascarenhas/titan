@@ -1,6 +1,6 @@
 # Operating-system library implementation
 
-`titan/os.titan` implements the [OS API](../language/standard-library-os.md):
+`titan/os.native.titan` implements the [OS API](../language/standard-library-os.md):
 environment and host queries, calendars, parent standard streams, process
 configuration, captured streams, the `popen` shell facade, signals, and
 graceful exit. It uses ordinary compiled imports of public `uv` and `async`.

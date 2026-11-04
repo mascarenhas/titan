@@ -915,7 +915,7 @@ source providers likewise expose one native owner/entry per declaration.
 
 ## Generic async owners
 
-`titan.async` (`titan/async.titan`) declares the generic Task, status,
+`titan.async` (`titan/async.native.titan`) declares the generic Task, status,
 cancellation, and result owners and the generic `run`, combinator, and
 `channel<|T|>` schemes. Their runtime behavior (waits, listeners, suspension,
 combinators, channels, subscriptions) is specified in
