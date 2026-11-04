@@ -244,7 +244,7 @@ function test_parser_configured_nesting_boundary(_context: test.Context)
   local depth = 128
   local objects = string.rep('{"x":', depth) .. "true" .. string.rep("}", depth)
   local current: value = json.decode(objects, nil, json.DecodeOption.max_depth(depth))
-  test.assert(json.encode(current, json.EncodeOption.max_depth(depth)) == objects)
+  check_nested_encoding(current, objects, depth, nil)
   local failure = expect_json_error(function()
     json.encode(current, json.EncodeOption.max_depth(depth - 1))
   end)
@@ -256,7 +256,7 @@ function test_parser_configured_nesting_boundary(_context: test.Context)
   test.assert(current == true)
   local arrays = string.rep("[", depth) .. "true" .. string.rep("]", depth)
   current = json.decode(arrays, nil, json.DecodeOption.max_depth(depth))
-  test.assert(json.encode(current, json.EncodeOption.max_depth(depth)) == arrays)
+  check_nested_encoding(current, arrays, depth, nil)
   failure = expect_json_error(function()
     json.encode(current, json.EncodeOption.max_depth(depth - 1))
   end)
@@ -295,8 +295,7 @@ function test_parser_deep_mixed_containers_and_sibling_members(_context: test.Co
     local current: value = json.decode(source, nil,
       json.DecodeOption.max_depth(depth), json.DecodeOption.null_value(null))
     gc.collect()
-    test.assert(json.encode(current, json.EncodeOption.max_depth(depth),
-      json.EncodeOption.null_value(null)) == source)
+    check_nested_encoding(current, source, depth, null)
     for level = depth, 1, -1 do
       if level % 2 == 1 then
         local object: {string: value} = current

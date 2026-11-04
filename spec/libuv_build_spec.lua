@@ -2793,6 +2793,8 @@ int main(void) {
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
+            assert.same({ "titan/json/native.h" },
+                makefile_words("JSON_TITAN_HEADERS"))
             assert.same({ "titan/lua/lua.titan", "titan/lua/worker.titan" },
                 makefile_words("LUA_TITAN_SOURCES"))
             assert.same({ "titan/lua/native.h" },
@@ -3882,7 +3884,8 @@ esac
             for _, ensemble in ipairs({
                 "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES", "PROTOBUF_TITAN_SOURCES",
                 "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES", "THREAD_TITAN_SOURCES",
-                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
+                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "JSON_TITAN_HEADERS",
+                "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
                     sources[#sources + 1] = source

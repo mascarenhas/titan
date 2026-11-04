@@ -1,0 +1,104 @@
+local depth_protobuf = import "protobuf"
+local depth_string = import "string"
+
+local TRANSFER_DEPTH_LIMIT = 0
+local TRANSFER_ACCEPTED_DEPTH = 0
+local TRANSFER_DEPTH_ERROR = ""
+
+record TransferDepthNode
+  name: string
+  next: TransferDepthNode?
+end
+
+local function transfer_depth_chain(depth: integer): TransferDepthNode
+  local current = TransferDepthNode("n", nil)
+  for _ = 2, depth do current = TransferDepthNode("n", current) end
+  return current
+end
+
+local function transfer_depth_length(current: TransferDepthNode): integer
+  local count = 1
+  while current.next ~= nil do
+    current = current.next
+    count = count + 1
+  end
+  return count
+end
+
+local function transfer_depth_bytes(depth: integer): string
+  local bytes = depth_string.char(10, 1) .. "n"
+  for _ = 2, depth do
+    local length = #bytes
+    local varint = ""
+    repeat
+      local byte = length & 127
+      length = length >> 7
+      if length > 0 then byte = byte | 128 end
+      varint = varint .. depth_string.char(byte)
+    until length == 0
+    bytes = depth_string.char(10, 1) .. "n" .. depth_string.char(18) .. varint .. bytes
+  end
+  return bytes
+end
+
+local function transfer_depth_policy(depth: integer): transfer.TransferValue
+  return transfer.TransferValue.is_record("transfer.tests", "transfer.tests.TransferDepthNode",
+    transfer_depth_bytes(depth))
+end
+
+local function add_transfer_depth_cases(context: test.Context, generated: boolean)
+  local label = "reflective"
+  if generated then label = "generated" end
+  context:run(label .. "_accepts_" .. TRANSFER_ACCEPTED_DEPTH, function(_: test.Context)
+    local previous = depth_protobuf.use_generated_codecs(generated)
+    defer depth_protobuf.use_generated_codecs(previous)
+    local subject = transfer_depth_chain(TRANSFER_ACCEPTED_DEPTH)
+    local policy = transfer.TransferValue.from_value(subject)
+    case policy
+    when is_record{data} then
+      test.assert(data == transfer_depth_bytes(TRANSFER_ACCEPTED_DEPTH))
+    else raise "transfer did not produce a structural record policy"
+    end
+    local decoded: TransferDepthNode = policy:to_value()
+    test.assert(transfer_depth_length(decoded) == TRANSFER_ACCEPTED_DEPTH)
+    local raw = transfer.encode_message(subject)
+    defer transfer.discard_message(raw)
+    decoded = transfer.decode_message(raw)
+    test.assert(raw == nil and transfer_depth_length(decoded) == TRANSFER_ACCEPTED_DEPTH)
+  end)
+  context:run(label .. "_encode_rejects_" .. TRANSFER_DEPTH_LIMIT, function(_: test.Context)
+    local previous = depth_protobuf.use_generated_codecs(generated)
+    defer depth_protobuf.use_generated_codecs(previous)
+    local subject = transfer_depth_chain(TRANSFER_DEPTH_LIMIT)
+    support.assert_raises_contains(function()
+      transfer.TransferValue.from_value(subject)
+    end, TRANSFER_DEPTH_ERROR)
+    support.assert_raises_contains(function()
+      local raw = transfer.encode_message(subject)
+      defer transfer.discard_message(raw)
+    end, TRANSFER_DEPTH_ERROR)
+  end)
+  context:run(label .. "_decode_rejects_" .. TRANSFER_DEPTH_LIMIT, function(_: test.Context)
+    local previous = depth_protobuf.use_generated_codecs(generated)
+    defer depth_protobuf.use_generated_codecs(previous)
+    local policy = transfer_depth_policy(TRANSFER_DEPTH_LIMIT)
+    support.assert_raises_contains(function() policy:to_value() end, TRANSFER_DEPTH_ERROR)
+    local raw = transfer.encode_message(policy)
+    defer transfer.discard_message(raw)
+    local caught = false
+    do
+      transfer.decode_message(raw)
+    catch
+      caught = true
+      test.assert(error == TRANSFER_DEPTH_ERROR, "wrong packet depth error")
+    end
+    test.assert(caught and raw == nil, "depth rejection did not consume the packet")
+    local recovered: TransferDepthNode = transfer_depth_policy(2):to_value()
+    test.assert(transfer_depth_length(recovered) == 2)
+  end)
+end
+
+function test_target_depth_boundaries(context: test.Context)
+  add_transfer_depth_cases(context, true)
+  add_transfer_depth_cases(context, false)
+end

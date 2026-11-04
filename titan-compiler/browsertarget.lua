@@ -17,6 +17,8 @@ local RECORD_KEYS = { "fork_revision", "archive_sha256", "headers_sha256",
 local TARGET_DEFINES = {
     "-DTITAN_TARGET_BROWSER=1",
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
+    "-DTITAN_CODEC_DEPTH_LIMIT=43",
+    "-DTITAN_JSON_WRITER_DEPTH_LIMIT=103",
     "-DMCO_ASYNCFY_STACK_SIZE=65536",
 }
 -- One object profile per build profile (D26). `production` optimizes as native

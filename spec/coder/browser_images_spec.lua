@@ -508,6 +508,14 @@ describe("browser image profile and SDK readiness", function()
                 { "-sNO_PRINTF_LONG_DOUBLE=1" },
                 { "-DPRINTF_LONG_DOUBLE=0" },
                 { "-U", "PRINTF_LONG_DOUBLE" },
+                { "-DTITAN_CODEC_DEPTH_LIMIT=1000" },
+                { "-D", "TITAN_CODEC_DEPTH_LIMIT=1000" },
+                { "-UTITAN_CODEC_DEPTH_LIMIT" },
+                { "-U", "TITAN_CODEC_DEPTH_LIMIT" },
+                { "-DTITAN_JSON_WRITER_DEPTH_LIMIT=1000" },
+                { "-D", "TITAN_JSON_WRITER_DEPTH_LIMIT=1000" },
+                { "-UTITAN_JSON_WRITER_DEPTH_LIMIT" },
+                { "-U", "TITAN_JSON_WRITER_DEPTH_LIMIT" },
             }) do
                 local ok, why = browserlink.validate_extras(flags, { purpose = purpose })
                 assert.is_nil(ok)
@@ -516,7 +524,9 @@ describe("browser image profile and SDK readiness", function()
         end
         -- Compile extras are reported by the compile diagnostic, link extras by
         -- the link one (OG-L4): the same option, one owner, one message.
-        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-DTITAN_TARGET_BROWSER=1" }) do
+        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-DTITAN_TARGET_BROWSER=1",
+            "-DTITAN_CODEC_DEPTH_LIMIT=1000", "-UTITAN_CODEC_DEPTH_LIMIT",
+            "-DTITAN_JSON_WRITER_DEPTH_LIMIT=1000", "-UTITAN_JSON_WRITER_DEPTH_LIMIT" }) do
             local ok, why = browserlink.validate_extras({ flag }, { purpose = "gate" }, "production", "compile")
             assert.is_nil(ok)
             assert.equal('browser production profile owns compile option "' .. flag .. '"', why)

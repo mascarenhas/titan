@@ -21,7 +21,10 @@ local function field_ordinal(number: integer): integer
 end
 
 local function require_depth(depth: integer)
-  if depth > 128 then raise "protobuf: nesting exceeds 128 levels" end
+  if depth > ffi.TITAN_CODEC_DEPTH_LIMIT then
+    local limit: integer = ffi.TITAN_CODEC_DEPTH_LIMIT
+    raise "protobuf: nesting exceeds " .. limit .. " levels"
+  end
 end
 
 local function resolve_type(descriptor: reflect.Type): reflect.Type
