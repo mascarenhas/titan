@@ -252,7 +252,7 @@ Titan dogfoods this layout in its public low-level libuv binding:
 
 ```
 titan/uv/
-  uv.titan          # shared state, core owners, loop/handle/request operations
+  uv.native.titan   # shared state, core owners, loop/handle/request operations
   callbacks.titan   # public callback aliases
   constants.titan   # native constants and tagged alternatives
   data.titan        # copied native value records
@@ -264,7 +264,11 @@ titan/uv/
   ...               # address, descriptor, pipe/TTY, TCP, UDP, and utility APIs
 ```
 
-The Makefile's `UV_TITAN_SOURCES` explicitly lists all contributors. They share
+The Makefile's `UV_TITAN_SOURCES` explicitly lists all contributors. The main
+is the `native` [target variant](target-source-selection.md) `uv.native.titan`,
+so `titan.uv` exists only on native targets: for the browser target no main is
+selected, and the contributors, which keep plain names, are never composed.
+They share
 one module scope and one initializer. Public native owners, callbacks, data
 records, constants, functions, and methods form the ordinary compiled `uv`
 interface. Async, timer, fs, net, os, and sqlite3 use `import "uv"` or its

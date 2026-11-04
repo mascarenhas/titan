@@ -333,7 +333,9 @@ static inline double titan_protobuf_read_double(
  * context, and one reflective Encoder per root.
  * ------------------------------------------------------------------------ */
 
+#ifndef TITAN_CODEC_DEPTH_LIMIT
 #define TITAN_CODEC_DEPTH_LIMIT 128
+#endif
 
 /* Reflective handoff operations (TitanCodecHandoff.op). */
 #define TITAN_CODEC_ENCODE_FIELD 1
@@ -435,7 +437,9 @@ static inline void titan_codec_raise(lua_State *L, const char *message) {
 
 static inline void titan_codec_depth(lua_State *L, int depth) {
   if (depth > TITAN_CODEC_DEPTH_LIMIT) {
-    titan_codec_raise(L, "protobuf: nesting exceeds 128 levels");
+    lua_checkstack(L, 1);
+    lua_pushfstring(L, "protobuf: nesting exceeds %d levels", (int)TITAN_CODEC_DEPTH_LIMIT);
+    lua_error(L);
   }
 }
 

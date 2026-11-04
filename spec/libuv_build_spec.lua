@@ -18,7 +18,7 @@ local _, close_contexts, resolver_options =
     require("spec.support.resolver_contexts")(driver)
 after_each(close_contexts)
 
-local UV_MAIN_SOURCE = "titan/uv/uv.titan"
+local UV_MAIN_SOURCE = "titan/uv/uv.native.titan"
 local STDLIB_TYPES_FIXTURE =
 "spec/fixtures/stdlib/titan_stdlib_types.lua"
 local UV_TYPES_FIXTURE =
@@ -161,70 +161,70 @@ local UV_FOREIGN_CALLBACKS = {
     { name = "udp_send_callback", source = "titan/uv/udp.titan",
       record = "udp_send_t", field = "handler", handler = "udp_sent", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status)" },
-    { name = "timer_callback", source = "titan/uv/uv.titan",
+    { name = "timer_callback", source = "titan/uv/uv.native.titan",
       record = "timer_t", field = "handler", handler = "timer_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "timer_close_callback", source = "titan/uv/uv.titan",
+    { name = "timer_close_callback", source = "titan/uv/uv.native.titan",
       record = "timer_t", field = "close_handler", handler = "timer_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "fs_callback", source = "titan/uv/uv.titan",
+    { name = "fs_callback", source = "titan/uv/uv.native.titan",
       record = "fs_t", field = "handler", handler = "fs_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "work_after_callback", source = "titan/uv/uv.titan",
+    { name = "work_after_callback", source = "titan/uv/uv.native.titan",
       record = "work_t", field = "handler", handler = "work_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
-    { name = "walk_callback", source = "titan/uv/uv.titan",
+    { name = "walk_callback", source = "titan/uv/uv.native.titan",
       record = "loop_t", field = "walk_handler", handler = "walk_deliver", owner = "loop",
       call = "entry(L, module, handler, loop, native)" },
-    { name = "idle_callback", source = "titan/uv/uv.titan",
+    { name = "idle_callback", source = "titan/uv/uv.native.titan",
       record = "idle_t", field = "handler", handler = "idle_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "idle_close_callback", source = "titan/uv/uv.titan",
+    { name = "idle_close_callback", source = "titan/uv/uv.native.titan",
       record = "idle_t", field = "close_handler", handler = "idle_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "prepare_callback", source = "titan/uv/uv.titan",
+    { name = "prepare_callback", source = "titan/uv/uv.native.titan",
       record = "prepare_t", field = "handler", handler = "prepare_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "prepare_close_callback", source = "titan/uv/uv.titan",
+    { name = "prepare_close_callback", source = "titan/uv/uv.native.titan",
       record = "prepare_t", field = "close_handler", handler = "prepare_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "check_callback", source = "titan/uv/uv.titan",
+    { name = "check_callback", source = "titan/uv/uv.native.titan",
       record = "check_t", field = "handler", handler = "check_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "check_close_callback", source = "titan/uv/uv.titan",
+    { name = "check_close_callback", source = "titan/uv/uv.native.titan",
       record = "check_t", field = "close_handler", handler = "check_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "async_callback", source = "titan/uv/uv.titan",
+    { name = "async_callback", source = "titan/uv/uv.native.titan",
       record = "async_t", field = "handler", handler = "async_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "async_close_callback", source = "titan/uv/uv.titan",
+    { name = "async_close_callback", source = "titan/uv/uv.native.titan",
       record = "async_t", field = "close_handler", handler = "async_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "signal_callback", source = "titan/uv/uv.titan",
+    { name = "signal_callback", source = "titan/uv/uv.native.titan",
       record = "signal_t", field = "handler", handler = "signal_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, signum as foreign lua_Integer)" },
-    { name = "signal_close_callback", source = "titan/uv/uv.titan",
+    { name = "signal_close_callback", source = "titan/uv/uv.native.titan",
       record = "signal_t", field = "close_handler", handler = "signal_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "poll_callback", source = "titan/uv/uv.titan",
+    { name = "poll_callback", source = "titan/uv/uv.native.titan",
       record = "poll_t", field = "handler", handler = "poll_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, events as foreign lua_Integer)" },
-    { name = "poll_close_callback", source = "titan/uv/uv.titan",
+    { name = "poll_close_callback", source = "titan/uv/uv.native.titan",
       record = "poll_t", field = "close_handler", handler = "poll_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "random_callback", source = "titan/uv/uv.titan",
+    { name = "random_callback", source = "titan/uv/uv.native.titan",
       record = "random_t", field = "handler", handler = "random_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, buflen as foreign lua_Integer)" },
-    { name = "fs_event_callback", source = "titan/uv/uv.titan",
+    { name = "fs_event_callback", source = "titan/uv/uv.native.titan",
       record = "fs_event_t", field = "handler", handler = "fs_event_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, filename, events as foreign lua_Integer, status as foreign lua_Integer)" },
-    { name = "fs_event_close_callback", source = "titan/uv/uv.titan",
+    { name = "fs_event_close_callback", source = "titan/uv/uv.native.titan",
       record = "fs_event_t", field = "close_handler", handler = "fs_event_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "fs_poll_callback", source = "titan/uv/uv.titan",
+    { name = "fs_poll_callback", source = "titan/uv/uv.native.titan",
       record = "fs_poll_t", field = "handler", handler = "fs_poll_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, prev, curr)" },
-    { name = "fs_poll_close_callback", source = "titan/uv/uv.titan",
+    { name = "fs_poll_close_callback", source = "titan/uv/uv.native.titan",
       record = "fs_poll_t", field = "close_handler", handler = "fs_poll_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
 }
@@ -269,8 +269,8 @@ local UV_NATIVE_ENTRIES = {
     { name = "native_once", source = "titan/uv/sync.titan" },
     { name = "native_thread_join", source = "titan/uv/threading.titan" },
     { name = "native_thread_detach", source = "titan/uv/threading.titan" },
-    { name = "work_worker_callback", source = "titan/uv/uv.titan" },
-    { name = "async_send_native", source = "titan/uv/uv.titan" },
+    { name = "work_worker_callback", source = "titan/uv/uv.native.titan" },
+    { name = "async_send_native", source = "titan/uv/uv.native.titan" },
 }
 local LEGACY_UV_CALLBACKS = {
     "titan_uvshim_signal_cb",
@@ -1175,8 +1175,8 @@ esac
             local root = make_temp_dir()
             local tested, failure = xpcall(function()
                 assert(lfs.mkdir(root .. "/titan"))
-                write_file(root .. "/titan/" .. consumer .. ".titan",
-                    read_file("titan/" .. consumer .. ".titan"))
+                write_file(root .. "/titan/" .. consumer .. ".native.titan",
+                    read_file("titan/" .. consumer .. ".native.titan"))
                 if consumer == "async" then
                     for _, header in ipairs({
                         "async_receiver_native.h", "async_signal_platform.h", "transfer_native.h",
@@ -1206,7 +1206,8 @@ end
 ]])
                 end
                 local producer = consumer == "async" and "coroutine" or "os"
-                assert.falsy(file_exists(root .. "/titan/" .. producer .. ".titan"))
+                assert.is_nil(driver.resolve_source(resolver_options().context,
+                    "titan." .. producer, root))
                 local prefix = installed_prefix.active()
                 local executable_suffix = platform.windows and ".exe" or ""
                 -- Source async owns its POSIX signal policy; use the same
@@ -1313,18 +1314,18 @@ end
                 write_file(root .. "/Makefile", table.concat({
                     "UV_TITAN_SOURCES := titan/uv/tcp.titan titan/uv/tcp.linux.titan",
                     "STDLIB_TITAN_SOURCES := $(UV_TITAN_SOURCES) " ..
-                    "titan/fs.titan titan/fs.native.titan",
+                    "titan/sample.titan titan/sample.native.titan",
                     "",
                 }, "\n"))
                 local files = stdlib_source_files(root .. "/Makefile")
                 assert.same({
                     "titan/uv/tcp.titan", "titan/uv/tcp.linux.titan",
-                    "titan/fs.titan", "titan/fs.native.titan",
+                    "titan/sample.titan", "titan/sample.native.titan",
                 }, files)
                 local families = source_families(files)
                 assert.equal(2, #families)
                 assert.equal("titan/uv/tcp.titan", families[1].logical)
-                assert.equal("titan/fs.titan", families[2].logical)
+                assert.equal("titan/sample.titan", families[2].logical)
                 local expected = {
                     linux = "titan/uv/tcp.linux.titan",
                     darwin = "titan/uv/tcp.titan",
@@ -1333,7 +1334,7 @@ end
                 }
                 assert.equal(expected[host_source_label()],
                     selected_host_source(families[1]))
-                assert.equal("titan/fs.native.titan",
+                assert.equal("titan/sample.native.titan",
                     selected_host_source(families[2]))
 
                 local folder = root .. "/titan/uv"
@@ -1646,7 +1647,6 @@ done
             assert.falsy(seen[module], "duplicate native owner " .. module)
             seen[module], roots[#roots + 1] = true, module
         end
-        assert.equal(30, #roots)
         assert.equal("test.tests", roots[1])
         local driver = require "titan-compiler.driver"
         local testroots = require "titan-compiler.testroots"
@@ -1658,7 +1658,7 @@ done
         assert.truthy(ok, discovered)
         assert.truthy(discovered, detail)
         table.sort(roots)
-        assert.same(roots, discovered, "discovery must select exactly the 30 audited owners")
+        assert.same(roots, discovered, "discovery must select exactly the audited owners")
         for _, retired in ipairs({ "TITAN_TEST_MODULES", "TITAN_TEST_SOURCES_",
                 "TITAN_TEST_IMPORTS_", "TITAN_TEST_C_INPUTS_", "TITAN_TEST_FOREIGN_" }) do
             assert.falsy(read_file(manifest):find(retired, 1, true), retired)
@@ -2229,7 +2229,7 @@ printf '%s/%s\n' "$directory" "$object"
         end)
 
     it("keeps inherited SIGPIPE policy in async and argc/argv setup in public UV", function()
-        local async = read_file("titan/async.titan")
+        local async = read_file("titan/async.native.titan")
         for _, contract in ipairs({
             'foreign import "async_signal_platform.h"',
             "local native_error = ffi.titan_async_ignore_sigpipe_if_default()",
@@ -2260,7 +2260,7 @@ printf '%s/%s\n' "$directory" "$object"
 
     it("keeps public UV independent of Task policy and owns nominal async types in async", function()
         local async_exports = {}
-        for _, name in ipairs(public_declarations("titan/async.titan")) do async_exports[name] = true end
+        for _, name in ipairs(public_declarations("titan/async.native.titan")) do async_exports[name] = true end
         for _, name in ipairs({"Error", "OperationError", "ResumeToken", "CancellationReason",
                 "TaskStatus", "Task", "Completion", "TransferValue", "checkpoint",
                 "await_with", "await_cancellable_with", "await_cleanup_with",
@@ -2291,7 +2291,7 @@ printf '%s/%s\n' "$directory" "$object"
     end)
 
     it("keeps generic Tasks and ordinary, cancellable and cleanup waits in async", function()
-        local async = read_file("titan/async.titan")
+        local async = read_file("titan/async.native.titan")
         for _, contract in ipairs({
             "record ResumeToken", "const source: string?", "union CancellationReason<|B|>",
             "union TaskStatus<|A, B|>", "record Task<|A, B|>", "local record Runtime",
@@ -2348,7 +2348,7 @@ printf '%s/%s\n' "$directory" "$object"
     it("keeps the reviewed HTTP source list equal to the folder ensemble",
         function()
             local listed = makefile_words("STDLIB_HTTP_SOURCES")
-            assert.equal("titan/http/http.titan", listed[1])
+            assert.equal("titan/http/http.native.titan", listed[1])
             local normalized = {}
             local seen = {}
             for _, source in ipairs(listed) do
@@ -2744,7 +2744,7 @@ int main(void) {
         end
         assert.same({}, (function ()
             local entries = {}
-            for _, node in ipairs(parsed_source("titan/fs.titan")) do
+            for _, node in ipairs(parsed_source("titan/fs.native.titan")) do
                 if node._tag == "Ast.TopLevelForeignFunc" then entries[#entries + 1] = node.name end
             end
             return entries
@@ -2753,7 +2753,7 @@ int main(void) {
     end)
 
     it("keeps filesystem request cleanup before settlement and watchers on scoped generic batches", function()
-        local source = read_file("titan/fs.titan")
+        local source = read_file("titan/fs.native.titan")
         local first = assert(source:find("local function file_completed<|T|>", 1, true))
         local last = assert(source:find("local function start_file<|T|>", first, true))
         local completed = source:sub(first, last - 1)
@@ -2793,12 +2793,14 @@ int main(void) {
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
-            assert.same({ "titan/lua/lua.titan", "titan/lua/worker.titan" },
+            assert.same({ "titan/json/native.h" },
+                makefile_words("JSON_TITAN_HEADERS"))
+            assert.same({ "titan/lua/lua.native.titan", "titan/lua/worker.titan" },
                 makefile_words("LUA_TITAN_SOURCES"))
             assert.same({ "titan/lua/native.h" },
                 makefile_words("LUA_TITAN_HEADERS"))
             assert.same({
-                "titan/thread/thread.titan", "titan/thread/channel.titan",
+                "titan/thread/thread.native.titan", "titan/thread/channel.titan",
                 "titan/thread/group.titan", "titan/thread/spawn.titan",
             }, makefile_words("THREAD_TITAN_SOURCES"))
             assert.same({ "titan/thread/native.h" },
@@ -2831,7 +2833,7 @@ int main(void) {
 
             assert.same({
                 "titan/coroutine.titan",
-                "titan/uv/uv.titan",
+                "titan/uv/uv.native.titan",
                 "titan/uv/address.titan",
                 "titan/uv/callbacks.titan",
                 "titan/uv/capabilities.titan",
@@ -2854,16 +2856,16 @@ int main(void) {
                 "titan/uv/transfer.titan",
                 "titan/uv/udp.titan",
                 "titan/uv/utilities.titan",
-                "titan/async.titan",
-                "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
-                "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
-                "titan/http/http.titan", "titan/http/client.titan",
+                "titan/async.native.titan",
+                "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
+                "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
+                "titan/http/http.native.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
                 "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
-                "titan/websocket/websocket.titan", "titan/websocket/handshake.titan",
+                "titan/websocket/websocket.native.titan", "titan/websocket/handshake.titan",
                 "titan/websocket/connection.titan", "titan/websocket/frames.titan",
                 "titan/websocket/utf8.titan", "titan/websocket/native.titan",
-                "titan/os.titan", "titan/path.titan",
+                "titan/os.native.titan", "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -2873,10 +2875,10 @@ int main(void) {
                 "titan/string/pack.titan", "titan/string/regex_api.titan",
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
-                "titan/math.titan", "titan/lua/lua.titan", "titan/lua/worker.titan",
+                "titan/math.titan", "titan/lua/lua.native.titan", "titan/lua/worker.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
                 "titan/reflect.titan",
-                "titan/sqlite3/sqlite3.titan", "titan/sqlite3/bindings.titan",
+                "titan/sqlite3/sqlite3.native.titan", "titan/sqlite3/bindings.titan",
                 "titan/sqlite3/row.titan", "titan/sqlite3/worker.titan",
                 "titan/json/json.titan", "titan/json/parser.titan",
                 "titan/json/decoder.titan", "titan/json/writer.titan",
@@ -2884,7 +2886,7 @@ int main(void) {
                 "titan/protobuf/protobuf.titan", "titan/protobuf/encoder.titan",
                 "titan/protobuf/decoder.titan", "titan/protobuf/schema.titan",
                 "titan/transfer.titan",
-                "titan/thread/thread.titan", "titan/thread/channel.titan",
+                "titan/thread/thread.native.titan", "titan/thread/channel.titan",
                 "titan/thread/group.titan", "titan/thread/spawn.titan",
             }, stdlib_source_files())
         end)
@@ -2910,8 +2912,8 @@ int main(void) {
                 end
             end
         end
-        for _, source in ipairs({"titan/async.titan", "titan/timer.titan", "titan/fs.titan",
-                "titan/net.titan", "titan/os.titan"}) do
+        for _, source in ipairs({"titan/async.native.titan", "titan/timer.native.titan", "titan/fs.native.titan",
+                "titan/net.native.titan", "titan/os.native.titan"}) do
             local imports = {}
             for _, node in ipairs(parsed_source(source)) do
                 if node._tag == "Ast.TopLevelImport" then imports[node.modname] = true end
@@ -2926,7 +2928,7 @@ int main(void) {
     -- the Runtime now owns one shared wake and an intrusive FIFO.
 
     it("retires explicit suspension and the exact Wait before terminal listeners", function()
-        local task = read_file("titan/async.titan")
+        local task = read_file("titan/async.native.titan")
         local first = assert(task:find("local function clear_suspension(task: Task)", 1, true))
         local last = assert(task:find("\nend", first, true))
         local clear = task:sub(first, last - 1)
@@ -2943,7 +2945,7 @@ int main(void) {
     end)
 
     it("keeps SSL path loading high-level and PEM owners private", function()
-        local ssl = read_file("titan/ssl.titan")
+        local ssl = read_file("titan/ssl.native.titan")
         local openssl_headers = {}
         for header in ssl:gmatch(
             'foreign import "openssl/([^"]+)"') do
@@ -2993,11 +2995,11 @@ int main(void) {
             "DefaultClientContextOwner", "ProgressWait", "Operation",
             "CleanupWait", "ChildDrain", "PemBlock",
             "CertificateResult", "PrivateKeyResult",
-        }, local_record_declarations("titan/ssl.titan"))
+        }, local_record_declarations("titan/ssl.native.titan"))
         assert.same({ "OperationResult" },
-            local_union_declarations("titan/ssl.titan"))
+            local_union_declarations("titan/ssl.native.titan"))
         local public = {}
-        for _, name in ipairs(public_declarations("titan/ssl.titan")) do
+        for _, name in ipairs(public_declarations("titan/ssl.native.titan")) do
             public[name] = true
         end
         for _, helper in ipairs({
@@ -3010,11 +3012,11 @@ int main(void) {
     end)
 
     it("keeps listener defaults in the high-level facades", function()
-        local net = read_file("titan/net.titan")
+        local net = read_file("titan/net.native.titan")
         assert.truthy(net:find(
             "local actual_backlog = 128", 1, true), net)
 
-        local ssl = read_file("titan/ssl.titan")
+        local ssl = read_file("titan/ssl.native.titan")
         assert.truthy(ssl:find(
                 "local actual_private_key_file = certificate_file", 1, true),
             ssl)
@@ -3044,12 +3046,11 @@ int main(void) {
         assert.truthy(tested, ok)
         assert.truthy(ok, output)
         local expected = {}
+        local context = resolver_options().context
         for _, module in ipairs(STDLIB_MODULES) do
-            local stem = "titan/" .. module
-            if not file_exists(stem .. ".titan") then
-                stem = stem .. "/" .. module
-            end
-            assert.truthy(file_exists(stem .. ".titan"), stem)
+            local source = assert(driver.resolve_source(context, "titan." .. module, "."))
+            assert.truthy(file_exists(source.main), source.main)
+            local stem = paths.to_slash(source.native_output):gsub("^%./", ""):gsub("[.]titan$", "")
             expected[#expected + 1] = "out/" .. stem .. ".ffi.h"
         end
         for _, header in ipairs({
@@ -3083,7 +3084,7 @@ int main(void) {
                 error("unexpected titan.io source type " .. tostring(typ._tag))
             end
 
-            local path = "titan/io.titan"
+            local path = "titan/io.native.titan"
             local source = read_file(path)
             local ast, parse_error = parser.parse(path, source)
             assert.truthy(ast, parse_error and parse_error.label)
@@ -3346,7 +3347,7 @@ int main(void) {
 
     it("pins the public fs facade and its portable location bridges",
         function()
-            local path = "titan/fs.titan"
+            local path = "titan/fs.native.titan"
             assert.same({
                 "File", "Stat", "Stat.new", "open", "File:read",
                 "File:read_until", "File:write", "File:flush",
@@ -3406,9 +3407,9 @@ int main(void) {
             "InputOutputStream:write", "InputOutputStream:wait",
             "InputOutputStream:close", "InputOutputStream:to_transfer_payload",
             "InputOutputStream.from_transfer_payload", "popen",
-        }, public_declarations("titan/os.titan"))
+        }, public_declarations("titan/os.native.titan"))
 
-        assert.falsy(read_file("titan/os.titan"):find(
+        assert.falsy(read_file("titan/os.native.titan"):find(
             "os_stdio_is_closed", 1, true))
     end)
 
@@ -3860,13 +3861,13 @@ esac
                 return
             end
             local sources = {
-                "titan/coroutine.titan", "titan/async.titan",
-                "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
-                "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
-                "titan/http/http.titan", "titan/http/client.titan",
+                "titan/coroutine.titan", "titan/async.native.titan",
+                "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
+                "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
+                "titan/http/http.native.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
                 "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
-                "titan/os.titan", "titan/path.titan",
+                "titan/os.native.titan", "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -3882,7 +3883,8 @@ esac
             for _, ensemble in ipairs({
                 "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES", "PROTOBUF_TITAN_SOURCES",
                 "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES", "THREAD_TITAN_SOURCES",
-                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
+                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "JSON_TITAN_HEADERS",
+                "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
                     sources[#sources + 1] = source

@@ -4,7 +4,7 @@ The user-facing contract is in the
 [thread standard-library chapter](../language/standard-library-thread.md).
 `titan.thread` is a folder ensemble under `titan/thread/`:
 
-- `thread.titan`: folder main; public `Error` and `ThreadStatus`; the intrusive
+- `thread.native.titan`: folder main; public `Error` and `ThreadStatus`; the intrusive
   waiter queue (`waiter_enqueue`, `waiter_unlink`, `waiter_wake_one`,
   `waiter_wake_all`); packet helpers (`value_to_thread_message`,
   `thread_message_discard`); the public C-ABI endpoint callbacks

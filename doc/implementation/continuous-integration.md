@@ -241,34 +241,46 @@ every `EMSDK_*` variable it does not set itself, and the job sets
    PREFIX="$PREFIX"`, and asserts the ten installed SDK files listed in the
    [browser SDK layout](browser-target.md#the-browser-sdk) apart from the
    LPegLabel archive (`titan-browser-trace.js` included).
-8. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
+8. **Browser core stdlib suite.** With emsdk sourced, `make
+   titan-stdlib-browser-test PREFIX="$PREFIX"` runs unfiltered: it builds the
+   browser-portable stdlib owners into one validation-profile test image,
+   checks its dependency closure and native/browser member inventory, runs it
+   under Node and then Chromium (`TITAN_NODE` and `TITAN_CHROME` from the
+   earlier steps), and requires a nonzero case count for every owner
+   ([browser test owners](browser-target.md#test-owners-and-the-browser-suite)).
+   Each engine's stdout report and stderr go to separate logs in
+   `out/browser-stdlib/`, next to the image, `roots.txt`, and `members.md`;
+   the step's console shows both streams.
+9. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
-   prefix's installed `busted -c -o gtest -v` runs the thirteen real-toolchain
+   prefix's installed `busted -c -o gtest -v` runs the fifteen real-toolchain
    files `spec/wasm_toolchain_spec.lua`, `spec/coder/browser_toolchain_spec.lua`,
    `spec/coder/browser_providers_spec.lua`,
    `spec/coder/browser_incremental_spec.lua`,
    `spec/coder/browser_images_spec.lua`,
    `spec/coder/browser_protocol_spec.lua`,
-   `spec/browser_sdk_spec.lua`, `spec/coder/browser_entry_gate_spec.lua`,
+   `spec/browser_sdk_spec.lua`, `spec/coder/browser_stdlib_closure_spec.lua`,
+   `spec/coder/browser_entry_gate_spec.lua`,
+   `spec/coder/browser_stdlib_gate_spec.lua`,
    `spec/coder/browser_fixtures_spec.lua`, `spec/browser_trace_map_spec.lua`,
    `spec/coder/browser_trace_entries_spec.lua`,
    `spec/coder/browser_budgets_spec.lua`, and `spec/minicoro_spec.lua` under
    LuaCov, with output copied to `$RUNNER_TEMP/browser-gate.log`. A missing
    gate file fails with `missing browser real-toolchain spec: <path>` before
    Busted starts. The entry-gate and budget specs build their own assertion-on
-   and assertion-off images, and the gate, fixture, budget, and minicoro specs
-   run both engines.
-9. **Browser compiler coverage.** `luacov "titan%-compiler/" "titanc$"` and
-   `prepare_codecov_report.lua` produce `luacov.report.out` and
-   `luacov.codecov.out`, and `codecov/codecov-action@v7` uploads
-   `./luacov.codecov.out` with `flags: compiler`, `name: browser`,
-   `use_oidc: true`, and `fail_ci_if_error: true`, so the real linking and
-   executing-protocol paths that are pending in the emsdk-free shards are
-   measured.
-10. **Runner images.** The installed `titanc` builds `runner_image` (a
+   and assertion-off images, and the entry and stdlib gate, fixture, budget,
+   and minicoro specs run both engines.
+10. **Browser compiler coverage.** `luacov "titan%-compiler/" "titanc$"` and
+    `prepare_codecov_report.lua` produce `luacov.report.out` and
+    `luacov.codecov.out`, and `codecov/codecov-action@v7` uploads
+    `./luacov.codecov.out` with `flags: compiler`, `name: browser`,
+    `use_oidc: true`, and `fail_ci_if_error: true`, so the real linking and
+    executing-protocol paths that are pending in the emsdk-free shards are
+    measured.
+11. **Runner images.** The installed `titanc` builds `runner_image` (a
     `--test` image) and `runner_status` (a program) from `spec/browser` into
     `out/browser/runner` and asserts `.mjs`, `.wasm`, and `.wasm.map` for each.
-11. **Loader images.** For assertions 2 and 0, the job sets
+12. **Loader images.** For assertions 2 and 0, the job sets
     `driver.browser_link_options` and builds `loader_app` and `fidelity`
     (programs with `--c-source spec/fixtures/browser_loader/loader.c`) with the
     `program` purpose and `loader_names` (a `--test` image) with the `test`
@@ -280,19 +292,19 @@ every `EMSDK_*` variable it does not set itself, and the job sets
     assertions off, plus the harness-only `--ldflag=-Os` (the profile itself
     supplies the debug flags), because Emscripten 6.0.13 minifies export names
     only at `-O3` or a shrink level.
-12. **Loader suite.** The installed `titan-browser-run --timeout 300000
+13. **Loader suite.** The installed `titan-browser-run --timeout 300000
     --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
     workspace with relative image paths, runs under Node and then Chromium,
     with output copied to `$RUNNER_TEMP/browser-loader.log`.
-13. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
+14. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
     runs against the minified image under both engines with the same timeout
     and grace and output copied to `$RUNNER_TEMP/browser-guard.log`.
-14. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
+15. **Runner suite.** `node --test spec/browser/runner.test.mjs` runs with
     `TITAN_BROWSER_RUNNER_IMAGE`, `TITAN_BROWSER_RUNNER_STATUS_IMAGE`,
     `TITAN_BROWSER_RUNNER` (the installed launcher), and
     `TITAN_BROWSER_LOADER_IMAGE` (the assertions-2 `fidelity` image), with
     output copied to `$RUNNER_TEMP/browser-runner.log`.
-15. **Trace adapter and supervisor units.** For `assertions` in `2` and `0`,
+16. **Trace adapter and supervisor units.** For `assertions` in `2` and `0`,
     `emcc` compiles `spec/fixtures/browser_trace_adapter/lifecycle.c` and
     `spec/fixtures/browser_trace_adapter/filter.c` (with `titan-runtime/titan.c`
     and `$PREFIX/lib/browser/liblua.a`) into `out/browser/trace-adapter/`. The
@@ -303,7 +315,7 @@ every `EMSDK_*` variable it does not set itself, and the job sets
     then runs with both `TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE` and
     `TITAN_BROWSER_TRACE_FILTER_IMAGE` set (so no adapter prerequisite skips
     occur), with output copied to `$RUNNER_TEMP/browser-trace-units.log`.
-16. **Node trace gate.** `lua -E spec/browser/build-trace.lua
+17. **Node trace gate.** `lua -E spec/browser/build-trace.lua
     "$GITHUB_WORKSPACE/out/browser/trace-node"` stages the trace gate for both
     assertion modes (`$RUNNER_TEMP/browser-trace-build.log`); the installed
     `titan-browser-run --engine node --timeout 300000 --grace 2000 --root
@@ -315,18 +327,21 @@ every `EMSDK_*` variable it does not set itself, and the job sets
     --allow-degraded-trace --root "$output" --js-test "$output/trace.test.mjs"
     -- --degraded` exercises the degraded Lua-only fallback rows
     (`$RUNNER_TEMP/browser-trace-node-degraded.log`).
-17. **Failure logs.** On failure, `actions/upload-artifact` uploads the
-    `browser-*.log` files and `out/browser` for seven days.
+18. **Failure logs.** On failure, `actions/upload-artifact` uploads the
+    `browser-*.log` files, `out/browser`, and the browser core stdlib suite's
+    `out/browser-stdlib/` (its image, per-engine stdout and stderr logs,
+    `roots.txt`, and `members.md`) as `browser-toolchain-failure` for seven
+    days.
 
 The browser target's spec files (`spec/browser_isolation_spec.lua`,
 `spec/browser_target_spec.lua`, `spec/browser_sdk_spec.lua`,
-`spec/browser_trace_map_spec.lua`, `spec/wasm_toolchain_spec.lua`, and the
-`spec/coder/browser_*_spec.lua` files) are also ordinary rows of
-`spec/support/ci_compiler_test_groups.txt` and run in the covered compiler
-shards against the SDK-only prefix. There, without
-Emscripten, Node, Chrome, or a browser SDK, every real-toolchain case is
-pending and the synthesized cases run; compiler shards never become browser
-SDK consumers.
+`spec/browser_stdlib_spec.lua`, `spec/browser_trace_map_spec.lua`,
+`spec/wasm_toolchain_spec.lua`, and the `spec/coder/browser_*_spec.lua`
+files) are also ordinary rows of `spec/support/ci_compiler_test_groups.txt`
+and run in the covered compiler shards against the SDK-only prefix. There,
+without Emscripten, Node, Chrome, or a browser SDK, every real-toolchain case
+is pending and the synthesized cases run (all of `spec/browser_stdlib_spec.lua`
+is emsdk-free); compiler shards never become browser SDK consumers.
 
 ## `browser-playwright` job
 

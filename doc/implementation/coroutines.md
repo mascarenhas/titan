@@ -253,7 +253,7 @@ before or during the switch (tag, state, finalizer, minicoro, stack) propagate
 as ordinary raises. The staging and raising helpers stay private to
 `titan/coroutine.titan`.
 
-`titan/async.titan` imports `coroutine` through its ordinary public interface
+`titan/async.native.titan` imports `coroutine` through its ordinary public interface
 and uses `transfer` to drive Task roots; the report policy that decides whether
 to append a driver trace is described in
 [Task status](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators).
@@ -575,7 +575,12 @@ Unwinding has three layers:
   nested pair there, and checks that the state's `lua_close` runs each defer
   exactly once and no abandoned `catch` or continuation body.
   `spec/coder/browser_fixtures_spec.lua` builds the module, with `gc.tests`,
-  for the browser.
+  for the browser. The five Lua-host cases (`test_lua_host_*` and
+  `test_running_lua_host_preserves_identity`) live in the native contributor
+  `lua_boundary_test.native.titan`, so the browser selection (the common
+  contributors plus `close.browser.titan`) runs in the browser core stdlib
+  suite ([browser test owners](browser-target.md#test-owners-and-the-browser-suite))
+  on Node and Chromium.
 - `spec/coder/error_handling_spec.lua` ("unwind boundaries") checks that a
   finally boundary is initialized with `TITAN_STATUS_FINALLY` and that a
   catch-only try emits no unwind code. `spec/coder/unwind_stdlib_spec.lua`

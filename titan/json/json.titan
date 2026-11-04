@@ -7,6 +7,7 @@ local string = import "string"
 local math = import "math"
 local peg = import "peg"
 local iteration = import "iteration"
+foreign import "native.h"
 
 --- Structured JSON failure with a stable code, path, and optional source position.
 -- @field code Stable failure category or grammar label.
@@ -28,7 +29,7 @@ end
 --- Per-call JSON encoding policy; repeated options use their last value.
 -- @field tag_field Union discriminator key, default tag.
 -- @field null_value Explicit null sentinel; nil selects the default null policy.
--- @field max_depth Positive container depth limit, default 32.
+-- @field max_depth Positive container depth limit, default 32; browser encoding clamps to min(max_depth, 103).
 -- @field max_bytes Positive text byte limit, default 16 MiB.
 -- @field max_nodes Positive JSON value count limit, default 1000000.
 -- @usage standard-library-json.md

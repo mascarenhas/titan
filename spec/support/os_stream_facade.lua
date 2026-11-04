@@ -144,7 +144,7 @@ function M.prepare(workspace, include_io)
 
     if include_io then
         async_stdlib.write_source(
-            workspace, "titan.io", async_stdlib.read("titan/io.titan"))
+            workspace, "titan.io", async_stdlib.read("titan/io.native.titan"))
         async_stdlib.compile(workspace, "titan.io", {
             layout = layout,
             cppflags = "",

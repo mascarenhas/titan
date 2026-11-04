@@ -184,7 +184,7 @@ if [[ $mode == build ]]; then
     print-stdlib-test-roots > "$work/roots.txt"
   roots=()
   while IFS= read -r root; do roots+=("${root%$'\r'}"); done < "$work/roots.txt"
-  [[ ${#roots[@]} == 30 && ${roots[0]} == test.tests ]]
+  [[ ${#roots[@]} -gt 0 && ${roots[0]} == test.tests ]]
   copy_input "$source_root/spec/support/check_stdlib_test_output.lua" "$work/check_stdlib_test_output.lua"
   winprefix=$(cygpath -m "$work/sdk")
   winnative=$(cygpath -m "$work/cwd/.titan-tests")

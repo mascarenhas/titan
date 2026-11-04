@@ -9,6 +9,9 @@ foreign import "string.h"
 foreign import "locale.h"
 foreign import "math.h"
 
+-- Draw before any case can replace the seed installed by math's initializer.
+local initializer_draw: float = 0.0
+
 local type CheckedAction = function (): ()
 
 -- Lua is used only where the original behavior depends on raw numeric tags,
@@ -107,6 +110,19 @@ local function assert_raises_contains(action: CheckedAction,
                 "', got '" .. message .. "'")
   end
   test.assert(caught, "expected an error containing '" .. fragment .. "'")
+end
+
+function test_automatic_and_argumentless_seeding(_context: test.Context)
+  test.assert(initializer_draw >= 0.0 and initializer_draw < 1.0,
+              "the automatically seeded generator did not produce a unit draw")
+  local first, second = mathlib.randomseed()
+  test.assert(numeric_tag(first) == 1 and numeric_tag(second) == 1,
+              "argumentless randomseed did not return two integer seeds")
+  local draw: float = mathlib.random()
+  test.assert(draw >= 0.0 and draw < 1.0)
+  mathlib.randomseed(first, second)
+  test.assert(mathlib.random() == draw,
+              "argumentless seeds did not reproduce their first draw")
 end
 
 function test_typed_surface_and_constants(_context: test.Context)
@@ -369,4 +385,8 @@ return function()
 end
 ]]) as function (): (boolean)
   test.assert(not bad_dynamic_call())
+end
+
+do
+  initializer_draw = mathlib.random()
 end

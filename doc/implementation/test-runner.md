@@ -242,7 +242,9 @@ bytes exactly, and exits with the completion status masked to its low byte,
 so the runner's 0, 1, and 2 keep their meaning and never coincide with the
 [runner's infrastructure statuses](browser-target.md#the-runner). A run that
 selects no case exits 0, so browser acceptance checks count the selected
-cases rather than trusting the exit status.
+cases rather than trusting the exit status. The repository's [browser core
+stdlib suite](browser-target.md#test-owners-and-the-browser-suite) builds the
+browser-portable standard-library owners into one such image.
 
 ## `titan.test` execution API and private state
 
@@ -392,10 +394,10 @@ spec. All commands run from the repository root; the shared harness is
 | Public standard-library API/runtime behavior, including fresh-process host behavior | Module-owned Titan sources in `spec/stdlib/titan/`, through the aggregate executable; no Busted wrappers or Lua library suites. |
 | Native dependency builds and canonical standard-provider ownership | `spec/libuv_build_spec.lua` and `spec/rockspec_spec.lua`. |
 | Production bundled/system OpenSSL static consumers | `spec/support/ci_dependency_mode_smoke.sh`. |
-| Browser target mechanics: SDK build, source-map extensions, entry registration, images, incremental certification and rollback, providers, protocol check, entry gate, budgets, runtime fixtures, minicoro on Emscripten | Busted files `spec/browser_sdk_spec.lua`, `spec/browser_trace_map_spec.lua`, `spec/coder/browser_{trace_entries,images,incremental,providers,protocol,entry_gate,fixtures,budgets}_spec.lua`, and `spec/minicoro_spec.lua`, run with the real toolchain in the [`browser-toolchain` job](continuous-integration.md#browser-toolchain-job); Titan and C fixtures under `spec/fixtures/browser_runtime/`. |
+| Browser target mechanics: SDK build, source-map extensions, entry registration, images, incremental certification and rollback, providers, protocol check, entry gate, budgets, runtime fixtures, minicoro on Emscripten, the browser stdlib's dependency closure, member inventory, and initialization/fidelity gate | Busted files `spec/browser_sdk_spec.lua`, `spec/browser_trace_map_spec.lua`, `spec/browser_stdlib_spec.lua`, `spec/coder/browser_{trace_entries,images,incremental,providers,protocol,entry_gate,fixtures,budgets,stdlib_closure,stdlib_gate}_spec.lua`, and `spec/minicoro_spec.lua`, run with the real toolchain in the [`browser-toolchain` job](continuous-integration.md#browser-toolchain-job); Titan and C fixtures under `spec/fixtures/browser_runtime/` and `spec/fixtures/browser_stdlib/`. |
 | Browser loader, runner, and trace-adapter behavior | The portable `spec/browser/loader.test.mjs` (fixtures in `spec/fixtures/browser_loader/`) through the installed runner's `--js-test` on both engines, and the Node `node:test` suites `spec/browser/runner.test.mjs` (`spec/browser/runner-fixtures.mjs`) and `spec/browser/trace-adapter.test.mjs` (`spec/fixtures/browser_trace_adapter/`). |
 | Browser traceback behavior across engines | Native Titan cases in `spec/fixtures/browser_trace/` (`trace_cases` and `trace_uncaught`), staged by `spec/browser/build-trace.lua` and driven through `spec/browser/trace.test.mjs` by `titan-browser-run` (Node) and `spec/browser/playwright-run.mjs` (Playwright Chromium, Firefox, and WebKit). |
-| Public `coroutine`/`gc` behavior on the browser target | The owning module tests in `spec/stdlib/titan/`, split into common, `.native.titan`, and `.browser.titan` contributors where a case needs host-only or browser-only facilities; `spec/coder/browser_fixtures_spec.lua` builds them with `--test --target browser` and checks the selected case counts. |
+| Public behavior of the browser standard library on the browser target | The owning module tests in `spec/stdlib/titan/` named by `TITAN_STDLIB_BROWSER_TEST_ROOTS`, which import only browser-subset modules and `support.common.titan`; host-only cases go to native-only owners (`test.host_tests`, `reflect.lua_tests`, `json.lua_tests`, `protobuf.resource_tests`) or `.native.titan` contributors, and browser-only ones to `.browser.titan` contributors. `make titan-stdlib-browser-test` runs them on Node and Chromium ([browser test owners](browser-target.md#test-owners-and-the-browser-suite)); `spec/coder/browser_fixtures_spec.lua` also builds `coroutine.tests` and `gc.tests` and checks their selected case counts. |
 
 Keep library behavior outside LuaCov. Compilation alone does not make a
 library integration a compiler test; add a small independent compiler case
@@ -437,14 +439,25 @@ teardown when the deadline wins, and timer-only cancellation when the reader win
 
 ## Repository dogfooding
 
-The shared `spec/support/stdlib_test_modules.mk` manifest names the 30
+The shared `spec/support/stdlib_test_modules.mk` manifest names the
 module-owned roots under `spec/stdlib/titan/` (`TITAN_STDLIB_TEST_ROOTS`,
 beginning with `TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests`) along with their
-measured validation durations and timing guards. This manifest is runtime
+measured validation durations and timing guards, and the browser-portable
+subset in `TITAN_STDLIB_BROWSER_TEST_ROOTS`. This manifest is runtime
 scheduling and output-audit metadata for Linux, macOS, and Windows, not a Make
-dependency graph or compiler input list (`spec/libuv_build_spec.lua` verifies
-that `testroots.discover` over `spec/stdlib/titan` matches the exact 30-owner
-set).
+dependency graph or compiler input list (`spec/libuv_build_spec.lua` and
+`spec/coder/test_root_discovery_spec.lua` verify that `testroots.discover` over
+`spec/stdlib/titan` matches the native owner set exactly).
+
+The browser roots are named explicitly rather than discovered with
+`--test-dir`, because native-only owners in the same tree (such as
+`test.host_tests`, which imports `fs`) cannot build for `browser`. Every
+browser root is also a native root, so the two suites share logical owners and
+their portable cases; target-selected contributors still differ, so an owner
+can hold native-only cases (`tests/unwind_test.native.titan` in
+`coroutine.tests`) and browser-only ones (`tests/close.browser.titan`).
+`make titan-stdlib-test` does not run the browser suite, which is the separate
+[`make titan-stdlib-browser-test`](browser-target.md#test-owners-and-the-browser-suite).
 
 On Unix, `titan-stdlib-test-objects` and `titan-stdlib-test-build` run from
 `TITAN_TEST_BUILD_DIR` (default `out/tests`) and invoke a single installed
@@ -457,7 +470,7 @@ spec/stdlib/titan) test.tests` and the three aggregate C helpers
 options, which `-c` rejects. `test.tests` stays explicit and first so it owns
 the default provider identity and executable path (`out/tests/test/tests`,
 passed explicitly via `--exe` on `titan-stdlib-test-build`); `--test-dir`
-discovers the other 29 owners and deduplicates `test.tests`. Module C, objects,
+discovers the other owners and deduplicates `test.tests`. Module C, objects,
 and headers reproduce the test source hierarchy below `out/tests`, aggregate
 `--c-source` objects live in `out/tests/.native/`, and the link certificate and
 synthetic runner/entrypoint live under `out/tests/.titan-links/<key>/`.

@@ -222,6 +222,74 @@ function test_core_default_depth_limit(_context: test.Context)
               "[" .. source .. "]")
 end
 
+record WriterDepthRecord
+  next: value
+end
+
+local function writer_depth_chain(depth: integer, kind: string): (value, string)
+  local current: value = true
+  local prefix = "["
+  local suffix = "]"
+  for _ = 1, depth do
+    if kind == "array" then
+      local array: {value} = {current}
+      current = array
+    elseif kind == "map" then
+      local map: {string: value} = {["next"] = current}
+      current = map
+      prefix, suffix = '{"next":', "}"
+    else
+      current = WriterDepthRecord(current)
+      prefix, suffix = '{"next":', "}"
+    end
+  end
+  return current, string.rep(prefix, depth) .. "true" .. string.rep(suffix, depth)
+end
+
+local function check_writer_depth_limit(context: test.Context, kind: string)
+  local configured = 128
+  local limit = writer_depth_limit(configured)
+  context:run(kind .. "_accepts_" .. limit, function(_: test.Context)
+    local subject, expected = writer_depth_chain(limit, kind)
+    test.assert(json.encode(subject, json.EncodeOption.max_depth(configured)) == expected)
+    test.assert(json.encode(subject, json.EncodeOption.max_depth(math.maxinteger)) == expected)
+  end)
+  context:run(kind .. "_rejects_" .. (limit + 1), function(_: test.Context)
+    local subject, expected = writer_depth_chain(limit + 1, kind)
+    local failure = core_error(function()
+      json.encode(subject, json.EncodeOption.max_depth(configured))
+    end, "limit_exceeded")
+    test.assert(failure.message == "value exceeds max_depth")
+    test.assert(failure.position == nil and failure.line == nil and failure.column == nil)
+    if JSON_WRITER_DEPTH_LIMIT < math.maxinteger then
+      failure = core_error(function()
+        json.encode(subject, json.EncodeOption.max_depth(math.maxinteger))
+      end, "limit_exceeded")
+      test.assert(failure.message == "value exceeds max_depth")
+    else
+      test.assert(json.encode(subject, json.EncodeOption.max_depth(math.maxinteger)) == expected)
+    end
+    test.assert(json.encode(WriterDepthRecord(true)) == [[{"next":true}]],
+                "writer did not recover after the nesting error")
+  end)
+  context:run(kind .. "_smaller_setting", function(_: test.Context)
+    local subject, expected = writer_depth_chain(limit - 1, kind)
+    test.assert(json.encode(subject, json.EncodeOption.max_depth(math.maxinteger),
+      json.EncodeOption.max_depth(limit - 1)) == expected)
+    local failure = core_error(function()
+      json.encode(subject, json.EncodeOption.max_depth(math.maxinteger),
+        json.EncodeOption.max_depth(limit - 2))
+    end, "limit_exceeded")
+    test.assert(failure.message == "value exceeds max_depth")
+  end)
+end
+
+function test_core_writer_target_depth_limit(context: test.Context)
+  check_writer_depth_limit(context, "array")
+  check_writer_depth_limit(context, "map")
+  check_writer_depth_limit(context, "record")
+end
+
 function test_core_cycles_sharing_and_unsupported_values(_context: test.Context)
   local cycle: {value} = {}
   cycle[1] = cycle
@@ -252,20 +320,3 @@ function test_core_cycles_sharing_and_unsupported_values(_context: test.Context)
   end
 end
 
-function test_core_raw_sentinel_and_map_iteration(_context: test.Context)
-  local loader = lua.load([[
-    return function()
-      local mt = {
-        __eq = function() error("JSON called equality metamethod") end,
-        __pairs = function() error("JSON called pairs metamethod") end,
-        __index = function() error("JSON called index metamethod") end,
-        __tostring = function() error("JSON called tostring metamethod") end,
-      }
-      return setmetatable({a = 1}, mt), setmetatable({a = 1}, mt)
-    end
-  ]], "json-raw-values", nil)
-  local factory = loader() as function (): (value, value)
-  local first, second = factory()
-  test.assert(json.encode(first, json.EncodeOption.null_value(first)) == "null")
-  test.assert(json.encode(first, json.EncodeOption.null_value(second)) == [[{"a":1}]])
-end

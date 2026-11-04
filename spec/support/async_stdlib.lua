@@ -361,10 +361,10 @@ function M.prepare_async_core(workspace, layout, facades)
         "uv", "runtime", "task", "file", "tcp", "process", "os",
     }) do
         M.write_source(workspace, "titan.uv." .. name,
-            M.read("titan/uv/" .. name .. ".titan"))
+            M.read("titan/uv/" .. name .. (name == "uv" and ".native" or "") .. ".titan"))
     end
     M.write_source(workspace, "titan.async",
-        M.read("titan/async.titan"))
+        M.read("titan/async.native.titan"))
 
     for _, name in ipairs(facades) do
         assert.truthy(allowed[name],
@@ -376,7 +376,7 @@ function M.prepare_async_core(workspace, layout, facades)
         bundled[modname] = true
         roots[#roots + 1] = modname
         M.write_source(workspace, modname,
-            M.read("titan/" .. name .. ".titan"))
+            M.read("titan/" .. name .. ".native.titan"))
     end
 
     local cppflags, ldflags, archive = host_libuv_config()

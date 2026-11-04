@@ -25,9 +25,11 @@ dependency. When a consumer needs a producer's private state, either the
 behavior belongs with the producer (the shell facade lives in `titan.os`, next
 to the Process and streams it owns) or the producer should export one complete
 public operation (`Coroutine:transfer` returns the outcome and trace that
-async needs). The `STDLIB_IMPORTS_*` lists in the `Makefile` mirror these
-imports and still order the build; dropping a source import does not remove a
-dependency.
+async needs). There is no second module graph in Make: `titanc --incremental`
+discovers and orders the imports itself, and `spec/libuv_build_spec.lua`
+asserts that no `STDLIB_IMPORTS_*` list or per-module object rule returns. The
+Makefile's source lists are audit inventories, not prerequisites
+([Make inventories](target-source-selection.md#make-inventories-and-audits)).
 
 Evaluate a pure zero-argument machine/module invariant once in the owning
 module's final initializer and cache it locally (the `titan.string` initializer
@@ -35,6 +37,27 @@ in `titan/string/string.titan` is the model). Factories, mutable-state
 initialization, locale-sensitive builders, and intentionally lazy conditional
 work do not satisfy that rule. When you find one violation, audit the sibling
 library implementations for the same call-graph pattern.
+
+## Keep the browser subset dependency-closed
+
+Thirteen modules form the [browser standard
+library](browser-target.md#the-browser-standard-library): `coroutine`, `gc`,
+`iteration`, `math`, `test`, `reflect`, `json`, `protobuf`, `transfer`, `peg`,
+`string`, `url`, and `path`. None of them may gain an import path to `uv`,
+`async`, or another native-only module (`timer`, `io`, `fs`, `net`, `ssl`,
+`http`, `websocket`, `os`, `lua`, `sqlite3`, `thread`), and their only native
+payload and include path is LPegLabel: a libuv, OpenSSL, llhttp, or SQLite
+header, archive, or symbol fails the [dependency-closure
+check](browser-target.md#the-dependency-closure-check) in `make browser-sdk`
+and `make titan-stdlib-browser-test`. A new delivered module or member keeps
+its native signature and behavior; the [member
+inventory](browser-target.md#interface-derived-member-inventory) fails on any
+difference between the native and browser interfaces. Read a target-dependent
+constant from a target C define through `ffi`, as `coroutine`, `protobuf`,
+`json`, and `path` do, rather than adding a `.browser.titan` copy; reserve a
+variant for a real behavioral difference. The native-only modules keep their
+canonical mains as `<name>.native.titan`, so a later browser composition adds
+a selected `.browser.titan` main or contributors without renaming them back.
 
 ## Use existing typed storage and narrow foreign boundaries
 
@@ -63,7 +86,7 @@ shortcuts when libuv provides it. See [foreign functions](foreign-functions.md)
 and [libuv extension rules](libuv-extension-guide.md).
 
 Foreign workers consume stable native callback data rather than the hosting
-state's Titan/Lua objects. In `titan/uv/uv.titan`, `uv_work_t.data` points to
+state's Titan/Lua objects. In `titan/uv/uv.native.titan`, `uv_work_t.data` points to
 the embedded C `titan_uv_work_data` (`titan/uv/work-data.h`) that `queue_work`
 fills and that stays unchanged while work is pending; public
 `work_t:get_data`/`set_data` accesses a separate traced value. Keep those roles
@@ -107,6 +130,16 @@ Lua/native harnesses; do not recreate source transformers, redundant native
 interposition, or generated-object inspection in library cases. A library
 failure exposing a compiler gap gets a small separate compiler regression.
 See [test placement](test-runner.md#regression-placement).
+
+A case for a browser-subset module belongs in an owner that the browser suite
+runs (`TITAN_STDLIB_BROWSER_TEST_ROOTS`), which imports only subset modules,
+owner-local support, and `support.common.titan`. A case that needs `lua`,
+`fs`, `thread`, a host command, or another native-only facility goes to the
+module's native-only owner (`test.host_tests`, `reflect.lua_tests`,
+`json.lua_tests`, `protobuf.resource_tests`) or a `.native.titan` contributor,
+never to a browser copy. Express target facts (sizes, endianness, locale,
+pointer width) as target-derived expectations instead of skipping them; see
+[the browser test owners](browser-target.md#test-owners-and-the-browser-suite).
 
 Runtime-bound resources must retire through the same supervisor Task before
 its loop ends. Cancellation never releases native callback owners early, and
