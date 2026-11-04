@@ -324,8 +324,17 @@ Unknown fields are skipped. Repeated scalar fields take their last value;
 repeated singular messages merge, including Array slot sequences. A later
 different union variant replaces the previous variant. Malformed tags, varints,
 lengths, groups, wire kinds, out-of-range native integers, missing required
-fields, and unrecognized union selections raise. Nesting is limited to 128
-levels, and messages must fit the protobuf 2 GiB size bound.
+fields, and unrecognized union selections raise. Messages must fit the
+protobuf 2 GiB size bound.
+
+Nesting is limited on every encoding, decoding, and schema path, generated or
+reflective. Levels count nested messages and the fields of the innermost one:
+a chain of records whose innermost record has a field holds at most 127 records
+on a native target, and deeper input raises `protobuf: nesting exceeds 128
+levels`. On the [browser target](browser-target.md#nesting-limits) the chain
+holds at most 42 records and deeper input raises `protobuf: nesting exceeds 43
+levels`, before the JavaScript engine's stack can run out. The error is an
+ordinary catchable error on both targets.
 
 String entry points keep their input alive throughout decoding, including
 while a custom decoder runs after the caller has dropped its last reference to

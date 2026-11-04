@@ -190,10 +190,10 @@ because it also reaches Busted. See [native SDK
 selection](test-runner.md#native-sdk-selection).
 
 `test.tests` is passed explicitly first so it remains the default executable
-and provider owner (`out/tests/test/tests`); `--test-dir` discovers all 30
-standard-library test roots under `spec/stdlib/titan` and deduplicates
+and provider owner (`out/tests/test/tests`); `--test-dir` discovers every
+standard-library test root under `spec/stdlib/titan` and deduplicates
 `test.tests` ([automatic test-root
-discovery](test-runner.md#automatic-test-root-discovery)). The 30-root list and
+discovery](test-runner.md#automatic-test-root-discovery)). The root list and
 per-owner timing metadata in `spec/support/stdlib_test_modules.mk` serve
 runtime scheduling and output auditing, not Make dependency rules. Only the
 three aggregate C helpers (`async_foreign_work.c`, `fs_fixture.c`, and
@@ -240,6 +240,22 @@ timestamps.
 $(abspath spec/stdlib/titan)`, `--exe $(TITAN_COVERAGE_EXECUTABLE) test.tests`,
 the three aggregate `--c-source` helpers, and `-X $(STDLIB_EXTRA_OBJECTS)`
 ([native coverage](native-coverage.md#repository-integration-and-verification)).
+
+### Browser core stdlib suite
+
+`titan-stdlib-browser-test` is a phony test goal (so it defaults to the
+`validation` profile) that needs the installed compiler, the native standard
+provider, the browser SDK, emsdk, Node 24, and a headless Chromium. Under
+`BROWSER_SDK_ENV`, with `TITAN_PATH_0_6` pointing at the installed browser SDK,
+it runs one installed `titanc -q --target browser --test --incremental`
+invocation over the explicit `TITAN_STDLIB_BROWSER_TEST_ROOTS` into
+`$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`), with
+`--c-source spec/fixtures/browser_runtime/close.c`; then the build-owned
+closure and inventory checks of `scripts/check_browser_stdlib.lua`; then the
+SDK's `titan-browser-run` under Node and Chromium, each log audited for
+per-owner counts. `TITAN_FILTER` is forwarded as one `--filter=` argument. The
+recipe and its artifacts are described in [the browser
+standard library](browser-target.md#test-owners-and-the-browser-suite).
 
 ## Make job pool and titanc recipes
 
@@ -353,7 +369,7 @@ with `+` and `RECURSIVE_WRAPPER_GUARD`, and delegates native parallelism to
 | `install` (no `INST_PREFIX`) | `install-compiler`, `publish-titan-sdk`, `publish-stdlib`. |
 | `install` (LuaRocks pass) | `install-compiler`, `install-rock-tools`, `stage-rock-payload`. |
 | `binary-rock` | `luarocks pack titan`, renaming the `.all.rock` result to the suffix from `luarocks config arch`. |
-| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, publish the browser standard provider `titan.a` (`titan.test`, `titan.coroutine`, `titan.gc`) through ordinary library mode, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; apart from `make lua-browser`, the only Titan target that needs emsdk. |
+| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, publish the browser standard provider `titan.a` (the thirteen [core stdlib](browser-target.md#the-browser-standard-library) roots with LPegLabel as the only `-X` payload and include path) through ordinary library mode, certify its dependency closure, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; with `make lua-browser` and `make titan-stdlib-browser-test`, one of the three Titan targets that need emsdk. |
 
 Standard-library installation copies the built provider pair, licenses, and
 optional symbols. SDK installation also publishes Titan's own `LICENSE` at

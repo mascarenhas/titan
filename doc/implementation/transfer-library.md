@@ -448,3 +448,31 @@ These rules are generic; domain chapters keep only their gate and schema:
 - **Destination loop.** UV keeps the destination loop binding in state-local
   module state: Runtime initialization binds it, shutdown admission clears it,
   and native reconstruction refuses an absent binding.
+
+## Browser subset and verification
+
+`titan.transfer` is part of the [browser standard
+library](browser-target.md#the-browser-standard-library) because its imports
+(`reflect`, `protobuf`, `gc`, and through them `string`, `peg`, and
+`iteration`) reach no native-only module. It is delivered for same-instance
+data behavior: encoding, decoding, copying, and discarding packets, the scoped
+resource table, and `transfer_load_module` through the image's static preload
+table. The packet consumers (`thread`, `async`, and `lua`) are not available
+there, so no packet leaves the instance. Nominal encoding and decoding use
+protobuf's [nesting limit](protobuf-library.md#nesting-limit), which the
+browser target lowers to 42 accepted levels.
+
+The same-instance cases live in the `transfer.tests` folder owner
+(`spec/stdlib/titan/transfer/tests/`), which imports only the browser subset,
+owner-local support, and `support.common.titan`, and runs in both the native
+aggregate and the browser core stdlib suite. It exercises all three raw
+exports: `copy_message` and `discard_message` (nil handling, copied scalar
+ownership, refusal to copy a packet with resources, retained and released
+resource ownership) and `transfer_load_module` on the current state (an
+explicit canonical-name length with trailing bytes beyond it, one pushed
+userdata equal to the registered module, and identity on a second load).
+`depth_test.titan` checks the accepted and rejected nesting boundaries against
+`ffi.TITAN_CODEC_DEPTH_LIMIT`, so the same case holds natively and in the
+browser. The Task, thread, and independent-state transfer cases stay native,
+in the `async.tests` contributors `transfer_payload_test.titan` and
+`transfer_scope_reuse_test.titan` and in `thread.tests`.
