@@ -54,7 +54,8 @@ local function cli(info, ...)
     local setup = string.format("package.path=%q..package.path;",
         repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. (info.compiler_setup or "")
     local argv = { "env", "TITAN_ROOT=" .. (info.sdk_prefix or info.prefix), "TITAN_TARGET=", "TITAN_PATH_0_6=",
-        "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+        "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=" .. (info.extra_cflags or ""),
+        "TITAN_EXTRA_LDFLAGS=",
         info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
         "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", info.output or workspace .. "/out" }
     for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
@@ -432,6 +433,36 @@ describe("browser image profile and SDK readiness", function()
         assert.is_false(result.ok, "a purposeless preset was accepted")
         local log = result.output or result.diagnostic or ""
         assert.truthy(log:find("browser link profile options require a purpose", 1, true), log)
+    end)
+
+    it("reports a CLI compile extra with the compile diagnostic and a link extra with the link one", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/plain.titan",
+            "function answer(): integer\n    return 1\nend\n")
+        local profile = driver.BUILD_PROFILE
+        local compile = "browser " .. profile .. " profile owns compile option "
+        local link = "browser " .. profile .. " link profile owns option "
+        for _, case in ipairs({
+            { arguments = { "-c", "plain", "--cflag=-O2" }, expected = compile .. '"-O2"' },
+            { arguments = { "-c", "plain", "--cflag=-fno-inline" }, expected = compile .. '"-fno-inline"' },
+            { arguments = { "-c", "plain" }, extra_cflags = "-g2", expected = compile .. '"-g2"' },
+            { arguments = { "-c", "plain" }, extra_cflags = "-sBINARYEN_EXTRA_PASSES=--coalesce-locals",
+                expected = compile .. '"-sBINARYEN_EXTRA_PASSES=--coalesce-locals"' },
+            -- --ldflag is a link-phase option, which -c rejects, so the link
+            -- cases run the ordinary build and stop at the ownership check.
+            { arguments = { "plain", "--ldflag=-O3" }, expected = link .. "-O3" },
+            { arguments = { "plain", "--ldflag=-fno-optimize-sibling-calls" }, expected = link .. "-fno-optimize-sibling-calls" },
+        }) do
+            local result = cli({ prefix = info.prefix, extra_cflags = case.extra_cflags },
+                table.unpack(case.arguments))
+            assert.is_false(result.ok, "the CLI accepted an owned option: " .. case.expected)
+            local log = result.output or result.diagnostic or ""
+            assert.truthy(log:find(case.expected, 1, true), log)
+            local other = case.expected:find("link profile", 1, true) and compile or link
+            assert.is_nil(log:find(other, 1, true), log)
+        end
     end)
 
     it("rejects trailing attempts to override profile-owned settings", function()
