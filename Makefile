@@ -288,7 +288,8 @@ TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O) $(TITAN_PATH_O) $(LTITANLIB_
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
 TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
 	titan-runtime/titan_path.c titan-runtime/ltitanlib.c
-BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc
+BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
+	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -1275,12 +1276,13 @@ BROWSER_SDK_ENV = PREFIX=$(call make_shell_quote,$(PREFIX)) \
 	TITAN_ROOT=$(call make_shell_quote,$(TITAN_INSTALL_TREE)) \
 	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) \
 	TITAN_PATH= \
+	CPPFLAGS= TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(LPEGLABEL_CPPFLAGS)) \
 	TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BUILD_PROFILE)) \
 	TITAN_VERBOSE=$(call make_shell_quote,$(TITAN_VERBOSE)) \
 	$(if $(strip $(ROCKS_TREE)),LUA_PATH=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/share/lua/5.5/?.lua;$(TITAN_INSTALL_TREE)/share/lua/5.5/?/init.lua;;)) \
 	$(if $(strip $(ROCKS_TREE)),LUA_CPATH=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/lua/5.5/?.so;;))
 
-browser-sdk: ## Build and install the browser target runtime, tools and minimal provider
+browser-sdk: ## Build and install the browser target runtime, tools and core stdlib provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	if test -z "$${TITAN_NODE:-}"; then \
@@ -1309,6 +1311,7 @@ browser-sdk: ## Build and install the browser target runtime, tools and minimal 
 	  "$$build_dir" $(call make_shell_quote,$(CURDIR)) "$$@"; \
 	$(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
 	  --output "$$build_dir" --source-first --incremental -j$(TITAN_JOBS) \
+	  -X $(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)/libtitan-lpeglabel.a) \
 	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) $(BROWSER_STDLIB_ROOTS); \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua finalize "$$build_dir"
 

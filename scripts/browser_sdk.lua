@@ -312,7 +312,11 @@ elseif action == "finalize" then
         fail(provider_err)
     end
     check_no_forbidden_symbols(staged_provider, scanned)
-    local expected_modules = { "titan.coroutine", "titan.gc", "titan.test" }
+    local expected_modules = {
+        "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
+        "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
+        "titan.test", "titan.transfer", "titan.url",
+    }
     if #(scanned.key_order or {}) ~= #expected_modules then
         fail("browser provider titan.a has unexpected module count: " .. tostring(#(scanned.key_order or {})))
     end

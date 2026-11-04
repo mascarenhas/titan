@@ -41,7 +41,9 @@ local EXPECTED_LPEGLABEL_SYMBOLS = {
 }
 
 local EXPECTED_PROVIDER_MODULES = {
-    "titan.coroutine", "titan.gc", "titan.test",
+    "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
+    "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
+    "titan.test", "titan.transfer", "titan.url",
 }
 
 local function contains(text, fragment)
