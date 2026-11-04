@@ -136,4 +136,46 @@ describe("browser core stdlib build checks", function()
         assert.truthy(result.output:find("Browser stdlib owner fixture.tests: 1 cases", 1, true), result.output)
         assert.truthy(result.output:find("selected=1 passed=0 skipped=0 failed=1 owners=1/1", 1, true), result.output)
     end)
+
+    it("audits a case emitting stderr in the middle of a report line from stdout alone", function()
+        if platform.windows then
+            pending("browser suite shell wrapper is Unix-only")
+            return
+        end
+        local log = temporary.name("-browser-stdout.log")
+        local diagnostics = temporary.name("-browser-stderr.log")
+        local roots = temporary.name("-browser-roots.txt")
+        local producer = temporary.name("-browser-report.lua")
+        scratch = {log, diagnostics, roots, producer}
+        assert(strategy:write_file(roots, "fixture.tests\n"))
+        local report = [[
+[==========] Running Titan tests.
+[ RUN      ] fixture.tests.test_stderr
+[       OK ] fixture.tests.test_stderr
+[==========] 1 test ran.
+[  PASSED  ] 1 test.
+]]
+        local warning = "Lua warning: error in coroutine cleanup (expected fixture warning)\n"
+        assert(strategy:write_file(producer, string.format([[
+io.stdout:setvbuf("no")
+io.stdout:write("[==========] Running Titan tests.\n[ RUN      ] fixture.tests.")
+io.stderr:write(%q)
+io.stderr:flush()
+io.stdout:write("test_stderr\n[       OK ] fixture.tests.test_stderr\n[==========] 1 test ran.\n[  PASSED  ] 1 test.\n")
+]], warning)))
+        local lua = installed_prefix.active() .. "/bin/lua"
+        local captured = strategy:run({"bash", "scripts/run_browser_stdlib.sh",
+            log, diagnostics, lua, producer}, {stderr_to_stdout = true})
+        assert.is_true(captured.ok, captured.output)
+        assert.equal(report, assert(strategy:read_file(log)))
+        assert.equal(warning, assert(strategy:read_file(diagnostics)))
+        assert.truthy(captured.output:find(warning, 1, true), captured.output)
+        local audited = strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua",
+            "output", log, roots}, {stderr_to_stdout = true})
+        assert.is_true(audited.ok, audited.output)
+        assert.truthy(audited.output:find("Browser stdlib owner fixture.tests: 1 cases", 1, true),
+            audited.output)
+        assert.truthy(audited.output:find("selected=1 passed=1 skipped=0 failed=0 owners=1/1", 1, true),
+            audited.output)
+    end)
 end)

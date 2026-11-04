@@ -1347,8 +1347,9 @@ titan-stdlib-browser-test: ## Build one browser stdlib image, audit it, and run 
 	  set --; \
 	  if test -n "$$filter"; then set -- "--filter=$$filter"; fi; \
 	  status=0; \
-	  bash -o pipefail -c 'log=$$1; shift; "$$@" 2>&1 | tee "$$log"' -- \
+	  bash scripts/run_browser_stdlib.sh \
 	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.log \
+	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.stderr.log \
 	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan-browser-run) \
 	    --engine "$$engine" --timeout 300000 --grace 2000 \
 	    --root $(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))) \
