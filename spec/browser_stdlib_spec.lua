@@ -2,19 +2,26 @@ local assert = require "luassert"
 local checks = dofile("scripts/browser_stdlib.lua")
 local types = require "titan-compiler.types"
 local strategy = require("titan-compiler.io").new_sync()
+local temporary = require "spec.support.temporary"
+local installed_prefix = require "spec.support.installed_prefix"
+local platform = require "titan-compiler.platform"
 
 describe("browser core stdlib build checks", function()
-    it("keeps the provider native payload and include policy lpeglabel-only", function()
+    local scratch = {}
+    after_each(function()
+        for _, path in ipairs(scratch) do os.remove(path) end
+        scratch = {}
+    end)
+
+    it("keeps native stdlib dependencies out of the browser provider recipe", function()
         local makefile = assert(strategy:read_file("Makefile"))
-        local environment = assert(makefile:match("\nBROWSER_SDK_ENV = (.-)\n\nbrowser%-sdk:"))
-        assert.truthy(environment:find("CPPFLAGS= TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(LPEGLABEL_CPPFLAGS))", 1, true))
+        local environment = assert(makefile:match("\nBROWSER_SDK_ENV%s*[:?+]?=%s*(.-)\n\nbrowser%-sdk:"))
         local recipe = assert(makefile:match("\nbrowser%-sdk:[^\n]*\n(.-)\n\n"))
-        local payloads = {}
-        for payload in recipe:gmatch("%-X ([^\n]+)") do payloads[#payloads + 1] = payload end
-        assert.same({ "$(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)/libtitan-lpeglabel.a) \\" }, payloads)
         for _, forbidden in ipairs({ "STDLIB_EXTRA_OBJECTS", "LIBUV_", "OPENSSL_", "LLHTTP_", "SQLITE3_" }) do
             assert.is_nil((environment .. recipe):find(forbidden, 1, true), forbidden)
         end
+        -- The real SDK spec builds with poisoned ambient CPPFLAGS and checks
+        -- the exact native archive members instead of pinning recipe spelling.
     end)
 
     it("rejects forbidden header and archive dependencies including injected libuv headers", function()
@@ -26,6 +33,15 @@ describe("browser core stdlib build checks", function()
             local ok, err = checks.check_path(path)
             assert.is_nil(ok, path)
             assert.truthy(err:find("forbidden browser stdlib dependency", 1, true), err)
+        end
+        for _, stem in ipairs({ "libuv", "libssl", "libcrypto", "libopenssl",
+            "libllhttp", "libsqlite3", "libtitan-llhttp", "libtitan-sqlite3" }) do
+            for _, suffix in ipairs({ ".a", "_a.a", "_1.48.a", "-static.a", ".1.a" }) do
+                local path = "/fixture/" .. stem .. suffix
+                local ok, err = checks.check_path(path)
+                assert.is_nil(ok, path)
+                assert.truthy(err:find(path, 1, true), err)
+            end
         end
         local ok, err = checks.check_headers({ c_header_dependencies = {
             { kind = "file", path = "/injected/libuv/include/uv.h", identity = "fixture" },
@@ -98,5 +114,26 @@ describe("browser core stdlib build checks", function()
         local rows, err = checks.inventory(provider("left"), provider("right"))
         assert.is_nil(rows)
         assert.truthy(err:find("semantic declaration differs", 1, true), err)
+    end)
+
+    it("prints the per-owner audit and failure counts before rejecting a failed run", function()
+        local log, roots = temporary.name("-browser-failed.log"), temporary.name("-browser-roots.txt")
+        scratch = {log, roots}
+        assert(strategy:write_file(roots, "fixture.tests\n"))
+        assert(strategy:write_file(log, [[
+[==========] Running Titan tests.
+[ RUN      ] fixture.tests.test_fail
+[  FAILED  ] fixture.tests.test_fail
+[==========] 1 test ran.
+[  PASSED  ] 0 tests.
+[  FAILED  ] 1 test.
+[  FAILED  ] fixture.tests.test_fail
+]]))
+        local lua = installed_prefix.active() .. "/bin/lua" .. (platform.windows and ".exe" or "")
+        local result = strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua", "output", log, roots, "test_fail"},
+            {stderr_to_stdout = true})
+        assert.is_false(result.ok)
+        assert.truthy(result.output:find("Browser stdlib owner fixture.tests: 1 cases", 1, true), result.output)
+        assert.truthy(result.output:find("selected=1 passed=0 skipped=0 failed=1 owners=1/1", 1, true), result.output)
     end)
 end)

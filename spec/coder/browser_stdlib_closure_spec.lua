@@ -69,7 +69,7 @@ end
         write("portable.c", "int portable_payload(void) { return 0; }\n")
         write("portable.h", "int portable_payload(void);\n")
         run({ info.tools.cc[1], "-c", workspace .. "/portable.c", "-o", workspace .. "/portable.o" })
-        run({ info.tools.ar[1], "rcs", workspace .. "/libuv.a", workspace .. "/portable.o" })
+        run({ info.tools.ar[1], "rcs", workspace .. "/libuv_a.a", workspace .. "/portable.o" })
         write("archive_intruder.titan", [[
 foreign import "portable.h"
 function main(_args: {string}): integer
@@ -78,10 +78,10 @@ end
 ]])
         run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser", "--incremental",
             "--tree", workspace, "--output", workspace .. "/archive-out", "--exe", workspace .. "/archive-out/intruder.mjs",
-            "archive_intruder", "-X", workspace .. "/libuv.a" })
+            "archive_intruder", "-X", workspace .. "/libuv_a.a" })
         assert(checks.check_image(assert(strategy:read_file(workspace .. "/archive-out/intruder.wasm")), "archive.wasm"))
         ok, err = checks.check_output(strategy, workspace .. "/archive-out")
         assert.is_nil(ok)
-        assert.truthy(err:find("libuv.a", 1, true), err)
+        assert.truthy(err:find("libuv_a.a", 1, true), err)
     end)
 end)

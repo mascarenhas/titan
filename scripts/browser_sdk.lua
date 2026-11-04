@@ -272,8 +272,7 @@ elseif action == "stage-runtime" then
     archive_certified_objects(context, descriptor, assets.lpeglabel, lpeg_members, lpeg_paths)
     if getenv("TITAN_VERBOSE") == "1" then
         io.stderr:write("browser-sdk: LPegLabel descriptor object flags: ",
-            table.concat(descriptor.compile_flags, " "), "\n",
-            "browser-sdk: LPegLabel: 5 relocatable Wasm objects, no bitcode/LTO or GOT PIC imports\n")
+            table.concat(descriptor.compile_flags, " "), "\n")
     end
 
     local browser_src = repo_root .. "/titan-runtime/browser"

@@ -27,12 +27,15 @@
 # the default lane and stay in the ordinary compiler partitions.
 # Issue 330 trace map/entry rows use the same unmeasured 1.000 planning weight;
 # no local or CI covered duration is claimed for these inventory additions.
+# Issue 331 browser stdlib rows use the same unmeasured 1.000 planning weight;
+# real-toolchain closure fixtures pend outside the emsdk gate.
 compiler spec/abi_spec.lua 0.201 2.926
 retained spec/asan_generated_c_context_spec.lua 0.587 -
 compiler spec/binary_compatibility_spec.lua 0.017 0.107
 compiler spec/browser_isolation_spec.lua 1.000 -
 compiler spec/browser_target_spec.lua 1.000 -
 compiler spec/browser_sdk_spec.lua 1.000 -
+compiler spec/browser_stdlib_spec.lua 1.000 -
 compiler spec/browser_trace_map_spec.lua 1.000 -
 compiler spec/cdeclarator_spec.lua 0.017 0.058
 compiler spec/cdefines_spec.lua 0.050 0.054
@@ -97,6 +100,7 @@ compiler spec/coder/browser_images_spec.lua 1.000 -
 compiler spec/coder/browser_incremental_spec.lua 1.000 -
 compiler spec/coder/browser_protocol_spec.lua 1.000 -
 compiler spec/coder/browser_providers_spec.lua 1.000 -
+compiler spec/coder/browser_stdlib_closure_spec.lua 1.000 -
 compiler spec/coder/browser_toolchain_spec.lua 1.000 -
 compiler spec/coder/browser_trace_entries_spec.lua 1.000 -
 compiler spec/coder/build_scheduler_spec.lua 1.000 -

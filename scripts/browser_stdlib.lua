@@ -16,10 +16,10 @@ function M.check_path(path)
         name == "llhttp.h" or normalized:find("/llhttp/", 1, true) or
         name == "sqlite3.h" or name == "sqlite3ext.h" or normalized:find("/sqlite3/", 1, true))
     local archive = name:match("%.a$") and (
-        name:match("^libuv[%.-]") or name:match("^libssl[%.-]") or
-        name:match("^libcrypto[%.-]") or name:match("^libopenssl[%.-]") or
-        name:match("^libllhttp[%.-]") or name:match("^libsqlite3[%.-]") or
-        name:match("^libtitan%-llhttp[%.-]") or name:match("^libtitan%-sqlite3[%.-]"))
+        name:match("^libuv[%._-]") or name:match("^libssl[%._-]") or
+        name:match("^libcrypto[%._-]") or name:match("^libopenssl[%._-]") or
+        name:match("^libllhttp[%._-]") or name:match("^libsqlite3[%._-]") or
+        name:match("^libtitan%-llhttp[%._-]") or name:match("^libtitan%-sqlite3[%._-]"))
     if header or archive then return nil, "forbidden browser stdlib dependency: " .. path end
     return true
 end

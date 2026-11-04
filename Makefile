@@ -1345,16 +1345,20 @@ titan-stdlib-browser-test: ## Build one browser stdlib image, audit it, and run 
 	  echo "Browser stdlib engine: $$engine"; \
 	  set --; \
 	  if test -n "$$filter"; then set -- "--filter=$$filter"; fi; \
+	  status=0; \
 	  bash -o pipefail -c 'log=$$1; shift; "$$@" 2>&1 | tee "$$log"' -- \
 	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.log \
 	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan-browser-run) \
 	    --engine "$$engine" --timeout 300000 --grace 2000 \
 	    --root $(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))) \
-	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_IMAGE)) -- "$$@"; \
+	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_IMAGE)) -- "$$@" || status=$$?; \
+	  audit=0; \
 	  $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua output \
 	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.log \
 	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)/roots.txt) \
-	    $(call make_shell_quote_value,TITAN_FILTER); \
+	    $(call make_shell_quote_value,TITAN_FILTER) || audit=$$?; \
+	  test "$$status" = 0 || exit "$$status"; \
+	  test "$$audit" = 0 || exit "$$audit"; \
 	done
 
 # Compatibility name for callers of the former rockspec build target.
