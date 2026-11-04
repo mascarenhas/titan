@@ -248,8 +248,9 @@ every `EMSDK_*` variable it does not set itself, and the job sets
    under Node and then Chromium (`TITAN_NODE` and `TITAN_CHROME` from the
    earlier steps), and requires a nonzero case count for every owner
    ([browser test owners](browser-target.md#test-owners-and-the-browser-suite)).
-   The engine logs and member table stay in `out/browser-stdlib/` and are not
-   part of the failure upload; the step's console output carries the run.
+   Each engine's stdout report and stderr go to separate logs in
+   `out/browser-stdlib/`, next to the image, `roots.txt`, and `members.md`;
+   the step's console shows both streams.
 9. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
    prefix's installed `busted -c -o gtest -v` runs the fifteen real-toolchain
@@ -327,7 +328,10 @@ every `EMSDK_*` variable it does not set itself, and the job sets
     -- --degraded` exercises the degraded Lua-only fallback rows
     (`$RUNNER_TEMP/browser-trace-node-degraded.log`).
 18. **Failure logs.** On failure, `actions/upload-artifact` uploads the
-    `browser-*.log` files and `out/browser` for seven days.
+    `browser-*.log` files, `out/browser`, and the browser core stdlib suite's
+    `out/browser-stdlib/` (its image, per-engine stdout and stderr logs,
+    `roots.txt`, and `members.md`) as `browser-toolchain-failure` for seven
+    days.
 
 The browser target's spec files (`spec/browser_isolation_spec.lua`,
 `spec/browser_target_spec.lua`, `spec/browser_sdk_spec.lua`,

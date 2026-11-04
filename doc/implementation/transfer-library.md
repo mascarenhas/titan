@@ -471,8 +471,12 @@ ownership, refusal to copy a packet with resources, retained and released
 resource ownership) and `transfer_load_module` on the current state (an
 explicit canonical-name length with trailing bytes beyond it, one pushed
 userdata equal to the registered module, and identity on a second load).
-`depth_test.titan` checks the accepted and rejected nesting boundaries against
-`ffi.TITAN_CODEC_DEPTH_LIMIT`, so the same case holds natively and in the
-browser. The Task, thread, and independent-state transfer cases stay native,
+`depth_test.titan` (`test_target_depth_boundaries`) derives its depths and
+message from `ffi.TITAN_CODEC_DEPTH_LIMIT` and checks, through both
+`TransferValue` policies and raw packets on the generated and reflective
+paths, that the accepted chain round-trips, that encoding and decoding one
+level deeper raise the protobuf nesting error, and that a rejected packet is
+still consumed; the same case holds natively (127/128) and in the browser
+(42/43). The Task, thread, and independent-state transfer cases stay native,
 in the `async.tests` contributors `transfer_payload_test.titan` and
 `transfer_scope_reuse_test.titan` and in `thread.tests`.

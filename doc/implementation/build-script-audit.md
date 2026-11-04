@@ -252,8 +252,10 @@ invocation over the explicit `TITAN_STDLIB_BROWSER_TEST_ROOTS` into
 `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`), with
 `--c-source spec/fixtures/browser_runtime/close.c`; then the build-owned
 closure and inventory checks of `scripts/check_browser_stdlib.lua`; then the
-SDK's `titan-browser-run` under Node and Chromium, each log audited for
-per-owner counts. `TITAN_FILTER` is forwarded as one `--filter=` argument. The
+SDK's `titan-browser-run` under Node and Chromium through
+`scripts/run_browser_stdlib.sh`, which keeps each engine's stdout and stderr in
+separate logs, and only the stdout report is audited for per-owner counts.
+`TITAN_FILTER` is forwarded as one `--filter=` argument. The
 recipe and its artifacts are described in [the browser
 standard library](browser-target.md#test-owners-and-the-browser-suite).
 

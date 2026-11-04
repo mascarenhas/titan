@@ -57,8 +57,9 @@ The implementation is spread over:
 * the Make targets `lua-browser` (`scripts/lua_browser.sh`), `browser-sdk`
   (`scripts/browser_sdk.lua`), and `titan-stdlib-browser-test`, with the
   build-owned [standard-library checks](#the-browser-standard-library) in
-  `scripts/browser_stdlib.lua` and its command-line front end
-  `scripts/check_browser_stdlib.lua`.
+  `scripts/browser_stdlib.lua`, its command-line front end
+  `scripts/check_browser_stdlib.lua`, and the suite's stream-separating runner
+  wrapper `scripts/run_browser_stdlib.sh`.
 
 The source label and the target name are both `browser`. `wasm32` is a
 physical ABI and toolchain fact only: it never names a target, an SDK path
@@ -567,20 +568,31 @@ emsdk, Node 24, and a headless Chromium. It:
 3. runs `check_browser_stdlib.lua inventory` against the installed native and
    browser providers and writes `members.md`;
 4. writes `roots.txt` and, for `node` and then `chromium`, runs the SDK's
-   `titan-browser-run --engine <engine> --timeout 300000 --grace 2000`,
-   forwarding a nonempty `TITAN_FILTER` as one `--filter=` argument, and tees
-   the output to `<engine>.log` under `bash -o pipefail`; and
-5. audits each log with `check_browser_stdlib.lua output`, which applies the
-   native aggregate's validator (`spec/support/check_stdlib_test_output.lua`):
-   an unfiltered run must report a nonzero case count for every root, a
-   filtered run follows the native filtered rules. It always prints one
+   `titan-browser-run --engine <engine> --timeout 300000 --grace 2000`
+   through `scripts/run_browser_stdlib.sh`, forwarding a nonempty
+   `TITAN_FILTER` as one `--filter=` argument. The wrapper saves the runner's
+   stdout in `<engine>.log` and its stderr in `<engine>.stderr.log`, then
+   replays both to the caller and returns the runner's status; and
+5. audits only the stdout report, `<engine>.log`, with
+   `check_browser_stdlib.lua output`, which applies the native aggregate's
+   validator (`spec/support/check_stdlib_test_output.lua`): an unfiltered run
+   must report a nonzero case count for every root, a filtered run follows the
+   native filtered rules. It always prints one
    `Browser stdlib owner <root>: <n> cases` line per root and a
    `Browser stdlib gate: selected=… passed=… skipped=… failed=… owners=…/…`
    summary, even for a failed run, and the target fails if either the runner
    or the audit failed.
 
-The [`browser-toolchain` job](continuous-integration.md#browser-toolchain-job)
-runs it unfiltered after the SDK is built.
+The streams stay separate because a case may write to stderr while the runner
+is in the middle of a report line: an expected Lua warning (`Lua warning: error
+in coroutine cleanup ...`) once split a `protobuf.tests` report line in a merged
+log, which the validator rightly rejected. Warnings
+stay visible in `<engine>.stderr.log` and on the console; nothing is filtered
+out. `out/browser-stdlib/` therefore holds `stdlib.mjs`, `stdlib.wasm`,
+`stdlib.wasm.map`, `roots.txt`, `members.md`, and the four engine logs. The
+[`browser-toolchain` job](continuous-integration.md#browser-toolchain-job)
+runs the target unfiltered after the SDK is built and uploads that directory
+when the job fails.
 
 ### Initialization and fidelity gate
 
@@ -627,11 +639,16 @@ unchanged.
 `TITAN_CODEC_DEPTH_LIMIT` is a raw budget: `require_depth` in
 `titan/protobuf/protobuf.titan` and `titan_codec_depth` in `transfer.h` raise
 when a depth exceeds it, and the fields of the innermost message are probed
-one level deeper, so 128 accepts 127 records and 43 accepts 42. Both messages
+one level deeper, so 128 accepts 127 records and 43 accepts 42 (a union whose
+selected variant has no parts is accepted at the budget itself; see the
+[protobuf nesting limit](protobuf-library.md#nesting-limit)). Both messages
 print the macro value (`protobuf: nesting exceeds <limit> levels`).
-`encode_value` in `titan/json/writer.titan` lowers a configured `max_depth`
-above the define to the define, so the writer's ordinary `limit_exceeded`
-(`value exceeds max_depth`) fires; the default `max_depth` of 32 is unchanged.
+`encode_value` in `titan/json/writer.titan` clamps the call's `max_depth` to
+the define after option validation, so only an encode whose setting exceeds
+103 is affected, and the writer's ordinary `limit_exceeded` (`value exceeds
+max_depth`) fires; the default `max_depth` of 32 and every decode setting are
+unchanged. Both defines are profile-owned, so a `-D` or `-U` of either is
+rejected like the other target defines.
 
 The measurements (Emscripten 6.0.13, Node 24.19.0, Chrome for Testing
 156.0.8078.80, `--test` images) sweep one subtest per depth over a record chain
@@ -3214,7 +3231,8 @@ hosts`).
   check](#the-dependency-closure-check) and its negative fixtures, the
   interface-derived [member inventory](#interface-derived-member-inventory)
   (raw foreign functions, nominal members, named-call metadata, unrecorded
-  differences), and the suite's per-owner audit of a failed run.
+  differences), the suite's per-owner audit of a failed run, and the stdout-only
+  audit of a run whose stderr arrives in the middle of a report line.
 * `spec/coder/browser_stdlib_gate_spec.lua` — the [initialization and
   fidelity gate](#initialization-and-fidelity-gate).
 * `spec/coder/browser_entry_gate_spec.lua` — the [entry gate](#the-entry-gate-decision).
