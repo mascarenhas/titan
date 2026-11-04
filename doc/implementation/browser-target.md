@@ -1393,9 +1393,12 @@ assertions 2 and 0.
 
 Ceilings at assertions 2 / 0 (`—` where a cell was not measured; the WebKit
 `-O3` assertions-2 mixed sweep found no failure up to its 4,096 maximum). The
-Firefox mixed cells are the fixture's own assertion boundary, not the
-engine's: past it, Firefox's 128-frame capture loses `original_leaf` and the
-fixture's trace assertions fail first. The engine's own `InternalError: too
+Firefox mixed cells are the fixture's own boundary, not the engine's: one
+level deeper, the native case fails its own assertions (it returns status 1)
+before the engine raises. In production those failing rows record a failed
+capture, `(native Titan frames unavailable: capture failed)` followed by the
+truncation marker; the validation rows record only the failed case. The
+engine's own `InternalError: too
 much recursion` came later. Under validation it appeared at 576 at assertions
 2, and at assertions 0 it was first observed at 640. Under production it was
 first observed at 1,792 (assertions 2) and 1,776 (assertions 0). The sweeps did
@@ -2051,9 +2054,11 @@ Validation ceilings with Lua's limit out of the way (deepest passing level;
 | WebKit 26.0 | 0 | 1,074 | — | — |
 
 V8 fails with `RangeError: Maximum call stack size exceeded`, Firefox with
-`InternalError: too much recursion`, and WebKit with `RangeError`. Past 572
-levels, Firefox's 128-frame capture drops `original_leaf` and the fixture's
-own assertions fail before the engine does. The production ceilings, higher
+`InternalError: too much recursion`, and WebKit with `RangeError`. On Firefox
+the mixed fixture fails its own assertions first: at 573 and 574 levels at
+assertions 2 and at 575 and 576 at assertions 0, each recorded only as a
+failed case, before the engine's `InternalError` at 576 (assertions 2) and 640
+(assertions 0). The production ceilings, higher
 on every engine, are in [Measurements](#measurements).
 
 ### Engine stack per construct
