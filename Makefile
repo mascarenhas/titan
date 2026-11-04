@@ -323,13 +323,13 @@ LPEGLABEL_BUILD_CFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 
 # Every standard-library Titan source is listed here explicitly. A target
 # variant (`name.<label>.titan`, labels windows/darwin/linux/browser and the
-# umbrella native) is its own entry immediately after the default
-# (`name.titan`) it replaces; there are no wildcards. Only the selected
-# variant of a family compiles, so the Busted source-policy audits read this
-# inventory family by family and fail on a folder file no entry declares.
+# umbrella native) follows its default (`name.titan`) when one exists; a
+# variant-only family lists just its variants. There are no wildcards. Only
+# the selected variant of a family compiles, so the Busted source-policy audits
+# read this inventory family by family and fail on a folder file no entry declares.
 # Implementation notes: doc/implementation/target-source-selection.md#make-inventories-and-audits
 UV_TITAN_SOURCES := \
-	titan/uv/uv.titan \
+	titan/uv/uv.native.titan \
 	titan/uv/address.titan \
 	titan/uv/callbacks.titan \
 	titan/uv/capabilities.titan \
@@ -366,23 +366,23 @@ UV_TITAN_HEADERS := \
 	titan/uv/utility_bits.h \
 	titan/uv/version-native.h \
 	titan/uv/work-data.h
-STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
+STDLIB_HTTP_SOURCES := titan/http/http.native.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan titan/http/pool.titan \
 	titan/http/server.titan titan/http/transfer.titan titan/http/upgrade.titan
-SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
+SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.native.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan
 SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
-LUA_TITAN_SOURCES := titan/lua/lua.titan titan/lua/worker.titan
+LUA_TITAN_SOURCES := titan/lua/lua.native.titan titan/lua/worker.titan
 LUA_TITAN_HEADERS := titan/lua/native.h
 STRING_TITAN_HEADERS := titan/string/format_native.h
-WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.titan titan/websocket/handshake.titan \
+WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.native.titan titan/websocket/handshake.titan \
 	titan/websocket/connection.titan titan/websocket/frames.titan \
 	titan/websocket/utf8.titan titan/websocket/native.titan
 JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
 PROTOBUF_TITAN_SOURCES := titan/protobuf/protobuf.titan titan/protobuf/encoder.titan \
 	titan/protobuf/decoder.titan titan/protobuf/schema.titan
-THREAD_TITAN_SOURCES := titan/thread/thread.titan titan/thread/channel.titan \
+THREAD_TITAN_SOURCES := titan/thread/thread.native.titan titan/thread/channel.titan \
 	titan/thread/group.titan titan/thread/spawn.titan
 THREAD_TITAN_HEADERS := titan/thread/native.h
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string \
@@ -394,9 +394,9 @@ STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer titan.thread
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
-	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
-	titan/net.titan titan/ssl.titan titan/url.titan \
-	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.titan titan/path.titan \
+	titan/async.native.titan titan/timer.native.titan titan/io.native.titan titan/fs.native.titan \
+	titan/net.native.titan titan/ssl.native.titan titan/url.titan \
+	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.native.titan titan/path.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
 	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \

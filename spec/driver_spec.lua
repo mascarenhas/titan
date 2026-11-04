@@ -13019,7 +13019,7 @@ end)
 describe("target-aware source resolver", function()
     local fixtures = require "spec.fixtures.target_selection.support"
     local root, contexts, saved_imported, saved_registry, saved_path
-    local saved_browser_target, saved_initialize_platform
+    local saved_browser_target, saved_initialize_platform, saved_binary_path
     local function context(target, strategy)
         local value = driver.new_resolver_context({ target = target, io = strategy,
             analysis_only = true })
@@ -13035,6 +13035,7 @@ describe("target-aware source resolver", function()
         saved_imported, saved_registry, saved_path =
             driver.imported, types.registry, driver.TITAN_SOURCE_PATH
         driver.imported, types.registry, driver.TITAN_SOURCE_PATH = {}, {}, root
+        saved_binary_path = driver.TITAN_BIN_PATH
         saved_browser_target, saved_initialize_platform =
             driver._browser_target, driver.initialize_platform
         driver._browser_target = setmetatable({ build = function(_, inputs)
@@ -13052,6 +13053,7 @@ describe("target-aware source resolver", function()
         for _, value in ipairs(contexts) do assert(driver.close_resolver_context(value)) end
         driver.imported, types.registry, driver.TITAN_SOURCE_PATH =
             saved_imported, saved_registry, saved_path
+        driver.TITAN_BIN_PATH = saved_binary_path
         driver._browser_target, driver.initialize_platform =
             saved_browser_target, saved_initialize_platform
         fixtures.remove(root)
@@ -13114,6 +13116,60 @@ describe("target-aware source resolver", function()
         assert.equal(root .. "/only.browser.titan",
             assert(driver.resolve_source(context("browser"), "only")).main)
     end)
+
+    local stdlib_root = paths.to_slash(lfs.currentdir())
+    local excluded_stdlib = {
+        { "async", "async" }, { "timer", "timer" }, { "io", "io" },
+        { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" }, { "os", "os" },
+        { "uv", "uv/uv", "tcp" }, { "http", "http/http", "client" },
+        { "websocket", "websocket/websocket", "handshake" },
+        { "sqlite3", "sqlite3/sqlite3", "bindings" },
+        { "lua", "lua/lua", "worker" }, { "thread", "thread/thread", "channel" },
+    }
+    for _, entry in ipairs(excluded_stdlib) do
+        local name = "titan." .. entry[1]
+        local physical = stdlib_root .. "/titan/" .. entry[2]
+        it("keeps the native-only stdlib selection for " .. name, function()
+            for _, target in ipairs({ "linux", "darwin", "windows", "native" }) do
+                local source = assert(driver.resolve_source(context(target), name, stdlib_root))
+                assert.equal(physical .. ".native.titan", source.main, target)
+                assert.equal(physical .. ".titan", source.native_output, target)
+                assert.equal(entry[3] and "folder" or "flat", source.kind, target)
+                assert.equal(source.main, source.files[1], target)
+            end
+        end)
+
+        it("rejects browser imports of the native-only stdlib module " .. name, function()
+            driver.TITAN_SOURCE_PATH = root .. ";" .. stdlib_root
+            driver.TITAN_BIN_PATH = root
+            local ctx = context("browser")
+            assert.is_nil(driver.resolve_source(ctx, name, stdlib_root))
+            put("consumer.titan", 'local excluded = import "' .. entry[1] .. '"\n')
+            local ok, _, errors = driver.defaultloader({}, {
+                context = ctx, source_roots = { consumer = true },
+            })("consumer")
+            assert.is_true(ok)
+            assert.equal(1, #errors, table.concat(errors, "\n"))
+            assert.matches("module '" .. name .. "' not found", errors[1], 1, true)
+            assert.is_nil(driver.imported[name])
+        end)
+    end
+
+    for _, target in ipairs(driver.SOURCE_LABELS) do
+        it("blocks native-only stdlib folder contributors on " .. target, function()
+            for _, entry in ipairs(excluded_stdlib) do
+                if entry[3] then
+                    local name = "titan." .. entry[1] .. "." .. entry[3]
+                    local source = assert(driver.resolve_source(context(target), name, stdlib_root))
+                    assert.equal("blocked", source.kind, name)
+                    assert.equal(stdlib_root .. "/titan/" .. entry[2] .. ".native.titan",
+                        source.main, name)
+                    assert.equal(stdlib_root .. "/titan/" .. entry[1] .. "/" .. entry[3] .. ".titan",
+                        source.contributor, name)
+                end
+            end
+        end)
+    end
 
     posix_model_it("selects native then default on an unlisted native host", function()
         local strategy = compiler_io.new_sync()

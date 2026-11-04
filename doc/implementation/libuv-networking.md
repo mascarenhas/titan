@@ -1,6 +1,6 @@
 # DNS and TCP implementation
 
-`titan/net.titan` implements the [TCP API](../language/standard-library-net.md)
+`titan/net.native.titan` implements the [TCP API](../language/standard-library-net.md)
 with ordinary imports of public `uv`, `async`, and `string`. It has no C FFI
 import or source-private UV dependency. The
 [UV binding](../language/standard-library-uv.md) owns native storage, callback
