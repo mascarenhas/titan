@@ -102,3 +102,6 @@
 
 # Workspace language-server cache.
 .titan-ls/
+
+# Per-checkout language-server SDK selection (sets only compiler_root).
+titan-config.local.lua

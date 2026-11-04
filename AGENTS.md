@@ -25,6 +25,7 @@ TypeScript, Go, or C. Load every applicable peer cartridge as well:
 | Runtime schemas, nominal descriptors, reflected access | [titan-reflect](.agents/skills/titan-reflect/SKILL.md) |
 | JSON, null policy, typed mappings, diagnostics | [titan-json](.agents/skills/titan-json/SKILL.md) |
 | Compiler completion and language-server completion integration | [titan-completion](.agents/skills/titan-completion/SKILL.md) |
+| Querying Titan code through an agent harness's language-server tool (omp `lsp`), per-checkout SDK selection | [titan-language-server](.agents/skills/titan-language-server/SKILL.md) |
 
 For example, async networking behavior tests require programmer, tester, async,
 and networking. The cartridges are the operational default; follow their links
