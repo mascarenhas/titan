@@ -908,11 +908,11 @@ The browser modules follow the target's C facts and its fixed limits:
   and `L` options use 4 bytes; `j` and `J` (`lua_Integer`) stay 8 bytes, and
   native byte order is little endian.
 * **`long double`.** `printf`'s `%L` conversions format C `long double`
-  values with their full precision, as on a native target. [`reflect`
-  projections](standard-library-reflect.md) and `protobuf` and `transfer`
-  fields carry such values as hexadecimal text, which therefore reads back
-  equal to the original. A value that `double` cannot represent prints the
-  same text as on a native target whose `long double` has that precision.
+  values with their full precision instead of narrowing them to `double`.
+  [`reflect` projections](standard-library-reflect.md) and `protobuf` and
+  `transfer` fields carry such values as hexadecimal text, which therefore
+  reads back equal to the original. The exact spelling of that text comes from
+  the target's C library and is not guaranteed to match a native one.
 * **Locale.** The browser's C library uses the C locale's numeric conventions
   whatever `setlocale` selects: the decimal point is always `.`.
 * **Paths.** `path` uses POSIX rules: `path.separator` is `/` and
@@ -1084,7 +1084,8 @@ A recursive library operation spends engine stack on every level, and running
 the engine stack out ends the instance with an uncatchable `RangeError:
 Maximum call stack size exceeded` that no Titan `catch` receives. The standard
 library therefore stops over-deep input sooner on the browser target, with the
-module's ordinary catchable error:
+module's ordinary catchable error. The limits bound the library's own
+traversal; stack that the caller already uses is not counted:
 
 | Operation | Native target | Browser target | Error |
 | --- | --- | --- | --- |

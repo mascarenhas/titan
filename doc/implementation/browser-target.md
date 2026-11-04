@@ -371,20 +371,20 @@ and `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
 ([Make inventories](target-source-selection.md#make-inventories-and-audits)).
 For `browser` the resolver finds no main, so an import reports the ordinary
 `module 'titan.<name>' not found`, and a contributor of a folder whose main is
-unselected stays blocked rather than resolving as a flat module. Under the
-hybrid-subset policy these return as follows:
+unselected stays blocked rather than resolving as a flat module. The plan for
+them is provisional:
 
-| Modules | Browser plan |
+| Modules | Browser plan (provisional) |
 | --- | --- |
-| `async`, `timer` | browser compositions with the scheduler and outer suspension (#334) |
-| `io`, `os`, `lua` | browser compositions with `io.print`, streams, clocks, and Lua loading (#335) |
-| `http` | browser composition (#336, the only follow-on that may build llhttp for the target) |
-| `fs` | only together with a virtual filesystem follow-on |
+| `async`, `timer` | browser compositions with a browser scheduler and outer suspension |
+| `io`, `os`, `lua` | browser compositions with `io.print`, streams, clocks, and Lua loading |
+| `http` | a browser composition; the only absent module that may bring llhttp into the browser closure |
+| `fs` | only together with a virtual filesystem |
 | `uv`, `net`, `ssl` | absent |
-| `websocket`, `sqlite3`, `thread` | absent; WebSocket, SQLite, and Worker-based threads are recorded follow-ons |
+| `websocket`, `sqlite3`, `thread` | absent; browser WebSocket, SQLite, and Worker-based threads are possible later additions |
 
-Raise-on-invoke members, the reviewed absence list, and a complete-interface
-parity gate belong to #336; the subset adds none of them. Output goes through
+The subset has no raise-on-invoke members, no absence list, and no
+complete-interface parity gate. Output goes through
 Emscripten stdio only: `titan.test` writes with `putchar`/`fflush` and imports
 no Titan module, the generated runner imports only `titan.test` and the test
 owners, and the [loader](#the-loader)'s per-byte `Module.stdout`/`Module.stderr`
@@ -447,7 +447,8 @@ inventory fails. The check is owned by the SDK build and the subset suite (it
 is never part of `titanc`'s general link path): `browser_sdk.lua finalize`
 checks the staged provider, the LPegLabel archive, and the SDK build tree, and
 `titan-stdlib-browser-test` checks its output tree, the installed provider, and
-its test image. Only #336 may relax it, and only for llhttp.
+its test image. Admitting llhttp would be a deliberate change to these checks;
+no other relaxation is part of the policy.
 
 `spec/browser_stdlib_spec.lua` (emsdk-free) covers the path and symbol
 matrices, including every archive stem with `.a`, `_a.a`, `_1.48.a`,
@@ -508,19 +509,21 @@ delivered.
 | `url` | yes | none | `url.tests` | builds the URL patterns | none |
 | `path` | yes | none | `path.tests` | separator from `TITAN_PATH_WINDOWS` (POSIX on the browser) | none |
 
-The hard prerequisites of the later browser work are all delivered: `reflect`
-and `gc` for the JavaScript bridge (#332), and `coroutine`, `gc`, `string`,
-`transfer`, and `iteration` with their closure for the browser scheduler
-(#334). `transfer` is delivered for verified same-instance data behavior only;
-no thread, native-resource, or JavaScript-handle feature is implied.
+The subset includes, with their closure, every import of `titan.async` other
+than `uv` (`coroutine`, `gc`, `string`, `transfer`, and `iteration`) and the
+`reflect` and `gc` modules that inspect and root values. `transfer` covers
+verified same-instance data behavior only; no thread, native-resource, or
+JavaScript-handle feature is implied.
 
 Initialization audit:
 
-* **`math`.** The automatic seed is `time(NULL) ~ clock()`. Emscripten's libc
-  supplies both through `wasi_snapshot_preview1` without a JavaScript bridge,
-  on Node and in Chromium; its `clock()` measures elapsed time, not process CPU
-  time, which is an acceptable component of Lua's weak default seed. No
-  delivered module calls `getrandom()`, which does not link.
+* **`math`.** The automatic seed has two components: `time(NULL) ~ clock()`
+  and a value drawn from the generator with `next_random()`, and
+  `set_random_seed` takes both. Emscripten's libc supplies `time` and `clock`
+  through `wasi_snapshot_preview1` without a JavaScript bridge, on Node and in
+  Chromium; its `clock()` measures elapsed time, not process CPU time, which is
+  an acceptable component of Lua's weak default seed. No delivered module
+  calls `getrandom()`, which does not link.
 * **`test`.** The browser entry opens the standard Lua libraries before any
   module initializes, as the native runner does, so the helpers load eagerly.
 * **`string`.** The target facts are computed at run time: on wasm32,
@@ -538,12 +541,16 @@ Initialization audit:
 
 Each browser test owner imports only delivered modules, owner-local support,
 and `support.common.titan`. Cases that need `lua`, `fs`, `thread`, or a host
-command moved to native-only owners or contributors in the same source tree,
-so the native aggregate keeps every case: `test.host_tests`,
-`reflect.lua_tests`, `json.lua_tests`, `protobuf.resource_tests`, and the
-`coroutine.tests` contributor `tests/lua_boundary_test.native.titan`. The
-same-instance `transfer` cases moved out of `async.tests` into
-`transfer.tests`. `spec/support/stdlib_test_modules.mk` lists the browser
+command live in native-only owners or contributors in the same source tree:
+`test.host_tests`, `reflect.lua_tests`, `json.lua_tests`,
+`protobuf.resource_tests`, and the `coroutine.tests` contributor
+`tests/lua_boundary_test.native.titan`. Same-instance `transfer` cases belong
+to `transfer.tests`; the Task, thread, and independent-state transfer cases
+belong to `async.tests` and `thread.tests`. Both suites share the browser
+roots and their portable cases, while target-selected contributors (such as
+`coroutine.tests`' `tests/close.browser.titan` and
+`tests/unwind_test.native.titan`) add cases to one target only.
+`spec/support/stdlib_test_modules.mk` lists the browser
 roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
 `TITAN_STDLIB_TEST_ROOTS`:
 
@@ -584,9 +591,9 @@ emsdk, Node 24, and a headless Chromium. It:
    or the audit failed.
 
 The streams stay separate because a case may write to stderr while the runner
-is in the middle of a report line: an expected Lua warning (`Lua warning: error
-in coroutine cleanup ...`) once split a `protobuf.tests` report line in a merged
-log, which the validator rightly rejected. Warnings
+is in the middle of a report line, and a merged log then splits that line; the
+expected Lua warnings (`Lua warning: error in coroutine cleanup ...`) are such
+writes, and the validator rejects a split report. Warnings
 stay visible in `<engine>.stderr.log` and on the console; nothing is filtered
 out. `out/browser-stdlib/` therefore holds `stdlib.mjs`, `stdlib.wasm`,
 `stdlib.wasm.map`, `roots.txt`, `members.md`, and the four engine logs. The
@@ -628,8 +635,9 @@ WebAssembly and twelve JavaScript frames. A nesting-bounded library operation
 therefore gets a browser value from a target define, at most half of the
 lowest ceiling measured across engines and build profiles (the rule that set
 the [browser C-call limit](#the-browser-c-call-limit)), so over-deep input
-raises the module's ordinary catchable error first. Native values are
-unchanged.
+raises the module's ordinary catchable error with headroom to spare in the
+measured configurations. The counters cover only the library's own traversal,
+not stack the caller already uses. Native values are unchanged.
 
 | Bound | Define (browser value) | Native default | Lowest measured ceiling | Browser limit |
 | --- | --- | --- | --- | --- |

@@ -452,7 +452,10 @@ dependency graph or compiler input list (`spec/libuv_build_spec.lua` and
 The browser roots are named explicitly rather than discovered with
 `--test-dir`, because native-only owners in the same tree (such as
 `test.host_tests`, which imports `fs`) cannot build for `browser`. Every
-browser root is also a native root, so the native aggregate keeps every case;
+browser root is also a native root, so the two suites share logical owners and
+their portable cases; target-selected contributors still differ, so an owner
+can hold native-only cases (`tests/unwind_test.native.titan` in
+`coroutine.tests`) and browser-only ones (`tests/close.browser.titan`).
 `make titan-stdlib-test` does not run the browser suite, which is the separate
 [`make titan-stdlib-browser-test`](browser-target.md#test-owners-and-the-browser-suite).
 

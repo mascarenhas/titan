@@ -299,8 +299,8 @@ visibility, and GC lifetime belong in the native tests under
 the [browser core stdlib suite](browser-target.md#test-owners-and-the-browser-suite),
 and its three `lua.load` cases are in the native-only `reflect.lua_tests`,
 which shares the owner's nominal fixtures through an owner-local source import.
-Native-projection cases compare against target-compiled values, so the
-browser's full-precision `long double` text is checked there too. Exercise a
+Native-projection cases compare restored values against target-compiled
+values, so they also check the browser's full-precision formatting. Exercise a
 fresh collectable value after its maker returns, and use minor collections
 against an aged receiver when checking a write barrier; a local constant
 string plus a full collection is not a barrier oracle.

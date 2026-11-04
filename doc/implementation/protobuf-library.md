@@ -168,8 +168,8 @@ One budget, `TITAN_CODEC_DEPTH_LIMIT`, bounds every codec path. It is
 defined in `titan-runtime/transfer.h` as 128 unless the target defines it;
 the browser target's descriptor defines it as 43
 ([browser nesting limits](browser-target.md#nesting-limits)), and
-`titan/protobuf/native.h` already includes `transfer.h`, so `protobuf.titan`
-reads it as `ffi.TITAN_CODEC_DEPTH_LIMIT` with no new header. The reflective
+`titan/protobuf/native.h` includes `transfer.h`, so `protobuf.titan` reads it
+as `ffi.TITAN_CODEC_DEPTH_LIMIT` through its existing `foreign import`. The reflective
 `require_depth` (used by the encoder, the decoder, and `schema`) and the
 generated codecs' `titan_codec_depth` (also used when their field reader skips
 a group) raise when a depth exceeds the budget, with `protobuf: nesting

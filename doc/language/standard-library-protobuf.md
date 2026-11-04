@@ -333,8 +333,9 @@ a chain of records whose innermost record has a field holds at most 127 records
 on a native target, and deeper input raises `protobuf: nesting exceeds 128
 levels`. On the [browser target](browser-target.md#nesting-limits) the chain
 holds at most 42 records and deeper input raises `protobuf: nesting exceeds 43
-levels`, before the JavaScript engine's stack can run out. The error is an
-ordinary catchable error on both targets.
+levels`, a limit that keeps the codec's own recursion well within the
+JavaScript engine's stack (stack that the caller already uses is not counted).
+The error is an ordinary catchable error on both targets.
 
 String entry points keep their input alive throughout decoding, including
 while a custom decoder runs after the caller has dropped its last reference to

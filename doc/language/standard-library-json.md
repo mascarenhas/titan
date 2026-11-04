@@ -336,8 +336,9 @@ applies to emitted text. Exceeding a limit raises `limit_exceeded`.
 On the [browser target](browser-target.md#nesting-limits), `encode` applies a
 `max_depth` of at most 103: a larger configured value is accepted, and a value
 nested deeper than 103 containers raises `limit_exceeded` (`value exceeds
-max_depth`) before the JavaScript engine's stack can run out. The default of
-32 and every decode limit are the same on every target.
+max_depth`). The cap keeps the writer's own traversal well within the
+JavaScript engine's stack; stack that the caller already uses is not counted.
+The default of 32 and every decode limit are the same on every target.
 
 The configured depth is a container budget, not a guarantee that every document
 within it fits the available execution resources. Parsing also consumes PEG
