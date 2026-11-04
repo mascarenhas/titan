@@ -1391,15 +1391,21 @@ not ship. Engine ceilings are the deepest passing level with Lua's limit out of
 the way (a session-only `-DLUAI_MAXCCALLS=60000` install); `a2` and `a0` are
 assertions 2 and 0.
 
-Engine ceilings at assertions 2 / 0 (`—` where a cell was not measured; the
-WebKit `-O3` assertions-2 mixed sweep found no failure up to its 4,096
-maximum):
+Ceilings at assertions 2 / 0 (`—` where a cell was not measured; the WebKit
+`-O3` assertions-2 mixed sweep found no failure up to its 4,096 maximum). The
+Firefox mixed cells are the fixture's own assertion boundary, not the
+engine's: past it, Firefox's 128-frame capture loses `original_leaf` and the
+fixture's trace assertions fail first. The engine's own `InternalError: too
+much recursion` came later. Under validation it appeared at 576 at assertions
+2, and at assertions 0 it was first observed at 640. Under production it was
+first observed at 1,792 (assertions 2) and 1,776 (assertions 0). The sweeps did
+not sample the depths in between.
 
 | Construct, engine | `-O2` | `-O3` (production) | Validation |
 | --- | ---: | ---: | ---: |
 | Mixed Lua/Titan, Node | 1,208 / 1,210 | 1,220 / 1,222 | 318 / 319 |
 | Mixed Lua/Titan, Chromium | 1,226 / — | 1,239 / 1,242 | 320 / 321 |
-| Mixed Lua/Titan, Firefox | — | 1,757 / 1,763 | 572 / 574 |
+| Mixed Lua/Titan, Firefox (fixture boundary) | — | 1,757 / 1,763 | 572 / 574 |
 | Mixed Lua/Titan, WebKit | — | > 4,096 / 4,095 | 479 (contiguous) / 1,074 |
 | Nested `pcall`, Node | 364 / 419 | 362 / 416 | 201 / 204 |
 | Nested `pcall`, Chromium | 372 / — | 367 / 421 | 201 / — |
@@ -1410,15 +1416,21 @@ maximum):
 | Nested `coroutine.resume`, Firefox | — | 799 / 994 | 393 / — |
 | Nested `coroutine.resume`, WebKit | — | 2,216 / 2,528 | 831 / — |
 
-Production raises the ceilings on every engine: about 1.8× for `pcall` and
-`coroutine.resume` on V8, 2 to 3× on Firefox and WebKit, and about 4× for
-mixed recursion, where inlining removes frames from each level. The order
-never changes. Validation binds in every measured cell, `pcall` and
-`coroutine.resume` bind on every engine in both profiles, and V8 binds in both
-profiles: production `pcall` reaches 362 levels on Node, against 775 on
-Firefox and 2,121 on WebKit. The minimum over constructs, engines, profiles,
-and assertion modes is therefore still 204 counts, under validation at
-assertions 2 on Node and Chromium.
+Production raises the ceilings on every engine. At assertions 2, nested
+`pcall` and `coroutine.resume` gain about 1.8× on V8 (362/201, 366/201 on
+Node), 2.0× on Firefox (775/385, 799/393), and 3.3× and 2.7× on WebKit
+(2,121/639, 2,216/831). Mixed recursion, where inlining removes frames from
+each level, gains about 3.8× on V8 (1,220/318 on Node, 1,239/320 on
+Chromium), 3.1× on Firefox (1,757/572, both fixture boundaries), and at
+least 8.5× on WebKit (more than 4,096/479; 3.8× at assertions 0,
+4,095/1,074). The order never changes. Validation binds in every measured
+cell, `pcall` and `coroutine.resume` bind on every engine in both profiles,
+and V8 binds in both profiles: production `pcall` reaches 362 levels on Node,
+against 775 on Firefox and 2,121 on WebKit. Over the measured cells the
+minimum is therefore still 204 counts, under validation at assertions 2 on
+Node and Chromium. Validation `pcall` and `coroutine.resume` were measured at
+assertions 0 only on Node, where they reach 204 levels against 201 at
+assertions 2.
 
 | Measurement | `-O2` | `-O3` (production) | Validation |
 | --- | ---: | ---: | ---: |
@@ -1449,9 +1461,10 @@ same host at the base (`scripts/browser_baseline.lua`, `-O1` with Asyncify):
 
 The benchmark images were 1,369,778 (`-O3`) and 1,372,292 (`-O2`) bytes, with
 295,199 and 285,073-byte maps; the Chromium `-O3` image was 1,369,468 bytes
-with a 295,187-byte map. Between the two production levels, `-O3` cuts the
-coroutine-switch time by about 23% on Node and is equal or faster elsewhere;
-the suspension round trip is Asyncify-bound and does not change. The #329
+with a 295,187-byte map. Between the two production levels on Node, `-O3`
+cuts the coroutine-switch time by about 23% and is equal or faster on the
+other benchmarks; the suspension round trip is Asyncify-bound and does not
+change. The #329
 harness columns are a reference, not a like-for-like comparison: that harness
 links with the `baseline` purpose, without the trace libraries and the map,
 while the production columns are ordinary installed-profile programs. The

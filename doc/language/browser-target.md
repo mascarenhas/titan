@@ -361,9 +361,13 @@ link writes the source map and keeps the WebAssembly `name` section
 [traces](#traces). Every Titan frame that a trace shows is therefore
 attributed to its `.titan` file and line as that section describes, and a
 deployed program needs its `<stem>.wasm.map` next to `<stem>.wasm`, in either
-profile. Production images are smaller and faster; the [implementation
-manual](../implementation/browser-target.md#measurements) records the
-measurements, and [traces](#traces) shows what an optimized trace looks like.
+profile. Production images are smaller: the trace gate's production test image
+is 3,231,911 bytes against 5,261,947 under `validation` (39% smaller), and its
+program image 659,474 against 1,052,334 (37% smaller). No like-for-like speed
+comparison between the two profiles has been measured. The [implementation
+manual](../implementation/browser-target.md#measurements) records sizes, link
+times, engine ceilings, and micro-benchmarks, with their caveats, and
+[traces](#traces) shows what an optimized trace looks like.
 
 **Test images keep their frames.** Under `production`, `titanc --test`
 compiles each test module (a module that declares discovered `test_`
