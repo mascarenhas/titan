@@ -438,7 +438,7 @@ static inline void titan_codec_raise(lua_State *L, const char *message) {
 static inline void titan_codec_depth(lua_State *L, int depth) {
   if (depth > TITAN_CODEC_DEPTH_LIMIT) {
     lua_checkstack(L, 1);
-    lua_pushfstring(L, "protobuf: nesting exceeds %d levels", TITAN_CODEC_DEPTH_LIMIT);
+    lua_pushfstring(L, "protobuf: nesting exceeds %d levels", (int)TITAN_CODEC_DEPTH_LIMIT);
     lua_error(L);
   }
 }

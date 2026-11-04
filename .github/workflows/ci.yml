@@ -743,7 +743,12 @@ jobs:
           path: |
             ${{ runner.temp }}/browser-*.log
             out/browser
-            out/browser-stdlib/
+            out/browser-stdlib/*.log
+            out/browser-stdlib/*.mjs
+            out/browser-stdlib/*.wasm
+            out/browser-stdlib/*.wasm.map
+            out/browser-stdlib/roots.txt
+            out/browser-stdlib/members.md
           if-no-files-found: warn
           retention-days: 7
 

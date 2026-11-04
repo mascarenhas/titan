@@ -4,6 +4,7 @@ local support = import "support.common.titan"
 
 foreign import "titan/ffi.h"
 foreign import "lauxlib.h"
+foreign import "transfer.h"
 
 function test_raw_loader_uses_explicit_length_and_canonical_identity(_context: test.Context)
   local top = ffi.lua_gettop(L)
