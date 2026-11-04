@@ -1,6 +1,6 @@
 # The async continuation runtime
 
-`titan.async` (`titan/async.titan`) implements Tasks, generic waits,
+`titan.async` (`titan/async.native.titan`) implements Tasks, generic waits,
 cancellation, subscriptions, cross-thread external waits, coalescing
 cross-state receivers, and shutdown. It uses only the public `titan.uv` module
 interface. UV owns native allocations, callback roots, borrowed native data, and
@@ -15,7 +15,7 @@ operation number.
 ## Module and type ownership
 
 `Error`, `OperationError`, `ResumeToken`, `CancellationReason<|B|>`,
-`TaskStatus<|A,B|>`, and `Task<|A,B|>` are declared in `titan/async.titan`; UV
+`TaskStatus<|A,B|>`, and `Task<|A,B|>` are declared in `titan/async.native.titan`; UV
 declares none of them. `titan.transfer` owns `TransferValue` and the native
 packet format ([transfer policy](transfer-library.md)). Async re-exports
 `TransferValue` as a transparent alias and owns `Receiver` and `ExternalWait`.
@@ -772,7 +772,7 @@ example, SQLite's context and UV argument owner retain its packet. Adapters
 still retain arguments, interpret native results, and dispose of unpublished
 result resources lexically.
 
-`timer.sleep` (`titan/timer.titan`) owns a dedicated one-shot `uv.timer_t`, a
+`timer.sleep` (`titan/timer.native.titan`) owns a dedicated one-shot `uv.timer_t`, a
 `Sleep` record, and a `ResumeToken`, with named callbacks. Firing and
 cancellation coalesce through `Task:resume`, and a deferred cleanup Completion
 waits for native timer close before returning or finishing cancellation unwind.

@@ -2,7 +2,7 @@
 
 The public API and observable behavior are documented in the
 [TLS standard-library chapter](../language/standard-library-ssl.md). This
-chapter describes the `titan/ssl.titan` state machine, its narrow OpenSSL
+chapter describes the `titan/ssl.native.titan` state machine, its narrow OpenSSL
 boundary, and its build inputs.
 
 ## Layering boundary

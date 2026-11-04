@@ -7,13 +7,13 @@ callback bridge, streaming parser ownership, and high-level server composition.
 
 ## Folder-module structure and layering
 
-The `titan/http/http.titan` main imports `async`, `io`, `math`, `net`,
+The `titan/http/http.native.titan` main imports `async`, `io`, `math`, `net`,
 `protobuf`, `reflect`, `ssl`, `string`, `timer` and `url`; `server.titan` adds
 `uv`. The contributors (`Makefile` `STDLIB_HTTP_SOURCES`) share one
 module-private scope:
 
 ```text
-titan/http/http.titan       imports and initialization
+titan/http/http.native.titan       imports and initialization
 titan/http/client.titan     request/response exchanges and ClientResponse
 titan/http/pool.titan       Client pools, idle leases, bounded background drains
 titan/http/headers.titan    ordered public Headers value

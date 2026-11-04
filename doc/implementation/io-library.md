@@ -2,7 +2,7 @@
 
 The user-facing Interfaces, printing, and line-iteration contracts are in the
 [I/O standard-library chapter](../language/standard-library-io.md).
-`titan/io.titan` is a flat Titan module whose only imports are the ordinary
+`titan/io.native.titan` is a flat Titan module whose only imports are the ordinary
 public `os` and `string` interfaces, so a source build composes with
 compiled-only providers of both. It adds no compiler intrinsic, Lua C API
 operation, or native code. Concrete streams, including the shell facade, live
