@@ -486,6 +486,11 @@ jobs:
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 
+      - name: Run the browser core stdlib suite under Node and Chromium
+        run: |
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          make titan-stdlib-browser-test PREFIX="$PREFIX"
+
       - name: Run the browser real-toolchain gate
         env:
           TITAN_ROOT: ${{ github.workspace }}/.lua
@@ -502,6 +507,7 @@ jobs:
             spec/coder/browser_images_spec.lua
             spec/coder/browser_protocol_spec.lua
             spec/browser_sdk_spec.lua
+            spec/coder/browser_stdlib_closure_spec.lua
             spec/coder/browser_entry_gate_spec.lua
             spec/coder/browser_stdlib_gate_spec.lua
             spec/coder/browser_fixtures_spec.lua
