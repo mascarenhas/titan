@@ -5,6 +5,7 @@ local browserlink = require "titan-compiler.browserlink"
 local driver = require "titan-compiler.driver"
 local incremental = require "titan-compiler.incremental"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local objectmetadata = require "titan-compiler.objectmetadata"
 local compiler_io = require "titan-compiler.io"
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
@@ -682,9 +683,18 @@ end
         }))
         assert(driver.validate_browser_provider(provider_ar))
         assert.same(EXPECTED_PROVIDER_MODULES, provider_ar.key_order)
-        local native_payload_members = {}
+        local compiler_members, native_payload_members = {}, {}
         for _, member in ipairs(provider_ar.members) do
-            if not member.object.metadata then
+            if member.object.metadata then
+                local record = assert(objectmetadata.read(member.bytes, member.display_name))
+                local stem = assert(member.display_name:match("^(.*)%.o$"))
+                for _, part in ipairs(assert(record.object_metadata.parts)) do
+                    compiler_members[stem .. part.object_suffix] = true
+                end
+            end
+        end
+        for _, member in ipairs(provider_ar.members) do
+            if not compiler_members[member.display_name] then
                 native_payload_members[#native_payload_members + 1] = member.display_name
             end
         end
