@@ -764,7 +764,7 @@ option "<flag>"`, quoting both words of a split spelling); the one exception is
 a single `-O0` to `-O3` or `-Os` level in a `trace_control` build. The
 descriptor validator enforces the same rule on the finished flags ([Object
 flags](#object-flags)).
-`browserlink.validate_extras(flags, options, build_profile)` rejects
+`browserlink.validate_extras(flags, options, build_profile, origin)` rejects
 `trace_option` flags in the normalized compile and link extras and final link
 extras unless `options.purpose` is `baseline`, `minicoro`, or `budget`, as well
 as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
@@ -775,13 +775,19 @@ as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
 `FILESYSTEM`, `MINIMAL_RUNTIME`, `EXPORTED_FUNCTIONS`,
 `EXPORTED_RUNTIME_METHODS`, `INCOMING_MODULE_JS_API`, `ASSERTIONS`,
 `STACK_OVERFLOW_CHECK`, and the three target defines, plus `--no-entry` and
-`--js-library` (`--js-library=...` included), with `browser <profile> link
-profile owns option <flag>`, or `browser link profile owns option <flag>` when
-the caller passes no profile. `titanc` checks its normalized compile and link
-extras with `driver.BUILD_PROFILE`, and image links and the protocol probe pass
-the descriptor's `build_profile`, so `--cflag=-O2` in a production build
-reports `browser production link profile owns option -O2`. Other Emscripten
-settings pass through, so a later user flag can never weaken the profile.
+`--js-library` (`--js-library=...` included). One owned option has one
+diagnostic, chosen by `origin`: compile extras (`origin == "compile"`) report
+`browser <profile> profile owns compile option "<flag>"`, the same message as
+`browsertarget.build`, and link extras report `browser <profile> link profile
+owns option <flag>` (`browser link profile owns option <flag>` when the caller
+passes no profile). `titanc` checks its normalized compile extras (`--cflag`,
+`-I`, `-D`, `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`) as `compile` and its
+link extras as `link`, both with `driver.BUILD_PROFILE`; image links and the
+protocol probe check link extras under the descriptor's `build_profile`. So
+`--cflag=-O2` in a production build reports `browser production profile owns
+compile option "-O2"`, and `--ldflag=-O3` reports `browser production link
+profile owns option -O3`. Other Emscripten settings pass through, so a later
+user flag can never weaken the profile.
 
 ## Semantic-cache ownership
 
@@ -1166,13 +1172,16 @@ purpose is given, passes a harness purpose (`protocol`, `gate`, `minicoro`,
 `budget`, or `baseline`) through, and refuses a `program` or `test` purpose
 that contradicts a known kind with `browser link purpose "<purpose>" does not
 match this <kind> image`, so a test image is never certified or linked with the
-program profile. Target initialization applies that check and validates the
-options against the built descriptor; for `baseline`, `minicoro`, and `budget`
-it marks the descriptor `trace_control`, and an `optimization` override enters
-the descriptor's compile prefix ([the harness level
-hook](#the-harness-level-hook)). `driver.browser_link_plan(context, purpose)`
-returns the plan for the harness options when they are set (`browser link
-profile options require a purpose` when they name none) and otherwise for
+program profile. Target initialization does not know the image kind yet, so it
+checks only the options' shape: a preset without a purpose is refused with
+`browser link profile options require a purpose`, and the options are
+validated against the built descriptor. For `baseline`, `minicoro`, and
+`budget` it marks the descriptor `trace_control`, and an `optimization`
+override enters the descriptor's compile prefix ([the harness level
+hook](#the-harness-level-hook)). The kind check happens where the kind is
+known. `driver.browser_link_plan(context, purpose)` resolves the purpose
+against the kind and returns the plan for the harness options when they are
+set (refusing a purposeless preset with the same message) and otherwise for
 `{purpose = <resolved kind>, assertions = 2}`. `titanc` certifies the final
 link with `browser_link_plan(context, kind)`, and
 `driver.compile_browser_image` resolves its purpose the same way, also
@@ -1355,15 +1364,19 @@ pass list.
 When `driver.browser_link_options.purpose` is `baseline`, `minicoro`, or
 `budget`, target initialization builds the descriptor with `trace_control =
 true` (D27 addendum). Only such a descriptor may carry an owned option after
-the profile prefix: exactly one trailing level flag (`-O0` to `-O3`, or `-Os`),
-the `optimization` override. Both `browsertarget.build` and the validator
-refuse every other owned option, including a second level or any
-`BINARYEN_EXTRA_PASSES` spelling, with `browser <profile> profile owns compile
-option "<flag>"`. `trace_control` is descriptor data and enters the identity.
-The hook is reachable only through the Lua API, and its options must name a
-purpose ([internal selection](#the-link-profile)); without it, `--cflag`,
-`--ldflag`, and the `TITAN_EXTRA_*` variables are refused as above, naming the
-profile. Its users are CI's baseline cell, `scripts/browser_baseline.lua`, and
+the profile prefix: exactly one trailing level flag, `-O0` to `-O3` or `-Os`,
+which comes from the `optimization` override (`-O1` or `-O2`) or from a
+harness `--cflag` (`validate_extras` admits level flags for these three
+purposes). One rule, `check_owned_tail`, applies in both `browsertarget.build`
+(on the extras, before tool discovery) and the validator (after the profile
+prefix): every other owned option, including a second level or any
+`BINARYEN_EXTRA_PASSES` spelling, is refused with `browser <profile> profile
+owns compile option "<flag>"`. `trace_control` is descriptor data and enters
+the identity. The hook is reachable only through the Lua API, and its options
+must name a purpose ([internal selection](#the-link-profile)); without it,
+`--cflag`, `--ldflag`, and the `TITAN_EXTRA_*` variables are refused as above,
+naming the profile. Its users are CI's baseline cell,
+`scripts/browser_baseline.lua`, and
 the measurement and budget specs. Production builds stay at
 `PRODUCTION_LEVEL`.
 
@@ -1372,17 +1385,43 @@ the measurement and budget specs. Production builds stay at
 Measured for #343 with Emscripten 6.0.13, Node 24.19.0, host Chrome
 156.0.8078.79, and Playwright 1.56.1's Firefox 142.0.1 and WebKit 26.0, one
 cold process per depth, on the retained trace fixture
-(`spec/fixtures/browser_trace`, then 34 native cases). `-O2` is the same tree
-with `PRODUCTION_LEVEL` patched for the comparison; it does not ship. Engine
-ceilings are the deepest passing level with Lua's limit out of the way (a
-session-only `-DLUAI_MAXCCALLS=60000` install); `a2` and `a0` are assertions
-2 and 0.
+(`spec/fixtures/browser_trace`) and its session-only measurement copy. `-O2`
+is the same tree with `PRODUCTION_LEVEL` patched for the comparison; it does
+not ship. Engine ceilings are the deepest passing level with Lua's limit out of
+the way (a session-only `-DLUAI_MAXCCALLS=60000` install); `a2` and `a0` are
+assertions 2 and 0.
+
+Engine ceilings at assertions 2 / 0 (`—` where a cell was not measured; the
+WebKit `-O3` assertions-2 mixed sweep found no failure up to its 4,096
+maximum):
+
+| Construct, engine | `-O2` | `-O3` (production) | Validation |
+| --- | ---: | ---: | ---: |
+| Mixed Lua/Titan, Node | 1,208 / 1,210 | 1,220 / 1,222 | 318 / 319 |
+| Mixed Lua/Titan, Chromium | 1,226 / — | 1,239 / 1,242 | 320 / 321 |
+| Mixed Lua/Titan, Firefox | — | 1,757 / 1,763 | 572 / 574 |
+| Mixed Lua/Titan, WebKit | — | > 4,096 / 4,095 | 479 (contiguous) / 1,074 |
+| Nested `pcall`, Node | 364 / 419 | 362 / 416 | 201 / 204 |
+| Nested `pcall`, Chromium | 372 / — | 367 / 421 | 201 / — |
+| Nested `pcall`, Firefox | — | 775 / 947 | 385 / — |
+| Nested `pcall`, WebKit | — | 2,121 / 2,401 | 639 / — |
+| Nested `coroutine.resume`, Node | 369 / 425 | 366 / 421 | 201 / 204 |
+| Nested `coroutine.resume`, Chromium | 376 / — | 373 / 434 | 201 / — |
+| Nested `coroutine.resume`, Firefox | — | 799 / 994 | 393 / — |
+| Nested `coroutine.resume`, WebKit | — | 2,216 / 2,528 | 831 / — |
+
+Production raises the ceilings on every engine: about 1.8× for `pcall` and
+`coroutine.resume` on V8, 2 to 3× on Firefox and WebKit, and about 4× for
+mixed recursion, where inlining removes frames from each level. The order
+never changes. Validation binds in every measured cell, `pcall` and
+`coroutine.resume` bind on every engine in both profiles, and V8 binds in both
+profiles: production `pcall` reaches 362 levels on Node, against 775 on
+Firefox and 2,121 on WebKit. The minimum over constructs, engines, profiles,
+and assertion modes is therefore still 204 counts, under validation at
+assertions 2 on Node and Chromium.
 
 | Measurement | `-O2` | `-O3` (production) | Validation |
 | --- | ---: | ---: | ---: |
-| Mixed Lua/Titan ceiling, Node a2 / Node a0 / Chromium a2 | 1,208 / 1,210 / 1,226 | 1,220 / 1,222 / 1,239 | 318 / 319 / 320 |
-| Nested `pcall` ceiling, Node a2 / Node a0 / Chromium a2 | 364 / 419 / 372 | 362 / 416 / 367 | 201 / 204 / 201 |
-| Nested `coroutine.resume` ceiling, Node a2 / Node a0 / Chromium a2 | 369 / 425 / 376 | 366 / 421 / 373 | 201 / 204 / 201 |
 | `getCcalls` counts per level, every construct | 1 | 1 | 1 |
 | Test image `.wasm` / `.wasm.map` bytes, a2 | 3,182,978 / 871,991 | 3,140,922 / 868,617 | 5,128,240 / 1,227,298 |
 | Test image `.wasm` / `.wasm.map` bytes, a0 | 3,171,020 / 869,947 | 3,109,537 / 867,001 | 5,115,589 / 1,221,997 |
@@ -1390,29 +1429,34 @@ session-only `-DLUAI_MAXCCALLS=60000` install); `a2` and `a0` are assertions
 | Final link, test / program image, a2 | 8.686 s / 9.287 s | 10.951 s / 11.612 s | 9.065 s |
 | Maximum function locals, test a2 / test a0 / program a2 | 100 / 67 / 100 | 100 / 68 / 100 | 1,993 / 1,993 / — |
 
-Validation's ceilings on Firefox and WebKit are in [the browser C-call
-limit](#the-browser-c-call-limit); validation, not production, sets the worst
-case. `-O3` is 1.3% smaller than `-O2` and links about 2.3 s slower. No image
-comes near V8's 50,000-locals limit.
+The `-O3` test image is 1.3% smaller than the `-O2` one (3,140,922 against
+3,182,978 bytes), while the `-O3` program image is 0.6% larger (3,142,564
+against 3,122,463) with a 4.9% larger map; `-O3` links about 2.3 s slower. No
+image comes near V8's 50,000-locals limit.
 
 The #329 micro-benchmark program, built as an ordinary program at each level
-(Node, median of three runs, in milliseconds), against the #329 harness re-run
-on the same host at the base (`scripts/browser_baseline.lua`, `-O1` with
-Asyncify):
+(median of three runs, in milliseconds), next to the #329 harness re-run on the
+same host at the base (`scripts/browser_baseline.lua`, `-O1` with Asyncify):
 
-| Benchmark | `-O2` | `-O3` (production) | #329 harness, `-O1` with Asyncify |
-| --- | ---: | ---: | ---: |
-| 200 000 calls | 3.8 | 3.3 | 3.7 |
-| 50 000 closures | 6.8 | 5.7 | 8.1 |
-| 100 000-element Array | 1.4 | 1.2 | 2.1 |
-| 5 000-step string build | 1.5 | 1.5 | 2.2 |
-| 20 000 coroutine switches | 94.5 | 72.1 | 162.5 |
-| 200 suspensions, total | 216 | 216 | 215.4 |
+| Benchmark | Node `-O2` | Node `-O3` (production) | Node, #329 harness | Chromium `-O3` (production) | Chromium, #329 harness |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 200 000 calls | 3.8 | 3.3 | 3.7 | 14.1 | 5.8 |
+| 50 000 closures | 6.8 | 5.7 | 8.1 | 23.0 | 7.9 |
+| 100 000-element Array | 1.4 | 1.2 | 2.1 | 3.6 | 2.4 |
+| 5 000-step string build | 1.5 | 1.5 | 2.2 | 5.1 | 2.5 |
+| 20 000 coroutine switches | 94.5 | 72.1 | 162.5 | 149.4 | 181.4 |
+| 200 suspensions, total | 216 | 216 | 215.4 | 814.2 | 805.8 |
 
 The benchmark images were 1,369,778 (`-O3`) and 1,372,292 (`-O2`) bytes, with
-295,199 and 285,073-byte maps. `-O3` cuts the coroutine-switch time by about
-23% against `-O2` and is equal or faster elsewhere; the suspension round trip
-is Asyncify-bound and does not change.
+295,199 and 285,073-byte maps; the Chromium `-O3` image was 1,369,468 bytes
+with a 295,187-byte map. Between the two production levels, `-O3` cuts the
+coroutine-switch time by about 23% on Node and is equal or faster elsewhere;
+the suspension round trip is Asyncify-bound and does not change. The #329
+harness columns are a reference, not a like-for-like comparison: that harness
+links with the `baseline` purpose, without the trace libraries and the map,
+while the production columns are ordinary installed-profile programs. The
+Chromium numbers are therefore recorded as measured, with no regression or
+speedup claimed against the harness.
 
 The trace gate's own images, as the gate builds them with its current 36
 native cases (maximum locals count parameters and declared locals):
@@ -1960,8 +2004,10 @@ The value had to be greater than 10 (otherwise `LUAI_MAXCCALLS / 10 * 11` is 0
 and every overflow escalates to error-in-error-handling), at least 20 in
 practice so overflow handling and the two reserved finalizer slots stay
 usable, within 16 bits, and at most half the lowest engine ceiling measured in
-counts on any engine and either profile: the margin rule #330 used for its
-headroom row. Each construct costs exactly one count per level wherever it was
+counts on any engine and either profile (both profiles were measured on all
+four engines; see [Measurements](#measurements) and the table below): the
+margin rule #330 used for its headroom row. Each construct costs exactly one
+count per level wherever it was
 measured (mixed recursion on all four engines in both assertion modes, every
 construct on Node, and `pcall`, `coroutine.resume`, and mixed recursion in both
 profiles), so levels and counts differ only by the starting count (2 in the
@@ -1974,8 +2020,8 @@ more than 100 counts, against an engine ceiling of 204, a 2.04× margin; the
 fork's comment quotes 2.08×, 204 against the 98 counts at which the mixed
 fixture trips. At
 Lua's default 200, the same `pcall` chain tripped at 195 levels (198 counts),
-a 1.03× margin, and mixed recursion tripped at 195 levels on all four engines
-in both assertion modes, as a catchable error.
+a 1.03× margin, and mixed recursion passed 195 levels and tripped at 196 on
+all four engines in both assertion modes, as a catchable error.
 
 Validation ceilings with Lua's limit out of the way (deepest passing level;
 `-DLUAI_MAXCCALLS=60000`):
@@ -1994,8 +2040,8 @@ Validation ceilings with Lua's limit out of the way (deepest passing level;
 V8 fails with `RangeError: Maximum call stack size exceeded`, Firefox with
 `InternalError: too much recursion`, and WebKit with `RangeError`. Past 572
 levels, Firefox's 128-frame capture drops `original_leaf` and the fixture's
-own assertions fail before the engine does. The production ceilings are in
-[Measurements](#measurements).
+own assertions fail before the engine does. The production ceilings, higher
+on every engine, are in [Measurements](#measurements).
 
 ### Engine stack per construct
 
@@ -2043,7 +2089,12 @@ Two validation levers were measured and not adopted: adding `--coalesce-locals`
 after `--asyncify` raised the Node mixed ceiling from 318 to 334, removing
 `luaD_callnoyield` from Asyncify (`-sASYNCIFY_REMOVE`) to 324, and both to 339
 (+6.6%), at no extra link time; `--simplify-locals-nonesting` and
-`--merge-locals` changed nothing. Production gains nothing from them.
+`--merge-locals` changed nothing. These levers were measured only in
+validation. The only post-Asyncify measurement in production removed D18's
+pair: without it the `-O3` mixed ceiling stays at or above 1,200 levels, the
+`.wasm` is 14 KB smaller, the map 33 KB larger, and the maximum 102 locals
+instead of 100 (D34, [why the cleanup is
+load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)).
 
 ### The regression
 

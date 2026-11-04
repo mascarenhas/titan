@@ -910,20 +910,20 @@ and exports, the filesystem layer, assertions and stack checks, and the three
 target defines. Other Emscripten `-s` settings, such as `-sWASM_BIGINT=1`, may
 be passed with `--ldflag`, but a compile or link flag that overrides or
 negates one of these owned settings is rejected, as are `--no-entry` and
-`--js-library`. The message names the build profile:
+`--js-library`. The message names the build profile, and says whether the
+flag came from the compile flags (`--cflag`, `TITAN_EXTRA_CPPFLAGS`,
+`TITAN_EXTRA_CFLAGS`) or the link flags (`--ldflag`, `TITAN_EXTRA_LDFLAGS`):
 
 ```text
-browser production link profile owns option -O2
-browser production link profile owns option -fno-inline
+browser production profile owns compile option "-O2"
+browser production profile owns compile option "-fno-inline"
+browser production link profile owns option -O3
 browser production link profile owns option -sBINARYEN_EXTRA_PASSES=--coalesce-locals
 browser production link profile owns option -sASYNCIFY=0
 browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)
 ```
 
-`titanc` checks `--cflag`, `--ldflag`, and the `TITAN_EXTRA_*` variables
-against the same owned set, so a compile flag such as `--cflag=-O2` is also
-reported as owned by the link profile. A `validation` build reports `browser
-validation link profile owns option ...`.
+A `validation` build names `validation` instead.
 
 ## Limits
 
