@@ -1740,6 +1740,29 @@ done
         assert.equal(2, union_ok.owners)
         assert.same(result.cases, union_ok.cases)
 
+        local empty_out = "[==========] Running Titan tests.\n[==========] 0 tests ran.\n[  PASSED  ] 0 tests."
+        local filtered_union, filtered_err = validate_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+            { id = "2", owners = { "second.tests" }, contents = empty_out },
+        }, roots, true)
+        assert.truthy(filtered_union, filtered_err)
+        assert.equal(1, filtered_union.count)
+        assert.equal(1, filtered_union.owners)
+        assert.is_nil(validate(empty_out, roots, true), "a wholly empty filtered suite must still fail")
+        local empty_union, empty_err = validate_union({
+            { id = "1", owners = { "first.tests" }, contents = empty_out },
+            { id = "2", owners = { "second.tests" }, contents = empty_out },
+        }, roots, true)
+        assert.is_nil(empty_union)
+        assert.truthy(empty_err:find("selected no cases", 1, true), empty_err)
+        local unfinished, unfinished_err = validate_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+            { id = "2", owners = { "second.tests" },
+                contents = empty_out .. "\n[ RUN      ] second.tests.test_unfinished" },
+        }, roots, true)
+        assert.is_nil(unfinished)
+        assert.truthy(unfinished_err:find("did not finish", 1, true), unfinished_err)
+
         local function rejects_union(groups, expected, all_roots)
             local accepted, message = validate_union(groups, all_roots or roots)
             assert.is_nil(accepted)

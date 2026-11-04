@@ -1317,51 +1317,58 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua finalize "$$build_dir"
 
 TITAN_BROWSER_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-stdlib
-TITAN_BROWSER_TEST_IMAGE := $(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))/stdlib.mjs
 TITAN_BROWSER_TEST_SDK := $(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)
 
 .PHONY: titan-stdlib-browser-test
-titan-stdlib-browser-test: ## Build one browser stdlib image, audit it, and run Node and Chromium (TITAN_FILTER supported)
-	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
+titan-stdlib-browser-test: ## Build size-bounded browser stdlib images, audit their owner union, and run Node and Chromium
+	+@$(strip $(TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK)) $(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
-	mkdir -p $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)); \
-	$(BROWSER_SDK_ENV) TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)) \
-	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc) -q --target browser --test --incremental \
-	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
-	  --output $(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))) \
-	  --exe $(call make_shell_quote,$(TITAN_BROWSER_TEST_IMAGE)) -j$(TITAN_JOBS) \
-	  --c-source $(call make_shell_quote,$(abspath spec/fixtures/browser_runtime/close.c)) \
-	  $(TITAN_STDLIB_BROWSER_TEST_ROOTS); \
-	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua closure \
-	  $(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))) \
-	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) \
-	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_IMAGE:.mjs=.wasm)); \
+	build_dir=$(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))); \
+	mkdir -p "$$build_dir/images"; \
+	printf '%s\n' $(TITAN_STDLIB_BROWSER_TEST_ROOTS) > "$$build_dir/roots.txt"; \
+	$(foreach image,$(TITAN_STDLIB_BROWSER_TEST_IMAGES),printf '%s\n' $(TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_$(image)) > "$$build_dir/$(image).roots.txt";) \
+	for image in $(TITAN_STDLIB_BROWSER_TEST_IMAGES); do \
+	  set --; \
+	  while IFS= read -r owner; do set -- "$$@" "$$owner"; done < "$$build_dir/$$image.roots.txt"; \
+	  echo "Browser stdlib building image: $$image"; \
+	  started=$$(date +%s); \
+	  $(BROWSER_SDK_ENV) TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)) \
+	    $(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc) -q --target browser --test --incremental \
+	    --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
+	    --output "$$build_dir" --exe "$$build_dir/images/$$image.mjs" -j$(TITAN_JOBS) \
+	    --c-source $(call make_shell_quote,$(abspath spec/fixtures/browser_runtime/close.c)) "$$@"; \
+	  elapsed=$$(($$(date +%s) - $$started)); \
+	  echo "Browser stdlib image $$image build_seconds=$$elapsed"; \
+	  $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua size \
+	    "$$build_dir/images/$$image.wasm" $(call make_shell_quote,$(TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES)); \
+	  $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua closure \
+	    "$$build_dir" $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/images/$$image.wasm"; \
+	done; \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua inventory \
 	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.a) \
-	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) \
-	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)/members.md); \
-	printf '%s\n' $(TITAN_STDLIB_BROWSER_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)/roots.txt); \
+	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/members.md"; \
 	filter=$(call make_shell_quote_value,TITAN_FILTER); \
+	overall=0; \
 	for engine in node chromium; do \
-	  echo "Browser stdlib engine: $$engine"; \
-	  set --; \
-	  if test -n "$$filter"; then set -- "--filter=$$filter"; fi; \
-	  status=0; \
-	  bash scripts/run_browser_stdlib.sh \
-	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.log \
-	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.stderr.log \
-	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan-browser-run) \
-	    --engine "$$engine" --timeout 300000 --grace 2000 \
-	    --root $(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))) \
-	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_IMAGE)) -- "$$@" || status=$$?; \
-	  audit=0; \
+	  for image in $(TITAN_STDLIB_BROWSER_TEST_IMAGES); do \
+	    echo "Browser stdlib engine: $$engine image: $$image"; \
+	    set --; \
+	    if test -n "$$filter"; then set -- "--filter=$$filter"; fi; \
+	    status=0; \
+	    bash scripts/run_browser_stdlib.sh "$$build_dir/$$image.$$engine.log" "$$build_dir/$$image.$$engine.stderr.log" \
+	      $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan-browser-run) \
+	      --engine "$$engine" --timeout 300000 --grace 2000 --root "$$build_dir/images" \
+	      "$$build_dir/images/$$image.mjs" -- "$$@" || status=$$?; \
+	    if test "$$status" != 0; then \
+	      echo "Browser stdlib image $$image failed under $$engine (status $$status)" >&2; \
+	      overall=1; \
+	    fi; \
+	  done; \
 	  $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua output \
-	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.log \
-	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)/roots.txt) \
-	    $(call make_shell_quote_value,TITAN_FILTER) || audit=$$?; \
-	  test "$$status" = 0 || exit "$$status"; \
-	  test "$$audit" = 0 || exit "$$audit"; \
-	done
+	    "$$build_dir/roots.txt" "$$filter" \
+	    $(foreach image,$(TITAN_STDLIB_BROWSER_TEST_IMAGES),$(image) "$$build_dir/$(image).$$engine.log" "$$build_dir/$(image).roots.txt") || overall=1; \
+	done; \
+	test "$$overall" = 0
 
 # Compatibility name for callers of the former rockspec build target.
 rock-build: all
