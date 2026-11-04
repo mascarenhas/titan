@@ -5,6 +5,7 @@ local browserlink = require "titan-compiler.browserlink"
 local driver = require "titan-compiler.driver"
 local incremental = require "titan-compiler.incremental"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local objectmetadata = require "titan-compiler.objectmetadata"
 local compiler_io = require "titan-compiler.io"
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
@@ -41,7 +42,9 @@ local EXPECTED_LPEGLABEL_SYMBOLS = {
 }
 
 local EXPECTED_PROVIDER_MODULES = {
-    "titan.coroutine", "titan.gc", "titan.test",
+    "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
+    "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
+    "titan.test", "titan.transfer", "titan.url",
 }
 
 local function contains(text, fragment)
@@ -130,7 +133,6 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         contains(makefile, "scripts/lua_browser.sh")
         contains(makefile, "scripts/browser_sdk.lua")
         contains(makefile, "--print-c-objects")
-        contains(makefile, "BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc")
 
         -- Ordinary Make targets must not invoke lua-browser or browser-sdk or inherit TITAN_TARGET.
         local all_rule = assert(makefile:match("\nall:[^\n]*\n\t([^\n]+)"))
@@ -617,6 +619,10 @@ end
             EMSDK = fake_emsdk,
             TITAN_NODE = "",
             CCACHE_DISABLE = "1",
+            -- Both ambient spellings must be replaced, not appended to the
+            -- browser provider's lpeglabel-only include policy.
+            TITAN_EXTRA_CPPFLAGS = "-include /missing/ambient-titan-cppflags.h",
+            CPPFLAGS = "-include /missing/ambient-cppflags.h",
         }, {
             "make", "--no-print-directory", "browser-sdk",
             "PREFIX=" .. info.prefix,
@@ -677,6 +683,23 @@ end
         }))
         assert(driver.validate_browser_provider(provider_ar))
         assert.same(EXPECTED_PROVIDER_MODULES, provider_ar.key_order)
+        local compiler_members, native_payload_members = {}, {}
+        for _, member in ipairs(provider_ar.members) do
+            if member.object.metadata then
+                local record = assert(objectmetadata.read(member.bytes, member.display_name))
+                local stem = assert(member.display_name:match("^(.*)%.o$"))
+                for _, part in ipairs(assert(record.object_metadata.parts)) do
+                    compiler_members[stem .. part.object_suffix] = true
+                end
+            end
+        end
+        for _, member in ipairs(provider_ar.members) do
+            if not compiler_members[member.display_name] then
+                native_payload_members[#native_payload_members + 1] = member.display_name
+            end
+        end
+        table.sort(native_payload_members)
+        assert.same(EXPECTED_LPEGLABEL_MEMBERS, native_payload_members)
         assert_no_forbidden_symbols(assets.provider, provider_ar)
         assert.is_nil(strategy:stat(browser_paths.titan_bin .. "/titan.so"))
         assert.is_nil(strategy:stat(browser_paths.titan_bin .. "/titan.dll"))
