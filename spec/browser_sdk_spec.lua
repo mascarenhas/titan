@@ -619,6 +619,10 @@ end
             EMSDK = fake_emsdk,
             TITAN_NODE = "",
             CCACHE_DISABLE = "1",
+            -- Both ambient spellings must be replaced, not appended to the
+            -- browser provider's lpeglabel-only include policy.
+            TITAN_EXTRA_CPPFLAGS = "-include /missing/ambient-titan-cppflags.h",
+            CPPFLAGS = "-include /missing/ambient-cppflags.h",
         }, {
             "make", "--no-print-directory", "browser-sdk",
             "PREFIX=" .. info.prefix,

@@ -45,6 +45,7 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local compiler_io = require "titan-compiler.io"
 local paths = require "titan-compiler.path"
 local util = require "titan-compiler.util"
+local stdlib_checks = dofile("scripts/browser_stdlib.lua")
 
 local strategy = compiler_io.new_sync()
 
@@ -269,6 +270,11 @@ elseif action == "stage-runtime" then
     local context, descriptor, assets = new_browser_context(build_dir)
     archive_certified_objects(context, descriptor, assets.runtime, runtime_members, runtime_paths)
     archive_certified_objects(context, descriptor, assets.lpeglabel, lpeg_members, lpeg_paths)
+    if getenv("TITAN_VERBOSE") == "1" then
+        io.stderr:write("browser-sdk: LPegLabel descriptor object flags: ",
+            table.concat(descriptor.compile_flags, " "), "\n",
+            "browser-sdk: LPegLabel: 5 relocatable Wasm objects, no bitcode/LTO or GOT PIC imports\n")
+    end
 
     local browser_src = repo_root .. "/titan-runtime/browser"
     copy_file_atomic(browser_src .. "/titan-browser-library.js", assets.js_library, false)
@@ -312,6 +318,13 @@ elseif action == "finalize" then
         fail(provider_err)
     end
     check_no_forbidden_symbols(staged_provider, scanned)
+    local closed, closure_err = stdlib_checks.check_archive(staged_provider, scanned)
+    if not closed then fail(closure_err) end
+    closed, closure_err = stdlib_checks.check_archive(assets.lpeglabel)
+    if not closed then fail(closure_err) end
+    closed, closure_err = stdlib_checks.check_output(strategy, build_dir)
+    if not closed then fail(closure_err) end
+    io.stderr:write("browser-sdk: core stdlib closure passed (archive symbols and certified headers)\n")
     local expected_modules = {
         "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
         "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
