@@ -503,6 +503,7 @@ jobs:
             spec/coder/browser_protocol_spec.lua
             spec/browser_sdk_spec.lua
             spec/coder/browser_entry_gate_spec.lua
+            spec/coder/browser_stdlib_gate_spec.lua
             spec/coder/browser_fixtures_spec.lua
             spec/browser_trace_map_spec.lua
             spec/coder/browser_trace_entries_spec.lua

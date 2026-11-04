@@ -1,0 +1,6 @@
+local test = import "test"
+local subject = import "coroutine"
+
+function test_initializer_completed(_context: test.Context)
+  test.assert(test.testing(), "coroutine initializer did not reach its test")
+end

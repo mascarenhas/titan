@@ -1,0 +1,6 @@
+local test = import "test"
+local subject = import "json"
+
+function test_initializer_completed(_context: test.Context)
+  test.assert(test.testing(), "json initializer did not reach its test")
+end

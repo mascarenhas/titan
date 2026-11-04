@@ -1,0 +1,6 @@
+local test = import "test"
+local subject = import "url"
+
+function test_initializer_completed(_context: test.Context)
+  test.assert(test.testing(), "url initializer did not reach its test")
+end
