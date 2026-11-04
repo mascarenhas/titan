@@ -10,6 +10,10 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests websocket.tests \
 	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests protobuf.tests thread.tests
 
+# Browser roots are one image, using the same owner sources as the native suite.
+TITAN_STDLIB_BROWSER_TEST_ROOTS := coroutine.tests iteration.tests gc.tests math.tests peg.tests \
+	string.core_test string.format_pack_test string.regex_test url.tests path.tests
+
 # Per-owner measured validation durations (seconds) and timing-sensitive guards.
 # Guarded owners contain short TLS/HTTP/WebSocket/timer/TCP deadlines or host
 # wall-clock assertions and run alone in one serial pass after the ordinary

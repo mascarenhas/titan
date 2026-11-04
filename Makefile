@@ -19,7 +19,7 @@ make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 # provider dependencies. Choose it before Make expands the test graph.
 TITAN_TEST_GOALS := test rock-test busted-test stdlib-test stdlib-busted-test \
 	titan-stdlib-test titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run \
-	titan-stdlib-test-run-parallel \
+	titan-stdlib-test-run-parallel titan-stdlib-browser-test \
 	titan-native-coverage titan-native-coverage-build titan-native-coverage-run
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)
@@ -1314,6 +1314,48 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 	  -X $(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)/libtitan-lpeglabel.a) \
 	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) $(BROWSER_STDLIB_ROOTS); \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua finalize "$$build_dir"
+
+TITAN_BROWSER_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-stdlib
+TITAN_BROWSER_TEST_IMAGE := $(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))/stdlib.mjs
+TITAN_BROWSER_TEST_SDK := $(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)
+
+.PHONY: titan-stdlib-browser-test
+titan-stdlib-browser-test: ## Build one browser stdlib image, audit it, and run Node and Chromium (TITAN_FILTER supported)
+	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
+	mkdir -p $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)); \
+	$(BROWSER_SDK_ENV) TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)) \
+	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc) -q --target browser --test --incremental \
+	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
+	  --output $(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))) \
+	  --exe $(call make_shell_quote,$(TITAN_BROWSER_TEST_IMAGE)) -j$(TITAN_JOBS) \
+	  --c-source $(call make_shell_quote,$(abspath spec/fixtures/browser_runtime/close.c)) \
+	  $(TITAN_STDLIB_BROWSER_TEST_ROOTS); \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua closure \
+	  $(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))) \
+	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) \
+	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_IMAGE:.mjs=.wasm)); \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua inventory \
+	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.a) \
+	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) \
+	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)/members.md); \
+	printf '%s\n' $(TITAN_STDLIB_BROWSER_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)/roots.txt); \
+	filter=$(call make_shell_quote_value,TITAN_FILTER); \
+	for engine in node chromium; do \
+	  echo "Browser stdlib engine: $$engine"; \
+	  set --; \
+	  if test -n "$$filter"; then set -- "--filter=$$filter"; fi; \
+	  bash -o pipefail -c 'log=$$1; shift; "$$@" 2>&1 | tee "$$log"' -- \
+	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.log \
+	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan-browser-run) \
+	    --engine "$$engine" --timeout 300000 --grace 2000 \
+	    --root $(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))) \
+	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_IMAGE)) -- "$$@"; \
+	  $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua output \
+	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR))/$$engine.log \
+	    $(call make_shell_quote,$(TITAN_BROWSER_TEST_BUILD_DIR)/roots.txt) \
+	    $(call make_shell_quote_value,TITAN_FILTER); \
+	done
 
 # Compatibility name for callers of the former rockspec build target.
 rock-build: all
