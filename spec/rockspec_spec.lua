@@ -1054,6 +1054,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "titan/json/decoder.titan",
             "titan/json/writer.titan",
             "titan/json/numbers.titan",
+            "titan/json/native.h",
             "spec/stdlib/titan/json/tests/tests.titan",
             "spec/stdlib/titan/json/tests/parser_test.titan",
             "spec/stdlib/titan/json/tests/mapping_test.titan",

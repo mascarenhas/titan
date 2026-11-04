@@ -4,6 +4,7 @@ local support = import "support.common.titan"
 
 foreign import "titan/ffi.h"
 foreign import "lauxlib.h"
+foreign import "transfer.h"
 
 function test_raw_loader_uses_explicit_length_and_canonical_identity(_context: test.Context)
   local top = ffi.lua_gettop(L)
@@ -22,4 +23,11 @@ function test_raw_loader_uses_explicit_length_and_canonical_identity(_context: t
   transfer.transfer_load_module(L, name, #name)
   test.assert(ffi.lua_gettop(L) == top + 2 and ffi.lua_rawequal(L, -1, -2) ~= 0,
               "repeated raw module load did not preserve module identity")
+end
+
+do
+  TRANSFER_DEPTH_LIMIT = ffi.TITAN_CODEC_DEPTH_LIMIT
+  -- A leaf field is probed at depth + 1, so the accepted record chain is one less.
+  TRANSFER_ACCEPTED_DEPTH = TRANSFER_DEPTH_LIMIT - 1
+  TRANSFER_DEPTH_ERROR = "protobuf: nesting exceeds " .. TRANSFER_DEPTH_LIMIT .. " levels"
 end

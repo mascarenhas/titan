@@ -10,6 +10,10 @@ foreign import "titan/ffi.h"
 foreign import "limits.h"
 foreign import "protobuf_fixture.h"
 
+local CODEC_DEPTH_LIMIT = 0
+local CODEC_ACCEPTED_DEPTH = 0
+local CODEC_DEPTH_ERROR = ""
+
 local function descriptor(candidate: value): reflect.Type
   case reflect.inspect(candidate)
   when is_record(record_value) then return reflect.Type.is_record(record_value.type)
@@ -580,12 +584,13 @@ end
 
 function test_excessive_graph_and_unknown_group_nesting_is_rejected(_context: test.Context)
   local chain = Node("leaf", nil)
-  for index = 1, 129 do chain = Node("branch", chain) end
-  expect_error(function() protobuf.serialize(chain) end, "nesting exceeds 128")
-  local groups = string.rep(string.char(51), 129) .. string.rep(string.char(52), 129)
+  for index = 1, CODEC_DEPTH_LIMIT + 1 do chain = Node("branch", chain) end
+  expect_error(function() protobuf.serialize(chain) end, CODEC_DEPTH_ERROR)
+  local groups = string.rep(string.char(51), CODEC_DEPTH_LIMIT + 1)
+      .. string.rep(string.char(52), CODEC_DEPTH_LIMIT + 1)
   expect_error(function()
     protobuf.deserialize(string.char(8, 0) .. groups, descriptor(IntegerValue(0)))
-  end, "nesting exceeds 128")
+  end, CODEC_DEPTH_ERROR)
 end
 
 function test_foreign_scalars_preserve_full_unsigned_bits_and_pointer_addresses(_context: test.Context)
@@ -984,19 +989,18 @@ end
 function test_directory_decode_depth_limit(context: test.Context)
   local target = descriptor(Node("", nil))
   context:run("accepted_boundary", function (_child: test.Context)
-    -- Each Node also decodes its name and optional next at depth + 1.
-    local decoded: Node = protobuf.deserialize(directory_node_bytes(127), target)
+    local decoded: Node = protobuf.deserialize(directory_node_bytes(CODEC_ACCEPTED_DEPTH), target)
     local count = 1
     while decoded.next ~= nil do
       decoded = decoded.next
       count = count + 1
     end
-    test.assert(count == 127)
+    test.assert(count == CODEC_ACCEPTED_DEPTH)
   end)
   context:run("rejected_boundary", function (_child: test.Context)
     expect_error(function ()
-      protobuf.deserialize(directory_node_bytes(128), target)
-    end, "nesting exceeds 128")
+      protobuf.deserialize(directory_node_bytes(CODEC_DEPTH_LIMIT), target)
+    end, CODEC_DEPTH_ERROR)
   end)
 end
 
@@ -1900,9 +1904,9 @@ function test_generated_codecs_raise_reflective_errors(context: test.Context)
   check_same_error(context, "cycle_in_packet", function ()
     backpatch_transfer_roundtrip(ring)
   end, "cyclic object graph")
-  check_same_error(context, "depth_128", function ()
-    protobuf.serialize(node_chain(128))
-  end, "nesting exceeds 128")
+  check_same_error(context, "depth_" .. CODEC_DEPTH_LIMIT, function ()
+    protobuf.serialize(node_chain(CODEC_DEPTH_LIMIT))
+  end, CODEC_DEPTH_ERROR)
   check_same_error(context, "hook_failure_under_generated_parent", function ()
     protobuf.serialize(HookedChoice.single(HookedToken(-1, "neg")))
   end, "hooked token encode rejected negative secret")
@@ -1981,29 +1985,35 @@ end
 
 function test_generated_codecs_depth_boundaries(context: test.Context)
   local node_type = descriptor(Node("", nil))
-  context:run("encode_127_accepted", function (_: test.Context)
-    test.assert(generated_wire(node_chain(127)) == node_chain_bytes(127))
-    test.assert(reflective_serialize(node_chain(127)) == node_chain_bytes(127))
+  context:run("encode_" .. CODEC_ACCEPTED_DEPTH .. "_accepted", function (_: test.Context)
+    test.assert(generated_wire(node_chain(CODEC_ACCEPTED_DEPTH)) ==
+        node_chain_bytes(CODEC_ACCEPTED_DEPTH))
+    test.assert(reflective_serialize(node_chain(CODEC_ACCEPTED_DEPTH)) ==
+        node_chain_bytes(CODEC_ACCEPTED_DEPTH))
   end)
-  context:run("decode_127_accepted", function (_: test.Context)
-    local chain: Node = generated_decode(node_chain_bytes(127), node_type)
-    test.assert(chain_length(chain) == 127)
-    test.assert(generated_wire(chain) == node_chain_bytes(127))
+  context:run("decode_" .. CODEC_ACCEPTED_DEPTH .. "_accepted", function (_: test.Context)
+    local chain: Node = generated_decode(node_chain_bytes(CODEC_ACCEPTED_DEPTH), node_type)
+    test.assert(chain_length(chain) == CODEC_ACCEPTED_DEPTH)
+    test.assert(generated_wire(chain) == node_chain_bytes(CODEC_ACCEPTED_DEPTH))
+    local reflective: Node = reflective_deserialize(node_chain_bytes(CODEC_ACCEPTED_DEPTH),
+        node_type)
+    test.assert(chain_length(reflective) == CODEC_ACCEPTED_DEPTH)
   end)
-  context:run("decode_128_rejected_by_both", function (_: test.Context)
-    local generated = decode_outcome(node_chain_bytes(128), node_type, true)
-    test.assert(generated == decode_outcome(node_chain_bytes(128), node_type, false), generated)
-    test.assert(string.find(generated, "nesting exceeds 128", 1, true) ~= nil, generated)
+  context:run("decode_" .. CODEC_DEPTH_LIMIT .. "_rejected_by_both", function (_: test.Context)
+    local generated = decode_outcome(node_chain_bytes(CODEC_DEPTH_LIMIT), node_type, true)
+    test.assert(generated ==
+        decode_outcome(node_chain_bytes(CODEC_DEPTH_LIMIT), node_type, false), generated)
+    test.assert(string.find(generated, CODEC_DEPTH_ERROR, 1, true) ~= nil, generated)
   end)
-  context:run("partless_union_at_128", function (_: test.Context)
-    -- Valid on both paths: the empty variant at depth 128 has no fields.
+  context:run("partless_union_at_" .. CODEC_DEPTH_LIMIT, function (_: test.Context)
+    -- A partless union at the raw depth budget has no deeper field probe.
     local chain = DepthChain(nil, Choice.empty())
-    for _ = 2, 127 do chain = DepthChain(chain, nil) end
-    test.assert(generated_wire(chain) == depth_chain_bytes(127))
-    test.assert(reflective_serialize(chain) == depth_chain_bytes(127))
-    local decoded = generated_decode(depth_chain_bytes(127),
+    for _ = 2, CODEC_ACCEPTED_DEPTH do chain = DepthChain(chain, nil) end
+    test.assert(generated_wire(chain) == depth_chain_bytes(CODEC_ACCEPTED_DEPTH))
+    test.assert(reflective_serialize(chain) == depth_chain_bytes(CODEC_ACCEPTED_DEPTH))
+    local decoded = generated_decode(depth_chain_bytes(CODEC_ACCEPTED_DEPTH),
         descriptor(DepthChain(nil, nil)))
-    test.assert(reflective_serialize(decoded) == depth_chain_bytes(127))
+    test.assert(reflective_serialize(decoded) == depth_chain_bytes(CODEC_ACCEPTED_DEPTH))
   end)
 end
 
@@ -2090,9 +2100,9 @@ function test_value_fields_raise_reflective_errors(context: test.Context)
   check_same_error(context, "cycle", function () protobuf.serialize(cyclic) end,
       "cyclic object graph")
   local deep = AnyValue(1)
-  for _ = 1, 130 do deep = AnyValue(deep) end
+  for _ = 1, CODEC_DEPTH_LIMIT + 2 do deep = AnyValue(deep) end
   check_same_error(context, "depth", function () protobuf.serialize(deep) end,
-      "nesting exceeds 128")
+      CODEC_DEPTH_ERROR)
 end
 
 function test_value_fields_carry_scalars_in_packets(_context: test.Context)
@@ -2249,7 +2259,7 @@ function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Co
   test.assert(protobuf.find_generated_codec(leaf) ~= nil)
   local fields = codec_boundary_scalar_fields()
   local bytes = fields
-  for _ = 2, 127 do bytes = fields .. backpatch_field(64, bytes) end
+  for _ = 2, CODEC_ACCEPTED_DEPTH do bytes = fields .. backpatch_field(64, bytes) end
   local too_deep = fields .. backpatch_field(64, bytes)
   -- Keep both reflective oracles on the host stack: deep reflective decoding
   -- has little coroutine-stack headroom, and traceback capture can exhaust it.
@@ -2265,14 +2275,21 @@ function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Co
       current = current.next
       count = count + 1
     end
-    test.assert(count == 127 and current.f63 == 63)
+    test.assert(count == CODEC_ACCEPTED_DEPTH and current.f63 == 63)
     test.assert(generated_wire(decoded) == bytes)
-    -- Scalar fields of the 128th full-width record exceed the shared depth
+    -- Scalar fields just past the accepted record depth exceed the shared
     -- budget. The generated path must reject safely on this coroutine stack.
     local generated = decode_outcome(too_deep, target, true)
     test.assert(generated == reflective_error, generated)
-    test.assert(string.find(generated, "nesting exceeds 128", 1, true) ~= nil, generated)
+    test.assert(string.find(generated, CODEC_DEPTH_ERROR, 1, true) ~= nil, generated)
     return count
   end, "codec-boundary")
-  test.assert(co:resume(nil) == 127 and co:status() == "dead")
+  test.assert(co:resume(nil) == CODEC_ACCEPTED_DEPTH and co:status() == "dead")
+end
+
+do
+  CODEC_DEPTH_LIMIT = ffi.TITAN_CODEC_DEPTH_LIMIT
+  -- A leaf field is probed at depth + 1, so the accepted record chain is one less.
+  CODEC_ACCEPTED_DEPTH = CODEC_DEPTH_LIMIT - 1
+  CODEC_DEPTH_ERROR = "protobuf: nesting exceeds " .. CODEC_DEPTH_LIMIT .. " levels"
 end
