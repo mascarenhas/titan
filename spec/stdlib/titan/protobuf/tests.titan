@@ -615,7 +615,7 @@ function test_foreign_function_pointer_keeps_its_borrowed_address(_context: test
 end
 
 function test_anonymous_pointer_fields_preserve_null_and_all_address_bits(_context: test.Context)
-  local pointer_bits = foreign uintptr_t.sizeof * ffi.CHAR_BIT
+  local pointer_bits: integer = foreign uintptr_t.sizeof * ffi.CHAR_BIT
   local mask = -1
   if pointer_bits < 64 then mask = (1 << pointer_bits) - 1 end
   local fields: const {reflect.Type} = {
