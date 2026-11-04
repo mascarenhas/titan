@@ -55,11 +55,12 @@ TITAN_STDLIB_TEST_SECONDS_sqlite3.tests := 5.3
 TITAN_STDLIB_TEST_SECONDS_json.tests := 0.6
 TITAN_STDLIB_TEST_SECONDS_protobuf.tests := 0.4
 TITAN_STDLIB_TEST_SECONDS_thread.tests := 39.0
-TITAN_STDLIB_TEST_SECONDS_test.host_tests := 0.9
-TITAN_STDLIB_TEST_SECONDS_reflect.lua_tests := 0.1
-TITAN_STDLIB_TEST_SECONDS_json.lua_tests := 0.1
-TITAN_STDLIB_TEST_SECONDS_protobuf.resource_tests := 0.1
-TITAN_STDLIB_TEST_SECONDS_transfer.tests := 0.1
+# Zero-duration owners completed within the 0.1s measurement resolution.
+TITAN_STDLIB_TEST_SECONDS_test.host_tests := 1.7
+TITAN_STDLIB_TEST_SECONDS_reflect.lua_tests := 0.0
+TITAN_STDLIB_TEST_SECONDS_json.lua_tests := 0.0
+TITAN_STDLIB_TEST_SECONDS_protobuf.resource_tests := 0.0
+TITAN_STDLIB_TEST_SECONDS_transfer.tests := 2.7
 
 TITAN_STDLIB_TEST_GUARD_timer.tests := 1
 TITAN_STDLIB_TEST_GUARD_net.tests := 1

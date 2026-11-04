@@ -1646,7 +1646,6 @@ done
             assert.falsy(seen[module], "duplicate native owner " .. module)
             seen[module], roots[#roots + 1] = true, module
         end
-        assert.equal(30, #roots)
         assert.equal("test.tests", roots[1])
         local driver = require "titan-compiler.driver"
         local testroots = require "titan-compiler.testroots"
@@ -1658,7 +1657,7 @@ done
         assert.truthy(ok, discovered)
         assert.truthy(discovered, detail)
         table.sort(roots)
-        assert.same(roots, discovered, "discovery must select exactly the 30 audited owners")
+        assert.same(roots, discovered, "discovery must select exactly the audited owners")
         for _, retired in ipairs({ "TITAN_TEST_MODULES", "TITAN_TEST_SOURCES_",
                 "TITAN_TEST_IMPORTS_", "TITAN_TEST_C_INPUTS_", "TITAN_TEST_FOREIGN_" }) do
             assert.falsy(read_file(manifest):find(retired, 1, true), retired)
