@@ -101,6 +101,7 @@ compiler spec/coder/browser_incremental_spec.lua 1.000 -
 compiler spec/coder/browser_protocol_spec.lua 1.000 -
 compiler spec/coder/browser_providers_spec.lua 1.000 -
 compiler spec/coder/browser_stdlib_closure_spec.lua 1.000 -
+compiler spec/coder/browser_stdlib_gate_spec.lua 1.000 -
 compiler spec/coder/browser_toolchain_spec.lua 1.000 -
 compiler spec/coder/browser_trace_entries_spec.lua 1.000 -
 compiler spec/coder/build_scheduler_spec.lua 1.000 -

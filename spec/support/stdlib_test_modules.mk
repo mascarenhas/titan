@@ -8,11 +8,14 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests websocket.tests \
-	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests protobuf.tests thread.tests
+	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests protobuf.tests thread.tests \
+	test.host_tests reflect.lua_tests json.lua_tests protobuf.resource_tests transfer.tests
 
-# Browser roots are one image, using the same owner sources as the native suite.
-TITAN_STDLIB_BROWSER_TEST_ROOTS := coroutine.tests iteration.tests gc.tests math.tests peg.tests \
-	string.core_test string.format_pack_test string.regex_test url.tests path.tests
+# The delivered browser subset uses the same portable cases as the native suite.
+TITAN_STDLIB_BROWSER_TEST_ROOTS := \
+	coroutine.tests iteration.tests gc.tests math.tests peg.tests \
+	string.core_test string.format_pack_test string.regex_test url.tests path.tests \
+	test.tests reflect.tests json.tests protobuf.tests transfer.tests
 
 # Per-owner measured validation durations (seconds) and timing-sensitive guards.
 # Guarded owners contain short TLS/HTTP/WebSocket/timer/TCP deadlines or host
@@ -52,6 +55,12 @@ TITAN_STDLIB_TEST_SECONDS_sqlite3.tests := 5.3
 TITAN_STDLIB_TEST_SECONDS_json.tests := 0.6
 TITAN_STDLIB_TEST_SECONDS_protobuf.tests := 0.4
 TITAN_STDLIB_TEST_SECONDS_thread.tests := 39.0
+# Zero-duration owners completed within the 0.1s measurement resolution.
+TITAN_STDLIB_TEST_SECONDS_test.host_tests := 1.7
+TITAN_STDLIB_TEST_SECONDS_reflect.lua_tests := 0.0
+TITAN_STDLIB_TEST_SECONDS_json.lua_tests := 0.0
+TITAN_STDLIB_TEST_SECONDS_protobuf.resource_tests := 0.0
+TITAN_STDLIB_TEST_SECONDS_transfer.tests := 2.7
 
 TITAN_STDLIB_TEST_GUARD_timer.tests := 1
 TITAN_STDLIB_TEST_GUARD_net.tests := 1

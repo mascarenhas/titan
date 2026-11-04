@@ -1,0 +1,25 @@
+local test = import "test"
+local transfer = import "transfer"
+local support = import "support.common.titan"
+
+foreign import "titan/ffi.h"
+foreign import "lauxlib.h"
+
+function test_raw_loader_uses_explicit_length_and_canonical_identity(_context: test.Context)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 3) ~= 0)
+  local name = "titan.protobuf"
+  transfer.transfer_load_module(L, name .. "ignored trailing bytes", #name)
+  test.assert(ffi.lua_gettop(L) == top + 1 and
+              ffi.lua_type(L, -1) == ffi.LUA_TUSERDATA,
+              "raw module loader did not push exactly one module userdata")
+  ffi.lua_pushstring(L, "Titan module " .. name)
+  ffi.lua_rawget(L, ffi.LUA_REGISTRYINDEX)
+  test.assert(ffi.lua_rawequal(L, -1, -2) ~= 0,
+              "raw module loader returned a noncanonical module")
+  ffi.lua_settop(L, (top + 1) as foreign int)
+  transfer.transfer_load_module(L, name, #name)
+  test.assert(ffi.lua_gettop(L) == top + 2 and ffi.lua_rawequal(L, -1, -2) ~= 0,
+              "repeated raw module load did not preserve module identity")
+end

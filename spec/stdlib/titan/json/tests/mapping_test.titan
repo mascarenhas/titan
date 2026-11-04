@@ -405,36 +405,6 @@ function test_mapping_interface_snapshot_and_unsupported_targets(_context: test.
   test.assert(exact_nil == nil)
 end
 
-function test_mapping_array_lua_writer_policy_and_const_rejection(_context: test.Context)
-  local write = lua.load("local a, i, v = ...; a[i] = v", "=json_array_write")
-  local mutable = mapping_array(reflect.Type.is_integer(),
-                                 reflect.ArrayTypeConstness.is_mutable())
-  local array: {integer} = json.decode("[1]", mutable)
-  -- This is a genuine Lua write; the decoded Array retains its value writer,
-  -- so the float is stored unchanged and the later integer read must reject.
-  write(array, 1, 2.0)
-  test.assert(mapping_raises(function()
-    mapping_integer_head(array)
-  end), "decoded Array unexpectedly acquired an integer Lua writer")
-  write(array, 1, 3)
-  test.assert(array[1] == 3)
-
-  local immutable = mapping_array(reflect.Type.is_integer(),
-                                   reflect.ArrayTypeConstness.is_const())
-  local frozen: const {integer} = json.decode("[1]", immutable)
-  test.assert(mapping_raises(function()
-    write(frozen, 1, 2)
-  end), "decoded const Array accepted a Lua write")
-  test.assert(frozen[1] == 1)
-
-  local person: MappingPerson = json.decode([[{"name":"Ada","active":false}]],
-                                           mapping_target("MappingPerson"))
-  local change_name = lua.load("local r = ...; r.name = 'changed'", "=json_const_field")
-  test.assert(mapping_raises(function()
-    change_name(person)
-  end), "decoded const record field accepted a Lua write")
-  test.assert(person.name == "Ada")
-end
 
 local function mapping_fresh_records(): {MappingPerson}
   local source = string.writer()
