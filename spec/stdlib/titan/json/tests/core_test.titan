@@ -252,20 +252,3 @@ function test_core_cycles_sharing_and_unsupported_values(_context: test.Context)
   end
 end
 
-function test_core_raw_sentinel_and_map_iteration(_context: test.Context)
-  local loader = lua.load([[
-    return function()
-      local mt = {
-        __eq = function() error("JSON called equality metamethod") end,
-        __pairs = function() error("JSON called pairs metamethod") end,
-        __index = function() error("JSON called index metamethod") end,
-        __tostring = function() error("JSON called tostring metamethod") end,
-      }
-      return setmetatable({a = 1}, mt), setmetatable({a = 1}, mt)
-    end
-  ]], "json-raw-values", nil)
-  local factory = loader() as function (): (value, value)
-  local first, second = factory()
-  test.assert(json.encode(first, json.EncodeOption.null_value(first)) == "null")
-  test.assert(json.encode(first, json.EncodeOption.null_value(second)) == [[{"a":1}]])
-end

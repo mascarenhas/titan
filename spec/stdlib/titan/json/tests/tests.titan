@@ -4,7 +4,6 @@ local peg = import "peg"
 local reflect = import "reflect"
 local string = import "string"
 local math = import "math"
-local lua = import "lua"
 local gc = import "gc"
 
 local function expect_json_error(action: function (): ()): json.Error
