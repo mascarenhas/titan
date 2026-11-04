@@ -101,6 +101,56 @@ local function discover()
         record_path = paths.join(base, "liblua-config.txt") }
 end
 
+-- Browser Lua compilation macros, from the installed record. Harnesses that
+-- compile C against the archive must use exactly these: the fork changes them
+-- (for example LUAI_MAXCCALLS), and an object built with a local list is a
+-- different configuration than the archive it links against.
+function M.lua_defines(info)
+    local record_path = type(info) == "table" and info.record_path
+    assert(type(record_path) == "string",
+        "browser toolchain info with a record path is required", 2)
+    local file, open_error = io.open(record_path, "rb")
+    assert(file, "cannot read browser Lua record " .. string.format("%q", record_path) ..
+        ": " .. tostring(open_error), 2)
+    local text = assert(file:read("a")); assert(file:close())
+    local recorded
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        local value = line:match("^lua_defines=(.*)$")
+        if value then recorded = value end
+    end
+    assert(type(recorded) == "string" and recorded ~= "",
+        "browser Lua record " .. string.format("%q", record_path) ..
+        " lacks lua_defines; reinstall the browser Lua fork", 2)
+    local defines = {}
+    for define in recorded:gmatch("%S+") do defines[#defines + 1] = define end
+    assert(#defines > 0, "browser Lua record " .. string.format("%q", record_path) ..
+        " has an empty lua_defines; reinstall the browser Lua fork", 2)
+    return defines
+end
+
+-- A compile command that names the record's browser Lua macros. They are
+-- spliced in by appending, never by `table.unpack` in a non-final position: a
+-- table constructor keeps only the first result of a non-final `table.unpack`,
+-- which silently drops all but one define. Every caller gets the same
+-- self-check, so a recurrence fails instead of compiling a different
+-- configuration than the archive it links against.
+function M.with_lua_defines(info, before, after)
+    local argv = {}
+    for _, flag in ipairs(before or {}) do argv[#argv + 1] = flag end
+    local defines = M.lua_defines(info)
+    for _, define in ipairs(defines) do argv[#argv + 1] = define end
+    for _, flag in ipairs(after or {}) do argv[#argv + 1] = flag end
+    for _, define in ipairs(defines) do
+        local seen = 0
+        for _, flag in ipairs(argv) do
+            if flag == define then seen = seen + 1 end
+        end
+        assert(seen == 1, "browser compile command must carry record define " ..
+            define .. " exactly once: " .. table.concat(argv, " "))
+    end
+    return argv
+end
+
 -- ROOT is the installed Titan tree: `ROCKS_TREE` when it is set, else PREFIX.
 local function install_root(prefix)
     local rocks_tree = os.getenv("ROCKS_TREE")

@@ -54,7 +54,8 @@ local function cli(info, ...)
     local setup = string.format("package.path=%q..package.path;",
         repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. (info.compiler_setup or "")
     local argv = { "env", "TITAN_ROOT=" .. (info.sdk_prefix or info.prefix), "TITAN_TARGET=", "TITAN_PATH_0_6=",
-        "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+        "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=" .. (info.extra_cflags or ""),
+        "TITAN_EXTRA_LDFLAGS=",
         info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
         "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", info.output or workspace .. "/out" }
     for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
@@ -214,6 +215,53 @@ describe("browser image profile and SDK readiness", function()
         }, profile.link_flags)
         assert.equal(descriptor.identity, profile.identity_inputs.target_identity)
         assert.equal("-O1", profile.identity_inputs.optimization)
+        assert.equal("validation", profile.identity_inputs.profile)
+    end)
+
+    it("gives production programs the descriptor level and no frame flags", function()
+        local descriptor = fixtures.descriptor(nil, { build_profile = "production" })
+        local profile = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
+        assert.same({}, profile.compile_flags)
+        assert.same({
+            "-O3", "-gsource-map", "-g2",
+            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals",
+            "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
+            "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
+            "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
+            "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
+            "-sFORCE_FILESYSTEM=1",
+            '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]',
+            '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
+            '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
+            "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
+            "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
+            "-sASSERTIONS=2", "-sSTACK_OVERFLOW_CHECK=2",
+        }, profile.link_flags)
+        assert.equal("-O3", profile.identity_inputs.optimization)
+        assert.equal("production", profile.identity_inputs.profile)
+    end)
+
+    it("keeps frames and skips Binaryen inlining in a production test image", function()
+        local descriptor = fixtures.descriptor(nil, { build_profile = "production" })
+        local profile = assert(browserlink.profile(descriptor, { purpose = "test", assertions = 2 }))
+        local flags = table.concat(profile.link_flags, " ")
+        assert.truthy(flags:find("-O3 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2 ", 1, true), flags)
+        assert.truthy(flags:find(
+            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals," ..
+            "--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination", 1, true), flags)
+        -- The validation profile never runs the level optimizer, so its test
+        -- images keep #330's frozen link flags exactly.
+        local frozen = assert(browserlink.profile(fixtures.descriptor(), { purpose = "test", assertions = 2 }))
+        local program = assert(browserlink.profile(fixtures.descriptor(), { purpose = "program", assertions = 2 }))
+        assert.same(program.link_flags, frozen.link_flags)
+        -- Harness purposes keep their frame-preserving link settings even when
+        -- the installation optimizes.
+        for _, purpose in ipairs({ "protocol", "gate", "minicoro", "budget", "baseline" }) do
+            local harness = assert(browserlink.profile(descriptor, { purpose = purpose, assertions = 2 }))
+            local text = table.concat(harness.link_flags, " ")
+            assert.truthy(text:find("-fno-inline -fno-optimize-sibling-calls", 1, true), purpose)
+            assert.is_nil(text:find("--skip-pass", 1, true), purpose)
+        end
     end)
 
     it("keeps internal gate, budget and baseline variants constrained", function()
@@ -242,7 +290,7 @@ describe("browser image profile and SDK readiness", function()
 
     it("retains ordered local cleanup in every Titan-entry profile and its identity", function()
         local cleanup = "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals"
-        for _, purpose in ipairs({ "program", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
             for _, assertions in ipairs({ 0, 2 }) do
                 local plan = assert(browserlink.profile(fixtures.descriptor(),
                     { purpose = purpose, assertions = assertions }))
@@ -260,7 +308,7 @@ describe("browser image profile and SDK readiness", function()
     end)
 
     it("preserves byte-oriented FS and TTY for every purpose including the interpreter baseline", function()
-        for _, purpose in ipairs({ "program", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
             for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
                 local plan = assert(browserlink.profile(fixtures.descriptor(),
                     { purpose = purpose, assertions = 2, entry = entry }))
@@ -268,6 +316,62 @@ describe("browser image profile and SDK readiness", function()
                 assert.same(plan.link_flags, plan.identity_inputs.link_flags)
             end
         end
+    end)
+
+    it("derives the image link purpose and refuses a contrary certified purpose", function()
+        local saved_descriptor, saved_options = driver.context_target_descriptor, driver.browser_link_options
+        local production = fixtures.descriptor(nil, { build_profile = "production" })
+        driver.context_target_descriptor = function() return production end
+        local cleanup <close> = setmetatable({}, { __close = function()
+            driver.context_target_descriptor, driver.browser_link_options = saved_descriptor, saved_options
+        end })
+        driver.browser_link_options = nil
+        local test_context = { target = "browser", link_kind = "test" }
+        local test_plan = assert(driver.browser_link_plan(test_context))
+        -- identity_inputs is what titanc records as policy.browser_profile.
+        assert.equal("test", test_plan.identity_inputs.purpose)
+        assert.equal("production", test_plan.identity_inputs.profile)
+        local test_flags = table.concat(test_plan.link_flags, " ")
+        assert.truthy(test_flags:find("-O3 -fno-inline -fno-optimize-sibling-calls", 1, true), test_flags)
+        assert.truthy(test_flags:find("--skip-pass=inlining-optimizing", 1, true), test_flags)
+        assert.truthy(test_flags:find("--skip-pass=duplicate-function-elimination", 1, true), test_flags)
+        local program_plan = assert(driver.browser_link_plan({ target = "browser", link_kind = "program" }))
+        assert.equal("program", program_plan.identity_inputs.purpose)
+        local program_flags = table.concat(program_plan.link_flags, " ")
+        assert.is_nil(program_flags:find("-fno-inline", 1, true), program_flags)
+        assert.is_nil(program_flags:find("--skip-pass", 1, true), program_flags)
+        -- A harness purpose is not an image kind and stays usable on either kind.
+        driver.browser_link_options = { purpose = "budget", assertions = 2 }
+        assert.equal("budget", assert(driver.browser_link_plan(test_context)).identity_inputs.purpose)
+        assert.equal("budget", assert(driver.browser_link_plan(
+            { target = "browser", link_kind = "program" })).identity_inputs.purpose)
+        -- A program purpose may never certify or link a test image, or the reverse,
+        -- whether the caller passes the kind explicitly (titanc's certificate call
+        -- and compile_browser_image's shape) or lets it be derived.
+        local program_context = { target = "browser", link_kind = "program" }
+        for _, call in ipairs({ { test_context }, { test_context, "test" } }) do
+            driver.browser_link_options = { purpose = "program", assertions = 2 }
+            local refused, err = driver.browser_link_plan(call[1], call[2])
+            assert.is_nil(refused)
+            assert.equal('browser link purpose "program" does not match this test image', err)
+        end
+        for _, call in ipairs({ { program_context }, { program_context, "program" } }) do
+            driver.browser_link_options = { purpose = "test", assertions = 2 }
+            local refused, err = driver.browser_link_plan(call[1], call[2])
+            assert.is_nil(refused)
+            assert.equal('browser link purpose "test" does not match this program image', err)
+        end
+        -- An agreeing preset still certifies and links, through both shapes.
+        for _, call in ipairs({ { test_context }, { test_context, "test" } }) do
+            driver.browser_link_options = { purpose = "test", assertions = 2 }
+            assert.equal("test", assert(driver.browser_link_plan(call[1], call[2])).identity_inputs.purpose)
+        end
+        -- A preset harness table must name its profile; inheriting the kind
+        -- would silently give a measurement build an image's flags.
+        driver.browser_link_options = { assertions = 2 }
+        local unnamed, unnamed_error = driver.browser_link_plan(test_context)
+        assert.is_nil(unnamed)
+        assert.equal("browser link profile options require a purpose", unnamed_error)
     end)
 
     it("uses Wasm's supported input trace instead of an ELF-only dependency flag", function()
@@ -317,6 +421,50 @@ describe("browser image profile and SDK readiness", function()
         assert.equal("/* user header */", read(header))
     end)
 
+    it("refuses a preset link profile that names no purpose", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/plain.titan",
+            "function answer(): integer\n    return 1\nend\n")
+        local result = cli({ prefix = info.prefix,
+            compiler_setup = "require('titan-compiler.driver').browser_link_options={assertions=2};" },
+            "-c", "plain")
+        assert.is_false(result.ok, "a purposeless preset was accepted")
+        local log = result.output or result.diagnostic or ""
+        assert.truthy(log:find("browser link profile options require a purpose", 1, true), log)
+    end)
+
+    it("reports a CLI compile extra with the compile diagnostic and a link extra with the link one", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/plain.titan",
+            "function answer(): integer\n    return 1\nend\n")
+        local profile = driver.BUILD_PROFILE
+        local compile = "browser " .. profile .. " profile owns compile option "
+        local link = "browser " .. profile .. " link profile owns option "
+        for _, case in ipairs({
+            { arguments = { "-c", "plain", "--cflag=-O2" }, expected = compile .. '"-O2"' },
+            { arguments = { "-c", "plain", "--cflag=-fno-inline" }, expected = compile .. '"-fno-inline"' },
+            { arguments = { "-c", "plain" }, extra_cflags = "-g2", expected = compile .. '"-g2"' },
+            { arguments = { "-c", "plain" }, extra_cflags = "-sBINARYEN_EXTRA_PASSES=--coalesce-locals",
+                expected = compile .. '"-sBINARYEN_EXTRA_PASSES=--coalesce-locals"' },
+            -- --ldflag is a link-phase option, which -c rejects, so the link
+            -- cases run the ordinary build and stop at the ownership check.
+            { arguments = { "plain", "--ldflag=-O3" }, expected = link .. "-O3" },
+            { arguments = { "plain", "--ldflag=-fno-optimize-sibling-calls" }, expected = link .. "-fno-optimize-sibling-calls" },
+        }) do
+            local result = cli({ prefix = info.prefix, extra_cflags = case.extra_cflags },
+                table.unpack(case.arguments))
+            assert.is_false(result.ok, "the CLI accepted an owned option: " .. case.expected)
+            local log = result.output or result.diagnostic or ""
+            assert.truthy(log:find(case.expected, 1, true), log)
+            local other = case.expected:find("link profile", 1, true) and compile or link
+            assert.is_nil(log:find(other, 1, true), log)
+        end
+    end)
+
     it("rejects trailing attempts to override profile-owned settings", function()
         for _, flags in ipairs({ { "-sASYNCIFY=0" }, { "-s", "ASYNCIFY_IGNORE_INDIRECT=1" },
             { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "-UTITAN_TARGET_BROWSER" }, { "-sNO_ASYNCIFY=1" },
@@ -331,7 +479,7 @@ describe("browser image profile and SDK readiness", function()
         for _, purpose in ipairs({ "baseline", "minicoro", "budget" }) do
             assert.is_true(browserlink.validate_extras({ "-g2", "-Os" }, { purpose = purpose }))
         end
-        for _, purpose in ipairs({ "program", "protocol", "gate", "baseline", "minicoro", "budget" }) do
+        for _, purpose in ipairs({ "program", "test", "protocol", "gate", "baseline", "minicoro", "budget" }) do
             for _, flags in ipairs({
                 { "-sBINARYEN_EXTRA_PASSES=" },
                 { "-s", "BINARYEN_EXTRA_PASSES=coalesce-locals" },
@@ -343,6 +491,31 @@ describe("browser image profile and SDK readiness", function()
                 assert.is_nil(ok)
                 assert.equal("browser link profile owns option " .. flags[1], why)
             end
+        end
+        -- Compile extras are reported by the compile diagnostic, link extras by
+        -- the link one (OG-L4): the same option, one owner, one message.
+        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-DTITAN_TARGET_BROWSER=1" }) do
+            local ok, why = browserlink.validate_extras({ flag }, { purpose = "gate" }, "production", "compile")
+            assert.is_nil(ok)
+            assert.equal('browser production profile owns compile option "' .. flag .. '"', why)
+        end
+        assert.is_nil(browserlink.validate_extras({ "-O2" }, { purpose = "gate" }, "production"))
+        -- The real call path names the installation profile it protects.
+        for _, purpose in ipairs({ "program", "test", "gate" }) do
+            for _, profile in ipairs({ "production", "validation" }) do
+                for _, flag in ipairs({ "-O2", "-g2", "-fno-inline",
+                    "-fno-optimize-sibling-calls" }) do
+                    local ok, why = browserlink.validate_extras({ flag }, { purpose = purpose }, profile)
+                    assert.is_nil(ok)
+                    assert.equal("browser " .. profile .. " link profile owns option " .. flag, why)
+                end
+                local ok = browserlink.validate_extras({ "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" },
+                    { purpose = purpose }, profile)
+                assert.is_nil(ok)
+            end
+            -- Unrelated Emscripten settings still pass through.
+            assert.is_true(browserlink.validate_extras({ "-sWASM_BIGINT=1", "-lm" },
+                { purpose = purpose }, "production"))
         end
         assert.same({ "out/app.mjs", "out/app.wasm" }, { driver.browser_program_path("out/app") })
         local filename, err = driver.browser_program_path("unused", "out/app.js")
@@ -361,7 +534,7 @@ describe("real browser test image", function()
         workspace = runtime.workspace()
         for _, assertions in ipairs({ 0, 2 }) do
             local root = workspace .. "/assertions-" .. assertions
-            local ok, log = runtime.cli(info, root, { purpose = "program", assertions = assertions }, {
+            local ok, log = runtime.cli(info, root, { purpose = "test", assertions = assertions }, {
                 "--test", "--exe", root .. "/public.mjs",
                 "--c-source", runtime.fixture .. "/close.c", "coroutine.tests", "gc.tests" })
             assert.is_true(ok, log)
@@ -372,6 +545,65 @@ describe("real browser test image", function()
             io.stdout:write(string.format("\nCOROUTINE-LOCALS assertions=%d max-declared=%d\n", assertions, maximum))
             io.stdout:flush()
         end
+    end)
+
+    -- Production-only by construction: it asserts the production object and
+    -- link profile from a real production installation. CI runs it in the
+    -- production `browser-playwright` cell, never in a validation install.
+    it("keeps frame flags on test owners only and links a production test image as a test image", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        if driver.BUILD_PROFILE ~= "production" then
+            -- The observed compile and link lines are the production profile's.
+            pending("needs a production installation to observe the production object profile")
+            return
+        end
+        local fixture = repository .. "/spec/fixtures/browser_trace"
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local setup = string.format("package.path=%q..package.path;",
+            repository .. "/?.lua;" .. repository .. "/?/init.lua;")
+        local function build(name, purpose, test)
+            local options = purpose and ("require('titan-compiler.driver').browser_link_options=" ..
+                string.format("{purpose=%q,assertions=2};", purpose)) or ""
+            local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=", "TITAN_PATH_0_6=",
+                "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+                "TITAN_PROBE_CACHE_DISABLE=1", "CCACHE_DISABLE=1",
+                info.prefix .. "/bin/lua", "-E", "-e", setup .. options, repository .. "/titanc",
+                "-v", "--target", "browser", "--no-uv-bootstrap", "--tree", fixture,
+                "-o", workspace .. "/out", "--exe", workspace .. "/out/" .. name .. ".mjs",
+                "--c-source", fixture .. "/trace_support.c" }
+            if test then argv[#argv + 1] = "--test" end
+            argv[#argv + 1] = "trace_cases"
+            argv[#argv + 1] = "trace_uncaught"
+            local result = run(argv)
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            return result.output or ""
+        end
+        local function command(log, needle, anchor)
+            local found
+            for line in log:gmatch("[^\n]+") do
+                if line:find(needle, 1, true) and line:find(anchor, 1, true) then
+                    assert.is_nil(found, "repeated command line for " .. needle .. "\n" .. log)
+                    found = line
+                end
+            end
+            return assert(found, "no command line for " .. needle .. "\n" .. log)
+        end
+        local test_log = build("test_image", "test", true)
+        local owner = command(test_log, "/trace_cases/trace_cases.c'", "'-c'")
+        assert.truthy(owner:find("'-fno-inline'", 1, true), owner)
+        assert.truthy(owner:find("'-fno-optimize-sibling-calls'", 1, true), owner)
+        local helper = command(test_log, "/trace_uncaught.c'", "'-c'")
+        assert.is_nil(helper:find("'-fno-inline'", 1, true), helper)
+        local test_link = command(test_log, "test_image.mjs'", "'--no-entry'")
+        assert.truthy(test_link:find("'-fno-inline'", 1, true), test_link)
+        assert.truthy(test_link:find("--skip-pass=inlining-optimizing", 1, true), test_link)
+        assert.truthy(test_link:find("--skip-pass=duplicate-function-elimination", 1, true), test_link)
+        local program_log = build("program_image", nil, false)
+        local plain = command(program_log, "/trace_uncaught.c'", "'-c'")
+        assert.is_nil(plain:find("'-fno-inline'", 1, true), plain)
+        local program_link = command(program_log, "program_image.mjs'", "'--no-entry'")
+        assert.is_nil(program_link:find("'-fno-inline'", 1, true), program_link)
+        assert.is_nil(program_link:find("--skip-pass", 1, true), program_link)
     end)
 
     it("raises the seven dynamic-provider guard diagnostics without native loader imports", function()

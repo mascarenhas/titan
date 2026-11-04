@@ -21,6 +21,7 @@ local cases = {
   "test_locations_before_after_yield", "test_coroutine_propagation_append",
   "test_recursion_beyond_ten", "test_recursion_near_capacity",
   "test_recursion_capacity_truncation", "test_mixed_recursion_headroom",
+  "test_mixed_recursion_overflow", "test_pcall_recursion_overflow",
 }
 local special = { "test_host_capture_ready", "test_host_capture_failed", "test_host_lua_fallback_capacity",
   "test_degraded_map", "test_degraded_lua_capacity", "test_missing_symbols" }
@@ -42,6 +43,7 @@ local function json(value)
       return string.format('\\u%04x', c:byte())
     end) .. '"'
   elseif type(value) == "number" then return tostring(value)
+  elseif type(value) == "boolean" then return value and "true" or "false"
   elseif type(value) == "table" then
     local rows = {}; for _, item in ipairs(value) do rows[#rows + 1] = json(item) end
     return "[" .. table.concat(rows, ",") .. "]"
@@ -52,19 +54,27 @@ local all = {}; for _, name in ipairs(cases) do all[#all + 1] = "trace_cases." .
 for _, name in ipairs(special) do all[#all + 1] = "trace_cases." .. name end
 table.sort(all)
 mkdir(output)
+-- The installation profile decides what a program image's trace may show
+-- (D21/D28). The gate builds and reports it; it never selects it.
+local profile = os.getenv("TITAN_BUILD_PROFILE") or "production"
+assert(profile == "production" or profile == "validation",
+  "TITAN_BUILD_PROFILE must be production or validation")
 
 for _, assertions in ipairs({2, 0}) do
   local root = path.join(output, "assertions-" .. assertions)
   mkdir(root)
-  -- LUA_INIT runs the *installed* compiler's ordinary CLI. The profile is the
-  -- existing test-profile control, not a different optimization/link policy.
-  -- Discovery checks checked cases, never a source-text approximation.
-  local init = path.join(root, "profile.lua")
-  local expected = {}; for _, name in ipairs(all) do expected[#expected + 1] = string.format("%q", name) end
-  write(init, string.format([[
+  for _, target in ipairs({{name="runtime", owner="trace_cases", testing=true},
+                           {name="uncaught", owner="trace_uncaught"}}) do
+    -- LUA_INIT runs the *installed* compiler's ordinary CLI. The profile is
+    -- the existing test-profile control; the link purpose distinguishes a
+    -- test image from a program image. Discovery checks checked cases, never
+    -- a source-text approximation.
+    local init = path.join(root, "profile-" .. target.name .. ".lua")
+    local expected = {}; for _, name in ipairs(all) do expected[#expected + 1] = string.format("%q", name) end
+    write(init, string.format([[
 package.path = %q .. ";" .. %q .. ";" .. package.path
 local driver = require "titan-compiler.driver"
-driver.browser_link_options = {purpose="program", assertions=%d}
+driver.browser_link_options = {purpose=%q, assertions=%d}
 local runner = require "titan-compiler.test_runner"
 local discover = runner.discover
 runner.discover = function(...)
@@ -77,9 +87,8 @@ runner.discover = function(...)
   io.stdout:write("TRACE-DISCOVERED " .. #found .. " native cases\n")
   return found, modules
 end
-]], path.join(prefix, "share/lua/5.5/?.lua"), path.join(prefix, "share/lua/5.5/?/init.lua"), assertions, table.concat(expected, ",")))
-  for _, target in ipairs({{name="runtime", owner="trace_cases", testing=true},
-                           {name="uncaught", owner="trace_uncaught"}}) do
+]], path.join(prefix, "share/lua/5.5/?.lua"), path.join(prefix, "share/lua/5.5/?/init.lua"),
+      target.testing and "test" or "program", assertions, table.concat(expected, ",")))
     local image = path.join(root, target.name .. ".mjs")
     local argv = {prefix .. "/bin/titanc", "-q", "--incremental", "--target", "browser",
       "--no-uv-bootstrap", "--tree", fixture, "--output", path.join(root, "objects"),
@@ -98,12 +107,12 @@ end
   end
 end
 
-local manifest = {cases={}, degradedCases={}}
-local function row(list, name, image, test_name, count, kind, status, stderr)
+local manifest = {profile=profile, cases={}, degradedCases={}}
+local function row(list, name, image, test_name, count, kind, status, stderr, program)
   local args = {}
   if type(test_name) == "string" then test_name = {test_name} end
   for _, name in ipairs(test_name or {}) do args[#args + 1] = "--filter=^trace_cases%." .. name .. "$" end
-  list[#list + 1] = {name=name, image=image, args=args,
+  list[#list + 1] = {name=name, image=image, args=args, program=program == true,
     kind=kind or "returned", status=status or 0, testCount=count, stderrContains=stderr or {}}
 end
 for _, assertions in ipairs({2, 0}) do
@@ -118,8 +127,16 @@ for _, assertions in ipairs({2, 0}) do
       host == "prepare_accessor" and "test_host_capture_failed" or "test_host_capture_ready", 1)
   end
   row(manifest.cases, mode .. ".host_lua_fallback_capacity", mode .. "/runtime.mjs", "test_host_lua_fallback_capacity", 1)
-  row(manifest.cases, mode .. ".uncaught", mode .. "/uncaught.mjs", nil, 0, "failed", 1,
-    {"trace-uncaught-original", "trace_uncaught.uncaught_leaf", "trace_uncaught.uncaught_middle", "TRACE uncaught cleanup=1"})
+  -- A program image reports the original error and its cleanup exactly. Its
+  -- Titan frames are the profile's business: production inlining may drop
+  -- them, and the JS gate then requires the survivors to be an ordered
+  -- subsequence of the exact frames (D28).
+  local uncaught = {"trace-uncaught-original", "TRACE uncaught cleanup=1"}
+  if profile == "validation" then
+    table.insert(uncaught, 2, "trace_uncaught.uncaught_middle")
+    table.insert(uncaught, 2, "trace_uncaught.uncaught_leaf")
+  end
+  row(manifest.cases, mode .. ".uncaught", mode .. "/uncaught.mjs", nil, 0, "failed", 1, uncaught, true)
   local map = read(path.join(base, "runtime.wasm.map"))
   assert(map:find('"x_titan_image"%s*:%s*"%x%x'), "runtime map lacks Titan image identity")
   for _, variant in ipairs({"missing", "malformed", "wrong_image", "extension_free", "missing_symbols"}) do
@@ -158,11 +175,13 @@ local function rows(values)
     encoded[#encoded + 1] = "{" .. table.concat({
       '"name":' .. json(entry.name), '"image":' .. json(entry.image), '"args":' .. json(entry.args),
       '"kind":' .. json(entry.kind), '"status":' .. entry.status,
+      '"program":' .. json(entry.program),
       '"testCount":' .. entry.testCount, '"stderrContains":' .. json(entry.stderrContains)}, ",") .. "}"
   end
   return "[\n" .. table.concat(encoded, ",\n") .. "\n]"
 end
-write(path.join(output, "manifest.json"), '{"cases":' .. rows(manifest.cases) .. ',"degradedCases":' .. rows(manifest.degradedCases) .. '}\n')
+write(path.join(output, "manifest.json"), '{"profile":' .. json(manifest.profile) ..
+  ',"cases":' .. rows(manifest.cases) .. ',"degradedCases":' .. rows(manifest.degradedCases) .. '}\n')
 write(path.join(output, "trace.test.mjs"), read(path.join(repository, "spec/browser/trace.test.mjs")))
 io.stdout:write(string.format("TRACE-GATE %s cases=%d degradedCases=%d nativeCases=%d\n",
   output, #manifest.cases, #manifest.degradedCases, #all))

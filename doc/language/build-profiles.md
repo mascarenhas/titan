@@ -99,6 +99,11 @@ schema versions. A small compiler smoke continues to test unset production
 optimization and cross-module LTO while ordinary validation fixtures stay at
 `-O0`.
 
+`TITAN_BUILD_PROFILE` also selects how `titanc --target browser` compiles and
+links: `production` optimizes browser images at `-O3`, while `validation`
+keeps every physical frame for exact traces. See [browser build
+profiles](browser-target.md#build-profiles).
+
 ## Compiler jobs and GNU Make
 
 `titanc --jobs N` (`-j N`) or `TITAN_JOBS=N` sets the maximum number of

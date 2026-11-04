@@ -37,6 +37,8 @@ export async function run(context) {
   context.assert(degraded || context.args.length === 0, "trace gate accepts only --degraded");
   const manifest = JSON.parse(decoder.decode(await context.bytes("manifest.json")));
   context.assert(Array.isArray(manifest.cases) && Array.isArray(manifest.degradedCases), "invalid trace manifest lists");
+  context.assert(manifest.profile === "production" || manifest.profile === "validation",
+    "invalid trace manifest profile");
   const names = new Set();
   for (const row of [...manifest.cases, ...manifest.degradedCases]) {
     context.assert(typeof row.name === "string" && !names.has(row.name), "duplicate/invalid manifest name");
@@ -47,7 +49,8 @@ export async function run(context) {
     context.assert(["returned", "failed"].includes(row.kind) && Number.isInteger(row.status) &&
       row.status >= -2147483648 && row.status <= 2147483647, "invalid manifest outcome");
     context.assert(Number.isInteger(row.testCount) && row.testCount >= 0 && Array.isArray(row.stderrContains) &&
-      row.stderrContains.every(value => typeof value === "string"), "invalid manifest assertions");
+      row.stderrContains.every(value => typeof value === "string") && typeof row.program === "boolean",
+      "invalid manifest assertions");
   }
   const selected = degraded ? manifest.degradedCases : manifest.cases;
   context.assert(selected.length > 0, "empty trace gate");
@@ -60,8 +63,8 @@ export async function run(context) {
   let recordCost = !degraded;
   for (const row of selected) {
     nativeExecutions += webkit && row.name.endsWith(".host_limit_absent")
-      ? await executeIsolatedRow(context, row, degraded, recordCost)
-      : await executeRow(context, row, degraded, recordCost);
+      ? await executeIsolatedRow(context, row, degraded, recordCost, manifest.profile)
+      : await executeRow(context, row, degraded, recordCost, false, manifest.profile);
     recordCost = false;
     await context.tick();
     await context.gc();
@@ -71,15 +74,51 @@ export async function run(context) {
     fidelity:webkit ? "function-level/no-line; 100-frame engine ceiling" : firefox ? "file/line; 128-frame engine ceiling" : "file/line; 512-record capacity"});
 }
 
-export async function executeRow(context, row, degraded, recordCost, isolated = false) {
+export async function executeRow(context, row, degraded, recordCost, isolated = false,
+    profile) {
+  // The installation profile is required: a missing or unknown value must not
+  // silently weaken a production program row into the exact contract.
+  context.assert(profile === "production" || profile === "validation",
+    "invalid trace manifest profile");
   const emit = record => context.stdout(encoder.encode(JSON.stringify({engine: context.engine, ...record}) + "\n"));
   const webkit = context.engine === "webkit";
   const firefox = context.engine === "firefox";
+  // A production program image inlines, as native production does, so its
+  // Titan frames may be absent; whatever survives must still be an ordered
+  // subsequence of the exact expectation with the exact file and line (D28).
+  // Test images and the validation profile stay exact.
+  const orderedSubsequence = profile === "production" && row.program === true;
 
-  function exact(trace, file, line, name) {
-    const expected = `${file}:${webkit ? "" : line + ":"} in ${name}`;
+  // Titan frames with the attribution the contract compares: file, execution
+  // line and name. WebKit's documented no-line form compares file only.
+  function titanFrameLines(trace) {
+    const frames = [];
+    for (const line of trace.split("\n")) {
+      const match = /^([^:\n]+\.titan)(?::([0-9]+))?: in (.+)$/.exec(line);
+      if (match) frames.push({file: match[1],
+        line: match[2] === undefined ? undefined : Number(match[2]),
+        name: match[3], text: line});
+    }
+    return frames;
+  }
+
+  // Lines the program-row grammar accepts besides Titan frames: `[C]` frames,
+  // Lua frames from the fixture's loaded-Lua shapes, and the documented
+  // truncation marker. Anything else must be a parsed Titan frame.
+  function acceptedNonTitan(line) {
+    return line.startsWith("[C]:") || /^[^:\n]+\.lua(?::[0-9]+)?: in /.test(line) ||
+      line === unavailable || line === captureFailed || line === truncated;
+  }
+
+  function exactFrame(file, line, name) {
+    return `${file}:${webkit ? "" : line + ":"} in ${name}`;
+  }
+  function exactLine(trace, expected) {
     context.assert(trace.split("\n").includes(expected), "missing engine-specific frame " + expected + "\n" + trace);
     return expected;
+  }
+  function exact(trace, file, line, name) {
+    return exactLine(trace, exactFrame(file, line, name));
   }
   function checkTrace(label, trace, missingSymbols) {
     let currentStateTrace = trace;
@@ -88,8 +127,8 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
       // names table. D15 requires their exact raw fallbacks, not a blanket
       // exception for nested traces or arbitrary mangled function names.
       const parentLines = new Set();
-      for (const [line, symbol] of [[105, "titan_test_runner_ℳ_run_test_26_titan"],
-                                    [179, "titan_test_runner_ℳ_main_titan"]]) {
+      for (const [line, symbol] of [[109, "titan_test_runner_ℳ_run_test_27_titan"],
+                                    [189, "titan_test_runner_ℳ_main_titan"]]) {
         parentLines.add(exact(trace, "trace_cases__test_runner.titan", line, symbol));
         context.assert(frameCount(trace, ": in " + symbol) === 1,
           "nested trace duplicated/omitted parent raw fallback " + symbol);
@@ -118,11 +157,51 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
     if (label === "host_failed" || label === "lua_fallback_failed" || label.startsWith("degraded")) return;
     context.assert(!trace.includes(unavailable) && !trace.includes(captureFailed), "positive trace degraded: " + label);
     if (label === "uncaught") {
-      exact(trace, "trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf");
-      exact(trace, "trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle");
-      for (const name of ["uncaught_leaf", "uncaught_middle"]) {
-        context.assert(frameCount(trace, ": in trace_uncaught." + name) === 1,
-          "uncaught report duplicated/omitted " + name);
+      // The row's exact frames, as the validation profile renders them. A
+      // production program image may keep fewer of them, in this order, and
+      // an inlined callee keeps its own physical line under the surviving
+      // enclosing function's name, exactly as native production does (D28).
+      const uncaughtFrames = [
+        ["trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf"],
+        ["trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle"],
+        ["trace_uncaught.titan", 16, "trace_uncaught.main"],
+      ];
+      if (orderedSubsequence) {
+        const shown = titanFrameLines(trace);
+        const lines = trace.split("\n").filter(line => line.length > 0);
+        const titanTexts = new Set(shown.map(frame => frame.text));
+        const unexplained = lines.filter(line => !titanTexts.has(line) && !acceptedNonTitan(line));
+        context.assert(unexplained.length === 0,
+          "program trace has unparsed lines: " + unexplained.join(" | ") + "\n" + trace);
+        // The program entry is called from C and cannot be inlined away, so a
+        // production program row always shows at least one Titan frame and the
+        // outermost of them is the entry frame.
+        context.assert(shown.length > 0, "program trace showed no Titan frame:\n" + trace);
+        context.assert(shown.at(-1).name === "trace_uncaught.main",
+          "program trace omitted the entry frame trace_uncaught.main:\n" + trace);
+        let next = 0;
+        for (const frame of shown) {
+          const index = uncaughtFrames.findIndex(([file, line], position) =>
+            position >= next && frame.file === file && frame.line === (webkit ? undefined : line));
+          context.assert(index >= 0,
+            "program frame outside the exact expectation: " + frame.text + "\n" + trace);
+          // The surviving name is either the matched frame's own name or one
+          // of the enclosing callers it was inlined into, which are exactly
+          // the later expected frames (D32).
+          const enclosing = uncaughtFrames.slice(index).map(([, , name]) => name);
+          context.assert(enclosing.includes(frame.name),
+            "program frame name is not the matched frame or an enclosing caller: " +
+            frame.text + "\n" + trace);
+          next = index + 1;
+        }
+        emit({programFrames: shown.map(frame => frame.text),
+          expectedFrames: uncaughtFrames.map(([file, line, name]) => exactFrame(file, line, name))});
+      } else {
+        for (const [file, line, name] of uncaughtFrames.slice(0, 2)) exact(trace, file, line, name);
+        for (const name of ["uncaught_leaf", "uncaught_middle"]) {
+          context.assert(frameCount(trace, ": in trace_uncaught." + name) === 1,
+            "uncaught report duplicated/omitted " + name);
+        }
       }
       return;
     }
@@ -169,11 +248,24 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
         "capacity trace was not bounded/marked");
       emit({depth, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
-    if (label === "mixed_depth_14") {
+    if (label === "mixed_depth_90") {
       const count = frameCount(trace, ": in trace_cases.mixed_recurse");
-      context.assert(count <= 15, "mixed trace duplicated recursive frames");
-      if (count < 15) context.assert(occurrences(trace, truncated) === 1, "mixed JS headroom cut was not marked");
-      emit({mixedDepth: 14, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
+      context.assert(count <= 91, "mixed trace duplicated recursive frames");
+      if (count < 91) context.assert(occurrences(trace, truncated) === 1, "mixed JS headroom cut was not marked");
+      emit({mixedDepth: 90, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
+    }
+    if (label === "mixed_overflow" || label === "pcall_overflow") {
+      // Mirrors the native arms: the mixed chain keeps recursion activations,
+      // while the pcall chain unwinds them and keeps the protected chunk.
+      const mixed = label === "mixed_overflow";
+      const count = frameCount(trace, ": in trace_cases.mixed_overflow_step");
+      context.assert(!trace.includes(captureFailed) && !trace.includes(unavailable),
+        "overflow trace lost its capture: " + label);
+      if (mixed) context.assert(count >= 10, "overflow trace omitted the recursion: " + label);
+      else context.assert(trace.includes("trace-pcall.lua"),
+        "overflow trace omitted the protected call: " + label);
+      context.assert(occurrences(trace, truncated) <= 1, "overflow trace has duplicate truncation markers");
+      emit({overflow: label, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
     }
     if (label === "append") {
       for (const name of ["original_leaf", "resumed_leaf", "append_middle", "append_outer", "test_coroutine_propagation_append"]) {
@@ -294,7 +386,7 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
   return nativeExecutions;
 }
 
-async function executeIsolatedRow(context, row, degraded, recordCost) {
+async function executeIsolatedRow(context, row, degraded, recordCost, profile) {
   const originalConstructor = own(globalThis, "Error");
   const originalLimit = own(Error, "stackTraceLimit");
   const originalPrepare = own(Error, "prepareStackTrace");
@@ -316,7 +408,7 @@ async function executeIsolatedRow(context, row, degraded, recordCost) {
         event.preventDefault();
         reject(event.reason);
       });
-      child.traceFixtureRealm = {engine:context.engine, row, degraded, recordCost, resolve, reject,
+      child.traceFixtureRealm = {engine:context.engine, row, degraded, recordCost, profile, resolve, reject,
         root:new URL("./", import.meta.url).href,
         sdk:new URL("/sdk/titan-browser.mjs", import.meta.url).href,
         page:new URL("/sdk/titan-browser-page.mjs", import.meta.url).href,
@@ -363,5 +455,5 @@ export async function runInRealm(bridge) {
       if (!response.ok) throw new Error(`cannot read isolated asset ${path}: HTTP ${response.status}`);
       return new Uint8Array(await response.arrayBuffer());
     }});
-  return executeRow(context, bridge.row, bridge.degraded, bridge.recordCost, true);
+  return executeRow(context, bridge.row, bridge.degraded, bridge.recordCost, true, bridge.profile);
 }

@@ -86,6 +86,7 @@ local function fake_context(options)
     end
     return { io = strategy, extra_ffi_include_dirs = {} },
         { paths = paths, runtime_include = paths.include,
+            build_profile = options.build_profile or "validation",
             probe_cache_directory = FAKE_ROOT .. "/probes/browser-6.0.13/" .. cprobe_cache.VERSION },
         calls, files, record
 end
@@ -407,28 +408,159 @@ describe("browser target descriptor", function()
         "-finline-functions", "-fno-inline", "-fno-inline-functions",
         "-foptimize-sibling-calls", "-fno-optimize-sibling-calls",
         "-fomit-frame-pointer", "-fno-omit-frame-pointer",
+        "-sBINARYEN_EXTRA_PASSES=--coalesce-locals", "-sBINARYEN_EXTRA_PASSES",
     }) do
-        it("rejects the trace-owned compile option " .. flag .. " before tool discovery", function()
+        it("rejects the profile-owned compile option " .. flag .. " before tool discovery", function()
             local context, inputs, calls = fake_context()
             inputs.compile_flags = { flag }
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor)
-            assert.equal("browser target owns compile_flags option " .. flag, err)
+            assert.equal('browser validation profile owns compile option "' .. flag .. '"', err)
             assert.equal(0, #calls)
         end)
     end
+
+    it("rejects the two-token Binaryen extras spelling naming the profile", function()
+        local context, inputs, calls = fake_context()
+        inputs.build_profile = "production"
+        inputs.compile_flags = { "-s", "BINARYEN_EXTRA_PASSES=--coalesce-locals" }
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        assert.equal('browser production profile owns compile option "-s BINARYEN_EXTRA_PASSES=--coalesce-locals"', err)
+        assert.equal(0, #calls)
+    end)
+
+    it("rejects an unknown build profile", function()
+        local context, inputs, calls = fake_context()
+        inputs.build_profile = "release"
+        local descriptor, err = browser.build(context, inputs)
+        assert.is_nil(descriptor)
+        assert.equal('invalid browser build profile "release"', err)
+        assert.equal(0, #calls)
+    end)
 
     it("changes identity for record revision, effective flags, paths and profile facts", function()
         local baseline = fixtures.descriptor()
         for _, change in ipairs({
             function(data) data.lua.record.fork_revision = string.rep("b", 40) end,
-            function(data) data.compile_flags[#data.compile_flags + 1] = "-O0" end,
+            function(data) data.compile_flags[#data.compile_flags + 1] = "-DCHANGED=1" end,
             function(data) data.include_dirs[1] = "/other/lua" end,
             function(data) data.probe_cache_directory = "/other/probes" end,
         }) do
             local data = fixtures.descriptor()
             change(data); fixtures.identify(data)
             assert.not_equal(baseline.identity, data.identity)
+        end
+        -- The build profile is part of the identity even where flags agree:
+        -- the two installations are separate targets (D26).
+        local production = fixtures.descriptor(nil, { build_profile = "production" })
+        assert.not_equal(baseline.identity, production.identity)
+        assert.equal("production", production.build_profile)
+    end)
+
+    it("builds the production object profile from the profile, not from flags", function()
+        local context, inputs, calls = fake_context({ build_profile = "production" })
+        local descriptor = assert(browser.build(context, inputs))
+        assert.equal("production", descriptor.build_profile)
+        assert.same({
+            "--std=c99", "-O3", "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function",
+            "-gline-tables-only", "-sSUPPORT_LONGJMP=emscripten",
+            "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(fixtures.target_defines),
+        }, descriptor.compile_flags)
+        assert.is_true(#calls > 0, "the production build never probed its toolchain")
+        -- The same inputs under the validation profile produce #330's frozen set.
+        local validation = assert(browser.build(fake_context()))
+        assert.same({
+            "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls",
+            "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function",
+            "-gline-tables-only", "-sSUPPORT_LONGJMP=emscripten",
+            "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(fixtures.target_defines),
+        }, validation.compile_flags)
+        assert.not_equal(descriptor.identity, validation.identity)
+    end)
+
+    it("refuses every spelling of the owned pass list before tool discovery", function()
+        for _, extras in ipairs({
+            { "-s", "BINARYEN_EXTRA_PASSES" },
+            { "-s", "BINARYEN_EXTRA_PASSES=--coalesce-locals" },
+            { "-sBINARYEN_EXTRA_PASSES" },
+            { "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" },
+            { "-sNO_BINARYEN_EXTRA_PASSES=1" },
+            { "-s", "NO_BINARYEN_EXTRA_PASSES=1" },
+        }) do
+            local context, inputs, calls = fake_context()
+            inputs.compile_flags = extras
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            local expected = extras[1]
+            if extras[1] == "-s" then expected = "-s " .. extras[2] end
+            assert.equal('browser validation profile owns compile option "' .. expected .. '"', err)
+            assert.equal(0, #calls)
+        end
+    end)
+
+    it("refuses a second measurement level and non-level overrides before tool discovery", function()
+        for _, extras in ipairs({ { "-O2", "-O1" }, { "-O2", "-g2" }, { "-g2" } }) do
+            local context, inputs, calls = fake_context()
+            inputs.trace_control = true
+            inputs.compile_flags = extras
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            assert.equal('browser validation profile owns compile option "' ..
+                extras[#extras] .. '"', err)
+            assert.equal(0, #calls)
+        end
+        local context, inputs, calls = fake_context()
+        inputs.trace_control = true
+        inputs.compile_flags = { "-O2" }
+        assert(browser.build(context, inputs))
+        assert.is_true(#calls > 0)
+    end)
+
+    it("refuses a descriptor whose flags belong to the other profile", function()
+        local data = fixtures.descriptor()
+        data.compile_flags[2] = "-O3"
+        fixtures.identify(data)
+        local imported, err = browser.import(data)
+        assert.is_nil(imported)
+        assert.equal("browser validation profile compile flags do not match its object profile", err)
+    end)
+
+    it("accepts exactly one certified measurement level for a trace-control build", function()
+        for _, level in ipairs({ "-O1", "-O2" }) do
+            local data = fixtures.descriptor(nil, { trace_control = true })
+            data.compile_flags[#data.compile_flags + 1] = level
+            fixtures.identify(data)
+            assert(browser.import(data))
+            -- The measurement override is descriptor data: it changes identity.
+            local plain = fixtures.descriptor()
+            assert.not_equal(plain.identity, data.identity)
+        end
+        local twice = fixtures.descriptor(nil, { trace_control = true })
+        twice.compile_flags[#twice.compile_flags + 1] = "-O2"
+        twice.compile_flags[#twice.compile_flags + 1] = "-O1"
+        fixtures.identify(twice)
+        local imported, err = browser.import(twice)
+        assert.is_nil(imported)
+        assert.equal('browser validation profile owns compile option "-O1"', err)
+        -- A non-level owned option needs no trace control and is refused.
+        local gated = fixtures.descriptor(nil, { trace_control = true })
+        gated.compile_flags[#gated.compile_flags + 1] = "-g2"
+        fixtures.identify(gated)
+        local denied, deny_error = browser.import(gated)
+        assert.is_nil(denied)
+        assert.equal('browser validation profile owns compile option "-g2"', deny_error)
+    end)
+
+    it("refuses a profile-owned option smuggled in after the profile flags", function()
+        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-foptimize-sibling-calls",
+            "-sBINARYEN_EXTRA_PASSES=--coalesce-locals" }) do
+            local data = fixtures.descriptor()
+            data.compile_flags[#data.compile_flags + 1] = flag
+            fixtures.identify(data)
+            local imported, err = browser.import(data)
+            assert.is_nil(imported)
+            assert.equal('browser validation profile owns compile option "' .. flag .. '"', err)
         end
     end)
 

@@ -37,7 +37,7 @@ function M.require_sdk(context, descriptor, install)
     return assets
 end
 
-local purposes = { program = true, protocol = true, gate = true,
+local purposes = { program = true, test = true, protocol = true, gate = true,
     minicoro = true, budget = true, baseline = true }
 local option_keys = { purpose = true, assertions = true, optimization = true,
     asyncify = true, budgets = true, entry = true }
@@ -94,14 +94,38 @@ function M.profile(descriptor, options)
             if flag:match("^%-O") then effective_opt = flag end
         end
     end
+    local profile = descriptor.build_profile
+    if not require("titan-compiler.browsertarget").valid_profile(profile) then
+        return nil, "invalid browser build profile"
+    end
+    -- A production program link optimizes like its objects and accepts the
+    -- frames that costs. Test images, the validation profile and the fixed
+    -- harness purposes keep the frame flags.
+    local frames = profile ~= "production" or purpose ~= "program"
     local function add(flag) flags[#flags + 1] = flag end
-    add("-" .. (optimization or "O1"))
-    add("-fno-inline")
-    add("-fno-optimize-sibling-calls")
+    add(effective_opt or "-O1")
+    if frames then
+        add("-fno-inline")
+        add("-fno-optimize-sibling-calls")
+    end
     add("-gsource-map")
     add("-g2")
+    -- D18's post-Asyncify local cleanup stays in every Titan-entry profile.
+    -- A production test image also skips the two level-pipeline transforms
+    -- that rewrite function identity, both of which run before --asyncify:
+    -- `inlining-optimizing` and `duplicate-function-elimination`. The second
+    -- is measured: with only inlining skipped, Binaryen still folded
+    -- byte-identical bodies, so `locations.browser.titan`'s selected_leaf and
+    -- selected_outer became original_leaf and direct_middle (issue C's
+    -- identical-function-folding risk) and four fixtures lost their frames.
+    -- Object-level `-fno-inline` alone does not prevent that folding.
+    local passes = "simplify-locals,reorder-locals"
+    if profile == "production" and purpose == "test" then
+        passes = passes .. ",--skip-pass=inlining-optimizing" ..
+            ",--skip-pass=duplicate-function-elimination"
+    end
     if entry == "titan" then
-        add("-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals")
+        add("-sBINARYEN_EXTRA_PASSES=" .. passes)
     end
     add("-sASYNCIFY=" .. (asyncify and "1" or "0"))
     add("-sSUPPORT_LONGJMP=" .. descriptor.lua.record.sjlj)
@@ -136,9 +160,10 @@ function M.profile(descriptor, options)
     add("-sASSERTIONS=" .. assertions)
     add("-sSTACK_OVERFLOW_CHECK=2")
     return { link_flags = flags, compile_flags = compile,
-        identity_inputs = { target_identity = descriptor.identity, purpose = purpose,
-            entry = entry, assertions = assertions, optimization = effective_opt,
-            asyncify = asyncify, budgets = budgets, link_flags = flags, compile_flags = compile } }
+        identity_inputs = { target_identity = descriptor.identity, profile = profile,
+            purpose = purpose, entry = entry, assertions = assertions,
+            optimization = effective_opt, asyncify = asyncify, budgets = budgets,
+            link_flags = flags, compile_flags = compile } }
 end
 
 -- Target-owned settings cannot be weakened by trailing user flags. Accept
@@ -152,12 +177,23 @@ local owned = { SUPPORT_LONGJMP = true, ASYNCIFY = true, STACK_SIZE = true,
     INCOMING_MODULE_JS_API = true, ASSERTIONS = true, STACK_OVERFLOW_CHECK = true,
     TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
     MCO_ASYNCFY_STACK_SIZE = true, BINARYEN_EXTRA_PASSES = true }
-function M.validate_extras(flags, options)
+-- `origin` is "compile" for a caller's compile extras and "link" otherwise, so
+-- one owned option is reported by the diagnostic that owns it: the compile
+-- message matches `browsertarget.build`'s, the link message names the link
+-- profile.
+function M.validate_extras(flags, options, build_profile, origin)
+    local label = build_profile and ("browser " .. build_profile .. " link profile") or
+        "browser link profile"
+    local compile_label = "browser profile"
+    if build_profile then compile_label = "browser " .. build_profile .. " profile" end
     for index, flag in ipairs(flags or {}) do
         local purpose = options and options.purpose
         if purpose ~= "baseline" and purpose ~= "minicoro" and purpose ~= "budget" and
             require("titan-compiler.browsertarget").trace_option(flag) then
-            return nil, "browser link profile owns option " .. flag
+            if origin == "compile" then
+                return nil, compile_label .. " owns compile option " .. string.format("%q", flag)
+            end
+            return nil, label .. " owns option " .. flag
         end
         local setting = flag:match("^%-[sDU](.+)") or
             (flag == "-s" or flag == "-D" or flag == "-U") and flags[index + 1]
@@ -165,7 +201,10 @@ function M.validate_extras(flags, options)
         local positive = key and key:gsub("^NO_", "")
         if key and (owned[positive] or positive:match("^ASYNCIFY_")) or
             flag == "--no-entry" or flag == "--js-library" or flag:match("^%-%-js%-library=") then
-            return nil, "browser link profile owns option " .. flag
+            if origin == "compile" then
+                return nil, compile_label .. " owns compile option " .. string.format("%q", flag)
+            end
+            return nil, label .. " owns option " .. flag
         end
     end
     return true

@@ -460,7 +460,9 @@ Lua settings that the record could not describe truthfully.
 
 `make browser-sdk` uses the installed `titanc` to build the browser runtime,
 loader, runner, and standard library into `lib/titan-browser/0.6/`, and writes
-the SDK digest manifest last. It needs Node 24 to check the standard library
+the SDK digest manifest last. It compiles them under the `TITAN_BUILD_PROFILE`
+in effect (`production` unless set; see [browser build
+profiles](browser-target.md#build-profiles)). It needs Node 24 to check the standard library
 before publishing it: `make browser-sdk` uses `TITAN_NODE` when set and
 nonempty, otherwise places emsdk's bundled Node directory ahead of `PATH` when
 `EMSDK` is set, and otherwise uses `node` on `PATH` (`browser provider

@@ -160,12 +160,12 @@ static const unsigned char wasm_probe_bytes[] = {
         local emcc_obj = track_file(root .. "/wasm_alpha.emcc.o")
         local clang_obj = track_file(root .. "/wasm_alpha.clang.o")
 
-        run_tool(strategy, info.tools.cc, {
-            "--std=c99", "-O2", "-DLUA_USE_POSIX", "-DLUA_USE_BROWSER",
-            "-sSUPPORT_LONGJMP=emscripten",
-            include_root, include_runtime, include_lua,
-            "-c", c_path, "-o", emcc_obj,
-        })
+        local emcc_flags = toolchain.with_lua_defines(info,
+            { "--std=c99", "-O2" },
+            { "-sSUPPORT_LONGJMP=emscripten",
+              include_root, include_runtime, include_lua,
+              "-c", c_path, "-o", emcc_obj })
+        run_tool(strategy, info.tools.cc, emcc_flags)
         run_tool(strategy, info.tools.clang, {
             "--target=wasm32-unknown-emscripten", "--std=c99", "-O2",
             "-c", clang_c_path, "-o", clang_obj,
@@ -287,11 +287,10 @@ int *p = &foo;
         local include_root = "-I" .. root
         local include_runtime = "-I" .. info.prefix .. "/include"
         local include_lua = "-I" .. info.prefix .. "/lib/browser/include"
-        local common_flags = {
-            "--std=c99", "-O2", "-DLUA_USE_POSIX", "-DLUA_USE_BROWSER",
-            "-sSUPPORT_LONGJMP=emscripten",
-            include_root, include_runtime, include_lua,
-        }
+        local common_flags = toolchain.with_lua_defines(info,
+            { "--std=c99", "-O2" },
+            { "-sSUPPORT_LONGJMP=emscripten",
+              include_root, include_runtime, include_lua })
 
         local alpha_c = track_file(root .. "/wasm_alpha.c")
         local beta_c = track_file(root .. "/wasm_beta.c")

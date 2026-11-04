@@ -141,39 +141,55 @@ do
     end
 end
 
+-- One description of a cell's link configuration: the plan, the certificate
+-- and the child build must all use it, or the recorded identity describes a
+-- different configuration than the image it claims.
+local function cell_options(cell, entry)
+    return { purpose = "baseline", assertions = 2,
+        optimization = cell.optimization, asyncify = cell.asyncify, entry = entry }
+end
+
 -- Build selects the cell through the internal measurement seam, exactly as the
 -- link-profile contract requires; the harness never duplicates flag lists.
+-- The preset is installed while the descriptor is built so its recorded
+-- `trace_control` and measurement level are the ones the build certifies.
 local function plan_for(cell, out, entry)
     local driver = require "titan-compiler.driver"
     local browserlink = require "titan-compiler.browserlink"
     mkdirp(out)
+    local preset = cell_options(cell, entry)
+    local saved = driver.browser_link_options
+    driver.browser_link_options = preset
+    local function finish(value, failure)
+        driver.browser_link_options = saved
+        return value, failure
+    end
     local context = driver.new_resolver_context({
         target = "browser", output_root = out })
     local configured, failure = driver.configure_foreign_c(context)
     if not configured then
         driver.close_resolver_context(context)
-        return nil, failure
+        return finish(nil, failure)
     end
     local descriptor, descriptor_error = driver.context_target_descriptor(context)
     if not descriptor then
         driver.close_resolver_context(context)
-        return nil, descriptor_error
+        return finish(nil, descriptor_error)
     end
-    local plan, plan_error = browserlink.profile(descriptor, {
-        purpose = "baseline", assertions = 2,
-        optimization = cell.optimization, asyncify = cell.asyncify,
-        entry = entry })
+    local plan, plan_error = browserlink.profile(descriptor, preset)
     driver.close_resolver_context(context)
-    return plan, plan_error
+    return finish(plan, plan_error)
 end
 
 local function preamble(cell, entry)
+    local options = cell_options(cell, entry)
     return string.format(
         "package.path=%q..package.path; require('titan-compiler.driver')" ..
-        ".browser_link_options={purpose='baseline',assertions=2," ..
+        ".browser_link_options={purpose=%q,assertions=%d," ..
         "optimization=%q,asyncify=%s,entry=%q}",
         repository .. "/?.lua;" .. repository .. "/?/init.lua;",
-        cell.optimization, tostring(cell.asyncify), entry)
+        options.purpose, options.assertions, options.optimization,
+        tostring(options.asyncify), options.entry)
 end
 
 local function build_titan_cell(cell, out, plan)
@@ -181,6 +197,13 @@ local function build_titan_cell(cell, out, plan)
         repository .. "/titanc", "-q", "--target", "browser",
         "--tree", fixtures, "-o", out, "--exe", out .. "/baseline.mjs",
         "--c-source", fixtures .. "/baseline.c", "baseline" })
+end
+
+-- The interpreter cell's macros are the installed record's, once, so the
+-- receipt can show exactly what the fork's own sources were built with.
+local lua_defines = {}
+for define in ((record_fields.lua_defines or ""):gmatch("%S+")) do
+    lua_defines[#lua_defines + 1] = define
 end
 
 local lua_sources
@@ -200,8 +223,13 @@ end
 
 local function build_lua_cell(cell, out, plan)
     mkdirp(out)
-    local argv = { emcc, "-I", repository .. "/lua-5.5.1/src",
-        "-DLUA_USE_POSIX", "-DLUA_USE_BROWSER" }
+    -- The interpreter cell compiles the fork's own sources, so its macros are
+    -- the installed record's: the fork changes them and a local list would
+    -- build a different configuration than the one the record describes.
+    assert(#lua_defines > 0,
+        "browser Lua record lacks lua_defines; reinstall the browser Lua fork")
+    local argv = { emcc, "-I", repository .. "/lua-5.5.1/src" }
+    for _, define in ipairs(lua_defines) do argv[#argv + 1] = define end
     for _, source in ipairs(sources_for_interpreter()) do
         argv[#argv + 1] = source
     end
@@ -483,6 +511,7 @@ for _, cell in ipairs(cells) do
                 optimization = cell.optimization,
                 asyncify = cell.asyncify,
                 entry = "lua-main",
+                defines = lua_defines,
                 compile_flags = plan.compile_flags,
                 link_flags = plan.link_flags,
                 identity = plan.identity_inputs,

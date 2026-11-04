@@ -151,11 +151,14 @@ end
         -- headers in PREFIX/include must not quote-capture native Lua headers.
         local dependency = workspace .. "/headers.d"
         local command = { table.unpack(info.tools.cc) }
-        for _, argument in ipairs({ "--std=c99", "-O0", "-sSUPPORT_LONGJMP=emscripten",
-                "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", "-DTITAN_TARGET_BROWSER=1",
-                "-I", info.prefix .. "/lib/browser/include", "-I", info.prefix .. "/include",
-                "-MD", "-MF", dependency, "-c", workspace .. "/out/object_fixture.c",
-                "-o", workspace .. "/header-check.o" }) do command[#command + 1] = argument end
+        for _, argument in ipairs(toolchain.with_lua_defines(info,
+                { "--std=c99", "-O0", "-sSUPPORT_LONGJMP=emscripten" },
+                { "-DTITAN_TARGET_BROWSER=1",
+                  "-I", info.prefix .. "/lib/browser/include", "-I", info.prefix .. "/include",
+                  "-MD", "-MF", dependency, "-c", workspace .. "/out/object_fixture.c",
+                  "-o", workspace .. "/header-check.o" })) do
+            command[#command + 1] = argument
+        end
         local result = compiler_io.new_sync():run(command, { stderr_to_stdout = true })
         assert.is_true(result.started and result.ok, result.output or result.diagnostic)
         local header_names = {}

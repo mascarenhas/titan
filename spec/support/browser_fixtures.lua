@@ -87,16 +87,33 @@ function M.identify(data, context)
     return data
 end
 
+-- The owned object prefix of each build profile, hand-written so the spec pins
+-- the contract instead of borrowing the implementation.
+M.object_flags = {
+    validation = { "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls" },
+    production = { "--std=c99", "-O3" },
+}
+for _, profile in pairs(M.object_flags) do
+    profile[#profile + 1] = "-Wall"
+    profile[#profile + 1] = "-Wno-unused-but-set-variable"
+    profile[#profile + 1] = "-Wno-unused-function"
+    profile[#profile + 1] = "-gline-tables-only"
+    profile[#profile + 1] = "-sSUPPORT_LONGJMP=emscripten"
+end
+
 function M.descriptor(root, overrides)
     local paths = M.paths(root)
     local record, record_text = M.record()
     local profile = M.profile_data()
     local tools = (platform.windows and "C:" or "") .. "/emsdk/upstream/emscripten/"
-    local flags = { "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls",
-        "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function", "-gline-tables-only",
-        "-sSUPPORT_LONGJMP=emscripten",
-        "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(M.target_defines) }
+    local build_profile = overrides and overrides.build_profile or "validation"
+    local flags = { table.unpack(M.object_flags[build_profile] or {}) }
+    for _, define in ipairs({ "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX" }) do
+        flags[#flags + 1] = define
+    end
+    for _, define in ipairs(M.target_defines) do flags[#flags + 1] = define end
     local data = { label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
+        build_profile = build_profile, trace_control = (overrides and overrides.trace_control) or nil,
         tools = { cc = { tools .. "emcc" }, ar = { tools .. "emar" },
             ranlib = { tools .. "emranlib" }, version = "6.0.13", source = "EMSDK",
             location = tools:sub(1, -2), version_output = "emcc (Emscripten) 6.0.13\n" },

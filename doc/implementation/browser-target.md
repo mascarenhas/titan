@@ -15,8 +15,8 @@ The implementation is spread over:
 
 * `titan-compiler/browsertarget.lua`, which locates and pins the Emscripten
   tools, reads and verifies the fork's Lua build record, probes the target C
-  facts, and builds, freezes, exports, and imports the browser target
-  descriptor;
+  facts, owns each build profile's object flags (`object_flags`), and builds,
+  freezes, exports, and imports the browser target descriptor;
 * `titan-compiler/browserlink.lua`, which owns the SDK asset layout
   (`sdk_assets`), the SDK readiness check (`require_sdk`), the link profile
   (`profile`), the owned-option check for user link extras
@@ -116,7 +116,9 @@ with:
 * `CC=emcc`, `AR="emar rcu"`, `RANLIB=emranlib`, and no `-fPIC`: a PIC Wasm
   object imports `GOT.mem`/`GOT.func` like a side module, which the static
   consumers reject;
-* `-DLUA_USE_POSIX -DLUA_USE_BROWSER`, without `LUA_USE_DLOPEN` or readline;
+* `-DLUA_USE_POSIX -DLUA_USE_BROWSER`, without `LUA_USE_DLOPEN` or readline,
+  and `-DLUAI_MAXCCALLS=100` ([the browser C-call
+  limit](#the-browser-c-call-limit));
 * `-sSUPPORT_LONGJMP=emscripten` in `SYSCFLAGS`, with `MYCFLAGS` passed
   through and `CMCFLAGS` applied to every browser object;
 * browser `LUA_PATH_DEFAULT`/`LUA_CPATH_DEFAULT` rooted at the empty
@@ -363,8 +365,11 @@ uses the same memo.
 `browsertarget.build` verifies the installation once per coordinator context,
 in this order; the first failure is reported:
 
-1. The direct-API compile extras pass the [unsupported-flag
-   check](#unsupported-flags).
+1. `inputs.build_profile` is `production` or `validation` (`invalid browser
+   build profile "<value>"`), and the direct-API compile extras pass the
+   [unsupported-flag check](#unsupported-flags) and contain no option the
+   build profile owns, except the one level that a `trace_control` build may
+   add (`browser <profile> profile owns compile option "<flag>"`).
 2. `emcc`, `emar`, and `emranlib` are located and `emcc` reports 6.0.13 (see
    [Emscripten pin](#emscripten-pin-and-tool-location)).
 3. The record is read and parsed: banner and text encoding, then unknown and
@@ -490,7 +495,9 @@ strings without NUL, CR, or LF; paths are normalized absolute paths):
   label = "browser", triple = "wasm32-unknown-emscripten", memory_bits = 32,
   tools = { cc = argv, ar = argv, ranlib = argv, version = "6.0.13",
     source = "EMSDK" | "PATH", location = string, version_output = string },
+  build_profile = "production" | "validation",
   compile_flags = argv,          -- complete effective flags; include_dirs appended separately
+  trace_control = boolean,       -- the harness level hook; optional on import
   include_dirs = { string, ... },
   target_defines = { "-DTITAN_TARGET_BROWSER=1",
     "-DTITAN_COROUTINE_STACK_SIZE=262144", "-DMCO_ASYNCFY_STACK_SIZE=65536" },
@@ -515,7 +522,10 @@ context-owned (`context.target_profile`), never stored in the frozen graph.
 
 `compile_flags` is, in order:
 
-1. `--std=c99`, `-O1`, `-fno-inline`, `-fno-optimize-sibling-calls`, `-Wall`,
+1. the build profile's owned object flags,
+   `browsertarget.object_flags(build_profile)` ([Object flags](#object-flags)):
+   `--std=c99`, then `-O1 -fno-inline -fno-optimize-sibling-calls`
+   (`validation`) or `-O3` (`production`), then `-Wall`,
    `-Wno-unused-but-set-variable`, `-Wno-unused-function`,
    `-gline-tables-only`, and `-sSUPPORT_LONGJMP=emscripten`;
 2. the record's `lua_defines`, in record order;
@@ -527,18 +537,11 @@ context-owned (`context.target_profile`), never stored in the frozen graph.
    `--cflag` in written order), otherwise `TITAN_EXTRA_CPPFLAGS` followed by
    `TITAN_EXTRA_CFLAGS`, followed by an internal measurement optimization
    (`-O1` or `-O2`) when `driver.browser_link_options.optimization` selects one
-   ([The link profile](#the-link-profile)).
+   ([the harness level hook](#the-harness-level-hook)).
 
-There is no `-fPIC` and no LTO. Both `production` and `validation`
-installations share the frozen release trace object profile `-O1 -fno-inline
--fno-optimize-sibling-calls -gline-tables-only` (frozen for #330 with
-Emscripten 6.0.13 alongside the final Titan-entry link profile `-O1 -fno-inline
--fno-optimize-sibling-calls -gsource-map -g2
--sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals`, the retained Wasm
-`name` section, and the unchanged Asyncify, SjLj, budget, and assertions `0`/`2`
-settings; the `baseline`/`O2`/`-Os` measurement controls are not part of the
-frozen release profile, and raising optimization later requires the same trace
-gates to pass).
+There is no `-fPIC` and no LTO. The two build profiles' object and link flags,
+the test-image exception, and the measurements behind them are in [Build
+profiles](#build-profiles).
 Object compilation uses `-gline-tables-only` rather than `-g2` because
 Emscripten 6.0.13's `emcc` rewrites `-g2` to `-g0` on compile-only `-c`
 invocations (`tools/cmdline.py`), which strips DWARF line tables from `.o`
@@ -608,7 +611,8 @@ cross-check.
 The identity is `"browser:sha256:" .. incremental.digest(context,
 "browser-target", data)` over the plain graph without `identity`: the label
 and physical facts, the tool argv, version, source, location, and complete
-version output, the effective flags and include roots in order, the target
+version output, `build_profile` and `trace_control`, the effective flags and
+include roots in order, the target
 defines, every installed path, the parsed record and the SHA-256 of its raw
 bytes (so `fork_revision` is included), the expected fingerprint, the
 exported profile and its identity, the probe-cache directory when enabled, and
@@ -620,7 +624,8 @@ probe cache therefore changes the identity.
 `browsertarget.export(descriptor)` copies the frozen graph into plain,
 metatable-free data. `browsertarget.import(data)` revalidates the closed shape
 and every pure invariant (argv and path forms, sibling tool locations, the
-record fields, required flags and longjmp setting, include order, fingerprint,
+record fields, the build profile and its owned object flags, required flags
+and longjmp setting, include order, fingerprint,
 policies, profile, identity) and freezes it, without reading files, running
 subprocesses, or reselecting sources. `build` runs the same validation before
 freezing, so a built and an imported descriptor obey one contract. Import
@@ -745,26 +750,44 @@ at target initialization with `browser target owns option --no-line-directives
 (TITAN_NO_LINE_DIRECTIVES)`.
 
 The [link profile](#the-link-profile) owns the image settings the runtime
-depends on. `browsertarget.trace_option(flag)` recognizes flags that would
-override the trace-preserving optimization, inlining, tail-call, frame-pointer,
-or debug settings: `^-O`, `^-g`, and (after normalizing a leading `-fno-` to
-`-f`) `^-finline`, `^-foptimize-sibling-calls`, or `^-fomit-frame-pointer`.
-`browsertarget.build` rejects `trace_option` in `inputs.compile_flags` unless
-`inputs.trace_control` is set (`browser target owns compile_flags option
-<flag>`), and `browserlink.validate_extras(flags, options)` rejects it in the
-normalized compile and link extras and final link extras unless
-`options.purpose` is `baseline`, `minicoro`, or `budget`, as well as every
-`-s`, `-D`, or `-U` spelling, joined or split and with or without a `NO_`
-prefix, of `SUPPORT_LONGJMP`, `ASYNCIFY` and every `ASYNCIFY_*` setting,
+depends on, and the [build profile](#build-profiles) owns the object flags.
+`browsertarget.trace_option(flag)` recognizes flags that would override the
+profile's optimization, inlining, tail-call, frame-pointer, or debug settings:
+`^-O`, `^-g`, and (after normalizing a leading `-fno-` to `-f`) `^-finline`,
+`^-foptimize-sibling-calls`, or `^-fomit-frame-pointer`.
+`browsertarget.owned_compile_option(flags, index)` adds every
+`BINARYEN_EXTRA_PASSES` spelling: `-sBINARYEN_EXTRA_PASSES[=...]`, the split
+`-s BINARYEN_EXTRA_PASSES[=...]`, and the same two forms of
+`NO_BINARYEN_EXTRA_PASSES`. `browsertarget.build` rejects an owned compile
+option in `inputs.compile_flags` (`browser <profile> profile owns compile
+option "<flag>"`, quoting both words of a split spelling); the one exception is
+a single `-O0` to `-O3` or `-Os` level in a `trace_control` build. The
+descriptor validator enforces the same rule on the finished flags ([Object
+flags](#object-flags)).
+`browserlink.validate_extras(flags, options, build_profile, origin)` rejects
+`trace_option` flags in the normalized compile and link extras and final link
+extras unless `options.purpose` is `baseline`, `minicoro`, or `budget`, as well
+as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
+`NO_` prefix, of `SUPPORT_LONGJMP`, `ASYNCIFY` and every `ASYNCIFY_*` setting,
 `BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
 `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
 `FILESYSTEM`, `MINIMAL_RUNTIME`, `EXPORTED_FUNCTIONS`,
 `EXPORTED_RUNTIME_METHODS`, `INCOMING_MODULE_JS_API`, `ASSERTIONS`,
 `STACK_OVERFLOW_CHECK`, and the three target defines, plus `--no-entry` and
-`--js-library` (`--js-library=...` included), with `browser
-link profile owns option <flag>`. Other Emscripten settings pass through, so a
-later user flag can never weaken the profile.
+`--js-library` (`--js-library=...` included). One owned option has one
+diagnostic, chosen by `origin`: compile extras (`origin == "compile"`) report
+`browser <profile> profile owns compile option "<flag>"`, the same message as
+`browsertarget.build`, and link extras report `browser <profile> link profile
+owns option <flag>` (`browser link profile owns option <flag>` when the caller
+passes no profile). `titanc` checks its normalized compile extras (`--cflag`,
+`-I`, `-D`, `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`) as `compile` and its
+link extras as `link`, both with `driver.BUILD_PROFILE`; image links and the
+protocol probe check link extras under the descriptor's `build_profile`. So
+`--cflag=-O2` in a production build reports `browser production profile owns
+compile option "-O2"`, and `--ldflag=-O3` reports `browser production link
+profile owns option -O3`. Other Emscripten settings pass through, so a later
+user flag can never weaken the profile.
 
 ## Semantic-cache ownership
 
@@ -1070,10 +1093,10 @@ flag list.
 `options` is closed: `purpose`, `assertions`, `optimization`, `asyncify`,
 `budgets`, and `entry` (`unknown browser link profile option <key>`).
 
-* `purpose` is `program`, `protocol`, `gate`, `minicoro`, `budget`, or
-  `baseline` (`invalid browser link profile purpose`). Programs and tests use
-  `program`; the executing check uses `protocol`; the others serve the
-  runtime-evidence and measurement harnesses.
+* `purpose` is `program`, `test`, `protocol`, `gate`, `minicoro`, `budget`,
+  or `baseline` (`invalid browser link profile purpose`). Programs use
+  `program` and `--test` images use `test`; the executing check uses
+  `protocol`; the others serve the runtime-evidence and measurement harnesses.
 * `assertions` is required and is 0 or 2 (`browser assertions must be 0 or
   2`).
 * `asyncify` defaults to true; only `minicoro` and `baseline` may turn it off,
@@ -1090,13 +1113,16 @@ flag list.
 * `entry` defaults to `titan`; the only alternative, `lua-main`, is for the
   `baseline` measurement of the fork's own Lua interpreter (`invalid browser
   link entry`).
+* The descriptor's `build_profile` selects the level and the frame flags
+  ([Link flags per purpose](#link-flags-per-purpose)); a descriptor without a
+  valid one is refused with `invalid browser build profile`.
 
 `link_flags` is, in order:
 
 | Flags | Purpose |
 | --- | --- |
-| `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2` | the trace-preserving base of the frozen release Titan-entry link profile (frozen for #330 with the Binaryen local-cleanup pass below, Emscripten 6.0.13, the retained `name` section, and the unchanged Asyncify/SjLj, budget, and assertions `0`/`2` settings; raising optimization later requires the same trace gates to pass); measurement purposes (`minicoro`, `budget`, `baseline`) apply an explicit `-O1` or `-O2` `optimization` override when selected and are not part of the frozen release profile |
-| `-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals` | part of the frozen release Titan-entry link profile (`entry == "titan"`, omitted for `lua-main`): coalesces post-Asyncify temporaries because at link `-O1`, `emcc` runs no default Binaryen optimization passes, and Asyncify inflated large coroutine functions (`coroutine_tests_ℳ_unwind_innermost_frame_titan`, from 1,072 to 126,402 locals) past V8's 50,000-local WebAssembly validation limit (`local count too large`). Running `simplify-locals,reorder-locals` keeps the function at 1,396 locals (module maximum 3,431) without inlining or dropping physical frames or line mappings |
+| `<level>`, then `-fno-inline -fno-optimize-sibling-calls` except for a production `program`, then `-gsource-map -g2` | the level is the `optimization` override or else the descriptor's last `-O` flag (`-O1` for validation, `-O3` for production), so the link optimizes like its objects; a production program accepts the frames that inlining costs, while every other profile and purpose keeps the frame flags ([Link flags per purpose](#link-flags-per-purpose)); `-gsource-map -g2` writes the source map and keeps the Wasm `name` section in every profile |
+| `-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals`, plus `,--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` for a production `test` image | D18's post-Asyncify local cleanup, in every Titan-entry profile (`entry == "titan"`, omitted for `lua-main`); `emcc` runs `BINARYEN_EXTRA_PASSES` after `--asyncify` ([pass order](#binaryen-pass-order)). At link `-O1`, `emcc` runs no other Binaryen pass, and Asyncify inflated large coroutine functions (`coroutine_tests_ℳ_unwind_innermost_frame_titan`, from 1,072 to 126,402 locals) past V8's 50,000-local WebAssembly validation limit (`local count too large`); `simplify-locals,reorder-locals` kept that function at 1,396 locals (module maximum 3,431) without inlining or dropping physical frames or line mappings. The same passes set the validation profile's per-level engine-stack cost ([why they are load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)), and the two skips keep a production test image's frames ([test images](#test-images)) |
 | `-sASYNCIFY=1` | minicoro's Emscripten fiber backend refuses to create fibers without Asyncify, and Asyncify carries the outer suspension. Indirect calls keep the default conservative instrumentation: closures and the module ABI call through function pointers, so there are no `ASYNCIFY_IGNORE_INDIRECT`, `ASYNCIFY_ONLY`, or `ASYNCIFY_REMOVE` lists. `-sASYNCIFY=0` only for a control. |
 | `-sSUPPORT_LONGJMP=<sjlj>` | the record's verified longjmp mode, `emscripten`, matching `liblua.a` and `titan.h` |
 | `-sSTACK_SIZE=1048576`, `-sASYNCIFY_STACK_SIZE=65536` | the main C stack and the outer Asyncify data budget ([Budgets](#budgets)); the second only with Asyncify |
@@ -1111,8 +1137,9 @@ flag list.
 | `-sASSERTIONS=<0\|2> -sSTACK_OVERFLOW_CHECK=2` | Emscripten detects reentry corruption only with assertions; the suites also pass with assertions off; stack checking stays on in both |
 
 `compile_flags` is empty without an override. `identity_inputs` is plain data,
-exactly `{target_identity, purpose, entry, assertions, optimization, asyncify,
-budgets, link_flags, compile_flags}`, where `optimization` is the override or
+exactly `{target_identity, profile, purpose, entry, assertions, optimization,
+asyncify, budgets, link_flags, compile_flags}`, where `profile` is the
+descriptor's `build_profile`, `optimization` is the override or
 else the last `-O` flag of the descriptor's compile prefix and `budgets` holds
 all four effective sizes. Image certificates hash it together with the content
 of the referenced SDK assets, so a budget, profile, or JavaScript library
@@ -1137,11 +1164,328 @@ can grow memory instead of retaining an old view.
 **Internal selection.** `driver.browser_link_options` is a Lua field for
 in-process harnesses (`{purpose=..., assertions=..., ...}`), set before
 `titanc` runs in the same Lua process; there is no command-line option or
-environment variable. Target initialization validates it against the built
-descriptor, and an `optimization` override enters the descriptor's compile
-prefix ([Compile prefix](#compile-prefix-and-target-defines)).
-`driver.browser_link_plan(context, purpose)` returns the plan for those
-options, or `{purpose=purpose or "program", assertions=2}` without them.
+environment variable, and it must name a purpose. The image kind decides
+between `program` and `test`: `driver.browser_link_kind(context)` is `test`
+for a `--test` link (`context.link_kind == "test"`) and `program` otherwise.
+`driver.browser_link_purpose(context, purpose)` returns that kind when no
+purpose is given, passes a harness purpose (`protocol`, `gate`, `minicoro`,
+`budget`, or `baseline`) through, and refuses a `program` or `test` purpose
+that contradicts a known kind with `browser link purpose "<purpose>" does not
+match this <kind> image`, so a test image is never certified or linked with the
+program profile. Target initialization does not know the image kind yet, so it
+checks only the options' shape: a preset without a purpose is refused with
+`browser link profile options require a purpose`, and the options are
+validated against the built descriptor. For `baseline`, `minicoro`, and
+`budget` it marks the descriptor `trace_control`, and an `optimization`
+override enters the descriptor's compile prefix ([the harness level
+hook](#the-harness-level-hook)). The kind check happens where the kind is
+known. `driver.browser_link_plan(context, purpose)` resolves the purpose
+against the kind and returns the plan for the harness options when they are
+set (refusing a purposeless preset with the same message) and otherwise for
+`{purpose = <resolved kind>, assertions = 2}`. `titanc` certifies the final
+link with `browser_link_plan(context, kind)`, and
+`driver.compile_browser_image` resolves its purpose the same way, also
+checking the purpose of an explicit `options.profile`.
+
+## Build profiles
+
+`TITAN_BUILD_PROFILE` (`driver.BUILD_PROFILE`, `production` by default)
+selects the browser object and link profile as well as the native one. Target
+initialization passes it to `browsertarget.build` as `inputs.build_profile`,
+and the descriptor records it as `build_profile` (D26). Probes, generated
+objects, `--c-source` objects, entrypoint compiles, and imported worker
+descriptors therefore certify one configuration, and the descriptor identity
+changes with the profile even where flags would agree, so the two profiles
+never share objects or link records. `make browser-sdk` builds the SDK's
+runtime and standard library under the profile in its environment (Make's
+default for that goal is `production`), and images link the installed SDK
+archives as they are, as native images link the installed standard provider
+(D25). The user contract is in [build
+profiles](../language/browser-target.md#build-profiles).
+
+### Object flags
+
+`browsertarget.object_flags(build_profile)` is the single source of the owned
+object prefix:
+
+| Profile | Owned object flags |
+| --- | --- |
+| `validation` | `--std=c99 -O1 -fno-inline -fno-optimize-sibling-calls -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=emscripten` |
+| `production` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=emscripten` |
+
+`validation` is #330's frozen profile, flag for flag. The production level is
+the one constant `PRODUCTION_LEVEL = "-O3"`, the native production level,
+chosen over `-O2` by [measurement](#measurements) (D34). Both profiles keep
+`-gline-tables-only` ([why not `-g2`](#compile-prefix-and-target-defines)),
+the warnings, and the longjmp mode; the record's `lua_defines` and the target
+defines follow.
+
+The validator, shared by `build` and `import`, requires `compile_flags` to
+start with exactly that list (`browser <profile> profile compile flags do not
+match its object profile`) and refuses every later owned compile option
+(`browsertarget.owned_compile_option`: every `trace_option` flag and every
+`-sBINARYEN_EXTRA_PASSES` spelling) with `browser <profile> profile owns
+compile option "<flag>"`. The only exception is the [harness level
+hook](#the-harness-level-hook).
+
+### Link flags per purpose
+
+`browserlink.profile` takes the link level from the harness `optimization`
+override or else from the descriptor's last `-O` compile flag, so a
+Titan-entry link optimizes at its objects' level, and it adds the frame flags
+everywhere except a production program:
+
+| Profile | Purpose | Level and frame flags | `-sBINARYEN_EXTRA_PASSES=` |
+| --- | --- | --- | --- |
+| `validation` | every purpose | `-O1` (or the harness level) `-fno-inline -fno-optimize-sibling-calls` | `simplify-locals,reorder-locals` |
+| `production` | `program` | `-O3` | `simplify-locals,reorder-locals` |
+| `production` | `test` | `-O3 -fno-inline -fno-optimize-sibling-calls` | `simplify-locals,reorder-locals,--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` |
+| `production` | `protocol`, `gate`, `minicoro`, `budget`, `baseline` | `-O3` (or the harness level) `-fno-inline -fno-optimize-sibling-calls` | `simplify-locals,reorder-locals` |
+
+`-gsource-map -g2` and the rest of [the link profile](#the-link-profile)
+follow in every row, and the pass list is omitted for the `lua-main` entry. A
+validation test image's flags equal its program image's. The image kind
+decides between `program` and `test`; a harness that sets
+`driver.browser_link_options` may choose one of the harness purposes instead,
+but a contrary `program` or `test` purpose is an error ([internal
+selection](#the-link-profile)). The trace gate's `build-trace.lua` therefore
+names `test` for its test image and `program` for its uncaught image.
+
+### Binaryen pass order
+
+In emsdk 6.0.13 the Binaryen optimizer runs only at link `-O2` and above
+(`should_run_binaryen_optimizer()` in `tools/link.py`), and
+`get_binaryen_passes()` lists the level's pipeline, then `--asyncify`, then
+`BINARYEN_EXTRA_PASSES`. The `wasm-opt` command that `EMCC_DEBUG=1` logs for a
+production program link at assertions 2 is (Asyncify import list and file
+arguments shortened):
+
+```text
+wasm-opt --strip-target-features --post-emscripten -O3 --low-memory-unused
+  --asyncify --pass-arg=asyncify-asserts --pass-arg=asyncify-propagate-addlist
+  --pass-arg=asyncify-imports@env.invoke_*,env.__asyncjs__*,...
+  --zero-filled-memory --pass-arg=directize-initial-contents-immutable
+  --simplify-locals --reorder-locals ...
+```
+
+A production test link ends `--simplify-locals --reorder-locals
+--skip-pass=inlining-optimizing --skip-pass=duplicate-function-elimination`
+instead. The optimized link therefore optimizes before Asyncify, and
+`BINARYEN_EXTRA_PASSES` is the only thing that runs after it, as at `-O1`,
+where no level pipeline runs at all. Because `-gsource-map` keeps DWARF
+through the optimizer, `emcc` also warns `running limited binaryen
+optimizations because DWARF info requested (or indirectly required)`;
+inlining and duplicate-function elimination still run, as the test-image
+findings below show.
+
+`BINARYEN_PASS_DEBUG=1` cannot record these links: it validates the module
+after every pass, and the pinned binaryen 133 rejects the output of the
+`stack-check` pass that `wasm-emscripten-finalize --check-stack-overflow` runs
+for `-sSTACK_OVERFLOW_CHECK=2` (`Fatal: Last pass (stack-check) broke
+validation`), which aborts the link. The pass order above is `emcc`'s own
+`EMCC_DEBUG=1` log of the `wasm-opt` argv (D31).
+
+### Test images
+
+A production `--test` image keeps the exact frames that the trace gate
+asserts, as native `--test` keeps its own (D25):
+
+* **Test owners.** `driver.test_owner_flags(test_build, test_functions,
+  context)` puts `-fno-inline` before `test_runner.TEST_COMPILE_FLAGS`
+  (`-fno-optimize-sibling-calls`) for a browser context whose descriptor
+  profile is `production`. A worker reads the profile from its imported
+  descriptor. The flags follow the descriptor prefix on the owner's generated
+  C only, `codegen.test_flags` certifies them, and the descriptor identity
+  carries the profile. Other modules, the generated runner, and the SDK
+  archives keep the profile's flags.
+* **No Binaryen inlining.** The `test` purpose adds
+  `--skip-pass=inlining-optimizing` to `BINARYEN_EXTRA_PASSES`. `--skip-pass`
+  is a `wasm-opt` option, not a pass: it disables the named pass wherever it
+  runs, including inside the `-O3` pipeline before `--asyncify`, so its place
+  after `--asyncify` in the argv does not matter. The pipeline's pass is named
+  `inlining-optimizing`; `--skip-pass=inlining` disables nothing. With the
+  skip, `inlining-optimizing` took 3.7e-07 s against 0.010 s without it, and
+  the output differed.
+* **No duplicate-function folding (D31).** With only inlining skipped, four
+  production test-image rows lost frames: `test_selected_contributor_locations`
+  and `test_locations_before_after_yield` (`locations.browser.titan`), and
+  `test_static_entry` and `test_lambda_entry` (`wrappers.titan`). Binaryen's
+  `duplicate-function-elimination` had folded byte-identical bodies
+  (`selected_leaf` into `original_leaf`, `selected_outer` into
+  `direct_middle`). Adding `-fno-inline -fno-optimize-sibling-calls` to every
+  object did not restore them; `--skip-pass=duplicate-function-elimination`
+  did, and no gate assertion changed.
+* **Validation needs neither.** Its objects already carry the frame flags,
+  and its `-O1` link never runs the Binaryen optimizer.
+
+A production *program* image accepts inlining, as native production does. The
+trace gate's production program rows require the shown Titan frames to be an
+ordered subsequence of the row's exact frames, with the exact file and
+execution line (file only on WebKit), and each name to be the matched frame's
+or that of a later expected frame, the enclosing caller it was inlined into
+(D28, D32). At least one Titan frame must appear, and the outermost must be the
+entry, `trace_uncaught.main`: the entry is called from C and cannot be inlined
+away. Every other line must be a `[C]` frame, a Lua frame, or a documented
+marker, so an unparsed line fails the row. Lua frames, markers, fallbacks, and
+merge order stay exact, and no `titanentry` symbol or mangled C name may
+appear. Test-image and validation rows stay byte-exact. The gate takes the
+installation profile from `manifest.json` and fails without a valid one, so a
+missing profile cannot weaken a production program row.
+
+### Why the post-Asyncify cleanup is load-bearing
+
+D18 added `simplify-locals,reorder-locals` after `--asyncify` to keep
+Asyncify-inflated functions under V8's locals limit. The same passes set the
+validation profile's engine-stack cost per level (D30). With Lua's limit out
+of the way (a session-only `-DLUAI_MAXCCALLS=60000` install), the validation
+trace image measured for #343 reaches 318 mixed Lua/Titan levels on Node and
+320 on Chromium at assertions 2. The same image linked without the two passes
+reaches
+29 on both, its whole-image maximum rises from 2,012 to 38,683 locals
+(`trace_cases_ℳ_test_defer_failure_titan`), and its `.wasm` and `.wasm.map`
+grow from 5,148,243 and 1,234,920 to 6,638,213 and 2,754,427 bytes.
+
+That reproduces #330's D16 table (29 levels pass and 30 fail on V8) exactly:
+D16 was measured on images built before D18's passes landed, and its estimate
+of about 30 KB of engine stack per level is the pre-D18 cost (984 KB / 29 ≈
+34 KB), against 2.92 KB per level with the passes. On the same base with the
+passes in place, all four engines reached Lua's default limit first (195
+levels pass, 196 fail), so D16's ceilings are not inputs to the [C-call
+limit](#the-browser-c-call-limit).
+
+In production the passes are optional: without them the `-O3` mixed ceiling
+stays above 1,200 levels, and with them the `.wasm` is 14,486 bytes larger,
+the `.wasm.map` 33,050 bytes smaller, and the maximum 100 locals instead of
+102. Production keeps them (D34), so both profiles share one post-Asyncify
+pass list.
+
+### The harness level hook
+
+When `driver.browser_link_options.purpose` is `baseline`, `minicoro`, or
+`budget`, target initialization builds the descriptor with `trace_control =
+true` (D27 addendum). Only such a descriptor may carry an owned option after
+the profile prefix: exactly one trailing level flag, `-O0` to `-O3` or `-Os`,
+which comes from the `optimization` override (`-O1` or `-O2`) or from a
+harness `--cflag` (`validate_extras` admits level flags for these three
+purposes). One rule, `check_owned_tail`, applies in both `browsertarget.build`
+(on the extras, before tool discovery) and the validator (after the profile
+prefix): every other owned option, including a second level or any
+`BINARYEN_EXTRA_PASSES` spelling, is refused with `browser <profile> profile
+owns compile option "<flag>"`. `trace_control` is descriptor data and enters
+the identity. The hook is reachable only through the Lua API, and its options
+must name a purpose ([internal selection](#the-link-profile)); without it,
+`--cflag`, `--ldflag`, and the `TITAN_EXTRA_*` variables are refused as above,
+naming the profile. Its users are CI's baseline cell,
+`scripts/browser_baseline.lua`, and
+the measurement and budget specs. Production builds stay at
+`PRODUCTION_LEVEL`.
+
+### Measurements
+
+Measured for #343 with Emscripten 6.0.13, Node 24.19.0, host Chrome
+156.0.8078.79, and Playwright 1.56.1's Firefox 142.0.1 and WebKit 26.0, one
+cold process per depth, on the retained trace fixture
+(`spec/fixtures/browser_trace`) and its session-only measurement copy. `-O2`
+is the same tree with `PRODUCTION_LEVEL` patched for the comparison; it does
+not ship. Engine ceilings are the deepest passing level with Lua's limit out of
+the way (a session-only `-DLUAI_MAXCCALLS=60000` install); `a2` and `a0` are
+assertions 2 and 0.
+
+Ceilings at assertions 2 / 0 (`—` where a cell was not measured; the WebKit
+`-O3` assertions-2 mixed sweep found no failure up to its 4,096 maximum). The
+Firefox mixed cells are the fixture's own boundary, not the engine's: one
+level deeper, the native case fails its own assertions (it returns status 1)
+before the engine raises. In production those failing rows record a failed
+capture, `(native Titan frames unavailable: capture failed)` followed by the
+truncation marker; the validation rows record only the failed case. The
+engine's own `InternalError: too
+much recursion` came later. Under validation it appeared at 576 at assertions
+2, and at assertions 0 it was first observed at 640. Under production it was
+first observed at 1,792 (assertions 2) and 1,776 (assertions 0). The sweeps did
+not sample the depths in between.
+
+| Construct, engine | `-O2` | `-O3` (production) | Validation |
+| --- | ---: | ---: | ---: |
+| Mixed Lua/Titan, Node | 1,208 / 1,210 | 1,220 / 1,222 | 318 / 319 |
+| Mixed Lua/Titan, Chromium | 1,226 / — | 1,239 / 1,242 | 320 / 321 |
+| Mixed Lua/Titan, Firefox (fixture boundary) | — | 1,757 / 1,763 | 572 / 574 |
+| Mixed Lua/Titan, WebKit | — | > 4,096 / 4,095 | 479 (contiguous) / 1,074 |
+| Nested `pcall`, Node | 364 / 419 | 362 / 416 | 201 / 204 |
+| Nested `pcall`, Chromium | 372 / — | 367 / 421 | 201 / — |
+| Nested `pcall`, Firefox | — | 775 / 947 | 385 / — |
+| Nested `pcall`, WebKit | — | 2,121 / 2,401 | 639 / — |
+| Nested `coroutine.resume`, Node | 369 / 425 | 366 / 421 | 201 / 204 |
+| Nested `coroutine.resume`, Chromium | 376 / — | 373 / 434 | 201 / — |
+| Nested `coroutine.resume`, Firefox | — | 799 / 994 | 393 / — |
+| Nested `coroutine.resume`, WebKit | — | 2,216 / 2,528 | 831 / — |
+
+Production raises the ceilings on every engine. At assertions 2, nested
+`pcall` and `coroutine.resume` gain about 1.8× on V8 (362/201, 366/201 on
+Node), 2.0× on Firefox (775/385, 799/393), and 3.3× and 2.7× on WebKit
+(2,121/639, 2,216/831). Mixed recursion, where inlining removes frames from
+each level, gains about 3.8× on V8 (1,220/318 on Node, 1,239/320 on
+Chromium), 3.1× on Firefox (1,757/572, both fixture boundaries), and at
+least 8.5× on WebKit (more than 4,096/479; 3.8× at assertions 0,
+4,095/1,074). The order never changes. Validation binds in every measured
+cell, `pcall` and `coroutine.resume` bind on every engine in both profiles,
+and V8 binds in both profiles: production `pcall` reaches 362 levels on Node,
+against 775 on Firefox and 2,121 on WebKit. Over the measured cells the
+minimum is therefore still 204 counts, under validation at assertions 2 on
+Node and Chromium. Validation `pcall` and `coroutine.resume` were measured at
+assertions 0 only on Node, where they reach 204 levels against 201 at
+assertions 2.
+
+| Measurement | `-O2` | `-O3` (production) | Validation |
+| --- | ---: | ---: | ---: |
+| `getCcalls` counts per level, every construct | 1 | 1 | 1 |
+| Test image `.wasm` / `.wasm.map` bytes, a2 | 3,182,978 / 871,991 | 3,140,922 / 868,617 | 5,128,240 / 1,227,298 |
+| Test image `.wasm` / `.wasm.map` bytes, a0 | 3,171,020 / 869,947 | 3,109,537 / 867,001 | 5,115,589 / 1,221,997 |
+| Program image of the same fixture, `.wasm` / `.wasm.map` bytes, a2 | 3,122,463 / 870,683 | 3,142,564 / 913,532 | (links like the test image) |
+| Final link, test / program image, a2 | 8.686 s / 9.287 s | 10.951 s / 11.612 s | 9.065 s |
+| Maximum function locals, test a2 / test a0 / program a2 | 100 / 67 / 100 | 100 / 68 / 100 | 1,993 / 1,993 / — |
+
+The `-O3` test image is 1.3% smaller than the `-O2` one (3,140,922 against
+3,182,978 bytes), while the `-O3` program image is 0.6% larger (3,142,564
+against 3,122,463) with a 4.9% larger map; `-O3` links about 2.3 s slower. No
+image comes near V8's 50,000-locals limit.
+
+The #329 micro-benchmark program, built as an ordinary program at each level
+(median of three runs, in milliseconds), next to the #329 harness re-run on the
+same host at the base (`scripts/browser_baseline.lua`, `-O1` with Asyncify):
+
+| Benchmark | Node `-O2` | Node `-O3` (production) | Node, #329 harness | Chromium `-O3` (production) | Chromium, #329 harness |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 200 000 calls | 3.8 | 3.3 | 3.7 | 14.1 | 5.8 |
+| 50 000 closures | 6.8 | 5.7 | 8.1 | 23.0 | 7.9 |
+| 100 000-element Array | 1.4 | 1.2 | 2.1 | 3.6 | 2.4 |
+| 5 000-step string build | 1.5 | 1.5 | 2.2 | 5.1 | 2.5 |
+| 20 000 coroutine switches | 94.5 | 72.1 | 162.5 | 149.4 | 181.4 |
+| 200 suspensions, total | 216 | 216 | 215.4 | 814.2 | 805.8 |
+
+The benchmark images were 1,369,778 (`-O3`) and 1,372,292 (`-O2`) bytes, with
+295,199 and 285,073-byte maps; the Chromium `-O3` image was 1,369,468 bytes
+with a 295,187-byte map. Between the two production levels on Node, `-O3`
+cuts the coroutine-switch time by about 23% and is equal or faster on the
+other benchmarks; the suspension round trip is Asyncify-bound and does not
+change. The #329
+harness columns are a reference, not a like-for-like comparison: that harness
+links with the `baseline` purpose, without the trace libraries and the map,
+while the production columns are ordinary installed-profile programs. The
+Chromium numbers are therefore recorded as measured, with no regression or
+speedup claimed against the harness.
+
+The trace gate's own images, as the gate builds them with its current 36
+native cases (maximum locals count parameters and declared locals):
+
+| Image | Production `.wasm` / `.wasm.map` bytes, maximum locals | Validation |
+| --- | ---: | ---: |
+| Test image, a2 | 3,231,911 / 904,919, 104 | 5,261,947 / 1,279,867, 2,164 |
+| Test image, a0 | 3,199,994 / 903,404, 68 | 5,249,175 / 1,274,520, 2,164 |
+| `trace_uncaught` program, a2 | 659,474 / 118,115, 38 | 1,052,334 / 150,948, 482 |
+| `trace_uncaught` program, a0 | 650,671 / 117,374, 38 | 1,043,126 / 147,764, 482 |
+
+Every one of these images instantiates and passes the gate on Node, Chromium,
+Firefox, and WebKit.
 
 ## Program and test images
 
@@ -1163,9 +1507,11 @@ archives, extra_objects, verbose, options)` (with `options.context` required,
 plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
 `final_link_flags`, and `dependency_output`) links one image:
 
-1. require the SDK, select the plan (an explicit `options.profile`, otherwise
-   `browser_link_plan`), and check the final link extras with
-   `validate_extras`;
+1. require the SDK, resolve the purpose with `driver.browser_link_purpose`
+   (the image kind unless a harness purpose was named), select the plan (an
+   explicit `options.profile`, whose purpose passes the same check, otherwise
+   `browser_link_plan`), and check the link extras and final link flags with
+   `validate_extras` under the descriptor's `build_profile`;
 2. scan the runtime archive with the descriptor fingerprint and validate it
    structurally, as a provider;
 3. compute the 64-character lowercase hexadecimal image identity with
@@ -1444,9 +1790,10 @@ is emitted at load time. Ordinary web pages still run in degraded mode;
 fail the run as a harness error (`degraded browser trace: <reason>`) unless
 `--allow-degraded-trace` was passed.
 
-Observed trace cost on the representative compiled trace-gate image
-`out/browser/trace/assertions-2/runtime.mjs` (which links all 34 native trace
-fixture cases under the D14 object profile `-O1 -fno-inline
+Observed trace cost for #330, when both installations still linked what is now
+the validation profile, on the representative compiled trace-gate image
+`out/browser/trace/assertions-2/runtime.mjs` (which then linked all 34 native
+trace fixture cases under the D14 object profile `-O1 -fno-inline
 -fno-optimize-sibling-calls -gline-tables-only` and the D18 Titan-entry link
 profile `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2
 -sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals`):
@@ -1473,13 +1820,19 @@ only (`pcs`, `sources`, `lines`, `starts`, `ends`, and `first`); it excludes
 the retained `names` and `bases` JavaScript string arrays and temporary parsing
 allocations, so it is not total retained or peak JavaScript heap usage.
 
+Since #343 the production installation links a different image: its current
+trace-gate test image is 3,231,911 bytes with a 904,919-byte map, against
+5,261,947 and 1,279,867 for validation ([Measurements](#measurements)). Its
+eager-load cost has not been measured again.
+
 ### WebAssembly stack survey
 
 Before finalizing the stack parser and WebKit renderer, a synthetic C/JS survey
 (324 raw stack captures across nine call topologies, named and `name`-stripped
 binaries, and default versus raised `Error.stackTraceLimit`) was recorded with
 Emscripten 6.0.13 and `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map
--g2` plus the base Asyncify/longjmp link profile across six engines:
+-g2` (today's validation link flags) plus the base Asyncify/longjmp link
+profile across six engines:
 
 | Engine | Version | Platform |
 | --- | --- | --- |
@@ -1587,11 +1940,11 @@ blames `ASYNCIFY_STACK_SIZE` even when the cause is corruption, so a generic
 The recoverable limits are ordinary errors in every cell:
 
 * plain recursion through nested `pcall` in loaded Lua reaches Lua's own limit
-  (`LUAI_MAXCCALLS`) and raises the catchable `C stack overflow` long before
-  the 1 MiB C stack is exhausted (whereas recursion that alternates between Lua
-  and compiled Titan adds Asyncify-instrumented Wasm and JS frames per boundary
-  and can exhaust the engine's JavaScript stack with `RangeError: Maximum call
-  stack size exceeded` before `LUAI_MAXCCALLS`; see [Settlement](#the-loader));
+  (`LUAI_MAXCCALLS`, 100 on the browser) and raises the catchable `C stack
+  overflow` long before the 1 MiB C stack is exhausted, and so does recursion
+  that alternates between Lua and compiled Titan, whose WebAssembly and
+  JavaScript frames per level the [browser C-call
+  limit](#the-browser-c-call-limit) is sized against;
 * a forced `mco_create` failure raises exactly `could not create coroutine:
   Out of memory`, and a fresh coroutine can then be created and resumed; and
 * creating coroutines while a canary coroutine is parked grows memory through
@@ -1606,6 +1959,189 @@ of linear memory never aborts the instance. A coroutine's stack size changes
 only through the target define, which is part of the compile prefix and the
 descriptor identity; the native default stays 2 MiB. At 2 MiB, about 992
 coroutines would fit in 2 GiB; 256 KiB admits 5454.
+
+## The browser C-call limit
+
+The fork's browser target compiles Lua with `-DLUAI_MAXCCALLS=100`
+(`BROWSER_SYSCFLAGS` in the fork's `src/Makefile`); the native, macOS, and
+Windows targets read their own `SYSCFLAGS` and keep Lua's default 200. The
+user contract is in [Lua's C-call
+limit](../language/browser-target.md#luas-c-call-limit).
+
+### What the limit counts
+
+`LUAI_MAXCCALLS` bounds `getCcalls(L)`, the low 16 bits of `L->nCcalls`
+(`lstate.h`). Each recursive C construct adds one per level:
+
+* `ccall`, behind `luaD_call` and `luaD_callnoyield`: `pcall`, metamethod
+  calls, `string.gsub` and `table.sort` callbacks, `__tostring`, and every
+  call from compiled Titan into a Lua function. A Lua function calling a
+  compiled Titan function enters it through `luaD_precall` without a count, so
+  one interleaved Lua/Titan level costs one count.
+* `lua_resume`, which starts a coroutine from its resumer's count (`L->nCcalls
+  = getCcalls(from)`), refuses a resume at the limit with `C stack overflow`,
+  and then adds one.
+* The parser's `enterlevel`, through `luaE_incCstack`.
+
+Exactly at the limit `luaE_checkcstack` raises `C stack overflow`; up to
+`LUAI_MAXCCALLS / 10 * 11` it lets the overflow's error handling run, and
+beyond that it raises the error-in-error-handling status.
+`luaD_checkminstack` reports no room within two counts of the limit; the
+collector then postpones pending `__gc` finalizers, and nothing is raised.
+Titan's `errorhandler`, which `luaG_errormsg` calls through
+`luaD_callnoyield`, takes one count, and closing the trace builder's spilled
+`luaL_Buffer` box (`luaL_pushresult` → `lua_closeslot` → `callclosemethod` →
+`luaD_callnoyield`) can take another. An error raised two counts below the
+limit is therefore replaced by `C stack overflow` while its trace is built: a
+mixed recursion that raises at its leaf, starting from the test runner's count
+of 2, passes 195 levels and reports `C stack overflow` at 196 when the limit
+is 200 (`LUAI_MAXCCALLS - 5` levels).
+
+### How Titan carries the value
+
+The fork's installer derives the record's `lua_defines` from the browser
+build's own `-D` flags, sorted and unique, so the record reads
+`lua_defines=-DLUAI_MAXCCALLS=100 -DLUA_USE_BROWSER -DLUA_USE_POSIX` under the
+unchanged `# Lua 5.5.1 browser build record v1` banner and closed key set.
+Titan verifies it like any other define: `lua_defines` must equal the `-D`
+tokens of `cflags` ([verification order](#verification-order), step 7), and
+the archive digest must match. `browsertarget.build` appends the record's
+defines to the descriptor's compile prefix, and the validator requires each of
+them there, so generated C, `--c-source` objects, C probes, and FFI
+preprocessing compile against the same limit as `liblua.a` (`titanc -v` shows
+the define on every browser compile). Titan does not hard-code the value: the
+fork commit that the `lua-5.5.1` gitlink names, recorded as `fork_revision`,
+does, and `make lua-browser` rebuilds an installation whose record names
+another commit.
+
+### Choosing 100
+
+The value had to be greater than 10 (otherwise `LUAI_MAXCCALLS / 10 * 11` is 0
+and every overflow escalates to error-in-error-handling), at least 20 in
+practice so overflow handling and the two reserved finalizer slots stay
+usable, within 16 bits, and at most half the lowest engine ceiling measured in
+counts on any engine and either profile (both profiles were measured on all
+four engines; see [Measurements](#measurements) and the table below): the
+margin rule #330 used for its headroom row. Each construct costs exactly one
+count per level wherever it was
+measured (mixed recursion on all four engines in both assertion modes, every
+construct on Node, and `pcall`, `coroutine.resume`, and mixed recursion in both
+profiles), so levels and counts differ only by the starting count (2 in the
+mixed fixture, 3 in the construct probe).
+
+The lowest ceiling is 204 counts (201 levels): nested `pcall` and nested
+`coroutine.resume` on V8 (Node and Chromium), validation, assertions 2. Half of
+it is 102, and the maintainer chose 100 (D33). No construct can then reach
+more than 100 counts, against an engine ceiling of 204, a 2.04× margin; the
+fork's comment quotes 2.08×, 204 against the 98 counts at which the mixed
+fixture trips. At
+Lua's default 200, the same `pcall` chain tripped at 195 levels (198 counts),
+a 1.03× margin, and mixed recursion passed 195 levels and tripped at 196 on
+all four engines in both assertion modes, as a catchable error.
+
+Validation ceilings with Lua's limit out of the way (deepest passing level;
+`-DLUAI_MAXCCALLS=60000`):
+
+| Engine | Assertions | Mixed Lua/Titan | Nested `pcall` | Nested `coroutine.resume` |
+| --- | ---: | ---: | ---: | ---: |
+| Node 24.19.0 | 2 | 318 | 201 | 201 |
+| Node 24.19.0 | 0 | 319 | 204 | 204 |
+| Chromium 156.0.8078.79 | 2 | 320 | 201 | 201 |
+| Chromium 156.0.8078.79 | 0 | 321 | — | — |
+| Firefox 142.0.1 | 2 | 572 | 385 | 393 |
+| Firefox 142.0.1 | 0 | 574 | — | — |
+| WebKit 26.0 | 2 | 479 (contiguous; 480 fails, 1,024 passed once) | 639 | 831 |
+| WebKit 26.0 | 0 | 1,074 | — | — |
+
+V8 fails with `RangeError: Maximum call stack size exceeded`, Firefox with
+`InternalError: too much recursion`, and WebKit with `RangeError`. On Firefox
+the mixed fixture fails its own assertions first: at 573 and 574 levels at
+assertions 2 and at 575 and 576 at assertions 0, each recorded only as a
+failed case, before the engine's `InternalError` at 576 (assertions 2) and 640
+(assertions 0). The production ceilings, higher
+on every engine, are in [Measurements](#measurements).
+
+### Engine stack per construct
+
+Node, validation, assertions 2. The slope between the default stack (984 KB)
+and `--stack-size=256` gives the bytes per level, which is also the bytes per
+count; for mixed recursion it comes from the 256 KB and 512 KB points:
+
+| Construct | Ceiling at 984 KB | Ceiling at 256 KB | Bytes per count |
+| --- | ---: | ---: | ---: |
+| Parser: nested parenthesized expressions | 1,784 | 433 | 552 |
+| Parser: nested table constructors | 254 | 254 | — (a parser limit binds first: depth 255 is a syntax error) |
+| Parser: nested function bodies | 431 | 104 | 2,280 |
+| Nested `pcall` | 201 | 49 | 4,904 |
+| `__index` function chain | 405 | 98 | 2,428 |
+| `string.gsub` with a recursing replacement | 331 | 80 | 2,970 |
+| Nested `coroutine.resume` | 201 | 49 | 4,904 |
+| `table.sort` with a recursing comparator | 295 | 71 | 3,328 |
+| `tostring` with a recursing `__tostring` | 328 | 79 | 2,994 |
+| Mixed Lua/Titan recursion | 318 | 63 | 2,913 |
+
+For mixed recursion the 256 KB, 512 KB, and 984 KB points pass 63, 153, and 318
+levels: 2,913 bytes per level below 512 KB and 2,929 above it, with an
+intercept of about 78.6 KB.
+
+**Why a protected call costs more.** One mixed level, captured from
+JavaScript at depth 1 (youngest first), is `luaD_callnoyield`,
+`luaV_execute`, `luaD_precall`, the Titan entry wrapper
+(`..._titanentry_lua`), two Titan closures around `mixed_recurse`, and
+`dynCall_viii` in WebAssembly, then `__asyncify_wrapper_2521`, `outer`, the
+Asyncify instrumentation at `runtime.mjs:541`, `invoke_viii`, and the import
+thunk in JavaScript. One `pcall` level, captured at depth 6, is `luaD_pcall`,
+`lua_pcallk`, `luaB_pcall`, `luaD_pretailcall`, `luaV_execute`,
+`luaD_callnoyield`, `f_call`, `dynCall_vii`, `__asyncify_wrapper_2538`,
+`outer`, `runtime.mjs:541`, `invoke_vii`, the import thunk, and
+`luaD_rawrunprotected`. Both levels leave WebAssembly through an `invoke_*`
+import and re-enter it through `dynCall_*` under Asyncify's wrapper; for
+`pcall` and `coroutine.resume` that trampoline is Emscripten's SjLj lowering
+of the protected call in `luaD_rawrunprotected`, which runs Lua's `setjmp`.
+The two levels differ in their WebAssembly frames, and the protected-call
+level's frames cost 4,904 − 2,913 ≈ 2 KB more per count. The trampoline's
+JavaScript half cannot be removed while
+Titan closures may suspend (`ASYNCIFY_IGNORE_INDIRECT` would be unsound).
+
+Two validation levers were measured and not adopted: adding `--coalesce-locals`
+after `--asyncify` raised the Node mixed ceiling from 318 to 334, removing
+`luaD_callnoyield` from Asyncify (`-sASYNCIFY_REMOVE`) to 324, and both to 339
+(+6.6%), at no extra link time; `--simplify-locals-nonesting` and
+`--merge-locals` changed nothing. These levers were measured only in
+validation. The only post-Asyncify measurement in production removed D18's
+pair: without it the `-O3` mixed ceiling stays at or above 1,200 levels, the
+`.wasm` is 14 KB smaller, the map 33 KB larger, and the maximum 102 locals
+instead of 100 (D34, [why the cleanup is
+load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)).
+
+### The regression
+
+`spec/fixtures/browser_trace/trace_cases/limits.titan` holds three rows:
+
+* `test_mixed_recursion_headroom` recurses 90 mixed levels, below the 95
+  (`LUAI_MAXCCALLS - 5`) that this fixture's accounting leaves room for, and
+  must keep at most 91 `mixed_recurse` frames with at most one truncation
+  marker.
+* `test_mixed_recursion_overflow` and `test_pcall_recursion_overflow` recurse
+  toward a bound of 150, above the limit and below every engine ceiling,
+  through `@trace-shape.lua` and through `@trace-pcall.lua`, a Lua chain whose
+  only C boundary is `pcall`, so it costs one count per level (it passes 96
+  levels and trips at 97 on Node). Each must catch exactly `C stack overflow`
+  with a real capture and return normally. A missing limit reaches the base
+  case's `expected C stack overflow` and fails the assertion instead of
+  crashing the engine, which a `-DLUAI_MAXCCALLS=60000` install confirms.
+
+All three pass on Node, Chromium, Firefox, and WebKit, at assertions 2 and 0,
+under both profiles. The loader still reports a real engine failure with its
+`cause` ([Settlement](#the-loader)); the C-call limit only keeps Lua's
+recursion from reaching one.
+
+### Direction: JSPI
+
+WebAssembly JavaScript Promise Integration (stack switching at link) is the
+recorded long-term direction. It would remove Asyncify, and with it most of
+the per-level engine-stack cost. It depends on engine support (WebKit's is
+pending) and is a separate design; #343 does not adopt it.
 
 ## Completion and output channels
 
@@ -1688,8 +2224,11 @@ The guarded identities are read with static property accesses,
 minification rewrites static accesses but not a dynamic `exports[name]`
 lookup, so the guard survives minified images. The pinned Emscripten runs that
 minification (`will_metadce`) only at `-O3` or a shrink level (`-Os`, `-Oz`),
-not at the profile's `-O2`; a dedicated harness image linked with
-`--ldflag=-Os` proves the minified case.
+and only with assertions off. A production image linked with assertions off is
+therefore minified (its exports become short names such as `la` and `ma`), and
+the trace gate's production rows at assertions 0 run on such images.
+Validation's `-O1` images are not minified; a dedicated harness image linked
+with `--ldflag=-Os` proves the guard's minified case.
 
 A refused external call through the loader rejects with `TitanBrowserError`
 `TITAN_BROWSER_REENTRY`, `browser instance is suspended; reentry is not
@@ -1746,10 +2285,10 @@ instead, and the first failure wins:
   (`TITAN_BROWSER_PROTOCOL`) when `ccall` has fulfilled (`callFulfilled`),
   nothing is pending, and no completion arrived — checking `callFulfilled`
   ensures that an earlier queued safe point never masks a synchronous throw or
-  rejected `ccall` (such as an engine `RangeError: Maximum call stack size
-  exceeded` when deep mixed Lua/Titan recursion exhausts the engine's JS stack
-  before Lua's `LUAI_MAXCCALLS`), which instead rejects with the engine error
-  preserved as `cause`;
+  rejected `ccall`, such as an engine `RangeError: Maximum call stack size
+  exceeded`, which instead rejects with the engine error preserved as `cause`
+  (`spec/browser/runner.test.mjs` injects one; recursion through Lua's C API
+  stops at the [browser C-call limit](#the-browser-c-call-limit) first);
 * `cannot buffer browser <stream>` (`TITAN_BROWSER_PROTOCOL`) when an output
   buffer cannot grow;
 * `TITAN_BROWSER_TRAP` when an original trap was recorded, or a
@@ -2115,14 +2654,25 @@ The size and speed baseline is a measurement, not a gate. It feeds the later
 release-profile and packaging work. `scripts/browser_baseline.lua` builds the
 micro-benchmark program (`spec/fixtures/browser_baseline/`) through the
 `baseline` profile (`entry = "titan"`) and the fork's Lua interpreter (`entry
-= "lua-main"`, built from `lua-5.5.1/src/*.c` with the profile's flags) at
-`-O1` and `-O2`, each with and without Asyncify (the Asyncify-off controls
-create no coroutine of either kind and never suspend), in separate output
-trees, and runs each image three times per engine; every published value below
-is the median of the three raw repeats (`format = "titan-browser-baseline-2"`).
+= "lua-main"`, built from `lua-5.5.1/src/*.c` with the profile's flags and the
+installed record's `lua_defines`, which the cell's receipt records as
+`defines`) at `-O1` and `-O2`, each with and without Asyncify (the
+Asyncify-off controls create no coroutine of either kind and never suspend),
+in separate output trees, and runs each image three times per engine; every
+published value below is the median of the three raw repeats (`format =
+"titan-browser-baseline-2"`). One description of each cell's link options
+(`purpose = "baseline"`, assertions 2, and the cell's optimization, Asyncify
+setting, and entry) feeds the plan, the receipt, and the child build:
+`plan_for` installs it as `driver.browser_link_options` while it builds the
+descriptor and restores the previous value afterwards, so the plan's descriptor
+certifies the same `trace_control` and measurement level as the child
+`titanc`, which receives the same options through its preamble.
 Toolchain: Emscripten 6.0.13, Node 24.19.0, Google Chrome for Testing
 156.0.8078.80 headless shell, fork commit `4f740a4b`, all with
 `-sFORCE_FILESYSTEM=1`.
+
+The micro-benchmarks were re-run for #343 against the build profiles; those
+results are in [Build profiles](#measurements). The tables below are #329's.
 
 | Titan cell | `.wasm` bytes | `.mjs` bytes | Node instantiate / run (ms) | Chromium instantiate / run (ms) | Suspension, Node / Chromium (ms) |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -2215,9 +2765,13 @@ hosts`).
   `incremental.native_input_kind`.
 * `spec/browser_target_spec.lua` — the descriptor with hand-made records and
   fake tools: freezing, every record and tool diagnostic, the three target
-  defines, flags, paths, include-root resolution, the probe-cache directory,
-  worker import, the compiler-probe feature diagnostic, the browser
-  `--coverage` refusal, and the Windows host scope.
+  defines, flags, the two build profiles (the profile in the identity, the
+  object profile built from the profile, the other profile's flags refused,
+  every owned compile option and `BINARYEN_EXTRA_PASSES` spelling refused
+  naming the profile, exactly one certified harness level), paths,
+  include-root resolution, the probe-cache directory, worker import, the
+  compiler-probe feature diagnostic, the browser `--coverage` refusal, and the
+  Windows host scope.
 * `spec/browser_isolation_spec.lua` — semantic-cache generations and guards,
   the native → browser → native sequence, output markers, toolchain-detail
   hashing, and unchanged native link records.
@@ -2225,14 +2779,22 @@ hosts`).
   validation, archive-only publication with executing validation and its
   failure boundaries, companions, and the process audit
   (`spec/support/browser_process_audit.lua`).
-* `spec/coder/browser_images_spec.lua` — the link profile and its owned
-  options, missing-SDK and `.mjs` diagnostics, program and test images with
+* `spec/coder/browser_images_spec.lua` — the link profile per build profile
+  and purpose (production program levels without frame flags, production test
+  images with frame flags and both Binaryen skips, test owners' frame flags,
+  validation and harness purposes unchanged), the image-derived link purpose
+  and its refusals of a contrary or missing purpose, the owned options named
+  by profile, missing-SDK and `.mjs` diagnostics, program and test images with
   statuses, binary arguments, uncaught reports, protected initialization and
   allocation failures, the libc drain, the stdio-only filesystem regression,
   dynamic-loading guards, three-file preflight reservation and repeated-link
   image identity, contributor-prologue `.wasm.map` attribution, image
   inventories, measurement optimization, and the native libbacktrace and
-  fallback trace invariants.
+  fallback trace invariants. Its production-only pin (`keeps frame flags on
+  test owners only and links a production test image as a test image`) is
+  pending in a validation installation and runs in the production Chromium
+  [`browser-playwright`](continuous-integration.md#browser-playwright-job)
+  cell.
 * `spec/coder/browser_incremental_spec.lua` — browser object and three-file
   link certificates, shared-asset and `.wasm.map`-change invalidation,
   three-predecessor rollback across backup/publication/certificate boundaries,
@@ -2295,23 +2857,33 @@ hosts`).
 * `spec/browser/build-trace.lua`, `spec/browser/trace.test.mjs`,
   `spec/browser/playwright-run.mjs`, `spec/browser/playwright-runner.test.mjs`,
   and `spec/fixtures/browser_trace/` — the
-  staged multi-engine browser trace gate (34 discovered native cases in
+  staged multi-engine browser trace gate (36 discovered native cases in
   `trace_cases` plus `trace_uncaught`, staged into `assertions-2` and
-  `assertions-0` with 72 positive `cases` rows and 8 intentional
-  `degradedCases` rows in `manifest.json`) covering direct and `.browser.titan`
+  `assertions-0` with 76 positive `cases` rows and 8 intentional
+  `degradedCases` rows in `manifest.json`, which also records the installation
+  `profile`) covering direct and `.browser.titan`
   contributor locations, deep recursion and engine truncation, mixed
-  `Lua -> Titan -> Lua -> Titan` merge order, all wrapper families, fresh raise
-  versus bare rethrow, coroutine append across yield/resume, adjacent unmapped
-  helpers, immediate literal calls, held-storage nested capture, merge
+  `Lua -> Titan -> Lua -> Titan` merge order, mixed and `pcall` recursion past
+  the [browser C-call limit](#the-regression), all wrapper families, fresh
+  raise versus bare rethrow, coroutine append across yield/resume, adjacent
+  unmapped helpers, immediate literal calls, held-storage nested capture, merge
   `LUA_ERRMEM` recovery, and WebKit reduced-fidelity rendering across Node,
-  Chromium, Firefox, and WebKit.
+  Chromium, Firefox, and WebKit. `build-trace.lua` links the test image with
+  the `test` purpose and the uncaught image with `program`; every row is exact
+  except a production program row, which follows the [ordered-subsequence
+  contract](#test-images).
 
 The Busted files need emcc 6.0.13 and the installed browser Lua; the image,
 protocol, SDK, gate, fixture, budget, and minicoro files also need Node 24, a
 headless Chromium, and an installed browser SDK, which
 `spec/support/browser_toolchain.lua` discovers through `require({node=true,
-chrome=true, sdk=true})` and the runner's `--probe`. Each real case is pending
-when a capability is absent; `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` turns absence
-into a failure, and a present but malformed SDK or probe result always fails.
+chrome=true, sdk=true})` and the runner's `--probe`. Its
+`lua_defines(info)` reads the installed record's `lua_defines`, so specs that
+compile C against the browser Lua archive (`spec/wasm_toolchain_spec.lua` and
+`spec/coder/browser_toolchain_spec.lua`) use exactly the archive's macros,
+including `LUAI_MAXCCALLS`; a record without them fails. Each real case is
+pending when a capability is absent; `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` turns
+absence into a failure, and a present but malformed SDK or probe result always
+fails.
 The Linux CI job that runs them is described in
 [Continuous integration](continuous-integration.md#browser-toolchain-job).

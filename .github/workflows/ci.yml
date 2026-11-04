@@ -570,6 +570,9 @@ jobs:
             output="$root/assertions-$assertions"
             mkdir -p "$output"
             preamble="package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='program',assertions=$assertions}"
+            # A --test build is a test image and must link with the test
+            # profile, never the program profile.
+            test_preamble="package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='test',assertions=$assertions}"
             for module in loader_app fidelity; do
               TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e "$preamble" \
                 "$GITHUB_WORKSPACE/titanc" -q --target browser --no-uv-bootstrap \
@@ -577,7 +580,7 @@ jobs:
                 --exe "$output/$module.mjs" \
                 --c-source spec/fixtures/browser_loader/loader.c "$module"
             done
-            TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e "$preamble" \
+            TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e "$test_preamble" \
               "$GITHUB_WORKSPACE/titanc" -q --target browser --test --no-uv-bootstrap \
               --tree spec/fixtures/browser_loader -o "$output" \
               --exe "$output/loader_names.mjs" loader_names
@@ -663,6 +666,12 @@ jobs:
             -gsource-map -g2 -sMODULARIZE=1 -sEXPORT_ES6=1
             -sENVIRONMENT=web,node -sALLOW_MEMORY_GROWTH=1 --no-entry
             --js-library titan-runtime/browser/titan-browser-trace.js)
+          # The filter image compiles against the installed Lua archive, so its
+          # macros are the installed record's, never a local list: the fork
+          # changes them (LUAI_MAXCCALLS) and a mismatch is a different
+          # configuration than the archive.
+          lua_defines="$(sed -n 's/^lua_defines=//p' "$PREFIX/lib/browser/liblua-config.txt")"
+          test -n "$lua_defines"
           for assertions in 2 0; do
             emcc "${trace_flags[@]}" -sASSERTIONS="$assertions" \
               -sEXPORTED_FUNCTIONS='["_trace_capture_once","_titan_browser_trace_identity"]' \
@@ -671,7 +680,7 @@ jobs:
             emcc "${trace_flags[@]}" -sASSERTIONS="$assertions" \
               -Wall -Wno-unused-function -DTITAN_TARGET_BROWSER=1 \
               -DTITAN_COROUTINE_STACK_SIZE=262144 -DMCO_ASYNCFY_STACK_SIZE=65536 \
-              -DLUA_USE_BROWSER -DLUA_USE_POSIX -sSUPPORT_LONGJMP=emscripten \
+              $lua_defines -sSUPPORT_LONGJMP=emscripten \
               -sEXPORTED_FUNCTIONS='["_trace_filter_case","_trace_filter_status","_titan_browser_trace_identity"]' \
               -sEXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
               -I"$PREFIX/lib/browser/include" -Ititan-runtime -I"$PREFIX/include" \
@@ -917,6 +926,54 @@ jobs:
             "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-degraded.log"
 
+      # A validation install cannot stand in for a production one: the
+      # descriptor and SDK identity would disagree. This cell already owns a
+      # production prefix, so the profile-dependent pins run here and nowhere
+      # else, and are `pending` in every validation run by design.
+      - name: Run the production-only browser pins
+        if: matrix.profile == 'production' && matrix.engine == 'chromium'
+        env:
+          TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
+          TITAN_PROBE_CACHE_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua \
+            --filter="keeps frame flags on test owners" \
+            2>&1 | tee "$RUNNER_TEMP/browser-production-pins.log"
+
+      # Node is the binding engine for the C-call limit, and the other Node
+      # trace gate runs in a validation installation only.
+      - name: Run the production trace gate on Node
+        if: matrix.profile == 'production' && matrix.engine == 'chromium'
+        run: |
+          set -euo pipefail
+          runner="$PREFIX/lib/titan-browser/0.6/titan-browser-run"
+          "$runner" --engine node --timeout 300000 --grace 2000 \
+            --root "$TITAN_TRACE_OUTPUT" --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-trace.log"
+          TITAN_TRACE_OUTPUT="$TITAN_TRACE_OUTPUT" TITAN_TRACE_RUNNER="$runner" \
+            node --input-type=module <<'JS' \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-policy.log"
+          import {readFileSync} from 'node:fs';
+          import {spawnSync} from 'node:child_process';
+          import {resolve} from 'node:path';
+          const root = process.env.TITAN_TRACE_OUTPUT;
+          const manifest = JSON.parse(readFileSync(resolve(root, 'manifest.json'), 'utf8'));
+          if (!manifest.degradedCases?.length) throw new Error('missing degraded trace cases');
+          for (const row of manifest.degradedCases) {
+            const result = spawnSync(process.env.TITAN_TRACE_RUNNER,
+              ['--engine', 'node', '--timeout', '60000', '--root', root,
+               resolve(root, row.image)], {stdio: 'inherit', timeout: 90000});
+            if (result.error || result.status !== 75)
+              throw new Error(`${row.name}: degraded trace was not a harness failure (${result.status})`);
+          }
+          JS
+          "$runner" --engine node --timeout 300000 --grace 2000 \
+            --allow-degraded-trace --root "$TITAN_TRACE_OUTPUT" \
+            --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-degraded.log"
+
       - name: Upload Playwright trace receipts
         if: always()
         uses: actions/upload-artifact@v7
@@ -924,6 +981,7 @@ jobs:
           name: browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}
           path: |
             ${{ runner.temp }}/browser-playwright-*.log
+            ${{ runner.temp }}/browser-production-pins.log
             ${{ env.TITAN_TRACE_OUTPUT }}
           if-no-files-found: error
           retention-days: 7

@@ -268,11 +268,14 @@ every `EMSDK_*` variable it does not set itself, and the job sets
 10. **Runner images.** The installed `titanc` builds `runner_image` (a
     `--test` image) and `runner_status` (a program) from `spec/browser` into
     `out/browser/runner` and asserts `.mjs`, `.wasm`, and `.wasm.map` for each.
-11. **Loader images.** For assertions 2 and 0, the job selects the `program`
-    profile through `driver.browser_link_options` and builds `loader_app` and
-    `fidelity` (programs with `--c-source spec/fixtures/browser_loader/loader.c`)
-    and `loader_names` (a `--test` image) into `out/browser/loader`, asserting
-    `.mjs`, `.wasm`, and `.wasm.map` for each. It also
+11. **Loader images.** For assertions 2 and 0, the job sets
+    `driver.browser_link_options` and builds `loader_app` and `fidelity`
+    (programs with `--c-source spec/fixtures/browser_loader/loader.c`) with the
+    `program` purpose and `loader_names` (a `--test` image) with the `test`
+    purpose, because a contrary purpose is refused
+    ([internal selection](browser-target.md#the-link-profile)), into
+    `out/browser/loader`, asserting `.mjs`, `.wasm`, and `.wasm.map` for each.
+    It also
     builds one `fidelity` image with the `baseline` profile at `O2` and
     assertions off, plus the harness-only `--ldflag=-Os` (the profile itself
     supplies the debug flags), because Emscripten 6.0.13 minifies export names
@@ -292,10 +295,12 @@ every `EMSDK_*` variable it does not set itself, and the job sets
 15. **Trace adapter and supervisor units.** For `assertions` in `2` and `0`,
     `emcc` compiles `spec/fixtures/browser_trace_adapter/lifecycle.c` and
     `spec/fixtures/browser_trace_adapter/filter.c` (with `titan-runtime/titan.c`
-    and `$PREFIX/lib/browser/liblua.a`) into `out/browser/trace-adapter/`, and
-    `node --test spec/browser/trace-adapter.test.mjs
-    spec/browser/playwright-runner.test.mjs` runs with both
-    `TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE` and
+    and `$PREFIX/lib/browser/liblua.a`) into `out/browser/trace-adapter/`. The
+    `filter.c` image takes its Lua macros from the installed record's
+    `lua_defines` (an empty value fails the step), never from a local list,
+    because the fork changes them (`LUAI_MAXCCALLS`). `node --test
+    spec/browser/trace-adapter.test.mjs spec/browser/playwright-runner.test.mjs`
+    then runs with both `TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE` and
     `TITAN_BROWSER_TRACE_FILTER_IMAGE` set (so no adapter prerequisite skips
     occur), with output copied to `$RUNNER_TEMP/browser-trace-units.log`.
 16. **Node trace gate.** `lua -E spec/browser/build-trace.lua
@@ -369,7 +374,10 @@ runner with a 60-minute timeout after `build-compiler`:
    pin/rethrow/clear, coroutine-append, Firefox `async*` cutoff and 128-frame
    ceiling, held-storage nested capture, and merge-OOM guard-recovery checks on
    `chromium` and `firefox`, and the reduced-fidelity no-line / 100-frame
-   counterpart on `webkit`.
+   counterpart on `webkit`. The gate reads the installation profile from
+   `manifest.json`: every row is exact except a `production` cell's uncaught
+   program rows, which use the [ordered-subsequence
+   contract](browser-target.md#test-images) for inlined frames.
 6. **Degraded-mode policy and fallback checks.** Every row in
    `manifest.degradedCases` is first run with `playwright-run.mjs ... --image
    <row.image>` without `--allow-degraded-trace` and must fail with exit status
@@ -378,8 +386,29 @@ runner with a 60-minute timeout after `build-compiler`:
    -- --degraded` (`$RUNNER_TEMP/browser-playwright-degraded.log`) verifies the
    single load warning, the `(native Titan frames unavailable: trace map not
    loaded)` marker, and original-error preservation.
-7. **Receipts.** On `always()`, `actions/upload-artifact` uploads
-   `${{ runner.temp }}/browser-playwright-*.log` and
+7. **Production-only pins (`production` × `chromium` only).** With
+   `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` and `TITAN_PROBE_CACHE_DISABLE=1`,
+   `"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua
+   --filter="keeps frame flags on test owners"` runs the pin that observes the
+   production object and link profile from a real production installation
+   (`$RUNNER_TEMP/browser-production-pins.log`). A validation installation
+   cannot stand in for it, so it is pending in every validation run, including
+   the `browser-toolchain` job.
+8. **Production trace gate on Node (same cell).** Node is the binding engine
+   for the [browser C-call limit](browser-target.md#the-browser-c-call-limit),
+   and the `browser-toolchain` job's Node gate runs a validation installation
+   only. The cell's installed `titan-browser-run --engine node --timeout 300000
+   --grace 2000 --root "$TITAN_TRACE_OUTPUT" --js-test
+   "$TITAN_TRACE_OUTPUT/trace.test.mjs"` therefore runs the positive gate
+   against the production images
+   (`$RUNNER_TEMP/browser-playwright-node-trace.log`). A policy check runs
+   every `manifest.degradedCases` image without `--allow-degraded-trace` and
+   requires exit status 75 (`$RUNNER_TEMP/browser-playwright-node-policy.log`),
+   and the `--allow-degraded-trace ... -- --degraded` run covers the degraded
+   rows (`$RUNNER_TEMP/browser-playwright-node-degraded.log`).
+9. **Receipts.** On `always()`, `actions/upload-artifact` uploads
+   `${{ runner.temp }}/browser-playwright-*.log`,
+   `${{ runner.temp }}/browser-production-pins.log`, and
    `${{ env.TITAN_TRACE_OUTPUT }}` as
    `browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}` for seven
    days.

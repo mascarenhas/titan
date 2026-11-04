@@ -732,6 +732,12 @@ function driver._finish_target_initialization(context)
             })
             if not descriptor then return nil, err end
             if driver.browser_link_options then
+                -- The image kind is not known yet (the driver learns it when
+                -- it links), so only the options' shape is checked here; the
+                -- kind check happens in browser_link_plan.
+                if driver.browser_link_options.purpose == nil then
+                    return nil, "browser link profile options require a purpose"
+                end
                 local plan, profile_error = driver.browserlink.profile(descriptor, driver.browser_link_options)
                 if not plan then return nil, profile_error end
             end
@@ -758,10 +764,49 @@ function driver.context_target_descriptor(context)
     return context.target_descriptor
 end
 
+-- The link purpose of the image this context is building. A `--test` build
+-- links a test image, and every other program link is a program image; harness
+-- purposes (protocol, gate, minicoro, budget, baseline) are not image kinds.
+function driver.browser_link_kind(context)
+    return context and context.link_kind == "test" and "test" or "program"
+end
+
+-- Certify and link an image under its own kind's profile. A requested purpose
+-- may only be a harness purpose or agree with the link kind: a test image that
+-- was certified or linked as a program image would lose the frame-preserving
+-- profile silently, so a disagreement is an error, not an override.
+function driver.browser_link_purpose(context, purpose)
+    if purpose == nil then return driver.browser_link_kind(context) end
+    if (purpose == "program" or purpose == "test") and context and
+            context.link_kind ~= nil and purpose ~= driver.browser_link_kind(context) then
+        return nil, "browser link purpose " .. string.format("%q", purpose) ..
+            " does not match this " .. driver.browser_link_kind(context) .. " image"
+    end
+    return purpose
+end
+
 function driver.browser_link_plan(context, purpose)
     local descriptor, err = driver.context_target_descriptor(context)
     if not descriptor then return nil, err end
-    local options = driver.browser_link_options or { purpose = purpose or "program", assertions = 2 }
+    local options = driver.browser_link_options
+    -- The requested purpose and the preset are both checked, because the
+    -- preset is what the link and its certificate consume: a caller passing
+    -- the image kind must not hide a contrary preset purpose.
+    local resolved
+    resolved, err = driver.browser_link_purpose(context, purpose)
+    if not resolved then return nil, err end
+    if options == nil then
+        options = { purpose = resolved, assertions = 2 }
+    elseif options.purpose == nil then
+        -- A harness that presets link options must say which profile it wants;
+        -- inheriting the image kind would silently give a measurement build a
+        -- program or test image's flags.
+        return nil, "browser link profile options require a purpose"
+    else
+        local preset
+        preset, err = driver.browser_link_purpose(context, options.purpose)
+        if not preset then return nil, err end
+    end
     return driver.browserlink.profile(descriptor, options)
 end
 
@@ -4794,12 +4839,26 @@ end
 -- Native flags a test owner's generated C is compiled with. Compilation and
 -- certification share this decision: an object compiled without them can
 -- never satisfy a `--test` build, whose runner relies on unoptimized sibling
--- calls for case locations.
-function driver.test_owner_flags(test_build, test_functions)
+-- calls for case locations. A browser test image under the production profile
+-- also turns inlining off (D25): its objects would otherwise lose the physical
+-- frames the exact trace gate asserts, which is the browser form of native
+-- `--test`'s frame preservation.
+function driver.test_owner_flags(test_build, test_functions, context)
     if test_build and type(test_functions) == "table" and
        #test_functions > 0 then
-        return { table.unpack(
-            require("titan-compiler.test_runner").TEST_COMPILE_FLAGS) }
+        local flags = {}
+        if context and context.target == "browser" then
+            -- The descriptor owns the profile, including in a build worker
+            -- that inherited it (D26).
+            local profile = context.target_descriptor and
+                context.target_descriptor.build_profile or driver.BUILD_PROFILE
+            if profile == "production" then flags[1] = "-fno-inline" end
+        end
+        for _, flag in ipairs(
+            require("titan-compiler.test_runner").TEST_COMPILE_FLAGS) do
+            flags[#flags + 1] = flag
+        end
+        return flags
     end
     return {}
 end
@@ -8907,7 +8966,7 @@ local function prepare_compile(
     local test_functions =
         require("titan-compiler.test_runner").function_names(ast)
     local test_flags = driver.test_owner_flags(
-        options and options.test, test_functions)
+        options and options.test, test_functions, context)
     local imports, deps, providers = {}, {}, {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelImport" then
@@ -13475,7 +13534,8 @@ function driver.run_standalone_archive_probe(
         -- fixed-profile protocol check. Validate them before making a copy.
         local extra_flags = driver.link_extra_flags()
         local valid
-        valid, err = driver.browserlink.validate_extras(extra_flags, driver.browser_link_options)
+        valid, err = driver.browserlink.validate_extras(extra_flags,
+            driver.browser_link_options, context.target_descriptor.build_profile)
         if not valid then return nil, err end
         local protocol_flags = {}
         local trace_option = require("titan-compiler.browsertarget").trace_option
@@ -13721,19 +13781,28 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local assets, err = driver.require_browser_sdk(context)
     if not assets then return nil, err end
     local plan
+    -- A `--test` image is a distinguishable link purpose: it keeps the frames
+    -- its exact trace gate asserts, where a program accepts inlining (D25).
+    local purpose
+    purpose, err = driver.browser_link_purpose(context, options.purpose)
+    if not purpose then return nil, err end
     if options.profile then
+        local agreed
+        agreed, err = driver.browser_link_purpose(context, options.profile.purpose)
+        if not agreed then return nil, err end
         plan, err = driver.browserlink.profile(context.target_descriptor, options.profile)
     else
-        plan, err = driver.browser_link_plan(context, options.purpose or "program")
+        plan, err = driver.browser_link_plan(context, purpose)
     end
     if not plan then return nil, err end
+    local build_profile = context.target_descriptor.build_profile
     local extra_flags = options.link_extra_flags or driver.link_extra_flags()
     local valid
     valid, err = driver.browserlink.validate_extras(extra_flags,
-        options.profile or driver.browser_link_options)
+        options.profile or driver.browser_link_options, build_profile)
     if not valid then return nil, err end
     valid, err = driver.browserlink.validate_extras(options.final_link_flags,
-        options.profile or driver.browser_link_options)
+        options.profile or driver.browser_link_options, build_profile)
     if not valid then return nil, err end
     local library_flags = { table.unpack(extra_flags) }
     append_argv(library_flags, options.final_link_flags)

@@ -185,6 +185,10 @@ Only translation units that own a discovered test receive
 `-fno-optimize-sibling-calls`, preserving useful native frames for
 [`location`](#location-and-failure-traces). Production source dependencies,
 `titan.test`, the generated runner, and the entrypoint retain normal flags.
+A browser test image built under the `production` profile also compiles those
+translation units with `-fno-inline` and links without the WebAssembly
+optimizer's inlining and identical-function merging
+([browser build profiles](browser-target.md#build-profiles)).
 
 ## The `titan.test` API
 

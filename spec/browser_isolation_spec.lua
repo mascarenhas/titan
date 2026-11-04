@@ -22,11 +22,9 @@ local function fresh_driver()
 end
 
 local function descriptor(root, changed)
-    local data = fixtures.descriptor(root)
-    if changed then
-        data.compile_flags[2] = "-O0"
-        fixtures.identify(data)
-    end
+    -- The build profile is descriptor data: switching it is a real identity
+    -- change, not a mutated flag list the validator would now refuse.
+    local data = fixtures.descriptor(root, changed and { build_profile = "production" } or nil)
     return assert(browser_target.import(data))
 end
 
