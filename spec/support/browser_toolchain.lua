@@ -128,6 +128,29 @@ function M.lua_defines(info)
     return defines
 end
 
+-- A compile command that names the record's browser Lua macros. They are
+-- spliced in by appending, never by `table.unpack` in a non-final position: a
+-- table constructor keeps only the first result of a non-final `table.unpack`,
+-- which silently drops all but one define. Every caller gets the same
+-- self-check, so a recurrence fails instead of compiling a different
+-- configuration than the archive it links against.
+function M.with_lua_defines(info, before, after)
+    local argv = {}
+    for _, flag in ipairs(before or {}) do argv[#argv + 1] = flag end
+    local defines = M.lua_defines(info)
+    for _, define in ipairs(defines) do argv[#argv + 1] = define end
+    for _, flag in ipairs(after or {}) do argv[#argv + 1] = flag end
+    for _, define in ipairs(defines) do
+        local seen = 0
+        for _, flag in ipairs(argv) do
+            if flag == define then seen = seen + 1 end
+        end
+        assert(seen == 1, "browser compile command must carry record define " ..
+            define .. " exactly once: " .. table.concat(argv, " "))
+    end
+    return argv
+end
+
 -- ROOT is the installed Titan tree: `ROCKS_TREE` when it is set, else PREFIX.
 local function install_root(prefix)
     local rocks_tree = os.getenv("ROCKS_TREE")
