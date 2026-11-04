@@ -2303,11 +2303,11 @@ local function parse_archive(bytes, origin, options, context)
         if not record.index_kind then
             local member_origin = archive_member_origin(origin, record)
             local member_target = options.target or
-                (members[1] and members[1].fingerprint.format == "wasm"
+                (not options.independent_members and members[1] and members[1].fingerprint.format == "wasm"
                     and members[1].fingerprint or nil)
             local object = classify_object_internal(
                 record.bytes, member_origin, member_target, options)
-            if not options.target and #members > 0 and
+            if not options.independent_members and not options.target and #members > 0 and
                object.format == "wasm" and
                members[1].fingerprint.format ~= "wasm" then
                 check_target_or_fail(
