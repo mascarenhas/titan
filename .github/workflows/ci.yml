@@ -743,6 +743,7 @@ jobs:
           path: |
             ${{ runner.temp }}/browser-*.log
             out/browser
+            out/browser-stdlib/
           if-no-files-found: warn
           retention-days: 7
 
