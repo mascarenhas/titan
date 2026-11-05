@@ -280,6 +280,8 @@ describe("incremental and separate compilation (CLI)", function()
         -- Owned-root relocation needs physical roots, not a temporary-directory
         -- alias such as Darwin's /tmp. Keep intentional symlinks in each case.
         workspace = assert(strategy:realpath(workspace))
+        -- Physical Windows paths still need the fixture's compiler-facing spelling.
+        if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
     end)
 
     after_each(function()

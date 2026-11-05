@@ -31,7 +31,7 @@ local function context(files)
     local io = { reads = {}, commands = {}, writes = {}, aliases = {}, clock = 1 }
     function io:cwd() return root end
     function io:realpath(path)
-        path = paths.to_slash(path)
+        if platform.windows then path = paths.to_slash(path) end
         path = self.aliases[path] or path
         if files[path] ~= nil or dirs[path] then return path end
         return nil, "missing " .. path
