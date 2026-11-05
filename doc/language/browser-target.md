@@ -1095,6 +1095,11 @@ engine invocation retires before its native allocation can be freed or reused.
 Freed linear blocks are reusable, but grown WebAssembly memory never shrinks
 back to the host.
 
+The boundary-search harness first checks a successful lowest sample and a
+failing ceiling, then locates adjacent samples at the declared step size.
+Those search ceilings bound validation work; they are not additional program
+limits or portable recursion-depth guarantees.
+
 ### Lua's C-call limit
 
 Lua counts nested calls through its C API and stops them with its ordinary
