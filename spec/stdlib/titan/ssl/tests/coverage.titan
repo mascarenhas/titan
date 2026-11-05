@@ -421,8 +421,10 @@ function test_ssl_coverage_rejected_sni_retires_adopted_transport(
     end)
     task_support.cleanup_task(peer, "TLS rejected-SNI peer")
     -- OpenSSL rejects an SNI host name longer than its 255-byte limit.
+    -- Keep labels short: OpenSSL 4 rejects a 256-byte label during peer-name
+    -- verification setup, before SNI configuration can reach that limit.
     -- Adoption has already transferred TCP ownership when configuration fails.
-    local host = string.rep("a", 256)
+    local host = string.rep("a.", 127) .. "aa"
     expect_ssl_failure(function ()
       ssl.client(net.connect("127.0.0.1", port), host, support.TRUST_ROOT)
     end, "ssl.connect.sni", "OPENSSL")
