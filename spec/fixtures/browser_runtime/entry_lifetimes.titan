@@ -1,7 +1,9 @@
 local coroutine = import "coroutine"
 local gc = import "gc"
 local test = import "test"
+local browser = import "browser"
 foreign import "stdio.h"
+foreign import "gate.h"
 
 local single: coroutine.Coroutine?
 local inner: coroutine.Coroutine?
@@ -77,4 +79,18 @@ function main(_args: {string}): integer
   resume()
   finish()
   return 0
+end
+
+do
+  if ffi.gate_lifetime_is_child(L) == 0 then
+    ffi.gate_test_publish()
+    local publisher = browser.binding("publish")
+    defer publisher:close()
+    browser.call_void(publisher, {browser.Argument.is_bytes("entry_prepare"),
+      browser.Argument.is_callable(browser.callable(function() ffi.gate_lifetime_operation(L, 0) end))})
+    browser.call_void(publisher, {browser.Argument.is_bytes("entry_resume"),
+      browser.Argument.is_callable(browser.callable(function() ffi.gate_lifetime_operation(L, 1) end))})
+    browser.call_void(publisher, {browser.Argument.is_bytes("entry_finish"),
+      browser.Argument.is_callable(browser.callable(function() ffi.gate_lifetime_operation(L, 2) end))})
+  end
 end

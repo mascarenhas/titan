@@ -212,8 +212,11 @@ On macOS, the build may need `dsymutil` output for fully symbolized
 standalone executables; the test suite and CI exercise that path.
 
 For the [browser target](browser-target.md#traces), a linked image traces
-through its `<stem>.wasm.map`, loaded eagerly during module initialization so
-nothing is fetched or awaited when an error is raised. Chromium, Firefox, and
+through its `<stem>.wasm.map`, loaded eagerly during Wasm instantiation before
+Lua initialization, so nothing is fetched or awaited when an error is raised.
+Embeddings may require that map with `create({requireTrace: true})`; the runner
+does so unless degraded mode is explicitly allowed. A required-map failure
+has no Titan trace because Lua has not run. Chromium, Firefox, and
 Node provide the same unified Titan/Lua frame order, selected `.titan`
 filenames, line numbers, display names, and pin/rethrow/append behavior as
 native builds, while WebKit and Safari provide reduced, function-level fidelity

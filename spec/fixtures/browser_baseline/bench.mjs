@@ -15,11 +15,11 @@ export async function run(context) {
   const path = context.args[0];
   context.assert(typeof path === 'string' && path.length > 0,
     'pass one relative image path');
-  const {factory, locateFile} = await context.image(path);
+  const {create, locateFile} = await context.image(path);
   const chunks = [];
   const errors = [];
   const created = now();
-  const instance = context.create(factory, {
+  const instance = create({
     locateFile,
     stdout: chunk => { chunks.push(chunk); },
     stderr: chunk => { errors.push(chunk); },

@@ -3,34 +3,30 @@ export async function run(context) {
   context.assert(context.args.length > 0, 'pass a real entry_gate.mjs image');
   for (const path of context.args) {
     const image = await context.image(path);
-    let module;
-    let bridge;
+    let controls;
     const stdout = [];
     const stderr = [];
-    const instance = context.create(async options => {
-      const attach = options.titanBrowserAttach;
-      options.titanBrowserAttach = state => { bridge = state; attach(state); };
-      module = await image.factory(options);
-      return module;
-    }, {
+    const instance = image.create({
       locateFile: image.locateFile,
+      bindings: {__titanTest(value) { controls = value; }},
       stdout: bytes => { stdout.push(bytes); },
       stderr: bytes => { stderr.push(bytes); },
     });
     try {
       await instance.initialize();
       // Wasm-EH protected calls remain inside the admitted promised entry.
-      context.assert(await module._titan_browser_gate_guarded() === 1,
+      context.assert(await controls.guarded() === 1,
         'fresh guarded SJLJ call was mistaken for external reentry');
       const running = instance.run(['--filter=^entry_gate%.test_08_']);
       await context.tick();
-      context.assert(bridge.owner && !bridge.safe(), 'guard fixture did not retain its logical entry owner');
-      const observed = module._titan_browser_gate_observe();
+      const snapshot = controls.snapshot();
+      context.assert(snapshot.owner && !snapshot.safe, 'guard fixture did not retain its logical entry owner');
+      const observed = controls.observe();
       let direct;
-      try { await module._titan_browser_gate_guarded(); } catch (error) { direct = error; }
+      try { await controls.rawGuarded(); } catch (error) { direct = error; }
       context.assert(direct?.code === 'TITAN_BROWSER_REENTRY',
         'direct guarded export entered an active logical entry');
-      context.assert(module._titan_browser_gate_observe() === observed,
+      context.assert(controls.observe() === observed,
         'guard refusal changed the admitted run');
       let rejected;
       try { await instance.run(); } catch (error) { rejected = error; }
@@ -65,7 +61,7 @@ export async function run(context) {
       context.stdout(new TextEncoder().encode(`loader guard regression: ${path}: ready=1 pending=rejected status=0\n`));
     } finally {
       await instance.dispose();
-      module = bridge = undefined;
+      controls = undefined;
     }
   }
 }

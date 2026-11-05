@@ -1,0 +1,639 @@
+local browser = import "browser"
+local test = import "test"
+local gc = import "gc"
+local reflect = import "reflect"
+local coroutine = import "coroutine"
+local string = import "string"
+local independent = import "browser.independent"
+foreign import "native.h"
+
+local function publish(name: string, callback: value)
+  local target = browser.binding("publish")
+  defer target:close()
+  browser.call_void(target, {browser.Argument.is_bytes(name),
+                            browser.Argument.is_callable(browser.callable(callback))})
+end
+
+local function expect_bridge_error(target_name: string, expected: string)
+  local target = browser.binding(target_name)
+  defer target:close()
+  local caught = false
+  do
+    browser.call_void(target, {})
+  catch
+    caught = true
+    test.assert(error is browser.Error, "host failure did not become browser.Error")
+    local failure: browser.Error = error
+    defer failure:close()
+    test.assert(string.find(failure.message, expected) ~= nil, "host diagnostic lost its message")
+    local checker = browser.binding("check_thrown")
+    defer checker:close()
+    test.assert(browser.call_boolean(checker, {browser.Argument.is_bytes(target_name),
+                                             browser.Argument.is_handle(failure.thrown)}),
+                "thrown JavaScript value lost its original identity")
+  end
+  test.assert(caught, "host failure unexpectedly returned")
+end
+
+function test_boolean_roundtrip(context: test.Context)
+  local target = browser.binding("echo_boolean")
+  context:cleanup(function() target:close() end)
+  context:run("false", function(_: test.Context)
+    test.assert(not browser.call_boolean(target, {browser.Argument.is_boolean(false)}))
+  end)
+  context:run("true", function(_: test.Context)
+    test.assert(browser.call_boolean(target, {browser.Argument.is_boolean(true)}))
+  end)
+end
+
+local function integer_case(context: test.Context, name: string, input: integer)
+  context:run(name, function(_: test.Context)
+    local target = browser.binding("echo_integer")
+    defer target:close()
+    test.assert(browser.call_integer(target, {browser.Argument.is_integer(input)}) == input)
+  end)
+end
+function test_i64_exact(context: test.Context)
+  integer_case(context, "minimum", 0x8000000000000000)
+  integer_case(context, "maximum", 0x7fffffffffffffff)
+  integer_case(context, "below_2_53", 9007199254740991)
+  integer_case(context, "at_2_53", 9007199254740992)
+  integer_case(context, "above_2_53", 9007199254740993)
+  integer_case(context, "negative_above_2_53", -9007199254740993)
+end
+
+function test_argument_array_exceeds_inline_storage(_: test.Context)
+  local arguments: {browser.Argument} = {}
+  for index = 1, 10 do arguments[index] = browser.Argument.is_integer(index) end
+  local target = browser.binding("echo_integer")
+  defer target:close()
+  test.assert(browser.call_integer(target, arguments) == 1,
+              "rooted dynamic argument storage did not survive marshaling")
+end
+
+function test_float_preserves_kind_and_bits(context: test.Context)
+  context:run("integral_float", function(_: test.Context)
+    local target = browser.binding("echo_float")
+    defer target:close()
+    local result = browser.call_float(target, {browser.Argument.is_float(17.0)})
+    case reflect.inspect(result)
+    when is_float(item) then test.assert(item == 17.0)
+    else raise "integral float changed runtime tag"
+    end
+  end)
+  context:run("negative_zero", function(_: test.Context)
+    local target = browser.binding("echo_float")
+    defer target:close()
+    local result = browser.call_float(target, {browser.Argument.is_float(-0.0)})
+    test.assert(result == 0.0 and 1.0 / result < 0.0)
+  end)
+  context:run("nan", function(_: test.Context)
+    local target = browser.binding("echo_float")
+    defer target:close()
+    local result = browser.call_float(target, {browser.Argument.is_float(0.0 / 0.0)})
+    test.assert(result ~= result)
+  end)
+end
+
+function test_counted_bytes(context: test.Context)
+  context:run("empty", function(_: test.Context)
+    local target = browser.binding("echo_bytes")
+    defer target:close()
+    test.assert(browser.call_bytes(target, {browser.Argument.is_bytes("")}) == "")
+  end)
+  context:run("binary", function(_: test.Context)
+    local target = browser.binding("echo_bytes")
+    defer target:close()
+    local bytes = "\0\255\195("
+    test.assert(browser.call_bytes(target, {browser.Argument.is_bytes(bytes)}) == bytes)
+  end)
+  context:run("short_count", function(_: test.Context)
+    local target = browser.binding("short_bytes")
+    defer target:close()
+    test.assert(browser.call_bytes(target, {}) == "\0\255\195(")
+  end)
+  context:run("memory_growth", function(_: test.Context)
+    local target = browser.binding("large_bytes")
+    defer target:close()
+    local bytes = browser.call_bytes(target, {})
+    test.assert(#bytes == 20 * 1024 * 1024)
+    test.assert(string.sub(bytes, 1, 4) == "\0\255\195(")
+    test.assert(string.sub(bytes, #bytes - 3) == "\0\255\195(")
+  end)
+  context:run("invalid_count", function(_: test.Context)
+    local target = browser.binding("invalid_bytes")
+    defer target:close()
+    local rejected = false
+    do
+      browser.call_bytes(target, {})
+    catch
+      rejected = true
+      test.assert(error is browser.Error)
+      local failure: browser.Error = error
+      failure:close()
+    end
+    test.assert(rejected, "over-capacity bytes were accepted")
+  end)
+end
+
+function test_js_exceptions_are_recoverable(context: test.Context)
+  local names = {"throw_error", "throw_string", "throw_value"}
+  for index = 1, #names do
+    local name = names[index]
+    context:run(name, function(_: test.Context)
+      expect_bridge_error(name, "bridge failure")
+      local target = browser.binding("echo_integer")
+      defer target:close()
+      test.assert(browser.call_integer(target, {browser.Argument.is_integer(42)}) == 42)
+    end)
+  end
+end
+
+function test_opaque_falsy_values_and_promise(context: test.Context)
+  local names = {"false_value", "zero_value", "null_value", "undefined_value"}
+  for index = 1, #names do
+    local name = names[index]
+    context:run(name, function(_: test.Context)
+      local item = browser.binding(name)
+      defer item:close()
+      local target = browser.binding("check_value")
+      defer target:close()
+      test.assert(browser.call_boolean(target, {browser.Argument.is_bytes(name),
+                                               browser.Argument.is_handle(item)}))
+      item:close()
+      item:close()
+    end)
+  end
+  context:run("promise_handle", function(_: test.Context)
+    local target = browser.binding("promise_value")
+    defer target:close()
+    local promise = browser.call_handle(target, {})
+    defer promise:close()
+    local checker = browser.binding("is_promise")
+    defer checker:close()
+    test.assert(browser.call_boolean(checker, {browser.Argument.is_handle(promise)}))
+  end)
+  context:run("promise_not_scalar", function(_: test.Context)
+    local target = browser.binding("promise_value")
+    defer target:close()
+    local rejected = false
+    do
+      browser.call_integer(target, {})
+    catch
+      rejected = true
+      local failure: browser.Error = error
+      failure:close()
+    end
+    test.assert(rejected)
+  end)
+end
+
+local function drop_handles()
+  for _ = 1, 64 do browser.binding("false_value") end
+end
+function test_unreachable_handle_finalizers(_: test.Context)
+  local counter = browser.binding("handle_count")
+  defer counter:close()
+  gc.collect()
+  local before = browser.call_integer(counter, {})
+  drop_handles()
+  gc.collect()
+  gc.collect()
+  test.assert(browser.call_integer(counter, {}) == before, "unreachable JSHandle units survived collection")
+end
+
+local function rejected_signature(callback: value)
+  local rejected = false
+  do
+    browser.callable(callback)
+  catch
+    rejected = true
+  end
+  test.assert(rejected, "unsupported callback signature was accepted")
+end
+function test_callback_signature_rejection(context: test.Context)
+  context:run("value", function(_: test.Context)
+    rejected_signature(function(item: value): value return item end)
+  end)
+  context:run("option", function(_: test.Context)
+    rejected_signature(function(item: integer?): integer? return item end)
+  end)
+  context:run("array", function(_: test.Context)
+    rejected_signature(function(item: {integer}): integer return #item end)
+  end)
+  context:run("vararg", function(_: test.Context)
+    rejected_signature(function(...: integer): integer return 1 end)
+  end)
+  context:run("flexret", function(_: test.Context)
+    rejected_signature(function(): (...: integer) return 1, 2 end)
+  end)
+  context:run("lua_function", function(_: test.Context)
+    local callback: value = ffi.titan_bridge_test_lua_function(L)
+    rejected_signature(callback)
+  end)
+  context:run("c_function", function(_: test.Context)
+    local callback: value = ffi.titan_bridge_test_c_function(L)
+    rejected_signature(callback)
+  end)
+end
+
+local function export_shared_captures()
+  local count = 0
+  publish("increment", function(delta: integer): integer count = count + delta; return count end)
+  publish("read_capture", function(): integer return count end)
+end
+function test_export_original_capture_roots(_: test.Context)
+  export_shared_captures()
+  gc.collect()
+  gc.collect()
+end
+
+function test_export_exact_signatures(_: test.Context)
+  publish("zero_results", function() end)
+  publish("one_nil", function(): nil return nil end)
+  publish("trailing_nil", function(item: integer, absent: nil): (integer, nil, boolean, nil)
+    test.assert(absent == nil)
+    return item, nil, false, nil
+  end)
+  publish("typed_echo", function(flag: boolean, whole: integer, number: float, bytes: string): (boolean, integer, float, string)
+    return flag, whole, number, bytes
+  end)
+  publish("wide_echo", function(a: integer, b: integer, c: integer, d: integer, e: integer,
+                                f: integer, g: integer, h: integer, i: integer, j: integer):
+                                (integer, integer, integer, integer, integer, integer, integer, integer, integer, integer)
+    return a, b, c, d, e, f, g, h, i, j
+  end)
+  publish("handle_echo", function(item: browser.JSHandle): browser.JSHandle return item end)
+  publish("callable_echo", function(item: browser.Callable): browser.Callable return item end)
+  publish("titan_failure", function(): integer raise "Titan bridge failure\0\255" end)
+  publish("valid_after_failure", function(): integer return 42 end)
+  publish("force_gc", function() gc.collect(); gc.collect() end)
+  publish("notification", function(item: integer)
+    local target = browser.binding("notification")
+    defer target:close()
+    browser.call_void(target, {browser.Argument.is_integer(item)})
+    if item == -1 then raise "notification failure" end
+  end)
+end
+
+function test_export_cross_entry_resumption(_: test.Context)
+  local child = coroutine.create(function(_: value): value
+    local first = coroutine.yield("parked", "bridge-single")
+    return first
+  end, "bridge-single")
+  test.assert(child:resume(nil) == "parked")
+  publish("resume_single", function(item: integer): integer return child:resume(item) end)
+  local inner = coroutine.create(function(_: value): value
+    return coroutine.yield("chain-parked", "bridge-outer")
+  end, "bridge-inner")
+  local middle = coroutine.create(function(_: value): value return inner:resume(nil) end, "bridge-middle")
+  local outer = coroutine.create(function(_: value): value return middle:resume(nil) end, "bridge-outer")
+  test.assert(outer:resume(nil) == "chain-parked")
+  test.assert(inner:status() == "stacked" and middle:status() == "stacked")
+  publish("resume_stacked", function(item: integer): integer
+    local result: integer = outer:resume(item)
+    test.assert(outer:status() == "dead" and inner:status() == "dead" and middle:status() == "dead")
+    return result
+  end)
+end
+
+local function abandon_for_allocation(log: {string})
+  local child = coroutine.create(function(_: value): value
+    defer do
+      log[#log + 1] = "closed"
+      local target = browser.binding("allocation_cleanup")
+      defer target:close()
+      browser.call_void(target, {})
+    end
+    coroutine.yield(nil, "bridge-abandoned")
+    raise "abandoned callback resumed normally"
+  end, "bridge-abandoned")
+  child:resume(nil)
+end
+function test_export_allocation_cleanup_callback(_: test.Context)
+  publish("allocation_gc", function(): integer
+    gc.incremental()
+    gc.pause_percent(0)
+    gc.stepmul(1000)
+    gc.pause()
+    local log: {string} = {}
+    abandon_for_allocation(log)
+    local garbage: {value} = {}
+    gc.resume()
+    for index = 1, 32768 do
+      garbage[index] = {index, index + 1, index + 2}
+      if #log > 0 then break end
+    end
+    test.assert(#log == 1)
+    return 42
+  end)
+end
+
+local pending: browser.Request?
+
+function test_export_requests_and_listeners(_: test.Context)
+  local completion = browser.callable(function(number: integer, bytes: string)
+    local observer = browser.binding("request_success")
+    defer observer:close()
+    browser.call_void(observer, {browser.Argument.is_integer(number), browser.Argument.is_bytes(bytes)})
+  end)
+  local failure = browser.callable(function(message: string, thrown: browser.JSHandle)
+    defer thrown:close()
+    local observer = browser.binding("request_failure")
+    defer observer:close()
+    browser.call_void(observer, {browser.Argument.is_bytes(message), browser.Argument.is_handle(thrown)})
+  end)
+  publish("start_request", function(name: string)
+    local target = browser.binding(name)
+    defer target:close()
+    pending = browser.start(target, {}, completion, failure)
+  end)
+  publish("start_listener", function()
+    local target = browser.binding("listener")
+    defer target:close()
+    pending = browser.listen(target, {}, completion, failure)
+  end)
+  publish("cancel_request", function() if pending ~= nil then pending:cancel() end end)
+  publish("close_request", function() if pending ~= nil then pending:close() end end)
+end
+
+function test_export_sdk_byte_io(_: test.Context)
+  local failure = function(message: string, thrown: browser.JSHandle)
+    defer thrown:close()
+    local observer = browser.binding("io_failure")
+    defer observer:close()
+    browser.call_void(observer, {browser.Argument.is_bytes(message), browser.Argument.is_handle(thrown)})
+  end
+  local written = function()
+    local observer = browser.binding("io_done")
+    defer observer:close()
+    browser.call_void(observer, {})
+  end
+  local read = function(bytes: string)
+    local observer = browser.binding("io_read")
+    defer observer:close()
+    browser.call_void(observer, {browser.Argument.is_bytes(bytes)})
+  end
+  publish("stdio_append", function(bytes: string)
+    local written = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
+                               #bytes as foreign size_t, ffi.stdout)
+    test.assert(written == #bytes, "C stdio append returned a short count")
+    test.assert(ffi.fflush(ffi.stdout) == 0, "C stdio append did not flush")
+  end)
+  publish("cleanup_failure", function(bytes: string): integer
+    local written = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
+                               #bytes as foreign size_t, ffi.stdout)
+    test.assert(written == #bytes, "primary-failure stdout returned a short count")
+    test.assert(ffi.fflush(ffi.stdout) == 0, "primary-failure stdout did not flush")
+    written = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
+                         #bytes as foreign size_t, ffi.stderr)
+    test.assert(written == #bytes, "primary-failure stderr returned a short count")
+    test.assert(ffi.fflush(ffi.stderr) == 0, "primary-failure stderr did not flush")
+    raise "Titan bridge failure\0\255"
+  end)
+  publish("sdk_write", function(bytes: string)
+    ffi.titan_bridge_test_write(L, written, failure, bytes as foreign const *unsigned char, #bytes)
+  end)
+  publish("sdk_read", function(capacity: integer)
+    ffi.titan_bridge_test_read(L, read, failure, capacity)
+  end)
+end
+
+local stored_callable: browser.Callable?
+function test_export_callable_reuse(_: test.Context)
+  publish("make_callable", function(): browser.Callable
+    stored_callable = browser.callable(function(): integer return 77 end)
+    return stored_callable
+  end)
+  publish("stored_callable", function(): browser.Callable return stored_callable end)
+end
+
+local function abandon_independent()
+  local owner: value = ffi.titan_bridge_test_new_state(L, 2)
+  ffi.titan_bridge_test_check_state(L, owner)
+end
+function test_independent_explicit_and_gc_close(_: test.Context)
+  local owner: value = ffi.titan_bridge_test_new_state(L, 1)
+  ffi.titan_bridge_test_check_state(L, owner)
+  ffi.titan_bridge_test_close_state(L, owner)
+  ffi.titan_bridge_test_close_state(L, owner)
+  abandon_independent()
+  gc.collect()
+  gc.collect()
+end
+
+function test_independent_detach_then_later_close(_: test.Context)
+  local owner: value = ffi.titan_bridge_test_new_state(L, 3)
+  ffi.titan_bridge_test_check_state(L, owner)
+  local detached = ffi.titan_bridge_test_detach_state(L, owner)
+  publish("close_detached", function()
+    if detached ~= nil then
+      ffi.titan_bridge_test_close_detached(detached)
+      detached = nil
+    end
+  end)
+end
+
+local r1_first_handle: browser.JSHandle?
+local r1_last_handle: browser.JSHandle?
+local r1_first_callable: browser.Callable?
+local r1_last_callable: browser.Callable?
+local r1_response_target: browser.JSHandle?
+local r1_response_observer: browser.JSHandle?
+local r1_start_target: browser.JSHandle?
+local r1_listener_target: browser.JSHandle?
+local r1_admission: browser.Request?
+
+local record R1ReleaseMarker
+  local position: integer
+end
+local function r1_collect_release(candidate: value)
+  local marker: R1ReleaseMarker = candidate
+  local target = browser.binding("r1_release_result")
+  defer target:close()
+  browser.call_void(target, {browser.Argument.is_integer(marker.position)})
+end
+local function r1_release_marker(position: integer)
+  local marker = R1ReleaseMarker { position = position }
+  gc.finalizable<|value|>(marker, r1_collect_release)
+end
+
+function test_r1_result_and_response_boundaries(_: test.Context)
+  publish("r1_prepare_results", function(): (browser.JSHandle, browser.Callable, browser.JSHandle, browser.Callable)
+    if r1_first_handle ~= nil then r1_first_handle:close() end
+    if r1_last_handle ~= nil then r1_last_handle:close() end
+    if r1_first_callable ~= nil then r1_first_callable:close() end
+    if r1_last_callable ~= nil then r1_last_callable:close() end
+    r1_first_handle = browser.binding("r1_handle_first")
+    r1_last_handle = browser.binding("r1_handle_last")
+    r1_first_callable = browser.callable(function(): integer return 101 end)
+    r1_last_callable = browser.callable(function(): integer return 202 end)
+    return r1_first_handle, r1_first_callable, r1_last_handle, r1_last_callable
+  end)
+  publish("r1_release_results", function(position: integer): (browser.JSHandle, browser.Callable, browser.JSHandle, browser.Callable)
+    local target = browser.binding("r1_release_result")
+    defer target:close()
+    browser.call_void(target, {browser.Argument.is_integer(position)})
+    return r1_first_handle, r1_first_callable, r1_last_handle, r1_last_callable
+  end)
+  publish("r1_gc_results", function(position: integer): (browser.JSHandle, browser.Callable, browser.JSHandle, browser.Callable)
+    ffi.titan_bridge_test_arm_identity_gc(L, 4)
+    r1_release_marker(position)
+    return r1_first_handle, r1_first_callable, r1_last_handle, r1_last_callable
+  end)
+  publish("r1_setup_responses", function()
+    if r1_response_target ~= nil then r1_response_target:close() end
+    if r1_response_observer ~= nil then r1_response_observer:close() end
+    r1_response_target = browser.binding("r1_response_throw")
+    r1_response_observer = browser.binding("r1_response_observe")
+  end)
+  publish("r1_response_call", function(): integer
+    local observed = false
+    local allocations = 0
+    ffi.titan_bridge_test_prepare_response_failure(L)
+    do
+      browser.call_void(r1_response_target, {})
+    catch
+      allocations = ffi.titan_bridge_test_finish_response_failure(L)
+      observed = true
+      if error is browser.Error then
+        local failure: browser.Error = error
+        defer failure:close()
+        browser.call_void(r1_response_observer, {browser.Argument.is_bytes(failure.message),
+          browser.Argument.is_handle(failure.thrown), browser.Argument.is_boolean(true)})
+      else
+        local message: string = error
+        browser.call_void(r1_response_observer, {browser.Argument.is_bytes(message),
+          browser.Argument.is_nil(), browser.Argument.is_boolean(false)})
+      end
+    end
+    if not observed then
+      ffi.titan_bridge_test_finish_response_failure(L)
+      raise "response fixture did not return its ordinary error"
+    end
+    test.assert(allocations == 0 or allocations == 2, "native response failure omitted the actual allocator retry")
+    return allocations
+  end)
+
+  local succeeded = browser.callable(function(number: integer, bytes: string)
+    local target = browser.binding("request_success")
+    defer target:close()
+    browser.call_void(target, {browser.Argument.is_integer(number), browser.Argument.is_bytes(bytes)})
+  end)
+  local failed = browser.callable(function(message: string, thrown: browser.JSHandle)
+    defer thrown:close()
+    local target = browser.binding("request_failure")
+    defer target:close()
+    browser.call_void(target, {browser.Argument.is_bytes(message), browser.Argument.is_handle(thrown)})
+  end)
+  publish("r1_prepare_admissions", function()
+    if r1_admission ~= nil then r1_admission:close(); r1_admission = nil end
+    if r1_start_target ~= nil then r1_start_target:close() end
+    if r1_listener_target ~= nil then r1_listener_target:close() end
+    r1_start_target = browser.binding("r1_start_source")
+    r1_listener_target = browser.binding("r1_listener_source")
+  end)
+  publish("r1_admit_start", function()
+    test.assert(r1_admission == nil, "admission fixture still owns an earlier request")
+    r1_admission = browser.start(r1_start_target, {}, succeeded, failed)
+  end)
+  publish("r1_admit_listener", function()
+    test.assert(r1_admission == nil, "admission fixture still owns an earlier listener")
+    r1_admission = browser.listen(r1_listener_target, {}, succeeded, failed)
+  end)
+  publish("r1_cancel_admission", function()
+    if r1_admission ~= nil then r1_admission:cancel() end
+  end)
+  publish("r1_close_admission", function()
+    if r1_admission ~= nil then r1_admission:close(); r1_admission = nil end
+  end)
+end
+
+function test_r1_callable_publication_transaction(_: test.Context)
+  local owner: value = ffi.titan_bridge_test_new_state(L, 0)
+  publish("r1_close_publication", function() ffi.titan_bridge_test_close_state(L, owner) end)
+end
+
+function test_r1_close_retains_owner_on_admission_failure(context: test.Context)
+  context:run("handle", function(_: test.Context)
+    local was_paused = gc.paused()
+    gc.pause()
+    defer do
+      if not was_paused then gc.resume() end
+    end
+    local owner = browser.binding("false_value")
+    defer owner:close()
+    local checker = browser.binding("check_value")
+    defer checker:close()
+    local counter = browser.binding("handle_count")
+    defer counter:close()
+    local before = browser.call_integer(counter, {})
+    local caught = false
+    ffi.titan_bridge_test_arm_admission_failure(L)
+    do
+      owner:close()
+    catch
+      caught = true
+    end
+    test.assert(ffi.titan_bridge_test_finish_admission_failure(L) == 1 and caught)
+    test.assert(browser.call_boolean(checker, {browser.Argument.is_bytes("false_value"),
+      browser.Argument.is_handle(owner)}), "failed close lost its still-live handle")
+    owner:close()
+    owner:close()
+    test.assert(browser.call_integer(counter, {}) == before - 1, "later handle close did not retire its unit once")
+  end)
+  context:run("request", function(_: test.Context)
+    local was_paused = gc.paused()
+    gc.pause()
+    defer do
+      if not was_paused then gc.resume() end
+    end
+    local target = browser.binding("r1_close_source")
+    defer target:close()
+    local counter = browser.binding("r1_close_count")
+    defer counter:close()
+    local succeeded = browser.callable(function() end)
+    defer succeeded:close()
+    local failed = browser.callable(function(_: string, thrown: browser.JSHandle) thrown:close() end)
+    defer failed:close()
+    local owner = browser.start(target, {}, succeeded, failed)
+    defer owner:close()
+    local before = browser.call_integer(counter, {})
+    local caught = false
+    ffi.titan_bridge_test_arm_admission_failure(L)
+    do
+      owner:close()
+    catch
+      caught = true
+    end
+    test.assert(ffi.titan_bridge_test_finish_admission_failure(L) == 1 and caught)
+    test.assert(browser.call_integer(counter, {}) == before, "failed close canceled its still-owned request")
+    owner:close()
+    owner:close()
+    test.assert(browser.call_integer(counter, {}) == before + 1, "later request close did not retire its owner once")
+  end)
+end
+
+local initializer_coroutine: coroutine.Coroutine?
+do
+  ffi.gate_test_publish()
+  initializer_coroutine = coroutine.create(function(_: value): value
+    defer do
+      -- These owners are created while GCSTPCLS suppresses their finalizers.
+      -- The earliest registry must release them at state-wide retirement.
+      local item = browser.binding("close_value")
+      local observer = browser.binding("close_observe")
+      browser.call_void(observer, {browser.Argument.is_handle(item)})
+      do
+        local target = browser.binding("throw_string")
+        browser.call_void(target, {})
+      catch
+        local failure: browser.Error = error
+        browser.call_void(observer, {browser.Argument.is_handle(failure.thrown)})
+      end
+      ffi.fputs("bridge-finalizer\n", ffi.stdout)
+    end
+    return coroutine.yield(nil, "bridge-initializer")
+  end, "bridge-initializer")
+  initializer_coroutine:resume(nil)
+end

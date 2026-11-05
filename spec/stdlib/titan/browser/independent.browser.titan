@@ -1,0 +1,92 @@
+local browser = import "browser"
+local coroutine = import "coroutine"
+local test = import "test"
+local gc = import "gc"
+foreign import "native.h"
+
+local index = 0
+local parked: coroutine.Coroutine?
+local success: browser.Callable?
+local failure: browser.Callable?
+
+local record PublicationCapture
+  local marker: integer
+end
+local publication_collected = 0
+local function publication_finalize(candidate: value)
+  local capture: PublicationCapture = candidate
+  publication_collected = publication_collected + capture.marker
+end
+local function failed_publication()
+  local capture = PublicationCapture { marker = 1 }
+  gc.finalizable<|value|>(capture, publication_finalize)
+  local original = function(): integer return capture.marker end
+  local caught = false
+  ffi.titan_bridge_test_arm_generation_failure(L)
+  do
+    browser.callable(original)
+  catch
+    caught = true
+  end
+  local observed = ffi.titan_bridge_test_finish_generation_failure(L)
+  test.assert(caught and observed == 15,
+    "generation failure did not follow committed root, allocation failure and exact unref rollback")
+end
+function publication(_: integer)
+  publication_collected = 0
+  failed_publication()
+  gc.collect()
+  gc.collect()
+  test.assert(publication_collected == 1, "unpublished callable retained its discarded capture")
+  local target = browser.binding("publish")
+  defer target:close()
+  browser.call_void(target, {browser.Argument.is_bytes("r1_publication_recovery"),
+    browser.Argument.is_callable(browser.callable(function(): integer return 42 end))})
+end
+
+function prepare(number: integer)
+  index = number
+  success = browser.callable(function() end)
+  failure = browser.callable(function(_: string, thrown: browser.JSHandle) thrown:close() end)
+  local target = browser.binding("publish")
+  defer target:close()
+  browser.call_void(target, {browser.Argument.is_bytes("independent_" .. number),
+    browser.Argument.is_callable(browser.callable(function(item: integer): integer return item + index end))})
+  parked = coroutine.create(function(_: value): value
+    defer do
+      local observer = browser.binding("independent_close")
+      local item = browser.binding("close_value")
+      local request_target = browser.binding("detachable_request")
+      local rejected = false
+      do
+        browser.start(request_target, {}, success, failure)
+      catch
+        rejected = true
+      end
+      test.assert(rejected, "independent close admitted an asynchronous request")
+      -- Intentionally leave newly created close-phase slots to the earliest
+      -- registry, because Lua suppresses their reachability finalizers here.
+      browser.call_void(observer, {browser.Argument.is_integer(index),
+                                   browser.Argument.is_boolean(rejected),
+                                   browser.Argument.is_handle(item)})
+      do
+        local throwing = browser.binding("throw_value")
+        browser.call_void(throwing, {})
+      catch
+        local error_value: browser.Error = error
+        browser.call_void(observer, {browser.Argument.is_integer(index),
+                                     browser.Argument.is_boolean(true),
+                                     browser.Argument.is_handle(error_value.thrown)})
+      end
+    end
+    return coroutine.yield(nil, "independent-close")
+  end, "independent-close")
+  parked:resume(nil)
+end
+
+function check()
+  test.assert(index > 0 and parked:status() == "suspended")
+  local target = browser.binding("echo_integer")
+  defer target:close()
+  test.assert(browser.call_integer(target, {browser.Argument.is_integer(index)}) == index)
+end

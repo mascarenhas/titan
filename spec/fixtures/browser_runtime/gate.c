@@ -4,6 +4,7 @@
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "fixture_controls.h"
 
 /* Authored C frames deliberately remain live across Titan coroutine switches.
  * Volatile canaries and the post-call check prevent tail-call elimination. */
@@ -78,11 +79,16 @@ int gate_frame_peak(void) { return (int)peak_frames; }
 
 /* Shared guard refusal must precede even setjmp. The admitted path really
  * performs a nonlocal unwind, rather than returning a fixture constant. */
-int titan_browser_gate_guarded(void) {
+int titan_browser_gate_guarded(uint64_t operation_id) {
   jmp_buf target;
-  if (!titan_browser_entry_allowed()) return -1;
+  titan_browser_completion completion = {0};
+  if (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_INVOKE)) return -1;
   if (!setjmp(target)) longjmp(target, 1);
-  return 1;
+  completion.operation_id = operation_id;
+  completion.operation = TITAN_BROWSER_INVOKE;
+  completion.application_status = 1;
+  titan_browser_complete(&completion);
+  return 0;
 }
 
 /* Observation is non-suspending and state-neutral, including after lua_close.

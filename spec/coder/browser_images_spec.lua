@@ -99,20 +99,23 @@ if (expectedSource) {
     assert.ok(map.sources.some(source => source.replaceAll('\\', '/').split('/').at(-1) === expectedSource),
         'final source map omitted ' + expectedSource);
 }
-const factory = (await import(pathToFileURL(image).href)).default;
-const instance = await factory({ locateFile: name => resolve(dirname(image), name) });
-const pointer = instance._titan_browser_trace_identity();
-const bytes = instance.HEAPU8.subarray(pointer, pointer + 65);
-assert.equal(bytes.length, 65);
-assert.equal(bytes[64], 0);
-const identity = Buffer.from(bytes.subarray(0, 64)).toString('ascii');
-assert.match(identity, /^[0-9a-f]{64}$/);
-assert.equal(identity, map.x_titan_image);
-assert.ok(Number.isInteger(map.x_titan_function_imports));
-assert.ok(map.x_titan_function_ranges.length > 0);
-assert.equal(map.x_titan_function_names.length,
-    map.x_titan_function_imports + map.x_titan_function_ranges.length);
-process.stdout.write(identity);
+const create = (await import(pathToFileURL(image).href)).default;
+const instance = create({locateFile: name => resolve(dirname(image), name)});
+try {
+    assert.deepEqual(Object.keys(instance).sort(), ['initialize', 'run', 'call', 'notify', 'drain', 'dispose', 'trace'].sort());
+    await instance.initialize();
+    assert.ok(Object.isFrozen(instance.trace));
+    // Ready means the eager adapter checked the private C export's identity
+    // against this map. No raw Module/heap/factory escapes the public creator.
+    assert.equal(instance.trace.state, 'ready', instance.trace.reason);
+    const identity = map.x_titan_image;
+    assert.match(identity, /^[0-9a-f]{64}$/);
+    assert.ok(Number.isInteger(map.x_titan_function_imports));
+    assert.ok(map.x_titan_function_ranges.length > 0);
+    assert.equal(map.x_titan_function_names.length,
+        map.x_titan_function_imports + map.x_titan_function_ranges.length);
+    process.stdout.write(identity);
+} finally { await instance.dispose(); }
 ]], image, source or "" })
     assert.is_true(result.ok, result.output or result.diagnostic)
     return result.output
@@ -161,6 +164,47 @@ assert(driver.close_resolver_context(context))
 end
 
 describe("browser image profile and SDK readiness", function()
+    it("embeds one private factory and exposes only the persistent image creator", function()
+        local image = "async function Module(options) { return options; }\n" ..
+            "const wasm = new URL('app.wasm', import.meta.url);\nexport default Module;\n"
+        local loader = "export function create(factory, options) { return {factory, options}; }\n"
+        local embedded = assert(browserlink.embed(image, loader, "app.wasm"))
+        assert.truthy(embedded:find("async function Module(options)", 1, true))
+        assert.truthy(embedded:find("new URL('app.wasm', import.meta.url)", 1, true))
+        assert.truthy(embedded:find('new URL("app.wasm.map", import.meta.url)', 1, true))
+        assert.truthy(embedded:find("options.locateFile ??", 1, true))
+        assert.truthy(embedded:find("export default function create(options = {})", 1, true))
+        assert.is_nil(embedded:find("export default Module", 1, true))
+        assert.is_nil(embedded:find("export function create", 1, true))
+        local _, exports = embedded:gsub("export default", "")
+        assert.equal(1, exports)
+    end)
+
+    it("rejects unsupported factory and loader surfaces before image publication", function()
+        local loader = "export function create(factory, options) { return options; }\n"
+        for _, image in ipairs({
+            "const Module = {};\n",
+            "export default Module;\n",
+            "\nexport default First;\nexport default Module;\n",
+            "\nexport default function Module() {}\n",
+        }) do
+            local embedded, err = browserlink.embed(image, loader, "app.wasm")
+            assert.is_nil(embedded)
+            assert.equal("browser image has no unique default factory export", err)
+        end
+        for _, source in ipairs({
+            "function create() {}\n",
+            "export function create() {}\nexport const module = {};\n",
+            "import runtime from './runtime.mjs';\nexport function create() {}\n",
+        }) do
+            local embedded, err = browserlink.embed("\nexport default Module;\n", source, "app.wasm")
+            assert.is_nil(embedded)
+            assert.equal("browser loader has an unsupported module surface", err)
+        end
+        local embedded = assert(browserlink.embed("\nexport default Module;\n", loader, 'a"b\n.wasm'))
+        assert.truthy(embedded:find('a\\u0022b\\u000a.wasm', 1, true))
+    end)
+
     it("derives the closed SDK asset set without extending BrowserPaths", function()
         local paths = fixtures.paths()
         local assets = browserlink.sdk_assets(paths)
@@ -169,7 +213,7 @@ describe("browser image profile and SDK readiness", function()
         local keys = {}
         for key in pairs(assets) do keys[#keys + 1] = key end
         table.sort(keys)
-        assert.same({ "js_library", "loader", "lpeglabel", "node_worker", "page", "provider",
+        assert.same({ "bridge_library", "js_library", "loader", "lpeglabel", "node_worker", "page", "provider",
             "runner", "runner_module", "runtime", "sdk_digests", "trace_library" }, keys)
     end)
 
@@ -181,7 +225,8 @@ describe("browser image profile and SDK readiness", function()
             stat = function(_, filename) return present[filename] and { kind = "file" } end,
             read_file = function(_, filename) return present[filename] and "bytes" end,
         } }
-        for _, key in ipairs({ "runtime", "js_library", "trace_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+        for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
+                "loader", "runner", "runner_module", "node_worker", "page" }) do
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
@@ -202,16 +247,20 @@ describe("browser image profile and SDK readiness", function()
             "-O1", "-fno-inline", "-fno-optimize-sibling-calls", "-gsource-map", "-g2",
             "-sJSPI=1",
             '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"]',
-            '-sJSPI_EXPORTS=["titan_browser_entry","titan_mco_entry"]',
+            '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
+                '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"]',
             "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
             "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
             "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
-            '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]',
-            '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
+            '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
+                '"_titan_browser_release_callable","_titan_browser_close",' ..
+                '"_titan_browser_alloc","_titan_browser_free","_titan_browser_trace_identity"]',
+            '-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
             "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
+            "--js-library", browserlink.sdk_assets(descriptor.paths).bridge_library,
             "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
             "-sASSERTIONS=2", "-sSTACK_OVERFLOW_CHECK=2",
         }, profile.link_flags)
@@ -228,16 +277,20 @@ describe("browser image profile and SDK readiness", function()
             "-O3", "-gsource-map", "-g2",
             "-sJSPI=1",
             '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"]',
-            '-sJSPI_EXPORTS=["titan_browser_entry","titan_mco_entry"]',
+            '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
+                '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"]',
             "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
             "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
             "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
-            '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]',
-            '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
+            '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
+                '"_titan_browser_release_callable","_titan_browser_close",' ..
+                '"_titan_browser_alloc","_titan_browser_free","_titan_browser_trace_identity"]',
+            '-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
             "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
+            "--js-library", browserlink.sdk_assets(descriptor.paths).bridge_library,
             "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
             "-sASSERTIONS=2", "-sSTACK_OVERFLOW_CHECK=2",
         }, profile.link_flags)
@@ -735,16 +788,17 @@ describe("real browser test image", function()
             info.sdk_root .. "/libtitan.a", { target = fixtures.fingerprint() }))
         local members = {}
         for index, member in ipairs(runtime.members) do members[index] = member.display_name end
-        assert.same({ "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }, members)
+        assert.same({ "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o", "titan-browser.o" }, members)
         assert.is_true(driver.validate_browser_provider(runtime))
         for _, image in ipairs({ "image_main", "explicit-program" }) do
             assert.equal("file", lfs.attributes(workspace .. "/out/" .. image .. ".mjs", "mode"))
             local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/" .. image .. ".wasm")))
             local exports = {}
             for _, item in ipairs(inventory.exports) do exports[item.name] = true end
-            assert.is_true(exports.titan_browser_entry)
-            assert.is_true(exports.malloc)
-            assert.is_true(exports.free)
+            for _, name in ipairs({ "titan_browser_initialize", "titan_browser_entry", "titan_browser_invoke",
+                    "titan_browser_release_callable", "titan_browser_close", "titan_browser_alloc", "titan_browser_free" }) do
+                assert.is_true(exports[name], "missing browser gateway " .. name)
+            end
             assert.is_nil(exports.titan_browser_gate_guarded)
             assert.is_nil(exports.main)
         end
@@ -780,7 +834,7 @@ describe("real browser test image", function()
         for _, case in ipairs({
             { "entry-close" }, { "entry-binary" }, { "entry-tostring" },
             { "entry-state-oom", { "-Wl,--wrap=luaL_newstate" } },
-            { "entry-copy-oom" },
+            { "entry-long-error" },
             { "entry-bootstrap-oom", { "-Wl,--wrap=luaL_openselectedlibs", "-Wl,--wrap=lua_pcallk" } },
         }) do
             names[#names + 1] = case[1]
@@ -1149,8 +1203,10 @@ end
         assert.truthy(map:find('"x_titan_function_ranges":[[', 1, true))
         assert.truthy(map:find('"x_titan_function_names":[', 1, true))
         image_identity(info, workspace .. "/out/image_case.mjs", "image_case.titan")
-        assert.is_true(exports.malloc)
-        assert.is_true(exports.free)
+        for _, name in ipairs({ "titan_browser_initialize", "titan_browser_invoke", "titan_browser_release_callable",
+                "titan_browser_close", "titan_browser_alloc", "titan_browser_free" }) do
+            assert.is_true(exports[name], "missing browser gateway " .. name)
+        end
         assert.is_nil(exports.titan_browser_gate_guarded)
         result = run({ info.sdk_root .. "/titan-browser-run", "--engine", "node", "--grace", "0",
             workspace .. "/out/image_case.mjs", "--", "--filter=^image_case[.]test_trivial$" })

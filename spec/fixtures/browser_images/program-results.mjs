@@ -4,7 +4,7 @@ export async function run(context) {
   const binary = new Uint8Array([65, 0, 255, 195, 40]);
   const failure = new Uint8Array([...encode('uncaught'), 0, 255, 195, 40]);
   for (const image of context.args) {
-    const { factory, locateFile } = await context.image(image);
+    const { create, locateFile } = await context.image(image);
     for (const [args, kind, status] of [
       [[], 'returned', 0],
       [['minus'], 'returned', -1],
@@ -12,7 +12,7 @@ export async function run(context) {
       [['error'], 'failed', 1],
     ]) {
       const stdout = [], stderr = [];
-      const instance = context.create(factory, {
+      const instance = create({
         locateFile,
         stdout: bytes => { stdout.push(...bytes); },
         stderr: bytes => { stderr.push(...bytes); },

@@ -13265,6 +13265,15 @@ describe("target-aware source resolver", function()
             assert.is_nil(driver.imported[name])
         end)
     end
+    it("selects the browser-only bridge without a native placeholder", function()
+        local selected = assert(driver.resolve_source(context("browser"), "titan.browser", stdlib_root))
+        assert.equal(stdlib_root .. "/titan/browser.browser.titan", paths.to_slash(selected.main))
+        for _, target in ipairs({ "linux", "darwin", "windows", "native" }) do
+            assert.is_nil(driver.resolve_source(context(target), "titan.browser", stdlib_root))
+        end
+        assert.equal("titan.browser", require("titan-compiler.parser").normalize_import("browser"))
+    end)
+
 
     for _, target in ipairs(driver.SOURCE_LABELS) do
         it("blocks native-only stdlib folder contributors on " .. target, function()

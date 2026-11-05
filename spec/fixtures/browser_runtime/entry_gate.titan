@@ -298,3 +298,7 @@ function test_negative_busy_wait_blocks_host(context: test.Context)
   ffi.gate_busy(150)
   context:log("GATE negative=busy_wait requested_ms=150")
 end
+
+do
+  ffi.gate_test_publish()
+end

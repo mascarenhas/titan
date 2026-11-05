@@ -1,0 +1,395 @@
+local gc = import "gc"
+local reflect = import "reflect"
+
+foreign import "titan/browser.h"
+
+--- A state-owned reference to an arbitrary JavaScript value, including nil-like and falsy values.
+-- @usage standard-library-browser.md#javascript-values
+record JSHandle
+  local state: foreign uint32_t
+  local slot: foreign uint32_t
+  local generation: foreign uint32_t
+end
+
+--- A rooted original Titan closure with an exact fixed scalar/byte/handle signature.
+-- @usage standard-library-browser.md#original-closures
+record Callable
+  local state: foreign uint32_t
+  local slot: foreign uint32_t
+  local generation: foreign uint32_t
+end
+
+--- One host request or listener; cancellation is not physical retirement.
+-- @usage standard-library-browser.md#requests-and-listeners
+record Request
+  local state: foreign uint32_t
+  local slot: foreign uint32_t
+  local generation: foreign uint32_t
+end
+
+--- A normally returned JavaScript exception, raised only after the import returns.
+-- @field message Copied diagnostic text.
+-- @field thrown Retained exact thrown JavaScript value.
+-- @usage standard-library-browser.md#errors
+record Error
+  const message: string
+  const thrown: JSHandle
+end
+
+--- The fixed in-process argument carrier; strings carry bytes, not implicit UTF-8 text.
+-- @usage standard-library-browser.md#typed-bindings
+union Argument
+  is_nil()
+  is_boolean(boolean)
+  is_integer(integer)
+  is_float(float)
+  is_bytes(string)
+  is_handle(JSHandle)
+  is_callable(Callable)
+end
+
+function JSHandle:close()
+  local slot = self.slot
+  if slot ~= 0 then
+    -- Detect an independent state's close phase before its first import too.
+    ffi.titan_browser_state(L)
+    self.slot = 0
+    ffi.titan_browser_host_release(self.state, slot, self.generation)
+  end
+end
+
+local function handle_finalize(candidate: value)
+  local self: JSHandle = candidate
+  self:close()
+end
+
+local function new_handle(slot: integer, generation: integer): JSHandle
+  if slot == 0 or generation == 0 then raise "browser handle identity is absent" end
+  local state = ffi.titan_browser_state(L)
+  local owner = JSHandle { state = state, slot = 0, generation = 0 }
+  gc.finalizable<|value|>(owner, handle_finalize)
+  if ffi.titan_browser_host_identity_live(state, slot, generation,
+      ffi.TITAN_BROWSER_HANDLE as foreign uint32_t) == 0 then
+    raise "browser handle is released or belongs to a closed state"
+  end
+  owner.slot = slot
+  owner.generation = generation
+  ffi.titan_browser_host_adopt(state, owner.slot, owner.generation)
+  return owner
+end
+
+local function new_callable(slot: integer, generation: integer): Callable
+  return Callable { state = ffi.titan_browser_state(L), slot = slot, generation = generation }
+end
+
+local function handle_identity(candidate: value): (integer, integer)
+  local owner: JSHandle = candidate
+  if owner.slot == 0 then raise "browser handle is closed" end
+  if owner.state ~= ffi.titan_browser_state(L) then raise "browser handle belongs to another state" end
+  return owner.slot, owner.generation
+end
+
+local function callable_identity(candidate: value): (integer, integer)
+  local owner: Callable = candidate
+  if owner.slot == 0 then raise "browser callable is closed" end
+  if owner.state ~= ffi.titan_browser_state(L) then raise "browser callable belongs to another state" end
+  return owner.slot, owner.generation
+end
+
+function Callable:close()
+  if self.slot ~= 0 then
+    local identity = foreign titan_browser_identity.new()
+    identity.state = self.state
+    identity.slot = self.slot
+    identity.generation = self.generation
+    ffi.titan_browser_drop_callable(L, identity)
+    self.slot = 0
+  end
+end
+
+function Request:close()
+  local slot = self.slot
+  if slot ~= 0 then
+    ffi.titan_browser_state(L)
+    self.slot = 0
+    ffi.titan_browser_host_release(self.state, slot, self.generation)
+  end
+end
+
+function Error:close()
+  self.thrown:close()
+end
+
+local function copied_bytes(bytes: foreign const *unsigned char, length: foreign uint32_t): string
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  ffi.luaL_checkstack(L, 1, "browser byte result")
+  ffi.lua_pushlstring(L, bytes as foreign const *char, length as foreign size_t)
+  local result: value = ffi.lua_totvalue(L, -1)
+  return result
+end
+
+local function check_response(response: foreign *titan_browser_response)
+  if response.status ~= ffi.TITAN_BROWSER_OK then
+    local message = copied_bytes(response.message, response.message_length)
+    if response.thrown_slot == 0 or response.thrown_generation == 0 then
+      if message == "" then
+        if response.status == ffi.TITAN_BROWSER_MEMORY then
+          raise "not enough memory for browser error"
+        end
+        raise "JavaScript binding failed without a thrown-value owner"
+      end
+      raise message
+    end
+    local thrown = new_handle(response.thrown_slot, response.thrown_generation)
+    response.thrown_slot = 0
+    response.thrown_generation = 0
+    raise Error(message, thrown)
+  end
+end
+
+local function adopt_handle(response: foreign *titan_browser_response): JSHandle
+  local owner = new_handle(response.value.slot, response.value.generation)
+  response.value.slot = 0
+  return owner
+end
+
+local function checked_target(target: JSHandle): foreign uint32_t
+  if target.slot == 0 then raise "browser handle is closed" end
+  local state = ffi.titan_browser_state(L)
+  if target.state ~= state then raise "browser handle belongs to another state" end
+  return state
+end
+
+local function marshal(arguments: {Argument}, state: foreign uint32_t,
+                       slots: foreign *titan_browser_value)
+  for index = 1, #arguments do
+    local argument = arguments[index]
+    local slot = slots + (index - 1)
+    case argument
+    when is_nil() then slot.kind = ffi.TITAN_BROWSER_NIL as foreign uint32_t
+    when is_boolean(item) then
+      slot.kind = ffi.TITAN_BROWSER_BOOLEAN as foreign uint32_t
+      if item then slot.scalar.integer = 1 else slot.scalar.integer = 0 end
+    when is_integer(item) then
+      slot.kind = ffi.TITAN_BROWSER_INTEGER as foreign uint32_t
+      slot.scalar.integer = item
+    when is_float(item) then
+      slot.kind = ffi.TITAN_BROWSER_FLOAT as foreign uint32_t
+      slot.scalar.number = item
+    when is_bytes(item) then
+      slot.kind = ffi.TITAN_BROWSER_BYTES as foreign uint32_t
+      slot.bytes = item as foreign const *unsigned char
+      slot.length = #item
+    when is_handle(item) then
+      if item.slot == 0 or item.state ~= state then raise "browser argument handle is closed or belongs to another state" end
+      slot.kind = ffi.TITAN_BROWSER_HANDLE as foreign uint32_t
+      slot.state = state
+      slot.slot = item.slot
+      slot.generation = item.generation
+    when is_callable(item) then
+      if item.slot == 0 or item.state ~= state then raise "browser argument callable is closed or belongs to another state" end
+      slot.kind = ffi.TITAN_BROWSER_CALLABLE as foreign uint32_t
+      slot.state = state
+      slot.slot = item.slot
+      slot.generation = item.generation
+    end
+  end
+end
+
+local function invoke(target: JSHandle, arguments: {Argument}, kind: foreign uint32_t,
+                      response: foreign *titan_browser_response)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  ffi.luaL_checkstack(L, 3, "browser argument owners")
+  ffi.lua_pushtvalue(L, target)
+  ffi.lua_pushtvalue(L, arguments)
+  local state = checked_target(target)
+  local small = foreign titan_browser_value.new_array(8)
+  local slots: foreign *titan_browser_value = small
+  if #arguments > 8 then
+    local extra: owned titan_browser_value[] = foreign titan_browser_value.new_array(#arguments)
+    slots = extra as foreign *titan_browser_value
+    ffi.lua_pushtvalue(L, extra)
+  end
+  marshal(arguments, state, slots)
+  ffi.titan_browser_host_call(state, target.slot, target.generation,
+                             #arguments, slots, kind, response)
+  check_response(response)
+end
+
+--- Look up an explicitly supplied create({bindings}) name, never a global or eval expression.
+function binding(name: string): JSHandle
+  local state = ffi.titan_browser_state(L)
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  ffi.titan_browser_host_binding(state, name as foreign const *unsigned char, #name, response)
+  check_response(response)
+  return adopt_handle(response)
+end
+
+--- Call a binding and require an exact JavaScript boolean result.
+function call_boolean(target: JSHandle, arguments: {Argument}): boolean
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  invoke(target, arguments, ffi.TITAN_BROWSER_BOOLEAN as foreign uint32_t, response)
+  return response.value.scalar.integer ~= 0
+end
+
+--- Call a binding and require a signed-i64 BigInt result, even for small integers.
+function call_integer(target: JSHandle, arguments: {Argument}): integer
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  invoke(target, arguments, ffi.TITAN_BROWSER_INTEGER as foreign uint32_t, response)
+  return response.value.scalar.integer
+end
+
+--- Call a binding and retain the Number's floating tag, NaN and negative zero.
+function call_float(target: JSHandle, arguments: {Argument}): float
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  invoke(target, arguments, ffi.TITAN_BROWSER_FLOAT as foreign uint32_t, response)
+  return response.value.scalar.number
+end
+
+--- Call a binding and copy exactly its counted byte result, including embedded NUL bytes.
+function call_bytes(target: JSHandle, arguments: {Argument}): string
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  invoke(target, arguments, ffi.TITAN_BROWSER_BYTES as foreign uint32_t, response)
+  local capacity: integer = response.value.scalar.integer
+  if capacity < 0 or response.value.length > capacity then
+    raise "invalid browser byte result length or capacity"
+  end
+  return copied_bytes(response.value.bytes, response.value.length)
+end
+
+--- Call a binding and retain its opaque result. A Promise is an ordinary opaque value here.
+function call_handle(target: JSHandle, arguments: {Argument}): JSHandle
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  invoke(target, arguments, ffi.TITAN_BROWSER_HANDLE as foreign uint32_t, response)
+  return adopt_handle(response)
+end
+
+--- Call a binding requiring no result. Returning a Promise is not a void result.
+function call_void(target: JSHandle, arguments: {Argument})
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  invoke(target, arguments, ffi.TITAN_BROWSER_VOID as foreign uint32_t, response)
+end
+
+local function signature_kind(descriptor: reflect.Type): foreign uint32_t
+  case descriptor
+  when is_nil() then return ffi.TITAN_BROWSER_NIL as foreign uint32_t
+  when is_boolean() then return ffi.TITAN_BROWSER_BOOLEAN as foreign uint32_t
+  when is_integer() then return ffi.TITAN_BROWSER_INTEGER as foreign uint32_t
+  when is_float() then return ffi.TITAN_BROWSER_FLOAT as foreign uint32_t
+  when is_string() then return ffi.TITAN_BROWSER_BYTES as foreign uint32_t
+  when is_named(named) then
+    if named.name == "titan.browser.JSHandle" then return ffi.TITAN_BROWSER_HANDLE as foreign uint32_t end
+    if named.name == "titan.browser.Callable" then return ffi.TITAN_BROWSER_CALLABLE as foreign uint32_t end
+  end
+  raise "browser callable requires fixed nil, scalar, byte or bridge-handle descriptors"
+end
+
+--- Root the original closure and its shared capture cells, without a generic-function coercion.
+function callable(callback: value): Callable
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  ffi.luaL_checkstack(L, 3, "browser original closure and signature owners")
+  ffi.lua_pushtvalue(L, callback)
+  -- callback remains the original traced value throughout reflection. The
+  -- inspection's variadic callable view is deliberately never used or rooted.
+  local inspected = reflect.inspect(callback)
+  case inspected
+  when is_titan_function{signature = type} then
+    if signature.vararg_descriptor ~= nil or signature.flexret_descriptor ~= nil then
+      raise "browser callable requires a fixed signature"
+    end
+    local parameters: owned uint32_t[] = foreign uint32_t.new_array(#signature.param_descriptors)
+    ffi.lua_pushtvalue(L, parameters)
+    local results: owned uint32_t[] = foreign uint32_t.new_array(#signature.return_descriptors)
+    ffi.lua_pushtvalue(L, results)
+    for index = 1, #signature.param_descriptors do
+      parameters[index - 1] = signature_kind(signature.param_descriptors[index])
+    end
+    for index = 1, #signature.return_descriptors do
+      results[index - 1] = signature_kind(signature.return_descriptors[index])
+    end
+    local descriptor = foreign titan_browser_signature.new()
+    descriptor.parameter_count = #signature.param_descriptors
+    descriptor.result_count = #signature.return_descriptors
+    descriptor.parameters = parameters
+    descriptor.results = results
+    local identity = foreign titan_browser_identity.new()
+    local owner = Callable { state = ffi.titan_browser_state(L), slot = 0, generation = 0 }
+    ffi.titan_browser_root_callable(L, callback, descriptor, identity)
+    owner.slot = identity.slot
+    owner.generation = identity.generation
+    return owner
+  end
+  raise "browser callable requires an actual Titan function"
+end
+
+function Request:cancel()
+  if self.slot == 0 then return end
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  ffi.titan_browser_state(L)
+  ffi.titan_browser_host_cancel(self.state, self.slot, self.generation, response)
+  check_response(response)
+end
+
+local function request(target: JSHandle, arguments: {Argument}, completion: Callable,
+                       failure: Callable, mode: foreign uint32_t): Request
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  ffi.luaL_checkstack(L, 5, "browser request owners")
+  ffi.lua_pushtvalue(L, target)
+  ffi.lua_pushtvalue(L, arguments)
+  ffi.lua_pushtvalue(L, completion)
+  ffi.lua_pushtvalue(L, failure)
+  local state = checked_target(target)
+  if ffi.titan_browser_state_closing(L) ~= 0 then raise "browser state is closing" end
+  if completion.slot == 0 or failure.slot == 0 or
+     completion.state ~= state or failure.state ~= state then
+    raise "browser request callback is closed or belongs to another state"
+  end
+  local small = foreign titan_browser_value.new_array(8)
+  local slots: foreign *titan_browser_value = small
+  if #arguments > 8 then
+    local extra: owned titan_browser_value[] = foreign titan_browser_value.new_array(#arguments)
+    slots = extra as foreign *titan_browser_value
+    ffi.lua_pushtvalue(L, extra)
+  end
+  marshal(arguments, state, slots)
+  local response = foreign titan_browser_response.new()
+  defer ffi.titan_browser_response_dispose(response)
+  ffi.titan_browser_host_start(state, target.slot, target.generation, #arguments,
+      slots, completion.slot, completion.generation, failure.slot, failure.generation,
+      mode, response)
+  check_response(response)
+  local owner = Request { state = state, slot = response.value.slot,
+                          generation = response.value.generation }
+  response.value.slot = 0
+  return owner
+end
+
+--- Start explicit detachable or guaranteed-terminal host work, notifying exactly one live outcome.
+-- @param failure Exact function(string, JSHandle): () callback for host rejection.
+function start(target: JSHandle, arguments: {Argument},
+               completion: Callable, failure: Callable): Request
+  return request(target, arguments, completion, failure, ffi.TITAN_BROWSER_START as foreign uint32_t)
+end
+
+--- Subscribe to a synchronous host listener; events are queued rather than invoked inline.
+-- @param failure Exact function(string, JSHandle): () callback for host failure.
+function listen(target: JSHandle, arguments: {Argument},
+                completion: Callable, failure: Callable): Request
+  return request(target, arguments, completion, failure, ffi.TITAN_BROWSER_LISTEN as foreign uint32_t)
+end
+
+do
+  ffi.titan_browser_configure(L, new_handle, new_callable, handle_identity, callable_identity)
+end

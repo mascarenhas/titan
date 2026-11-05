@@ -93,7 +93,9 @@ compiler spec/coder/backtrace_spec.lua 2.580 6.038
 compiler spec/coder/binary_compatibility_spec.lua 28.429 39.979
 compiler spec/coder/bound_methods_spec.lua 2.440 6.427
 stdlib spec/coder/build_coordination_spec.lua 1.000 34.874
+compiler spec/coder/browser_bridge_spec.lua 1.000 -
 compiler spec/coder/browser_budgets_spec.lua 1.000 -
+compiler spec/coder/browser_deployment_spec.lua 1.000 -
 compiler spec/coder/browser_entry_gate_spec.lua 1.000 -
 compiler spec/coder/browser_fixtures_spec.lua 1.000 -
 compiler spec/coder/browser_images_spec.lua 1.000 -

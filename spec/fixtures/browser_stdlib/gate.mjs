@@ -22,12 +22,13 @@ export async function run(context) {
   const emit = record => context.stdout(text(JSON.stringify({engine: context.engine, ...record}) + "\n"));
   async function execute(image) {
     const stdout = [], stderr = [];
-    const instance = context.create(image.factory, {locateFile: image.locateFile,
+    const instance = image.create({locateFile: image.locateFile,
       stdout: chunk => { stdout.push(chunk.slice()); },
       stderr: chunk => { stderr.push(chunk.slice()); }});
     try {
       await instance.initialize();
       const result = await instance.run([]);
+      await instance.dispose();
       return {result, stdout: join(stdout), stderr: join(stderr)};
     } finally { await instance.dispose(); }
   }
@@ -65,8 +66,8 @@ export async function run(context) {
     await context.tick();
     await context.gc();
   }
-  context.assert(subset.factory === (await context.image(subsetPath)).factory,
-    "repeated subset instances did not share the cached image factory");
+  context.assert(subset.create === (await context.image(subsetPath)).create,
+    "repeated subset instances did not share the cached image creator");
   emit({subsetInitializeRunDisposeCycles: 3});
 
   const observed = await execute(await context.image(fidelityPath));

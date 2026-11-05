@@ -1,6 +1,48 @@
 #include "loader.h"
 #include <emscripten.h>
 #include <stdio.h>
+#include <titan/browser.h>
+#include "../browser_runtime/fixture_controls.h"
+
+EM_JS(void, browser_loader_initialize_hook, (), {
+    const bindings = Module['titanBrowserBridge'].options.bindings;
+    const publish = bindings?.__loaderTest;
+    if (publish) publish(Object.freeze({
+        rawEntry: () => Module['_titan_browser_entry'](0n, 0, 0, 0),
+        privateEntry: () => Module['_titan_mco_entry'](0),
+        abort: () => abort('loader abort inside bridge binding'),
+        watchMemoryCalls: callback => {
+            const owner = Module['titanBrowserBridge'];
+            const allocate = Module['_titan_browser_alloc'], free = Module['_titan_browser_free'];
+            Module['_titan_browser_alloc'] = size => {
+                callback(Object.freeze({kind: 'allocate', poisoned: !!owner.terminal}));
+                return allocate(size);
+            };
+            Module['_titan_browser_free'] = pointer => {
+                callback(Object.freeze({kind: 'free', poisoned: !!owner.terminal}));
+                return free(pointer);
+            };
+            return () => {
+                Module['_titan_browser_alloc'] = allocate;
+                Module['_titan_browser_free'] = free;
+            };
+        },
+        watchResponses: callback => {
+            const owner = Module['titanBrowserBridge'], respond = owner.importResponse;
+            owner.importResponse = (pointer, state, action) => {
+                callback(Object.freeze({copy: () => Module.HEAPU8.slice(pointer, pointer + 56)}));
+                return respond.call(owner, pointer, state, action);
+            };
+            return () => { owner.importResponse = respond; };
+        },
+    }));
+    bindings?.initialize_hook?.();
+});
+
+void browser_loader_publish(void) {
+    gate_test_publish();
+    browser_loader_initialize_hook();
+}
 
 static char loader_stdout_buffer[512];
 static char loader_stderr_buffer[512];
@@ -27,11 +69,16 @@ void browser_loader_wait(int kind) {
     else browser_loader_async_wait();
 }
 
-extern void titan_browser_complete(int kind, int status,
-    const unsigned char *bytes, size_t length);
+EM_JS(uint64_t, browser_loader_current_operation, (), {
+    return Module['titanBrowserBridge'].pending.id;
+});
 
 void browser_loader_completion(int kind) {
-    titan_browser_complete(kind, 99, NULL, 0);
+    titan_browser_completion completion = {0};
+    completion.operation_id = browser_loader_current_operation();
+    completion.operation = kind == 9 ? 9 : TITAN_BROWSER_MAIN;
+    completion.application_status = 99;
+    titan_browser_complete(&completion);
 }
 
 int browser_loader_pattern(const unsigned char *bytes, size_t length) {

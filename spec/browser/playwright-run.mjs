@@ -79,9 +79,7 @@ async function run(options) {
   }
   const sdk = await realpath(resolve(options.sdk ??
     fileURLToPath(new URL('../../titan-runtime/browser/', import.meta.url))));
-  for (const name of ['titan-browser.mjs', 'titan-browser-page.mjs']) {
-    await assetPath(sdk, name);
-  }
+  await assetPath(sdk, 'titan-browser-page.mjs');
   const require = createRequire(join(resolve(process.env.TITAN_PLAYWRIGHT_ROOT ?? process.cwd()), 'package.json'));
   if (require('playwright/package.json').version !== playwrightVersion) {
     throw new Error(`Playwright ${playwrightVersion} is required`);
@@ -121,7 +119,7 @@ async function run(options) {
     });
     const origin = `http://127.0.0.1:${server.address().port}`;
     const config = {engine: options.engine, root: origin + '/root/',
-      file: relative(root, file).split(sep).join('/'), loader: origin + '/sdk/titan-browser.mjs',
+      file: relative(root, file).split(sep).join('/'),
       args: options.args, jsTest: options.jsTest, allowDegradedTrace: options.allowDegradedTrace};
     html = '<!doctype html><meta charset=utf-8><title>Titan Playwright tests</title><script type=module>' +
       `import {startPage} from '/sdk/titan-browser-page.mjs'; startPage(${JSON.stringify(config).replaceAll('<', '\\u003c')});</script>`;

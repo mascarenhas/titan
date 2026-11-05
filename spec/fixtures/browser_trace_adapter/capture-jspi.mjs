@@ -5,7 +5,7 @@
 export async function run(context) {
   context.assert(context.args.length === 1, 'pass a trace runtime image');
   const image = await context.image(context.args[0]);
-  const instance = context.create(image.factory, {locateFile: image.locateFile});
+  const instance = image.create({locateFile: image.locateFile});
   const NativeError = globalThis.Error;
   const captures = [];
   try {

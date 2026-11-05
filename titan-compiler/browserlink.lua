@@ -8,6 +8,7 @@ function M.sdk_assets(paths)
     return {
         runtime = paths.libtitan,
         js_library = path.join(root, "titan-browser-library.js"),
+        bridge_library = path.join(root, "titan-browser-bridge.js"),
         trace_library = path.join(root, "titan-browser-trace.js"),
         loader = path.join(root, "titan-browser.mjs"),
         runner = path.join(root, "titan-browser-run"),
@@ -22,8 +23,8 @@ end
 
 function M.require_sdk(context, descriptor, install)
     local assets = M.sdk_assets(descriptor.paths)
-    for _, key in ipairs({ "runtime", "js_library", "trace_library", "loader", "runner",
-            "runner_module", "node_worker", "page" }) do
+    for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
+            "loader", "runner", "runner_module", "node_worker", "page" }) do
         local filename = assets[key]
         local stat = context.io:stat(filename)
         local readable = stat and stat.kind == "file" and context.io:read_file(filename, 0)
@@ -119,7 +120,9 @@ function M.profile(descriptor, options)
     end
     add("-sJSPI=1")
     local imports = '"titan_mco_transfer","titan_mco_destroy"'
-    local promised = entry == "titan" and '"titan_browser_entry","titan_mco_entry"' or '"main"'
+    local promised = entry == "titan" and
+        '"titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
+        '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"' or '"main"'
     if purpose == "gate" then
         imports = imports .. ',"emscripten_sleep"'
         promised = promised .. ',"titan_browser_gate_guarded"'
@@ -142,17 +145,21 @@ function M.profile(descriptor, options)
     add("-sFORCE_FILESYSTEM=1")
     add("-sPRINTF_LONG_DOUBLE=1")
     local exports = entry == "titan" and
-        '"_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"' or
+        '"_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
+        '"_titan_browser_release_callable","_titan_browser_close",' ..
+        '"_titan_browser_alloc","_titan_browser_free","_titan_browser_trace_identity"' or
         '"_main","_malloc","_free"'
     if purpose == "gate" then
         exports = exports .. ',"_titan_browser_gate_guarded","_titan_browser_gate_observe"'
     end
     add("-sEXPORTED_FUNCTIONS=[" .. exports .. "]")
-    add('-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]')
+    add('-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]')
     add('-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]')
     if entry == "titan" then
         add("--js-library")
         add(M.sdk_assets(descriptor.paths).js_library)
+        add("--js-library")
+        add(M.sdk_assets(descriptor.paths).bridge_library)
         add("--js-library")
         add(M.sdk_assets(descriptor.paths).trace_library)
     end
@@ -218,6 +225,39 @@ function M.check_image_size(size)
             size, MAX_IMAGE_BYTES)
     end
     return true
+end
+
+-- Emscripten's pinned ES-module output has one trailing default factory export.
+-- Keep the factory lexical and its bundler-visible new URL expressions intact;
+-- only the embedded owner is an application entrypoint.
+function M.embed(image, loader, wasm_name)
+    local factory
+    local _, count = image:gsub("\n%s*export%s+default%s", "")
+    if count ~= 1 then return nil, "browser image has no unique default factory export" end
+    image, count = image:gsub("\nexport default ([%a_$][%w_$]*);%s*$", function(name)
+        factory = name
+        return "\n"
+    end)
+    if count ~= 1 then return nil, "browser image has no unique default factory export" end
+    loader, count = loader:gsub("export function create%(", "function create(", 1)
+    if count ~= 1 or loader:match("\n%s*export%s") or loader:match("^%s*export%s") or
+            loader:match("\n%s*import%s") or loader:match("^%s*import%s") then
+        return nil, "browser loader has an unsupported module surface"
+    end
+    local function quote(name)
+        return '"' .. name:gsub('[%z\1-\31\\"]', function(char)
+            return string.format("\\u%04x", char:byte())
+        end) .. '"'
+    end
+    local wasm, map = quote(wasm_name), quote(wasm_name .. ".map")
+    return image .. "\nconst titanCreate = (() => {\n" .. loader ..
+        "\nreturn create;\n})();\n" ..
+        "export default function create(options = {}) {\n" ..
+        "  const locateFile = options.locateFile ?? ((name, prefix) => {\n" ..
+        "    if (name.endsWith('.wasm.map')) return new URL(" .. map .. ", import.meta.url).href;\n" ..
+        "    if (name.endsWith('.wasm')) return new URL(" .. wasm .. ", import.meta.url).href;\n" ..
+        "    return prefix + name;\n  });\n" ..
+        "  return titanCreate(" .. factory .. ", {...options, locateFile});\n}\n"
 end
 
 -- Inventory shares the bounded final-image walk with the map rewriter.

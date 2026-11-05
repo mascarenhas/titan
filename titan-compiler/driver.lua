@@ -10366,6 +10366,23 @@ end
 
 function driver.browser_entrypoint_contents(modname, program_name, options)
     options = options or {}
+    local initializer = [[
+static int titan_browser_initialize_worker(lua_State *L) {
+    luaL_openlibs(L);
+    titan_install_searcher(L);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "preload");
+    lua_pushcfunction(L, luaopen_titan);
+    lua_setfield(L, -2, "titan");
+    lua_pushcfunction(L, $LUAOPEN);
+    lua_setfield(L, -2, "$MODNAME");
+    lua_settop(L, 0);
+    lua_getglobal(L, "require");
+    lua_pushliteral(L, "$MODNAME");
+    lua_call(L, 1, 0);
+    return 0;
+}
+]]
     local worker = [[
 static char titan_main_array_writer_key;
 static int titan_main_string_array_writer(lua_State *L) {
@@ -10381,18 +10398,10 @@ static int titan_browser_worker(lua_State *L) {
     TValue writer;
     Udata *proxy;
     int i;
-    luaL_openlibs(L);
-    titan_install_searcher(L);
-    lua_getglobal(L, "package");
-    lua_getfield(L, -1, "preload");
-    lua_pushcfunction(L, luaopen_titan);
-    lua_setfield(L, -2, "titan");
-    lua_pushcfunction(L, $LUAOPEN);
-    lua_setfield(L, -2, "$MODNAME");
     lua_settop(L, 0);
-    lua_getglobal(L, "require");
-    lua_pushliteral(L, "$MODNAME");
-    lua_call(L, 1, 1);
+    lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
+    lua_getfield(L, -1, "$MODNAME");
+    lua_remove(L, -2);
     lua_getfield(L, -1, "main");
     lua_remove(L, -2);
     array_metatable = titan_array_metatable(L);
@@ -10426,6 +10435,9 @@ static int titan_browser_worker(lua_State *L) {
         LUAOPEN = opener, MODNAME = c_string_contents(modname),
         SKIP = options.no_uv_bootstrap and "1" or "0",
     }), { declarations = "extern int luaopen_titan(lua_State *L);\nextern int " .. opener .. "(lua_State *L);",
+        initializer = util.render(initializer, {
+            LUAOPEN = opener, MODNAME = c_string_contents(modname),
+        }),
         program_name = c_string_contents(program_name or modname:gsub(".*[.]", "")) })
 end
 
@@ -13863,7 +13875,8 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     executable, wasm = driver.browser_program_path(executable, executable)
     if not executable then return nil, wasm end
     local inputs = { assets.runtime, context.target_descriptor.paths.liblua,
-        context.target_descriptor.paths.lua_record, assets.js_library, assets.trace_library }
+        context.target_descriptor.paths.lua_record, assets.js_library, assets.bridge_library,
+        assets.trace_library, assets.loader }
     append_argv(inputs, objects)
     append_argv(inputs, archives)
     append_argv(inputs, extra_objects)
@@ -13893,7 +13906,8 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local called, identity = pcall(browsertrace.identity, context, contents, compile, identity_flags,
         { objects or {}, archives or {}, extra_objects or {}, libraries,
           { assets.runtime, context.target_descriptor.paths.liblua,
-            context.target_descriptor.paths.lua_record, assets.js_library, assets.trace_library } })
+            context.target_descriptor.paths.lua_record, assets.js_library, assets.bridge_library,
+            assets.trace_library, assets.loader } })
     if not called then
         if type(identity) ~= "string" then error(identity, 0) end
         return nil, identity
@@ -13961,6 +13975,15 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     map_bytes, err = browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)
     if not map_bytes then return nil, err end
     valid, err = context.io:write_file(staged_map, map_bytes)
+    if not valid then return nil, err end
+    local module_bytes, loader_bytes
+    module_bytes, err = context.io:read_file(staged)
+    if not module_bytes then return nil, err end
+    loader_bytes, err = context.io:read_file(assets.loader)
+    if not loader_bytes then return nil, err end
+    module_bytes, err = driver.browserlink.embed(module_bytes, loader_bytes, wasm:match("([^/\\]+)$"))
+    if not module_bytes then return nil, err end
+    valid, err = context.io:write_file(staged, module_bytes)
     if not valid then return nil, err end
     if options.before_commit then
         valid, err = options.before_commit()

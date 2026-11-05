@@ -39,40 +39,39 @@ export function knownTrap(error) {
     return false;
 }
 
-// One wrapper per imported factory, approved by Main as the §4 identity amendment.
-// The production loader remains unmodified; its abort callback always runs first.
-export function observeFactory(factory, control, allowDegradedTrace = false) {
-    return options => Promise.resolve(factory({
+// Observation wraps the public image creator, never its private Wasm factory.
+// The loader poisons first and contains observer exceptions.
+export function observeImage(create, control, allowDegradedTrace = false) {
+    return (options = {}) => create({
         ...options,
-        onAbort(value) {
-            try { options.onAbort?.(value); }
-            finally { control({ type: "abort", reason: reason(value) }); }
+        requireTrace: !allowDegradedTrace,
+        onEngineFailure(event) {
+            try { options.onEngineFailure?.(event); }
+            finally {
+                // Abort/trap observations survive a caller's catch. Protocol
+                // poison stays local when explicitly handled; an uncaught
+                // operation rejection still follows the runner's failure path.
+                if (event.kind === "abort") control({ type: "abort", reason: reason(event.cause) });
+                else if (event.kind === "trap") control({ type: "failure", category: "trap",
+                    reason: reason(event.cause), knownTrap: true });
+            }
         },
-    })).then(module => {
-        if (module?.titanBrowserTrace?.state === "degraded" && !allowDegradedTrace) {
-            const message = "degraded browser trace: " + module.titanBrowserTrace.reason;
-            control({ type: "failure", category: "harness", reason: message });
-            throw new Error(message);
-        }
-        return module;
     });
 }
 
 function byteSink(sink) {
     return chunk => {
         if (!(chunk instanceof Uint8Array)) throw new Error("output chunk must be a Uint8Array");
-        sink(chunk);
+        return sink(chunk);
     };
 }
 
 export async function execute(config, host) {
-    const { create } = await import(config.loader);
     const stdout = byteSink(host.stdout);
     const stderr = byteSink(host.stderr);
     const context = Object.freeze({
         engine: config.engine,
         args: Object.freeze([...config.args]),
-        create,
         image: async path => Object.freeze(await host.image(relativePath(path))),
         bytes: async path => new Uint8Array(await host.bytes(relativePath(path))),
         stdout, stderr,
@@ -103,9 +102,13 @@ export async function execute(config, host) {
         host.control({ type: "complete", kind: "host-test", status: 0 });
         return;
     }
-    const { factory, locateFile } = await context.image(config.file);
-    const instance = create(factory, { stdout, stderr, locateFile });
+    const { create, locateFile } = await context.image(config.file);
+    const instance = create({ stdout, stderr, locateFile });
     try {
+        try { await instance.initialize(); }
+        catch (error) {
+            if (error?.code !== "TITAN_BROWSER_TITAN") throw error;
+        }
         const result = await instance.run(config.args);
         // Disposal is part of quiescence, never a cancellation mechanism.
         await instance.dispose();
@@ -157,10 +160,11 @@ export async function startPage(config) {
         module: path => import(url(path)),
         image(path) {
             if (!images.has(path)) images.set(path, import(url(path)).then(module => {
-                if (typeof module.default !== "function") throw new Error("image must export a default factory");
-                if (!wrappers.has(module.default)) wrappers.set(module.default, observeFactory(module.default, send, config.allowDegradedTrace));
+                if (typeof module.default !== "function") throw new Error("image must export a default create function");
+                if (!wrappers.has(module.default)) wrappers.set(module.default,
+                    observeImage(module.default, send, config.allowDegradedTrace));
                 return Object.freeze({
-                    factory: wrappers.get(module.default),
+                    create: wrappers.get(module.default),
                     locateFile: name => new URL(name.split("/").map(encodeURIComponent).join("/"), url(path)).href,
                 });
             }));

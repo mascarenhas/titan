@@ -117,6 +117,7 @@ local function stage_differing_roots()
         "include/titan.h",
         "include/transfer.h",
         "include/titan/ffi.h",
+        "include/titan/browser.h",
     }
 
     local norm_prefix = strategy:realpath(prefix) or paths.normalize(prefix)
@@ -254,7 +255,7 @@ if action == "prepare" then
 elseif action == "stage-runtime" then
     local build_dir = assert(select(2, ...), "build_dir is required")
     local repo_root = assert(select(3, ...), "repo_root is required")
-    local runtime_members = { "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }
+    local runtime_members = { "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o", "titan-browser.o" }
     local lpeg_members = { "lplcap.o", "lplcode.o", "lplprint.o", "lpltree.o", "lplvm.o" }
     local total_expected = #runtime_members + #lpeg_members
     local all_paths = {}
@@ -277,6 +278,7 @@ elseif action == "stage-runtime" then
 
     local browser_src = repo_root .. "/titan-runtime/browser"
     copy_file_atomic(browser_src .. "/titan-browser-library.js", assets.js_library, false)
+    copy_file_atomic(browser_src .. "/titan-browser-bridge.js", assets.bridge_library, false)
     copy_file_atomic(browser_src .. "/titan-browser-trace.js", assets.trace_library, false)
     copy_file_atomic(browser_src .. "/titan-browser.mjs", assets.loader, false)
     copy_file_atomic(browser_src .. "/titan-browser-run", assets.runner, true)
@@ -325,7 +327,7 @@ elseif action == "finalize" then
     if not closed then fail(closure_err) end
     io.stderr:write("browser-sdk: core stdlib closure passed (archive symbols and certified headers)\n")
     local expected_modules = {
-        "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
+        "titan.browser", "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
         "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
         "titan.test", "titan.transfer", "titan.url",
     }
@@ -353,11 +355,11 @@ elseif action == "finalize" then
             digest_inputs[#digest_inputs + 1] = paths.join(descriptor.paths.lua_source, name)
         end
     end
-    for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h" }) do
+    for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h", "titan/browser.h" }) do
         digest_inputs[#digest_inputs + 1] = paths.join(descriptor.paths.include, rel)
     end
     for _, key in ipairs({
-        "runtime", "js_library", "trace_library", "loader", "runner",
+        "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
         "runner_module", "node_worker", "page", "lpeglabel", "provider",
     }) do
         local asset_path = assets[key]

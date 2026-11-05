@@ -266,25 +266,33 @@ async function executeRow(context, row, degraded, recordCost, profile) {
     const originalFetch = own(globalThis, "fetch");
     const originalWarn = console.warn;
     const originalError = console.error;
-    let module, output = "", stderr = "", hostCalls = 0, fetchCalls = 0, located = 0, warnings = 0, recoveries = 0;
+    let controls, output = "", stderr = "", hostCalls = 0, fetchCalls = 0, located = 0, warnings = 0, recoveries = 0;
     let expectedLimit, expectedPrepare;
     const suffix = row.name.split(".").at(-1);
     const hostMode = suffix;
     const notice = values => { warnings += values.reduce((sum, value) => sum + occurrences(String(value), "Titan browser trace: "), 0); };
     console.warn = (...values) => { notice(values); originalWarn.apply(console, values); };
     console.error = (...values) => { notice(values); originalError.apply(console, values); };
-    const factory = async options => {
-      module = await image.factory(options);
-      return module;
-    };
-    const instance = context.create(factory, {
+    const instance = image.create({
+      bindings: {
+        __traceTest(value) { controls = value; },
+        traceFixtureRestoreDescriptors() {
+          context.assert(equalDescriptor(own(Error, "stackTraceLimit"), expectedLimit) &&
+            equalDescriptor(own(Error, "prepareStackTrace"), expectedPrepare), "failed capture did not restore descriptors before recovery");
+          restore(Error, "stackTraceLimit", originalLimit);
+          restore(Error, "prepareStackTrace", originalPrepare);
+          expectedLimit = own(Error, "stackTraceLimit"); expectedPrepare = own(Error, "prepareStackTrace");
+          recoveries++;
+        },
+      },
       locateFile(name) { located++; return image.locateFile(name); },
       stdout(chunk) { output += decoder.decode(chunk, {stream:true}); context.stdout(chunk); },
       stderr(chunk) { stderr += decoder.decode(chunk, {stream:true}); context.stderr(chunk); },
     });
     try {
       await instance.initialize();
-      const metadata = module.titanBrowserTrace;
+      context.assert(controls, "trace fixture did not publish its test-owned observations");
+      const metadata = controls.metadata();
       context.assert(metadata && metadata.state === (degraded ? "degraded" : "ready"), "missing/wrong eager trace readiness");
       context.assert(degraded ? typeof metadata.reason === "string" : metadata.reason === null, "invalid readiness reason");
       context.assert(warnings + occurrences(stderr, "Titan browser trace: ") === (degraded ? 1 : 0), "map load did not warn exactly once per degraded instance");
@@ -308,18 +316,11 @@ async function executeRow(context, row, degraded, recordCost, profile) {
         get() { hostCalls++; throw new Error("stack formatter getter invoked"); },
         set() { hostCalls++; throw new Error("stack formatter setter invoked"); }, configurable:true, enumerable:true});
       expectedLimit = own(Error, "stackTraceLimit"); expectedPrepare = own(Error, "prepareStackTrace");
-      module['traceFixtureRestoreDescriptors'] = () => {
-        context.assert(equalDescriptor(own(Error, "stackTraceLimit"), expectedLimit) &&
-          equalDescriptor(own(Error, "prepareStackTrace"), expectedPrepare), "failed capture did not restore descriptors before recovery");
-        restore(Error, "stackTraceLimit", originalLimit);
-        restore(Error, "prepareStackTrace", originalPrepare);
-        expectedLimit = own(Error, "stackTraceLimit"); expectedPrepare = own(Error, "prepareStackTrace");
-        recoveries++;
-      };
       const locatedBefore = located;
       if (originalFetch && typeof originalFetch.value === "function") Object.defineProperty(globalThis, "fetch", {
         ...originalFetch, value(...args) { fetchCalls++; return originalFetch.value.apply(this, args); }});
       const result = await instance.run(row.args);
+      await instance.dispose();
       context.assert(equalDescriptor(own(Error, "stackTraceLimit"), expectedLimit) &&
         equalDescriptor(own(Error, "prepareStackTrace"), expectedPrepare), "capture did not restore exact own descriptors");
       context.assert(equalDescriptor(own(globalThis, "Error"), originalConstructor), "Error constructor identity changed");
@@ -357,7 +358,7 @@ async function executeRow(context, row, degraded, recordCost, profile) {
       restore(globalThis, "fetch", originalFetch);
       console.warn = originalWarn; console.error = originalError;
       await instance.dispose();
-      module = undefined;
+      controls = undefined;
     }
   }
   await execute(row);

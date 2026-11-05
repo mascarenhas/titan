@@ -487,6 +487,7 @@ assert(os.remove(arg[0]))
             "lib/titan-browser/0.6/titan.a",
             "lib/titan-browser/0.6/titan-browser.mjs",
             "lib/titan-browser/0.6/titan-browser-library.js",
+            "lib/titan-browser/0.6/titan-browser-bridge.js",
             "lib/titan-browser/0.6/titan-browser-trace.js",
             "lib/titan-browser/0.6/titan-browser-run",
             "lib/titan-browser/0.6/titan-browser-run.mjs",

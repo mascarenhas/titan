@@ -1,4 +1,4 @@
-import {closeBytes, closed, encode, expectedBytes, join, prefixes, reentry, rejection} from './checks.mjs';
+import {closeBytes, disposed, encode, expectedBytes, join, prefixes, ran, reentry, rejection, tail} from './checks.mjs';
 
 function contains(bytes, part) {
   outer: for (let index = 0; index + part.length <= bytes.length; ++index) {
@@ -13,13 +13,15 @@ function contains(bytes, part) {
 export async function fidelity(context, paths) {
   let runs = 0;
   for (const path of paths) {
+    const initialRuns = runs;
     const image = await context.image(path);
     async function execute(mode) {
       const stdout = [], stderr = [];
-      const instance = context.create(image.factory, {locateFile: image.locateFile,
+      const instance = image.create({locateFile: image.locateFile,
         stdout: bytes => { stdout.push(bytes); }, stderr: bytes => { stderr.push(bytes); }});
       try {
         const result = await instance.run([mode]);
+        await instance.dispose();
         return {result, stdout: join(stdout), stderr: join(stderr)};
       } finally { await instance.dispose(); runs++; }
     }
@@ -50,16 +52,22 @@ export async function fidelity(context, paths) {
     context.assert(contains(failed.stderr, encode('stack traceback:\n\t')),
       'uncaught error omitted the standalone trace report');
 
-    for (const [mode, message] of [['duplicate', 'browser entry completed more than once'],
-      ['invalid', 'browser entry reported invalid completion kind 9']]) {
-      const stdout = [], stderr = [];
-      const instance = context.create(image.factory, {locateFile: image.locateFile,
+    for (const mode of ['duplicate', 'invalid']) {
+      const stdout = [], stderr = [], failures = [];
+      const instance = image.create({locateFile: image.locateFile,
+        onEngineFailure: event => { failures.push(event); },
         stdout: bytes => { stdout.push(bytes); }, stderr: bytes => { stderr.push(bytes); }});
       try {
-        await rejection(context, instance.run([mode]), {code: 'TITAN_BROWSER_PROTOCOL', message});
-        context.equalBytes(join(stdout), closeBytes, 'protocol failure abandoned stdout cleanup');
-        context.equalBytes(join(stderr), closeBytes, 'protocol failure abandoned stderr cleanup');
-        await rejection(context, instance.run(), closed);
+        const saved = await rejection(context, instance.run([mode]), {code: 'TITAN_BROWSER_PROTOCOL',
+          message: 'browser entry reported a duplicate or mismatched completion'});
+        context.assert(failures.length === 1 && failures[0].kind === 'protocol' && failures[0].cause === saved,
+          'handled protocol failure lost its local poison observation');
+        for (const promise of [instance.initialize(), instance.run(), instance.call(undefined), instance.drain()]) {
+          context.assert(await rejection(context, promise, {code: saved.code}) === saved,
+            'an application method replaced the saved poison');
+        }
+        context.equalBytes(join(stdout), new Uint8Array(), 'protocol poison attempted unsafe C cleanup');
+        context.equalBytes(join(stderr), new Uint8Array(), 'protocol poison attempted unsafe C cleanup');
       } finally { await instance.dispose(); runs++; }
     }
 
@@ -67,55 +75,91 @@ export async function fidelity(context, paths) {
       for (const behavior of ['throw', 'value', 'thenable']) {
         const cause = new Error(`${stream} ${behavior}`);
         const healthy = stream === 'stdout' ? 'stderr' : 'stdout';
-        const chunks = [];
-        let calls = 0, admission, safe = false, bridge;
-        const factory = options => {
-          const attach = options.titanBrowserAttach;
-          options.titanBrowserAttach = state => { bridge = state; attach(state); };
-          return image.factory(options);
-        };
-        let instance;
-        instance = context.create(factory, {locateFile: image.locateFile,
+        const chunks = [], admissions = [];
+        let calls = 0, safe = true, controls, instance, closing = false;
+        instance = image.create({locateFile: image.locateFile,
+          bindings: {__titanTest(value) { controls = value; }},
           [healthy]: bytes => { chunks.push(bytes); },
           [stream]: () => {
             calls++;
-            safe = bridge.safe();
-            admission = rejection(context, instance.run(), reentry);
+            const snapshot = controls.snapshot();
+            safe &&= snapshot.safe && !snapshot.owner;
+            admissions.push(rejection(context, instance.drain(), closing ? disposed : reentry));
             if (behavior === 'throw') throw cause;
             if (behavior === 'value') return 0;
             return Promise.reject(cause);
           }});
+        const expected = {code: 'TITAN_BROWSER_SINK', stream,
+          message: `browser ${stream} sink ${behavior === 'value' ? 'must return undefined or a promise' : 'failed'}`,
+          ...(behavior === 'value' ? {} : {cause})};
         try {
-          await rejection(context, instance.run(['fidelity']), {
-            code: 'TITAN_BROWSER_SINK', stream,
-            message: `browser ${stream} sink ${behavior === 'throw' ? 'failed' : 'must return undefined'}`,
-            ...(behavior === 'throw' ? {cause} : {}),
-          });
-          await admission;
-          context.assert(safe && calls === 1, 'failed sink ran again or ran before logical-entry retirement');
+          await rejection(context, instance.run(['fidelity']), expected);
+          await Promise.all(admissions);
+          await rejection(context, instance.run(), ran);
+          closing = true;
+          await rejection(context, instance.dispose(), expected);
+          await Promise.all(admissions);
+          context.assert(safe && calls === 2, 'sink failure suppressed a later close entry or ran inside Wasm');
           context.equalBytes(join(chunks), expectedBytes(healthy), 'sink failure abandoned/duplicated Lua cleanup');
-          await rejection(context, instance.run(), closed);
-        } finally { await instance.dispose(); runs++; }
+        } finally {
+          closing = true;
+          await instance.dispose().catch(() => {});
+          controls = undefined;
+          runs++;
+        }
       }
     }
 
     const first = [];
     const causes = {stdout: new Error('first stdout'), stderr: new Error('first stderr')};
-    const both = context.create(image.factory, {locateFile: image.locateFile,
+    const both = image.create({locateFile: image.locateFile,
       stdout: () => { first.push('stdout'); throw causes.stdout; },
       stderr: () => { first.push('stderr'); throw causes.stderr; }});
     try {
       const error = await rejection(context, both.run(['fidelity']), {code: 'TITAN_BROWSER_SINK'});
       context.assert(first.length === 2 && error.stream === first[0] && error.cause === causes[first[0]],
-        'secondary sink failure replaced the first or a failed sink was retried');
-    } finally { await both.dispose(); runs++; }
+        'secondary sink failure replaced the first');
+      await rejection(context, both.dispose(), {code: error.code, stream: error.stream, cause: error.cause});
+      context.assert(first.length === 4, 'first failure suppressed a later entry on either stream');
+    } finally { await both.dispose().catch(() => {}); runs++; }
 
-    let module;
+    let entered, release, stdoutCalls = 0, stderrCalls = 0;
+    const started = new Promise(resolve => { entered = resolve; });
+    const pending = new Promise(resolve => { release = resolve; });
+    const interruptionCause = new Error('stdout failed before stderr interruption');
+    const cleanup = [];
+    const interrupted = image.create({locateFile: image.locateFile,
+      stdout() { if (++stdoutCalls === 1) throw interruptionCause; },
+      stderr() { stderrCalls++; entered(); return pending; },
+      onNotificationError(event) { cleanup.push(event); }});
+    const sinkFailure = {code: 'TITAN_BROWSER_SINK', stream: 'stdout', cause: interruptionCause};
+    try {
+      const running = rejection(context, interrupted.run(['fidelity']), sinkFailure);
+      await started;
+      await rejection(context, interrupted.drain(), reentry);
+      const disposal = interrupted.dispose();
+      const error = await running;
+      context.assert(await rejection(context, disposal, sinkFailure) === error,
+        'disposal replaced the sink failure captured before its interruption');
+      context.assert(cleanup.length === 1 && cleanup[0].kind === 'cleanup' &&
+        cleanup[0].operation === 'run' && cleanup[0].error.code === 'TITAN_BROWSER_DISPOSED',
+        'a later stream interruption replaced or duplicated the already captured sink failure');
+      release();
+      await context.tick();
+      context.assert(stdoutCalls === 2 && stderrCalls === 1 && cleanup.length === 1,
+        'interrupted stream overlapped finalizer output or a late settlement repeated cleanup');
+    } finally {
+      release();
+      await interrupted.dispose().catch(() => {});
+      runs++;
+    }
+
+    let controls;
     const copies = {stdout: [], stderr: []}, retained = {stdout: [], stderr: []};
-    const mutable = context.create(async options => { module = await image.factory(options); return module; }, {
-      locateFile: image.locateFile,
+    const mutable = image.create({locateFile: image.locateFile,
+      bindings: {__titanTest(value) { controls = value; }},
       ...Object.fromEntries(['stdout', 'stderr'].map(stream => [stream, bytes => {
-        context.assert(bytes.buffer !== module.HEAPU8.buffer, 'sink received a borrowed Wasm view');
+        context.assert(bytes.buffer !== controls.weakTargets()[1].deref(), 'sink received a borrowed Wasm view');
         context.assert(retained[stream].every(previous => previous.buffer !== bytes.buffer), 'sink chunks reused storage');
         copies[stream].push(bytes.slice());
         retained[stream].push(bytes);
@@ -127,11 +171,16 @@ export async function fidelity(context, paths) {
       context.assert(result.kind === 'returned' && result.status === 23);
       for (const stream of ['stdout', 'stderr']) {
         context.assert(retained[stream].length === 1, 'internal transfers exposed an early sink delivery');
+        context.equalBytes(join(copies[stream]), join([prefixes[stream], tail]));
+      }
+      await mutable.dispose();
+      for (const stream of ['stdout', 'stderr']) {
+        context.assert(retained[stream].length === 2, 'explicit close omitted finalizer output');
         context.equalBytes(join(copies[stream]), expectedBytes(stream));
         context.assert(retained[stream].every(bytes => bytes.every(byte => byte === 90)), 'retained sink chunk changed later');
       }
-    } finally { await mutable.dispose(); module = undefined; runs++; }
-    context.stdout(encode(`loader fidelity: ${path}: 18 runs passed\n`));
+    } finally { await mutable.dispose(); controls = undefined; runs++; }
+    context.stdout(encode(`loader fidelity: ${path}: ${runs - initialRuns} runs passed\n`));
   }
   return runs;
 }
@@ -140,7 +189,7 @@ export async function names(context, paths) {
   for (const path of paths) {
     const image = await context.image(path);
     const stdout = [], stderr = [];
-    const instance = context.create(image.factory, {locateFile: image.locateFile,
+    const instance = image.create({locateFile: image.locateFile,
       stdout: bytes => { stdout.push(bytes); }, stderr: bytes => { stderr.push(bytes); }});
     try {
       const result = await instance.run();

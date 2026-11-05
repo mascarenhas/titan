@@ -399,7 +399,7 @@ class ChromiumEngine {
         await cdp.request("Runtime.enable", {}, sessionId);
         await cdp.request("Page.enable", {}, sessionId);
         await cdp.request("Runtime.addBinding", { name: "__titanRunner" }, sessionId);
-        const pageConfig = { ...config, root: this.origin + "/root/", loader: this.origin + "/sdk/titan-browser.mjs" };
+        const pageConfig = { ...config, root: this.origin + "/root/" };
         this.html = "<!doctype html><meta charset=utf-8><title>Titan browser runner</title><script type=module>" +
             `import { startPage } from '/sdk/titan-browser-page.mjs'; startPage(${JSON.stringify(pageConfig).replaceAll("<", "\\u003c")});</script>`;
         await cdp.request("Page.navigate", { url: this.origin + "/" }, sessionId);
@@ -540,8 +540,7 @@ async function main() {
     if (!(await stat(root)).isDirectory() || !(await stat(file)).isFile() || !within(root, file)) throw new Error("FILE must be a regular file beneath --root");
     if (!file.endsWith(".mjs")) throw new Error("FILE must end in .mjs");
     const config = { engine: options.engine, root, file: relative(root, file).split(sep).join("/"), args: options.args,
-        jsTest: options.jsTest, allowDegradedTrace: !!options.allowDegradedTrace,
-        loader: pathToFileURL(join(assets, "titan-browser.mjs")).href };
+        jsTest: options.jsTest, allowDegradedTrace: !!options.allowDegradedTrace };
     const monitor = new Monitor(options);
     const engine = options.engine === "node" ? new NodeEngine(monitor) : new ChromiumEngine(monitor, options, chrome);
     const interrupted = signal => monitor.fail("harness", `interrupted by ${signal}`);
