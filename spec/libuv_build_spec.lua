@@ -6010,7 +6010,7 @@ printf '%s\n' "${schedule[@]}"
                 "name: browser target real toolchain (ubuntu-24.04, " ..
                     "emsdk 6.0.13, Node 24)",
                 "needs: build-compiler", "runs-on: ubicloud-standard-4",
-                "timeout-minutes: 60",
+                "timeout-minutes: 75",
                 'TITAN_EMSDK_VERSION: "6.0.13"',
                 "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
                 "git clone --depth 1 https://github.com/emscripten-core/emsdk.git",
@@ -6208,6 +6208,7 @@ printf '%s\n' "${schedule[@]}"
 
             for _, contract in ipairs({
                 "needs: build-compiler", "runs-on: ubicloud-standard-4",
+                "timeout-minutes: 60",
                 "profile: [validation, production]",
                 "engine: [chromium, firefox, webkit]",
                 'TITAN_PLAYWRIGHT_VERSION: "1.56.1"',
