@@ -7580,7 +7580,7 @@ end)
         if platform.windows then pending("Unix sanitizer grep guard"); return end
         local patterns = {}
         for pattern in read_file(".github/workflows/ci.yml"):gmatch("grep %-Eq '([^']+)'") do
-            if pattern:find("[==========]", 1, true) then patterns[#patterns + 1] = pattern end
+            if pattern:find("==========", 1, true) then patterns[#patterns + 1] = pattern end
         end
         assert.equal(4, #patterns)
         local root = make_temp_dir()
