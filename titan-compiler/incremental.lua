@@ -1633,7 +1633,10 @@ local function rebound_record(context, record, roots, materialized_roots)
             if input.kind == "origin" then
                 local prefix = version.C_HEADER_ORIGIN_PROTOCOL .. ";real="
                 if input.identity:sub(1, #prefix) == prefix then
-                    input.identity = prefix .. relocation.rebind(context, input.identity:sub(#prefix + 1), previous)
+                    local real = relocation.rebind(context, input.identity:sub(#prefix + 1), previous)
+                    -- Origin identities retain the I/O strategy's native path spelling.
+                    if platform.windows then real = paths.normalize(real) end
+                    input.identity = prefix .. real
                 end
             end
         end

@@ -697,13 +697,19 @@ identity is rooted only for these owned paths; the separately recorded origin
 still checks the current realpath. Source-private header manifests and native
 provider bindings likewise retain the relative selected input and its
 content/interface evidence.
+On Windows the rebound origin's realpath retains native path serialization,
+matching the I/O strategy that records and revalidates it. Concrete path case
+and semantic C strings are not folded or rewritten.
 
 Compilation saves each generated part's formatted, coverage-converted C
-prefix before source-record injection. `incremental.preprocessed_identities`
-preprocesses that metadata-free prefix once, using the effective compile
-prefix, its actual quoted-include directory, and a macro-prefix mapping from
-the private temporary to the actual generated filename. The resulting digest
-keeps expanded C values, including `__FILE__` and `__BASE_FILE__`; it does not
+prefix before source-record injection. A binary read supplies its byte count
+and digest; appending the primary source record uses binary read/write to
+preserve that prefix. Formatting and coverage conversion remain text
+operations before this boundary. `incremental.preprocessed_identities`
+preprocesses the metadata-free prefix once, using the effective compile prefix,
+its actual quoted-include directory, and a macro-prefix mapping from the
+private temporary to the actual generated filename. The resulting digest keeps
+expanded C values, including `__FILE__` and `__BASE_FILE__`; it does not
 substitute roots inside expanded strings.
 Parts of one module run through the existing `io.run_batch` slot budget when
 the strategy supports it; custom synchronous runners retain their own

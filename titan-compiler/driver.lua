@@ -9278,7 +9278,7 @@ local function prepare_compile(
             local preprocessing = {}
             for index, part in ipairs(generated_parts) do
                 local filename = driver.part_c_filename(stem, part.index)
-                local contents, err = util.get_file_contents(filename)
+                local contents, err = util.get_file_contents(filename, "rb")
                 if not contents then return nil, err end
                 native.generated_inputs[index] = {
                     spelling = filename,
@@ -9292,9 +9292,9 @@ local function prepare_compile(
         local metadata, metadata_error = metadata_code()
         if not metadata then return nil, metadata_error end
         local primary = driver.part_c_filename(stem, 0)
-        local contents, read_error = util.get_file_contents(primary)
+        local contents, read_error = util.get_file_contents(primary, "rb")
         if not contents then return nil, read_error end
-        local written, write_error = util.set_file_contents(primary, contents .. metadata)
+        local written, write_error = util.set_file_contents(primary, contents .. metadata, "wb")
         if not written then return nil, write_error end
         if native.certificate then incremental.record_materialization(context, stem, native.certificate) end
         if source_entry then

@@ -81,6 +81,8 @@ receipt avoids repeating this extra work on later unchanged invocations.
 The receipt also tracks the roots used to materialize generated companions;
 moving back to an earlier root repairs those files without rewriting unchanged
 ones. A missing or interrupted materialization record causes a safe rebuild.
+The prefix's byte identity includes its stored line endings; appending metadata
+does not change that prefix, including on Windows.
 Reused objects retain their originally embedded diagnostic and debug paths;
 moving a tree does not rewrite object bytes or promise relocated debug
 locations.

@@ -8,6 +8,7 @@ local cpp = require "c-parser.cpp"
 local version = require "titan-compiler.version"
 local platform = require "titan-compiler.platform"
 local relocation = require "titan-compiler.relocation"
+local paths = require "titan-compiler.path"
 
 local function fixture_path(path)
     return platform.windows and "C:" .. path or path
@@ -1971,6 +1972,67 @@ describe("incremental local certification", function()
         assert.matches("nonregular generated header", result.detail, 1, true)
         assert.equal("relocation", incremental.certify_local(ctx, "main", source).reason)
     end)
+
+    for _, retargeted in ipairs({ false, true }) do
+        it((retargeted and "rejects a changed native origin" or "retains native origin spelling") ..
+            " through recursive companion relocation", function()
+            local ctx, saved, source, files = fixture()
+            local cert = saved.object_metadata.certificate
+            cert.roots = { sdk = fixture_path("/SDK"), output = fixture_path("/out") }
+            cert.stem = "<titan:output>/main"
+            local realpath = ctx.io.realpath
+            function ctx.io:realpath(path)
+                local real, err = realpath(self, path)
+                return real and paths.normalize(real) or nil, err
+            end
+            local inputs = {}
+            for index, name in ipairs({ "MixedCaseRoot", "MixedCaseDirect", "MixedCaseNested" }) do
+                local path = fixture_path("/out/Include/" .. name .. ".h")
+                files[path] = "unchanged header\n"
+                inputs[index] = { kind = "origin", path = path,
+                    identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. paths.normalize(path) }
+            end
+            saved.c_header_dependencies = { inputs[1] }
+            local contents = 'const char *path = "' .. fixture_path("/MovedSDK/KeepCase") .. '";\n'
+            local nested = { modname = "nested", identity = "<titan:output>/nested.ffi.h",
+                contents = contents, roots = cert.roots, search_inputs = { inputs[3] }, dependencies = {} }
+            saved.ffi_header_descriptor = {
+                modname = "main", identity = "<titan:output>/main.ffi.h",
+                contents = contents, roots = cert.roots, search_inputs = { inputs[2] },
+                dependencies = { {
+                    modname = "middle", identity = "<titan:output>/middle.ffi.h",
+                    contents = contents, roots = cert.roots, dependencies = { nested },
+                } },
+            }
+            -- Returning to the creation roots still repairs the companions.
+            ctx.relocation_roots = { sdk = fixture_path("/MovedSDK"), output = cert.roots.output }
+            incremental.record_materialization(ctx, fixture_path("/out/main"), cert)
+            ctx.relocation_roots = cert.roots
+            if retargeted then
+                local replacement = fixture_path("/external/Retargeted.h")
+                files[replacement] = files[inputs[1].path]
+                ctx.io.aliases[inputs[1].path] = replacement
+            end
+            local result = incremental.certify_local(ctx, "main", source)
+            if retargeted then
+                assert.equal("c-input", result.reason)
+                assert.equal(inputs[1].path .. ": provenance", result.detail)
+            else
+                assert.equal("hit", result.status, result.detail)
+            end
+            for _, input in ipairs(inputs) do
+                assert.equal(version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. paths.normalize(input.path),
+                    input.identity)
+                if not retargeted then
+                    local current, err, changed = cpp.revalidate_header_input(input, { io = ctx.io })
+                    assert.is_table(current, err)
+                    assert.is_false(changed)
+                end
+            end
+            assert.equal(contents, saved.ffi_header_descriptor.contents)
+            assert.equal(contents, nested.contents)
+        end)
+    end
 
     it("retains imports across configuration and codegen misses only when own sources match", function()
         local ctx, saved, source = fixture()

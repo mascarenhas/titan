@@ -6,6 +6,8 @@ local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 local filesystem = require "spec.support.filesystem"
 local objectmetadata = require "titan-compiler.objectmetadata"
+local incremental = require "titan-compiler.incremental"
+local coverage = require "titan-compiler.coverage"
 
 local NAMESPACE = "incremental_cli_fixture"
 local APP = "incremental_cli_app"
@@ -1117,6 +1119,49 @@ os.exit(result.ok and 0 or result.status or 1)
             decisions(build(output), saved, {})
             for _, filename in ipairs(headers) do assert.equal(timestamp, lfs.attributes(filename, "modification")) end
         end)
+
+        for _, covered in ipairs({ false, true }) do
+            it("certifies raw generated-C prefixes for split modules" ..
+                (covered and " after coverage conversion" or ""), function()
+                local compiler = private_compiler()
+                local generator = compiler .. "/titan-compiler/coder/generate.lua"
+                local configured, replacements = read(generator):gsub(
+                    "(coder%.DEFAULT_SPLIT_THRESHOLD%s*=)[^\n]+", "%1 0")
+                assert.equal(1, replacements)
+                write(generator, configured)
+                local functions = {}
+                for index = 1, 6 do
+                    functions[index] = ("function value%d(): integer return %d end\n"):format(index, index)
+                end
+                functions[#functions + 1] = main(42)
+                local stem = source(APP, table.concat(functions))
+                local arguments = { "-c", "--c-parts", "2" }
+                if covered then arguments[#arguments + 1] = "--coverage" end
+                arguments[#arguments + 1] = APP
+                certified(table.unpack(arguments))
+                local object = object_path(stem)
+                if covered then object = coverage.output_path(object) end
+                local native = assert(objectmetadata.read(read(object), object)).object_metadata
+                local inputs = native.certificate.generated
+                assert.is_true(#native.parts > 1)
+                assert.equal(#native.parts, #inputs)
+                assert.equal(covered, native.coverage and native.coverage.enabled == true or false)
+                local hashing = {}
+                for index, part in ipairs(native.parts) do
+                    local filename = inputs[index].spelling
+                    local contents = read(filename)
+                    local input = inputs[index]
+                    local prefix = contents:sub(1, input.bytes)
+                    assert.equal(input.bytes, #prefix)
+                    assert.equal(input.sha256, incremental.digest(hashing, "generated-c", prefix), filename)
+                    if part.index == 0 then
+                        assert.is_true(#contents > input.bytes)
+                    else
+                        assert.equal(input.bytes, #contents)
+                    end
+                end
+            end)
+        end
 
         for _, observable in ipairs({ false, true }) do
             it("reuses Windows mixed-case outputs after an SDK-only move " ..
