@@ -52,6 +52,10 @@ TITAN_RUNTIME_FUNC void titan_module_preload(lua_State *L, const char *name,
 ** titan_path.c; preserves the entry top. */
 TITAN_RUNTIME_FUNC void titan_install_searcher(lua_State *L);
 
+/* Allocation-free monotonic wall-clock nanoseconds for titan.test.
+** Returns -1 when the platform clock fails or exceeds lua_Integer range. */
+TITAN_RUNTIME_FUNC lua_Integer titan_test_monotonic_ns(void);
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/socket.h>
 

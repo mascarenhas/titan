@@ -1675,11 +1675,13 @@ done
         local output = table.concat({
             "[==========] Running Titan tests.",
             "[ RUN      ] first.tests.test_value",
-            "[       OK ] first.tests.test_value",
+            "[       OK ] first.tests.test_value (1.25 ms)",
             "[ RUN      ] second.tests.test_optional",
-            "[  SKIPPED ] second.tests.test_optional.child (parent skipped: capability: locale unavailable)",
-            "[  SKIPPED ] second.tests.test_optional (capability: locale unavailable)",
-            "[==========] 3 tests ran.",
+            "[  SKIPPED ] second.tests.test_optional.child (parent skipped: capability: locale unavailable) (0.00 ms)",
+            "[  SKIPPED ] second.tests.test_optional (capability: locale unavailable) (2.50 ms)",
+            "[----------] first.tests (1.25 ms total)",
+            "[----------] second.tests (2.50 ms total)",
+            "[==========] 3 tests ran. (4.00 ms total)",
             "[  PASSED  ] 1 test.",
             "[  SKIPPED ] 2 tests.",
         }, "\n")
@@ -1688,6 +1690,8 @@ done
         assert.equal(3, result.count)
         assert.equal(2, result.owners)
         assert.equal(2, result.categories.capability)
+        assert.equal(400, result.elapsed)
+        assert.same({ ["first.tests"] = 125, ["second.tests"] = 250 }, result.owner_times)
         local function rejects(contents, expected, inventory)
             local accepted, message = validate(contents, inventory or roots, false)
             assert.is_nil(accepted)
@@ -1696,36 +1700,69 @@ done
         rejects(output:gsub("capability: locale unavailable", "no locale"), "unclassified native skip")
         rejects(output:gsub("capability:", "portability:"), "unfinished portability skips")
         rejects(output:gsub("3 tests ran", "4 tests ran"), "summary differs")
-        rejects(output .. "\n[       OK ] first.tests.test_value", "duplicate native result")
+        rejects(output .. "\n[       OK ] first.tests.test_value (1.25 ms)", "duplicate native result")
         rejects(output .. "\n[ RUN      ] first.tests.test_unfinished", "did not finish")
         rejects(output .. "\n[  FAILED  ] first.tests.test_value", "native test failure")
         rejects(output, "native root did not execute", { "first.tests", "second.tests", "third.tests" })
-        rejects("[==========] Running Titan tests.\n[==========] 0 tests ran.\n[  PASSED  ] 0 tests.",
+        rejects("[==========] Running Titan tests.\n[==========] 0 tests ran. (0.00 ms total)\n[  PASSED  ] 0 tests.",
             "selected no cases")
         assert.truthy(validate(output, { "first.tests", "second.tests", "third.tests" }, true))
-        assert.same({ count = 3, passed = 1, skipped = 2, failed = 0 }, final_counts(output))
+        assert.same({ count = 3, passed = 1, skipped = 2, failed = 0, elapsed = 400,
+            owner_times = { ["first.tests"] = 125, ["second.tests"] = 250 } }, final_counts(output))
         local failed = output:gsub("%[       OK %] first.tests.test_value",
             "[  FAILED  ] first.tests.test_value"):gsub("1 test%.", "0 tests.") ..
             "\n[  FAILED  ] 1 test.\n[  FAILED  ] first.tests.test_value"
         rejects(failed, "native test failure")
-        assert.same({ count = 3, passed = 0, skipped = 2, failed = 1 }, final_counts(failed))
-        assert.is_nil(final_counts(failed:gsub("%[==========%] 3 tests ran%.\n", "")))
+        assert.same({ count = 3, passed = 0, skipped = 2, failed = 1, elapsed = 400,
+            owner_times = { ["first.tests"] = 125, ["second.tests"] = 250 } }, final_counts(failed))
+        assert.is_nil(final_counts(failed:gsub("%[==========%] 3 tests ran%. %([^\n]+%)\n", "")))
         assert.is_nil(final_counts(failed .. "\n[  FAILED  ] 1 test."))
         assert.is_nil(final_counts("[==========] Running Titan tests.\n[ RUN      ] first.tests.test_value"))
+
+        for _, suffix in ipairs({
+            "", " (-1.25 ms)", " (1.2 ms)", " (1.250 ms)", " (nan ms)",
+            " (inf ms)", " (1e2 ms)", " (1,25 ms)", " (1.25 ms total)",
+            " (1.25 ms) trailing", " (999999999999999999999999999999.00 ms)",
+        }) do
+            local malformed = output:gsub(
+                "(%[       OK %] first.tests.test_value) %(1%.25 ms%)",
+                function(prefix) return prefix .. suffix end)
+            rejects(malformed, "malformed native case timing")
+        end
+        rejects(output:gsub("child %((.-)%) %(0%.00 ms%)",
+            "child (%1) (0.01 ms)"), "uninvoked native child has nonzero timing")
+        rejects(output:gsub("%[----------%] first.tests %(1%.25 ms total%)\n", ""),
+            "missing native owner timing")
+        rejects(output .. "\n[----------] first.tests (1.25 ms total)",
+            "duplicate native owner timing")
+        rejects(output:gsub("%[----------%] first.tests %(1%.25 ms total%)",
+            "[----------] first.tests (1.26 ms total)"), "owner timing differs")
+        rejects(output:gsub("%[==========%] 3 tests ran%. %(4%.00 ms total%)",
+            "[==========] 3 tests ran."), "malformed native run timing")
+        rejects(output:gsub("%[==========%] 3 tests ran%. %(4%.00 ms total%)",
+            "[==========] 3 tests ran. (0.01 ms total)"), "run timing is shorter")
+        rejects(output .. "\n[----------] unknown.tests (0.00 ms total)",
+            "timing outside native root inventory")
+        rejects(output .. "\n[----------] third.tests (0.00 ms total)",
+            "timing for unexecuted native owner",
+            { "first.tests", "second.tests", "third.tests" })
+        assert.is_nil(final_counts(output:gsub("ran%. %(4%.00 ms total%)", "ran.")))
 
         local group_one_out = table.concat({
             "[==========] Running Titan tests.",
             "[ RUN      ] first.tests.test_value",
-            "[       OK ] first.tests.test_value",
-            "[==========] 1 test ran.",
+            "[       OK ] first.tests.test_value (1.25 ms)",
+            "[----------] first.tests (1.25 ms total)",
+            "[==========] 1 test ran. (1.50 ms total)",
             "[  PASSED  ] 1 test.",
         }, "\n")
         local group_two_out = table.concat({
             "[==========] Running Titan tests.",
             "[ RUN      ] second.tests.test_optional",
-            "[  SKIPPED ] second.tests.test_optional.child (parent skipped: capability: locale unavailable)",
-            "[  SKIPPED ] second.tests.test_optional (capability: locale unavailable)",
-            "[==========] 2 tests ran.",
+            "[  SKIPPED ] second.tests.test_optional.child (parent skipped: capability: locale unavailable) (0.00 ms)",
+            "[  SKIPPED ] second.tests.test_optional (capability: locale unavailable) (2.50 ms)",
+            "[----------] second.tests (2.50 ms total)",
+            "[==========] 2 tests ran. (2.60 ms total)",
             "[  PASSED  ] 0 tests.",
             "[  SKIPPED ] 2 tests.",
         }, "\n")
@@ -1739,8 +1776,49 @@ done
         assert.equal(2, union_ok.skipped)
         assert.equal(2, union_ok.owners)
         assert.same(result.cases, union_ok.cases)
+        assert.same(result.owner_times, union_ok.owner_times)
+        assert.equal(150, union_ok.group_results[1].result.elapsed)
+        assert.equal(260, union_ok.group_results[2].result.elapsed)
 
-        local empty_out = "[==========] Running Titan tests.\n[==========] 0 tests ran.\n[  PASSED  ] 0 tests."
+        local report_root = make_temp_dir()
+        local reported, report_error = xpcall(function()
+            write_file(report_root .. "/roots", table.concat(roots, "\n"))
+            write_file(report_root .. "/first-roots", "first.tests\n")
+            write_file(report_root .. "/second-roots", "second.tests\n")
+            write_file(report_root .. "/first-log", group_one_out)
+            write_file(report_root .. "/second-log", group_two_out)
+            local argv = {
+                installed_prefix.active() .. "/bin/" .. (platform.windows and "lua.exe" or "lua"),
+                "spec/support/check_stdlib_test_output.lua", "--union", report_root .. "/roots",
+                "1", report_root .. "/first-log", report_root .. "/first-roots",
+                "guarded", report_root .. "/second-log", report_root .. "/second-roots",
+            }
+            local ok, report = run_argv(argv)
+            assert.truthy(ok, report)
+            for _, expected in ipairs({
+                "Native stdlib group 1 report: selected=1 passed=1 skipped=0 failed=0. (1.50 ms total)",
+                "Native stdlib group guarded report: selected=2 passed=0 skipped=2 failed=0. (2.60 ms total)",
+                "Native stdlib owner first.tests report: (1.25 ms total).",
+                "Native stdlib owner second.tests report: (2.50 ms total).",
+            }) do
+                assert.truthy(report:find(expected, 1, true), report)
+            end
+            write_file(report_root .. "/first-log",
+                group_one_out:gsub("%[       OK %]", "[  FAILED  ]"):
+                    gsub("%[  PASSED  %] 1 test%.", "[  PASSED  ] 0 tests.") ..
+                    "\n[  FAILED  ] 1 test.\n[  FAILED  ] first.tests.test_value")
+            ok, report = run_argv(argv)
+            assert.falsy(ok)
+            assert.truthy(report:find(
+                "Native stdlib group 1 report: selected=1 passed=0 skipped=0 failed=1. (1.50 ms total)",
+                1, true), report)
+            assert.truthy(report:find(
+                "Native stdlib owner first.tests report: (1.25 ms total).", 1, true), report)
+        end, debug.traceback)
+        remove_tree(report_root)
+        if not reported then error(report_error, 0) end
+
+        local empty_out = "[==========] Running Titan tests.\n[==========] 0 tests ran. (0.00 ms total)\n[  PASSED  ] 0 tests."
         local filtered_union, filtered_err = validate_union({
             { id = "1", owners = { "first.tests" }, contents = group_one_out },
             { id = "2", owners = { "second.tests" }, contents = empty_out },
@@ -1793,9 +1871,11 @@ done
         -- Distinct, overlapping logical roots can each scope the same case.
         local shared_case_out = group_one_out:gsub("first%.tests%.test_value",
             "first.tests.test_nested.test_value")
+        local nested_case_out = shared_case_out:gsub(
+            "%[----------%] first.tests ", "[----------] first.tests.test_nested ")
         rejects_union({
             { id = "outer", owners = { "first.tests" }, contents = shared_case_out },
-            { id = "nested", owners = { "first.tests.test_nested" }, contents = shared_case_out },
+            { id = "nested", owners = { "first.tests.test_nested" }, contents = nested_case_out },
         }, "duplicate native case across groups", {"first.tests", "first.tests.test_nested"})
     end)
 

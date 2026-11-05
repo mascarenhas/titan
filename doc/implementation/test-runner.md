@@ -299,6 +299,45 @@ in a dense Array, validated once, and ORed. Help returns 0, malformed input 2,
 failed cases 1, and all other runs 0. Reporting uses C99 `putchar`, not
 `titan.io`, and is byte-length-aware.
 
+### Wall-time accounting and output
+
+The internal runtime entry `titan_test_monotonic_ns` returns monotonic
+nanoseconds as a `lua_Integer`, with no allocation or Lua-state access.
+Unix and browser builds use libc `clock_gettime(CLOCK_MONOTONIC)`; Windows
+uses `QueryPerformanceCounter` with its actual `QueryPerformanceFrequency`.
+The Windows conversion splits whole seconds from the subsecond remainder
+before scaling, avoiding overflow from multiplying the full counter by a
+billion. Clock failure or an unrepresentable timestamp returns `-1`; the
+Titan caller raises rather than inventing a zero duration. This helper is
+declared in the existing internal `titan/ffi.h`, so `titan.test` gains no
+Titan imports, native-only dependency, asynchronous bridge, or public API.
+
+`execute` starts its interval immediately before invoking the body and stops
+after all selected descendants and LIFO cleanup finish. It returns the elapsed
+nanoseconds for an entered case and nil for an unselected case. Every pass,
+failure, and skip terminal line ends in `(N.NN ms)`, after any skip reason.
+`skip_registered` reports an uninvoked child's duration as exactly `0.00 ms`.
+The final failed-name list remains untimed: those entries are references to
+already-reported failures, not second outcomes.
+
+`run` accumulates each returned top-level interval in an owner map and retains
+first-execution order in an Array. Interleaved custom case owners therefore
+produce one owner total each, without summing inclusive descendant intervals
+again. Before the ordinary count summaries it prints
+`[----------] <owner> (N.NN ms total)`. The run summary is
+`[==========] N tests ran. (N.NN ms total)` (or `1 test ran.`); its independent
+clock spans the banner and execution loop, including case-output overhead,
+but not the final owner/count summaries. Zero-case and zero-selected runs
+still carry a run duration and print no owner totals.
+
+Formatting rounds integer nanoseconds to the nearest hundredth of a
+millisecond and renders the decimal point explicitly, independent of the C
+locale. Owner totals sum unrounded top-level intervals; a sum of rounded
+displayed case times can differ by a final decimal place. Selection,
+registration order, cleanup/error precedence, counts, and exit statuses do
+not depend on timing.
+
+
 ## Trusted Lua helpers and traces
 
 `titan.test` imports `lua.h`, `lauxlib.h`, `titan/ffi.h`, `stdio.h`, and
@@ -764,6 +803,22 @@ parallel target unless `TITAN_FILTER` is set. Native coverage
 (`titan-native-coverage-run`), the CI sanitizer gates, and Windows keep serial
 aggregate runs because they share coverage counters, timing ownership, or one
 workspace.
+
+Each successful group report includes its independent run duration and one
+total per executed owner. The union preserves those group/owner measurements;
+it does not call their sum the elapsed time of the parallel run. When a group
+fails after producing complete final counts, the diagnostic report retains
+its run and owner timings as well.
+
+The stdout audit requires the new two-decimal timing suffixes, one owner total
+per executed owner, zero time for never-invoked child skips, and a run interval
+no shorter than its top-level owner intervals. It follows the nested
+`RUN`/outcome stack rather than inferring parenthood from dots in a custom
+case name. Owner totals are checked against top-level case times with only the
+rounding allowance implied by their displayed precision. Malformed, missing,
+duplicate, out-of-inventory, and inconsistent timing metadata fail the gate;
+old untimed execution output is not accepted. Ordinary `Context:log` lines
+remain distinct from owner metadata because they include `<case>: <message>`.
 
 ### Platform portability and complete execution
 

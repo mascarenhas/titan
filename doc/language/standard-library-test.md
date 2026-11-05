@@ -347,17 +347,37 @@ match is not entered and therefore cannot discover dynamic children. Entering
 a parent does not automatically select a child: each complete child name is
 filtered independently. Filtered cases are absent from counts, not skipped.
 
-The timing-free output follows the gtest shape:
+Output follows the gtest shape, with monotonic wall time in milliseconds:
 
 ```text
 [==========] Running Titan tests.
 [ RUN      ] calc_test.test_twice
 [ RUN      ] calc_test.test_twice.zero
-[       OK ] calc_test.test_twice.zero
-[       OK ] calc_test.test_twice
-[==========] 2 tests ran.
+[       OK ] calc_test.test_twice.zero (0.02 ms)
+[       OK ] calc_test.test_twice (0.08 ms)
+[----------] calc_test (0.08 ms total)
+[==========] 2 tests ran. (0.15 ms total)
 [  PASSED  ] 2 tests.
 ```
+
+Every case and subtest outcome has a duration with two decimal places, including
+failed and skipped outcomes. A skip reason precedes the duration:
+`[  SKIPPED ] calc_test.test_optional (unsupported platform) (0.03 ms)`.
+The interval includes the case's body, its selected descendants, and all of its
+cleanup callbacks. It measures elapsed wall time, including waits, rather than
+CPU time. A registered child that is never invoked because its parent failed
+or skipped reports `0.00 ms`; a filtered-out child is still absent.
+
+At the end, one `[----------] <owner> (N.NN ms total)` line reports each owner
+that had an entered top-level case, in first-execution order. That total sums
+only the owner's top-level intervals, so descendants are not counted twice.
+Custom `run` callers may interleave owners without splitting their totals.
+The `[==========]` total is measured independently across the execution loop,
+including runner output; it is not the sum of the displayed case or owner
+times. A zero-case or zero-selected run still reports its run time, but has no
+owner totals. Native Unix, Windows, and browser images under Node or Chromium
+use the same units, precision, and accounting.
+
 
 Help exits with status 0. Invalid options or patterns exit 2. Any failed case
 makes the executable exit 1; all-pass, all-skip, zero-selected, and zero-test
@@ -383,16 +403,18 @@ deadlines or wall-clock behavior, such as the TLS, HTTP, WebSocket, timer, net,
 and OS suites, run afterwards in one process of their own, with nothing else
 running. The target then audits the combined output: every owner exactly once,
 no case reported twice, and consistent totals. A failing group does not stop
-the others. Deadlines, retries, and case selection are the same as in one
-serial run. `make titan-stdlib-test-run` remains the focused single-process
-command, and native coverage and Windows runs stay serial. See [parallel
+the others. Group reports include each group's independent run time and each
+executed owner's non-double-counted total. Deadlines, retries, and case
+selection are the same as in one serial run. `make titan-stdlib-test-run`
+remains the focused single-process command, and native coverage and Windows
+runs stay serial. See [parallel
 native aggregate runs](../implementation/test-runner.md#parallel-native-aggregate-runs)
 and [Build and test parallelism](build-profiles.md#build-and-test-parallelism).
 
 ## Initial boundaries
 
 The runner is intentionally synchronous and recursive. It supplies no suite
-objects, fixtures, timing, parallel scheduling, coverage collection, or
+objects, fixture syntax, parallel scheduling, coverage collection, or
 `before_each`/`after_each` syntax. Ordinary functions plus `defer`, subtests,
 and cleanup cover the initial fixture needs. Deeply nested trusted subtests use
 the native call stack.

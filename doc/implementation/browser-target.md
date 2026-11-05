@@ -675,10 +675,16 @@ emsdk, Node 24, and a headless Chromium. It:
    across the union. A filtered run may leave an
    image or owner with no selected case, but the union must select at least
    one. It always prints one `Browser stdlib owner <root>: <n> cases` line per
-   root and a `Browser stdlib gate: selected=… passed=… skipped=… failed=…
-   owners=…/… images=…` summary (marked `(filtered)` when a filter applies),
-   even for a failed run. The target fails if any image failed under either
-   engine or if either audit failed.
+   root, appending `(N.NN ms total)` for owners whose interval was reported.
+   Each complete image report also produces
+   `Browser stdlib image <image>: <n> cases (N.NN ms total)` from that image's
+   independent run clock. These are not summed into a fictitious elapsed time
+   for the engine's whole image set. The
+   `Browser stdlib gate: selected=… passed=… skipped=… failed=… owners=…/…
+   images=…` summary is marked `(filtered)` when a filter applies. Counts and
+   available image/owner times remain visible even for a failed run; untimed
+   final failure-name references do not count as second outcomes. The target
+   fails if any image failed under either engine or if either audit failed.
 
 The streams stay separate because a case may write to stderr while the runner
 is in the middle of a report line, and a merged log then splits that line; the
