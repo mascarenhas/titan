@@ -395,7 +395,8 @@ describe("browser target descriptor", function()
 
     it("validates direct build compile extras before tool discovery", function()
         for _, flags in ipairs({
-            { "-fPIC" }, { "-flto" }, { "-s", "SUPPORT_LONGJMP=wasm" },
+            { "-fPIC" }, { "-flto" }, { "-s", "SUPPORT_LONGJMP=emscripten" },
+            { "-s", "WASM_LEGACY_EXCEPTIONS=0" },
             "not an array", { [1] = "-O0", [3] = "-g" }, { debug = "-O0" }, { true },
         }) do
             local context, inputs, calls = fake_context()
