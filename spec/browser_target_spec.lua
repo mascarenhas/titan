@@ -816,6 +816,12 @@ describe("browser target descriptor", function()
             local native = subject.new_resolver_context({ target = files.host() })
             assert.is_true(subject.initialize_platform(native))
             assert(subject.close_resolver_context(native))
+            local line_error = "browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)"
+            local ready, err = subject._finish_target_initialization({
+                target = "browser", host_target = files.host(),
+            })
+            assert.is_nil(ready)
+            assert.equal(line_error, err)
             local strategy = compiler_io.new_sync()
             local root, prefix = assert(strategy:cwd()), require("spec.support.installed_prefix").active()
             workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
@@ -833,7 +839,10 @@ describe("browser target descriptor", function()
             assert.is_true(result.started)
             assert.is_false(result.ok)
             assert.equal(1, result.status)
-            contains(result.output, "browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)")
+            -- CLI target validation precedes the browser option policy on an
+            -- unsupported host; neither rejection reaches tool discovery.
+            contains(result.output, platform.windows and
+                "browser builds are supported from Linux and macOS hosts (host is windows)" or line_error)
             assert.is_nil(result.output:find("stack traceback", 1, true))
         end)
     end

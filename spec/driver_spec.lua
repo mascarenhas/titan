@@ -5825,7 +5825,7 @@ describe("compiler module loader", function()
                     calls = calls + 1
                     assert.equal(name, modname)
                     assert.equal(source .. "/" .. name .. ".titan",
-                        source_description.main)
+                        paths.to_slash(source_description.main))
                     assert.is_nil(certified)
                     return {}
                 end,
@@ -9511,7 +9511,7 @@ end
         assert.is_table(driver.imported["titan.timer"].ast)
         assert.equal(true, deps["titan.timer"])
         assert.equal(source .. "/titan/timer/timer.titan",
-            driver.imported["titan.timer"].filename)
+            paths.to_slash(driver.imported["titan.timer"].filename))
         assert.equal("titan/timer__main",
             driver.imported["titan.timer"].program_output)
     end)
@@ -9554,10 +9554,10 @@ end
         assert.equal(0, #errors, table.concat(errors, "\n"))
         assert.equal("source", driver.imported["pkg.flat"].kind)
         assert.equal(source .. "/pkg/flat.titan",
-            driver.imported["pkg.flat"].filename)
+            paths.to_slash(driver.imported["pkg.flat"].filename))
         assert.equal("source", driver.imported["pkg.folder"].kind)
         assert.equal(source .. "/pkg/folder/folder.titan",
-            driver.imported["pkg.folder"].filename)
+            paths.to_slash(driver.imported["pkg.folder"].filename))
         assert.is_nil(driver.imported["pkg.flat.titan"])
         assert.is_nil(driver.imported["pkg.folder.titan"])
 
@@ -9865,7 +9865,7 @@ end
         assert.equal(0, #errors)
         assert.equal("source", driver.imported.preferred.kind)
         assert.equal(source .. "/preferred.titan",
-            driver.imported.preferred.filename)
+            paths.to_slash(driver.imported.preferred.filename))
     end)
 
     it("falls back to the preferred compiled format after a source miss",
@@ -11913,7 +11913,7 @@ typedef double titan_driver_symlink_value;
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal(source .. "/titan/sample.titan",
-            driver.imported["titan.sample"].filename)
+            paths.to_slash(driver.imported["titan.sample"].filename))
         assert.equal("titan/sample",
             driver.imported["titan.sample"].program_output)
 
@@ -11925,7 +11925,7 @@ typedef double titan_driver_symlink_value;
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal(later .. "/titan/sample/sample.titan",
-            driver.imported["titan.sample"].filename)
+            paths.to_slash(driver.imported["titan.sample"].filename))
         assert.equal("titan/sample__main",
             driver.imported["titan.sample"].program_output)
     end)

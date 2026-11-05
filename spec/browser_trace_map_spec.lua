@@ -2,6 +2,7 @@ local assert = require "luassert"
 local trace = require "titan-compiler.browsertrace"
 local metadata = require "titan-compiler.staticmetadata"
 local compiler_io = require "titan-compiler.io"
+local paths = require "titan-compiler.path"
 local fixtures = require "spec.support.browser_fixtures"
 local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
@@ -217,7 +218,8 @@ describe("browser content-derived image identity", function()
         local certificate = require "titan-compiler.linkcertificate"
         local resolved = assert(certificate.browser_trace_libraries(context, { "unused-compiler" },
             { "-sWASM_BIGINT=1", "-L", root, "-l", "named", "-Wl,-L," .. root .. ",-lnamed" }))
-        assert.same({ library, library }, resolved)
+        for index, filename in ipairs(resolved) do resolved[index] = paths.to_slash(filename) end
+        assert.same({ paths.to_slash(library), paths.to_slash(library) }, resolved)
         assert.same({}, assert(certificate.browser_trace_libraries(context, nil, { "-g2" })))
         function context.io:run() return { started = true, ok = true, output = "libabsent.a\n" } end
         local missing, why = certificate.browser_trace_libraries(context, { "unused-compiler" }, { "-labsent" })

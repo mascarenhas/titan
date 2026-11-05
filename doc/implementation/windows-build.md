@@ -1048,6 +1048,52 @@ file and continues after a failed file, and the supervisor preserves the
 worker's complete native exit status; see [Busted
 partitions](test-runner.md#busted-partitions).
 
+### Portable compiler fixtures
+
+Run the MSYS2 harness with `LC_ALL=C.UTF-8`. `Makefile.win` converts its SDK,
+build-root, and LuaRocks configuration paths with `cygpath`, which can truncate
+non-ASCII paths under the plain `C` locale. The setting reaches those harness
+utilities, not fixture children: commands started through
+`titan-compiler/process.lua` run with `LANG=C` and `LC_ALL=C` unless the caller
+explicitly inherits the environment. Fixture source and generated-C snapshots
+use binary-mode reads and writes, and child Lua commands select the SDK's
+`bin/lua.exe`. A child that loads compiler Lua from the checkout must also
+receive the selected SDK through `TITAN_ROOT`; otherwise it can select
+checkout-owned runtime inputs and attempt Unix Make/libbacktrace bootstrap
+instead of using the prepared Windows SDK.
+
+Ordinary resolver paths already use `/`. Native-library lookup joins its
+candidates with Windows separators, and a root spelled in the extended `\\?\`
+namespace keeps its literal `\` spelling. Where a test asserts only the
+selected file, compare with `path.to_slash` at the assertion, without changing
+production path spelling or weakening the rest of the result.
+Pure generated-header fixtures use drive-qualified virtual output paths on
+Windows, so direct code generation and the driver's absolute header plans
+refer to the same location.
+
+Browser builds remain unsupported on Windows. The CLI rejects that host when
+validating `--target browser`, before applying browser-specific option policy.
+The option-policy tests retain the exact disabled-line-directive diagnostic
+as a separate assertion; the Windows child asserts the earlier host rejection.
+
+The pre-marker generated-C upgrade fixture reads bytes in binary mode and
+exercises both LF and CRLF output. Removing generated preamble lines must
+accept either ending: the driver's text-mode C writer uses native Windows
+newlines, while the emulated legacy files are written without translation.
+
+An end-to-end compiler fixture should track the logical modules it generates
+and, after each case, remove only those modules' providers (`.so`, `.dll`,
+`.dylib`, `.a`), objects, and generated companions. Follow the tracked-module
+cleanup in `spec/coder/coder_spec.lua` and `spec/coder/closures_spec.lua`,
+including recursive directory removal and retention of generated C in verbose
+mode, rather than extension globs: a `*.so` glob misses Windows `.dll`
+providers, and a broader glob could reach unrelated checker metadata DLLs that
+are still mapped in the process. Missing-module checker unit cases use the
+table-backed `run_checker_modules` helper (`spec/support/helpers.lua`) with
+only their consumer source, so a provider left on disk cannot replace an
+expected missing-module diagnostic. Filesystem resolver behavior remains the
+responsibility of the driver specs.
+
 ## Native line coverage
 
 The prepared SDK supports `titanc --test --coverage` with matching Clang/LLVM

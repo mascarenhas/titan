@@ -2059,10 +2059,10 @@ describe("Titan type checker", function()
             local foo = import "foo"
             local bar = import "bar.baz"
         ]]
-        local ok, err = run_checker(code)
+        local ok, err = run_checker_modules({ test = code }, "test")
         assert.falsy(ok)
-        assert.match("module 'foo' not found", err)
-        assert.match("module 'bar.baz' not found", err)
+        assert.match("module 'foo' not found", err, 1, true)
+        assert.match("module 'bar.baz' not found", err, 1, true)
     end)
 
     it("fails to load foreign modules that do not exist", function ()

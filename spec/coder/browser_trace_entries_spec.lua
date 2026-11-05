@@ -8,6 +8,9 @@ local checker = require "titan-compiler.checker"
 
 local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
+local process = require "titan-compiler.process"
+local GENERATED_ROOT = platform.windows and "C:/generated" or "/generated"
 
 local SOURCE = [[
 record Item
@@ -44,11 +47,11 @@ local function generate(target, parts, source, line_policy)
     assert.equal(0, #errors, table.concat(errors, "\n"))
     -- Stable planned outputs keep checking-header temporary paths out of byte
     -- comparisons; these pure codegen cases do not write or compile the files.
-    ast._ffi_header_output = "/generated/entries.ffi.h"
-    ast._foreign_header_output = "/generated/entries.titan.h"
+    ast._ffi_header_output = GENERATED_ROOT .. "/entries.ffi.h"
+    ast._foreign_header_output = GENERATED_ROOT .. "/entries.titan.h"
     local generated = coder.generate("entries", ast, {}, driver.TITAN_ABI_VERSION, line_policy ~= false,
         { target = target, c_parts = parts or 1, split_threshold = 1,
-            source_output_stem = "/generated/entries" })
+            source_output_stem = GENERATED_ROOT .. "/entries" })
     return generated, ast
 end
 local function code(generated)
@@ -230,7 +233,7 @@ describe("browser traceback entry generation", function()
             local generated, ast = generate("browser", parts, DEFINITION_SOURCE)
             local all, count = {}, 0
             for _, part in ipairs(generated.parts) do
-                local filename = "/generated/entries"
+                local filename = GENERATED_ROOT .. "/entries"
                     .. (part.index == 0 and "" or ".part" .. part.index) .. ".c"
                 assert.truthy(part.code:find('#define TITAN_GENERATED_C_FILE "' .. filename .. '"', 1, true))
                 for name, definition in pairs(definitions(part.code)) do
@@ -316,9 +319,9 @@ describe("browser traceback entry generation", function()
     it("stamps immediate and graph foreign-header plans identically on both targets", function()
         local native, ast = generate(nil, 1, DEFINITION_SOURCE)
         local immediate = driver.plan_foreign_header("entries", ast,
-            "/generated/entries.titan", false)
+            GENERATED_ROOT .. "/entries.titan", false)
         local graph = assert(driver.plan_foreign_headers({ "entries" }, {
-            entries = { ast = ast, filename = "/generated/entries.titan" },
+            entries = { ast = ast, filename = GENERATED_ROOT .. "/entries.titan" },
         }))
         assert.equal(immediate.contents, graph[1].contents)
         local count = 0
@@ -419,7 +422,7 @@ function get(): integer return 1 end
     end
     local function planned(policy)
         return assert(driver.plan_foreign_header("entries", checked_ast(),
-            "/generated/entries.titan", false, policy))
+            GENERATED_ROOT .. "/entries.titan", false, policy))
     end
     local function line_count(contents)
         return select(2, (contents or ""):gsub("#line", ""))
@@ -459,7 +462,7 @@ function get(): integer return 1 end
             -- no stamps of its own.
             local generated = coder.generate("entries", checked_ast(), {},
                 driver.TITAN_ABI_VERSION, false, {
-                    source_output_stem = "/generated/entries",
+                    source_output_stem = GENERATED_ROOT .. "/entries",
                     foreign_header_plan = disabled,
                 })
             assert.is_nil(code(generated):find("#line", 1, true))
@@ -481,7 +484,7 @@ function get(): integer return 1 end
         assert.equal(0, line_count(disabled.contents))
         local ok, err = pcall(coder.generate, "entries", checked_ast(), {},
             driver.TITAN_ABI_VERSION, true, {
-                source_output_stem = "/generated/entries",
+                source_output_stem = GENERATED_ROOT .. "/entries",
                 foreign_header_plan = disabled,
             })
         assert.is_false(ok)
@@ -495,14 +498,14 @@ function get(): integer return 1 end
             local ast = checked_ast()
             coder.prepare_coverage(ast, true)
             local covered = assert(driver.plan_foreign_header("entries", ast,
-                "/generated/entries.titan", false, driver.header_policy(true)))
+                GENERATED_ROOT .. "/entries.titan", false, driver.header_policy(true)))
             assert.equal(0, line_count(covered.contents))
             assert.same({}, stamps(covered.contents))
             local generated = coder.generate("entries", ast, {},
                 driver.TITAN_ABI_VERSION, true, {
                     coverage = true,
                     coverage_backend = backend,
-                    source_output_stem = "/generated/entries",
+                    source_output_stem = GENERATED_ROOT .. "/entries",
                     foreign_header_plan = covered,
                 })
             local text = code(generated)
@@ -519,8 +522,8 @@ function get(): integer return 1 end
         local covered = checked_ast()
         coder.prepare_coverage(covered, true)
         local plans = assert(driver.plan_foreign_headers({ "plain", "covered" }, {
-            plain = { ast = plain, filename = "/generated/plain.titan" },
-            covered = { ast = covered, filename = "/generated/covered.titan" },
+            plain = { ast = plain, filename = GENERATED_ROOT .. "/plain.titan" },
+            covered = { ast = covered, filename = GENERATED_ROOT .. "/covered.titan" },
         }, function(name)
             return driver.header_policy(name == "covered")
         end))
@@ -683,8 +686,9 @@ function get(): integer return copy(1) end
         local file = assert(io.open(script, "wb"))
         assert(file:write(([[
 package.path = "./?.lua;./?/init.lua;" .. package.path
-local h = require "spec.support.helpers"
 local driver = require "titan-compiler.driver"
+assert(driver.INSTALLED, "header-policy child must use the installed SDK")
+local h = require "spec.support.helpers"
 local parser = require "titan-compiler.parser"
 local checker = require "titan-compiler.checker"
 local SOURCE = ]] .. string.format("%q", FOREIGN) .. [[
@@ -697,11 +701,14 @@ local ok, err = driver.compile("policy", ast, arg[1] .. "/policy.titan", {}, fal
 assert(ok, err)
 ]])))
         assert(file:close())
-        local LUA = require("spec.support.installed_prefix").active()
-            .. (require("titan-compiler.platform").windows and "/bin/lua.exe" or "/bin/lua")
+        local prefix = require("spec.support.installed_prefix").active()
+        local LUA = prefix .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
         local function child(emit)
-            local result = compiler_io.new_sync():run({
-                LUA, script, dir, emit and "on" or "off" })
+            local result = process.capture({
+                LUA, "-E", script, dir, emit and "on" or "off" }, {
+                env = { TITAN_ROOT = prefix },
+                stderr_to_stdout = true,
+            })
             assert.truthy(result.ok, result.output or result.diagnostic)
             return read(dir .. "/policy.titan.h")
         end
