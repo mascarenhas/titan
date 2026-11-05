@@ -129,6 +129,7 @@ function M.profile(descriptor, options)
     end
     add("-sASYNCIFY=" .. (asyncify and "1" or "0"))
     add("-sSUPPORT_LONGJMP=" .. descriptor.lua.record.sjlj)
+    add("-sWASM_LEGACY_EXCEPTIONS=1")
     add("-sSTACK_SIZE=" .. budgets.stack_size)
     if asyncify then add("-sASYNCIFY_STACK_SIZE=" .. budgets.asyncify_stack_size) end
     add("-sINITIAL_MEMORY=" .. budgets.initial_memory)
@@ -169,7 +170,8 @@ end
 
 -- Target-owned settings cannot be weakened by trailing user flags. Accept
 -- unrelated Emscripten settings, but reject every spelling of an owned one.
-local owned = { SUPPORT_LONGJMP = true, ASYNCIFY = true, STACK_SIZE = true,
+local owned = { SUPPORT_LONGJMP = true, WASM_LEGACY_EXCEPTIONS = true,
+    ASYNCIFY = true, STACK_SIZE = true,
     INITIAL_MEMORY = true, ALLOW_MEMORY_GROWTH = true, MAXIMUM_MEMORY = true,
     ABORTING_MALLOC = true, EXIT_RUNTIME = true, INVOKE_RUN = true,
     MODULARIZE = true, EXPORT_ES6 = true, ENVIRONMENT = true,
