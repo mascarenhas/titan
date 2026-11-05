@@ -580,6 +580,8 @@ exec cc "$@"
             local reused = run_with_env(strategy, env, {
                 "make", "--no-print-directory", "lua-browser", "PREFIX=" .. temp_prefix,
                 "LUA_DIR=" .. temp_lua, "LUA_BROWSER_CC=" .. guarded_cc,
+                "LUA_BROWSER_AR=" .. info.tools.ar[1] .. " rcu",
+                "LUA_BROWSER_RANLIB=" .. info.tools.ranlib[1],
             })
             assert.is_true(reused.ok, reused.output)
             assert.same(before, assert(strategy:stat(archive)))

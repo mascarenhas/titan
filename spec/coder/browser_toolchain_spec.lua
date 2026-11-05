@@ -130,6 +130,7 @@ end
 ]])
         for index, ambient in ipairs({ "-sWASM_LEGACY_EXCEPTIONS=0", "-sSUPPORT_LONGJMP=emscripten" }) do
             local output = workspace .. "/ambient-out-" .. index
+            files.mkdir(output)
             local image = output .. "/ambient.mjs"
             local poisoned = { prefix = info.prefix, output = output, emcc_cflags = ambient }
             local checked = string.format([[

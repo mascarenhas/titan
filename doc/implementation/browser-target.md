@@ -1805,11 +1805,11 @@ missing profile cannot weaken a production program row.
 
 ### Historical instrumentation measurements
 
-The #330/#343 instrumentation-local and engine-stack measurements were taken
-before JSPI. Their transformation-dependent local counts and recursion
-ceilings do not describe current images or justify a current pass list.
-The surviving production-test skips preserve trace identity independently
-of the coroutine backend.
+The #330/#343 instrumentation-local and engine-stack measurements used
+JavaScript SJLJ and Asyncify, before the Wasm-EH and JSPI cutovers. Their
+transformation-dependent local counts and recursion ceilings do not describe
+current images or justify a current pass list. The surviving production-test
+skips preserve trace identity independently of the coroutine backend.
 
 
 ### The harness level hook
@@ -1835,8 +1835,9 @@ the measurement and budget specs. Production builds stay at
 
 ### Measurements
 
-Measured for #343 with Emscripten 6.0.13, Node 24.19.0, host Chrome
-156.0.8078.79, and Playwright 1.56.1's Firefox 142.0.1 and WebKit 26.0, one
+Measured for #343 before the Wasm-EH cutover, using JavaScript SJLJ with
+Emscripten 6.0.13, Node 24.19.0, host Chrome 156.0.8078.79, and
+Playwright 1.56.1's Firefox 142.0.1 and WebKit 26.0, one
 cold process per depth, on the retained trace fixture
 (`spec/fixtures/browser_trace`) and its session-only measurement copy. `-O2`
 is the same tree with `PRODUCTION_LEVEL` patched for the comparison; it does
@@ -1883,7 +1884,7 @@ least 8.5× on WebKit (more than 4,096/479; 3.8× at assertions 0,
 cell, `pcall` and `coroutine.resume` bind on every engine in both profiles,
 and V8 binds in both profiles: production `pcall` reaches 362 levels on Node,
 against 775 on Firefox and 2,121 on WebKit. Over the measured cells the
-minimum is therefore still 204 counts, under validation at assertions 2 on
+minimum was therefore 204 counts, under validation at assertions 2 on
 Node and Chromium. Validation `pcall` and `coroutine.resume` were measured at
 assertions 0 only on Node, where they reach 204 levels against 201 at
 assertions 2.
@@ -2545,17 +2546,18 @@ load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)).
   must keep at most 91 `mixed_recurse` frames with at most one truncation
   marker.
 * `test_mixed_recursion_overflow` and `test_pcall_recursion_overflow` recurse
-  toward a bound of 150, above the limit and below every engine ceiling,
+  toward a bound of 150, above Lua's limit and below the historical engine ceilings,
   through `@trace-shape.lua` and through `@trace-pcall.lua`, a Lua chain whose
-  only C boundary is `pcall`, so it costs one count per level (it passes 96
-  levels and trips at 97 on Node). Each must catch exactly `C stack overflow`
+  only C boundary is `pcall`, so it costs one count per level (it passed 96
+  levels and tripped at 97 on the historical Node fixture). Each must catch
+  exactly `C stack overflow`
   with a real capture and return normally. A missing limit reaches the base
   case's `expected C stack overflow` and fails the assertion instead of
-  crashing the engine, which a `-DLUAI_MAXCCALLS=60000` install confirms.
+  crashing the engine, which a `-DLUAI_MAXCCALLS=60000` install confirmed.
 
-All three pass on Node, Chromium, Firefox, and WebKit, at assertions 2 and 0,
-under both profiles. The loader still reports a real engine failure with its
-`cause` ([Settlement](#the-loader)); the C-call limit only keeps Lua's
+All three passed on Node, Chromium, Firefox, and WebKit, at assertions 2 and 0,
+under both profiles before the Wasm-EH cutover. The loader still reports a real
+engine failure with its `cause` ([Settlement](#the-loader)); the C-call limit only keeps Lua's
 recursion from reaching one.
 
 ### JSPI and protected calls
