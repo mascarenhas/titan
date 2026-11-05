@@ -950,8 +950,9 @@ sources as the native standard library, plus the browser-only `titan.browser`:
 | [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
 | [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
 | [`test`](standard-library-test.md) | the test API and the native test runner |
+| [`browser`](standard-library-browser.md) | typed JavaScript bindings, original-closure callables, handles, and tracked host requests |
 
-Each of these modules is complete. Every public declaration, including the raw
+Each of the thirteen shared modules is complete. Every public declaration, including the raw
 C functions `protobuf.write_resource_index`,
 `protobuf.write_resource_index_bytes`, `transfer.copy_message`,
 `transfer.discard_message`, and `transfer.transfer_load_module`, has the same
@@ -960,6 +961,11 @@ from the target facts [below](#what-the-browser-target-changes). No member
 raises an "unavailable" error or returns a stand-in value. `transfer` encodes
 and decodes packets within one instance; the modules that carry packets to
 another Lua state or thread are not available.
+
+`titan.browser` is the reviewed target-only exception. It has no native
+placeholder and imports only the portable core. Its byte/scalar ABI is not the
+native transfer packet format; schema copies and a browser async scheduler are
+separate features. See [JavaScript bindings](standard-library-browser.md).
 
 ### Modules that are not available
 

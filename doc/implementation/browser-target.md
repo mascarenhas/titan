@@ -389,6 +389,11 @@ native targets and need no browser-specific defines.
 The provider also includes the browser-only `titan.browser` bridge module,
 bringing its total to fourteen roots.
 
+The fourteenth provider root, `titan.browser`, is a browser-only exception in
+`titan/browser.browser.titan`, with no native placeholder. It imports only
+`gc` and `reflect`; its [protected C runtime](browser-bridge.md) lives in the
+browser archive, not in a native-only dependency or a second coroutine driver.
+
 The other thirteen standard modules are absent at compile time: their
 canonical mains are the `native` variants `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
 and `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
@@ -2062,89 +2067,55 @@ maximum startup-memory guarantees.
 
 ## The browser entrypoint
 
-`browserentry.contents(worker, options)` renders the shared C wrapper around a
-`static int titan_browser_worker(lua_State *L)` that returns one Lua integer
-status. `driver.browser_c_image_contents(worker, options)` exposes it to the
-protocol probe and to test-owned C images; `options` adds `declarations`, the
-report's `program_name` (default `titan`), and `state_status`, the status for
-a state-allocation failure (default 1). The wrapper exports one function:
+`browserentry.contents(worker, options)` renders the persistent C export
+wrappers. `driver.browser_c_image_contents` is the same boundary for protocol
+and test-owned C images. Options supply declarations, a protected initializer
+(empty for C-only controls), a program name, and the state-allocation status.
+The installed [`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout)
+defines initialize, main, invoke, physical callable release, close, and the
+typed completion channel.
 
-```c
-int titan_browser_entry(int argc, const unsigned char *const *argv,
-                        const size_t *lengths);
-```
+Initialization creates the owner Lua state and its earliest bridge registry,
+then enters the image initializer under the shared protected gateway. Main
+runs once on that initialized state and leaves it live. Each contained C entry
+receives a nonzero unsigned 64-bit operation id, echoes it with its expected
+operation kind in exactly one completion, and returns only an admission code.
+The loader waits for both completion and physical promised-entry retirement.
 
-and imports two JavaScript functions from `titan-browser-library.js`:
+`argv` and `lengths` have `argc` elements, exclude the program name, and carry
+byte strings; zero-length arguments need no valid data pointer. The main
+worker constructs the normal string Array and calls `main(args)`, or the
+existing registered bootstrap hook when enabled. Its low 32 result bits have
+the documented signed application-status interpretation.
 
-```c
-void titan_browser_complete(int kind, int status,
-                            const unsigned char *bytes, size_t length);
-int titan_browser_entry_allowed(void);
-```
+Lua-running workers reserve stack space nonraisingly, save/restore the exact
+top, install `errorhandler`, and run under `lua_pcall`. Error conversion has a
+separate protected report without recapturing the original trace. Completion
+copies rooted byte results/messages/traces before the stack is restored; the
+old native malloc copy which existed only to outlive a one-shot state is no
+longer needed.
 
-`argv` and `lengths` have `argc` elements, the arguments exclude the program
-name, and a zero-length argument need not have a valid pointer. The return
-value is admission only, never the program's result: `-1` while another call
-is active or when `titan_browser_entry_allowed()` refuses ([Reentry
-guard](#the-reentry-guard)), `-2` after the one permitted run, and `0` after an
-admitted run. A refusal allocates nothing and transfers no coroutine context.
+Disposal holds the same execution owner while closing the state directly,
+never by a pcall on the state being freed. The registry invalidates last,
+after coroutine cleanup and finalizers. A warning callback installed before
+user initialization sends finalizer warnings to stderr. Both libc streams are
+flushed, preserving an earlier application error; the loader owns final copied
+stream drainage. Scope defers still run when main returns or raises, but state
+finalizers now run at explicit disposal.
 
-An admitted run:
-
-1. creates the state with `luaL_newstate`, outside any protection; the fresh
-   state's guaranteed `LUA_MINSTACK` (20) slots cover the three nonallocating
-   setup pushes of `errorhandler`, the worker, and the argument block without
-   a `lua_checkstack` call. A state-allocation failure completes with kind 1,
-   the configured state status, and the static payload `not enough memory for
-   state`;
-2. calls the worker under `lua_pcall` with `errorhandler` as message handler,
-   so the Lua libraries, the searcher, the preloads, every module
-   initializer, and `main` run inside one protected boundary, and an ordinary
-   failure anywhere returns there instead of panicking or aborting;
-3. on success, takes the worker's integer result as the status: its low 32
-   bits read as a signed 32-bit integer;
-4. on failure, sets kind 1 and status 1 and reports under a second
-   `lua_pcall` without a message handler, so that converting the error object
-   cannot recapture or overwrite the original trace. The report converts the
-   value like `lua.c` (string, `__tostring`, or `(error object is a <type>
-   value)`), strips the synthetic bootstrap chunk prefix, roots a
-   length-aware copy of the message, and writes `<progname>: <message>` and,
-   when a trace exists, `stack traceback:` followed by each raw trace line
-   after a newline and a tab, to stderr with `fwrite`, so embedded NUL bytes
-   survive. A throwing `__tostring` or a failed report completes with
-   `error while reporting browser failure` (also written to stderr), and a
-   failed copy of the message with `not enough memory to copy browser error`;
-   otherwise the message is copied to `malloc`ed storage that outlives the
-   state;
-5. closes the state, so finalizers and `__close` handlers still write output;
-6. drains libc explicitly: `fflush(stdout)`, then `fflush(stderr)`, both
-   always attempted. A run that had succeeded becomes kind 1, status 1 with
-   `cannot flush browser stdout` or, when only stderr failed, `cannot flush
-   browser stderr`; an already failed run keeps its first error;
-7. calls `titan_browser_complete` exactly once, frees the copied message after
-   that synchronous call returns, and clears the active flag.
-
-Neither the wrapper nor its report ever calls `exit`. The pin, rethrow, and
-bootstrap-hook semantics are the native ones; the native `main` template and
-its `exit(EXIT_FAILURE)` paths are unchanged.
-
-`driver.browser_entrypoint_contents(modname, program_name, options)` supplies
-the program worker. It opens the Lua libraries, installs the Titan searcher,
-and preloads the support module (`luaopen_titan` as `titan`) and the main
-module, then requires the main module and retrieves `main`. It builds the
-argument Array with the string-element writer and `lua_pushlstring` for each
-argument, so arguments are byte strings and `args[1]` is the first. It then
-calls `main(args)`, or `hook(main, args)` when a bootstrap hook is registered
-under `TITAN_MAIN_BOOTSTRAP_KEY` and `--no-uv-bootstrap` was not given. Unlike
-the native `pmain`, it publishes no `argc`/`argv` registry values, because no
-browser `uv` module exists. `<progname>` is the last component of the main
-module's name, or of the first test root's name for a test image.
+`driver.browser_entrypoint_contents` supplies the separate initializer and
+main workers: open libraries, install the Titan searcher/preloads and require
+the root during initialization; retrieve the initialized module from the
+ordinary loaded table and invoke main later. Native `main`/`pmain` templates
+are unchanged. See [browser bridge runtime](browser-bridge.md) for the exact
+C layout, state/capture roots, independent-state construction, errors, and
+close admission.
 
 ## Runtime guards
 
 The browser `libtitan.a` contains exactly `titan.o`, `minicoro.o`,
-`titan_path.o`, and `ltitanlib.o`; no archive or image references `dlopen`,
-`dlsym`, `dlerror`, or libbacktrace. Static images resolve modules through
+`titan_path.o`, `ltitanlib.o`, and `titan-browser.o`; no archive or image
+references `dlopen`, `dlsym`, `dlerror`, or libbacktrace. Static images resolve modules through
 provider symbol tables (`TitanModuleProvider.symbols`, the explicit-provider
 discipline Windows also uses) and `package.preload`. Under
 `TITAN_TARGET_BROWSER` the host-only paths compile out and raise a browser
