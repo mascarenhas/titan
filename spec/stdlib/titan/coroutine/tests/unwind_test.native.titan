@@ -1,6 +1,5 @@
 local unwind_lua = import "lua"
 local unwind_async = import "async"
-local unwind_string = import "string"
 local unwind_runtime = import "support.runtime.titan"
 local unwind_init_fixture = import "coroutine.unwind_init_fixture"
 
