@@ -241,16 +241,18 @@ every `EMSDK_*` variable it does not set itself, and the job sets
    PREFIX="$PREFIX"`, and asserts the ten installed SDK files listed in the
    [browser SDK layout](browser-target.md#the-browser-sdk) apart from the
    LPegLabel archive (`titan-browser-trace.js` included).
-8. **Browser core stdlib suite.** With emsdk sourced, `make
-   titan-stdlib-browser-test PREFIX="$PREFIX"` runs unfiltered: it builds the
-   browser-portable stdlib owners into one validation-profile test image,
-   checks its dependency closure and native/browser member inventory, runs it
-   under Node and then Chromium (`TITAN_NODE` and `TITAN_CHROME` from the
-   earlier steps), and requires a nonzero case count for every owner
+8. **Partitioned browser core stdlib suite.** With emsdk sourced and
+   `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
+   unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
+   builds the browser-portable stdlib owners into the manifest's four
+   validation-profile test images, checks each image against the 32,000,000-byte
+   budget and the dependency closure, checks the native/browser member
+   inventory, runs every image under Node and then Chromium (`TITAN_NODE` and
+   `TITAN_CHROME` from the earlier steps), and requires a nonzero case count
+   for every owner across the images
    ([browser test owners](browser-target.md#test-owners-and-the-browser-suite)).
-   Each engine's stdout report and stderr go to separate logs in
-   `out/browser-stdlib/`, next to the image, `roots.txt`, and `members.md`;
-   the step's console shows both streams.
+   Each image's stdout report and stderr under each engine go to separate logs
+   in `out/browser-stdlib/`.
 9. **Strict gate.** With `TITAN_ROOT=$PREFIX`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`, and `TITAN_PROBE_CACHE_DISABLE=1`, the
    prefix's installed `busted -c -o gtest -v` runs the fifteen real-toolchain
@@ -327,11 +329,12 @@ every `EMSDK_*` variable it does not set itself, and the job sets
     --allow-degraded-trace --root "$output" --js-test "$output/trace.test.mjs"
     -- --degraded` exercises the degraded Lua-only fallback rows
     (`$RUNNER_TEMP/browser-trace-node-degraded.log`).
-18. **Failure logs.** On failure, `actions/upload-artifact` uploads the
-    `browser-*.log` files, `out/browser`, and the browser core stdlib suite's
-    `out/browser-stdlib/` (its image, per-engine stdout and stderr logs,
-    `roots.txt`, and `members.md`) as `browser-toolchain-failure` for seven
-    days.
+18. **Failure logs.** On failure, `actions/upload-artifact` uploads, as
+    `browser-toolchain-failure` for seven days, the `browser-*.log` files,
+    `out/browser`, and the browser core stdlib suite's evidence:
+    `out/browser-stdlib/*.log` (each image's per-engine stdout and stderr
+    logs), `out/browser-stdlib/images/*.{mjs,wasm,wasm.map}`, the
+    `*roots.txt` files, and `members.md`.
 
 The browser target's spec files (`spec/browser_isolation_spec.lua`,
 `spec/browser_target_spec.lua`, `spec/browser_sdk_spec.lua`,

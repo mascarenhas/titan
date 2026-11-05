@@ -965,8 +965,9 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
    existing ancestor `realpath`s and folding slashes/case on Windows) and
    deduplicated in first-seen order. The authored spelling `source` is retained
    for compiler diagnostics and `__FILE__`. Committed artifacts are
-   `<output_root>/.native/<sha256("native-c-source-path", canonical)>.{o,record}`;
-   `<stem>.i`, `<stem>.d`, and any staged object are invocation scratch.
+   `<output_root>/.native/<sha256("native-c-source-path", canonical)>.{o,record}`
+   and, after a successful compile, its `<stem>.d`; `<stem>.i` and any staged
+   object are invocation scratch.
 2. **Unconditional preprocessing (`native-preprocess`).** On every invocation,
    `compile_node` runs:
 
@@ -974,8 +975,8 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
    <compile_argv...> -E -MD -MF <stem>.d -MT titan-native <source> -o <stem>.i
    ```
 
-   It invalidates any prior memo for `<stem>.i`, parses `<stem>.d` with
-   `depfile.parse`, and computes:
+   It invalidates any prior memo for `<stem>.i` and `<stem>.d`, parses
+   `<stem>.d` with `depfile.parse`, and computes:
 
    ```text
    input = incremental.digest(context, "native-c-input", {
@@ -1014,11 +1015,22 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
    list parsed from this invocation's `<stem>.d` (absolute or relative to the
    working directory, possibly including the source itself), so callers such
    as Windows stale-stage retirement see the files the preprocessor opened.
-5. **Scratch retirement.** On hits, misses, preprocessing or compile
-   failures, and cancellation, one protected cleanup removes `<stem>.i`,
-   `<stem>.d`, and any staged object. Committed `.o`/`.record` nodes are
-   retained as shared cache entries; no invocation prunes nodes that it did
-   not request.
+5. **Scratch retirement and provenance.** On hits, misses, preprocessing or
+   compile failures, and cancellation, one protected cleanup removes `<stem>.i`
+   and any staged object. `<stem>.d` is removed only when the node failed or was
+   cancelled: after a successful hit, miss, or uncacheable compile it stays as
+   the node's durable header provenance, which the [browser closure
+   check](browser-target.md#the-dependency-closure-check) audits. Committed
+   `.o`/`.record`/`.d` nodes are retained as shared cache entries, so a final
+   link that still names a node keeps its evidence after a later invocation
+   requests other sources; no invocation prunes nodes that it did not request.
+6. **Current-input inventory.** After every requested node succeeds,
+   `nativeinputs.compile` writes `<output_root>/.native/inputs` with the
+   certificate graph codec: `{ inputs = { object_path, ... } }`, one entry per
+   deduplicated source in request order. It names the authored inputs of the
+   latest successful invocation, including compile-only invocations and
+   uncacheable nodes that have no native or final-link certificate. A failed
+   invocation leaves the previous inventory in place.
 
 In `titanc`, `-c --c-source <file>` is permitted without Titan module names for
 standalone C helper preparation. Because the storage stem is derived from the

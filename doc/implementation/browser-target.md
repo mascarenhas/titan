@@ -423,8 +423,8 @@ members.
 
 ### The dependency-closure check
 
-`scripts/browser_stdlib.lua` rejects libuv, OpenSSL, llhttp, and SQLite at
-three levels:
+`scripts/browser_stdlib.lua` rejects libuv, OpenSSL, llhttp, and SQLite by
+path, by symbol, and through the evidence each certified input carries:
 
 * **Paths** (`check_path`): a header named `uv.h`, `llhttp.h`, `sqlite3.h`, or
   `sqlite3ext.h`, or below a `uv`, `libuv`, `openssl`, `llhttp`, or `sqlite3`
@@ -432,37 +432,80 @@ three levels:
   `libopenssl`, `libllhttp`, `libsqlite3`, `libtitan-llhttp`, or
   `libtitan-sqlite3` followed by `.`, `_`, or `-`.
 * **Symbols** (`check_symbol`): any name starting with `uv_`, `SSL_`,
-  `OPENSSL_`, `llhttp_`, or `sqlite3_`, defined or undefined, and any such
-  import.
-* **Certified inputs**: the C-header dependencies recorded in each object's
-  `.titan.source` metadata, and the `native` inputs of every link certificate
-  under `.titan-links/`.
+  `OPENSSL_`, `llhttp_`, or `sqlite3_`, whether a function or data, defined or
+  undefined, and any such import.
+* **Generated objects**: the C-header dependencies recorded in each object's
+  `.titan.source` metadata.
+* **Authored C**: each `.native/` directory must hold the `inputs` inventory
+  that `nativeinputs.compile` writes ([`--c-source`
+  compilation](build-coordinator.md#--c-source-compilation-and-records)). Every
+  object it names needs a readable, nonempty `<stem>.d`, and every header path
+  in that file gets the path check, so a header that only contributes macros is
+  still caught. A missing inventory or `.d`, or an invalid one, fails closed
+  (`missing authored-C header provenance`, `missing authored-C input
+  inventory`). The next successful build of those sources writes the evidence
+  again. Unused objects that older invocations left in the cache are
+  checked by content but need no `.d`.
+* **Link certificates**: every `native` input of every final-link record under
+  `.titan-links/` gets the path check, and every `.o` or `.a` among them,
+  inside or outside the output tree, is read and checked by content: archive
+  member names and every member's defined and undefined symbols, plus the
+  header metadata of objects that carry it. An authored-C object from this
+  output tree must also have its `.d`. Opaque third-party prebuilt inputs need
+  no header metadata; their contents are still checked.
+
+Each physical input is decoded once per `check_output` call. The key is its device and inode
+(or its real path where those are unavailable) together with its size, mode,
+and timestamps, so two different files with the same basename are both
+inspected, while hard-link aliases of one file are read once. The path check
+runs before deduplication. Referenced archives are scanned with
+`independent_members = true`, because a content audit must accept a toolchain
+archive whose members carry different feature vectors; provider lookup and
+target selection keep their strict scans ([relocatable
+WebAssembly](static-compiled-modules.md#relocatable-webassembly)).
 
 `check_archive` applies the path, symbol, and header checks to an archive and
-every member, `check_output` to every `.o` and link certificate below an
-output root, and `check_image` to a final `.wasm`: its imports, its exports,
-and every internal function name from the `name` section, so a dependency that
-dead-stripping left only internally is still found, and a missing name
-inventory fails. The check is owned by the SDK build and the subset suite (it
-is never part of `titanc`'s general link path): `browser_sdk.lua finalize`
-checks the staged provider, the LPegLabel archive, and the SDK build tree, and
-`titan-stdlib-browser-test` checks its output tree, the installed provider, and
-its test image. Admitting llhttp would be a deliberate change to these checks;
-no other relaxation is part of the policy.
+every member, `check_output` applies the generated-object, authored-C, and
+link-certificate checks to everything below an output root, and `check_image`
+checks a final `.wasm`: its imports, its exports, and every internal function
+name from the `name` section, so a dependency that dead-stripping left only
+internally is still found, and a missing name inventory fails. The check is
+owned by the SDK build and the subset suite (it is never part of `titanc`'s
+general link path): `browser_sdk.lua finalize` checks the staged provider, the
+LPegLabel archive, and the SDK build tree, and `titan-stdlib-browser-test`
+checks its output tree, the installed provider, and each of its test images.
+Admitting llhttp would be a deliberate change to these checks; no other
+relaxation is part of the policy.
 
 `spec/browser_stdlib_spec.lua` (emsdk-free) covers the path and symbol
 matrices, including every archive stem with `.a`, `_a.a`, `_1.48.a`,
 `-static.a`, and `.1.a` suffixes, and requires the `browser-sdk` environment
 and recipe to name no native-only dependency variable.
-`spec/coder/browser_stdlib_closure_spec.lua` is the real-toolchain negative
-fixture: a compiled provider that `foreign import`s an injected `uv.h`, an
-injected `libuv.a`, a neutrally named archive that defines
-`uv_closure_intruder`, an image that keeps that function internally, and an
-image linked with `-X libuv_a.a` whose selected object has no forbidden symbol
-but whose link certificate names the archive. `spec/browser_sdk_spec.lua`
-builds the SDK with poisoned ambient `CPPFLAGS` and `TITAN_EXTRA_CPPFLAGS`
-(both name a missing forced header, so appending either fails) and requires
-the provider's non-compiler members to be exactly the five LPegLabel objects.
+`spec/coder/browser_stdlib_closure_spec.lua` holds the real-toolchain negative
+fixtures:
+
+* a compiled provider that `foreign import`s an injected `uv.h`, an injected
+  `libuv.a`, a neutrally named archive that defines `uv_closure_intruder`, an
+  image that keeps that function internally, and an image linked with
+  `-X libuv_a.a` whose selected object has no forbidden symbol but whose link
+  certificate names the archive;
+* an authored C file whose only forbidden header contributes a macro, rejected
+  on a cache miss, on a hit, and as an uncacheable node; deleting its `.d` or
+  the `.native/inputs` inventory fails closed, and a clean rebuild with an
+  unused legacy cache object passes;
+* external `.o` and `.a` inputs whose functions have neutral names, so the
+  image's function-name check passes, while a denied data symbol is defined,
+  or kept live as a weak undefined reference; the closure check rejects both,
+  even beside a clean input with the same basename. Replacing the payload with
+  a clean opaque prebuilt passes without header metadata, and hard-link aliases
+  certified by a second image are read once per physical file.
+
+`spec/staticmetadata_spec.lua` covers the `independent_members` scan option,
+and `spec/coder/native_inputs_spec.lua` the retained `.d` and `inputs`
+evidence. `spec/browser_sdk_spec.lua` builds the SDK with poisoned ambient
+`CPPFLAGS` and `TITAN_EXTRA_CPPFLAGS` (both name a missing forced header, so
+appending either fails) and requires the provider's non-compiler members to be
+exactly the five LPegLabel objects.
 
 ### Interface-derived member inventory
 
@@ -560,45 +603,88 @@ string.core_test string.format_pack_test string.regex_test url.tests path.tests
 test.tests reflect.tests json.tests protobuf.tests transfer.tests
 ```
 
+The same manifest partitions those owners into test images, because one image
+holding all fifteen is too large for headless Chromium on mac-arm64:
+
+| Image (`TITAN_STDLIB_BROWSER_TEST_IMAGES`) | Owners (`TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_<image>`) |
+| --- | --- |
+| `core` | every browser root except the three images below |
+| `reflection` | `reflect.tests`, `json.tests` |
+| `protobuf` | `protobuf.tests` |
+| `transfer` | `transfer.tests` |
+
+`TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES` (32,000,000) caps each image's
+`.wasm`. Before the recipe runs, `TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK` stops
+Make if the image list is empty or repeats an image, if an image has no owners,
+or if a browser root is repeated, assigned twice, assigned to no image, or
+assigned without being a browser root. The budget must be a positive decimal
+integer of at most eight digits. Moving an owner between images is a manifest
+edit only.
+
+The budget is about half the smallest image measured to fail. With Emscripten
+6.0.13 and the pinned Chrome for Testing 156.0.8078.80, the single
+63,787,003-byte fifteen-owner validation image trapped the mac-arm64 headless
+Chromium renderer (`EXC_BREAKPOINT`/`SIGTRAP`) before any test ran, even with
+a filter that matched no case and with `--js-flags=--liftoff-only`, while Node
+and Linux Chromium ran it. A 55,932,427-byte image of the other fourteen owners
+and a 28,241,082-byte `transfer.tests` image passed there. The four images
+are the fewest that fit: every three-image pairing tried exceeded the budget
+(`protobuf` with `reflection` at 32,984,970 bytes, `protobuf` with
+`coroutine.tests` at 34,633,460, and `transfer` with `reflection` at
+32,556,174), and the four measure between about 23.1 MB and 28.8 MB on Linux
+and macOS. The engine-internal cause is not established; the size limit of
+V8 and Asyncify-expanded functions is separate follow-up work.
+
 `make titan-stdlib-browser-test` (a test goal, so it defaults to the
 `validation` profile) needs the installed native provider, the browser SDK,
 emsdk, Node 24, and a headless Chromium. It:
 
-1. builds one image, `$(TITAN_OUTPUT_DIR)/browser-stdlib/stdlib.mjs` with its
-   `.wasm` and `.wasm.map`, with the installed `titanc -q --target browser
-   --test --incremental --tree spec/stdlib/titan`, the explicit roots, and
-   `--c-source spec/fixtures/browser_runtime/close.c` (the browser helper of
-   `coroutine.tests`), under `BROWSER_SDK_ENV` with `TITAN_PATH_0_6` set to
-   the installed browser SDK directory;
-2. runs `check_browser_stdlib.lua closure` over the output tree, the
-   installed browser `titan.a`, and `stdlib.wasm`;
-3. runs `check_browser_stdlib.lua inventory` against the installed native and
-   browser providers and writes `members.md`;
-4. writes `roots.txt` and, for `node` and then `chromium`, runs the SDK's
-   `titan-browser-run --engine <engine> --timeout 300000 --grace 2000`
-   through `scripts/run_browser_stdlib.sh`, forwarding a nonempty
-   `TITAN_FILTER` as one `--filter=` argument. The wrapper saves the runner's
-   stdout in `<engine>.log` and its stderr in `<engine>.stderr.log`, then
-   replays both to the caller and returns the runner's status; and
-5. audits only the stdout report, `<engine>.log`, with
-   `check_browser_stdlib.lua output`, which applies the native aggregate's
-   validator (`spec/support/check_stdlib_test_output.lua`): an unfiltered run
-   must report a nonzero case count for every root, a filtered run follows the
-   native filtered rules. It always prints one
-   `Browser stdlib owner <root>: <n> cases` line per root and a
-   `Browser stdlib gate: selected=… passed=… skipped=… failed=… owners=…/…`
-   summary, even for a failed run, and the target fails if either the runner
-   or the audit failed.
+1. builds each image in manifest order into one output tree,
+   `$(TITAN_OUTPUT_DIR)/browser-stdlib`, as `images/<image>.mjs` with its
+   `.wasm` and `.wasm.map`. Each image is one installed `titanc -q --target
+   browser --test --incremental --tree spec/stdlib/titan` invocation over that
+   image's roots, with `--c-source spec/fixtures/browser_runtime/close.c` (the
+   browser helper of `coroutine.tests`), under `BROWSER_SDK_ENV` with
+   `TITAN_PATH_0_6` set to the installed browser SDK directory. The target
+   prints each image's build time, then runs `check_browser_stdlib.lua size`
+   (the image against the budget; an oversized image fails with a request to
+   repartition its owners) and `check_browser_stdlib.lua closure` (the output
+   tree, the installed browser `titan.a`, and that image's `.wasm`);
+2. runs `check_browser_stdlib.lua inventory` once against the installed native
+   and browser providers and writes `members.md`;
+3. writes `roots.txt` (every browser root) and `<image>.roots.txt` (each
+   image's owners) and, for `node` and then `chromium`, runs every image with
+   the SDK's `titan-browser-run --engine <engine> --timeout 300000 --grace
+   2000` through `scripts/run_browser_stdlib.sh`, forwarding a nonempty
+   `TITAN_FILTER` to each image as one `--filter=` argument. The wrapper saves
+   the runner's stdout in `<image>.<engine>.log` and its stderr in
+   `<image>.<engine>.stderr.log`, then replays both to the caller and returns
+   the runner's status. A failing image is reported and the remaining images
+   still run; and
+4. after each engine, audits only the stdout reports with
+   `check_browser_stdlib.lua output roots.txt <filter> <image> <log> <owners>...`,
+   which applies the native aggregate's union validator
+   (`spec/support/check_stdlib_test_output.lua`): each image's report is
+   checked against that image's owners, no case may appear in two images, and
+   an unfiltered run must report a nonzero case count for every browser root
+   across the union. A filtered run may leave an
+   image or owner with no selected case, but the union must select at least
+   one. It always prints one `Browser stdlib owner <root>: <n> cases` line per
+   root and a `Browser stdlib gate: selected=… passed=… skipped=… failed=…
+   owners=…/… images=…` summary (marked `(filtered)` when a filter applies),
+   even for a failed run. The target fails if any image failed under either
+   engine or if either audit failed.
 
 The streams stay separate because a case may write to stderr while the runner
 is in the middle of a report line, and a merged log then splits that line; the
 expected Lua warnings (`Lua warning: error in coroutine cleanup ...`) are such
 writes, and the validator rejects a split report. Warnings
-stay visible in `<engine>.stderr.log` and on the console; nothing is filtered
-out. `out/browser-stdlib/` therefore holds `stdlib.mjs`, `stdlib.wasm`,
-`stdlib.wasm.map`, `roots.txt`, `members.md`, and the four engine logs. The
+stay visible in the `.stderr.log` files and on the console; nothing is
+filtered out. `out/browser-stdlib/` therefore holds `images/` (each image's
+`.mjs`, `.wasm`, and `.wasm.map`), `roots.txt`, the `<image>.roots.txt` files,
+`members.md`, and the per-image, per-engine stdout and stderr logs. The
 [`browser-toolchain` job](continuous-integration.md#browser-toolchain-job)
-runs the target unfiltered after the SDK is built and uploads that directory
+runs the target unfiltered after the SDK is built and uploads those files
 when the job fails.
 
 ### Initialization and fidelity gate
@@ -3169,7 +3255,9 @@ hosts`).
 
 * `spec/staticmetadata_spec.lua` — synthesized Wasm objects and archives:
   payload readback, padded LEB128, every malformed case, fingerprints and the
-  standalone `-shared-mem` rule, mixed formats and features, bitcode, and
+  standalone `-shared-mem` rule, mixed formats and features, bitcode, the
+  `independent_members` content-scan option (heterogeneous features accepted
+  only with the option and without an explicit target), and
   `incremental.native_input_kind`.
 * `spec/browser_target_spec.lua` — the descriptor with hand-made records and
   fake tools: freezing, every record and tool diagnostic, the ordered target
@@ -3239,8 +3327,13 @@ hosts`).
   check](#the-dependency-closure-check) and its negative fixtures, the
   interface-derived [member inventory](#interface-derived-member-inventory)
   (raw foreign functions, nominal members, named-call metadata, unrecorded
-  differences), the suite's per-owner audit of a failed run, and the stdout-only
-  audit of a run whose stderr arrives in the middle of a report line.
+  differences), the image manifest (an exact owner partition and budget, and
+  rejection of incomplete, duplicate, empty, or unknown assignments and of
+  malformed budgets before any build), the byte budget at its exact boundary,
+  the CI failure artifact's image and per-engine log paths, the per-owner
+  audit of a failed run, the stdout-only audit of a run whose stderr arrives in
+  the middle of a report line, and the union audit, which fails when any image
+  fails.
 * `spec/coder/browser_stdlib_gate_spec.lua` — the [initialization and
   fidelity gate](#initialization-and-fidelity-gate).
 * `spec/coder/browser_entry_gate_spec.lua` — the [entry gate](#the-entry-gate-decision).

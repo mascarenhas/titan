@@ -244,7 +244,8 @@ so the runner's 0, 1, and 2 keep their meaning and never coincide with the
 selects no case exits 0, so browser acceptance checks count the selected
 cases rather than trusting the exit status. The repository's [browser core
 stdlib suite](browser-target.md#test-owners-and-the-browser-suite) builds the
-browser-portable standard-library owners into one such image.
+browser-portable standard-library owners into a manifest-declared set of such
+images, each under a byte budget, and audits their owner union.
 
 ## `titan.test` execution API and private state
 

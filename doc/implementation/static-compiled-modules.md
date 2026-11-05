@@ -304,6 +304,18 @@ with a matching fingerprint, even when the caller supplies no expected target,
 and names the offending member. In real `emar` archives the symbol index is
 record #1, so the first object is `archive member #2`.
 
+`scan_archive(filename, { independent_members = true })` relaxes only that
+implicit cross-member inference: without an explicit `target`, each member is
+classified on its own, so members with different feature vectors are
+accepted. Emscripten's `libclang_rt.builtins.a` has such a member
+(`__c_longjmp.o`, with an empty feature vector beside normally featured
+members). Only the browser stdlib's
+[dependency-closure check](browser-target.md#the-dependency-closure-check)
+passes the option, because it inspects archive contents rather than selecting
+a provider. An explicit `target` still applies to every member, and member
+parsing, metadata validation, and the default scans used for provider lookup
+and target selection stay strict.
+
 ## Target selection
 
 Interface resolution may scan an archive before source compilation. It must
