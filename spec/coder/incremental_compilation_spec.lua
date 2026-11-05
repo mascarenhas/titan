@@ -1118,6 +1118,52 @@ os.exit(result.ok and 0 or result.status or 1)
             for _, filename in ipairs(headers) do assert.equal(timestamp, lfs.attributes(filename, "modification")) end
         end)
 
+        for _, observable in ipairs({ false, true }) do
+            it("reuses Windows mixed-case outputs after an SDK-only move " ..
+                (observable and "with observable output-header __FILE__" or "without a path macro"), function()
+                if not platform.windows then pending("Windows concrete path spelling"); return end
+                local sdk = private_sdk()
+                local output = workspace .. "/MixedCaseOutput"
+                local contents = main(42)
+                if observable then
+                    local header = output .. "/Include/MixedCaseHeader.h"
+                    write(header, [[
+                        #include <string.h>
+                        static inline int relocation_path_length(void) { return (int)strlen(__FILE__); }
+                    ]])
+                    contents = "foreign import " .. string.format("%q", header) .. [[
+                        function main(args: {string}): integer
+                            return ffi.relocation_path_length() as integer
+                        end
+                    ]]
+                end
+                source(APP, contents)
+                local function build()
+                    return compiled("-c", "-o", output, "--incremental", "--source-first", "-v", APP)
+                end
+                build()
+                local object, timestamp = output .. "/" .. APP .. ".o", os.time() - 120
+                assert(lfs.touch(object, timestamp, timestamp))
+                local saved = { [APP] = { path = object, bytes = read(object), timestamp = timestamp } }
+                local moved = workspace .. "/MovedSDKCase"
+                assert(os.rename(sdk, moved))
+                assert.is_false(exists(sdk))
+                sdk_root = moved
+                local text = build()
+                decisions(text, saved, {})
+                no_native_compile(text)
+                assert.is_true(exists(output .. "/" .. APP .. ".ffi.h"))
+                local directories = 0
+                for name in lfs.dir(workspace) do
+                    if name:lower() == "mixedcaseoutput" then
+                        assert.equal("MixedCaseOutput", name)
+                        directories = directories + 1
+                    end
+                end
+                assert.equal(1, directories)
+            end)
+        end
+
         it("keeps moved source-adjacent builds conservative without an explicit output tree", function()
             source(APP, main(43))
             local previous = assert(lfs.currentdir())

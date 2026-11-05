@@ -5506,6 +5506,7 @@ describe("compiler module loader", function()
                 foreign_header = driver.plan_foreign_header(entry.type.name,
                     entry.ast, entry.native_output or entry.filename, false).recipe
             end
+            local generated = "int ordinary_object;\n"
             local native = {
                 has_main = false,
                 imports = imports,
@@ -5520,6 +5521,12 @@ describe("compiler module loader", function()
                     { index = 0, c_suffix = ".c", object_suffix = ".o" },
                 },
             }
+            native.generated_inputs = { {
+                spelling = stem .. ".c", bytes = #generated,
+                sha256 = incremental.digest(context, "generated-c", generated),
+                semantic = incremental.preprocessed_identities(context,
+                    { { filename = stem .. ".c", contents = generated } })[1],
+            } }
             entry.interface_digests = assert(incremental.producer_digests(
                 context, entry, layouts, native.foreign_header))
             native.certificate = assert(incremental.make_certificate(
@@ -5553,17 +5560,20 @@ describe("compiler module loader", function()
                     },
                     binary_usage = entry.ast and entry.ast._binary_usage or {},
                     generated_parts = {
-                        { index = 0, code = "int ordinary_object;\n" },
+                        { index = 0, code = generated },
                     },
                 }))
             if mutator then mutator(native) end
+            if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
+            local code = generated .. (payload == false and ""
+                or assert(objectmetadata.render(payload, "source_metadata")))
+            write_file(stem .. ".c", code)
+            if type(native.certificate) == "table" and type(native.certificate.object_identity) == "string" then
+                incremental.record_materialization(context, stem, native.certificate)
+            end
             if owns_context then
                 assert.is_true(driver.close_resolver_context(context))
             end
-            if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
-            local code = payload == false and "int ordinary_object;\n"
-                or assert(objectmetadata.render(payload, "source_metadata"))
-            write_file(stem .. ".c", code)
             local argv = assert(driver.generated_compile_prefix())
             for _, argument in ipairs({ "-c", stem .. ".c", "-o", object }) do
                 argv[#argv + 1] = argument
