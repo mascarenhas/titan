@@ -96,7 +96,7 @@ export async function lifecycle(context, paths) {
     const second = instances[1].run(['fidelity']);
     try {
       await context.tick();
-      context.assert(bridges.every(bridge => bridge.suspensionPending), 'independent waits did not overlap');
+      context.assert(bridges.every(bridge => bridge.owner && !bridge.safe()), 'independent logical entries did not overlap');
       await rejection(context, instances[1].run(), reentry);
       const disposingFirst = instances[0].dispose();
       await rejection(context, instances[0].run(), closed);

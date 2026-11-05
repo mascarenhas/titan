@@ -23,7 +23,7 @@ export const closed = {
   code: 'TITAN_BROWSER_STATE', message: 'browser instance has already run or is disposed',
 };
 export const reentry = {
-  code: 'TITAN_BROWSER_REENTRY', message: 'browser instance is suspended; reentry is not allowed',
+  code: 'TITAN_BROWSER_REENTRY', message: 'browser instance is active; reentry is not allowed',
 };
 export const closeBytes = new Uint8Array([99, 108, 111, 115, 101, 0, 255]);
 export const tail = new Uint8Array([0, 116, 97, 105, 108, 255]);

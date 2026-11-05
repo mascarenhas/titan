@@ -768,7 +768,7 @@ int main(void) {
     end)
 end)
 
-describe("minicoro Emscripten fiber backend", function()
+describe("minicoro Emscripten JSPI backend", function()
     local workspace
     after_each(function()
         if workspace then browser_support.files.remove(workspace); workspace = nil end
@@ -816,37 +816,58 @@ describe("minicoro Emscripten fiber backend", function()
         end
     end)
 
-    it("rejects a real coroutine creation without Asyncify with its diagnostic", function()
+    it("retires unstarted, suspended and stacked engine continuations before native reuse", function()
         local info, why = browser_toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = browser_support.workspace()
-        -- A capability refusal is a normal nonzero C-program result, not an
-        -- assertion abort: broken Wasm cannot promise the final libc drain.
-        -- The diagnostic below must still originate in real mco_create.
         local control = [[
 #include <assert.h>
 #include <stdio.h>
 #define MINICORO_IMPL
 #include "titan-runtime/minicoro.h"
-static void unused_entry(mco_coro *co) { (void)co; }
-int main(void) {
+static int ran, continued;
+static mco_coro *inner;
+static void *tag = (void *)1;
+static int same(void *a, void *b) { return a == b; }
+static void parked(mco_coro *co) {
+  ++ran;
+  assert(mco_yield(co, tag) == MCO_SUCCESS);
+  ++continued;
+}
+static void outer(mco_coro *co) {
+  (void)co;
+  assert(mco_resume(inner, (void *)2) == MCO_SUCCESS);
+  ++continued;
+}
+static mco_coro *make(void (*entry)(mco_coro *)) {
   mco_coro *co = NULL;
-  mco_desc desc = mco_desc_init(unused_entry, 262144);
-  mco_result result = mco_create(&co, &desc);
-  assert(result == MCO_MAKE_CONTEXT_ERROR);
-  assert(co == NULL);
-  puts("minicoro no-Asyncify control: 1 creation case refused");
-  return 1;
+  mco_desc desc = mco_desc_init(entry, 262144);
+  assert(mco_create(&co, &desc) == MCO_SUCCESS);
+  return co;
+}
+int main(void) {
+  mco_set_tag_comparator(same);
+  mco_coro *idle = make(parked);
+  assert(mco_destroy(idle) == MCO_SUCCESS && ran == 0);
+  mco_coro *single = make(parked);
+  assert(mco_resume(single, tag) == MCO_SUCCESS && ran == 1);
+  assert(mco_destroy(single) == MCO_SUCCESS && continued == 0);
+  inner = make(parked);
+  mco_coro *handler = make(outer);
+  assert(mco_resume(handler, tag) == MCO_SUCCESS);
+  assert(mco_status(inner) == MCO_STACKED && ran == 2);
+  assert(mco_destroy(handler) == MCO_SUCCESS);
+  assert(mco_destroy(inner) == MCO_SUCCESS && continued == 0);
+  puts("minicoro JSPI retirement: unstarted=1 suspended=1 stacked=2 continued=0");
+  return 0;
 }
 ]]
-        local ok, log = browser_support.c_image(info, workspace, "no-asyncify",
-            control, { purpose = "minicoro", assertions = 2, asyncify = false })
+        local ok, log = browser_support.c_image(info, workspace, "retirement",
+            control, { purpose = "minicoro", assertions = 2 })
         assert.truthy(ok, log)
         for _, engine in ipairs({ "node", "chromium" }) do
-            local status
-            ok, log, status = browser_support.image(info, workspace, engine, "no-asyncify")
-            assert.is_false(ok)
-            assert.equal(1, status, log)
-            assert.truthy(log:find("ASYNCIFY is not enabled", 1, true), log)
+            ok, log = browser_support.image(info, workspace, engine, "retirement")
+            assert.truthy(ok, log)
+            assert.truthy(log:find("unstarted=1 suspended=1 stacked=2 continued=0", 1, true), log)
         end
     end)
 end)

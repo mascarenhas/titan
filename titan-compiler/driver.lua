@@ -14015,10 +14015,10 @@ function driver.browser_node_ready(context, assets)
     local result = context.io:run({ assets.runner, "--probe" }, { stderr_to_stdout = true })
     if type(result) == "table" and result.ok then return true, nil, result.output end
     local detail = type(result) == "table" and (result.output or result.diagnostic) or "runner probe failed"
-    local reason = detail and detail:match("Node 24 is required %((.-)%)%s*$")
+    local reason = detail and detail:match("Node 26 or newer is required %((.-)%)%s*$")
     if reason then
-        return nil, "browser provider validation requires Node 24: " .. reason ..
-            "; set TITAN_NODE to a Node 24 executable"
+        return nil, "browser provider validation requires Node 26 or newer: " .. reason ..
+            "; set TITAN_NODE to a Node 26 or newer executable"
     end
     return nil, detail
 end

@@ -4,7 +4,7 @@
 -- Emscripten 6.0.13 and the fork's installed browser Lua. An explicit
 -- requirement table adds capabilities on top of it:
 --
---   { node = true }                                  -- Node 24 through the runner
+--   { node = true }                                  -- Node 26+ through the runner
 --   { node = true, chrome = true }                   -- plus headless Chromium
 --   { node = true, chrome = true, sdk = true }       -- plus the installed browser SDK
 --

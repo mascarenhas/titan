@@ -143,26 +143,18 @@ local function exercise(context: test.Context, mode: string, depth: integer)
     end, "shadow")
     test.assert(owner:resume(nil) == 91)
     log_shadow(context, "fiber", main_stack)
-  elseif mode == "outer-data" then
+  elseif mode == "outer-wait" then
     mixed_titan(3, function() ffi.budget_wait() end, depth)
-  elseif mode == "fiber-data" then
+  elseif mode == "coroutine-wait" then
     local owner = coroutine.create(function(_: value): value
       mixed_titan(3, function() coroutine.yield("parked", "data") end, depth)
       return "done"
     end, "data")
     test.assert(owner:resume(nil) == "parked")
     test.assert(owner:resume(nil) == "done")
-  elseif mode == "outer-no-wait" then
-    mixed_titan(3, function() end, depth)
-  elseif mode == "fiber-no-yield" then
-    local owner = coroutine.create(function(_: value): value
-      mixed_titan(3, function() end, depth)
-      return "done"
-    end, "control")
-    test.assert(owner:resume(nil) == "done")
-  elseif mode == "main-fiber-data" then
+  elseif mode == "nested-entry" then
     mixed_titan(3, function()
-      local owner = coroutine.create(function(_: value): value return 44 end, "main-buffer")
+      local owner = coroutine.create(function(_: value): value return 44 end, "nested-entry")
       test.assert(owner:resume(nil) == 44)
     end, depth)
   elseif mode == "lua-limit" then lua_limit(context)

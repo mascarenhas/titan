@@ -216,21 +216,21 @@ test("launcher rejects absent and wrong-major Node without stdout", { skip: !sup
     const result = await run(["--probe"], { TITAN_NODE: missing });
     assert.equal(result.status, 75);
     assert.equal(result.stdout.length, 0);
-    assert.equal(result.stderr.toString(), `titan-browser-run: Node 24 is required (node not executable at "${missing}")\n`);
+    assert.equal(result.stderr.toString(), `titan-browser-run: Node 26 or newer is required (node not executable at "${missing}")\n`);
     const noPath = await run(["--probe"], { TITAN_NODE: undefined, PATH: "" });
     assert.equal(noPath.status, 75);
     assert.equal(noPath.stdout.length, 0);
-    assert.equal(noPath.stderr.toString(), "titan-browser-run: Node 24 is required (node not found (TITAN_NODE unset; not on PATH))\n");
+    assert.equal(noPath.stderr.toString(), "titan-browser-run: Node 26 or newer is required (node not found (TITAN_NODE unset; not on PATH))\n");
     const explicit = await run(["--probe"], { PATH: "", TITAN_CHROME: "/missing/chrome-329" });
     assert.equal(explicit.status, 0, explicit.stderr.toString());
     const dir = await mkdtemp(join(tmpdir(), "titan-node-resolver-"));
     try {
         const node = join(dir, "node");
-        await writeFile(node, "#!/bin/sh\nprintf 'v22.23.4\\n'\n", { mode: 0o755 });
+        await writeFile(node, "#!/bin/sh\nprintf 'v24.19.0\\n'\n", { mode: 0o755 });
         const wrong = await run(["--probe"], { TITAN_NODE: node });
         assert.equal(wrong.status, 75);
         assert.equal(wrong.stdout.length, 0);
-        assert.equal(wrong.stderr.toString(), `titan-browser-run: Node 24 is required ("${node}" reports v22.23.4; expected Node 24)\n`);
+        assert.equal(wrong.stderr.toString(), `titan-browser-run: Node 26 or newer is required ("${node}" reports v24.19.0; expected Node 26 or newer)\n`);
     } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -754,11 +754,11 @@ test("direct invocation through a symlink still runs the runner CLI", {skip: !su
 // safe point deliberately precedes the loader's ccall outcome continuation.
 function entryOutcomeFactory(entry) {
     return options => {
-        options.titanBrowserAttach({safe: () => true, suspensionPending: false});
+        options.titanBrowserAttach({safe: () => true, poison() {}});
         return {
             HEAPU8: new Uint8Array(0),
             ccall() {
-                queueMicrotask(() => options.titanBrowserSafePoint(false));
+                queueMicrotask(() => options.titanBrowserSafePoint());
                 return entry(options);
             },
         };

@@ -1,9 +1,8 @@
 -- Lua micro-benchmarks for the #329 baseline, run by the fork's browser
 -- interpreter (`lua-5.5.1/src/browser/lua.js`) under Node.
 --
--- The fork's interpreter is a separate measurement lane: its optimization is the
--- fork build's, not Titan's O1/O2 profile choice, and it has no Asyncify
--- suspension path.
+-- The fork interpreter is a separate scale measurement; its optimization is
+-- the fork build's, not Titan's O1/O2 profile choice.
 local function measure(name, action)
     local before = os.clock()
     action()
@@ -44,18 +43,13 @@ measure("lua.strings", function()
     assert(#text == 5000)
 end)
 
--- Asyncify-off cells must create no coroutine at all, so the host sets this
--- flag only for cells whose build enables Asyncify. The fork lua.js lane sets
--- it too, because it keeps the coroutine row for scale.
-if BENCH_ASYNCIFY then
-    measure("lua.coroutine_switch", function()
-        local child = coroutine.create(function()
-            for _ = 1, 20000 do coroutine.yield("tick") end
-            return "done"
-        end)
-        for _ = 1, 20000 do assert(coroutine.resume(child) ~= nil) end
+measure("lua.coroutine_switch", function()
+    local child = coroutine.create(function()
+        for _ = 1, 20000 do coroutine.yield("tick") end
+        return "done"
     end)
-end
+    for _ = 1, 20000 do assert(coroutine.resume(child) ~= nil) end
+end)
 
 io.write("lua.done=1\n")
 -- The interpreter image keeps stdio buffered after main returns, so the host

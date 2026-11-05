@@ -72,9 +72,8 @@ __attribute__((noinline)) int budget_shadow_bytes(int bytes) {
   return bytes >= 256 ? budget_shadow_frame256(bytes) : budget_shadow_tail(bytes);
 }
 
-/* Distinct volatile input reads and output writes keep 32 actual Wasm locals
- * live over the recursive call. They therefore consume Asyncify data, rather
- * than a large C array that would exhaust the shadow stack first. */
+/* Distinct volatile reads/writes keep 32 actual Wasm locals live across a
+ * recursive call and JSPI suspension, separately from the linear C stack. */
 #define EACH(X) X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7) \
  X(8) X(9) X(10) X(11) X(12) X(13) X(14) X(15) \
  X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) \
@@ -93,7 +92,7 @@ __attribute__((noinline)) static int deep(lua_State *L, int depth) {
     fflush(stdout);
     lua_call(L, 0, 0);
   }
-#define CHECK(i) sink = v##i; if (v##i != expected + i) return luaL_error(L, "Asyncify register canary changed");
+#define CHECK(i) sink = v##i; if (v##i != expected + i) return luaL_error(L, "Wasm register canary changed");
   EACH(CHECK)
 #undef CHECK
   return 0;

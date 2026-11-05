@@ -583,17 +583,20 @@ end
                 no_sdk_root))
         assert.is_nil(link_empty_rocks_res.output:find("ROCKS_TREE=", 1, true), link_empty_rocks_res.output)
 
-        -- 1b. Non-24 Node is clearly diagnosed when TITAN_NODE points to it, while EMSDK's
-        -- bundled Node 24 is placed ahead of an earlier non-24 node on PATH when TITAN_NODE is unset.
-        local fake_node_dir = paths.join(root, "fake-node26")
+        -- An explicit old Node is diagnosed. An old EMSDK-bundled Node must
+        -- not override the qualifying Node selected through ordinary PATH.
+        local fake_node_dir = paths.join(root, "fake-node24")
+        local good_node_dir = paths.join(root, "node26")
         local fake_emsdk = paths.join(root, "fake-emsdk")
         local fake_emsdk_node_dir = paths.join(fake_emsdk, "node/24.19.0_64bit/bin")
         files.mkdir(fake_node_dir)
         files.mkdir(fake_emsdk_node_dir)
+        files.mkdir(good_node_dir)
         local bad_node = paths.join(fake_node_dir, "node")
-        assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v26.1.0'\n"))
+        assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v24.19.0'\n"))
         assert(strategy:run({ "chmod", "0755", bad_node }, { stderr_to_stdout = true }).ok)
-        assert(lfs.link(info.node.path, paths.join(fake_emsdk_node_dir, "node"), true))
+        assert(lfs.link(bad_node, paths.join(fake_emsdk_node_dir, "node"), true))
+        assert(lfs.link(info.node.path, paths.join(good_node_dir, "node"), true))
         assert(lfs.link(paths.dirname(em_dir), paths.join(fake_emsdk, "upstream"), true))
 
         local bad_node_res = run_with_env(strategy, {
@@ -609,13 +612,12 @@ end
         })
         assert.is_false(bad_node_res.ok)
         contains(bad_node_res.output,
-            string.format('browser provider validation requires Node 24: %q reports v26.1.0; expected Node 24; set TITAN_NODE to a Node 24 executable',
+            string.format('browser provider validation requires Node 26 or newer: %q reports v24.19.0; expected Node 26 or newer; set TITAN_NODE to a Node 26 or newer executable',
                 assert(strategy:realpath(bad_node))))
 
-        -- 2. Run make browser-sdk into a genuinely empty differing ROCKS_TREE, with fake Node 26
-        -- first on PATH and TITAN_NODE unset so EMSDK's bundled Node 24 must take precedence.
+        -- Run into an empty differing ROCKS_TREE with Node 26 on PATH.
         local sdk_res = run_with_env(strategy, {
-            PATH = fake_node_dir .. ":" .. em_dir .. ":" .. (os.getenv("PATH") or ""),
+            PATH = good_node_dir .. ":" .. fake_node_dir .. ":" .. em_dir .. ":" .. (os.getenv("PATH") or ""),
             EMSDK = fake_emsdk,
             TITAN_NODE = "",
             CCACHE_DISABLE = "1",

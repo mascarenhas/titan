@@ -47,7 +47,6 @@ describe("browser measured delivered budget limits", function()
         local plan = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
         assert.same({
             stack_size = 1048576,
-            asyncify_stack_size = 65536,
             initial_memory = 16777216,
             maximum_memory = 2147483648,
         }, plan.identity_inputs.budgets)
@@ -74,9 +73,6 @@ describe("browser measured delivered budget limits", function()
         local browser_stack = assert(csemantics.evaluate_macro_expression(
             profile, browser_types.TITAN_COROUTINE_STACK_SIZE.macro_expression))
         assert.equal(262144, tonumber(browser_stack.value))
-        local asyncfy_stack = assert(csemantics.evaluate_macro_expression(
-            profile, browser_types.MCO_ASYNCFY_STACK_SIZE.macro_expression))
-        assert.equal(65536, tonumber(asyncfy_stack.value))
     end)
 
     for _, assertions in ipairs({ 2, 0 }) do
@@ -84,7 +80,6 @@ describe("browser measured delivered budget limits", function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
             workspace = support.workspace()
             build(info, workspace, assertions, "budget")
-            build(info, workspace, assertions, "outer-half", { asyncify_stack_size = 32768 })
             for _, engine in ipairs({ "node", "chromium" }) do
                 local started = hrtime()
                 local probes, positive, negative = 0, 0, 0
@@ -147,29 +142,15 @@ describe("browser measured delivered budget limits", function()
 
                 -- Native Titan recursion is measured separately from a direct,
                 -- checked, non-yielding shadow-stack overrun in each context.
-                measure("budget", "main-titan", 1, 65536, 3424)
-                measure("budget", "main-shadow", 16, 4194304, 1041632)
-                measure("budget", "fiber-titan", 1, 65536, 855)
-                measure("budget", "fiber-shadow", 16, 1048576, 260704)
-
-                local outer_safe, outer_bad = measure("budget", "outer-data", 1, 16384, 407)
-                local _, fiber_bad = measure("budget", "fiber-data", 1, 16384, 409)
-                local _, main_fiber_bad = measure("budget", "main-fiber-data", 1, 16384, 405)
-                -- Identical deep mixed frames *above* each suspension failure must
-                -- run without a wait/switch. This attributes the trap to Asyncify
-                -- data rather than accepting generic unreachable as its own proof.
-                for _, control in ipairs({ { "outer-no-wait", outer_bad + 8 },
-                    { "fiber-no-yield", fiber_bad + 8 }, { "outer-no-wait", main_fiber_bad + 8 } }) do
-                    local ok, log = probe("budget", control[1], control[2])
-                    assert.is_true(ok, "non-suspending attribution control failed\n" .. log)
-                    assert.truthy(log:find("shadow_free=", 1, true), log)
-                end
-
-                -- Reduced outer data is supplementary attribution only; all the
-                -- delivered-size searches above remain mandatory.
-                local reduced_safe = measure("outer-half", "outer-data", 1, 16384, 196)
-                assert.truthy(reduced_safe < outer_safe * 0.8,
-                    "halving outer Asyncify data did not reduce its measured limit")
+                measure("budget", "main-titan", 1, 65536)
+                measure("budget", "main-shadow", 16, 4194304)
+                measure("budget", "fiber-titan", 1, 65536)
+                measure("budget", "fiber-shadow", 16, 1048576)
+                -- Live Wasm locals now belong to JSPI engine continuations;
+                -- there is no separate instrumentation-data buffer or budget.
+                measure("budget", "outer-wait", 1, 65536)
+                measure("budget", "coroutine-wait", 1, 65536)
+                measure("budget", "nested-entry", 1, 65536)
 
                 for _, mode in ipairs({ "lua-limit", "create-failure", "exhaust" }) do
                     local mode_started = hrtime()

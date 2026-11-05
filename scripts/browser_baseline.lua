@@ -1,14 +1,14 @@
 #!/usr/bin/env lua
 -- #329 size/speed baseline harness. This is a measurement, never a gate.
 --
--- Titan cells: the micro-benchmark program at -O1 and -O2, each with and without
--- Asyncify, measured under Node and headless Chromium, with image sizes,
+-- Titan cells: the micro-benchmark program at -O1 and -O2 with JSPI,
+-- measured under Node and headless Chromium, with image sizes,
 -- instantiate/run times, the per-suspension cost, import lists and whether the
 -- linker kept the Titan metadata sections.
 --
 -- Lua cells: the fork interpreter built through the shared `baseline` profile
--- with entry `lua-main`, at the same four configurations, executed in both
--- engines with an explicit argv marshalled into the werean heap.
+-- with entry `lua-main`, at the same two configurations, executed in both
+-- engines with an explicit argv marshalled into the Wasm heap.
 --
 -- Native rows and the fork's own `lua.js` interpreter provide scale.
 -- Published aggregates are medians of the raw repeats; the raw repeats stay in
@@ -18,7 +18,7 @@
 --   PREFIX=<prefix>           installed compiler, runtime and browser SDK
 --   TITAN_ROOT=<prefix>       the same installed tree
 --   EMSDK=<emsdk root>         Emscripten 6.0.13
---   TITAN_NODE=<node>          Node 24 for the runner and the reports
+--   TITAN_NODE=<node>          Node 26 or newer for the runner and reports
 --   TITAN_CHROME=<chrome>      headless Chromium for the Chromium cells
 --
 -- Usage: lua -E scripts/browser_baseline.lua [--out PATH] [--repeats N]
@@ -146,7 +146,7 @@ end
 -- different configuration than the image it claims.
 local function cell_options(cell, entry)
     return { purpose = "baseline", assertions = 2,
-        optimization = cell.optimization, asyncify = cell.asyncify, entry = entry }
+        optimization = cell.optimization, entry = entry }
 end
 
 -- Build selects the cell through the internal measurement seam, exactly as the
@@ -186,10 +186,9 @@ local function preamble(cell, entry)
     return string.format(
         "package.path=%q..package.path; require('titan-compiler.driver')" ..
         ".browser_link_options={purpose=%q,assertions=%d," ..
-        "optimization=%q,asyncify=%s,entry=%q}",
+        "optimization=%q,entry=%q}",
         repository .. "/?.lua;" .. repository .. "/?/init.lua;",
-        options.purpose, options.assertions, options.optimization,
-        tostring(options.asyncify), options.entry)
+        options.purpose, options.assertions, options.optimization, options.entry)
 end
 
 local function build_titan_cell(cell, out, plan)
@@ -361,7 +360,7 @@ local function copy(from, to)
     assert(output:write(bytes)); assert(output:close())
 end
 
-local function engine_run(engine, out, module, image, asynchronous)
+local function engine_run(engine, out, module, image)
     -- The runner imports --js-test from beneath --root, so the host module is
     -- copied into the cell's root before every run.
     copy(fixtures .. "/" .. module, out .. "/" .. module)
@@ -369,7 +368,6 @@ local function engine_run(engine, out, module, image, asynchronous)
     local argv = { runner, "--engine", engine, "--timeout", "180000",
         "--grace", "200", "--root", out, "--js-test", out .. "/" .. module,
         "--", image }
-    if asynchronous then argv[#argv + 1] = "asyncify" end
     local output, failure = run(argv)
     if not output then return { error = failure } end
     local values = rows(output)
@@ -448,13 +446,10 @@ end
 local out_root = absolute("out/browser-baseline")
 local cells = {}
 for _, optimization in ipairs({ "O1", "O2" }) do
-    for _, asyncify in ipairs({ true, false }) do
-        cells[#cells + 1] = {
-            name = optimization .. (asyncify and "-asyncify" or "-no-asyncify"),
-            optimization = optimization,
-            asyncify = asyncify,
-        }
-    end
+    cells[#cells + 1] = {
+        name = optimization .. "-jspi",
+        optimization = optimization,
+    }
 end
 
 for _, cell in ipairs(cells) do
@@ -470,7 +465,7 @@ for _, cell in ipairs(cells) do
             local report = {
                 name = cell.name,
                 optimization = cell.optimization,
-                asyncify = cell.asyncify,
+                backend = "jspi",
                 compile_flags = plan.compile_flags,
                 link_flags = plan.link_flags,
                 identity = plan.identity_inputs,
@@ -479,8 +474,7 @@ for _, cell in ipairs(cells) do
             }
             for _, engine in ipairs({ "node", "chromium" }) do
                 local results = repeat_runs(options.repeats, function()
-                    local values = engine_run(engine, out, "bench.mjs", "baseline.mjs",
-                        cell.asyncify)
+                    local values = engine_run(engine, out, "bench.mjs", "baseline.mjs")
                     if values.error then
                         fail(cell.name .. "/" .. engine .. ": " .. values.error)
                         return nil
@@ -509,7 +503,7 @@ for _, cell in ipairs(cells) do
             local report = {
                 name = cell.name,
                 optimization = cell.optimization,
-                asyncify = cell.asyncify,
+                backend = "jspi",
                 entry = "lua-main",
                 defines = lua_defines,
                 compile_flags = plan.compile_flags,
@@ -520,8 +514,7 @@ for _, cell in ipairs(cells) do
             }
             for _, engine in ipairs({ "node", "chromium" }) do
                 local results = repeat_runs(options.repeats, function()
-                    local values = engine_run(engine, out, "lua-bench.mjs", "lua.mjs",
-                        cell.asyncify)
+                    local values = engine_run(engine, out, "lua-bench.mjs", "lua.mjs")
                     if values.error then
                         fail("lua " .. cell.name .. "/" .. engine .. ": " .. values.error)
                         return nil
@@ -573,8 +566,7 @@ do
             -- The standalone interpreter parses any argument that starts with
             -- "-" as another option, so a leading newline keeps a comment-first
             -- benchmark chunk out of its option scan.
-            local output, run_error = run({ node, script, "-e",
-                "BENCH_ASYNCIFY=true", "-e", "\n" .. code })
+            local output, run_error = run({ node, script, "-e", "\n" .. code })
             if not output then
                 fail("lua.js: " .. tostring(run_error))
                 return nil
