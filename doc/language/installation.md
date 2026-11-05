@@ -478,12 +478,12 @@ PREFIX="$PREFIX" ROCKS_TREE="$ROCKS_TREE"` copies the verified browser Lua from
 `PREFIX` into `ROCKS_TREE` before it builds.
 
 The fork's own `install-browser` target installs the browser Lua without the
-reuse check. From the fork's release archive, which has no Git metadata, pass
-the commit the `v5.5.1-1` tag names as well, because the build record states
-the exact commit:
+reuse check. Use the fork commit named by the Titan checkout's `lua-5.5.1`
+gitlink; an older archive that still selects JavaScript SJLJ is not suitable.
+A source archive has no Git metadata, so pass that snapshot's exact commit:
 
 ```sh
-(cd lua-5.5.1-5.5.1-1 &&
+(cd lua-source &&
   make install-browser PREFIX="$PREFIX" FORK_REVISION=<40-hex commit>)
 ```
 

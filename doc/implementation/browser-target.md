@@ -142,8 +142,8 @@ fork tree's own `.git`; a tarball build must pass
 `FORK_REVISION=<40-hex commit>`. The fork's README documents the installer's
 own failure modes and the record's byte formats.
 
-Titan pins the fork commit through the gitlink and the `v5.5.1-1` release, not
-through the record's copy of the revision. `archive_sha256` is stable for one
+Titan pins the fork commit through the gitlink, not through the record's copy
+of the revision. `archive_sha256` is stable for one
 commit, flag set, and Emscripten build, because `emar` archives are
 deterministic.
 

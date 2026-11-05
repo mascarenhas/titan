@@ -216,8 +216,8 @@ targets are unchanged.
 
 The fork's own `install-browser` target does the same work without the
 reuse check, and is the command that the compiler's diagnostics name. From
-a source archive of the fork's release, which has no Git metadata, also pass
-the release's 40-character commit as `FORK_REVISION=<commit>`. See [Installing
+a source archive of the matching fork commit, which has no Git metadata, also
+pass its 40-character commit as `FORK_REVISION=<commit>`. See [Installing
 Titan](installation.md#the-browser-lua-and-sdk) for the complete steps.
 
 The installation writes only below `PREFIX/lib/browser/`:
