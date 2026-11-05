@@ -145,6 +145,7 @@ static void recovery_gc_empty_error(lua_State *L) {
     luaL_error(L, "before later declaration");
 }
 static void recovery_gc_note_finally(void) { ++recovery_gc_finally; }
+static int recovery_gc_finally_count(void) { return recovery_gc_finally; }
 static int recovery_gc_closed(void) { return recovery_gc_closes; }
 static int recovery_gc_old_collected(void) { return recovery_gc_during_close[1]; }
 static int recovery_gc_new_collected(void) { return recovery_gc_during_close[2]; }

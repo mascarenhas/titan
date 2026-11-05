@@ -150,6 +150,9 @@ local function value_case(fresh: integer, ordinary: boolean, marked: boolean)
   ffi.recovery_gc_begin(L)
   local out: foreign TValue = nil
   ffi.recovery_gc_old_value(L, out)
+  ffi.recovery_gc_collect(L)
+  check(ffi.recovery_gc_finalized_count(1) == 0,
+    "direct foreign TValue store was not rooted before the clear")
   local caught = false
   do
     if marked then
@@ -172,12 +175,18 @@ local function value_case(fresh: integer, ordinary: boolean, marked: boolean)
     end
   end
   check(caught, "TValue callee did not raise")
+  local finallies = ffi.recovery_gc_finally_count()
+  check((marked and finallies == 1) or (not marked and finallies == 0),
+    "TValue marked/unmarked path ran the wrong number of finallies")
 end
 
 local function pointer_case(fresh: integer, ordinary: boolean, marked: boolean)
   ffi.recovery_gc_begin(L)
   local out: foreign *Udata
   ffi.recovery_gc_old_pointer(L, out)
+  ffi.recovery_gc_collect(L)
+  check(ffi.recovery_gc_finalized_count(1) == 0,
+    "direct foreign Udata pointer store was not rooted before the clear")
   local caught = false
   do
     if marked then
@@ -200,6 +209,9 @@ local function pointer_case(fresh: integer, ordinary: boolean, marked: boolean)
     end
   end
   check(caught, "Udata pointer callee did not raise")
+  local finallies = ffi.recovery_gc_finally_count()
+  check((marked and finallies == 1) or (not marked and finallies == 0),
+    "Udata pointer marked/unmarked path ran the wrong number of finallies")
 end
 
 local function value_parameter(out: foreign TValue)
@@ -285,6 +297,8 @@ function main(_args: {string}): integer
   check(pair_case() == 18, "checked return lost a struct write")
   local pair = foreign recovery_pair.new()
   check(pair_parameter(pair) == 18, "struct parameter lost its address write")
+  -- Stored callables have no by-value POD-to-VM boxing path. The immediate
+  -- literal exercises POD lambda parameters without claiming that stored form.
   local pair_lambda = (function(item: foreign recovery_pair): integer
     do
       pair_checked(item, -1)

@@ -391,12 +391,14 @@ it takes the doubling branch and never receives bulk slack. A 64 KiB top-level
 byte field then causes one bulk growth after the small initial allocations, and
 ordinary metadata and a one-endpoint attachment tail fit in its slack.
 
-Because serialization can raise (`longjmp`) after buffer growth, callers
-allocate the descriptor as GC-owned storage
-(`owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()`), not a
-stack-spilled automatic C aggregate across `setjmp`, and pair
+Callers allocate the buffer descriptor as GC-owned storage
+(`owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()`). The
+descriptor's GC ownership is separate from its heap buffer: pair
 `titan_protobuf_buf_init_heap` with `defer ffi.titan_protobuf_buf_free_heap(buf)`
-so `buf->data` is freed on normal exit or unwind. String-returning entry points
+so `buf->data` is freed on normal exit or unwind. This storage choice is not a
+requirement of caught-error recovery: an automatic descriptor passed through a
+tracked mutable address also retains the serializer's completed writes.
+String-returning entry points
 use such a heap buffer outside the Lua GC and materialize the final Lua string
 once at the root. Never keep an interior `data` pointer across a reservation.
 

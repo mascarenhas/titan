@@ -676,10 +676,13 @@ A recovery-sensitive address-exposed declaration uses its actual volatile C
 object, with the same declaration escape barrier as scalar homes. Structs and
 unions keep their exact layout. Fixed and nested arrays remain real arrays,
 including typedef extents; only true array parameters undergo C's parameter
-adjustment. An automatic FAM qualifies its aligned union backing, covering the
-complete extended extent. Call lowering casts away only this implementation
-qualifier from the checked outgoing pointer type. It adds no allocation,
-boxing, aggregate snapshot or cleanup forwarding shim.
+adjustment. An automatic FAM gives its full-extent aligned union backing a
+volatile object type, while its existing typed pointer view is unqualified.
+Its retained writes rely on the declaration escape barrier and supported
+nonlocal-exit toolchain contract, not on volatile lvalue accesses through that
+view. Call lowering removes only implementation qualifiers from checked
+outgoing pointer types. No allocation, boxing, aggregate snapshot or cleanup
+forwarding shim is added.
 
 The live object is authoritative on both normal and nonlocal exits. A raising
 callee's completed writes are not rolled back. This replaces the former

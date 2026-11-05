@@ -852,11 +852,13 @@ unboxed direct-C Decl: integers, floating types, enums, pointers, structs,
 unions, fixed arrays and automatic FAM backing, including typedef spellings.
 `coder._local_cvardecl` qualifies locals and parameters, including lambda
 parameters. Automatic arrays retain their real extent rather than undergoing
-parameter adjustment; FAM storage qualifies its aligned backing union. There
-is no second byte snapshot or recovery reload. The outgoing pointer type
-removes the implementation's top-level qualifier without changing the native
-signature or ABI. `spill_decl_init` and `spill_decl_zero` emit the declaration
-escape barrier.
+parameter adjustment. FAM storage gives its aligned backing union a volatile
+object type for the C `setjmp` rule, but its existing typed pointer view is
+unqualified. The declaration escape barrier and supported nonlocal-exit
+toolchain contract preserve writes; the view does not make every FAM access
+volatile. No second byte snapshot or recovery reload is emitted. Outgoing
+pointer types remove only implementation qualifiers without changing the native
+signature or ABI. `spill_decl_init` and `spill_decl_zero` emit the barrier.
 
 Exact Lua `TValue` and `Udata *` out-parameters additionally retain their
 existing traced Lua slots. A normal return publishes their current values

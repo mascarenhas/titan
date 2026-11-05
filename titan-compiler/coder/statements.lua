@@ -2694,20 +2694,12 @@ function predeclare_defer_tail(ctx, block)
                                 -- before its initializer is reached.
                                 decl._slot = newslot(ctx)
                             end
-                            if decl._c_zero_init then
-                                table.insert(out,
-                                    coder._local_cvardecl(ctx, decl)
-                                    .. " = {0};")
-                            else
-                                local init = coder._decl_volatile_home(decl)
-                                    and types.is_gc(decl._type)
-                                    and (" = " .. initval(decl._type)) or ""
-                                table.insert(out, coder._local_cvardecl(ctx, decl)
-                                    .. init .. ";")
-                            end
-                            local spill = decl._c_zero_init
-                                and spill_decl_init(ctx, decl)
-                                or spill_decl_zero(ctx, decl)
+                            local init = coder._decl_volatile_home(decl)
+                                and types.is_gc(decl._type)
+                                and (" = " .. initval(decl._type)) or ""
+                            table.insert(out, coder._local_cvardecl(ctx, decl)
+                                .. init .. ";")
+                            local spill = spill_decl_zero(ctx, decl)
                             if spill ~= "" then
                                 decl._defer_tail_spill_predeclared = true
                                 table.insert(out, spill)
@@ -3099,31 +3091,6 @@ end
 function codestat_dispatch(ctx, node)
     local tag = node._tag
     if tag == "Ast.StatDecl" then
-        if node._c_zero_init then
-            local decl = assert(node.decls[1])
-            assert(#node.decls == 1 and #node.exps == 0
-                and decl._c_zero_init)
-            -- Automatic C aggregates are direct C objects, never adjusted
-            -- expression results or closure boxes. An unused object has no
-            -- observable initialization, so it may follow the ordinary unused
-            -- local elision rule.
-            decl._boxed = false
-            if not decl._used then return "" end
-            if not decl._cvar then
-                decl._cvar = "_local_" .. localname(ctx, decl.name)
-            end
-            if decl._c_zero_predeclared then
-                return ""
-            end
-            return render([[
-                $CDECL = {0};
-                $CSPILLDECL
-            ]], {
-                CDECL = coder._local_cvardecl(ctx, decl),
-                CSPILLDECL = spill_decl_init(ctx, decl),
-            })
-        end
-
         local has_automatic_allocation = false
         for _, decl in ipairs(node.decls) do
             if decl._c_allocation_plan
