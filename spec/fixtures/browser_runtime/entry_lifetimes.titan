@@ -1,0 +1,80 @@
+local coroutine = import "coroutine"
+local gc = import "gc"
+local test = import "test"
+foreign import "stdio.h"
+
+local single: coroutine.Coroutine?
+local inner: coroutine.Coroutine?
+local middle: coroutine.Coroutine?
+local outer: coroutine.Coroutine?
+local abandoned: coroutine.Coroutine?
+local events = ""
+
+function prepare()
+  test.assert(single == nil and outer == nil)
+  gc.pause()
+  single = coroutine.create(function(_: value): value
+    defer events = events .. "s"
+    return coroutine.yield("single-parked", "single")
+  end, "single")
+  inner = coroutine.create(function(_: value): value
+    defer events = events .. "i"
+    return coroutine.yield("chain-parked", "owner")
+  end, "inner")
+  middle = coroutine.create(function(_: value): value
+    defer events = events .. "m"
+    return inner:resume(nil)
+  end, "middle")
+  outer = coroutine.create(function(_: value): value
+    defer events = events .. "o"
+    return middle:resume(nil)
+  end, "owner")
+  abandoned = coroutine.create(function(_: value): value
+    defer do
+      events = events .. "g"
+      ffi.fputs("allocation-cleanup\n", ffi.stdout)
+      ffi.fflush(ffi.stdout)
+    end
+    coroutine.yield("abandoned-parked", "abandoned")
+    raise "abandoned continuation resumed"
+  end, "abandoned")
+  test.assert(single:resume(nil) == "single-parked")
+  test.assert(outer:resume(nil) == "chain-parked")
+  test.assert(abandoned:resume(nil) == "abandoned-parked")
+  test.assert(single:status() == "suspended" and outer:status() == "suspended")
+  test.assert(middle:status() == "stacked" and inner:status() == "stacked")
+  test.assert(events == "")
+end
+
+function resume()
+  test.assert(single:resume("single-done") == "single-done")
+  test.assert(outer:resume("chain-done") == "chain-done")
+  test.assert(single:status() == "dead" and outer:status() == "dead")
+  test.assert(middle:status() == "dead" and inner:status() == "dead")
+  test.assert(abandoned:status() == "suspended" and events == "simo")
+end
+
+function finish()
+  single, inner, middle, outer, abandoned = nil, nil, nil, nil, nil
+  gc.incremental()
+  gc.pause_percent(0)
+  gc.stepmul(1000)
+  local allocator = coroutine.create(function(_: value): value
+    local garbage: {value} = {}
+    gc.resume()
+    for index = 1, 32768 do
+      garbage[index] = {index, index + 1, index + 2}
+      if events == "simog" then break end
+    end
+    test.assert(events == "simog", "unrelated allocation did not finish abandoned cleanup")
+    return nil
+  end, "allocator")
+  test.assert(allocator:resume(nil) == nil)
+end
+
+function main(_args: {string}): integer
+  prepare()
+  resume()
+  finish()
+  return 0
+end

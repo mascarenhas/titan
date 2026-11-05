@@ -224,8 +224,8 @@ so their hooks, nested fields, and closure captures can attach resources to it
 without hooks and unions are serialized straight into the packet, without an
 intermediate `TransferValue` or Lua string. Records and unions use the
 protobuf wire format and its [nesting limit](standard-library-protobuf.md#wire-mapping):
-127 nested records on a native target and 42 on the browser target, past which
-encoding or decoding raises the protobuf nesting error. How packet storage
+127 nested records on native and browser targets, past which encoding or
+decoding raises the protobuf nesting error. How packet storage
 grows is not part of the contract; the
 [implementation chapter](../implementation/transfer-library.md#flat-packets-and-direct-classification)
 describes it.

@@ -780,7 +780,7 @@ describe("real browser test image", function()
         for _, case in ipairs({
             { "entry-close" }, { "entry-binary" }, { "entry-tostring" },
             { "entry-state-oom", { "-Wl,--wrap=luaL_newstate" } },
-            { "entry-copy-oom", { "-Wl,--wrap=malloc" } },
+            { "entry-copy-oom" },
             { "entry-bootstrap-oom", { "-Wl,--wrap=luaL_openselectedlibs", "-Wl,--wrap=lua_pcallk" } },
         }) do
             names[#names + 1] = case[1]
@@ -953,7 +953,7 @@ assert(driver.close_resolver_context(context))
         assert.match("^[0-9a-f]+$", image_identity(info, workspace .. "/out/repeated.mjs"))
     end)
 
-    it("publishes a matching extended map and callable identity for a minified measurement control", function()
+    it("publishes a matching extended map and callable identity for an optimized JSPI measurement control", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
@@ -1001,9 +1001,13 @@ end
             "measurement control did not execute the real static-provider protocol link")
         local image = workspace .. "/out/image_control.mjs"
         local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/image_control.wasm")))
+        -- The pinned JSPI path explicitly disables import/export minification
+        -- (Emscripten tools/link.py); do not claim an unsupported minified cell.
+        local stable_identity = false
         for _, item in ipairs(inventory.exports) do
-            assert.not_equal("titan_browser_trace_identity", item.name, "control exports were not minified")
+            if item.name == "titan_browser_trace_identity" then stable_identity = true end
         end
+        assert.is_true(stable_identity, "JSPI identity export did not follow the pinned naming contract")
         assert.match("^[0-9a-f]+$", image_identity(info, image, "image_control.titan"))
     end)
 

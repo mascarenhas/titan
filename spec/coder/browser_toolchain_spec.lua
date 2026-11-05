@@ -724,7 +724,7 @@ print("invalid-ok")
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason = toolchain.detect({ node = true })
 assert(found, tostring(reason))
-assert(found.node.version:match("^v24%."), tostring(found.node.version))
+assert(tonumber(found.node.version:match("^v(%d+)[.]")) >= 26, tostring(found.node.version))
 print("source-fallback-ok")
 ]])
         assert.is_true(ok, output)

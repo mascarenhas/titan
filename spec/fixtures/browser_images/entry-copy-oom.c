@@ -1,12 +1,11 @@
 #include <assert.h>
 static int fail_copy;
-void *__real_malloc(size_t size);
-void *__wrap_malloc(size_t size) {
+static void *entry_copy_allocate(size_t size) {
     if (fail_copy && size == 433) {
         assert(fputs("copy-allocator", stdout) >= 0);
         return NULL;
     }
-    return __real_malloc(size);
+    return malloc(size);
 }
 static int titan_browser_worker(lua_State *L) {
     unsigned char message[433];
@@ -18,3 +17,7 @@ static int titan_browser_worker(lua_State *L) {
     fail_copy = 1;
     return lua_error(L);
 }
+/* Interpose only the generated entry's later copy, not the exported host
+ * allocator. This keeps the real allocation-failure branch independent of
+ * linker wrapping and of runtime libraries' incidental malloc references. */
+#define malloc entry_copy_allocate

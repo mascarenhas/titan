@@ -2617,7 +2617,9 @@ C admission; JSPI continuation wakes do not re-enter that C preamble.
 
 Initialization wraps the general Module exports `titan_browser_entry` and
 the gate's `titan_browser_gate_guarded` with this hook. Static
-`wasmExports[...]` accesses preserve export minification. The driver's
+`wasmExports[...]` accesses retain the explicit identity. Emscripten 6.0.13
+disables import/export minification for JSPI, including O2/shrink controls;
+the optimized guard fixture asserts that pinned naming contract. The driver's
 lexical engine-entry export remains private; its published Module alias
 always rejects outside use. C-only state-neutral exports such as malloc,
 free, trace identity and the gate observer remain synchronous.
@@ -2980,6 +2982,13 @@ Bridge handles/callback queues and scheduler policy remain separate work;
 they must use the existing logical owner rather than inventing admission
 based on absence of live Wasm frames.
 
+`entry_lifetimes.titan` and its test-owned C guard keep an independent Lua
+state across three distinct promised C-entry lifetimes: park ordinary and
+STACKED chains, resume them, then run allocation-triggered abandoned cleanup
+and close the state. The JS fixture interleaves two instances and checks
+entry ownership and sink fencing on every private hop. This exercises the
+backend lifetime boundary without adding a repeatable public bridge API.
+
 
 ## Baseline
 
@@ -3177,7 +3186,7 @@ hosts`).
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and
-  dispose cycles, concurrent instances, lifecycle races, and the minified
+  dispose cycles, concurrent instances, lifecycle races, and the optimized
   guard image (`optimized-guard.mjs`).
 * `spec/browser/runner.test.mjs` and `spec/browser/runner-fixtures.mjs` — the
   runner's resolver, probe, CLI, `--allow-degraded-trace` and default

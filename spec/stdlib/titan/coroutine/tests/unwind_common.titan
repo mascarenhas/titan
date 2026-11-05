@@ -159,7 +159,7 @@ function test_linear_stack_survives_growth_and_transfers(context: test.Context)
   local child = coroutine.create(function (_: value): value
     local canary = foreign int.new_array(64)
     for index = 0, 63 do canary[index] = index * 17 + 3 end
-    coroutine.yield("parked")
+    coroutine.yield("parked", "growth-child")
     -- Exceeds the browser image's initial linear memory while another stack
     -- is parked. Native runs exercise the same public coroutine sequence.
     local grown = unwind_string.rep("g", 20 * 1024 * 1024)
@@ -167,7 +167,7 @@ function test_linear_stack_survives_growth_and_transfers(context: test.Context)
     for index = 0, 63 do
       test.assert(canary[index] == index * 17 + 3, "child linear-stack canary changed")
     end
-    return coroutine.yield("grown")
+    return coroutine.yield("grown", "growth-child")
   end, "growth-child")
   local parent = coroutine.create(function (_: value): value
     local canary = foreign int.new_array(64)

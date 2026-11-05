@@ -165,25 +165,21 @@ ordinary `protobuf.serialize` keeps its structural public-data rules. See the
 ## Nesting limit
 
 One budget, `TITAN_CODEC_DEPTH_LIMIT`, bounds every codec path. It is
-defined in `titan-runtime/transfer.h` as 128 unless the target defines it;
-the browser target's descriptor defines it as 43
-([browser nesting limits](browser-target.md#nesting-limits)), and
-`titan/protobuf/native.h` includes `transfer.h`, so `protobuf.titan` reads it
-as `ffi.TITAN_CODEC_DEPTH_LIMIT` through its existing `foreign import`. The reflective
+defined in `titan-runtime/transfer.h` as 128 on both native and browser
+targets. `titan/protobuf/native.h` includes that header, so `protobuf.titan`
+reads it as `ffi.TITAN_CODEC_DEPTH_LIMIT` through its existing import. The reflective
 `require_depth` (used by the encoder, the decoder, and `schema`) and the
 generated codecs' `titan_codec_depth` (also used when their field reader skips
 a group) raise when a depth exceeds the budget, with `protobuf: nesting
 exceeds <budget> levels` built from the macro in both. The budget is raw:
 each record or union with fields probes them one level deeper, so 128 accepts
-a 127-record chain and 43 accepts 42, while a union whose selected variant has
+a 127-record chain, while a union whose selected variant has
 no parts probes nothing deeper and is accepted at the budget itself. There is
 no reflective-only limit and no separate `transfer` constant: `transfer`
 encodes and decodes through these paths, so the one define bounds it too.
-The boundary tests derive their depths and messages from the macro, so their
-subtest names follow the target (`encode_127_accepted`,
-`decode_128_rejected_by_both`, and `partless_union_at_128` natively;
-`encode_42_accepted`, `decode_43_rejected_by_both`, and
-`partless_union_at_43` in the browser).
+The boundary tests derive their depths and messages from the macro:
+`encode_127_accepted`, `decode_128_rejected_by_both`, and
+`partless_union_at_128` apply on both targets.
 
 ## Generated nominal codecs
 
@@ -597,8 +593,7 @@ and their reservation failure, while `protobuf.resource_tests` holds the
 `thread` endpoint cases. Same-instance packet cases are in `transfer.tests`,
 cross-state transfer lifecycle cases in the Lua/async/thread native owners,
 and reflection/code-generation tests in their existing layers. Keep depth
-cases target-derived (`ffi.TITAN_CODEC_DEPTH_LIMIT`), since the [nesting
-limit](#nesting-limit) differs on the browser target. Cover full-width
+cases derived from `ffi.TITAN_CODEC_DEPTH_LIMIT` and cover full-width
 scalars, binary strings, custom constructors,
 const fields, foreign aggregate projections, nil Array positions, graph
 rejection, unknown fields, merge rules, malformed inputs, and schema/wire
