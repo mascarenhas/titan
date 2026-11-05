@@ -272,7 +272,10 @@ jobs:
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-4
-    timeout-minutes: 60
+    # Measured hosted baseline 39.6-43.6 min plus stdlib closure/gate specs
+    # (44s/307s), cold SDK (76s) and cold partitioned suite (275s) project
+    # 52-57 min; retain headroom for CI variability.
+    timeout-minutes: 75
     permissions:
       contents: read
       # The browser gate uploads its own compiler coverage report.

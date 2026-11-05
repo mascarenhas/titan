@@ -7,6 +7,7 @@ local checks = dofile("scripts/browser_stdlib.lua")
 local certificate = require "titan-compiler.linkcertificate"
 local native = require "titan-compiler.nativeinputs"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 
 describe("browser stdlib real-toolchain closure", function()
     local workspace
@@ -14,8 +15,8 @@ describe("browser stdlib real-toolchain closure", function()
         if workspace then files.remove(workspace); workspace = nil end
     end)
 
-    local function fixture()
-        local info, why = toolchain.require({ node = true, sdk = true })
+    local function fixture(requirements)
+        local info, why = toolchain.require(requirements or { node = true, sdk = true })
         if not info then pending(why); return end
         workspace = temporary.name("-browser-stdlib-closure")
         os.remove(workspace)
@@ -42,6 +43,48 @@ describe("browser stdlib real-toolchain closure", function()
         run(argv)
         assert(checks.check_image(assert(strategy:read_file(output .. "/intruder.wasm")), "intruder.wasm"))
     end
+
+    it("builds and audits the real suite target from cold and warm output trees", function()
+        if platform.windows then pending("browser suite Make target is Unix-only"); return end
+        local info = fixture({ node = true, chrome = true, sdk = true })
+        if not info then return end
+        local output = workspace .. "/suite"
+        assert.is_nil(strategy:lstat(output))
+        -- The smallest real owner exercises the same plan, compiler, closure
+        -- audits and two engines without relinking the entire stdlib suite.
+        local argv = {
+            "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
+            "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+            "make", "--no-print-directory", "titan-stdlib-browser-test",
+            "PREFIX=" .. info.prefix, "TITAN_BROWSER_TEST_BUILD_DIR=" .. output,
+            "TITAN_STDLIB_BROWSER_TEST_ROOTS=test.tests",
+            "TITAN_STDLIB_BROWSER_TEST_IMAGES=cold",
+            "TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_cold=test.tests",
+            "TITAN_FILTER=",
+        }
+        for _, state in ipairs({ "cold", "warm" }) do
+            local log = run(argv)
+            for _, engine in ipairs({ "node", "chromium" }) do
+                assert.truthy(log:find("Browser stdlib engine: " .. engine .. " image: cold", 1, true), log)
+            end
+            local summaries = 0
+            for _ in log:gmatch(
+                    "Browser stdlib gate: selected=1 passed=1 skipped=0 failed=0 owners=1/1 images=1%.") do
+                summaries = summaries + 1
+            end
+            assert.equal(2, summaries, state .. "\n" .. log)
+            assert.equal("browser\n", assert(strategy:read_file(output .. "/objects/.titan-target")))
+            assert.is_nil(strategy:lstat(output .. "/.titan-target"))
+            assert.equal("test.tests\n", assert(strategy:read_file(output .. "/roots.txt")))
+            assert.equal("test.tests\n", assert(strategy:read_file(output .. "/cold.roots.txt")))
+            for _, artifact in ipairs({
+                "images/cold.mjs", "images/cold.wasm", "images/cold.wasm.map", "members.md",
+                "cold.node.log", "cold.node.stderr.log", "cold.chromium.log", "cold.chromium.stderr.log",
+            }) do
+                assert.equal("file", assert(strategy:stat(output .. "/" .. artifact)).kind, artifact)
+            end
+        end
+    end)
 
     it("rejects a certified injected libuv header, an archive payload and an internal image symbol", function()
         local info, why = toolchain.require({ node = true, sdk = true })
