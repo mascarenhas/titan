@@ -258,7 +258,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | --- | --- |
 | `libtitan.a` | the browser runtime archive |
 | `libtitan-lpeglabel.a` | the PEG engine, built for the browser; `make browser-sdk` links it into `titan.a` |
-| `titan.a` | the [browser standard library](#the-browser-standard-library): fourteen standard modules and the PEG engine they use |
+| `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen shared modules, browser-only `titan.browser`, and the PEG engine |
 | `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |

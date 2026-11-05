@@ -248,7 +248,7 @@ prefix`.
 
 | Key | File | Contents |
 | --- | --- | --- |
-| `runtime` | `libtitan.a` (`paths.libtitan`) | the common runtime and `browser/titan-browser.c`, compiled for the browser |
+| `runtime` | `libtitan.a` (`paths.libtitan`) | `titan.o`, `minicoro.o`, `titan_path.o`, `ltitanlib.o`, `titan-browser.o`, compiled for the browser |
 | `js_library` | `titan-browser-library.js` | the Emscripten `--js-library` with the completion and admission imports ([channels](#completion-and-output-channels)) |
 | `bridge_library` | `titan-browser-bridge.js` | the Emscripten `--js-library` implementing the protected typed bridge imports and host ownership operations |
 | `trace_library` | `titan-browser-trace.js` | the Emscripten `--js-library` with the eager `.wasm.map` run-dependency loader, lookup index, and `Error.stack` capture/symbolization imports ([Browser trace backend](error-handling.md#browser-trace-backend)) |
@@ -258,15 +258,15 @@ prefix`.
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
-| `provider` | `titan.a` | the browser standard provider: the fourteen [core stdlib](#the-browser-standard-library) roots plus the five LPegLabel members |
+| `provider` | `titan.a` | the browser standard provider: thirteen shared core roots, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
 
-The runtime sources are compiled without `-fPIC`, LTO, or
+None of the five runtime sources is compiled with `-fPIC`, LTO, or
 libbacktrace; their host-only paths compile out under the browser target
 define ([Runtime guards](#runtime-guards)). Neither the native `lib/titan/<ver>`
 nor the native Lua headers are ever written; the common Titan headers
-`include/{minicoro.h,titan.h,transfer.h}` and `include/titan/ffi.h` are the
-native SDK's own files.
+`include/{minicoro.h,titan.h,transfer.h}` and
+`include/titan/{ffi.h,browser.h}` are the native SDK's own files.
 
 ### Readiness and the missing-SDK diagnostic
 
@@ -318,7 +318,7 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    an interrupted run cannot leave a manifest describing old files, and creates
    `titan_bin`.
 2. `titanc --target browser --output <build> -c --incremental
-   --print-c-objects` compiles the four runtime sources and the five
+   --print-c-objects` compiles the five runtime sources and the five
    LPegLabel sources as `--c-source` nodes; Make reads the certified object
    paths from stdout.
 3. `browser_sdk.lua stage-runtime` builds `libtitan.a` and
@@ -342,15 +342,15 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    runs the [dependency-closure
    check](#the-dependency-closure-check) over the staged provider, the
    LPegLabel archive, and every object and link certificate under `<build>`,
-   requires exactly the fourteen keys `titan.browser`, `titan.coroutine`,
-   `titan.gc`, `titan.iteration`, `titan.json`, `titan.math`, `titan.path`, `titan.peg`,
-   `titan.protobuf`, `titan.reflect`, `titan.string`, `titan.test`,
-   `titan.transfer`, and `titan.url` in that order, copies it to `titan.a`, and
+   requires exactly fourteen keys, in bytewise order: `titan.browser`,
+   `titan.coroutine`, `titan.gc`, `titan.iteration`, `titan.json`, `titan.math`,
+   `titan.path`, `titan.peg`, `titan.protobuf`, `titan.reflect`, `titan.string`,
+   `titan.test`, `titan.transfer`, and `titan.url`; copies it to `titan.a`; and
    finally writes `sdk-digests` with `incremental.write_sdk_digests` and the
    existing schema.
 
 The manifest records the browser `liblua.a` and its record, every browser Lua
-header, the four common Titan headers, and the ten other assets, hashed at
+header, the five common Titan headers, and the other browser assets, hashed at
 their installed destinations; the manifest never records itself. Every copy
 goes through a temporary file and a rename. A missing or invalid manifest is
 a digest-reuse miss, never evidence that the runtime is unavailable.
