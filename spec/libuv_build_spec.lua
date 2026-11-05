@@ -6141,7 +6141,7 @@ printf '%s\n' "${schedule[@]}"
                 for _, command in ipairs({
                     'tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz"',
                     '"$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"',
-                    'node_bin=$(find "$TITAN_EMSDK_ROOT/node"',
+                    'node_bin=$(command -v node)',
                     "python3 scripts/browser_extract_zip.py",
                     "grep -q 'id=\"sandbox\"' \"$log\"",
                     'make lua-browser PREFIX="$PREFIX"',
