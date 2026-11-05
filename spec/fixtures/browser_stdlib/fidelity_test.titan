@@ -1,0 +1,14 @@
+local test = import "test"
+-- Discovery includes the real portable coroutine owner before this owner.
+local coroutine_tests = import "coroutine.tests.titan"
+
+foreign import "stdio.h"
+
+function test_binary_failure_after_coroutine_owner(context: test.Context)
+  local marker = "stderr\0\255\195(\237\160\128:end\n"
+  test.assert(ffi.fwrite(marker, 1, #marker, ffi.stderr) == #marker)
+  test.assert(ffi.fflush(ffi.stderr) == 0)
+  context:run("name\0\255\195(\237\160\128:end", function(_child: test.Context)
+    test.assert(false, "message\0\255\195(\237\160\128:end")
+  end)
+end

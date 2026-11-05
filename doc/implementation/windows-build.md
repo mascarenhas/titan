@@ -913,7 +913,7 @@ mingw32-make -f Makefile.win titan-stdlib-test-run \
 pattern without narrowing compilation; omit it for complete validation. The
 compatibility entrypoint `spec/support/check_windows_stdlib_behavior.sh WORKSPACE SDK`
 also builds and runs the full shared suite. There is no separate Windows case
-allowlist: `--test-dir` discovers the same 30 owners under `spec/stdlib/titan`
+allowlist: `--test-dir` discovers the same owners under `spec/stdlib/titan`
 on all three platforms, with `test.tests` passed explicitly first and verified
 against `spec/support/stdlib_test_modules.mk`, including filesystem, SQLite,
 and local watchers (see [repository

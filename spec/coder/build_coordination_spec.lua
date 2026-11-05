@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
+local depfile = require "titan-compiler.depfile"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
 local publication = require "titan-compiler.windows_publication"
@@ -642,7 +643,12 @@ dofile(%q .. "/titanc")
         assert.matches("/.native/", preprocessed, 1, true)
         assert.matches("/.native/", dependencies, 1, true)
         assert.is_nil(lfs.attributes(preprocessed))
-        assert.is_nil(lfs.attributes(dependencies))
+        assert.equal("file", lfs.attributes(dependencies, "mode"))
+        local source_found = false
+        for _, filename in ipairs(assert(depfile.parse(read(dependencies)))) do
+            if filename == source then source_found = true; break end
+        end
+        assert.is_true(source_found, "retained native dependencies omit the successor's source")
         local object
         for _, event in ipairs(events) do
             local filename = event:match("^waiter:(/.+[.]o)$")

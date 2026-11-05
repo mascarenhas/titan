@@ -34,10 +34,10 @@ function main(args: {string}): integer
 end
 ```
 
-The browser standard library has no `io` module yet (see [current
-limits](#current-limits)), so the program writes its lines with C's `puts`
-through the [C FFI](ffi.md). Whatever a program writes to standard output or
-standard error reaches the page through the loader's output sinks.
+The browser standard library has no `io` module (see [the browser standard
+library](#the-browser-standard-library)), so the program writes its lines with
+C's `puts` through the [C FFI](ffi.md). Whatever a program writes to standard
+output or standard error reaches the page through the loader's output sinks.
 
 Build it for the browser:
 
@@ -250,8 +250,8 @@ root:
 | File | Contents |
 | --- | --- |
 | `libtitan.a` | the browser runtime archive |
-| `libtitan-lpeglabel.a` | the PEG engine, for a later browser `peg` module |
-| `titan.a` | the browser standard library: `titan.test`, `titan.coroutine`, and `titan.gc` |
+| `libtitan-lpeglabel.a` | the PEG engine, built for the browser; `make browser-sdk` links it into `titan.a` |
+| `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen standard modules and the PEG engine they use |
 | `titan-browser.mjs` | the [loader](#the-loader-api), which pages copy next to their programs |
 | `titan-browser-library.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, admission, eager trace-map loading, and stack capture) |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
@@ -259,8 +259,8 @@ root:
 
 The directory is a sibling of the native `lib/titan/0.6/`, never inside it,
 and native builds never search it. `make browser-sdk` works into an empty
-directory and, apart from `make lua-browser`, is the only Titan Make target
-that needs Emscripten. In a
+directory. Like `make lua-browser`, it needs Emscripten; no native Make target
+does. In a
 [separate rocks tree](installation.md#a-separate-rocks-tree), pass both roots,
 `make browser-sdk PREFIX="$PREFIX" ROCKS_TREE="$ROCKS_TREE"`; it first copies
 the verified browser Lua from `PREFIX` into `ROCKS_TREE`.
@@ -281,7 +281,8 @@ The pieces build in this order:
 4. `make browser-sdk` builds and installs the runtime archive, the loader
    library, and the runner tool into `lib/titan-browser/0.6/`;
 5. it publishes the browser standard library, checked against the runtime from
-   step 4; and
+   step 4 and checked to use no libuv, OpenSSL, llhttp, or SQLite header,
+   archive, or symbol; and
 6. it writes the SDK digest manifest last.
 
 A missing browser SDK is reported only when a program or test is linked or a
@@ -840,6 +841,91 @@ The availability and truncation markers are ordinary frame lines without an
 error message, header, or tab indentation, and remain part of a pinned trace on
 bare `raise`.
 
+## The browser standard library
+
+The browser SDK's `titan.a` holds the thirteen standard modules that need no
+libuv and no other native-only library. They are compiled from the same
+sources as the native standard library:
+
+| Module | Contents |
+| --- | --- |
+| [`coroutine`](coroutines.md) | stackful coroutines |
+| [`gc`](standard-library-gc.md) | weak Maps, ephemerons, finalizers, and collector control |
+| [`iteration`](standard-library-iteration.md) | Map and Array iteration |
+| [`math`](standard-library-math.md) | numeric functions and random numbers |
+| [`string`](standard-library-string.md) | byte strings, formatting, packing, writers, and regular expressions |
+| [`peg`](standard-library-peg.md) | parsing expressions |
+| [`url`](standard-library-url.md) | URL parsing and construction |
+| [`path`](standard-library-path.md) | lexical paths |
+| [`reflect`](standard-library-reflect.md) | runtime reflection |
+| [`json`](standard-library-json.md) | JSON encoding and decoding |
+| [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
+| [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
+| [`test`](standard-library-test.md) | the test API and the native test runner |
+
+Each of these modules is complete. Every public declaration, including the raw
+C functions `protobuf.write_resource_index`,
+`protobuf.write_resource_index_bytes`, `transfer.copy_message`,
+`transfer.discard_message`, and `transfer.transfer_load_module`, has the same
+signature as on a native target and behaves as its chapter describes, apart
+from the target facts [below](#what-the-browser-target-changes). No member
+raises an "unavailable" error or returns a stand-in value. `transfer` encodes
+and decodes packets within one instance; the modules that carry packets to
+another Lua state or thread are not available.
+
+### Modules that are not available
+
+The other standard modules are absent from the browser target: `uv`, `async`,
+`timer`, `io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
+`sqlite3`, and `thread`. Each of them uses libuv, directly or through its
+imports. Their sources exist only as native variants (such as
+`titan/os.native.titan`; see [target source
+selection](target-source-selection.md)), so a browser build finds no source and
+no browser archive for them. Importing one fails with the ordinary
+missing-module error, the same as for a module that does not exist:
+
+```text
+module 'titan.os' not found
+```
+
+There are no stand-in modules for them, and their folder contributors, such as
+`titan.uv.tcp`, are not importable on their own. A test module that imports one
+of them cannot be built into a browser test image either; keep such cases in
+native-only test modules.
+
+Browser versions of `async`, `timer`, `io`, `os`, `lua`, and `http` are
+planned, and `fs` is planned together with a browser file system. Until then,
+a program writes its output through C's `stdio.h`, as in [the first web
+page](#a-first-web-page), and the test runner reports through it too. Either
+way the output reaches the loader's sinks byte for byte ([status and output
+semantics](#status-and-output-semantics)).
+
+### What the browser target changes
+
+The browser modules follow the target's C facts and its fixed limits:
+
+* **C sizes.** `size_t` and C `long` are 4 bytes, so `string.pack`'s `T`, `l`,
+  and `L` options use 4 bytes; `j` and `J` (`lua_Integer`) stay 8 bytes, and
+  native byte order is little endian.
+* **`long double`.** `printf`'s `%L` conversions format C `long double`
+  values with their full precision instead of narrowing them to `double`.
+  [`reflect` projections](standard-library-reflect.md) and `protobuf` and
+  `transfer` fields carry such values as hexadecimal text, which therefore
+  reads back equal to the original. The exact spelling of that text comes from
+  the target's C library and is not guaranteed to match a native one.
+* **Locale.** The browser's C library uses the C locale's numeric conventions
+  whatever `setlocale` selects: the decimal point is always `.`.
+* **Paths.** `path` uses POSIX rules: `path.separator` is `/` and
+  `path.volume` always returns an empty string.
+* **Random numbers.** `math` seeds its generator automatically from the C
+  clock functions when it initializes, as on a native target. Explicit seeds
+  produce the same sequence as on a native target.
+* **Coroutines.** Each coroutine has a 256 KiB C stack instead of 2 MiB, so
+  deep recursion inside a coroutine fails sooner, and about 5,400 coroutines
+  fit in memory ([limits](#limits)).
+* **Nesting.** `protobuf`, `transfer`, and `json.encode` accept less nesting
+  than on a native target ([nesting limits](#nesting-limits)).
+
 ## Dependencies and the browser Titan path
 
 Browser builds use only browser archives and source. An import is resolved
@@ -873,9 +959,11 @@ TITAN_PATH_0_6='out-browser' titanc --target browser -o out-app app.main_lib
 ## Compiler and linker flags
 
 The browser target compiles with Titan's own Emscripten settings, the Lua
-defines from the build record, and three target defines that C headers can
-test: `TITAN_TARGET_BROWSER=1`, `TITAN_COROUTINE_STACK_SIZE=262144`, and
-`MCO_ASYNCFY_STACK_SIZE=65536`. `-I`, `-D`, and `--cflag` options and
+defines from the build record, and five target defines that C headers can
+test: `TITAN_TARGET_BROWSER=1`, `TITAN_COROUTINE_STACK_SIZE=262144`,
+`TITAN_CODEC_DEPTH_LIMIT=43`, `TITAN_JSON_WRITER_DEPTH_LIMIT=103` (the
+[nesting limits](#nesting-limits)), and `MCO_ASYNCFY_STACK_SIZE=65536`. `-I`,
+`-D`, and `--cflag` options and
 `TITAN_EXTRA_CPPFLAGS`/`TITAN_EXTRA_CFLAGS` are added after them, as for
 native builds. Flags that only make sense for a native target are rejected
 rather than ignored:
@@ -910,8 +998,9 @@ compilation), `-gsource-map`, `-g2`, and the WebAssembly optimizer's pass list
 `-sBINARYEN_EXTRA_PASSES` (for linking), and source `#line` directives
 (`--no-line-directives` and `TITAN_NO_LINE_DIRECTIVES=1`), together with
 Asyncify, the longjmp mode, the stack and memory sizes, the program lifecycle
-and exports, the filesystem layer, assertions and stack checks, and the three
-target defines. Other Emscripten `-s` settings, such as `-sWASM_BIGINT=1`, may
+and exports, the filesystem layer, full-precision `long double` printing,
+assertions and stack checks, and the target defines. Other Emscripten `-s`
+settings, such as `-sWASM_BIGINT=1`, may
 be passed with `--ldflag`, but a compile or link flag that overrides or
 negates one of these owned settings is rejected, as are `--no-entry` and
 `--js-library`. The message names the build profile, and says whether the
@@ -989,12 +1078,47 @@ Two more effects appear only close to the limit:
   (`__gc` metamethods, including [`gc.finalizable`](standard-library-gc.md#finalizers)
   callbacks) until the calls unwind.
 
+### Nesting limits
+
+A recursive library operation spends engine stack on every level, and running
+the engine stack out ends the instance with an uncatchable `RangeError:
+Maximum call stack size exceeded` that no Titan `catch` receives. The standard
+library therefore stops over-deep input sooner on the browser target, with the
+module's ordinary catchable error. The limits bound the library's own
+traversal; stack that the caller already uses is not counted:
+
+| Operation | Native target | Browser target | Error |
+| --- | --- | --- | --- |
+| `protobuf` encoding, decoding, and `protobuf.schema`; `transfer` packets and `TransferValue` records and unions | 127 nested levels | 42 nested levels | `protobuf: nesting exceeds 128 levels`, or `... 43 levels` on the browser |
+| `json.encode` | `max_depth` (default 32) | `max_depth`, at most 103 | `json.Error` with code `limit_exceeded` and message `value exceeds max_depth` |
+
+Protobuf levels count nested messages and the fields of the innermost one, so
+a chain of records whose innermost record has a field holds at most 127
+records natively and 42 in the browser. `json.encode` accepts a `max_depth`
+above 103 on the browser target and applies 103; the default of 32 is the same
+on every target. Each browser limit is at most half of the lowest nesting that
+completed across Node, Chromium, and both [build profiles](#build-profiles):
+85 levels for the reflective protobuf encoder and 206 for the JSON writer,
+both under `validation`.
+
+Everything else keeps its native limits: `json.decode` (its `max_depth`, and
+the PEG matching stack, which rejects deeper documents with an ordinary
+error), regular-expression nesting (512 groups) and captures (200), and `peg`
+grammars (400 matching-stack entries by default and 200 nested captures). A
+program that raises `peg.set_max_stack` far above its default also lets
+`json.decode` recurse deeper. Recursion that a program writes itself, such as
+a walk over a deep record graph with `reflect`, has no library limit; under
+`validation` such a walk exhausted the engine stack after about 3,000 levels.
+
 ## Current limits
 
-* The browser standard library provides only `test`, `coroutine`, and `gc`.
-  `async`, timers, files, networking, `io`, `lua`, `peg`, and the other
-  standard modules are not available yet; programs write output through C's
-  `stdio.h`, as in [the first web page](#a-first-web-page).
+* The browser standard library has [thirteen of the standard
+  modules](#the-browser-standard-library). `async`, timers, files, networking,
+  `io`, `os`, `lua`, `thread`, and `sqlite3` are not available, so programs
+  write output through C's `stdio.h`, as in [the first web
+  page](#a-first-web-page).
+* `protobuf`, `transfer`, and `json.encode` accept less nesting than on a
+  native target ([nesting limits](#nesting-limits)).
 * Browser images run in Chromium and Chrome, Firefox, WebKit and Safari, and
   Node 24; `titan-browser-run` (the test runner) drives only Node 24 and
   headless Chrome or Chromium.
@@ -1016,7 +1140,8 @@ Two more effects appear only close to the limit:
   supported for the browser target.
 
 See [the browser target](../implementation/browser-target.md) in the
-implementation manual for the descriptor, the SDK, the build profiles and
-their measurements, the link profile, the browser C-call limit, the
-entrypoint, the loader and runner mechanics, and the evidence behind the
-design.
+implementation manual for the descriptor, the SDK, the browser standard
+library's provider, dependency-closure check, and member inventory, the build
+profiles and their measurements, the link profile, the browser C-call limit,
+the nesting-limit measurements, the entrypoint, the loader and runner
+mechanics, and the evidence behind the design.

@@ -142,6 +142,7 @@ function M.profile(descriptor, options)
     add("-sEXPORT_ES6=1")
     add("-sENVIRONMENT=web,node")
     add("-sFORCE_FILESYSTEM=1")
+    add("-sPRINTF_LONG_DOUBLE=1")
     local exports = entry == "titan" and
         '"_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"' or
         '"_main","_malloc","_free"'
@@ -172,10 +173,11 @@ local owned = { SUPPORT_LONGJMP = true, ASYNCIFY = true, STACK_SIZE = true,
     INITIAL_MEMORY = true, ALLOW_MEMORY_GROWTH = true, MAXIMUM_MEMORY = true,
     ABORTING_MALLOC = true, EXIT_RUNTIME = true, INVOKE_RUN = true,
     MODULARIZE = true, EXPORT_ES6 = true, ENVIRONMENT = true,
-    FORCE_FILESYSTEM = true, FILESYSTEM = true, MINIMAL_RUNTIME = true,
+    FORCE_FILESYSTEM = true, FILESYSTEM = true, MINIMAL_RUNTIME = true, PRINTF_LONG_DOUBLE = true,
     EXPORTED_FUNCTIONS = true, EXPORTED_RUNTIME_METHODS = true,
     INCOMING_MODULE_JS_API = true, ASSERTIONS = true, STACK_OVERFLOW_CHECK = true,
     TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
+    TITAN_CODEC_DEPTH_LIMIT = true, TITAN_JSON_WRITER_DEPTH_LIMIT = true,
     MCO_ASYNCFY_STACK_SIZE = true, BINARYEN_EXTRA_PASSES = true }
 -- `origin` is "compile" for a caller's compile extras and "link" otherwise, so
 -- one owned option is reported by the diagnostic that owns it: the compile

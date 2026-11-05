@@ -161,15 +161,15 @@ unchanged.
 The standard library uses immediate calls to compute values such as
 `math.randomseed`'s seed pair, reflection descriptor selection
 (`titan/reflect.titan`), JSON descriptor searches (`titan/json/decoder.titan`,
-`titan/json/writer.titan`), and spawn stdio preparation (`titan/os.titan`).
+`titan/json/writer.titan`), and spawn stdio preparation (`titan/os.native.titan`).
 These sites pass their inputs explicitly and return the selected values
 instead of mutating captured placeholders. Optional result slots keep explicit
 annotations where absence is meaningful. Stored callbacks and returned
 iterators remain ordinary closures.
 
 An immediate call keeps the cleanup boundaries of the code around it. Lua source
-loading (`titan/lua/lua.titan`) keeps the file's close in the enclosing scope,
-and TLS context cleanup (`titan/ssl.titan`) stays outside the expression that
+loading (`titan/lua/lua.native.titan`) keeps the file's close in the enclosing scope,
+and TLS context cleanup (`titan/ssl.native.titan`) stays outside the expression that
 selects the context. The inline function boundary must preserve these
 relationships even though the generated code shares one C activation.
 

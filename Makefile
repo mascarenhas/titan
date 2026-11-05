@@ -19,7 +19,7 @@ make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 # provider dependencies. Choose it before Make expands the test graph.
 TITAN_TEST_GOALS := test rock-test busted-test stdlib-test stdlib-busted-test \
 	titan-stdlib-test titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run \
-	titan-stdlib-test-run-parallel \
+	titan-stdlib-test-run-parallel titan-stdlib-browser-test \
 	titan-native-coverage titan-native-coverage-build titan-native-coverage-run
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)
@@ -288,7 +288,8 @@ TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O) $(TITAN_PATH_O) $(LTITANLIB_
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
 TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
 	titan-runtime/titan_path.c titan-runtime/ltitanlib.c
-BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc
+BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
+	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -323,13 +324,13 @@ LPEGLABEL_BUILD_CFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 
 # Every standard-library Titan source is listed here explicitly. A target
 # variant (`name.<label>.titan`, labels windows/darwin/linux/browser and the
-# umbrella native) is its own entry immediately after the default
-# (`name.titan`) it replaces; there are no wildcards. Only the selected
-# variant of a family compiles, so the Busted source-policy audits read this
-# inventory family by family and fail on a folder file no entry declares.
+# umbrella native) follows its default (`name.titan`) when one exists; a
+# variant-only family lists just its variants. There are no wildcards. Only
+# the selected variant of a family compiles, so the Busted source-policy audits
+# read this inventory family by family and fail on a folder file no entry declares.
 # Implementation notes: doc/implementation/target-source-selection.md#make-inventories-and-audits
 UV_TITAN_SOURCES := \
-	titan/uv/uv.titan \
+	titan/uv/uv.native.titan \
 	titan/uv/address.titan \
 	titan/uv/callbacks.titan \
 	titan/uv/capabilities.titan \
@@ -366,23 +367,23 @@ UV_TITAN_HEADERS := \
 	titan/uv/utility_bits.h \
 	titan/uv/version-native.h \
 	titan/uv/work-data.h
-STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
+STDLIB_HTTP_SOURCES := titan/http/http.native.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan titan/http/pool.titan \
 	titan/http/server.titan titan/http/transfer.titan titan/http/upgrade.titan
-SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
+SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.native.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan
 SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
-LUA_TITAN_SOURCES := titan/lua/lua.titan titan/lua/worker.titan
+LUA_TITAN_SOURCES := titan/lua/lua.native.titan titan/lua/worker.titan
 LUA_TITAN_HEADERS := titan/lua/native.h
 STRING_TITAN_HEADERS := titan/string/format_native.h
-WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.titan titan/websocket/handshake.titan \
+WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.native.titan titan/websocket/handshake.titan \
 	titan/websocket/connection.titan titan/websocket/frames.titan \
 	titan/websocket/utf8.titan titan/websocket/native.titan
 JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
 PROTOBUF_TITAN_SOURCES := titan/protobuf/protobuf.titan titan/protobuf/encoder.titan \
 	titan/protobuf/decoder.titan titan/protobuf/schema.titan
-THREAD_TITAN_SOURCES := titan/thread/thread.titan titan/thread/channel.titan \
+THREAD_TITAN_SOURCES := titan/thread/thread.native.titan titan/thread/channel.titan \
 	titan/thread/group.titan titan/thread/spawn.titan
 THREAD_TITAN_HEADERS := titan/thread/native.h
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string \
@@ -394,9 +395,9 @@ STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer titan.thread
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
-	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
-	titan/net.titan titan/ssl.titan titan/url.titan \
-	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.titan titan/path.titan \
+	titan/async.native.titan titan/timer.native.titan titan/io.native.titan titan/fs.native.titan \
+	titan/net.native.titan titan/ssl.native.titan titan/url.titan \
+	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.native.titan titan/path.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
 	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
@@ -1275,12 +1276,13 @@ BROWSER_SDK_ENV = PREFIX=$(call make_shell_quote,$(PREFIX)) \
 	TITAN_ROOT=$(call make_shell_quote,$(TITAN_INSTALL_TREE)) \
 	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(CURDIR)) \
 	TITAN_PATH= \
+	CPPFLAGS= TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(LPEGLABEL_CPPFLAGS)) \
 	TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BUILD_PROFILE)) \
 	TITAN_VERBOSE=$(call make_shell_quote,$(TITAN_VERBOSE)) \
 	$(if $(strip $(ROCKS_TREE)),LUA_PATH=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/share/lua/5.5/?.lua;$(TITAN_INSTALL_TREE)/share/lua/5.5/?/init.lua;;)) \
 	$(if $(strip $(ROCKS_TREE)),LUA_CPATH=$(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/lua/5.5/?.so;;))
 
-browser-sdk: ## Build and install the browser target runtime, tools and minimal provider
+browser-sdk: ## Build and install the browser target runtime, tools and core stdlib provider
 	+@$(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	if test -z "$${TITAN_NODE:-}"; then \
@@ -1309,8 +1311,68 @@ browser-sdk: ## Build and install the browser target runtime, tools and minimal 
 	  "$$build_dir" $(call make_shell_quote,$(CURDIR)) "$$@"; \
 	$(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
 	  --output "$$build_dir" --source-first --incremental -j$(TITAN_JOBS) \
+	  -X $(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)/libtitan-lpeglabel.a) \
 	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) $(BROWSER_STDLIB_ROOTS); \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua finalize "$$build_dir"
+
+TITAN_BROWSER_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-stdlib
+TITAN_BROWSER_TEST_SDK := $(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)
+TITAN_BROWSER_TEST_BUDGET_CHECK = case $(call make_shell_quote,$(TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES)) in ''|0*|*[!0-9]*|?????????*) \
+	  echo 'browser stdlib image byte budget must be a positive decimal integer (at most 8 digits)' >&2; exit 2 ;; esac;
+
+# Keep compiler-owned output separate from the plan, images and logs: a cold
+# suite must leave browser output initialization and its marker to titanc.
+.PHONY: titan-stdlib-browser-test
+titan-stdlib-browser-test: ## Build size-bounded browser stdlib images, audit their owner union, and run Node and Chromium
+	+@$(strip $(TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK)) $(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) $(TITAN_BROWSER_TEST_BUDGET_CHECK) set -e; \
+	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
+	build_dir=$(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))); \
+	compiler_dir="$$build_dir/objects"; \
+	mkdir -p "$$build_dir/images"; \
+	printf '%s\n' $(TITAN_STDLIB_BROWSER_TEST_ROOTS) > "$$build_dir/roots.txt"; \
+	$(foreach image,$(TITAN_STDLIB_BROWSER_TEST_IMAGES),printf '%s\n' $(TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_$(image)) > "$$build_dir/$(image).roots.txt";) \
+	for image in $(TITAN_STDLIB_BROWSER_TEST_IMAGES); do \
+	  set --; \
+	  while IFS= read -r owner; do set -- "$$@" "$$owner"; done < "$$build_dir/$$image.roots.txt"; \
+	  echo "Browser stdlib building image: $$image"; \
+	  started=$$(date +%s); \
+	  $(BROWSER_SDK_ENV) TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)) \
+	    $(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc) -q --target browser --test --incremental \
+	    --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
+	    --output "$$compiler_dir" --exe "$$build_dir/images/$$image.mjs" -j$(TITAN_JOBS) \
+	    --c-source $(call make_shell_quote,$(abspath spec/fixtures/browser_runtime/close.c)) "$$@"; \
+	  elapsed=$$(($$(date +%s) - $$started)); \
+	  echo "Browser stdlib image $$image build_seconds=$$elapsed"; \
+	  $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua size \
+	    "$$build_dir/images/$$image.wasm" $(call make_shell_quote,$(TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES)); \
+	  $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua closure \
+	    "$$compiler_dir" $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/images/$$image.wasm"; \
+	done; \
+	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua inventory \
+	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.a) \
+	  $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan.a) "$$build_dir/members.md"; \
+	filter=$(call make_shell_quote_value,TITAN_FILTER); \
+	overall=0; \
+	for engine in node chromium; do \
+	  for image in $(TITAN_STDLIB_BROWSER_TEST_IMAGES); do \
+	    echo "Browser stdlib engine: $$engine image: $$image"; \
+	    set --; \
+	    if test -n "$$filter"; then set -- "--filter=$$filter"; fi; \
+	    status=0; \
+	    bash scripts/run_browser_stdlib.sh "$$build_dir/$$image.$$engine.log" "$$build_dir/$$image.$$engine.stderr.log" \
+	      $(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)/titan-browser-run) \
+	      --engine "$$engine" --timeout 300000 --grace 2000 --root "$$build_dir/images" \
+	      "$$build_dir/images/$$image.mjs" -- "$$@" || status=$$?; \
+	    if test "$$status" != 0; then \
+	      echo "Browser stdlib image $$image failed under $$engine (status $$status)" >&2; \
+	      overall=1; \
+	    fi; \
+	  done; \
+	  $(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/check_browser_stdlib.lua output \
+	    "$$build_dir/roots.txt" "$$filter" \
+	    $(foreach image,$(TITAN_STDLIB_BROWSER_TEST_IMAGES),$(image) "$$build_dir/$(image).$$engine.log" "$$build_dir/$(image).roots.txt") || overall=1; \
+	done; \
+	test "$$overall" = 0
 
 # Compatibility name for callers of the former rockspec build target.
 rock-build: all
@@ -1320,7 +1382,7 @@ include $(TITAN_TEST_MODULE_MANIFEST)
 TITAN_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 # The suite deadline includes fresh child-fixture compilation at the selected
-# native profile across all 30 test owners, including fresh child compilers.
+# native profile across all audited test owners, including fresh child compilers.
 # Focused gates may set a lower bound.
 TITAN_TEST_TIMEOUT ?= 600
 TITAN_TEST_JOBS ?= 4

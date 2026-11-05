@@ -1,0 +1,91 @@
+local test = import "test"
+local reflect = import "reflect"
+local lua = import "lua"
+local support = import "reflect.tests.titan"
+
+function test_value_and_type_fields_cross_lua_boundary(_context: test.Context)
+  local original = support.SimpleRecord.new(13, 21)
+  local inspected = support.record_value(original)
+  test.assert(inspected.value == original as value)
+  test.assert(inspected.type == support.required_record("reflect.tests.SimpleRecord"))
+
+  local variants = support.required_union("reflect.tests.TestShape").variants
+  local read_fields = lua.load([[
+    local reflected, payload, empty = ...
+    return reflected.value, reflected.type, reflected.type.fields[1].type,
+           payload.parts[1].type, #empty.parts
+  ]])
+  local candidate, schema, field, payload, empty =
+    read_fields(inspected, variants[1], variants[3])
+  test.assert(candidate == original as value)
+  test.assert(schema == inspected.type as value)
+  support.assert_integer_type(field as reflect.Type)
+  support.assert_integer_type(payload as reflect.Type)
+  test.assert(empty == 0)
+end
+
+function test_number_inspection_preserves_lua_numeric_subtype(_context: test.Context)
+  local chunk = lua.load("return 4, 4.0, -0.0, 1.5")
+  local int, integral_float, negative_zero, fraction = chunk()
+  case reflect.inspect(int)
+  when is_integer(n) then test.assert(n == 4)
+  else raise "Lua integer must remain integer"
+  end
+  case reflect.inspect(integral_float)
+  when is_float(n) then test.assert(n == 4.0)
+  else raise "integral Lua float must remain float"
+  end
+  case reflect.inspect(negative_zero)
+  when is_float(n) then test.assert(1.0 / n < 0.0)
+  else raise "negative zero must remain float"
+  end
+  case reflect.inspect(fraction)
+  when is_float(n) then test.assert(n == 1.5)
+  else raise "fractional Lua float must remain float"
+  end
+end
+
+function test_lua_function_c_function_and_thread_variants(_context: test.Context)
+  local make_function = lua.load("return function(first, second, ...) return first, second, ... end",
+                                 "=reflection-fixture")
+  local candidate: value = make_function()
+  case reflect.inspect(candidate)
+  when is_lua_function{fn_value = value, fn_type = type} then
+    test.assert(fn_type.source == "=reflection-fixture")
+    test.assert(fn_type.short_source == "reflection-fixture")
+    test.assert(fn_type.what == "Lua")
+    test.assert(fn_type.line_defined == 1)
+    test.assert(fn_type.last_line_defined == 1)
+    test.assert(fn_type.n_params == 2)
+    test.assert(fn_type.is_vararg)
+    local a, b, c = fn_value(3, false, "tail")
+    test.assert(a as integer == 3 and b == false and c == "tail")
+  else raise "expected Lua function"
+  end
+
+  local get_functions = lua.load("return math.abs, string.gmatch('ab', '.')")
+  local light, closure = get_functions()
+  case reflect.inspect(light)
+  when is_lua_c_function{fn_value = value, fn_entry = entry} then
+    test.assert(fn_entry ~= nil)
+    local callable = fn_value
+    test.assert(callable(-4) as integer == 4)
+  else raise "expected light Lua C function"
+  end
+  case reflect.inspect(closure)
+  when is_lua_c_function{fn_value = value, fn_entry = entry} then
+    test.assert(fn_entry ~= nil)
+    test.assert(fn_value() == "a")
+    test.assert(fn_value() == "b")
+  else raise "expected Lua C closure"
+  end
+
+  local create_thread = lua.load("return coroutine.create(function() end)")
+  local thread: value = create_thread()
+  case reflect.inspect(thread)
+  when is_lua_thread{inspected_value = value, inspected_thread = thread} then
+    test.assert(inspected_value == thread)
+    test.assert(inspected_thread ~= nil)
+  else raise "expected Lua thread"
+  end
+end

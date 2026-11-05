@@ -1,0 +1,13 @@
+foreign import "stdio.h"
+foreign import "stdlib.h"
+foreign import "float.h"
+
+function main(_arguments: {string}): integer
+    local number = ffi.strtold("0x1.000000000000001p0", nil)
+    ffi.printf("precision=%d/%d\n", ffi.LDBL_MANT_DIG as foreign int, ffi.DBL_MANT_DIG as foreign int)
+    ffi.printf("text=%.21Lg\n", number)
+    if ffi.LDBL_MANT_DIG > ffi.DBL_MANT_DIG and number == (number as foreign double) then
+        return 1
+    end
+    return 0
+end

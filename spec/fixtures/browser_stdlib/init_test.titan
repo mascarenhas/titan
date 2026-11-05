@@ -1,0 +1,5 @@
+local test = import "test"
+
+function test_initializer_completed(_context: test.Context)
+  test.assert(test.testing(), "test initialized without an active runner")
+end

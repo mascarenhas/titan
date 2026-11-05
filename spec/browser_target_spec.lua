@@ -1134,6 +1134,32 @@ end
         contains(coro_source, "ffi.TITAN_COROUTINE_STACK_SIZE")
         assert.is_nil(coro_source:find("local STACK_SIZE =", 1, true))
     end)
+
+    it("exposes native defaults and browser codec and JSON writer depth limits through FFI headers", function()
+        local strategy = compiler_io.new_sync()
+        local root = assert(strategy:cwd())
+        local prefix = require("spec.support.installed_prefix").active()
+        local runtime_dir = root .. "/titan-runtime"
+        local lua_dir = prefix .. "/src/lua-5.5.1"
+        if not strategy:stat(lua_dir .. "/lua.h") then lua_dir = root .. "/lua-5.5.1/src" end
+        local profile = fixtures.profile()
+        for _, case in ipairs({
+            { header = "transfer.h", macro = "TITAN_CODEC_DEPTH_LIMIT", native = 128, browser = 43 },
+            { header = "titan.h", macro = "TITAN_JSON_WRITER_DEPTH_LIMIT",
+                native = 0, browser = 103 },
+        }) do
+            for _, browser in ipairs({ false, true }) do
+                local types, err = cdriver.process_file(case.header, {
+                    compiler_include_dirs = { lua_dir, runtime_dir },
+                    cppflags = browser and { table.unpack(fixtures.target_defines) } or {},
+                })
+                assert.truthy(types, err)
+                local limit = assert(csemantics.evaluate_macro_expression(
+                    profile, types[case.macro].macro_expression))
+                assert.equal(browser and case.browser or case.native, tonumber(limit.value))
+            end
+        end
+    end)
 end)
 
 describe("browser real-toolchain pending policy", function()

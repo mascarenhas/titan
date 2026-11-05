@@ -16,6 +16,8 @@ M.banner = "# Lua 5.5.1 browser build record v1\n"
 M.target_defines = {
     "-DTITAN_TARGET_BROWSER=1",
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
+    "-DTITAN_CODEC_DEPTH_LIMIT=43",
+    "-DTITAN_JSON_WRITER_DEPTH_LIMIT=103",
     "-DMCO_ASYNCFY_STACK_SIZE=65536",
 }
 

@@ -1,0 +1,17 @@
+local test = import "test"
+local coroutinelib = import "coroutine"
+local mathlib = import "math"
+local iterationlib = import "iteration"
+local gclib = import "gc"
+local reflectlib = import "reflect"
+local jsonlib = import "json"
+local protobuflib = import "protobuf"
+local transferlib = import "transfer"
+local peglib = import "peg"
+local stringlib = import "string"
+local urllib = import "url"
+local pathlib = import "path"
+
+function test_initializers_completed(_context: test.Context)
+  test.assert(test.testing(), "subset initializers did not reach their test")
+end

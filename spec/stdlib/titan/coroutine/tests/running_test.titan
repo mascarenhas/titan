@@ -74,36 +74,3 @@ function test_running_restores_caller_after_error(_context: test.Context)
   test.assert(caught, "outer failure was not caught")
 end
 
-function test_running_lua_host_preserves_identity(_context: test.Context)
-  assert_coroutine_lua_probe([==[
-    local coroutine = require "titan.coroutine"
-    assert(coroutine.running() == nil)
-    local co
-    co = coroutine.create(function()
-      assert(rawequal(coroutine.running(), co))
-      collectgarbage("collect")
-      assert(rawequal(coroutine.running(), co))
-      coroutine.yield("paused", "running")
-      assert(rawequal(coroutine.running(), co))
-      return coroutine.running()
-    end, "running")
-    assert(coroutine.running() == nil)
-    assert(co:resume(nil) == "paused")
-    assert(coroutine.running() == nil)
-    assert(rawequal(co:resume(nil), co))
-    assert(coroutine.running() == nil)
-
-    -- Keep only the handle returned by running(), without a callback capture.
-    co = coroutine.create(function()
-      coroutine.yield(coroutine.running(), "running")
-      return coroutine.running()
-    end, "running")
-    local current = co:resume(nil)
-    assert(rawequal(current, co))
-    co = nil
-    collectgarbage("collect")
-    assert(current:status() == "suspended")
-    assert(rawequal(current:resume(nil), current))
-    assert(coroutine.running() == nil)
-  ]==], "Lua-host running identity probe")
-end

@@ -48,7 +48,11 @@ for a native host without an OS label and selects `name.native.titan`, then
 in [Compiling for the browser target](browser-target.md). A native build never
 selects a `.browser.titan` file, and a browser build never selects a
 `.native.titan` or OS-labeled file; see
-[choosing the target](#choosing-the-target--t--target-and-titan_target).
+[choosing the target](#choosing-the-target--t--target-and-titan_target). The
+standard library uses this for its native-only modules: `titan/os.native.titan`
+and the folder main `titan/uv/uv.native.titan`, among others, have no default,
+so those modules [do not exist for the browser
+target](browser-target.md#modules-that-are-not-available).
 
 ## Variant filenames
 

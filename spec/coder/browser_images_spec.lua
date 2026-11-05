@@ -205,7 +205,7 @@ describe("browser image profile and SDK readiness", function()
             "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sFORCE_FILESYSTEM=1",
+            "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]',
             '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
@@ -229,7 +229,7 @@ describe("browser image profile and SDK readiness", function()
             "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sFORCE_FILESYSTEM=1",
+            "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]',
             '-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
@@ -314,6 +314,23 @@ describe("browser image profile and SDK readiness", function()
                     { purpose = purpose, assertions = 2, entry = entry }))
                 assert.truthy(table.concat(plan.link_flags, " "):find("-sFORCE_FILESYSTEM=1", 1, true))
                 assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+            end
+        end
+    end)
+
+    it("preserves long-double printf precision in every profile, purpose and entry", function()
+        for _, build_profile in ipairs({ "production", "validation" }) do
+            for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+                for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
+                    local plan = assert(browserlink.profile(fixtures.descriptor(nil, {build_profile = build_profile}),
+                        {purpose = purpose, assertions = 2, entry = entry}))
+                    local count = 0
+                    for _, flag in ipairs(plan.link_flags) do
+                        if flag == "-sPRINTF_LONG_DOUBLE=1" then count = count + 1 end
+                    end
+                    assert.equal(1, count)
+                    assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+                end
             end
         end
     end)
@@ -486,6 +503,19 @@ describe("browser image profile and SDK readiness", function()
                 { "-sNO_BINARYEN_EXTRA_PASSES=1" },
                 { "-DBINARYEN_EXTRA_PASSES=0" },
                 { "-U", "BINARYEN_EXTRA_PASSES" },
+                { "-sPRINTF_LONG_DOUBLE=0" },
+                { "-s", "PRINTF_LONG_DOUBLE=0" },
+                { "-sNO_PRINTF_LONG_DOUBLE=1" },
+                { "-DPRINTF_LONG_DOUBLE=0" },
+                { "-U", "PRINTF_LONG_DOUBLE" },
+                { "-DTITAN_CODEC_DEPTH_LIMIT=1000" },
+                { "-D", "TITAN_CODEC_DEPTH_LIMIT=1000" },
+                { "-UTITAN_CODEC_DEPTH_LIMIT" },
+                { "-U", "TITAN_CODEC_DEPTH_LIMIT" },
+                { "-DTITAN_JSON_WRITER_DEPTH_LIMIT=1000" },
+                { "-D", "TITAN_JSON_WRITER_DEPTH_LIMIT=1000" },
+                { "-UTITAN_JSON_WRITER_DEPTH_LIMIT" },
+                { "-U", "TITAN_JSON_WRITER_DEPTH_LIMIT" },
             }) do
                 local ok, why = browserlink.validate_extras(flags, { purpose = purpose })
                 assert.is_nil(ok)
@@ -494,7 +524,9 @@ describe("browser image profile and SDK readiness", function()
         end
         -- Compile extras are reported by the compile diagnostic, link extras by
         -- the link one (OG-L4): the same option, one owner, one message.
-        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-DTITAN_TARGET_BROWSER=1" }) do
+        for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-DTITAN_TARGET_BROWSER=1",
+            "-DTITAN_CODEC_DEPTH_LIMIT=1000", "-UTITAN_CODEC_DEPTH_LIMIT",
+            "-DTITAN_JSON_WRITER_DEPTH_LIMIT=1000", "-UTITAN_JSON_WRITER_DEPTH_LIMIT" }) do
             local ok, why = browserlink.validate_extras({ flag }, { purpose = "gate" }, "production", "compile")
             assert.is_nil(ok)
             assert.equal('browser production profile owns compile option "' .. flag .. '"', why)
@@ -527,6 +559,50 @@ end)
 describe("real browser test image", function()
     after_each(function()
         if workspace then files.remove(workspace); workspace = nil end
+    end)
+    it("formats browser long doubles exactly and compares native text when its reported precision exceeds double", function()
+        local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
+        if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/long_double.titan", read(repository .. "/spec/fixtures/browser_images/long_double.titan"))
+        local setup = string.format("package.path=%q..package.path;",
+            repository .. "/?.lua;" .. repository .. "/?/init.lua;")
+        local native_image = workspace .. "/native/long_double"
+        local native_build = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=", "TITAN_PATH_0_6=",
+            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
+            info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc", "-q", "--incremental",
+            "--tree", workspace .. "/src", "--output", workspace .. "/native", "--exe", native_image, "long_double" })
+        assert.is_true(native_build.ok, native_build.output)
+        local native = run({native_image})
+        assert.is_true(native.ok, native.output)
+        local native_precision, double_precision = native.output:match("precision=(%d+)/(%d+)")
+        native_precision, double_precision = tonumber(native_precision), tonumber(double_precision)
+        assert.is_number(native_precision)
+        assert.is_number(double_precision)
+        local native_text = assert(native.output:match("text=([^\r\n]+)"))
+        local extended_text = "1.00000000000000000087"
+        if native_precision > double_precision then
+            assert.equal(extended_text, native_text)
+        else
+            assert.equal(double_precision, native_precision)
+            assert.equal("1", native_text)
+        end
+        local browser_build = cli(info, "--incremental", "--exe", workspace .. "/out/long_double.mjs", "long_double")
+        assert.is_true(browser_build.ok, browser_build.output)
+        for _, engine in ipairs({"node", "chromium"}) do
+            local result = run({info.sdk_root .. "/titan-browser-run", "--engine", engine, "--grace", "0",
+                workspace .. "/out/long_double.mjs"})
+            assert.is_true(result.ok, result.output)
+            local browser_precision, browser_double = result.output:match("precision=(%d+)/(%d+)")
+            assert.is_true(tonumber(browser_precision) > tonumber(browser_double), result.output)
+            local browser_text = assert(result.output:match("text=([^\r\n]+)"))
+            assert.equal(extended_text, browser_text)
+            if native_precision > double_precision then assert.equal(native_text, browser_text) end
+            io.stdout:write(string.format("\nLONG-DOUBLE engine=%s browser=%s native=%s precision=%d/%d native-reference=%s\n",
+                engine, browser_text, native_text, native_precision, double_precision,
+                native_precision > double_precision and "extended" or "double-width"))
+        end
     end)
     it("instantiates coroutine cleanup images well below the engine local limit", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end

@@ -279,7 +279,13 @@ invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):
 `titan.transfer`, and `titan.thread`. `titan.uv`, `titan.http`,
 `titan.websocket`, `titan.peg`, `titan.string`, `titan.sqlite3`,
 `titan.json`, `titan.lua`, `titan.protobuf`, and `titan.thread` are folder
-ensembles; the others are flat `titan/<name>.titan` sources. The root order is
+ensembles; the others are flat sources. The mains of `titan.async`,
+`titan.timer`, `titan.io`, `titan.fs`, `titan.net`, `titan.ssl`, `titan.os`,
+`titan.uv`, `titan.http`, `titan.websocket`, `titan.sqlite3`, `titan.lua`,
+and `titan.thread` are `native` variants (`titan/os.native.titan`,
+`titan/uv/uv.native.titan`), so the browser target has none of them; the
+other thirteen roots also form the [browser standard
+provider](browser-target.md#the-browser-standard-library). The root order is
 not topological (`titan.async` precedes `titan.string`, which it imports);
 recursive import loading resolves dependencies while the roots are processed.
 The invocation publishes root `titan.so` and `titan.a`:

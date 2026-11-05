@@ -18,7 +18,7 @@ local _, close_contexts, resolver_options =
     require("spec.support.resolver_contexts")(driver)
 after_each(close_contexts)
 
-local UV_MAIN_SOURCE = "titan/uv/uv.titan"
+local UV_MAIN_SOURCE = "titan/uv/uv.native.titan"
 local STDLIB_TYPES_FIXTURE =
 "spec/fixtures/stdlib/titan_stdlib_types.lua"
 local UV_TYPES_FIXTURE =
@@ -161,70 +161,70 @@ local UV_FOREIGN_CALLBACKS = {
     { name = "udp_send_callback", source = "titan/uv/udp.titan",
       record = "udp_send_t", field = "handler", handler = "udp_sent", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status)" },
-    { name = "timer_callback", source = "titan/uv/uv.titan",
+    { name = "timer_callback", source = "titan/uv/uv.native.titan",
       record = "timer_t", field = "handler", handler = "timer_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "timer_close_callback", source = "titan/uv/uv.titan",
+    { name = "timer_close_callback", source = "titan/uv/uv.native.titan",
       record = "timer_t", field = "close_handler", handler = "timer_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "fs_callback", source = "titan/uv/uv.titan",
+    { name = "fs_callback", source = "titan/uv/uv.native.titan",
       record = "fs_t", field = "handler", handler = "fs_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "work_after_callback", source = "titan/uv/uv.titan",
+    { name = "work_after_callback", source = "titan/uv/uv.native.titan",
       record = "work_t", field = "handler", handler = "work_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
-    { name = "walk_callback", source = "titan/uv/uv.titan",
+    { name = "walk_callback", source = "titan/uv/uv.native.titan",
       record = "loop_t", field = "walk_handler", handler = "walk_deliver", owner = "loop",
       call = "entry(L, module, handler, loop, native)" },
-    { name = "idle_callback", source = "titan/uv/uv.titan",
+    { name = "idle_callback", source = "titan/uv/uv.native.titan",
       record = "idle_t", field = "handler", handler = "idle_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "idle_close_callback", source = "titan/uv/uv.titan",
+    { name = "idle_close_callback", source = "titan/uv/uv.native.titan",
       record = "idle_t", field = "close_handler", handler = "idle_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "prepare_callback", source = "titan/uv/uv.titan",
+    { name = "prepare_callback", source = "titan/uv/uv.native.titan",
       record = "prepare_t", field = "handler", handler = "prepare_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "prepare_close_callback", source = "titan/uv/uv.titan",
+    { name = "prepare_close_callback", source = "titan/uv/uv.native.titan",
       record = "prepare_t", field = "close_handler", handler = "prepare_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "check_callback", source = "titan/uv/uv.titan",
+    { name = "check_callback", source = "titan/uv/uv.native.titan",
       record = "check_t", field = "handler", handler = "check_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "check_close_callback", source = "titan/uv/uv.titan",
+    { name = "check_close_callback", source = "titan/uv/uv.native.titan",
       record = "check_t", field = "close_handler", handler = "check_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "async_callback", source = "titan/uv/uv.titan",
+    { name = "async_callback", source = "titan/uv/uv.native.titan",
       record = "async_t", field = "handler", handler = "async_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "async_close_callback", source = "titan/uv/uv.titan",
+    { name = "async_close_callback", source = "titan/uv/uv.native.titan",
       record = "async_t", field = "close_handler", handler = "async_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "signal_callback", source = "titan/uv/uv.titan",
+    { name = "signal_callback", source = "titan/uv/uv.native.titan",
       record = "signal_t", field = "handler", handler = "signal_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, signum as foreign lua_Integer)" },
-    { name = "signal_close_callback", source = "titan/uv/uv.titan",
+    { name = "signal_close_callback", source = "titan/uv/uv.native.titan",
       record = "signal_t", field = "close_handler", handler = "signal_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "poll_callback", source = "titan/uv/uv.titan",
+    { name = "poll_callback", source = "titan/uv/uv.native.titan",
       record = "poll_t", field = "handler", handler = "poll_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, events as foreign lua_Integer)" },
-    { name = "poll_close_callback", source = "titan/uv/uv.titan",
+    { name = "poll_close_callback", source = "titan/uv/uv.native.titan",
       record = "poll_t", field = "close_handler", handler = "poll_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "random_callback", source = "titan/uv/uv.titan",
+    { name = "random_callback", source = "titan/uv/uv.native.titan",
       record = "random_t", field = "handler", handler = "random_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, buflen as foreign lua_Integer)" },
-    { name = "fs_event_callback", source = "titan/uv/uv.titan",
+    { name = "fs_event_callback", source = "titan/uv/uv.native.titan",
       record = "fs_event_t", field = "handler", handler = "fs_event_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, filename, events as foreign lua_Integer, status as foreign lua_Integer)" },
-    { name = "fs_event_close_callback", source = "titan/uv/uv.titan",
+    { name = "fs_event_close_callback", source = "titan/uv/uv.native.titan",
       record = "fs_event_t", field = "close_handler", handler = "fs_event_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "fs_poll_callback", source = "titan/uv/uv.titan",
+    { name = "fs_poll_callback", source = "titan/uv/uv.native.titan",
       record = "fs_poll_t", field = "handler", handler = "fs_poll_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, prev, curr)" },
-    { name = "fs_poll_close_callback", source = "titan/uv/uv.titan",
+    { name = "fs_poll_close_callback", source = "titan/uv/uv.native.titan",
       record = "fs_poll_t", field = "close_handler", handler = "fs_poll_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
 }
@@ -269,8 +269,8 @@ local UV_NATIVE_ENTRIES = {
     { name = "native_once", source = "titan/uv/sync.titan" },
     { name = "native_thread_join", source = "titan/uv/threading.titan" },
     { name = "native_thread_detach", source = "titan/uv/threading.titan" },
-    { name = "work_worker_callback", source = "titan/uv/uv.titan" },
-    { name = "async_send_native", source = "titan/uv/uv.titan" },
+    { name = "work_worker_callback", source = "titan/uv/uv.native.titan" },
+    { name = "async_send_native", source = "titan/uv/uv.native.titan" },
 }
 local LEGACY_UV_CALLBACKS = {
     "titan_uvshim_signal_cb",
@@ -1175,8 +1175,8 @@ esac
             local root = make_temp_dir()
             local tested, failure = xpcall(function()
                 assert(lfs.mkdir(root .. "/titan"))
-                write_file(root .. "/titan/" .. consumer .. ".titan",
-                    read_file("titan/" .. consumer .. ".titan"))
+                write_file(root .. "/titan/" .. consumer .. ".native.titan",
+                    read_file("titan/" .. consumer .. ".native.titan"))
                 if consumer == "async" then
                     for _, header in ipairs({
                         "async_receiver_native.h", "async_signal_platform.h", "transfer_native.h",
@@ -1206,7 +1206,8 @@ end
 ]])
                 end
                 local producer = consumer == "async" and "coroutine" or "os"
-                assert.falsy(file_exists(root .. "/titan/" .. producer .. ".titan"))
+                assert.is_nil(driver.resolve_source(resolver_options().context,
+                    "titan." .. producer, root))
                 local prefix = installed_prefix.active()
                 local executable_suffix = platform.windows and ".exe" or ""
                 -- Source async owns its POSIX signal policy; use the same
@@ -1313,18 +1314,18 @@ end
                 write_file(root .. "/Makefile", table.concat({
                     "UV_TITAN_SOURCES := titan/uv/tcp.titan titan/uv/tcp.linux.titan",
                     "STDLIB_TITAN_SOURCES := $(UV_TITAN_SOURCES) " ..
-                    "titan/fs.titan titan/fs.native.titan",
+                    "titan/sample.titan titan/sample.native.titan",
                     "",
                 }, "\n"))
                 local files = stdlib_source_files(root .. "/Makefile")
                 assert.same({
                     "titan/uv/tcp.titan", "titan/uv/tcp.linux.titan",
-                    "titan/fs.titan", "titan/fs.native.titan",
+                    "titan/sample.titan", "titan/sample.native.titan",
                 }, files)
                 local families = source_families(files)
                 assert.equal(2, #families)
                 assert.equal("titan/uv/tcp.titan", families[1].logical)
-                assert.equal("titan/fs.titan", families[2].logical)
+                assert.equal("titan/sample.titan", families[2].logical)
                 local expected = {
                     linux = "titan/uv/tcp.linux.titan",
                     darwin = "titan/uv/tcp.titan",
@@ -1333,7 +1334,7 @@ end
                 }
                 assert.equal(expected[host_source_label()],
                     selected_host_source(families[1]))
-                assert.equal("titan/fs.native.titan",
+                assert.equal("titan/sample.native.titan",
                     selected_host_source(families[2]))
 
                 local folder = root .. "/titan/uv"
@@ -1646,7 +1647,6 @@ done
             assert.falsy(seen[module], "duplicate native owner " .. module)
             seen[module], roots[#roots + 1] = true, module
         end
-        assert.equal(30, #roots)
         assert.equal("test.tests", roots[1])
         local driver = require "titan-compiler.driver"
         local testroots = require "titan-compiler.testroots"
@@ -1658,7 +1658,7 @@ done
         assert.truthy(ok, discovered)
         assert.truthy(discovered, detail)
         table.sort(roots)
-        assert.same(roots, discovered, "discovery must select exactly the 30 audited owners")
+        assert.same(roots, discovered, "discovery must select exactly the audited owners")
         for _, retired in ipairs({ "TITAN_TEST_MODULES", "TITAN_TEST_SOURCES_",
                 "TITAN_TEST_IMPORTS_", "TITAN_TEST_C_INPUTS_", "TITAN_TEST_FOREIGN_" }) do
             assert.falsy(read_file(manifest):find(retired, 1, true), retired)
@@ -1740,6 +1740,29 @@ done
         assert.equal(2, union_ok.owners)
         assert.same(result.cases, union_ok.cases)
 
+        local empty_out = "[==========] Running Titan tests.\n[==========] 0 tests ran.\n[  PASSED  ] 0 tests."
+        local filtered_union, filtered_err = validate_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+            { id = "2", owners = { "second.tests" }, contents = empty_out },
+        }, roots, true)
+        assert.truthy(filtered_union, filtered_err)
+        assert.equal(1, filtered_union.count)
+        assert.equal(1, filtered_union.owners)
+        assert.is_nil(validate(empty_out, roots, true), "a wholly empty filtered suite must still fail")
+        local empty_union, empty_err = validate_union({
+            { id = "1", owners = { "first.tests" }, contents = empty_out },
+            { id = "2", owners = { "second.tests" }, contents = empty_out },
+        }, roots, true)
+        assert.is_nil(empty_union)
+        assert.truthy(empty_err:find("selected no cases", 1, true), empty_err)
+        local unfinished, unfinished_err = validate_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+            { id = "2", owners = { "second.tests" },
+                contents = empty_out .. "\n[ RUN      ] second.tests.test_unfinished" },
+        }, roots, true)
+        assert.is_nil(unfinished)
+        assert.truthy(unfinished_err:find("did not finish", 1, true), unfinished_err)
+
         local function rejects_union(groups, expected, all_roots)
             local accepted, message = validate_union(groups, all_roots or roots)
             assert.is_nil(accepted)
@@ -1758,6 +1781,22 @@ done
         rejects_union({
             { id = "1", owners = {}, contents = group_one_out },
         }, "empty native owner group")
+        rejects_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+            { id = "2", owners = { "second.tests" }, contents = group_one_out },
+        }, "group 2: result outside native root inventory")
+        rejects_union({
+            { id = "foreign", owners = { "third.tests" }, contents = group_one_out },
+        }, "planned owner outside native root inventory: third.tests")
+        rejects_union({}, "empty native parallel group list")
+        rejects_union(nil, "empty native parallel group list")
+        -- Distinct, overlapping logical roots can each scope the same case.
+        local shared_case_out = group_one_out:gsub("first%.tests%.test_value",
+            "first.tests.test_nested.test_value")
+        rejects_union({
+            { id = "outer", owners = { "first.tests" }, contents = shared_case_out },
+            { id = "nested", owners = { "first.tests.test_nested" }, contents = shared_case_out },
+        }, "duplicate native case across groups", {"first.tests", "first.tests.test_nested"})
     end)
 
     it("always certifies one complete native aggregate and keeps runtime filters out of selection", function()
@@ -2229,7 +2268,7 @@ printf '%s/%s\n' "$directory" "$object"
         end)
 
     it("keeps inherited SIGPIPE policy in async and argc/argv setup in public UV", function()
-        local async = read_file("titan/async.titan")
+        local async = read_file("titan/async.native.titan")
         for _, contract in ipairs({
             'foreign import "async_signal_platform.h"',
             "local native_error = ffi.titan_async_ignore_sigpipe_if_default()",
@@ -2260,7 +2299,7 @@ printf '%s/%s\n' "$directory" "$object"
 
     it("keeps public UV independent of Task policy and owns nominal async types in async", function()
         local async_exports = {}
-        for _, name in ipairs(public_declarations("titan/async.titan")) do async_exports[name] = true end
+        for _, name in ipairs(public_declarations("titan/async.native.titan")) do async_exports[name] = true end
         for _, name in ipairs({"Error", "OperationError", "ResumeToken", "CancellationReason",
                 "TaskStatus", "Task", "Completion", "TransferValue", "checkpoint",
                 "await_with", "await_cancellable_with", "await_cleanup_with",
@@ -2291,7 +2330,7 @@ printf '%s/%s\n' "$directory" "$object"
     end)
 
     it("keeps generic Tasks and ordinary, cancellable and cleanup waits in async", function()
-        local async = read_file("titan/async.titan")
+        local async = read_file("titan/async.native.titan")
         for _, contract in ipairs({
             "record ResumeToken", "const source: string?", "union CancellationReason<|B|>",
             "union TaskStatus<|A, B|>", "record Task<|A, B|>", "local record Runtime",
@@ -2348,7 +2387,7 @@ printf '%s/%s\n' "$directory" "$object"
     it("keeps the reviewed HTTP source list equal to the folder ensemble",
         function()
             local listed = makefile_words("STDLIB_HTTP_SOURCES")
-            assert.equal("titan/http/http.titan", listed[1])
+            assert.equal("titan/http/http.native.titan", listed[1])
             local normalized = {}
             local seen = {}
             for _, source in ipairs(listed) do
@@ -2744,7 +2783,7 @@ int main(void) {
         end
         assert.same({}, (function ()
             local entries = {}
-            for _, node in ipairs(parsed_source("titan/fs.titan")) do
+            for _, node in ipairs(parsed_source("titan/fs.native.titan")) do
                 if node._tag == "Ast.TopLevelForeignFunc" then entries[#entries + 1] = node.name end
             end
             return entries
@@ -2753,7 +2792,7 @@ int main(void) {
     end)
 
     it("keeps filesystem request cleanup before settlement and watchers on scoped generic batches", function()
-        local source = read_file("titan/fs.titan")
+        local source = read_file("titan/fs.native.titan")
         local first = assert(source:find("local function file_completed<|T|>", 1, true))
         local last = assert(source:find("local function start_file<|T|>", first, true))
         local completed = source:sub(first, last - 1)
@@ -2793,12 +2832,12 @@ int main(void) {
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
-            assert.same({ "titan/lua/lua.titan", "titan/lua/worker.titan" },
+            assert.same({ "titan/lua/lua.native.titan", "titan/lua/worker.titan" },
                 makefile_words("LUA_TITAN_SOURCES"))
             assert.same({ "titan/lua/native.h" },
                 makefile_words("LUA_TITAN_HEADERS"))
             assert.same({
-                "titan/thread/thread.titan", "titan/thread/channel.titan",
+                "titan/thread/thread.native.titan", "titan/thread/channel.titan",
                 "titan/thread/group.titan", "titan/thread/spawn.titan",
             }, makefile_words("THREAD_TITAN_SOURCES"))
             assert.same({ "titan/thread/native.h" },
@@ -2831,7 +2870,7 @@ int main(void) {
 
             assert.same({
                 "titan/coroutine.titan",
-                "titan/uv/uv.titan",
+                "titan/uv/uv.native.titan",
                 "titan/uv/address.titan",
                 "titan/uv/callbacks.titan",
                 "titan/uv/capabilities.titan",
@@ -2854,16 +2893,16 @@ int main(void) {
                 "titan/uv/transfer.titan",
                 "titan/uv/udp.titan",
                 "titan/uv/utilities.titan",
-                "titan/async.titan",
-                "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
-                "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
-                "titan/http/http.titan", "titan/http/client.titan",
+                "titan/async.native.titan",
+                "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
+                "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
+                "titan/http/http.native.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
                 "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
-                "titan/websocket/websocket.titan", "titan/websocket/handshake.titan",
+                "titan/websocket/websocket.native.titan", "titan/websocket/handshake.titan",
                 "titan/websocket/connection.titan", "titan/websocket/frames.titan",
                 "titan/websocket/utf8.titan", "titan/websocket/native.titan",
-                "titan/os.titan", "titan/path.titan",
+                "titan/os.native.titan", "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -2873,10 +2912,10 @@ int main(void) {
                 "titan/string/pack.titan", "titan/string/regex_api.titan",
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
-                "titan/math.titan", "titan/lua/lua.titan", "titan/lua/worker.titan",
+                "titan/math.titan", "titan/lua/lua.native.titan", "titan/lua/worker.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
                 "titan/reflect.titan",
-                "titan/sqlite3/sqlite3.titan", "titan/sqlite3/bindings.titan",
+                "titan/sqlite3/sqlite3.native.titan", "titan/sqlite3/bindings.titan",
                 "titan/sqlite3/row.titan", "titan/sqlite3/worker.titan",
                 "titan/json/json.titan", "titan/json/parser.titan",
                 "titan/json/decoder.titan", "titan/json/writer.titan",
@@ -2884,7 +2923,7 @@ int main(void) {
                 "titan/protobuf/protobuf.titan", "titan/protobuf/encoder.titan",
                 "titan/protobuf/decoder.titan", "titan/protobuf/schema.titan",
                 "titan/transfer.titan",
-                "titan/thread/thread.titan", "titan/thread/channel.titan",
+                "titan/thread/thread.native.titan", "titan/thread/channel.titan",
                 "titan/thread/group.titan", "titan/thread/spawn.titan",
             }, stdlib_source_files())
         end)
@@ -2910,8 +2949,8 @@ int main(void) {
                 end
             end
         end
-        for _, source in ipairs({"titan/async.titan", "titan/timer.titan", "titan/fs.titan",
-                "titan/net.titan", "titan/os.titan"}) do
+        for _, source in ipairs({"titan/async.native.titan", "titan/timer.native.titan", "titan/fs.native.titan",
+                "titan/net.native.titan", "titan/os.native.titan"}) do
             local imports = {}
             for _, node in ipairs(parsed_source(source)) do
                 if node._tag == "Ast.TopLevelImport" then imports[node.modname] = true end
@@ -2926,7 +2965,7 @@ int main(void) {
     -- the Runtime now owns one shared wake and an intrusive FIFO.
 
     it("retires explicit suspension and the exact Wait before terminal listeners", function()
-        local task = read_file("titan/async.titan")
+        local task = read_file("titan/async.native.titan")
         local first = assert(task:find("local function clear_suspension(task: Task)", 1, true))
         local last = assert(task:find("\nend", first, true))
         local clear = task:sub(first, last - 1)
@@ -2943,7 +2982,7 @@ int main(void) {
     end)
 
     it("keeps SSL path loading high-level and PEM owners private", function()
-        local ssl = read_file("titan/ssl.titan")
+        local ssl = read_file("titan/ssl.native.titan")
         local openssl_headers = {}
         for header in ssl:gmatch(
             'foreign import "openssl/([^"]+)"') do
@@ -2993,11 +3032,11 @@ int main(void) {
             "DefaultClientContextOwner", "ProgressWait", "Operation",
             "CleanupWait", "ChildDrain", "PemBlock",
             "CertificateResult", "PrivateKeyResult",
-        }, local_record_declarations("titan/ssl.titan"))
+        }, local_record_declarations("titan/ssl.native.titan"))
         assert.same({ "OperationResult" },
-            local_union_declarations("titan/ssl.titan"))
+            local_union_declarations("titan/ssl.native.titan"))
         local public = {}
-        for _, name in ipairs(public_declarations("titan/ssl.titan")) do
+        for _, name in ipairs(public_declarations("titan/ssl.native.titan")) do
             public[name] = true
         end
         for _, helper in ipairs({
@@ -3010,11 +3049,11 @@ int main(void) {
     end)
 
     it("keeps listener defaults in the high-level facades", function()
-        local net = read_file("titan/net.titan")
+        local net = read_file("titan/net.native.titan")
         assert.truthy(net:find(
             "local actual_backlog = 128", 1, true), net)
 
-        local ssl = read_file("titan/ssl.titan")
+        local ssl = read_file("titan/ssl.native.titan")
         assert.truthy(ssl:find(
                 "local actual_private_key_file = certificate_file", 1, true),
             ssl)
@@ -3044,12 +3083,11 @@ int main(void) {
         assert.truthy(tested, ok)
         assert.truthy(ok, output)
         local expected = {}
+        local context = resolver_options().context
         for _, module in ipairs(STDLIB_MODULES) do
-            local stem = "titan/" .. module
-            if not file_exists(stem .. ".titan") then
-                stem = stem .. "/" .. module
-            end
-            assert.truthy(file_exists(stem .. ".titan"), stem)
+            local source = assert(driver.resolve_source(context, "titan." .. module, "."))
+            assert.truthy(file_exists(source.main), source.main)
+            local stem = paths.to_slash(source.native_output):gsub("^%./", ""):gsub("[.]titan$", "")
             expected[#expected + 1] = "out/" .. stem .. ".ffi.h"
         end
         for _, header in ipairs({
@@ -3083,7 +3121,7 @@ int main(void) {
                 error("unexpected titan.io source type " .. tostring(typ._tag))
             end
 
-            local path = "titan/io.titan"
+            local path = "titan/io.native.titan"
             local source = read_file(path)
             local ast, parse_error = parser.parse(path, source)
             assert.truthy(ast, parse_error and parse_error.label)
@@ -3346,7 +3384,7 @@ int main(void) {
 
     it("pins the public fs facade and its portable location bridges",
         function()
-            local path = "titan/fs.titan"
+            local path = "titan/fs.native.titan"
             assert.same({
                 "File", "Stat", "Stat.new", "open", "File:read",
                 "File:read_until", "File:write", "File:flush",
@@ -3406,9 +3444,9 @@ int main(void) {
             "InputOutputStream:write", "InputOutputStream:wait",
             "InputOutputStream:close", "InputOutputStream:to_transfer_payload",
             "InputOutputStream.from_transfer_payload", "popen",
-        }, public_declarations("titan/os.titan"))
+        }, public_declarations("titan/os.native.titan"))
 
-        assert.falsy(read_file("titan/os.titan"):find(
+        assert.falsy(read_file("titan/os.native.titan"):find(
             "os_stdio_is_closed", 1, true))
     end)
 
@@ -3860,13 +3898,13 @@ esac
                 return
             end
             local sources = {
-                "titan/coroutine.titan", "titan/async.titan",
-                "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
-                "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
-                "titan/http/http.titan", "titan/http/client.titan",
+                "titan/coroutine.titan", "titan/async.native.titan",
+                "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
+                "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
+                "titan/http/http.native.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
                 "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
-                "titan/os.titan", "titan/path.titan",
+                "titan/os.native.titan", "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -3882,7 +3920,8 @@ esac
             for _, ensemble in ipairs({
                 "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES", "PROTOBUF_TITAN_SOURCES",
                 "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES", "THREAD_TITAN_SOURCES",
-                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
+                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS",
+                "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
                     sources[#sources + 1] = source
@@ -5603,10 +5642,22 @@ printf '%s\n' "${schedule[@]}"
                     or (#job + 1)
                 return job:sub(first, finish - 1)
             end
-            local function assert_codecov_upload(job, step, upload_name, upload_path, flag)
+            local function step_containing(job, needle)
+                local selected
+                for first in job:gmatch("()\n      %- [^\n]*\n") do
+                    local finish = job:find("\n      - ", first + 1, true) or (#job + 1)
+                    local step = job:sub(first, finish - 1)
+                    if step:find(needle, 1, true) then
+                        assert.is_nil(selected, "duplicate step containing " .. needle)
+                        selected = step
+                    end
+                end
+                return assert(selected, "missing step containing " .. needle)
+            end
+            local function assert_codecov_upload(job, upload_name, upload_path, flag)
                 assert.equal(1, count_literal(job, "contents: read"), job)
                 assert.equal(1, count_literal(job, "id-token: write"), job)
-                job = named_step(job, step)
+                job = step_containing(job, "\n          name: " .. upload_name .. "\n")
                 assert.equal(1,
                     count_literal(job, "codecov/codecov-action@v7"), job)
                 assert.equal(1,
@@ -5623,6 +5674,7 @@ printf '%s\n' "${schedule[@]}"
             local build_job = named_job(linux_workflow, "build-compiler")
             local compiler_job = named_job(linux_workflow, "test-linux-compiler")
             local browser_job = named_job(linux_workflow, "browser-toolchain")
+            local browser_stdlib_job = named_job(linux_workflow, "browser-stdlib")
             local playwright_job = named_job(linux_workflow, "browser-playwright")
             local native_coverage_job = named_job(linux_workflow, "native-coverage")
             local macos_job = named_job(macos_workflow, "test-macos")
@@ -5635,16 +5687,17 @@ printf '%s\n' "${schedule[@]}"
             local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
             assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
                 macos_events)
-            assert.equal(6, count_literal(linux_workflow,
+            assert.equal(7, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
             assert.equal(1, count_literal(macos_workflow,
                 "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
-            assert.equal(6, count_literal(linux_workflow, "\n    runs-on:"),
+            assert.equal(7, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
             assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
                 macos_workflow)
             for _, job_name in ipairs({
                 "build-compiler", "test-linux-compiler", "browser-toolchain",
+                "browser-stdlib",
                 "browser-playwright", "native-coverage", "sanitizer",
             }) do
                 assert.equal(1, count_literal(linux_workflow,
@@ -5671,11 +5724,11 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(workflow:find(removed, 1, true), removed)
             end
             assert.falsy(workflow:find("awk", 1, true), workflow)
-            assert.equal(4, count_literal(workflow,
+            assert.equal(5, count_literal(workflow,
                 "codecov/codecov-action@v7"), workflow)
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 "id-token: write"), workflow)
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 'luacov "titan%-compiler/"'), workflow)
             assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
 
@@ -5800,7 +5853,7 @@ printf '%s\n' "${schedule[@]}"
                 "- name: Upload prepared Linux tree", pack_index, true))
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
-            assert.equal(11, count_literal(workflow,
+            assert.equal(13, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/restore@v4"), workflow)
@@ -5809,12 +5862,13 @@ printf '%s\n' "${schedule[@]}"
             assert.equal(4, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/2"), workflow)
             assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
-            assert.equal(6, count_literal(workflow,
+            assert.equal(7, count_literal(workflow,
                 "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
             -- Keep the existing regular cache identity when moving its owner.
             assert.truthy(native_coverage_job:find("-test-linux-stdlib-", 1, true))
             for _, job in ipairs({
-                build_job, compiler_job, browser_job, playwright_job, sanitizer_job,
+                build_job, compiler_job, browser_job, browser_stdlib_job,
+                playwright_job, sanitizer_job,
             }) do
                 assert.falsy(job:find("-test-linux-stdlib-", 1, true))
             end
@@ -5926,7 +5980,6 @@ printf '%s\n' "${schedule[@]}"
             end
             assert.falsy(compiler_job:find("continue-on-error", 1, true))
             assert_codecov_upload(compiler_job,
-                "Upload compiler coverage to Codecov",
                 "compiler-${{ matrix.shard-pair }}", "./luacov.codecov.out", "compiler")
             assert.falsy(compiler_job:find("native-stdlib", 1, true))
             assert.falsy(linux_workflow:find("merge_luacov_stats.lua", 1, true))
@@ -5965,113 +6018,155 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(read_file(".codecov.yml"):find(
                 '"^titanc[.]lua$::titanc"', 1, true))
 
+            for _, job in ipairs({ browser_job, browser_stdlib_job }) do
+                for _, contract in ipairs({
+                    "\n    needs: build-compiler\n", "runs-on: ubicloud-standard-4",
+                    "timeout-minutes: 60",
+                    'TITAN_EMSDK_VERSION: "6.0.13"',
+                    "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
+                    "git clone --depth 1 https://github.com/emscripten-core/emsdk.git",
+                    '"$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"',
+                    '"$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"',
+                    'TITAN_CHROME_VERSION: "156.0.8078.80"',
+                    "547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4",
+                    "chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-${{ env.TITAN_CHROME_SHA256 }}-v1",
+                    "sha256sum -c --strict -",
+                    "python3 scripts/browser_extract_zip.py",
+                    "browser-chrome-sandbox.log", "df -h /dev/shm",
+                    'sudo sysctl -w "$key=0"',
+                    'rm -f "$PREFIX/bin/titanc"',
+                    'rm -rf "$PREFIX/share/lua/5.5/titan-compiler"',
+                    "actions/download-artifact@v8",
+                    "name: titan-linux-prepared.tar.gz",
+                    'echo "$PWD/.lua/bin" >> "$GITHUB_PATH"',
+                    'make lua-browser PREFIX="$PREFIX"',
+                    '"$PREFIX/bin/luarocks" make',
+                    'make browser-sdk PREFIX="$PREFIX"',
+                    'test -z "${EMSDK:-}"', "! command -v emcc",
+                    'TITAN_PROBE_CACHE_DISABLE: "1"', "if: failure()",
+                }) do
+                    assert.equal(1, count_literal(job, contract), contract)
+                end
+                local previous = 0
+                for _, command in ipairs({
+                    'tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz"',
+                    '"$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"',
+                    'node_bin=$(find "$TITAN_EMSDK_ROOT/node"',
+                    "python3 scripts/browser_extract_zip.py",
+                    "grep -q 'id=\"sandbox\"' \"$log\"",
+                    'make lua-browser PREFIX="$PREFIX"',
+                    '"$PREFIX/bin/luarocks" make',
+                    'make browser-sdk PREFIX="$PREFIX"',
+                    "gate_specs=(", '"$PREFIX/bin/busted" -c -o gtest -v',
+                    'luacov "titan%-compiler/" "titanc$"',
+                    "lua spec/support/prepare_codecov_report.lua",
+                    "codecov/codecov-action@v7",
+                }) do
+                    previous = assert(job:find(command, previous + 1, true), command)
+                end
+                local gate = step_containing(job, "gate_specs=(")
+                assert.equal(1, count_literal(gate,
+                    "TITAN_ROOT: ${{ github.workspace }}/.lua"), gate)
+                assert.equal(1, count_literal(gate,
+                    'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"'), gate)
+                assert.truthy(gate:find('[[ ! -f $gate_spec ]]', 1, true), gate)
+                assert.truthy(gate:find('"${gate_specs[@]}"', 1, true), gate)
+            end
+            local all_gate_specs = {}
+            for _, group in ipairs({
+                { job = browser_job, coverage = "browser", specs = {
+                    "spec/wasm_toolchain_spec.lua",
+                    "spec/coder/browser_toolchain_spec.lua",
+                    "spec/browser_trace_map_spec.lua",
+                    "spec/coder/browser_trace_entries_spec.lua",
+                    "spec/coder/browser_budgets_spec.lua",
+                } },
+                { job = browser_stdlib_job, coverage = "browser-stdlib", specs = {
+                    "spec/coder/browser_providers_spec.lua",
+                    "spec/coder/browser_incremental_spec.lua",
+                    "spec/coder/browser_images_spec.lua",
+                    "spec/coder/browser_protocol_spec.lua",
+                    "spec/browser_sdk_spec.lua",
+                    "spec/coder/browser_stdlib_closure_spec.lua",
+                    "spec/coder/browser_entry_gate_spec.lua",
+                    "spec/coder/browser_stdlib_gate_spec.lua",
+                    "spec/coder/browser_fixtures_spec.lua",
+                    "spec/minicoro_spec.lua",
+                } },
+            }) do
+                local gate = step_containing(group.job, "gate_specs=(")
+                local array = assert(gate:match("gate_specs=%((.-)\n          %)"))
+                local actual = {}
+                for path in array:gmatch("spec/[%w_/-]+_spec%.lua") do
+                    assert.is_nil(actual[path], "duplicate gate spec " .. path)
+                    assert.is_nil(all_gate_specs[path], "gate spec in both jobs: " .. path)
+                    actual[path], all_gate_specs[path] = true, true
+                end
+                for _, path in ipairs(group.specs) do
+                    assert.is_true(actual[path], "missing gate spec " .. path)
+                    actual[path] = nil
+                end
+                assert.is_nil(next(actual), "unexpected gate spec")
+                assert_codecov_upload(group.job, group.coverage,
+                    "./luacov.codecov.out", "compiler")
+            end
             for _, contract in ipairs({
-                "name: browser target real toolchain (ubuntu-24.04, " ..
-                    "emsdk 6.0.13, Node 24)",
-                "needs: build-compiler", "runs-on: ubicloud-standard-4",
-                "timeout-minutes: 60",
-                'TITAN_EMSDK_VERSION: "6.0.13"',
-                "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
-                "git clone --depth 1 https://github.com/emscripten-core/emsdk.git",
-                '"$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"',
-                '"$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"',
-                'TITAN_CHROME_VERSION: "156.0.8078.80"',
-                "547dcd374e02961bf998f6046a267644f8502225c36bb78ca307dab32a0b3eb4",
-                "chrome-headless-shell-${{ env.TITAN_CHROME_VERSION }}-${{ env.TITAN_CHROME_SHA256 }}-v1",
-                "sha256sum -c --strict -",
-                "python3 scripts/browser_extract_zip.py",
-                "browser-chrome-sandbox.log",
-                "df -h /dev/shm",
-                'sudo sysctl -w "$key=0"',
-                'rm -f "$PREFIX/bin/titanc"',
-                'rm -rf "$PREFIX/share/lua/5.5/titan-compiler"',
-                "browser-loader.log",
-                "browser-guard.log",
-                "actions/download-artifact@v8",
-                "name: titan-linux-prepared.tar.gz",
-                'echo "$PWD/.lua/bin" >> "$GITHUB_PATH"',
-                'make lua-browser PREFIX="$PREFIX"',
-                '"$PREFIX/bin/luarocks" make',
-                'make browser-sdk PREFIX="$PREFIX"',
-                'TITAN_PROBE_CACHE_DISABLE: "1"',
-                "spec/wasm_toolchain_spec.lua",
-                "spec/coder/browser_toolchain_spec.lua",
-                "spec/coder/browser_providers_spec.lua",
-                "spec/coder/browser_incremental_spec.lua",
-                "spec/coder/browser_images_spec.lua",
-                "spec/coder/browser_protocol_spec.lua",
-                "spec/browser_sdk_spec.lua",
-                "spec/coder/browser_entry_gate_spec.lua",
-                "spec/coder/browser_fixtures_spec.lua",
-                "spec/coder/browser_budgets_spec.lua",
-                "spec/minicoro_spec.lua",
+                "browser-loader.log", "browser-guard.log",
                 "node --test spec/browser/runner.test.mjs",
                 "--js-test spec/browser/loader.test.mjs",
-                "if: failure()",
             }) do
                 assert.equal(1, count_literal(browser_job, contract), contract)
+                assert.falsy(browser_stdlib_job:find(contract, 1, true), contract)
             end
+            assert.falsy(browser_job:find("make titan-stdlib-browser-test", 1, true))
+            local stdlib_sdk = assert(browser_stdlib_job:find(
+                'make browser-sdk PREFIX="$PREFIX"', 1, true))
+            local stdlib_suite = assert(browser_stdlib_job:find(
+                "make titan-stdlib-browser-test", stdlib_sdk, true))
+            local stdlib_gate = assert(browser_stdlib_job:find("gate_specs=(", stdlib_suite, true))
+            assert.is_true(stdlib_sdk < stdlib_suite and stdlib_suite < stdlib_gate)
+            local renderer_flag = "--enable-features=HigherRendererMemoryLimit"
+            local renderer_wrapper = step_containing(browser_stdlib_job, renderer_flag)
+            for _, contract in ipairs({
+                'wrapper="$RUNNER_TEMP/titan-stdlib-chrome"',
+                "printf '#!/usr/bin/env bash\\n",
+                'exec %q ' .. renderer_flag .. ' "$@"\\n',
+                '"$TITAN_CHROME" > "$wrapper"',
+                'chmod +x "$wrapper"',
+                'echo "TITAN_CHROME=$wrapper" >> "$GITHUB_ENV"',
+            }) do
+                assert.truthy(renderer_wrapper:find(contract, 1, true), contract)
+            end
+            assert.equal(1, count_literal(linux_workflow, renderer_flag))
+            assert.equal(1, count_literal(linux_workflow,
+                'wrapper="$RUNNER_TEMP/titan-stdlib-chrome"'))
+            assert.falsy(browser_job:find(renderer_flag, 1, true))
+            local renderer_install = assert(browser_stdlib_job:find(
+                "scripts/browser_extract_zip.py", 1, true))
+            local renderer_wrapper_index = assert(browser_stdlib_job:find(
+                'wrapper="$RUNNER_TEMP/titan-stdlib-chrome"', 1, true))
+            local renderer_sandbox = assert(browser_stdlib_job:find(
+                "grep -q 'id=\"sandbox\"' \"$log\"", 1, true))
+            assert.is_true(renderer_install < renderer_wrapper_index and
+                renderer_wrapper_index < renderer_sandbox)
+            assert.falsy(browser_stdlib_job:find("--no-sandbox", 1, true))
+            assert.falsy(browser_stdlib_job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true))
             local browser_node = named_step(browser_job,
                 "Select Node 24 from the pinned Emscripten SDK")
             assert.truthy(browser_node:find('echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"',
                 1, true), browser_node)
             assert.truthy(browser_node:find("version=$(", 1, true), browser_node)
-            local browser_unpack_index = assert(browser_job:find(
-                "- name: Restore prepared Linux tree and environment", 1, true))
-            local browser_toolchain_index = assert(browser_job:find(
-                "- name: Install Emscripten", browser_unpack_index, true))
-            local browser_node_index = assert(browser_job:find(
-                "- name: Select Node 24 from the pinned Emscripten SDK",
-                browser_toolchain_index, true))
-            local browser_chrome_index = assert(browser_job:find(
-                "- name: Install Chrome for Testing headless shell",
-                browser_node_index, true))
-            local browser_sandbox_index = assert(browser_job:find(
-                "- name: Allow Chrome's user-namespace sandbox on the CI host",
-                browser_chrome_index, true))
-            local browser_lua_index = assert(browser_job:find(
-                "- name: Install the fork's browser Lua into the validation " ..
-                "prefix", browser_sandbox_index, true))
-            local browser_rocks_index = assert(browser_job:find(
-                "- name: Install the native runtime and compiler with LuaRocks",
-                browser_lua_index, true))
-            local browser_sdk_index = assert(browser_job:find(
-                "- name: Build and install the browser SDK",
-                browser_rocks_index, true))
-            local browser_gate_index = assert(browser_job:find(
-                "- name: Run the browser real-toolchain gate",
-                browser_sdk_index, true))
+            local browser_gate_index = assert(browser_job:find("gate_specs=(", 1, true))
             local browser_runner_index = assert(browser_job:find(
-                "- name: Run the browser runner supervisor suite",
-                browser_gate_index, true))
+                "node --test spec/browser/runner.test.mjs", browser_gate_index, true))
             local browser_upload_index = assert(browser_job:find(
-                "- name: Upload browser failure logs",
-                browser_runner_index, true))
-            assert.is_true(browser_unpack_index < browser_toolchain_index and
-                browser_toolchain_index < browser_node_index and
-                browser_node_index < browser_chrome_index and
-                browser_chrome_index < browser_sandbox_index and
-                browser_sandbox_index < browser_lua_index and
-                browser_lua_index < browser_rocks_index and
-                browser_rocks_index < browser_sdk_index and
-                browser_sdk_index < browser_gate_index and
-                browser_gate_index < browser_runner_index and
+                "name: browser-toolchain-failure", browser_runner_index, true))
+            assert.is_true(browser_gate_index < browser_runner_index and
                 browser_runner_index < browser_upload_index)
-            -- The gate runs the installed compiler of this commit, like every
-            -- other Linux job that consumes the prepared tree, and it is the
-            -- only strict browser gate: the portable JS steps carry their own.
-            local browser_gate = named_step(browser_job,
-                "Run the browser real-toolchain gate")
-            assert.equal(1, count_literal(browser_gate,
-                "TITAN_ROOT: ${{ github.workspace }}/.lua"), browser_gate)
             local node_trace_gate = named_step(browser_job,
                 "Build and run the browser trace gate under Node")
             assert.equal(1, count_literal(node_trace_gate,
                 "TITAN_ROOT: ${{ github.workspace }}/.lua"), node_trace_gate)
-            assert.truthy(browser_gate:find('"$PREFIX/bin/busted"', 1, true),
-                browser_gate)
-            assert.truthy(browser_gate:find(
-                'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"', 1, true), browser_gate)
             -- Emscripten must stay out of the ordinary native rock build, and
             -- the unregistered preparation copies must not survive as backups.
             local browser_rocks = named_step(browser_job,
@@ -6121,23 +6216,10 @@ printf '%s\n' "${schedule[@]}"
                 "Run the portable loader suite under Node and Chromium")
             assert.truthy(browser_loader:find("for engine in node chromium",
                 1, true), browser_loader)
-            -- The browser job is the only lane that exercises real linking and
-            -- the executing protocol, so it publishes its own compiler coverage.
-            assert.truthy(browser_gate:find("-c -o gtest", 1, true), browser_gate)
-            local browser_coverage = named_step(browser_job,
-                "Upload browser coverage to Codecov")
-            assert.truthy(browser_coverage:find("name: browser", 1, true),
-                browser_coverage)
-            assert.truthy(browser_coverage:find("flags: compiler", 1, true),
-                browser_coverage)
-            assert.truthy(browser_coverage:find("use_oidc: true", 1, true),
-                browser_coverage)
             local browser_coverage_index = assert(browser_job:find(
-                "- name: Upload browser coverage to Codecov",
-                browser_gate_index, true))
+                "codecov/codecov-action@v7", browser_gate_index, true))
             assert.is_true(browser_coverage_index <
-                assert(browser_job:find(
-                    "- name: Run the portable loader suite under Node and Chromium",
+                assert(browser_job:find("--js-test spec/browser/loader.test.mjs",
                     browser_coverage_index, true)))
             local browser_guard = named_step(browser_job,
                 "Run the optimized guard suite under Node and Chromium")
@@ -6167,6 +6249,7 @@ printf '%s\n' "${schedule[@]}"
 
             for _, contract in ipairs({
                 "needs: build-compiler", "runs-on: ubicloud-standard-4",
+                "timeout-minutes: 60",
                 "profile: [validation, production]",
                 "engine: [chromium, firefox, webkit]",
                 'TITAN_PLAYWRIGHT_VERSION: "1.56.1"',
@@ -6273,10 +6356,8 @@ printf '%s\n' "${schedule[@]}"
             end
             assert.falsy(native_coverage_job:find("continue-on-error", 1, true))
             assert_codecov_upload(native_coverage_job,
-                "Upload stdlib compiler integration coverage to Codecov",
                 "compiler-stdlib", "./luacov.codecov.out", "compiler")
             assert_codecov_upload(native_coverage_job,
-                "Upload native stdlib line coverage to Codecov",
                 "native-stdlib-lines", "out/coverage/report/coverage.info", "native-stdlib")
             local native_upload = named_step(native_coverage_job,
                 "Upload native stdlib line coverage to Codecov")

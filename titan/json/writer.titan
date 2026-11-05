@@ -302,6 +302,9 @@ local function Encoder:visit(subject: value, path: Path, depth: integer)
 end
 
 local function encode_value(subject: value, settings: Settings): string
+  if settings.max_depth > writer_depth_limit then
+    settings.max_depth = writer_depth_limit
+  end
   local output = string.writer()
   defer output:close()
   local encoder = Encoder {

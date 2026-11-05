@@ -978,9 +978,9 @@ Module dependencies are resolved *compiled first*:
   remains public-only.
 * A module named explicitly on the `titanc` command line is a build root, so
   its source is selected before any same-named binary. This is why
-  `titanc titan.uv` rebuilds the `titan/uv/uv.titan` folder module while that
-  module's own imports
-  still resolve through the selected compiled-format order first.
+  `titanc titan.uv` rebuilds the `titan/uv/` folder module (whose native main
+  is `uv.native.titan`) while that module's own imports still resolve through
+  the selected compiled-format order first.
 
 `--source-first` changes ordinary dependency selection to prefer available
 source. `--incremental` may reuse a selected source module's companion object;

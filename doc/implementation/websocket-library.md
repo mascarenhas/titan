@@ -8,7 +8,7 @@ and `gc` imports. It never imports private UV/async/transport state.
 
 ## Contributor responsibilities
 
-- `websocket.titan` declares public messages, errors and validated option owners,
+- `websocket.native.titan` declares public messages, errors and validated option owners,
   the transfer schema and the protocol budgets (`FRAME_BYTES`, `WORK_BYTES`,
   `FRAME_BUDGET`), imports dependencies, and makes the `openings` registry an
   ephemeron in its initializer.
@@ -160,7 +160,7 @@ shutdown and close call through its final cleanup. Internal Work slots may be
 released earlier to preserve frame fairness and receive takeover, so the count
 keeps a caller that is still resuming or unwinding from transferring.
 
-`connection_transfer_fields` (`websocket.titan`) is a private anonymous-root
+`connection_transfer_fields` (`websocket.native.titan`) is a private anonymous-root
 protobuf schema: the HTTP `UpgradedStream` payload bytes, client role,
 subprotocol, read limit, and the unread suffix of the input chunk. Reflection
 unwraps the known I/O Interface to that concrete owner; no Interface wrapper or

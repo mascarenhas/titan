@@ -380,7 +380,7 @@ other worker-acquired resources; an adapter owns those itself.
 
 ### Final state teardown is not ordinary shutdown
 
-Public `uv.loop_abandon` (`titan/uv/uv.titan`) is the destructive boundary for
+Public `uv.loop_abandon` (`titan/uv/uv.native.titan`) is the destructive boundary for
 an exclusively owned loop during final Lua-state teardown. It returns zero for
 uninitialized storage, raises off the owning main thread, and returns `EBUSY`
 during an active run, walk, or inline dispatch. Async's Runtime finalizer calls

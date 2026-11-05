@@ -13018,8 +13018,13 @@ end)
 
 describe("target-aware source resolver", function()
     local fixtures = require "spec.fixtures.target_selection.support"
+    local function slashed_files(files)
+        local result = {}
+        for index, filename in ipairs(files) do result[index] = paths.to_slash(filename) end
+        return result
+    end
     local root, contexts, saved_imported, saved_registry, saved_path
-    local saved_browser_target, saved_initialize_platform
+    local saved_browser_target, saved_initialize_platform, saved_binary_path
     local function context(target, strategy)
         local value = driver.new_resolver_context({ target = target, io = strategy,
             analysis_only = true })
@@ -13035,6 +13040,7 @@ describe("target-aware source resolver", function()
         saved_imported, saved_registry, saved_path =
             driver.imported, types.registry, driver.TITAN_SOURCE_PATH
         driver.imported, types.registry, driver.TITAN_SOURCE_PATH = {}, {}, root
+        saved_binary_path = driver.TITAN_BIN_PATH
         saved_browser_target, saved_initialize_platform =
             driver._browser_target, driver.initialize_platform
         driver._browser_target = setmetatable({ build = function(_, inputs)
@@ -13052,6 +13058,7 @@ describe("target-aware source resolver", function()
         for _, value in ipairs(contexts) do assert(driver.close_resolver_context(value)) end
         driver.imported, types.registry, driver.TITAN_SOURCE_PATH =
             saved_imported, saved_registry, saved_path
+        driver.TITAN_BIN_PATH = saved_binary_path
         driver._browser_target, driver.initialize_platform =
             saved_browser_target, saved_initialize_platform
         fixtures.remove(root)
@@ -13099,21 +13106,75 @@ describe("target-aware source resolver", function()
         for _, target in ipairs(driver.SOURCE_LABELS) do
             local ctx = context(target)
             local source = assert(driver.resolve_source(ctx, "choice"))
-            assert.equal(root .. "/choice." .. target .. ".titan", source.main)
-            assert.equal(root .. "/choice.titan", source.native_output)
+            assert.equal(root .. "/choice." .. target .. ".titan", paths.to_slash(source.main))
+            assert.equal(root .. "/choice.titan", paths.to_slash(source.native_output))
             assert.equal("choice", source.program_output)
             assert(os.remove(source.main))
             local fallback = assert(driver.resolve_source(ctx, "choice"))
             local label = target ~= "browser" and target ~= "native" and "native" or nil
             assert.equal(root .. "/choice" .. (label and "." .. label or "") .. ".titan",
-                fallback.main)
+                paths.to_slash(fallback.main))
             put("choice." .. target .. ".titan")
         end
         put("only.browser.titan")
         assert.is_nil(driver.resolve_source(context("linux"), "only"))
         assert.equal(root .. "/only.browser.titan",
-            assert(driver.resolve_source(context("browser"), "only")).main)
+            paths.to_slash(assert(driver.resolve_source(context("browser"), "only")).main))
     end)
+
+    local stdlib_root = paths.to_slash(lfs.currentdir())
+    local excluded_stdlib = {
+        { "async", "async" }, { "timer", "timer" }, { "io", "io" },
+        { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" }, { "os", "os" },
+        { "uv", "uv/uv", "tcp" }, { "http", "http/http", "client" },
+        { "websocket", "websocket/websocket", "handshake" },
+        { "sqlite3", "sqlite3/sqlite3", "bindings" },
+        { "lua", "lua/lua", "worker" }, { "thread", "thread/thread", "channel" },
+    }
+    for _, entry in ipairs(excluded_stdlib) do
+        local name = "titan." .. entry[1]
+        local physical = stdlib_root .. "/titan/" .. entry[2]
+        it("keeps the native-only stdlib selection for " .. name, function()
+            for _, target in ipairs({ "linux", "darwin", "windows", "native" }) do
+                local source = assert(driver.resolve_source(context(target), name, stdlib_root))
+                assert.equal(physical .. ".native.titan", paths.to_slash(source.main), target)
+                assert.equal(physical .. ".titan", paths.to_slash(source.native_output), target)
+                assert.equal(entry[3] and "folder" or "flat", source.kind, target)
+                assert.equal(source.main, source.files[1], target)
+            end
+        end)
+
+        it("rejects browser imports of the native-only stdlib module " .. name, function()
+            driver.TITAN_SOURCE_PATH = root .. ";" .. stdlib_root
+            driver.TITAN_BIN_PATH = root
+            local ctx = context("browser")
+            assert.is_nil(driver.resolve_source(ctx, name, stdlib_root))
+            put("consumer.titan", 'local excluded = import "' .. entry[1] .. '"\n')
+            local ok, _, errors = driver.defaultloader({}, {
+                context = ctx, source_roots = { consumer = true },
+            })("consumer")
+            assert.is_true(ok)
+            assert.equal(1, #errors, table.concat(errors, "\n"))
+            assert.matches("module '" .. name .. "' not found", errors[1], 1, true)
+            assert.is_nil(driver.imported[name])
+        end)
+    end
+
+    for _, target in ipairs(driver.SOURCE_LABELS) do
+        it("blocks native-only stdlib folder contributors on " .. target, function()
+            for _, entry in ipairs(excluded_stdlib) do
+                if entry[3] then
+                    local name = "titan." .. entry[1] .. "." .. entry[3]
+                    local source = assert(driver.resolve_source(context(target), name, stdlib_root))
+                    assert.equal("blocked", source.kind, name)
+                    assert.equal(stdlib_root .. "/titan/" .. entry[2] .. ".native.titan",
+                        paths.to_slash(source.main), name)
+                    assert.equal(stdlib_root .. "/titan/" .. entry[1] .. "/" .. entry[3] .. ".titan",
+                        paths.to_slash(source.contributor), name)
+                end
+            end
+        end)
+    end
 
     posix_model_it("selects native then default on an unlisted native host", function()
         local strategy = compiler_io.new_sync()
@@ -13125,10 +13186,10 @@ describe("target-aware source resolver", function()
         local ctx = context(nil, strategy)
         assert.equal("native", driver.context_target(ctx))
         assert.equal(root .. "/choice.native.titan",
-            assert(driver.resolve_source(ctx, "choice")).main)
+            paths.to_slash(assert(driver.resolve_source(ctx, "choice")).main))
         assert(os.remove(root .. "/choice.native.titan"))
         assert.equal(root .. "/choice.titan",
-            assert(driver.resolve_source(ctx, "choice")).main)
+            paths.to_slash(assert(driver.resolve_source(ctx, "choice")).main))
     end)
 
     it("preserves root and folder precedence and target-independent privacy", function()
@@ -13136,7 +13197,7 @@ describe("target-aware source resolver", function()
         local ctx = context("linux")
         local roots = root .. "/early;" .. root .. "/late"
         assert.equal(root .. "/early/pick.titan",
-            assert(driver.resolve_source(ctx, "pick", roots)).main)
+            paths.to_slash(assert(driver.resolve_source(ctx, "pick", roots)).main))
         put("early/pick/pick.titan")
         assert.equal("folder", assert(driver.resolve_source(ctx, "pick", roots)).kind)
         assert(os.remove(root .. "/early/pick/pick.titan"))
@@ -13147,7 +13208,7 @@ describe("target-aware source resolver", function()
         put("early/pick/child.titan")
         local blocked = assert(driver.resolve_source(ctx, "pick.child", roots))
         assert.equal("blocked", blocked.kind)
-        assert.equal(root .. "/early/pick/pick.browser.titan", blocked.main)
+        assert.equal(root .. "/early/pick/pick.browser.titan", paths.to_slash(blocked.main))
         put("early/pick/child/child.native.titan")
         assert.equal("folder", assert(driver.resolve_source(ctx, "pick.child", roots)).kind)
         put("early/pick/absent.browser.titan")
@@ -13164,11 +13225,12 @@ describe("target-aware source resolver", function()
         local expected = { "ensemble.linux.titan", "a-common.native.titan", "a.titan",
             "a_extra.linux.titan", "native_only.native.titan", "x.y.titan" }
         for index, name in ipairs(expected) do expected[index] = root .. "/ensemble/" .. name end
-        assert.same(expected, source.files)
+        assert.same(expected, slashed_files(source.files))
         local browser = assert(driver.resolve_source(context("browser"), "ensemble"))
         assert.same({ root .. "/ensemble/ensemble.titan", root .. "/ensemble/a.titan",
-            root .. "/ensemble/ignored.browser.titan", root .. "/ensemble/x.y.titan" }, browser.files)
-        assert.equal(root .. "/ensemble/ensemble.titan", source.native_output)
+            root .. "/ensemble/ignored.browser.titan", root .. "/ensemble/x.y.titan" },
+            slashed_files(browser.files))
+        assert.equal(root .. "/ensemble/ensemble.titan", paths.to_slash(source.native_output))
     end)
 
     it("preserves no-variant contributor order when any one member becomes a variant", function()
@@ -13177,7 +13239,7 @@ describe("target-aware source resolver", function()
         for _, name in ipairs(names) do put("ensemble/" .. name .. ".titan") end
         local ctx = context("native")
         local function selected()
-            return assert(driver.resolve_source(ctx, "ensemble")).files
+            return slashed_files(assert(driver.resolve_source(ctx, "ensemble")).files)
         end
         local expected = { root .. "/ensemble/ensemble.titan" }
         for _, name in ipairs(names) do expected[#expected + 1] = root .. "/ensemble/" .. name .. ".titan" end
@@ -13210,10 +13272,11 @@ describe("target-aware source resolver", function()
         local strategy = compiler_io.new_sync()
         local original_read = strategy.read_file
         function strategy:read_file(filename)
-            if filename == root .. "/selected.native.titan" then
+            local slashed = paths.to_slash(filename)
+            if slashed == root .. "/selected.native.titan" then
                 return nil, "selected read denied"
             end
-            assert.not_equal(root .. "/selected.titan", filename)
+            assert.not_equal(root .. "/selected.titan", slashed)
             return original_read(self, filename)
         end
         function strategy:list() return nil, "selected enumeration denied" end
@@ -13235,13 +13298,14 @@ describe("target-aware source resolver", function()
         local strategy = compiler_io.new_sync()
         local reads, original_read = {}, strategy.read_file
         function strategy:read_file(filename)
-            reads[filename] = true
+            reads[paths.to_slash(filename)] = true
             return original_read(self, filename)
         end
         local ctx = context("linux", strategy)
         local ok, _, errors = driver.defaultloader({}, { context = ctx,
             source_roots = { ensemble = true } })("ensemble")
         assert.is_true(ok); assert.equal(0, #errors)
+        assert.is_true(reads[root .. "/ensemble/ensemble.titan"])
         assert.is_nil(reads[root .. "/ensemble/bad.browser.titan"])
         assert.is_nil(reads[root .. "/ensemble/header.browser.titan"])
         put("terminal.titan")
@@ -13250,6 +13314,7 @@ describe("target-aware source resolver", function()
             source_roots = { terminal = true } })("terminal")
         assert.is_false(selected)
         assert.matches("terminal.native.titan", message, 1, true)
+        assert.is_true(reads[root .. "/terminal.native.titan"])
         assert.is_nil(reads[root .. "/terminal.titan"])
     end)
 
@@ -13269,8 +13334,8 @@ describe("target-aware source resolver", function()
             source_roots = { cached = true }, cached_interfaces = { cached = cached } })
         ok, _, errors = current("cached", { kind = "source-import" })
         assert.is_true(ok); assert.equal(0, #errors)
-        assert.equal(root .. "/cached.linux.titan", driver.imported.cached.filename)
-        assert.equal(root .. "/cached.titan", driver.imported.cached.native_output)
+        assert.equal(root .. "/cached.linux.titan", paths.to_slash(driver.imported.cached.filename))
+        assert.equal(root .. "/cached.titan", paths.to_slash(driver.imported.cached.native_output))
     end)
 
     it("keeps every generated stem logical when given a physical variant main", function()

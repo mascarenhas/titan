@@ -2,5 +2,4 @@
 local test = import "test"
 local coroutine = import "coroutine"
 local common = import "support.common.titan"
-local command = import "support.command.titan"
 local support = import "coroutine.test_support.titan"

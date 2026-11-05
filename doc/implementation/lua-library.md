@@ -9,7 +9,7 @@ need no compiler intrinsic. The module has three files:
 
 | File | Owns |
 | --- | --- |
-| `titan/lua/lua.titan` | current-state `load`, `load_from_reader`, `dofile` and `require`; the public `Lua` owner, its `LuaCall` operation record, admission, argument preparation and host-side result copy |
+| `titan/lua/lua.native.titan` | current-state `load`, `load_from_reader`, `dofile` and `require`; the public `Lua` owner, its `LuaCall` operation record, admission, argument preparation and host-side result copy |
 | `titan/lua/worker.titan` | source-defined foreign entries that run on the independent state: `lua_state_open`, `lua_state_run`, `lua_state_execute` and the result converters |
 | `titan/lua/native.h` | the `titan_lua_open`/`titan_lua_preload` initialization packet and the `titan_lua_call`/`titan_lua_value` call carrier |
 
