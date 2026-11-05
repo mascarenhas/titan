@@ -175,10 +175,13 @@ restore the command, and run it again.
 
 ## Validate an installation
 
-Use a separate validation SDK and local NTFS workspace. The test entrypoint
-selects the `validation` profile and reinstalls the source rock before testing:
+Use a separate validation SDK and local NTFS workspace. In the MSYS2 shell,
+set `LC_ALL=C.UTF-8` so utilities such as `cygpath` preserve non-ASCII paths;
+the plain `C` locale can truncate them. The test entrypoint selects the
+`validation` profile and reinstalls the source rock before testing:
 
 ```sh
+export LC_ALL=C.UTF-8
 mingw32-make -f Makefile.win test PREFIX=/c/Titan/sdk-validation
 ```
 

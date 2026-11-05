@@ -576,7 +576,7 @@ do base_offset = 10 end
         return src, cli
     end
 
-    it("upgrades same-path, moved and coverage-anchored pre-marker generated C", function()
+    local function assert_legacy_upgrade(newline)
         local src, cli = legacy_program("legacy")
         local marker = driver.GENERATED_C_MARKER
         local function unit_names(out)
@@ -597,10 +597,14 @@ do base_offset = 10 end
             for _, name in ipairs(names) do
                 local filename = out .. "/" .. name
                 local contents = read_file(filename)
+                -- Exercise native text-mode generated output on either host
+                -- while writing the emulated legacy bytes in binary mode.
+                contents = contents:gsub("\r\n", "\n")
+                if newline == "\r\n" then contents = contents:gsub("\n", newline) end
                 assert.equal(marker, contents:sub(1, #marker), filename)
                 -- Pre-marker compilers also had no generated-C filename macro.
                 contents = contents:gsub("^[^\n]*\n", "", 1)
-                    :gsub('^#define[ \t]+TITAN_GENERATED_C_FILE[ \t]+"[^"\n]*"\n', "", 1)
+                    :gsub('^#define[ \t]+TITAN_GENERATED_C_FILE[ \t]+"[^"\r\n]*"\r?\n', "", 1)
                 if anchor_lines then
                     contents = assert(coverage_lines.convert(contents, filename))
                 end
@@ -614,8 +618,8 @@ do base_offset = 10 end
                 contents = contents:gsub("^[^\n]*\n", "", 1)
             end
             contents = contents:gsub(
-                '^#define[ \t]+TITAN_GENERATED_C_FILE[ \t]+"[^"\n]*"\n', "", 1)
-            return assert(contents:match('^#include "([^"\n]*)"'))
+                '^#define[ \t]+TITAN_GENERATED_C_FILE[ \t]+"[^"\r\n]*"\r?\n', "", 1)
+            return assert(contents:match('^#include "([^"\r\n]*)"'))
         end
         local revision = 0
         local function rebuild(out, parts, names)
@@ -655,7 +659,13 @@ do base_offset = 10 end
         assert.truthy(read_file(anchored .. "/legacy.c"):find(
             '#line %d+ "[^\n]*"\nstatic TITAN_UNUSED inline int '))
         rebuild(anchored, 1, names)
-    end)
+    end
+
+    for _, newline in ipairs({ "LF", "CRLF" }) do
+        it("upgrades same-path, moved and coverage-anchored pre-marker generated C with " .. newline, function()
+            assert_legacy_upgrade(newline == "LF" and "\n" or "\r\n")
+        end)
+    end
 
     it("refuses authored and unproven split-shaped C at reserved C outputs", function()
         local _, cli = legacy_program("refuse")

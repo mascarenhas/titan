@@ -1048,6 +1048,33 @@ file and continues after a failed file, and the supervisor preserves the
 worker's complete native exit status; see [Busted
 partitions](test-runner.md#busted-partitions).
 
+### Portable compiler fixtures
+
+Run the MSYS2 harness with `LC_ALL=C.UTF-8`, including when a fixture invokes
+`cygpath`: the plain `C` locale can lose non-ASCII path bytes. Fixture source
+and generated-C snapshots use binary-mode reads and writes, and child Lua
+commands select the SDK's `bin/lua.exe`. A child that loads compiler Lua from
+the checkout must also receive the selected SDK through `TITAN_ROOT`; otherwise
+it can select checkout-owned runtime inputs and attempt Unix Make/libbacktrace
+bootstrap instead of using the prepared Windows SDK.
+
+Resolver and native-library lookup may return Windows separators. Where a test
+asserts only the selected file, compare with `path.to_slash` at the assertion,
+without changing production path spelling or weakening the rest of the result.
+Pure generated-header fixtures use drive-qualified virtual output paths on
+Windows, so direct code generation and the driver's absolute header plans
+refer to the same location.
+
+Browser builds remain unsupported on Windows. The CLI rejects that host when
+validating `--target browser`, before applying browser-specific option policy.
+The option-policy tests retain the exact disabled-line-directive diagnostic
+as a separate assertion; the Windows child asserts the earlier host rejection.
+
+The pre-marker generated-C upgrade fixture reads bytes in binary mode and
+exercises both LF and CRLF output. Removing generated preamble lines must
+accept either ending: the driver's text-mode C writer uses native Windows
+newlines, while the emulated legacy files are written without translation.
+
 ## Native line coverage
 
 The prepared SDK supports `titanc --test --coverage` with matching Clang/LLVM
