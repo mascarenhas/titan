@@ -1072,13 +1072,14 @@ mangled function name. An unmapped or native function without source metadata
 reports `source unavailable` and the reason; a native function with a mapping
 can name its C source. A nonempty `sourceRoot` is shown separately, as recorded
 in the map. Rejection happens before publication and leaves any previously
-published `.mjs`, `.wasm` and `.wasm.map` unchanged. Titan does not split an
-oversized function by hand or automatically outline it.
+published `.mjs`, `.wasm` and `.wasm.map` unchanged. Titan does not split or
+outline an oversized function automatically.
 
-Startup memory is measured separately from static byte size. The
-[implementation measurements](../implementation/browser-target.md#build-time-image-bounds)
-qualify the original large-function regression and a complete standard-library
-test image on Linux and macOS; they are not a startup-memory guarantee.
+Static byte size does not bound startup memory. The [implementation
+measurements](../implementation/browser-target.md#build-time-image-bounds)
+record observed startup memory for a large-function program and a complete
+standard-library test image on Linux and macOS; they are measurements, not a
+startup-memory guarantee.
 
 A browser program runs with these fixed sizes:
 

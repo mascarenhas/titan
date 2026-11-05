@@ -381,10 +381,10 @@ After step 7, `browser-stdlib` runs:
     measured.
 11. **Failure logs.** On failure, `actions/upload-artifact` uploads, as
     `browser-stdlib-failure` for seven days, the `browser-*.log` files and the
-    browser core stdlib suite's evidence: `out/browser-stdlib/*.log` (each
-    image's per-engine stdout and stderr logs),
-    `out/browser-stdlib/images/*.{mjs,wasm,wasm.map}`, the `*roots.txt` files,
-    and `members.md`.
+    browser core stdlib suite's evidence: `out/browser-stdlib/*.log` (the
+    per-engine `stdlib.<engine>.log` stdout and `stdlib.<engine>.stderr.log`
+    files), `out/browser-stdlib/images/*.{mjs,wasm,wasm.map}`, `roots.txt`
+    (through the `*roots.txt` pattern), and `members.md`.
 
 ## `browser-playwright` job
 
