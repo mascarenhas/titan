@@ -24,7 +24,7 @@ local function final_counts(contents)
     return counts
 end
 
-local function validate(contents, roots, filtered)
+local function validate(contents, roots, filtered, allow_empty)
     local inventory, seen_owners = {}, {}
     for _, root in ipairs(roots) do
         if inventory[root] then return nil, "duplicate native test root: " .. root end
@@ -116,7 +116,9 @@ local function validate(contents, roots, filtered)
             end
         end
     end
-    if not began or result.count == 0 then return nil, "native suite selected no cases" end
+    if not began or (result.count == 0 and not (filtered and allow_empty)) then
+        return nil, "native suite selected no cases"
+    end
     for name in pairs(started) do
         if not terminal[name] then return nil, "native case did not finish: " .. name end
     end
@@ -135,7 +137,7 @@ local function validate(contents, roots, filtered)
     return result
 end
 
-local function validate_union(groups, roots)
+local function validate_union(groups, roots, filtered)
     local root_inventory = {}
     for _, root in ipairs(roots or {}) do
         if root_inventory[root] then return nil, "duplicate native test root: " .. root end
@@ -174,7 +176,7 @@ local function validate_union(groups, roots)
             planned_owners[owner] = label
         end
 
-        local group_result, group_err = validate(group.contents or "", group.owners, false)
+        local group_result, group_err = validate(group.contents or "", group.owners, filtered, filtered)
         if not group_result then
             return nil, "group " .. label .. ": " .. group_err
         end
@@ -200,7 +202,8 @@ local function validate_union(groups, roots)
             return nil, "native root did not execute: " .. root
         end
     end
-    if combined.owners ~= #roots then
+    if combined.count == 0 then return nil, "native suite selected no cases" end
+    if not filtered and combined.owners ~= #roots then
         return nil, "native owner union count differs from root inventory"
     end
     return combined
