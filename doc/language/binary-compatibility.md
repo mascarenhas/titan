@@ -143,12 +143,13 @@ lambda without calling it. A replacement `Handler.new` could call it while
 rejects an override at load time, before its initializers run. The same
 applies when the stored value is a bound own method, an Interface value with
 an own implementation, or a value of an own record or union type with methods,
-including when it is nested inside another stored argument. Only delivered
-stored arguments create this requirement: discarded surplus values and spread
-setup alone do not. Callback-free stored arguments carry no such requirement.
-All evaluated computations still follow the [initializer dependency
-rule](modules.md#initializer-dependencies); generated storage does not protect
-an own callable exposed to a Map metamethod while computing an argument.
+including when it is nested inside another stored argument. Only values
+delivered to the constructor's parameters create this requirement: surplus
+arguments and spread elements that no parameter receives do not, and neither
+do callback-free stored arguments. Every evaluated computation still follows
+the [initializer dependency rule](modules.md#initializer-dependencies);
+generated storage does not protect an own callable exposed to a Map
+metamethod while an argument is computed.
 
 A call that fuses fresh native storage into the record's own allocation also
 relies on the generated default and rejects an override; that construction

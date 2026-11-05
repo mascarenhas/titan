@@ -89,10 +89,10 @@ earlier imports, but cannot evaluate a reference to the current module's own
 variables, functions, or methods. `const` makes the binding read-only; it does
 not require compile-time evaluation. A lambda or another own callable, such as
 a bound own method, may be stored, but not passed to or invoked by an explicit
-or implicit call that the initializer evaluates. This includes potentially
-metamethod-bearing Map indexing, equality, length, and spread; ordinary fresh
-Map literals and non-dispatching operations retain the distinctions described
-by the dependency rule.
+or implicit call that the initializer evaluates. Implicit calls include the
+metamethods that indexing, equality, length, and spread can invoke on a
+potentially metatable-bearing Map; the dependency rule lists the operations,
+such as those on fresh Map literals, that cannot dispatch.
 
 An initializer-less const module variable must have an explicit type from the
 same missing-nil domain as an initializer-less mutable local. It starts as the

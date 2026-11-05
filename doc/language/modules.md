@@ -342,22 +342,27 @@ c = registry.add({Counter(1):current})   -- rejected: nested in a call argument
 Map operations can call Lua metamethods without written call syntax. A read
 from a potentially metatable-bearing Map exposes both the Map and its key;
 Map/Map and Map/`value` equality in either orientation expose both operands;
-integer-Map length and spread expose the Map receiver. For example, given an
-imported `registry: {value: value}`, these initializers are rejected:
+integer-Map length and spread expose the Map receiver. For example, if an
+imported module `dep` declares `entries: {value: value}`, these initializers
+are rejected:
 
 ```text
-keyed = dep.registry[Counter(1):current]  -- __index could call the key
-equal = dep.registry ==                -- __eq could call the stored method
+keyed = dep.entries[Counter(1):current]   -- __index could call the key
+equal = dep.entries ==                    -- __eq could call the stored method
     ({["read"] = Counter(1):current} as {value: value})
 ```
 
-Fresh ordinary Map literals have no metatable, so operations proved to use
-only such fresh values do not create this exposure. Casts and boxing do not
-attach a metatable. Array indexing and length, raw `value`/`value` equality,
-and the supported primitive arithmetic, ordering, and concatenation
-operations do not dispatch arbitrary Lua metamethods. Their operand
-computations still obey the rule, and none clears exposure inherited from an
-enclosing call. See [Maps](arrays-maps.md#maps) for the precise dispatch rules.
+A fresh ordinary Map literal has no metatable. Indexing, length, or spread of
+such a literal cannot dispatch, and neither can equality between two of them,
+so these operations create no exposure even when the literals hold own
+callables. A cast or boxing neither attaches nor removes a metatable, and an
+`and`/`or` result stays fresh only when both operands are fresh or primitive.
+Array indexing and length, raw `value`/`value` equality, equality with an
+option operand, and the supported primitive arithmetic, ordering, and
+concatenation operations do not dispatch arbitrary Lua metamethods. Their
+operand computations still obey the rule, and none clears exposure inherited
+from an enclosing call. See [Maps](arrays-maps.md#maps) for the Map dispatch
+rules.
 
 Only own implementations count. An Interface declared by this module may
 dispatch to a method implemented by an imported record or union, and imported
@@ -367,13 +372,14 @@ An imported generated record constructor stores its arguments without calling
 them only while its provider keeps the generated `new`. When an initializer
 stores an own callable through one, directly or nested in another stored
 argument, the compiled consumer therefore also requires the generated default
-constructor. Only values delivered to stored parameter slots create this
-requirement, not discarded surplus values or spread setup alone. Every written
-argument still evaluates and must obey the dependency rule. A replacement
-provider that overrides `new` is rejected as incompatible when the consumer
-loads, before any of its initializers run; see [Replacing shared-library
+constructor. Only values delivered to the constructor's parameters create this
+requirement; surplus arguments and spread elements that no parameter receives
+are not stored and create none, although every written argument still
+evaluates and must obey the dependency rule. A replacement provider that
+overrides `new` is rejected as incompatible when the consumer loads, before
+any of its initializers run; see [Replacing shared-library
 dependencies](binary-compatibility.md#private-record-fields-and-construction).
-Imported construction with callback-free stored arguments depends only on
+Imported construction whose stored arguments are callback-free depends only on
 `new`'s signature, so such a consumer observes a compatible custom `new`.
 
 Initializers execute once per module instance, in declaration order. The

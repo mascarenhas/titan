@@ -122,17 +122,17 @@ record call whose delivered stored arguments carry an own callable (a lambda,
 bound own method, own Interface implementation, or own method-bearing
 record/union value, possibly nested in other stored arguments). The initializer
 checker accepts that storage only because generated construction does not call
-it, so it marks
-the call `_binary_initializer_constructor` and usage collection requests
-`literal` as well. A replacement that overrides `new` then fails compatibility
-checking before the consumer initializes, instead of invoking the callable
-against uninitialized module state. Nested generated constructors carry the
-requirement for both the outer and the inner record. Raw literals and
+it, so it marks the call `_binary_initializer_constructor` and usage collection
+requests `literal` as well. A replacement that overrides `new` then fails
+compatibility checking before the consumer initializes, instead of invoking
+the callable against uninitialized module state. Nested generated constructors
+carry the requirement for both the outer and the inner record. Raw literals and
 fused-storage calls retain their separate construction-capability requirement.
-Every evaluated argument remains effect-checked, but discarded surplus and
-spread setup do not independently request `literal`; only fixed/formal
-delivered values do. An implicit Map call evaluated inside an argument is
-checked separately and cannot be made safe by this storage capability.
+Every evaluated argument is still checked for own references and exposure, but
+discarded surplus and spread setup carriers do not independently request
+`literal`; only values delivered to the constructor's fixed parameters do. An
+implicit Map call evaluated inside an argument is checked separately and
+cannot be made safe by this storage capability.
 
 A `case` whose non-fallthrough proof depends on complete variant coverage
 ([case checking and control flow](unions.md#case-checking-and-control-flow)) is marked

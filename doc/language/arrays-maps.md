@@ -463,20 +463,23 @@ broaden that static rule.
 ### Module-variable initializers
 
 Map metatables also matter to the [initializer dependency
-rule](modules.md#initializer-dependencies). A potentially metatable-bearing
-Map read exposes its Map and key to `__index`; Map/Map or Map/`value`
-comparison exposes both operands to `__eq`; integer-Map length and spread
-expose their Map receiver to `__len` or `__index`. An own lambda, bound method,
-or other own callable cannot reach these implicit calls during initialization,
-even through a nested container or generated constructor.
+rule](modules.md#initializer-dependencies). A read from a potentially
+metatable-bearing Map exposes the Map and key to `__index`; Map/Map or
+Map/`value` comparison exposes both operands to `__eq`; integer-Map length and
+spread expose their Map to the `__len` and `__index` calls they may make. An
+own lambda, bound method, or other own callable cannot reach these implicit
+calls during initialization, even through a nested container or generated
+constructor.
 
-Fresh ordinary Map literals have no metatable, and their entries are filled
-with raw stores. Operations proved to stay on such fresh values remain legal,
-including equality and length of callable-bearing literals. Casts and boxing
-preserve their origin rather than introducing a metatable. Raw
-`value`/`value` equality and canonical Array indexing/length do not acquire Map
-dispatch. In every case, computations nested in the operands and any exposure
-from an enclosing call are still checked.
+A fresh ordinary Map literal has no metatable, and its entries are filled with
+raw stores, so filling it invokes no `__newindex`. Indexing, length, or
+spread of such a literal, and equality between two of them, cannot dispatch
+and remain legal even when the literals hold own callables. A cast or boxing
+neither attaches nor removes a metatable, and an `and`/`or` result stays fresh
+only when both operands are fresh or primitive. Raw `value`/`value` equality,
+equality with an option operand, and Array indexing and length do not acquire
+Map dispatch. In every case, computations nested in the operands and any
+exposure from an enclosing call are still checked.
 
 ## Lua representation and interoperation
 

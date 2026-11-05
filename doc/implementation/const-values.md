@@ -118,9 +118,10 @@ are valid, while evaluating a reference to an own-module variable, function,
 or method is not. Lambdas, bound own methods, own Interface implementations,
 and own method-bearing record/union values may be stored because creating them
 runs no body; they are rejected where an explicit or implicit call evaluated
-by the initializer could invoke them. The shared checker classifies Map
-index/equality/length/spread dispatch and preserves fixed-origin operations;
-constness introduces no separate exception or exposure state.
+by the initializer could invoke them. The shared check classifies Map index,
+equality, length, and spread dispatch; an operation whose dispatching operands
+all have fixed origins creates no Map exposure. Constness adds no separate
+exception or exposure state.
 
 Every initializer-less `TopLevelVar` requires an explicit nil-bearing type;
 the checker replaces `value == nil` with a checked `ExpNil`. A const one also

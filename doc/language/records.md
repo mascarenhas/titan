@@ -352,8 +352,9 @@ its module is already initialized. Every evaluated operand still follows the
 implicit calls used to compute an argument. When an initializer stores a
 lambda or another own callable through an imported generated constructor, the
 compiled consumer also requires that constructor to remain generated. Only
-delivered stored values create that requirement, not discarded surplus or
-spread setup; see [Replacing shared-library
+values delivered to the constructor's parameters create that requirement, not
+surplus arguments or spread elements that no parameter receives; see
+[Replacing shared-library
 dependencies](binary-compatibility.md#private-record-fields-and-construction).
 Use the module's final `do ... end` block for initialization that needs
 own-module state or callables.

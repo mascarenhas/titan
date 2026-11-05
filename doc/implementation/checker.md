@@ -302,29 +302,34 @@ metatable-bearing Map read exposes its base and key; Map/Map and Map/`value`
 equality in either orientation expose both operands; integer-Map length and
 spread expose the receiver. Equality uses the original checked
 `ComparisonPlan.left` and `.right`, because gradual injection may already have
-boxed the Map operand to `value`. Length and spread use the actual checked
-Map branch, not Array backing operations. Supported primitive ordering,
-arithmetic, and concatenation do not add Lua operator dispatch. Map literal
-filling uses raw stores into a fresh table, not `__newindex`; statement writes,
-generic-for close/iteration, and explicit tostring calls remain subject to
-their ordinary call boundaries.
+boxed the Map operand to `value`; a comparison with an Option plan operand
+keeps the raw option comparison and adds no dispatch. Length and spread use
+the actual checked Map branch (`#` on a `Type.Map` operand, a spread whose
+`_spread_kind` is `"map"`), not Array backing operations. Supported primitive
+ordering, arithmetic, and concatenation do not add Lua operator dispatch. Map
+literal filling uses raw stores into a fresh table, not `__newindex`. Map
+writes and generic-`for` loops, with their iteration and close calls, are
+statements, and converting a table to a string needs an explicit call such as
+`string.tostring`, so an initializer expression reaches them only through a
+call or lambda body that the rules above already cover.
 
 `fixed_metatable_origin` memoizes a separate result-origin fact: primitive
-results, fresh literal containers and closures, and validated generated
-constructor results cannot supply an arbitrary imported table metatable.
-Transparent casts/adjustments and `and`/`or` preserve that fact only when the
-possible result origins are fixed. Unknown imported values and ordinary call
-results stay unknown; a Function type alone proves nothing about `__call`.
-This is not an `isconst` bypass: every operand computation is still visited,
-and a fixed origin never clears inherited exposure.
+results, fresh table constructors, lambdas, bound-method references, and
+validated generated-constructor results cannot supply an arbitrary imported
+table metatable. Casts, adjustments, and `and`/`or` preserve that fact only
+when every operand they can return is fixed. Unknown imported values and
+ordinary call results stay unknown; a Function type alone proves nothing about
+`__call`. A fixed origin only withholds new Map exposure: every operand
+computation is still visited, and a fixed origin never clears inherited
+exposure.
 
 A scalar result (nil, boolean, number, or string) reports no stored callable
 to its enclosing expression, so an imported generated constructor receiving
-`#{lambda}` or `Own(1).number` needs no constructor proof. The effect-only
-`ExpSpread` carrier is the exception to scalar clearing: although stamped
-`Type.Nil`, it retains its callable fact for shared `ExpSpreadIndex`
-deliveries. An adjusted spread visits both its setup carrier and its delivered
-projection, matching code generation.
+`#{lambda}` or `Own(1).number` needs no constructor proof. `ExpSpread` nodes
+are exempt from this scalar clearing: the effect-only spread carrier is
+stamped `Type.Nil` but must keep its callable fact for the shared
+`ExpSpreadIndex` deliveries. An adjusted spread visits both its setup carrier
+and its delivered projection, matching code generation.
 
 Completed visits are memoized in two caches, one per exposure state, so a
 node first reached as stored is still checked when a shared plan or argument
@@ -339,13 +344,15 @@ carries an own callable, the visitor marks the call
 into the record's `literal` usage, so a replacement provider that overrides
 `new` fails compatibility checking before the consumer initializes; see
 [construction proofs](binary-compatibility.md#construction-and-closed-union-proofs).
-Every evaluated argument is checked for effects, but storage facts come only
-from the adjustment's fixed/formal slots (or normalized named arguments).
-`_arg_adjustment` and `_generic_arg_adjustment` are not result-conversion plans:
-discarded surplus and setup carriers must not create a stored-callable result
-or a literal requirement by themselves. Callback-free stored construction
-keeps only its `new` signature requirement. An implicit call computed inside
-an argument is checked independently of this storage proof.
+Every written argument is still visited for own references and exposure, but
+storage facts come only from the constructor's parameter positions in
+`_arg_adjustment.fixed`, or in the written argument list when the call has no
+adjustment. `_arg_adjustment` and `_generic_arg_adjustment` are not
+result-conversion plans: discarded surplus and setup carriers must not create
+a stored-callable result or a literal requirement by themselves.
+Callback-free stored construction keeps only its `new` signature requirement.
+An implicit call computed inside an argument is checked independently of this
+storage proof.
 
 Constness is an exact boolean on local declarations, record fields, module
 variables, and Array types. An omitted mutable initializer (local or module
