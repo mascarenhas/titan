@@ -5798,10 +5798,10 @@ printf '%s\n' "${schedule[@]}"
                     "\n  " .. job_name .. ":", 1, true), job_name)
             end
             assert.equal(1, count_literal(browser_job,
-                "\n    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 24)\n"),
+                "\n    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
                 browser_job)
             assert.equal(1, count_literal(browser_stdlib_job,
-                "\n    name: browser SDK and core stdlib (ubuntu-24.04, emsdk 6.0.13, Node 24)\n"),
+                "\n    name: browser SDK and core stdlib (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
                 browser_stdlib_job)
             assert.equal(1, count_literal(macos_workflow, "\n  test-macos:"),
                 macos_workflow)
@@ -6185,6 +6185,15 @@ printf '%s\n' "${schedule[@]}"
                     "${{ env.TITAN_CHROME_SHA256 }}", 1, true), chrome_cache)
                 assert.falsy(chrome_cache:find("restore-keys:", 1, true),
                     chrome_cache)
+                -- Extract only the verified pinned ZIP, in the step that
+                -- installs Chrome for either job.
+                local chrome_install = step_containing(job,
+                    "python3 scripts/browser_extract_zip.py")
+                local verified = assert(chrome_install:find(
+                    "sha256sum -c --strict -", 1, true), chrome_install)
+                assert.truthy(chrome_install:find(
+                    "python3 scripts/browser_extract_zip.py", verified, true),
+                    chrome_install)
                 -- Keep Chrome sandboxed in both jobs; qualify the host
                 -- restriction and record the launch proof in its own step.
                 local sandbox = step_containing(job,
@@ -6259,8 +6268,6 @@ printf '%s\n' "${schedule[@]}"
             assert.is_true(stdlib_sdk < stdlib_suite and stdlib_suite < stdlib_gate)
             assert.falsy(linux_workflow:find("HigherRendererMemoryLimit", 1, true))
             assert.falsy(browser_stdlib_job:find("titan-stdlib-chrome", 1, true))
-            assert.falsy(browser_stdlib_job:find("--no-sandbox", 1, true))
-            assert.falsy(browser_stdlib_job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true))
             for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job }) do
                 assert.truthy(job:find('TITAN_NODE_VERSION: "26.13.0"', 1, true))
                 local install_node = named_step(job, "Install the pinned Node 26 runtime")
