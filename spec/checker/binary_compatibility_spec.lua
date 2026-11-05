@@ -138,6 +138,8 @@ describe("binary dependency usage", function()
         {"a written cast", "(" .. callback .. ") as value"},
         {"an operator", "true and " .. callback},
         {"an own bound method", "Own(1):read"},
+        {"an own record", "Own(1)"},
+        {"an own union", "OwnChoice.Some()"},
         {"an own Interface implementation", "Own(1) as p.Reader"},
         {"a nested Interface implementation", '{["reader"] = Own(1) as p.Reader}'},
         {"an imported generated record", "p.Inner(" .. callback .. ")"},
@@ -159,6 +161,8 @@ describe("binary dependency usage", function()
                     local seed: integer?
                     record Own number: integer end
                     function Own:read(): integer return seed end
+                    union OwnChoice Some() end
+                    function OwnChoice:read(): integer return seed end
                     record LocalHolder item: function(): integer end
                     union Choice Some(function(): integer) end
                     local held = p.Holder(]] .. case[2] .. [[)
@@ -175,9 +179,13 @@ describe("binary dependency usage", function()
        function()
         for _, expression in ipairs({
             "p.external",
+            "p.ForeignBox(1)",
             "p.ForeignBox(1):read",
             "(p.ForeignBox(1) as Reader):read",
             "#{" .. callback .. "}",
+            "Plain(1)",
+            "nil as Own?",
+            "Own(1).number",
         }) do
             local tree = check({
                 provider = [[
@@ -190,6 +198,9 @@ describe("binary dependency usage", function()
                     local p = import "provider"
                     local seed: integer?
                     interface Reader function read(): integer end
+                    record Plain number: integer end
+                    record Own number: integer end
+                    function Own:read(): integer return seed end
                     local held = p.Holder(]] .. expression .. [[)
                 ]],
             })

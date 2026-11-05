@@ -1282,6 +1282,41 @@ int main(void) {
         rejects("Holder.literal")
     end)
 
+    for _, nominal in ipairs({
+        {name = "record", definition = "record Own end", value = "Own()"},
+        {name = "union", definition = "union Own Some() end", value = "Own.Some()"},
+    }) do
+        it("guards raw own " .. nominal.name ..
+           " witness dispatch during initializer replacement", function()
+            local declarations = [[
+                interface Reader function read(): integer end
+                record Holder item: value end
+                function invoke(item: value): integer
+                    local reader: Reader = item
+                    return reader:read()
+                end
+            ]]
+            local image = fixture(declarations, [[
+                local p = import "bc180_provider"
+                local seed: integer?
+            ]] .. nominal.definition .. [[
+                function Own:read(): integer return seed end
+                function witness(item: Own): p.Reader return item end
+                local held = p.Holder(]] .. nominal.value .. [[)
+                function run(): integer return p.invoke(held.item) end
+                do seed = 42 end
+            ]])
+            runs("assert(consumer.run() == 42)")
+            replace(declarations .. [[
+                function Holder.new(item: value): Holder
+                    invoke(item)
+                    return {item = item}
+                end
+            ]], image)
+            rejects("Holder.literal")
+        end)
+    end
+
     local callback = "function(): integer return seed end"
     local stored_callback_cases = {
         {

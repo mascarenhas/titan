@@ -532,6 +532,27 @@ function initializer_error(root, modname)
     local dependency =
         "module variable initializer cannot reference this module's variables, functions, or methods"
     local seen_nodes, seen_exposed_nodes, plan_callables = {}, {}, {}
+    local nominal_callables = {}
+    local function own_nominal_callable(typ)
+        if not typ or typ._tag ~= "Type.Nominal" then return false end
+        local owner = types.registry[typ.fqtn]
+        if not owner or (owner._tag ~= "Type.Record"
+                and owner._tag ~= "Type.Union") then
+            return false
+        end
+        local known = nominal_callables[owner]
+        if known == nil then
+            known = false
+            for _, method in pairs(owner.methods) do
+                if initializer_own_declaration(method, modname) then
+                    known = true
+                    break
+                end
+            end
+            nominal_callables[owner] = known
+        end
+        return known
+    end
     local function visit_plan(plan, seen)
         if type(plan) ~= "table" or plan._tag or seen[plan] then return false end
         seen[plan] = true
@@ -578,7 +599,9 @@ function initializer_error(root, modname)
         if not constructor and seen[node] ~= nil then
             return nil, seen[node]
         end
-        local has_callable = false
+        -- A bare own nominal can reach a concrete method through a dynamic
+        -- Interface witness published by another (even unexecuted) body.
+        local has_callable = own_nominal_callable(node._type)
         -- Use binary_collect_usage's selective plan convention. AST argument
         -- expressions are mirrored in the ordinary children, not followed
         -- through plan backrefs. An `is` proof constructs no wrapper.

@@ -339,6 +339,10 @@ describe("module initializer dependencies (typechecker)", function()
             record Box number: integer end
             type Alias = Box
             function Box:read(): integer return seed end
+            union Choice Some() end
+            function Choice:read(): integer return seed end
+            const bare = Alias(8)
+            const stored_union = Choice.Some()
             interface Reader function read(): integer end
             const bound = Alias(1):read
             const implicit: Reader = Box(2)
@@ -531,6 +535,10 @@ describe("module initializer dependencies (typechecker)", function()
     end)
 
     local exposed_methods = {
+        "dep.ignore(Box(1))",
+        "dep.ignore({Box(1)})",
+        "dep.ignore(Box(1) as value)",
+        "dep.ignore(Choice.Some())",
         "dep.ignore(Box(1):read)",
         "dep.ignore({Box(1):read})",
         "dep.ignore((true and Box(1):read) as value)",
@@ -563,6 +571,8 @@ describe("module initializer dependencies (typechecker)", function()
                     interface Reader function read(): integer end
                     record Box number: integer end
                     function Box:read(): integer return seed end
+                    union Choice Some() end
+                    function Choice:read(): integer return seed end
                     record Holder callback: function(): integer end
                     record ReaderHolder reader: Reader end
                     local bad = ]] .. expression,
