@@ -175,14 +175,15 @@ function io_module.new_sync(...)
     return strategy
 end
 ]], mjs, observed, candidate_path, map_path))
-            local function hooked(setup)
+            local function hooked(setup, collect)
+                local child_coverage = collect ~= false and fixture.collector:init_code() or ""
                 local argv = { info.prefix .. "/bin/lua", "-E", "-e",
                     string.format("package.path=%q..package.path;", fixture.frontend .. "/?.lua;" ..
-                        fixture.frontend .. "/?/init.lua;") .. fixture.collector:init_code() .. ";" .. setup,
+                        fixture.frontend .. "/?/init.lua;") .. child_coverage .. ";" .. setup,
                     fixture.frontend .. "/titanc", "--tree", fixture.source, "--output", fixture.output }
                 for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
                 local result = fixture:run(argv)
-                fixture.collector:collect()
+                if collect ~= false then fixture.collector:collect() end
                 return result
             end
             local rejected = hooked(string.format("dofile(%q)", hook))
@@ -221,12 +222,18 @@ end
             assert.matches("Titan link hit", warm.output, 1, true)
             local previous_record = fixtures.read(record)
             local policy = fixture.frontend .. "/titan-compiler/browserlink.lua"
-            fixtures.write(policy, fixtures.read(policy) .. "\n-- changed image-limit compiler identity\n")
-            local changed = fixture:compile(arguments)
+            local policy_bytes = fixtures.read(policy)
+            local restore_policy <close> = setmetatable({}, { __close = function()
+                fixtures.write(policy, policy_bytes)
+            end })
+            -- Only changed-identity children cannot map to tracked-source coverage.
+            -- Restore the copy even on assertion failure, before collector teardown.
+            fixtures.write(policy, policy_bytes .. "\n-- changed image-limit compiler identity\n")
+            local changed = hooked("", false)
             assert.is_true(changed.ok, changed.output)
             assert.matches("Titan link miss", changed.output, 1, true)
             assert.not_equal(previous_record, fixtures.read(record))
-            warm = fixture:compile(arguments)
+            warm = hooked("", false)
             assert.is_true(warm.ok, warm.output)
             assert.matches("Titan link hit", warm.output, 1, true)
         end)
