@@ -20,9 +20,10 @@ describe("browser core stdlib build checks", function()
 include spec/support/stdlib_test_modules.mk
 .PHONY: plan
 plan:
-	@$(strip $(TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK)) printf '%s\n' 'budget=$(TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES)' 'roots=$(TITAN_STDLIB_BROWSER_TEST_ROOTS)' $(foreach image,$(TITAN_STDLIB_BROWSER_TEST_IMAGES),'$(image):$(strip $(TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_$(image)))')
+	@$(strip $(TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK)) printf '%s\n' 'budget=$(TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES)' 'roots=$(TITAN_STDLIB_BROWSER_TEST_ROOTS)' $(foreach image,$(TITAN_STDLIB_BROWSER_TEST_IMAGES),'image=$(image):$(strip $(TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_$(image)))')
 ]]))
-        local argv = {"make", "--no-print-directory", "-f", file, "plan"}
+        local argv = {"env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
+            "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-f", file, "plan"}
         for _, option in ipairs(overrides or {}) do argv[#argv + 1] = option end
         return strategy:run(argv, {stderr_to_stdout = true})
     end
@@ -31,12 +32,13 @@ plan:
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local result = image_plan()
         assert.is_true(result.ok, result.output)
-        assert.truthy(result.output:find("budget=32000000", 1, true), result.output)
+        assert.truthy(result.output:find("budget=32000000", 1, true),
+            "D14 deliberately pins the 32,000,000-byte browser image budget; do not loosen it to fit an oversized image")
         local roots = {}
         for root in assert(result.output:match("roots=([^\r\n]+)")):gmatch("%S+") do roots[root] = true end
         local owners, images = {}, 0
         for line in result.output:gmatch("[^\r\n]+") do
-            local image, members = line:match("^([%w_-]+):(.+)$")
+            local image, members = line:match("^image=([%w_-]+):(.*)$")
             if image then
                 images = images + 1
                 for owner in members:gmatch("%S+") do
@@ -48,7 +50,7 @@ plan:
         end
         local count = 0
         for owner in pairs(roots) do assert.truthy(owners[owner], owner); count = count + 1 end
-        assert.equal(15, count)
+        assert.equal(15, count, "the audited browser inventory has 15 owners; change this deliberately")
         assert.is_true(images >= 2)
     end)
 
@@ -78,6 +80,30 @@ plan:
         end
     end)
 
+    it("rejects malformed image budgets before build setup or linking", function()
+        if platform.windows then pending("browser suite Make target is Unix-only"); return end
+        -- A regular file cannot become the output directory: a regressed
+        -- preflight fails promptly at mkdir rather than starting a real link.
+        local guard = temporary.name("-browser-budget-preflight")
+        scratch[#scratch + 1] = guard
+        local sentinel = "image budget validation must run before build setup\n"
+        assert(strategy:write_file(guard, sentinel))
+        for _, budget in ipairs({"", "0", "01", "-1", "abc", "32.0e6", "100000000"}) do
+            local rejected = strategy:run({
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
+                "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "make", "--no-print-directory",
+                "-f", "Makefile", "titan-stdlib-browser-test",
+                "TITAN_BROWSER_TEST_BUILD_DIR=" .. guard,
+                "TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES=" .. budget,
+            }, {stderr_to_stdout = true})
+            assert.is_false(rejected.ok, rejected.output)
+            assert.truthy(rejected.output:find(
+                "browser stdlib image byte budget must be a positive decimal integer", 1, true),
+                rejected.output)
+            assert.equal(sentinel, assert(strategy:read_file(guard)))
+        end
+    end)
+
     it("enforces the supplied image byte budget at its exact boundary", function()
         assert.is_true(checks.check_image_size(32, 32, "fixture.wasm"))
         local ok, err = checks.check_image_size(33, 32, "fixture.wasm")
@@ -94,14 +120,23 @@ plan:
             "size", path, "32"}, {stderr_to_stdout = true})
         assert.is_false(rejected.ok)
         assert.truthy(rejected.output:find("exceeds manifest budget", 1, true), rejected.output)
+        local directory = strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua",
+            "size", ".", "32"}, {stderr_to_stdout = true})
+        assert.is_false(directory.ok)
+        assert.truthy(directory.output:find("must be a regular file", 1, true), directory.output)
     end)
 
     it("keeps partitioned image and per-engine evidence in the CI failure artifact", function()
         local workflow = assert(strategy:read_file(".github/workflows/ci.yml")):match(
             "\n  browser%-toolchain:\n(.-)\n  browser%-playwright:")
         assert.truthy(workflow, "missing browser-toolchain CI job")
-        assert.truthy(workflow:find("Run partitioned browser core stdlib suite under Node and Chromium", 1, true))
-        assert.truthy(workflow:find('tee "$RUNNER_TEMP/browser-stdlib.log"', 1, true))
+        local suite
+        for step in workflow:gmatch("\n      %- name:[^\n]*\n(.-)\n\n") do
+            if step:find("make titan-stdlib-browser-test", 1, true) then suite = step; break end
+        end
+        assert.truthy(suite, "browser-toolchain must run the browser stdlib target")
+        assert.truthy(suite:find("set -euo pipefail", 1, true), suite)
+        assert.truthy(suite:find('tee "$RUNNER_TEMP/browser-stdlib.log"', 1, true), suite)
         for _, path in ipairs({
             "out/browser-stdlib/*.log", "out/browser-stdlib/images/*.mjs",
             "out/browser-stdlib/images/*.wasm", "out/browser-stdlib/images/*.wasm.map",
@@ -310,6 +345,12 @@ if arg[1] == "fail" then os.exit(7) end
         assert.is_true(passed.ok, passed.output)
         assert.truthy(passed.output:find("selected=2 passed=2 skipped=0 failed=0 owners=2/2 images=2", 1, true),
             passed.output)
+
+        assert(strategy:write_file(second, report("first.tests", false)))
+        local foreign_case = strategy:run(argv, {stderr_to_stdout = true})
+        assert.is_false(foreign_case.ok, foreign_case.output)
+        assert.truthy(foreign_case.output:find(
+            "group second: result outside native root inventory", 1, true), foreign_case.output)
 
         assert(strategy:write_file(second, report("second.tests", true)))
         local failed = strategy:run(argv, {stderr_to_stdout = true})

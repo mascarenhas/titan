@@ -1318,10 +1318,12 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 
 TITAN_BROWSER_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-stdlib
 TITAN_BROWSER_TEST_SDK := $(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)
+TITAN_BROWSER_TEST_BUDGET_CHECK = case $(call make_shell_quote,$(TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES)) in ''|0*|*[!0-9]*|?????????*) \
+	  echo 'browser stdlib image byte budget must be a positive decimal integer (at most 8 digits)' >&2; exit 2 ;; esac;
 
 .PHONY: titan-stdlib-browser-test
 titan-stdlib-browser-test: ## Build size-bounded browser stdlib images, audit their owner union, and run Node and Chromium
-	+@$(strip $(TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK)) $(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) set -e; \
+	+@$(strip $(TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK)) $(RECURSIVE_WRAPPER_GUARD) $(TITAN_JOBS_CHECK) $(TITAN_BROWSER_TEST_BUDGET_CHECK) set -e; \
 	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 TITAN_TARGET; \
 	build_dir=$(call make_shell_quote,$(abspath $(TITAN_BROWSER_TEST_BUILD_DIR))); \
 	mkdir -p "$$build_dir/images"; \

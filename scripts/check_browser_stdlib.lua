@@ -30,9 +30,9 @@ elseif action == "inventory" then
     print(string.format("Browser stdlib inventory: %d modules, %d public members, no differences.", #browser.key_order, #rows))
 elseif action == "size" then
     assert(first and second, "size requires Wasm image and manifest byte budget")
-    local image = need(io.open(first, "rb"))
-    local size = need(image:seek("end"))
-    need(image:close())
+    local info = need(strategy:lstat(first))
+    need(info.kind == "file", "browser stdlib image must be a regular file: " .. first)
+    local size = info.size
     local budget = tonumber(second)
     need(checks.check_image_size(size, budget, first))
     print(string.format("Browser stdlib image %s: %d bytes (budget %d).", first, size, budget))

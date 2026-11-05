@@ -1781,6 +1781,22 @@ done
         rejects_union({
             { id = "1", owners = {}, contents = group_one_out },
         }, "empty native owner group")
+        rejects_union({
+            { id = "1", owners = { "first.tests" }, contents = group_one_out },
+            { id = "2", owners = { "second.tests" }, contents = group_one_out },
+        }, "group 2: result outside native root inventory")
+        rejects_union({
+            { id = "foreign", owners = { "third.tests" }, contents = group_one_out },
+        }, "planned owner outside native root inventory: third.tests")
+        rejects_union({}, "empty native parallel group list")
+        rejects_union(nil, "empty native parallel group list")
+        -- Distinct, overlapping logical roots can each scope the same case.
+        local shared_case_out = group_one_out:gsub("first%.tests%.test_value",
+            "first.tests.test_nested.test_value")
+        rejects_union({
+            { id = "outer", owners = { "first.tests" }, contents = shared_case_out },
+            { id = "nested", owners = { "first.tests.test_nested" }, contents = shared_case_out },
+        }, "duplicate native case across groups", {"first.tests", "first.tests.test_nested"})
     end)
 
     it("always certifies one complete native aggregate and keeps runtime filters out of selection", function()
