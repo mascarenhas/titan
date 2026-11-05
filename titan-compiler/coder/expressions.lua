@@ -1789,7 +1789,20 @@ end
 function codeindexc(ctx, node)
     local elem = node._type
     local parts = codecindex_parts(ctx, node)
-    local ctmp, tmpname, tmpslot = newtmp(ctx, elem, types.is_gc(elem))
+    local temporary_type = elem
+    if types.is_c_array(elem)
+       and coder._decl_volatile_home(coder._lvalue_root_decl(node)) then
+        -- An indexed subarray decays into a pointer temporary. Preserve the
+        -- canonical backing's volatility for subsequent compiler-owned reads.
+        local adjusted = cdeclarator.adjust_parameter_type(elem)
+        local quals = {}
+        for _, qual in ipairs(adjusted.quals or {}) do
+            if qual ~= "volatile" then table.insert(quals, qual) end
+        end
+        table.insert(quals, "volatile")
+        temporary_type = types.CPointer(adjusted.pointee, quals)
+    end
+    local ctmp, tmpname, tmpslot = newtmp(ctx, temporary_type, types.is_gc(elem))
     local cset = types.is_gc(elem) and setslot(elem, tmpslot, tmpname) or ""
 
     return render([[
