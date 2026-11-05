@@ -176,7 +176,7 @@ assert(driver.close_resolver_context(restored))
             }, { stderr_to_stdout = true })
             assert.is_true(disassembled.ok, disassembled.output)
             local instructions = read(wat)
-            assert.truthy(instructions:find("(try ", 1, true), "legacy Wasm EH try was not emitted")
+            assert.truthy(instructions:match("%(try%s"), "legacy Wasm EH try was not emitted")
             assert.is_nil(instructions:find("(try_table", 1, true), "ambient flags changed the EH encoding")
             assert.is_nil(instructions:match('%(import [^\n]-"invoke_'), "ambient flags restored JS SJLJ")
             local executed = compiler_io.new_sync():run({
