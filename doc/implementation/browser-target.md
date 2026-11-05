@@ -543,10 +543,10 @@ delivered.
 | `coroutine` | yes | none | `coroutine.tests` (the Lua-host cases are in the native contributor `tests/lua_boundary_test.native.titan`) | creates or checks the `titan.coroutine` registry metatable | none |
 | `gc` | yes | none | `gc.tests` | none | none |
 | `iteration` | yes | none | `iteration.tests` | none | none |
-| `math` | yes | none | `math.tests`, including automatic and argumentless seeding | publishes `maxinteger`/`mininteger` from `LLONG_MAX`/`LLONG_MIN`, then calls `randomseed()` | none |
+| `math` | yes | none | `math.tests`, including automatic and argumentless seeding | calls `randomseed()` | none |
 | `test` | yes | none | `test.tests`, and every other owner through the runner | loads the Lua trace and pattern helpers when the Lua `string` library is open | none |
 | `reflect` | yes | none | `reflect.tests` | metatable, hydration, brand, and tag tables | none |
-| `json` | yes | none | `json.tests` | builds the JSON pattern | none |
+| `json` | yes | none | `json.tests` | caches the writer depth limit, then builds the JSON pattern | none |
 | `protobuf` | yes | none | `protobuf.tests`, including both raw index writers and the reservation failure | caches the nominal registry, sets up the ephemeron, validates the codec handoff | `write_resource_index`, `write_resource_index_bytes` |
 | `transfer` | yes | none | `transfer.tests` (same-instance behavior), including all three raw exports | installs protobuf's packet-context provider and nominal loader, the ephemerons, and `closure_fields` | `copy_message`, `discard_message`, `transfer_load_module` |
 | `peg` | yes | none | `peg.tests` | `_initialize_native()` | none |

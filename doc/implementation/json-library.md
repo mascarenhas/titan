@@ -138,7 +138,7 @@ the engine stack ran out
 `titan/json/writer.titan` clamps its private per-call settings once, after
 `validate_settings`: a zero or negative `max_depth` is still `invalid_option`,
 the last repeated option still wins, a smaller setting still binds, and a
-larger one is lowered to the define, so a deeper value raises the ordinary
+setting above the cached limit is lowered to it. A deeper value raises the ordinary
 `limit_exceeded` (`value exceeds max_depth`). The default of 32 and the
 parser's budgets are the same on every target: decoding settings are never
 clamped, and the parser is bounded by `max_depth` and by the
