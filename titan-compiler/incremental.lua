@@ -1,5 +1,6 @@
 -- Source-object certification has no resolver side effects. Local evidence is
 -- checked before restoring declarations; dependency evidence uses the final plan.
+local lpeg = require "lpeglabel"
 local sha256 = require "titan-compiler.sha256"
 local version = require "titan-compiler.version"
 local paths = require "titan-compiler.path"
@@ -412,8 +413,38 @@ local function append(target, values)
     return target
 end
 
+-- CPP expands the predefined location macros, but leaves native location
+-- readers unresolved. Unadorned function names are root-independent; signature
+-- strings are not, because Clang prints locations of anonymous C parameter
+-- types in __PRETTY_FUNCTION__ and the Microsoft signature forms.
+local P, R, S = lpeg.P, lpeg.R, lpeg.S
+local identifier_character = R("az", "AZ", "09", "\128\255") + S("_$")
+local identifier = (identifier_character - R("09")) * identifier_character^0
+local location_reader = (P("__builtin_FILE_NAME") + P("__builtin_FILE")
+    + P("__builtin_LINE") + P("__builtin_COLUMN") + P("__builtin_source_location")
+    + P("__builtin_FUNCSIG") + P("__PRETTY_FUNCTION__") + P("L__FUNCSIG__") + P("__FUNCSIG__"))
+    * -identifier_character
+local function quoted(quote)
+    return P(quote) * (P("\\") * P(1) + (P(1) - S(quote .. "\\\r\n")))^0 * P(quote)
+end
+-- A streaming match allocates no token graph; only a GNU C raw delimiter is
+-- captured so embedded quotes cannot expose literal builtin spellings.
+local raw_string = lpeg.Cmt((P("u8") + S("uUL"))^-1 * P('R"')
+    * lpeg.C((P(1) - S(" ()\\\t\r\n\v\f"))^-16) * P("("),
+    function(subject, position, delimiter)
+        local _, finish = subject:find(")" .. delimiter .. '"', position, true)
+        return finish and finish + 1
+    end)
+local c_token = raw_string + quoted('"') + quoted("'")
+    + P("/*") * (P(1) - P("*/"))^0 * P("*/")
+    + P("//") * (P(1) - S("\r\n"))^0
+    + identifier + P(1)
+local presumed_location = (c_token - location_reader)^0 * location_reader
+
 -- Temporary translation units use the actual generated filename for macro
--- expansion. Expanded C strings remain semantic input, unlike #line markers.
+-- expansion. Expanded C bytes remain strict semantic input. Native location
+-- readers also bind the part to its filename and all concrete owned roots:
+-- an included SDK header can move while the generated filename stays fixed.
 -- Ordinary failures return nil, diagnostic after retiring scratch. A native
 -- signal belongs to the resolver owner until close; unwind with its non-string
 -- value so local certification cannot mistake cancellation for a cache miss.
@@ -424,6 +455,10 @@ function incremental.preprocessed_identities(context, inputs)
         for index, input in ipairs(inputs) do
             local source = required(context.io:tmpname())
             temporaries[#temporaries + 1] = source
+            -- Keep the two prefix-map keys distinct even for a relative
+            -- strategy tmpname; neither map may replace a full FILE/BASE_FILE
+            -- expansion with a basename (or vice versa).
+            source = absolute(context, source)
             local output = required(context.io:tmpname())
             temporaries[#temporaries + 1] = output
             outputs[index] = output
@@ -431,6 +466,8 @@ function incremental.preprocessed_identities(context, inputs)
             commands[index] = append({ table.unpack(opts.compile_prefix) }, {
                 "-iquote", paths.dirname(absolute(context, input.filename)),
                 "-fmacro-prefix-map=" .. source .. "=" .. input.filename,
+                -- GCC/Clang take __FILE_NAME__'s basename before prefix mapping.
+                "-fmacro-prefix-map=" .. paths.basename(source) .. "=" .. paths.basename(input.filename),
                 "-E", "-P", "-x", "c", source, "-o", output })
         end
         local results
@@ -451,7 +488,15 @@ function incremental.preprocessed_identities(context, inputs)
             required(native and native.ok, native and (native.diagnostic or native.output)
                 or "generated-C preprocessing returned no result")
             local expanded = required(context.io:read_file(output))
-            identities[index] = incremental.digest(context, "generated-c-semantics", expanded)
+            local semantic = expanded
+            local may_read_location = expanded:find("__builtin_", 1, true)
+                or expanded:find("__PRETTY_FUNCTION__", 1, true)
+                or expanded:find("__FUNCSIG__", 1, true)
+            if may_read_location and lpeg.match(presumed_location, expanded) then
+                semantic = { expanded = expanded, source = inputs[index].contents,
+                    filename = inputs[index].filename, roots = context.relocation_roots or {} }
+            end
+            identities[index] = incremental.digest(context, "generated-c-semantics", semantic)
         end
         local counters = state(context).counters
         counters.relocation_preprocesses = (counters.relocation_preprocesses or 0) + #commands

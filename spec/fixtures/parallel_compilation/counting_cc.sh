@@ -12,7 +12,13 @@ for argument in "$@"; do
     case "$argument" in
         -c) phase=compile ;;
         -E) preprocess=yes ;;
-        -fmacro-prefix-map=*) mapped_source=${argument#-fmacro-prefix-map=}; mapped_source=${mapped_source#*=} ;;
+        -fmacro-prefix-map=*)
+            mapping=${argument#-fmacro-prefix-map=}
+            target=${mapping#*=}
+            # A basename-only map implements __FILE_NAME__, not the generated
+            # translation-unit path used by preprocessing instrumentation.
+            case "$target" in */* | *\\*) mapped_source=$target ;; esac
+            ;;
     esac
     previous=$argument
 done

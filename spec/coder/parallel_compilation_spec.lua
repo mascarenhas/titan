@@ -403,6 +403,28 @@ describe("parallel generated-C compilation", function()
         assert.is_false(file_exists(source_root .. "/batch/one.o"))
     end)
 
+    for _, basename_first in ipairs({ false, true }) do
+        it("keeps full preprocessing mappings when the basename map comes " ..
+            (basename_first and "first" or "last"), function()
+            local plain = workspace_directory .. "/plain.c"
+            local generated = source_root .. "/batch/one.c"
+            assert(compiler_io.new_sync():write_file(plain, "int ordinary_input;\n"))
+            local full = "-fmacro-prefix-map=" .. plain .. "=" .. generated
+            local basename = "-fmacro-prefix-map=plain.c=one.c"
+            local argv = { "env", "TITAN_PARALLEL_TEST_PHASE=preprocess",
+                "TITAN_PARALLEL_TEST_STATE=" .. state_directory,
+                "TITAN_PARALLEL_TEST_EXPECTED=1", "TITAN_PARALLEL_TEST_DELAY=0",
+                "TITAN_PARALLEL_TEST_FAIL=one", platform.windows and "bash" or "sh", WRAPPER,
+                basename_first and basename or full, basename_first and full or basename,
+                "-E", "-P", plain, "-o", workspace_directory .. "/plain.i" }
+            local ok, output = run(argv)
+            assert.falsy(ok)
+            assert.matches("parallel compiler sentinel: one", output, 1, true)
+            assert.equal("1\n", read_file(state_directory .. "/started"))
+            assert.equal("0\n", read_file(state_directory .. "/active"))
+        end)
+    end
+
     local function semantic_context(cap)
         local strategy = compiler_io.new_sync()
         local tmpname = strategy.tmpname
@@ -557,7 +579,195 @@ describe("parallel generated-C compilation", function()
         assert_retired(temporaries)
     end)
 
-    for _, macro in ipairs({ "__FILE__", "__BASE_FILE__" }) do
+    -- Supply already-expanded tokens to test the identity policy independently
+    -- of which native builtins the host compiler implements.
+    local function token_context()
+        local context, temporaries = semantic_context(2)
+        function context.io:run(argv)
+            assert(self:write_file(argv[#argv], assert(self:read_file(argv[#argv - 2]))))
+            return { ok = true }
+        end
+        context.relocation_roots = { sdk = "/sdk", compiler = "/compiler", output = "/output" }
+        return context, temporaries
+    end
+
+    for _, builtin in ipairs({ "__builtin_FILE", "__builtin_FILE_NAME", "__builtin_LINE",
+        "__builtin_COLUMN", "__builtin_source_location", "__builtin_FUNCSIG",
+        "__PRETTY_FUNCTION__", "__FUNCSIG__", "L__FUNCSIG__" }) do
+        it("binds native " .. builtin .. " to its original location context", function()
+            local context, temporaries = token_context()
+            local expression = builtin:match("^__builtin_") and builtin .. "()" or builtin
+            local inputs = {
+                { filename = source_root .. "/batch/location.c",
+                    contents = "void location(void) { (void)" .. expression .. "; }\n" },
+                { filename = source_root .. "/batch/control.c", contents = "int control;\n" },
+            }
+            local original = assert(incremental.preprocessed_identities(context, inputs))
+            assert.same(original, assert(incremental.preprocessed_identities(context, inputs)))
+            for _, root in ipairs({ "sdk", "compiler", "output" }) do
+                local previous = context.relocation_roots[root]
+                context.relocation_roots[root] = previous .. "-moved"
+                local moved = assert(incremental.preprocessed_identities(context, inputs))
+                assert.not_equal(original[1], moved[1], root)
+                assert.equal(original[2], moved[2], root)
+                context.relocation_roots[root] = previous
+            end
+            context.relocation_roots = { sdk = "/new-sdk", compiler = "/new-compiler", output = "/new-output" }
+            local combined = assert(incremental.preprocessed_identities(context, inputs))
+            assert.not_equal(original[1], combined[1])
+            assert.equal(original[2], combined[2])
+            context.relocation_roots = { sdk = "/sdk", compiler = "/compiler", output = "/output" }
+            inputs[1].filename = source_root .. "/batch/moved-location.c"
+            local renamed = assert(incremental.preprocessed_identities(context, inputs))
+            assert.not_equal(original[1], renamed[1])
+            assert.equal(original[2], renamed[2])
+            assert_retired(temporaries)
+        end)
+    end
+
+    for _, item in ipairs({
+        { name = "ordinary code", text = "int ordinary;\n" },
+        { name = "quoted text", text = [[const char *s = "quote: \" __builtin_FILE()";]] },
+        { name = "prefixed text", text = [[const char *s = u8"__builtin_FILE()";]] },
+        { name = "quoted signatures", text = [[const char *s = "__PRETTY_FUNCTION__ __FUNCSIG__";]] },
+        { name = "character text", text = [['__builtin_FILE']] },
+        { name = "block comments", text = "/* __builtin_FILE() */ int ordinary;\n" },
+        { name = "line comments", text = "// __builtin_FILE()\nint ordinary;\n" },
+        { name = "identifier prefixes", text = "int unrelated__builtin_FILE;\n" },
+        { name = "identifier suffixes", text = "int __builtin_FILE_suffix, __builtin_FILE2;\n" },
+        { name = "raw strings", text = [[const char *s = R"tag(" __builtin_FILE() ')tag";]] },
+        { name = "prefixed raw strings", text = [[const char *s = u8R"tag(" __builtin_LINE())tag";]] },
+        { name = "wide raw strings", text = [[const void *s = LR"tag(" __builtin_COLUMN())tag";]] },
+        { name = "function names", text = [[
+            __builtin_FUNCTION(); __func__; __FUNCTION__; L__FUNCTION__; __FUNCDNAME__;
+        ]] },
+        { name = "expanded macros", text = [[const char *s = "/path/__builtin_FILE"; int line = 42;]] },
+    }) do
+        it("keeps moved-root reuse for " .. item.name, function()
+            local context, temporaries = token_context()
+            local inputs = { { filename = source_root .. "/batch/control.c", contents = item.text } }
+            local original = assert(incremental.preprocessed_identities(context, inputs))
+            context.relocation_roots = { sdk = "/new-sdk", compiler = "/new-compiler", output = "/new-output" }
+            inputs[1].filename = source_root .. "/batch/moved-control.c"
+            assert.same(original, assert(incremental.preprocessed_identities(context, inputs)))
+            inputs[1].contents = item.text .. "\nint changed_expanded_bytes;\n"
+            local changed = assert(incremental.preprocessed_identities(context, inputs))
+            assert.not_equal(original[1], changed[1])
+            assert_retired(temporaries)
+        end)
+    end
+
+    it("retains original line-control bytes for native location readers", function()
+        local context, temporaries = semantic_context(1)
+        local input = { filename = source_root .. "/batch/location.c",
+            contents = "#line 17\nint line = __builtin_LINE();\n" }
+        local first = assert(incremental.preprocessed_identities(context, { input }))
+        input.contents = "#line 71\nint line = __builtin_LINE();\n"
+        local second = assert(incremental.preprocessed_identities(context, { input }))
+        assert.not_equal(first[1], second[1])
+        assert_retired(temporaries)
+    end)
+
+    it("executes native presumed-location readers produced by token pasting", function()
+        local filename = source_root .. "/batch/native_location.c"
+        local executable = workspace_directory .. "/native_location" .. (platform.windows and ".exe" or "")
+        local contents = [[
+            #include <stdio.h>
+            #include <string.h>
+            #define LOCATION(name) __builtin_ ## name ()
+            #ifndef __has_builtin
+            #define __has_builtin(name) 0
+            #endif
+            #line 100 "presumed/native_location.c"
+            int main(void) {
+                if (strcmp(LOCATION(FILE), __FILE__)) return 1;
+                if (LOCATION(LINE) != __LINE__) return 2;
+                if (strcmp(LOCATION(FUNCTION), __func__)) return 3;
+                puts("FILE LINE FUNCTION");
+            #if defined(__GNUC__) && !defined(__clang__)
+                if (strcmp(__PRETTY_FUNCTION__, __func__)) return 6;
+                puts("name-only PRETTY_FUNCTION");
+            #endif
+            #if __has_builtin(__builtin_FILE_NAME)
+                if (strcmp(LOCATION(FILE_NAME), __FILE_NAME__)) return 4;
+                puts("FILE_NAME");
+            #endif
+            #if __has_builtin(__builtin_COLUMN)
+                if (LOCATION(COLUMN) == 0) return 5;
+                puts("COLUMN");
+            #endif
+                return 0;
+            }
+        ]]
+        assert(compiler_io.new_sync():write_file(filename, contents))
+        local ok, output = run({ "cc", "-x", "c", filename, "-o", executable })
+        assert.is_true(ok, output)
+        ok, output = run({ executable })
+        assert.is_true(ok, output)
+        assert.matches("FILE LINE FUNCTION\n", output, 1, true)
+        print("native presumed-location readers: " .. output:gsub("\n", " "))
+    end)
+
+    it("executes Clang signature readers that embed anonymous C type locations", function()
+        local available, banner = run({ "clang", "--version" })
+        if not available then pending("Clang signature semantics unavailable"); return end
+        local filename = source_root .. "/batch/native_signature.c"
+        local executable = workspace_directory .. "/native_signature" .. (platform.windows and ".exe" or "")
+        assert(compiler_io.new_sync():write_file(filename, [[
+            #include <stdio.h>
+            #include <string.h>
+            #include <wchar.h>
+            #line 100 "presumed/native_signature.c"
+            static const char *pretty(struct { int member; } *value) {
+                return __PRETTY_FUNCTION__;
+            }
+            static const char *signature(struct { int member; } *value) {
+                return __FUNCSIG__;
+            }
+            static const wchar_t *wide_signature(struct { int member; } *value) {
+                return L__FUNCSIG__;
+            }
+            static const char *function_name(struct { int member; } *value) {
+                return __builtin_FUNCTION();
+            }
+            #if __has_builtin(__builtin_FUNCSIG)
+            static const char *builtin_signature(struct { int member; } *value) {
+                return __builtin_FUNCSIG();
+            }
+            #endif
+            int main(void) {
+                const char *path = "presumed/native_signature.c";
+                if (!strstr(pretty(0), path)) return 1;
+                if (!strstr(signature(0), path)) return 2;
+                if (!wcsstr(wide_signature(0), L"presumed/native_signature.c")) return 3;
+                puts("PRETTY_FUNCTION FUNCSIG L_FUNCSIG");
+                if (strcmp(function_name(0), "function_name")) return 5;
+                puts("builtin_FUNCTION");
+            #if __has_builtin(__builtin_FILE_NAME)
+                if (strcmp(__builtin_FILE_NAME(), __FILE_NAME__)) return 6;
+                puts("builtin_FILE_NAME");
+            #endif
+            #if __has_builtin(__builtin_COLUMN)
+                if (__builtin_COLUMN() == 0) return 7;
+                puts("builtin_COLUMN");
+            #endif
+            #if __has_builtin(__builtin_FUNCSIG)
+                if (!strstr(builtin_signature(0), path)) return 4;
+                puts("builtin_FUNCSIG");
+            #endif
+                return 0;
+            }
+        ]]))
+        local ok, output = run({ "clang", "-fms-extensions", "-x", "c", filename, "-o", executable })
+        assert.is_true(ok, output)
+        ok, output = run({ executable })
+        assert.is_true(ok, output)
+        assert.matches("PRETTY_FUNCTION FUNCSIG L_FUNCSIG\n", output, 1, true)
+        print("native signature readers (" .. assert(banner:match("[^\n]+")) .. "): " ..
+            output:gsub("\n", " "))
+    end)
+
+    for _, macro in ipairs({ "__FILE__", "__BASE_FILE__", "__FILE_NAME__" }) do
         it("keeps expanded " .. macro .. " values in the semantic identity", function()
             local context, temporaries = semantic_context(2)
             local contents = "const char *path = " .. macro .. ";\n"
@@ -571,6 +781,53 @@ describe("parallel generated-C compilation", function()
             assert_retired(temporaries)
         end)
     end
+
+    it("preserves full and basename macros with relative scratch names", function()
+        local previous = assert(lfs.currentdir())
+        local ok, failure = xpcall(function()
+            assert(lfs.chdir(workspace_directory))
+            local context, temporaries = semantic_context(1)
+            local serial, expanded = 0
+            function context.io:tmpname()
+                serial = serial + 1
+                local filename = "relative-semantic-" .. serial .. ".tmp"
+                -- Sync.write_file itself reserves a tmpname for publication.
+                local file = assert(io.open(filename, "wb"))
+                assert(file:close())
+                temporaries[#temporaries + 1] = filename
+                return filename
+            end
+            local read = context.io.read_file
+            function context.io:read_file(filename)
+                local bytes, err = read(self, filename)
+                expanded = bytes
+                return bytes, err
+            end
+            for _, macro in ipairs({ "__FILE__", "__BASE_FILE__", "__FILE_NAME__" }) do
+                local input = { filename = source_root .. "/batch/one.c",
+                    contents = "const char *path = " .. macro .. ";\n" }
+                local first = assert(incremental.preprocessed_identities(context, { input }))
+                local expected = macro == "__FILE_NAME__" and "one.c" or input.filename
+                assert.matches(string.format("%q", expected), expanded, 1, true)
+                assert.same(first, assert(incremental.preprocessed_identities(context, { input })))
+            end
+            assert_retired(temporaries)
+        end, debug.traceback)
+        assert(lfs.chdir(previous))
+        assert.is_true(ok, failure)
+    end)
+
+    it("keeps expanded __LINE__ values in the semantic identity", function()
+        local context, temporaries = semantic_context(2)
+        local first = { filename = source_root .. "/batch/line.c",
+            contents = "#line 17\nint line = __LINE__;\n" }
+        local second = { filename = first.filename,
+            contents = "#line 71\nint line = __LINE__;\n" }
+        local identities = assert(incremental.preprocessed_identities(context, { first, second }))
+        assert.not_equal(identities[1], identities[2])
+        assert.same(identities, assert(incremental.preprocessed_identities(context, { first, second })))
+        assert_retired(temporaries)
+    end)
 
     it("batches only the driver C object commands", function()
         configure_counting_compiler("reverse")

@@ -251,16 +251,17 @@ local function no_native_compile(output)
     end
 end
 
-local function certified_exit(expected)
+local function certified_exit(expected, output)
+    output = output or workspace .. "/build"
     local executable = platform.windows and
-        assert(driver.windows_program_paths(APP, nil, nil, workspace .. "/build")).executable
-        or workspace .. "/build/" .. APP
+        assert(driver.windows_program_paths(APP, nil, nil, output)).executable
+        or output .. "/" .. APP
     local argv = { "env",
         "PATH=" .. (sdk_root or prefix) .. "/bin" .. (platform.windows and ";" or ":") ..
             (os.getenv("PATH") or ""),
         "TITAN_PATH_0_6=" ..
-            (platform.windows and (workspace .. "/build/lib/titan/0.6;") or "") ..
-            workspace .. "/build;" ..
+            (platform.windows and (output .. "/lib/titan/0.6;") or "") ..
+            output .. ";" ..
             (sdk_root or prefix) .. "/lib/titan/0.6;;", executable }
     local ok, output, why, status = run(argv)
     assert.equal("exit", why, output)
@@ -1440,6 +1441,106 @@ os.exit(result.ok and 0 or result.status or 1)
             saved[APP].path = moved .. "/" .. APP .. ".o"
             local text = compiled("-o", moved, "--incremental", "--source-first", "-v", APP)
             decisions(text, saved, { [APP] = "c-input relocated generated-C semantics" })
+        end)
+
+        for _, moved_root in ipairs({ "SDK", "output" }) do
+            it("rebuilds native presumed paths after an " .. moved_root .. "-only move", function()
+                local sdk = moved_root == "SDK" and private_sdk() or prefix
+                local output = workspace .. "/build"
+                local header_directory = moved_root == "SDK" and sdk .. "/include" or output
+                write(header_directory .. "/relocation_builtin.h", [[
+                    #include <stdio.h>
+                    #define RELOCATION_LOCATION(name) __builtin_ ## name ()
+                    static inline int relocation_path(void) {
+                        puts(RELOCATION_LOCATION(FILE));
+                        return 0;
+                    }
+                ]])
+                local control = source(OTHER, "function value(): integer return 0 end\n")
+                local stem = source(APP, [[
+                    foreign import "relocation_builtin.h"
+                    local control = import "incremental_cli_other"
+                    function main(args: {string}): integer
+                        return (ffi.relocation_path() as integer) + control.value()
+                    end
+                ]])
+                local function build()
+                    return compiled("-o", output, "--incremental", "--source-first",
+                        "-I", header_directory, "-v", APP)
+                end
+                build()
+                local saved = remember_objects({ [APP] = stem, [OTHER] = control })
+                local expected = (header_directory .. "/relocation_builtin.h\n"):gsub("\\", "/")
+                assert.equal(expected, (certified_exit(0):gsub("\\", "/")))
+                if moved_root == "SDK" then
+                    local moved = workspace .. "/much longer moved SDK"
+                    assert(os.rename(sdk, moved))
+                    assert.is_false(exists(sdk))
+                    sdk_root, header_directory = moved, moved .. "/include"
+                    -- Output and generated filename remain fixed; only the
+                    -- builtin's included SDK-header origin has changed.
+                    assert.equal(workspace .. "/build", output)
+                else
+                    local moved = workspace .. "/much longer moved output"
+                    assert(os.rename(output, moved))
+                    assert.is_false(exists(output))
+                    for _, previous in pairs(saved) do
+                        previous.path = moved .. previous.path:sub(#output + 1)
+                    end
+                    output, header_directory = moved, moved
+                end
+                local text = build()
+                decisions(text, saved, { [APP] = "c-input relocated generated-C semantics" })
+                expected = (header_directory .. "/relocation_builtin.h\n"):gsub("\\", "/")
+                assert.equal(expected, (certified_exit(0, output):gsub("\\", "/")))
+                saved[APP].bytes, saved[APP].timestamp = read(saved[APP].path), os.time() - 120
+                assert(lfs.touch(saved[APP].path, saved[APP].timestamp, saved[APP].timestamp))
+                text = build()
+                decisions(text, saved, {})
+                no_native_compile(text)
+            end)
+        end
+
+        it("conservatively relocates signature-bearing external assertions but keeps ordinary controls", function()
+            local sdk = private_sdk()
+            write(workspace .. "/stable_assert.h", [[
+                #include <assert.h>
+                #include <stdio.h>
+                static inline int assertion_answer(int value) {
+                    assert(value >= 0);
+                    puts(__PRETTY_FUNCTION__);
+                    return value;
+                }
+            ]])
+            local control = source(OTHER, "function value(): integer return 0 end\n")
+            local stem = source(APP, [[
+                foreign import "stable_assert.h"
+                local control = import "incremental_cli_other"
+                function main(args: {string}): integer
+                    return (ffi.assertion_answer(42) as integer) + control.value()
+                end
+            ]])
+            certified(APP)
+            local original = certified_exit(42)
+            assert.matches("assertion_answer", original, 1, true)
+            local stems = { [APP] = stem, [OTHER] = control }
+            local saved = remember_objects(stems)
+            local text = certified(APP)
+            decisions(text, saved, {})
+            no_native_compile(text)
+            local moved = workspace .. "/moved signature SDK"
+            assert(os.rename(sdk, moved))
+            assert.is_false(exists(sdk))
+            sdk_root = moved
+            text = certified(APP)
+            -- A signature is location-semantic on every compiler even if this
+            -- particular (non-anonymous) signature's runtime value is unchanged.
+            decisions(text, saved, { [APP] = "c-input relocated generated-C semantics" })
+            assert.equal(original, certified_exit(42))
+            saved = remember_objects(stems)
+            text = certified(APP)
+            decisions(text, saved, {})
+            no_native_compile(text)
         end)
 
         it("keeps absolute user source spelling significant during relocation", function()

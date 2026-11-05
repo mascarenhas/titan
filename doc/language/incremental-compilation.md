@@ -78,9 +78,17 @@ On the first use after an owned root moves, `titanc` preprocesses the saved
 generated C against the current headers and roots before reusing its object.
 It reads those saved bytes exactly, including their line endings, and excludes
 the certificate data that `titanc` appends to the primary C file, so the check
-behaves the same on Windows. An observable path macro such as `__FILE__` or
-`__BASE_FILE__` must still match; a changed value rebuilds the module. A
-disposable `<stem>.relocation` receipt avoids repeating this extra work on
+behaves the same on Windows. Expanded location macros (`__FILE__`,
+`__BASE_FILE__`, `__FILE_NAME__`, and `__LINE__`) remain exact compared values;
+a changed value rebuilds the module. Native presumed-location builtins such
+as `__builtin_FILE()` are resolved later than preprocessing. Parts containing
+these readers conservatively rebuild when an owned root moves, including an
+SDK-only move with a fixed output directory. This also covers filename, line,
+and column readers whose values preprocessing alone cannot certify.
+Signature readers can also contain anonymous C type locations and are guarded;
+unadorned function-name-only readers do not impose this restriction.
+
+A disposable `<stem>.relocation` receipt avoids repeating this extra work on
 later unchanged invocations. The receipt also tracks the roots used to
 materialize generated companions; moving back to an earlier root repairs
 those files without rewriting unchanged ones. A missing or interrupted

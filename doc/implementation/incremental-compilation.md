@@ -708,9 +708,40 @@ binary read/write to preserve that prefix. Formatting and coverage conversion
 are text operations that precede this boundary.
 `incremental.preprocessed_identities` preprocesses the metadata-free prefix
 once, using the effective compile prefix, its actual quoted-include directory,
-and a macro-prefix mapping from the private temporary to the actual generated
-filename. The resulting digest keeps expanded C values, including `__FILE__`
-and `__BASE_FILE__`; it does not substitute roots inside expanded strings.
+and macro-prefix mappings from the private temporary path and basename to
+the actual generated filename and basename. The scratch source is made
+absolute after registering cleanup, keeping those mapping keys distinct even
+when an I/O strategy returns a relative name. GCC and Clang strip the basename
+for `__FILE_NAME__` before applying the mappings. The resulting digest keeps all
+expanded C bytes, including `__FILE__`, `__BASE_FILE__`, `__FILE_NAME__`, and
+`__LINE__`; it does not substitute roots inside expanded strings.
+
+The preprocessor leaves native presumed-location builtins unresolved. A
+streaming lexical match detects `__builtin_FILE`, `__builtin_FILE_NAME`,
+`__builtin_LINE`, `__builtin_COLUMN`, `__builtin_source_location`,
+`__builtin_FUNCSIG`, `__PRETTY_FUNCTION__`, `__FUNCSIG__` and `L__FUNCSIG__`
+after macro expansion, including token-pasted names, without allocating a
+token graph. Quoted and GNU C raw strings, character constants, comments and
+longer identifiers do not count as location reads. For affected parts, the
+digest also includes the original generated prefix, filename and concrete SDK,
+compiler and output roots. This conservatively rejects a moved location context even
+when `-E -P` removes the relevant line information or leaves identical tokens;
+an SDK-header origin remains significant when the output root stays fixed.
+The basename, line and column values may be unchanged by a particular move,
+but are not inferred from the stripped token stream. The source-location
+aggregate is a C++ facility, not enabled by Titan's C compilation; its spelling
+is conservatively recognized as well. Clang can print an anonymous C parameter
+type's presumed file, line and column inside a signature.
+Signature forms are treated as path-semantic on every toolchain, including
+GCC C's name-only `__PRETTY_FUNCTION__` expansion; unadorned
+`__builtin_FUNCTION`, `__func__`, `__FUNCTION__`, `L__FUNCTION__` and
+`__FUNCDNAME__` do not add this location context.
+See the [GCC builtin semantics](https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html),
+[Clang source-location semantics](https://clang.llvm.org/docs/LanguageExtensions.html#source-location-builtins),
+and Clang's
+[signature construction](https://github.com/llvm/llvm-project/blob/main/clang/lib/AST/Expr.cpp)
+and [anonymous-type location printing](https://github.com/llvm/llvm-project/blob/main/clang/lib/AST/Decl.cpp).
+
 Parts of one module run through `io.run_batch` under the resolver's local cap
 and shared Make job-slot ledger when the strategy supports batching; custom
 synchronous runners keep their own execution boundary unless they also supply
