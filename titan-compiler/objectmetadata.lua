@@ -4,6 +4,8 @@ local projectcache = require "titan-compiler.projectcache"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local util = require "titan-compiler.util"
 local version = require "titan-compiler.version"
+local relocation = require "titan-compiler.relocation"
+local declaration_schemas = require "titan-compiler.declarationschemas"
 
 local objectmetadata = {}
 local BANNER = "-- Titan object source metadata\n"
@@ -138,6 +140,31 @@ function objectmetadata.validate_parts(native)
     return true
 end
 
+local function valid_descriptor_roots(entry)
+    local visited, headers = {}, {}
+    local function header(value)
+        if type(value) ~= "table" or headers[value] then return true end
+        headers[value] = true
+        if not relocation.valid_roots(value.roots) then return false end
+        for _, dependency in ipairs(value.dependencies or {}) do
+            if not header(dependency) then return false end
+        end
+        return true
+    end
+    local function declarations(value)
+        if type(value) ~= "table" or visited[value] then return true end
+        visited[value] = true
+        local schema = declaration_schemas[value._tag]
+        if schema and schema._c_origin_header and type(value._c_origin_header) == "table"
+            and not header(value._c_origin_header.generated_header) then return false end
+        for _, child in pairs(value) do
+            if not declarations(child) then return false end
+        end
+        return true
+    end
+    return header(entry.ffi_header_descriptor) and declarations(entry)
+end
+
 function objectmetadata.decode(payload, origin, expected_abi)
     origin = origin or "<object source metadata>"
     expected_abi = expected_abi or version.TITAN_ABI_VERSION
@@ -186,6 +213,9 @@ function objectmetadata.decode(payload, origin, expected_abi)
                     tostring(layout_error)
             end
             record.entry.layout_inventory = inventory
+        end
+        if not valid_descriptor_roots(record.entry) then
+            return nil, "invalid object header relocation roots", "record-schema"
         end
         return record.entry
     end)

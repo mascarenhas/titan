@@ -2357,7 +2357,7 @@ end
 -- clients. Unlike `types.serialize`, this is not executable metadata: it also
 -- covers declarations visible only through an explicit `.titan` import and
 -- their exact C-header inputs.
-function driver.serialize_source_interface(entry)
+function driver.serialize_source_interface(entry, context)
     if type(entry) ~= "table" or entry.kind ~= "source"
        or (type(entry.ast) ~= "table" and entry._analysis_manifest ~= true)
        or type(entry.type) ~= "table"
@@ -2389,7 +2389,7 @@ function driver.serialize_source_interface(entry)
         type = entry.type,
         c_header_dependencies = headers,
     }
-    return sourceinterface.serialize(normalized)
+    return sourceinterface.serialize(normalized, context)
 end
 
 -- File-only verification also serves publication's fresh digest/header memo;
@@ -6147,7 +6147,7 @@ function driver.defaultloader(static_deps, options)
             source_certificate = source_certificate,
         }
         local source_manifest, manifest_error =
-            driver.serialize_source_interface(entry)
+            driver.serialize_source_interface(entry, context)
         if not source_manifest then
             -- Keep the checked source available to semantic clients even when
             -- its interface cannot be retained. Report this alongside checker
@@ -8784,7 +8784,8 @@ function driver.plan_foreign_headers(names, imported, policy_for)
             end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 entry.preserve = entry.contents ~= nil and
-                    lfs.attributes(entry.filename, "mode") == "file"
+                    lfs.attributes(entry.filename, "mode") == "file" and
+                    util.get_file_contents(entry.filename) == entry.contents
             end
         else
             plan.ffi_header.contents = coder.generate_ffi_header(
@@ -8832,6 +8833,12 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
             ok, err = driver.format_generated_file(
                 temporary, verbose, pretty_print)
             if not ok then return abandon(err) end
+            if lfs.attributes(entry.filename, "mode") == "file" and
+                util.get_file_contents(entry.filename) == util.get_file_contents(temporary) then
+                local removed, remove_error = os.remove(temporary)
+                if not removed then return abandon(remove_error) end
+                staged[entry], entry.preserve = nil, true
+            end
         end
     end
     for _, entry in ipairs(entries) do
@@ -9289,6 +9296,7 @@ local function prepare_compile(
         if not contents then return nil, read_error end
         local written, write_error = util.set_file_contents(primary, contents .. metadata)
         if not written then return nil, write_error end
+        if native.certificate then incremental.record_materialization(context, stem, native.certificate) end
         if source_entry then
             source_entry.coverage = native.coverage
             source_entry.private_symbols = private_symbols

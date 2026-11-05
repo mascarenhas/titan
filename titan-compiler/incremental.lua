@@ -1354,7 +1354,7 @@ function incremental.producer_digests(context, entry, layouts, recipe)
     end
     local public = incremental.digest(context, "public-interface", {
         types.serialize_semantic(entry.type), layouts, helper })
-    local private = not next(context.relocation_roots or {}) and entry.source_manifest
+    local private = entry.source_manifest
         or required(require("titan-compiler.sourceinterface").serialize(entry, context))
     return { public = public,
         source = incremental.digest(context, "source-interface", { public, private }) }
@@ -1458,7 +1458,7 @@ local function valid_certificate(value, modname)
         or type(value.interface.source) ~= "string" or type(value.object_identity) ~= "string" then
         return false
     end
-    if type(value.roots) ~= "table" or not dense(value.generated, function(part)
+    if not relocation.valid_roots(value.roots) or not dense(value.generated, function(part)
         return type(part) == "table" and math.type(part.bytes) == "integer" and part.bytes >= 0
             and type(part.sha256) == "string" and type(part.semantic) == "string"
     end) or #value.generated == 0 then return false end
@@ -1625,14 +1625,15 @@ end
 
 -- Rebind explicit filesystem fields only. Source paths, C values and foreign
 -- helper bodies are not a general graph/string relocation surface.
-local function rebound_record(context, record, roots)
-    local function inputs(list)
+local function rebound_record(context, record, roots, materialized_roots)
+    local function inputs(list, previous)
+        previous = previous or roots
         for _, input in ipairs(list or {}) do
-            input.path = relocation.rebind(context, input.path, roots)
+            input.path = relocation.rebind(context, input.path, previous)
             if input.kind == "origin" then
                 local prefix = version.C_HEADER_ORIGIN_PROTOCOL .. ";real="
                 if input.identity:sub(1, #prefix) == prefix then
-                    input.identity = prefix .. relocation.rebind(context, input.identity:sub(#prefix + 1), roots)
+                    input.identity = prefix .. relocation.rebind(context, input.identity:sub(#prefix + 1), previous)
                 end
             end
         end
@@ -1657,13 +1658,14 @@ local function rebound_record(context, record, roots)
     local function descriptor(item)
         if not item or visited[item] then return end
         visited[item] = true
-        item.contents = relocation.generated(context, item.contents, roots)
+        local previous = item.roots or roots
+        item.contents = relocation.generated(context, item.contents, previous)
         item.roots = context.relocation_roots
         for index, include in ipairs(item.direct_includes or {}) do
-            item.direct_includes[index] = relocation.includes(context, "#include " .. include, roots)
+            item.direct_includes[index] = relocation.includes(context, "#include " .. include, previous)
                 :match("^#include (.*)$")
         end
-        inputs(item.search_inputs)
+        inputs(item.search_inputs, previous)
         for _, dependency in ipairs(item.dependencies or {}) do descriptor(dependency) end
         local filename = relocation.resolve(context, item.identity)
         if platform.is_absolute(filename) then
@@ -1672,7 +1674,7 @@ local function rebound_record(context, record, roots)
             local helper = outputs[item.modname]
             local stat = context.io:lstat(helper)
             if stat and stat.kind == "file" then
-                write(helper, relocation.generated(context, required(context.io:read_file(helper)), roots))
+                write(helper, relocation.generated(context, required(context.io:read_file(helper)), materialized_roots))
             end
         end
     end
@@ -1695,18 +1697,66 @@ local function rebound_record(context, record, roots)
         end
         native.coverage.anchors = anchors
     end
+    record._relocation_roots = context.relocation_roots
     return companions
+end
+
+local RELOCATION_RECEIPT_LIMIT = 128 * 1024
+
+local function relocation_codec_options(context)
+    return { max_bytes = RELOCATION_RECEIPT_LIMIT, max_nodes = 4, max_entries = 16,
+        max_string_bytes = RELOCATION_RECEIPT_LIMIT,
+        sha256_binary = context.cache_adapter and context.cache_adapter.sha256_binary }
+end
+
+local function read_relocation_receipt(context, stem)
+    local filename = stem .. ".relocation"
+    local stat, stat_error = context.io:lstat(filename)
+    if stat_error ~= nil and type(stat_error) ~= "string" then error(stat_error, 0) end
+    if not stat or stat.kind ~= "file" or stat.size > RELOCATION_RECEIPT_LIMIT then return end
+    local bytes, err = context.io:read_file(filename, RELOCATION_RECEIPT_LIMIT)
+    if err ~= nil and type(err) ~= "string" then error(err, 0) end
+    if not bytes or #bytes > RELOCATION_RECEIPT_LIMIT then return end
+    local receipt = graphcodec.decode(bytes, relocation_codec_options(context))
+    if not closed_cache_table(receipt, { roots = true, object = true, complete = true, semantic = true })
+        or type(receipt.object) ~= "string" or type(receipt.complete) ~= "boolean"
+        or type(receipt.roots) ~= "table" or not relocation.valid_roots(receipt.roots)
+        or receipt.semantic ~= nil and not digest_string(receipt.semantic) then return end
+    return receipt
+end
+
+local function write_relocation_receipt(context, stem, certificate, complete, semantic)
+    local filename = stem .. ".relocation"
+    local bytes = required(graphcodec.encode({
+        roots = context.relocation_roots or {}, object = certificate.object_identity,
+        complete = complete, semantic = semantic }, relocation_codec_options(context)))
+    required(context.io:write_file(filename .. ".tmp", bytes))
+    required(context.io:rename(filename .. ".tmp", filename))
+end
+
+-- The object records creation roots; generated companions have their own
+-- materialization state. Bind that state to the recipe even before compile,
+-- so a failed replacement cannot certify the previous object's companions.
+function incremental.record_materialization(context, stem, certificate)
+    write_relocation_receipt(context, stem, certificate, true)
 end
 
 local function check_relocation(context, record, stem)
     local native, cert = record.object_metadata, record.object_metadata.certificate
-    if not relocation.changed(context, cert.roots) then return { status = "hit" } end
+    local receipt = read_relocation_receipt(context, stem)
+    if not receipt or not receipt.complete or receipt.object ~= cert.object_identity then
+        return miss("relocation", "missing or incomplete generated companion materialization")
+    end
+    local moved = relocation.changed(context, cert.roots)
+    local companions_moved = relocation.changed(context, receipt.roots)
+    if not moved and not companions_moved then return { status = "hit" } end
     if #cert.generated ~= #native.parts then return miss("record-schema", "missing generated-C semantics") end
-    local companions = rebound_record(context, record, cert.roots)
+    if companions_moved then write_relocation_receipt(context, stem, cert, false) end
+    local companions = rebound_record(context, record, record._relocation_roots or cert.roots, receipt.roots)
     if native.private_header then
         local filename = stem .. native.private_header
         local contents = required(context.io:read_file(filename))
-        local rebound = relocation.generated(context, contents, cert.roots)
+        local rebound = relocation.generated(context, contents, receipt.roots)
         if rebound ~= contents then
             required(context.io:write_file(filename, rebound))
             incremental.invalidate_file(context, filename)
@@ -1732,10 +1782,9 @@ local function check_relocation(context, record, stem)
     -- A disposable receipt avoids repeating relocation preprocessing on later
     -- unchanged builds. It is bound to the exact object/generated bytes and
     -- concrete current roots; header/source/configuration checks still run.
-    local receipt = stem .. ".relocation"
     local key = incremental.digest(context, "relocated-generated-c", evidence)
-    local stat = context.io:lstat(receipt)
-    if stat and stat.kind == "file" and context.io:read_file(receipt, 65) == key then
+    if receipt.semantic == key or not moved then
+        if companions_moved then write_relocation_receipt(context, stem, cert, true, key) end
         return { status = "hit" }
     end
     local preprocessing = {}
@@ -1756,8 +1805,7 @@ local function check_relocation(context, record, stem)
             return miss("c-input", "relocated generated-C semantics")
         end
     end
-    required(context.io:write_file(receipt .. ".tmp", key))
-    required(context.io:rename(receipt .. ".tmp", receipt))
+    write_relocation_receipt(context, stem, cert, true, key)
     return { status = "hit" }
 end
 
@@ -1808,6 +1856,7 @@ function incremental.certify_local(context, modname, source)
         stage = "coverage-artifacts"
         local covered = check_coverage(context, record.object_metadata, stem)
         if covered.status ~= "hit" then return covered end
+        stage = "relocation"
         local relocated = check_relocation(context, record, stem)
         if relocated.status ~= "hit" then return relocated end
         stage = "c-input"

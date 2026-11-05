@@ -385,6 +385,20 @@ describe("incremental certificate identities", function()
         assert.is_not.equal(private.public, helper.public)
     end)
 
+    it("reuses a checked contextual manifest instead of serializing its type graph again", function()
+        local ctx = context({})
+        ctx.relocation_roots = { sdk = fixture_path("/sdk") }
+        local entry = source_entry("main")
+        local sourceinterface = require "titan-compiler.sourceinterface"
+        local serialize = sourceinterface.serialize
+        sourceinterface.serialize = function() error("checked manifest must be reused") end
+        local ok, result = pcall(incremental.producer_digests, ctx, entry, "layouts")
+        sourceinterface.serialize = serialize
+        assert.is_true(ok, result)
+        entry.source_manifest = "changed contextual manifest"
+        assert.is_not.equal(result.source, incremental.producer_digests(ctx, entry, "layouts").source)
+    end)
+
     it("memoizes binary interfaces by logical module rather than combined-provider bytes", function()
         local ctx = context({ [fixture_path("/sdk/titan.so")] = "provider bytes" })
         local function binary(name, layouts)
@@ -905,35 +919,95 @@ describe("compiler-owned relocation paths", function()
             compiler = fixture_path(root .. "/source"), output = fixture_path(root .. "/source/out") } }
     end
 
-    it("labels only complete owned path prefixes and preserves ordered path operands", function()
+    it("admits only real roots and missing children of real parents", function()
+        local real, alias = fixture_path("/real"), fixture_path("/alias")
+        local ctx = context({ [real .. "/file.h"] = "header" })
+        ctx.io.aliases[alias] = real
+        local admitted = relocation.roots(ctx.io,
+            { sdk = real, compiler = alias, output = real .. "/missing/nested" })
+        assert.same({ sdk = real, output = real .. "/missing/nested" }, admitted)
+        assert.equal("<titan:output>/Leaf.c",
+            relocation.path({ relocation_roots = admitted }, real .. "/missing/nested/Leaf.c"))
+        assert.same({}, relocation.roots(ctx.io, { output = alias .. "/missing/nested" }))
+    end)
+
+    it("labels only complete owned prefixes and preserves ordered known path operands", function()
         local first, second = owned("/first"), owned("/second")
         local function arguments(root)
             return { "cc", "-I" .. fixture_path(root .. "/source/vendor"),
-                "-isystem", fixture_path(root .. "/sdk/include"), "-I/external/one",
-                "-I/external/two", "-DROOT=" .. fixture_path("/first/sdk"),
-                "-ffile-prefix-map=" .. fixture_path("/first/sdk") .. "=semantic",
-                fixture_path(root .. "/source/out/native.o") }
+                "-isystem", fixture_path(root .. "/sdk/include"), "-I/external/one", "-I/external/two" }
         end
         assert.same(relocation.argv(first, arguments("/first")), relocation.argv(second, arguments("/second")))
         assert.equal("<titan:output>/native.o", relocation.path(first, fixture_path("/first/source/out/native.o")))
+        assert.equal("<titan:compiler>/vendor/a.h", relocation.path(first, fixture_path("/first/source/vendor/a.h")))
         assert.equal(fixture_path("/first/sdk-other/a.h"), relocation.path(first, fixture_path("/first/sdk-other/a.h")))
         local reversed = arguments("/second")
         reversed[5], reversed[6] = reversed[6], reversed[5]
         assert.is_not.same(relocation.argv(first, arguments("/first")), relocation.argv(second, reversed))
-        local changed = arguments("/second")
-        changed[7] = "-DROOT=changed"
-        assert.is_not.same(relocation.argv(first, arguments("/first")), relocation.argv(second, changed))
     end)
 
-    it("rebinds generated directives without rewriting path-valued C strings", function()
+    it("keeps opaque operands and path-valued flag text byte-exact", function()
         local first, second = owned("/first"), owned("/second")
-        local source = '#include "' .. fixture_path("/first/sdk/include/a.h") .. '"\n' ..
-            'const char *value = "' .. fixture_path("/first/sdk/value") .. '";\n'
-        local rebound = relocation.generated(second, source, first.relocation_roots)
-        assert.matches(fixture_path("/second/sdk/include/a.h"), rebound, 1, true)
-        assert.matches(fixture_path("/first/sdk/value"), rebound, 1, true)
+        for _, arguments in ipairs({
+            function(root) return { "cc", "-Xclang", "-load", fixture_path(root .. "/sdk/plugin.so") } end,
+            function(root) return { "cc", "-R", fixture_path(root .. "/sdk/lib") } end,
+            function(root) return { "cc", "-DROOT=" .. fixture_path(root .. "/sdk") } end,
+            function(root) return { "cc", "-ffile-prefix-map=" .. fixture_path(root .. "/sdk") .. "=semantic" } end,
+            function(root) return { "cc", fixture_path(root .. "/source/out/input.o") } end,
+        }) do
+            local left, right = arguments("/first"), arguments("/second")
+            assert.same(left, relocation.argv(first, left))
+            assert.same(right, relocation.argv(second, right))
+            assert.is_not.same(relocation.argv(first, left), relocation.argv(second, right))
+        end
+    end)
+
+    it("rebinds only generated directives and both include forms, never C string values", function()
+        local first, second = owned("/first"), owned("/second")
+        local function generated(root)
+            return '#include "' .. fixture_path(root .. '/sdk/include/odd>name.h') .. '"\n' ..
+                '#include <' .. fixture_path(root .. '/sdk/include/a.h') .. '>\n' ..
+                '#define TITAN_GENERATED_C_FILE "' .. fixture_path(root .. '/source/out/Part.c') .. '"\n' ..
+                '#line 17 "' .. fixture_path(root .. '/source/out/Part.c') .. '"\n' ..
+                '#line 2 "/authored/Source.titan"\n' ..
+                'const char *value = "' .. fixture_path('/first/sdk/value') .. '";\n' ..
+                '#define LITERAL "' .. fixture_path('/first/sdk/value') .. '"\n'
+        end
+        assert.equal(generated("/second"), relocation.generated(second, generated("/first"), first.relocation_roots))
+        local labelled = relocation.generated(first, generated("/first"))
+        assert.matches('#include <<titan:sdk>/include/a.h>', labelled, 1, true)
+        assert.matches('<titan:output>/Part.c', labelled, 1, true)
+        assert.matches('"/authored/Source.titan"', labelled, 1, true)
+        assert.matches(fixture_path('/first/sdk/value'), labelled, 1, true)
         assert.is_true(relocation.changed(second, first.relocation_roots))
         assert.is_false(relocation.changed(second, second.relocation_roots))
+    end)
+
+    it("preserves mixed-case concrete tails while matching Windows roots case-insensitively", function()
+        local original = platform.windows
+        platform.windows = true
+        local ok, err = pcall(function()
+            local first = { relocation_roots = { sdk = "C:/OldSDK", output = "C:/Project/Out" } }
+            local second = { relocation_roots = { sdk = "D:/NewSDK", output = "C:/Project/Out" } }
+            local filename = "C:/Project/Out/Mixed.Part1.c"
+            assert.equal("<titan:output>/Mixed.Part1.c", relocation.path(first, "c:/project/out/Mixed.Part1.c"))
+            assert.equal(filename, relocation.rebind(second, filename, first.relocation_roots))
+            local source = '#define TITAN_GENERATED_C_FILE "' .. filename .. '"\n'
+            assert.equal(source, relocation.generated(second, source, first.relocation_roots))
+            assert.equal("D:/NewSDK/Include/Mixed.h",
+                relocation.rebind(second, "c:/oldsdk/Include/Mixed.h", first.relocation_roots))
+        end)
+        platform.windows = original
+        assert.is_true(ok, err)
+    end)
+
+    it("validates optional closed root maps before using path operations", function()
+        assert.is_true(relocation.valid_roots(nil))
+        assert.is_true(relocation.valid_roots({}))
+        assert.is_true(relocation.valid_roots(owned("/first").relocation_roots))
+        for _, roots in ipairs({ "sdk", { sdk = 1 }, { sdk = "" }, { unknown = "/sdk" }, { "/sdk" } }) do
+            assert.is_false(relocation.valid_roots(roots))
+        end
     end)
 end)
 
@@ -1833,6 +1907,16 @@ describe("incremental dependency verdicts", function()
         saved.object_metadata.certificate.generated = nil
         assert.equal("record-schema", incremental.verdict(saved, {}).reason)
     end)
+
+    it("rejects malformed certificate roots while accepting absent roots", function()
+        local saved = record()
+        for _, roots in ipairs({ "sdk", { sdk = 1 }, { sdk = "" }, { unknown = "/sdk" } }) do
+            saved.object_metadata.certificate.roots = roots
+            assert.equal("record-schema", incremental.verdict(saved, {}).reason)
+        end
+        saved.object_metadata.certificate.roots = nil
+        assert.equal("hit", incremental.verdict(saved, {}).status)
+    end)
 end)
 
 describe("incremental local certification", function()
@@ -1854,6 +1938,7 @@ describe("incremental local certification", function()
         staticmetadata.scan_bytes = function() return { kind = "object", fingerprint = {} } end
         local source = { kind = "flat", main = fixture_path("/src/main.titan"),
             files = { fixture_path("/src/main.titan") } }
+        incremental.record_materialization(ctx, fixture_path("/out/main"), saved.object_metadata.certificate)
         return ctx, saved, source, files
     end
 
@@ -1865,6 +1950,26 @@ describe("incremental local certification", function()
         assert.same({ fixture_path("/out/main.o") }, result.objects)
         assert.same({}, result.imports)
         assert.same({}, ctx.io.commands)
+    end)
+
+    it("reports raised companion relocation failures under the relocation stage", function()
+        local ctx, saved, source = fixture()
+        local cert = saved.object_metadata.certificate
+        cert.roots, cert.stem = { output = fixture_path("/old-out") }, "<titan:output>/main"
+        saved.ffi_header_descriptor = { modname = "main", identity = "<titan:output>/main.ffi.h",
+            contents = "generated environment", dependencies = {} }
+        ctx.relocation_roots = cert.roots
+        incremental.record_materialization(ctx, fixture_path("/out/main"), cert)
+        ctx.relocation_roots = { output = fixture_path("/out") }
+        local lstat = ctx.io.lstat
+        function ctx.io:lstat(path)
+            if path == fixture_path("/out/main.ffi.h") then return { kind = "directory" } end
+            return lstat(self, path)
+        end
+        local result = incremental.certify_local(ctx, "main", source)
+        assert.equal("relocation", result.reason)
+        assert.matches("nonregular generated header", result.detail, 1, true)
+        assert.equal("relocation", incremental.certify_local(ctx, "main", source).reason)
     end)
 
     it("retains imports across configuration and codegen misses only when own sources match", function()

@@ -142,7 +142,8 @@ local function record_valid(record)
         outputs = true, native = true, roots = true }) or record.schema ~= version.TITAN_LINK_RECORD_SCHEMA or
         record.digest ~= version.CERTIFICATE_DIGEST or
         record.canonicalization ~= version.CERTIFICATE_CANONICALIZATION or
-        not digest_string(record.input) or not dense(record.outputs) or not valid_files(record.native) then
+        not digest_string(record.input) or not dense(record.outputs) or not valid_files(record.native)
+        or not relocation.valid_roots(record.roots) then
         return false
     end
     for _, output in ipairs(record.outputs) do if not valid_snapshot(output) then return false end end

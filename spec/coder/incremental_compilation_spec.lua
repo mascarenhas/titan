@@ -1054,6 +1054,101 @@ os.exit(result.ok and 0 or result.status or 1)
             assert.is_nil(output:find("[cprobe] candidate cache miss", 1, true), output)
         end)
 
+        it("repairs source-import companions after an A-to-B-to-A root round trip", function()
+            local sdk = private_sdk()
+            local compiler = private_compiler()
+            local generator = compiler .. "/titan-compiler/coder/generate.lua"
+            local configured, replacements = read(generator):gsub(
+                "(coder%.DEFAULT_SPLIT_THRESHOLD%s*=)[^\n]+", "%1 0")
+            assert.equal(1, replacements)
+            write(generator, configured)
+            local dependency = NAMESPACE .. ".return_dep"
+            local dependency_stem = source(dependency, [[
+                local foreign function bump(item: int): int return item + 1 end
+                function anchor(value: integer): integer return value end
+            ]])
+            local function consumer(value)
+                return 'local dep = import "' .. dependency .. [[.titan"
+                    function main(args: {string}): integer
+                        return dep.bump(]] .. value .. [[) as integer
+                    end
+                ]]
+            end
+            local stem = source(APP, consumer(40))
+            local output = workspace .. "/build"
+            local function build(destination)
+                return compiled("-o", destination, "--incremental", "--source-first",
+                    "--c-parts", "2", "-v", APP)
+            end
+            build(output)
+            local saved = remember_objects({ [dependency] = dependency_stem, [APP] = stem })
+            local moved_output = workspace .. "/moved output"
+            local moved_sdk = workspace .. "/moved sdk"
+            assert(os.rename(sdk, moved_sdk))
+            assert(os.rename(output, moved_output))
+            assert.is_false(exists(sdk)); assert.is_false(exists(output))
+            sdk_root = moved_sdk
+            for _, item in pairs(saved) do item.path = moved_output .. item.path:sub(#output + 1) end
+            local text = build(moved_output)
+            decisions(text, saved, {})
+            assert(os.rename(moved_sdk, sdk))
+            assert(os.rename(moved_output, output))
+            assert.is_false(exists(moved_sdk)); assert.is_false(exists(moved_output))
+            sdk_root = sdk
+            for _, item in pairs(saved) do item.path = output .. item.path:sub(#moved_output + 1) end
+            source(APP, consumer(41))
+            text = build(output)
+            decisions(text, saved, { [APP] = "source-content" })
+            local header = output .. "/" .. dependency:gsub("%.", "/") .. ".titan.h"
+            assert.matches(header:gsub("%.titan%.h$", ".ffi.h"), read(header), 1, true)
+            assert.is_nil(read(header):find(moved_output, 1, true))
+            certified_exit(42)
+            local headers = { header, (header:gsub("%.titan%.h$", ".ffi.h")) }
+            saved = remember_objects({ [dependency] = dependency_stem, [APP] = stem })
+            local private = header:gsub("%.titan%.h$", ".priv.h")
+            assert.is_true(exists(private))
+            headers[#headers + 1] = private
+            for _, filename in ipairs(headers) do
+                assert.is_nil(read(filename):find(moved_output, 1, true))
+                assert.is_nil(read(filename):find(moved_sdk, 1, true))
+            end
+            local timestamp = os.time() - 120
+            for _, filename in ipairs(headers) do assert(lfs.touch(filename, timestamp, timestamp)) end
+            decisions(build(output), saved, {})
+            for _, filename in ipairs(headers) do assert.equal(timestamp, lfs.attributes(filename, "modification")) end
+        end)
+
+        it("keeps moved source-adjacent builds conservative without an explicit output tree", function()
+            source(APP, main(43))
+            local previous = assert(lfs.currentdir())
+            local ok, failure = xpcall(function()
+                assert(lfs.chdir(workspace))
+                local function build()
+                    local argv = compiler_arguments()
+                    for index, argument in ipairs(argv) do
+                        if argument == "--tree" then argv[index + 1] = "."; break end
+                    end
+                    for _, argument in ipairs({ "-c", "--incremental", "--source-first", "-v", APP }) do
+                        argv[#argv + 1] = argument
+                    end
+                    local built, text = run(argv)
+                    assert.is_true(built, text)
+                    return text
+                end
+                build()
+                local old, moved = workspace, workspace .. "-moved-adjacent"
+                assert(os.rename(old, moved))
+                workspace = moved
+                assert(lfs.chdir(workspace))
+                assert.is_false(exists(old))
+                local text = build()
+                assert.matches("Titan object miss " .. APP .. ": output-moved", text, 1, true)
+                assert.is_nil(text:find("Titan object hit " .. APP, 1, true))
+            end, debug.traceback)
+            assert(lfs.chdir(previous))
+            assert.is_true(ok, failure)
+        end)
+
         it("invalidates an observable foreign-header __FILE__ during SDK relocation", function()
             local sdk = private_sdk()
             write(sdk .. "/include/relocation_file.h", [[

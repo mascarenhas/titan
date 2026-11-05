@@ -2158,6 +2158,27 @@ local function probe_result(context, kind, stage, source, run, rejection)
     local status = run.classification == "success" and "success"
         or run.classification == "compiler_rejection" and "rejected"
         or "infrastructure_failure"
+    local diagnostic = run.diagnostic or ""
+    if diagnostic ~= "" and context.generated_header then
+        local aliases, seen = {}, {}
+        local resolve = require("titan-compiler.relocation").resolve
+        local display_context = { relocation_roots = context.service.relocation_roots }
+        local function add(header)
+            if seen[header] then return end
+            seen[header] = true
+            local display = resolve(display_context, header.identity)
+            if display ~= header.identity then
+                aliases[#aliases + 1] = { physical_path = header.identity, public_path = display }
+            end
+            for _, dependency in ipairs(header.dependencies) do add(dependency) end
+        end
+        add(context.generated_header)
+        if #aliases > 0 then
+            -- Cache diagnostics retain stable identities. Render a public
+            -- view for both fresh and replayed runs without mutating them.
+            diagnostic = normalize_private_diagnostic(diagnostic, nil, nil, nil, aliases)
+        end
+    end
     local result = {
         kind = kind, status = status,
         ok = status == "success",
@@ -2170,8 +2191,8 @@ local function probe_result(context, kind, stage, source, run, rejection)
         cache_tier = run.cache_tier or "compiler",
         cache_path = run.cache_path,
         baseline_cached = run.baseline_cached,
-        diagnostic = run.diagnostic or "",
-        summary = first_diagnostic_line(run.diagnostic),
+        diagnostic = diagnostic,
+        summary = first_diagnostic_line(diagnostic),
         source = run.source or source,
         command = run.command, argv = run.argv,
         source_path = run.source_path, object_path = run.object_path,

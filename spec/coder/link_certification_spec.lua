@@ -420,6 +420,22 @@ describe("final link certificates", function()
         assert.is_false(hit())
     end)
 
+    it("misses malformed relocation root maps without aborting and accepts absent roots", function()
+        local ticket = commit()
+        local ctx = context()
+        local record = assert(certificate.read_record(ctx, ticket.record))
+        for _, roots in ipairs({ "sdk", { sdk = 1 }, { sdk = "" }, { unknown = "/sdk" } }) do
+            record.roots = roots
+            assert(certificate.write_record(ctx, ticket.record, record))
+            local reused, reason = hit()
+            assert.is_false(reused)
+            assert.equal("link record schema", reason)
+        end
+        record.roots = nil
+        assert(certificate.write_record(ctx, ticket.record, record))
+        assert.is_true(hit())
+    end)
+
     it("treats a record whose output snapshot has an unknown kind as a miss", function()
         local ticket = commit()
         assert.is_true(hit())

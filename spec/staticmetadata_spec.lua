@@ -886,6 +886,28 @@ static const unsigned char result[] = {84,73,84,69,78,85,77,0,1,12,
         assert.equal(version.TITAN_ABI_VERSION, envelope.abi)
     end)
 
+    it("rejects malformed roots in embedded and C-origin generated header descriptors", function()
+        local function payload(entry)
+            return "return {abi=" .. string.format("%q", version.TITAN_ABI_VERSION)
+                .. ",schema=" .. string.format("%q", version.OBJECT_RECORD_SCHEMA)
+                .. ",digest=" .. string.format("%q", version.CERTIFICATE_DIGEST)
+                .. ",canonicalization=" .. string.format("%q", version.CERTIFICATE_CANONICALIZATION)
+                .. ",entry=" .. entry .. "}"
+        end
+        for _, entry in ipairs({
+            "{ffi_header_descriptor={roots={sdk=1}}}",
+            "{ffi_header_descriptor={roots={unknown='/sdk'}}}",
+            "{ffi_header_descriptor={dependencies={{roots={sdk=''}}}}}",
+            "{type={_tag='Type.CUnion',_c_origin_header={generated_header={roots='sdk'}}}}",
+        }) do
+            local restored, err, reason = objectmetadata.decode(payload(entry))
+            assert.is_nil(restored)
+            assert.equal("record-schema", reason)
+            assert.matches("header relocation roots", err, 1, true)
+        end
+        assert.is_table(objectmetadata.decode(payload("{ffi_header_descriptor={dependencies={}}}")))
+    end)
+
     it("loads compiler records without a second declaration schema validation", function()
         local payload = "return { abi=" .. string.format("%q", version.TITAN_ABI_VERSION)
             .. ", schema=" .. string.format("%q", version.OBJECT_RECORD_SCHEMA)

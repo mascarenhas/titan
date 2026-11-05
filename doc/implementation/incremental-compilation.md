@@ -671,15 +671,24 @@ one of these roots receives a root label and relative suffix; the most
 specific root wins. A symlinked root is not admitted as a relocatable binding.
 Neither a user source root nor an arbitrary external include/provider/tool
 directory becomes relocatable just because it appears in a command.
+The reuse-on-move guarantee requires an explicit `-o`/`--output` tree. Legacy
+source-adjacent builds have no owned output root and retain their conservative
+move miss; the user source directory is not added to the root map.
 
 Configuration hashing applies this mapping to known path operands in the
 ordered compile argv, FFI include roots, the SDK root, and preamble dependency
 paths and realpaths. Preprocessed preamble bytes remain unchanged input.
-Opaque flags, `-D` values, prefix-map options, runtime search paths, and
-external paths keep their exact bytes. Browser certification derives a
+Opaque flags and their separated operands, `-D` values, prefix-map options,
+runtime search paths, and external paths keep their exact bytes. Bare absolute
+argv elements are not inferred to be file operands; native source and link
+input/output files already have separate typed inventories. Browser certification derives a
 root-relative view of the frozen descriptor's SDK paths without changing its
 operational identity or external Emscripten tool selection. Native and browser
 probe directories remain separate.
+Browser final-link profiles still carry their operational target identity and
+SDK-dependent flag lists, so a moved browser SDK may conservatively miss its
+link certificate. Browser final-link relocation reuse is not part of the
+native guarantee described here.
 
 Generated FFI descriptor identities and their include operands use the same
 mapping, rather than embedding an output-root address into every probe
@@ -700,25 +709,37 @@ Parts of one module run through the existing `io.run_batch` slot budget when
 the strategy supports it; custom synchronous runners retain their own
 execution boundary unless they also supply a batch override.
 
-When a certificate's original roots differ, local certification rebinds only
-its explicit header-input and generated-descriptor fields, recreates current
-generated companions, and revalidates header contents, origins, and lookup
-candidates. It checks each saved generated prefix against its recorded hash,
-rebinds compiler-owned generated directives, and compares the current
-preprocessed program with the recorded semantic digest. A mismatch is
-`c-input relocated generated-C semantics`; missing semantics are
-`record-schema`, not a migration. Ordinary same-root hits do not perform this
-extra preprocessing.
+Certificates retain the roots at object creation. A separate materialization
+receipt records the roots used for the generated companions and is bound to
+the object recipe. Fresh compilation records that state after materializing
+its generated files. Before moving existing companions, certification marks
+the receipt incomplete; an interrupted or malformed materialization cannot
+certify a later hit.
 
-The disposable `<stem>.relocation` receipt binds a successful comparison to
-the exact object/generated companion bytes and concrete current roots, so
-subsequent unchanged builds do not preprocess again. It cannot replace the
+When either root set differs, local certification rebinds explicit header and
+descriptor fields from their recorded roots, and companion files from their
+last materialization roots. It compares current generated contents before
+writing them, including on a return to the creation roots. Restored header
+plans likewise compare contents before preserving a file; a formatter's
+unchanged output is not republished. Header contents, origins and lookup
+candidates are freshly validated.
+
+Only a move away from the creation roots requires checking every saved
+generated prefix against its hash and comparing the current preprocessed
+program with the original semantic digest. A mismatch is
+`c-input relocated generated-C semantics`; missing semantics are
+`record-schema`, not a migration. Ordinary same-root hits do not repeat this
+preprocessing.
+
+The disposable `<stem>.relocation` data-only receipt binds successful semantic
+comparison to the exact object/generated companion bytes and concrete current
+roots, so subsequent unchanged builds do not preprocess again. It also keeps
+materialization state distinct from immutable certificate roots. It cannot replace the
 ordinary source, configuration, header or dependency checks. Reused native
 objects keep their original debug and diagnostic path strings. Authored C
 nodes retain their normal preprocessing check, and final-link records rebind
 only named owned input/output paths; neither path changes nor missing output
 validation are ignored.
-
 
 ## Own-source content and folder membership
 
@@ -841,10 +862,11 @@ source = digest("source-interface", {
 * `rendered_foreign_helper_or_empty` is `ffiheaders.foreign_contents(recipe,
   "module.ffi.h", ...)` when the module exports or defines source
   `foreign function` helpers in `.titan.h`, and `""` otherwise.
-* `entry.source_manifest` is `sourceinterface.serialize(entry)`
-  (`titan-source-interface-v2`), which adds private top-level declarations,
-  inherited C-header input identities, and documentation maps for explicit
-  `.titan` source importers.
+* `entry.source_manifest` is computed once by
+  `sourceinterface.serialize(entry, context)` (`titan-source-interface-v2`)
+  during checking and reused by certification. It adds private top-level
+  declarations, inherited C-header input identities, and documentation maps
+  for explicit `.titan` source importers.
 
 Because `interface.public` and `interface.source` are stored in the producer's
 own `.titan.source` record and read back verbatim on a hit, a freshly compiled

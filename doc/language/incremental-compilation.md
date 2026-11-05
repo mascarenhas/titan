@@ -57,10 +57,12 @@ Reuse follows user source spelling, but compiler-owned roots can move. The
 selected `--tree` path appears in generated `#line` directives, debug
 information, and tracebacks: changing an absolute user source path, or
 switching between relative and absolute spelling, rebuilds the affected
-modules. Moving a checkout whose source paths remain relative, together with
-its output tree and an identical SDK prefix, does not by itself recompile
-certified objects. Equivalent spellings of one `--output` or `--exe`
-destination also reuse the existing objects and link record.
+modules. With an explicit `-o`/`--output` tree, moving a checkout whose source
+paths remain relative, together with its output tree and an identical SDK
+prefix, does not by itself recompile certified objects. Legacy source-adjacent
+builds without `-o` keep a conservative miss when moved; the user source tree
+is not treated as a compiler-owned root. Equivalent spellings of one
+`--output` or `--exe` destination reuse the existing objects and link record.
 
 The compiler identifies its SDK prefix, its own source checkout when running
 from source, and the selected output root by relative paths within those
@@ -69,12 +71,16 @@ SDK include roots, generated companions, and selected SDK providers; it is
 not a rule that removes arbitrary absolute paths. External includes, tools,
 providers, explicit source spellings, option values such as `-D` strings and
 runtime search paths, and changed symlink bindings remain significant.
+A root reached through a symlink is not admitted to this relocation guarantee.
 
 On the first use after an owned root moves, `titanc` preprocesses the saved
 generated C against the current headers and roots before reusing its object.
 An observable path macro such as `__FILE__` or `__BASE_FILE__` must still
 match; a changed value rebuilds the module. A disposable `<stem>.relocation`
 receipt avoids repeating this extra work on later unchanged invocations.
+The receipt also tracks the roots used to materialize generated companions;
+moving back to an earlier root repairs those files without rewriting unchanged
+ones. A missing or interrupted materialization record causes a safe rebuild.
 Reused objects retain their originally embedded diagnostic and debug paths;
 moving a tree does not rewrite object bytes or promise relocated debug
 locations.
@@ -328,6 +334,7 @@ titanc: waiting for build lock '<lock-path>'
 | `coverage-artifacts <path>` | A required `.c` source or `.gcno` note file for a coverage-instrumented module is missing or not a regular file. |
 | `c-input <path>: content\|provenance\|missing\|unreadable\|candidate\|changed-during-read` | A transitive C header or include-search candidate changed content, declaring realpath origin, existence/kind, or readability, or changed while being read. |
 | `c-input relocated generated-C semantics` | Moving an owned root changed the preprocessed program, including an observable C path-macro expansion. |
+| `relocation [<detail>]` | Generated-companion materialization evidence is missing/incomplete, or rebinding, reading, writing, or preprocessing relocated artifacts failed. |
 | `import-interface <module> (public\|source)` | A direct dependency's semantic public interface, nominal layout, copied `.titan.h` helper body, or (for `.titan` imports) source-private manifest changed. |
 | `owner-interface <module>` | A contextually reached nominal owner's public interface or layout changed. |
 | `import-binding <module>: <before> -> <after>` | A direct dependency's native binding (`direct`, `handle`, or `global`) or selected provider path changed. |
