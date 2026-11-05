@@ -243,9 +243,9 @@ describe("automatic C object code generation", function()
                 "ffi_anonymous_holder _local_holder_%d+ = %{0%};",
                 csrc)
             assert.match(
-                "unsigned char volatile _spill_local_holder_%d+"
-                    .. "%[sizeof%(_local_holder_%d+%)%];",
+                "volatile ffi_anonymous_holder _local_holder_%d+ = %{0%};",
                 csrc)
+            assert.not_match("_spill_local_holder_", csrc)
 
             -- Struct/union arguments take their local address. Arrays use
             -- their ordinary decay expression and must never become
