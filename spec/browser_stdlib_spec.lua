@@ -233,7 +233,7 @@ plan:
         assert.truthy(result.output:find(
             "Browser stdlib owner fixture.tests: 1 cases (1.25 ms total)", 1, true), result.output)
         assert.truthy(result.output:find(
-            "Browser stdlib image fixture: 1 cases (1.50 ms total)", 1, true), result.output)
+            "Browser stdlib image stdlib: 1 cases (1.50 ms total)", 1, true), result.output)
     end)
 
     it("audits a case emitting stderr in the middle of a report line from stdout alone", function()

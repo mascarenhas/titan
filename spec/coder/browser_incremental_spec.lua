@@ -146,11 +146,13 @@ local driver = require "titan-compiler.driver"
 local io_module = require "titan-compiler.io"
 local new_sync, image = io_module.new_sync, driver.compile_browser_image
 function driver.compile_browser_image(contents, entrypoint, executable, objects, archives, extra, verbose, options)
-    local before = options.before_commit
-    options.before_commit = function(...)
-        local file = assert(io.open(%q, "wb")); assert(file:write("entered")); assert(file:close())
-        if before then return before(...) end
-        return true
+    if executable == %q then
+        local before = options.before_commit
+        options.before_commit = function(...)
+            local file = assert(io.open(%q, "wb")); assert(file:write("entered")); assert(file:close())
+            if before then return before(...) end
+            return true
+        end
     end
     return image(contents, entrypoint, executable, objects, archives, extra, verbose, options)
 end
@@ -172,7 +174,7 @@ function io_module.new_sync(...)
     end
     return strategy
 end
-]], observed, candidate_path, map_path))
+]], mjs, observed, candidate_path, map_path))
             local function hooked(setup)
                 local argv = { info.prefix .. "/bin/lua", "-E", "-e",
                     string.format("package.path=%q..package.path;", fixture.frontend .. "/?.lua;" ..
@@ -205,8 +207,16 @@ end
             local recovered = fixture:compile(arguments)
             assert.is_true(recovered.ok, recovered.output)
             assert.matches("Titan link miss", recovered.output, 1, true)
-            local warm = hooked([[require("titan-compiler.browserlink").image_inventory =
-                function() error("warm final-link hit reparsed image") end]])
+            local warm = hooked(string.format([[
+local file = assert(io.open(%q, "rb"))
+local published = assert(file:read("*a")); assert(file:close())
+local browserlink = require "titan-compiler.browserlink"
+local inventory = browserlink.image_inventory
+function browserlink.image_inventory(bytes)
+    if bytes == published then error("warm final-link hit reparsed image") end
+    return inventory(bytes)
+end
+]], outputs[2]))
             assert.is_true(warm.ok, warm.output)
             assert.matches("Titan link hit", warm.output, 1, true)
             local previous_record = fixtures.read(record)

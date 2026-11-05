@@ -103,6 +103,16 @@ function driver.publish_provider_bundle(dso, archive, destination, options)
 end
 local oversized = os.getenv("TITAN_PROTOCOL_OVERSIZED")
 if oversized and oversized ~= "" then
+    local link = driver.run_link_command
+    function driver.run_link_command(argv, verbose, output)
+        local linked, term, code = link(argv, verbose, output)
+        if linked and output and output:match("[.]mjs$") then
+            local wasm = output:gsub("[.]mjs$", ".wasm")
+            assert(util.set_file_contents(wasm, assert(util.get_file_contents(oversized, "rb"))))
+            assert(util.set_file_contents(wasm .. ".map", assert(util.get_file_contents(oversized .. ".map", "rb"))))
+        end
+        return linked, term, code
+    end
     local io_module = require "titan-compiler.io"
     local new_sync = io_module.new_sync
     function io_module.new_sync(...)
@@ -112,17 +122,7 @@ if oversized and oversized ~= "" then
             if argv[1]:match("titan%-browser%-run$") and argv[2] == "--engine" then
                 error("oversize protocol image reached the runner")
             end
-            local result = run(self, argv, options)
-            if result.ok then
-                for index, flag in ipairs(argv) do
-                    if flag == "-o" and argv[index + 1]:match("[.]mjs$") then
-                        local wasm = argv[index + 1]:gsub("[.]mjs$", ".wasm")
-                        assert(self:write_file(wasm, assert(self:read_file(oversized))))
-                        assert(self:write_file(wasm .. ".map", assert(self:read_file(oversized .. ".map"))))
-                    end
-                end
-            end
-            return result
+            return run(self, argv, options)
         end
         return strategy
     end
