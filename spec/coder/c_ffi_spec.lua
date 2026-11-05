@@ -1571,11 +1571,11 @@ describe("C FFI code generation", function()
             const maximum: integer = ffi.LLONG_MAX as integer
             const macro: integer = ffi.INITIALIZER_MACRO
             const enumeration: integer = ffi.INITIALIZER_ENUM
-            local native_value: integer = ffi.initializer_value
+            native_value: integer = ffi.initializer_value
             const field: integer = ffi.initializer_object.number
             const indexed: integer = ffi.initializer_array[1]
             const first: integer = ffi.initializer_mark(1)
-            local second: integer = (ffi.initializer_pointer(2))
+            second: integer = (ffi.initializer_pointer(2))
             const trace: integer = ffi.initializer_read_trace()
             local storage = foreign int.new_array(ffi.initializer_count())
             function count(): integer return #storage end
@@ -1590,6 +1590,18 @@ describe("C FFI code generation", function()
             assert(not pcall(function() test.first = 9 end))
             test.second = 9
             assert(test.second == 9 and test.trace == 12)
+        ]])
+    end)
+
+    it("rebases scalar-only foreign module-variable initializers without root slots",
+       function()
+        h.run_coder([[
+            foreign import "spec/fixtures/module_initializers.h"
+            const first: integer = ffi.initializer_mark(1)
+            const second: integer = ffi.initializer_pointer(2)
+            const trace: integer = ffi.initializer_read_trace()
+        ]], [[
+            assert(test.first == 1 and test.second == 2 and test.trace == 12)
         ]])
     end)
 

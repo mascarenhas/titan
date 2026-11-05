@@ -1327,6 +1327,14 @@ Initialization order inside `_init`:
 - Canonical top-level and static closures are populated before variable
   initializers and before module exposure.
 
+`$INITVARS` evaluates module-variable initializers in AST declaration order.
+Imported and foreign calls use the ordinary expression/call lowerings and may
+relocate the Lua stack. `coder/generate.lua` therefore declares `_base` and its
+saved `_base_off` whenever `initctx.uses_base_off` is set, even when
+`initctx.nslots == 0`. A scalar-only initializer needs the saved base but no
+root-slot allocation or clearing loop; GC-bearing results retain the existing
+reserved slots and barriers. The initializer restores `L->top.p` afterward.
+
 An importing module never sees this module's AST. The `Type.Module` interface
 reconstructs the public prefix at compile time, but a separately loaded
 provider may later reorder compatible declarations. Cross-module variable

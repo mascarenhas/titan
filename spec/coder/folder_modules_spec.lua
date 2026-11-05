@@ -719,10 +719,14 @@ end
     it("keeps shared contributors, logical sort order and the selected main's sole initializer", function()
         local folder = fixture.source .. "/ensemble"
         fixtures.write(fixture.source .. "/initializer_trace.titan", [[
+foreign import "titan/ffi.h"
 local ready = false
 trace = 0
 function mark(digit: integer): integer
     if not ready then raise "dependency not initialized" end
+    if ffi.lua_checkstack(L, 8192) == 0 then
+        raise "cannot grow initializer stack"
+    end
     trace = trace * 10 + digit
     return digit
 end

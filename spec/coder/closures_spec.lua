@@ -962,7 +962,8 @@ describe("closures (end-to-end)", function()
             end
 
             function call_bound_as_integer(): integer
-                local f: function (): integer = bound
+                local callback = bound
+                local f: function (): integer = callback
                 return f()
             end
 

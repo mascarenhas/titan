@@ -107,11 +107,16 @@ describe("const values (code generator)", function()
        function()
         local ok, err = h.generate_modules({
             initializer_dep = [[
+                foreign import "titan/ffi.h"
                 local ready = false
                 trace = ""
                 const seed = 100
                 function mark(number: integer): integer
                     if not ready then raise "dependency not initialized" end
+                    if ffi.lua_checkstack(L, 8192) == 0 then
+                        raise "cannot grow initializer stack"
+                    end
+                    ffi.lua_gc(L, ffi.LUA_GCCOLLECT)
                     trace = trace .. number
                     return number
                 end
