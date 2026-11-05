@@ -5524,8 +5524,8 @@ describe("compiler module loader", function()
             native.generated_inputs = { {
                 spelling = stem .. ".c", bytes = #generated,
                 sha256 = incremental.digest(context, "generated-c", generated),
-                semantic = incremental.preprocessed_identities(context,
-                    { { filename = stem .. ".c", contents = generated } })[1],
+                semantic = assert(incremental.preprocessed_identities(context,
+                    { { filename = stem .. ".c", contents = generated } }))[1],
             } }
             entry.interface_digests = assert(incremental.producer_digests(
                 context, entry, layouts, native.foreign_header))

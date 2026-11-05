@@ -1580,12 +1580,20 @@ skips this second check. Only then does the CLI write every planned header, as
 the batch's sole header writer, and call `driver.compile_modules(requests,
 parallelism, verbose, plans)`, which plans the batch itself when no plans are
 given. Each plan's `materialize` closure runs once and is then released,
-dropping the generated C it held.
+dropping the generated C it held. Generated-C semantic preprocessing failures
+return through the same `nil, diagnostic` boundary as other materialization
+failures. The old primary commit marker has already been retired; no source
+record is appended and no object command for that module starts. Non-string
+strategy exceptions still unwind unchanged after preprocessing scratch cleanup.
+Native preprocessing signals unwind without becoming ordinary diagnostics and
+are redelivered by resolver close after the header and probe owners retire.
 
-`driver.compile_modules` materializes every source plan in request order
-before compiling anything; only the native object commands that follow ever
-overlap. With a bound of one it runs each module's part commands in request
-and part order. A larger bound flattens all prepared part jobs across all
+`driver.compile_modules` materializes every source plan in request order before
+starting object compilation. A module's semantic preprocessing can batch its
+parts under the resolver's job-slot budget during materialization; native object
+commands overlap only in the later compilation phase. With a bound of one it
+runs each module's object commands in request and part order. A larger bound
+flattens all prepared part jobs across all
 modules into one worklist that launches the largest part first, by its
 `code_bytes` cost estimate, with stable ties by module request index and then
 part index ([Parallel generated-C

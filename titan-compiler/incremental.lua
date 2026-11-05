@@ -413,6 +413,9 @@ end
 
 -- Temporary translation units use the actual generated filename for macro
 -- expansion. Expanded C strings remain semantic input, unlike #line markers.
+-- Ordinary failures return nil, diagnostic after retiring scratch. A native
+-- signal belongs to the resolver owner until close; unwind with its non-string
+-- value so local certification cannot mistake cancellation for a cache miss.
 function incremental.preprocessed_identities(context, inputs)
     local opts = options(context)
     local temporaries, outputs, commands = {}, {}, {}
@@ -433,9 +436,10 @@ function incremental.preprocessed_identities(context, inputs)
         local cap = context.jobs or 1
         if #commands > 1 and cap > 1 and type(context.io.run_batch) == "function"
             and (context.io.run_batch ~= default_io.run_batch or context.io.run == default_io.run) then
-            local cancelled
-            results, cancelled = context.io:run_batch(commands, { jobs = cap })
-            if cancelled then error("generated-C preprocessing interrupted by signal " .. tostring(cancelled), 0) end
+            results, context.generated_c_cancelled_signal = context.io:run_batch(commands, { jobs = cap })
+            if context.generated_c_cancelled_signal then
+                error(context.generated_c_cancelled_signal, 0)
+            end
         else
             results = {}
             for index, argv in ipairs(commands) do results[index] = context.io:run(argv) end
@@ -455,14 +459,14 @@ function incremental.preprocessed_identities(context, inputs)
     local cleanup_failure, cleanup_cancelled
     for _, filename in ipairs(temporaries) do
         local called, removed, err = pcall(context.io.unlink, context.io, filename)
-        if not called and type(removed) ~= "string" then cleanup_cancelled = removed
+        if not called and type(removed) ~= "string" then cleanup_cancelled = { error = removed }
         elseif not called or not removed then cleanup_failure = tostring(err or removed) end
         incremental.invalidate_file(context, filename)
     end
     if not ok and type(result) ~= "string" then error(result, 0) end
-    if cleanup_cancelled then error(cleanup_cancelled, 0) end
-    if not ok then error(result, 0) end
-    if cleanup_failure then error(cleanup_failure, 0) end
+    if cleanup_cancelled then error(cleanup_cancelled.error, 0) end
+    if not ok then return nil, result end
+    if cleanup_failure then return nil, cleanup_failure end
     return result
 end
 
@@ -1802,7 +1806,8 @@ local function check_relocation(context, record, stem)
             cert.generated[index].spelling or (stem .. part.c_suffix), cert.roots)
         preprocessing[index] = { filename = spelling, contents = source }
     end
-    local current = incremental.preprocessed_identities(context, preprocessing)
+    local current, preprocessing_error = incremental.preprocessed_identities(context, preprocessing)
+    current = required(current, preprocessing_error)
     for index, identity in ipairs(current) do
         if identity ~= cert.generated[index].semantic then
             return miss("c-input", "relocated generated-C semantics")

@@ -711,9 +711,22 @@ once, using the effective compile prefix, its actual quoted-include directory,
 and a macro-prefix mapping from the private temporary to the actual generated
 filename. The resulting digest keeps expanded C values, including `__FILE__`
 and `__BASE_FILE__`; it does not substitute roots inside expanded strings.
-Parts of one module run through `io.run_batch` under the invocation's job-slot
-budget when the strategy supports it; custom synchronous runners keep their
-own execution boundary unless they also supply a batch override.
+Parts of one module run through `io.run_batch` under the resolver's local cap
+and shared Make job-slot ledger when the strategy supports batching; custom
+synchronous runners keep their own execution boundary unless they also supply
+a batch override. The batch reaps every launched compiler and returns its exact
+borrowed token bytes before preprocessing removes its source/output scratch.
+
+An ordinary preprocessing or scratch-cleanup failure returns `nil, diagnostic`;
+fresh materialization returns that failure through the normal compilation
+result, before appending a source record or starting object compilation. A
+relocation check turns the same diagnostic into a miss, never a successful
+semantic certificate. Raised non-string values retain their identity after all
+scratch-removal attempts, with the original exceptional outcome taking
+precedence over cleanup noise. A caught native batch signal is retained on the
+resolver context and raised as a non-string value, so certification cannot
+demote cancellation to a miss. `driver.close_resolver_context` redelivers it
+under the restored signal action after closing the header and probe owners.
 
 Certificates retain the roots at object creation. A separate materialization
 receipt records the roots used for the generated companions and is bound to

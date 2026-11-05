@@ -2,18 +2,35 @@
 set -eu
 
 state=${TITAN_PARALLEL_TEST_STATE:?}
-matched=no
+phase=other
 source=
+mapped_source=
+previous=
 for argument in "$@"; do
+    if [ "$previous" = -c ]; then source=$argument; fi
     case "$argument" in
+        -c) phase=compile ;;
+        -E) phase=preprocess ;;
+        -fmacro-prefix-map=*) mapped_source=${argument#-fmacro-prefix-map=}; mapped_source=${mapped_source#*=} ;;
+    esac
+    previous=$argument
+done
+
+# Compile controls observe only the positional input after -c, never an
+# option ending in a generated filename. Semantic-preprocessing controls
+# explicitly select -E and the generated name carried by its macro mapping.
+matched=no
+if [ "$phase" = "${TITAN_PARALLEL_TEST_PHASE:-compile}" ]; then
+    if [ "$phase" = preprocess ]; then source=$mapped_source; fi
+    case "$source" in
+        -*) ;;
         */batch/one.c | */batch/two.c | */batch/three.c | */batch/four.c | \
         */batch/five.c | */batch/six.c | */batch/seven.c | */batch/eight.c | \
         */batch/*.part[1-9]*.c)
             matched=yes
-            source=$argument
             ;;
     esac
-done
+fi
 
 lock() {
     while ! mkdir "$state/lock" 2>/dev/null; do sleep 0.01; done

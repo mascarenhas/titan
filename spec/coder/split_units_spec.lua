@@ -8,6 +8,8 @@ local coverage = require "titan-compiler.coverage"
 local coverage_lines = require "titan-compiler.coverage_lines"
 local driver = require "titan-compiler.driver"
 local h = require "spec.support.helpers"
+local incremental = require "titan-compiler.incremental"
+local jobs = require "titan-compiler.jobs"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local module_symbols = require "spec.support.module_symbols"
@@ -1316,20 +1318,26 @@ print("VARIANT_OK")
         local wrapper = workspace .. "/diagnostics_cc.sh"
         write_file(wrapper, string.format([[
 #!/bin/sh
+compile=no
+source=
+previous=
 for arg in "$@"; do
-  case "$arg" in
-    %q.c) part=0 ;;
-    %q.part1.c) part=1 ;;
-    %q.part2.c) part=2 ;;
-    %q.part3.c) part=3 ;;
-    *) continue ;;
-  esac
-  test ! -e %q.o || exit 95
-  test "$part" != 0 || sleep 0.1
-  echo "split-diagnostic-$part" >&2
-  exit 1
+  test "$previous" != -c || source=$arg
+  case "$arg" in -c) compile=yes ;; -E) compile=no ;; esac
+  previous=$arg
 done
-exit 94
+test "$compile" = yes || exit 94
+case "$source" in
+  %q.c) part=0 ;;
+  %q.part1.c) part=1 ;;
+  %q.part2.c) part=2 ;;
+  %q.part3.c) part=3 ;;
+  *) exit 94 ;;
+esac
+test ! -e %q.o || exit 95
+test "$part" != 0 || sleep 0.1
+echo "split-diagnostic-$part" >&2
+exit 1
 ]], stem, stem, stem, stem, stem))
         assert(run_cmd({ "chmod", "+x", wrapper }))
         -- Capture the real process boundary instead of replacing Busted's
@@ -1401,16 +1409,19 @@ assert(results[1].ok == nil, "injected C compilation unexpectedly succeeded")
                 write_file(wrapper, string.format([==[
 local cdriver = require("c-parser.cdriver")
 local command = assert(cdriver.split_shell_words(%q))
-for _, argument in ipairs(arg) do
-    if argument:match("%%.part%d%%.c$") then
-        io.stderr:write("injected part %d failure\n")
-        local marker = assert(io.open(%q, "wb"))
-        assert(marker:write(argument))
-        assert(marker:close())
-        os.exit(1)
-    end
-    command[#command + 1] = argument
+local source
+for index, argument in ipairs(arg) do
+    if argument == "-c" then source = arg[index + 1] end
+    if argument == "-E" then source = nil; break end
 end
+if source and source:match("%%.part%d%%.c$") then
+    io.stderr:write("injected part %d failure\n")
+    local marker = assert(io.open(%q, "wb"))
+    assert(marker:write(source))
+    assert(marker:close())
+    os.exit(1)
+end
+for _, argument in ipairs(arg) do command[#command + 1] = argument end
 local result = require("titan-compiler.io").new_sync():run(command,
     { stderr_to_stdout = true })
 io.stderr:write(result.output or result.diagnostic or "")
@@ -1550,6 +1561,167 @@ os.exit(result.ok and 0 or 1)
             end
         end
     end)
+
+    local function certified_split_module()
+        local source_root = workspace .. "/semantic_src"
+        local output_root = workspace .. "/semantic_out"
+        local filename = source_root .. "/mod.titan"
+        write_file(filename, MULTI_CONSTRUCT_SOURCE)
+        h.reset(true)
+        driver.TITAN_SOURCE_PATH = source_root
+        driver.OUTPUT_ROOT = assert(driver.prepare_output_root(output_root))
+        local context = driver.new_resolver_context({
+            source_first = true, output_root = output_root, jobs = 2,
+        })
+        cleanup_context = context
+        assert(driver.configure_foreign_c(context))
+        local options = { context = context, c_parts = 4, split_threshold = 1 }
+        local loader = driver.defaultloader({}, {
+            source_roots = { mod = true }, incremental = false,
+            context = context, output_root = driver.OUTPUT_ROOT,
+            c_parts = 4, split_threshold = 1,
+        })
+        local ok, errors = checker.checkimport("mod", loader)
+        assert.truthy(ok, errors)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local mod = driver.imported.mod
+        filename = mod.native_output or filename
+        assert(driver.compile("mod", mod.ast, filename, { mod = true },
+            false, options, mod))
+        assert.is_true(file_exists(output_root .. "/mod.o"))
+        return context, mod, options, filename, output_root
+    end
+
+    for _, boundary in ipairs({ "direct", "serial batch", "parallel batch" }) do
+        it("returns a real preprocessing failure without a commit marker through " .. boundary, function()
+            local context, mod, options, filename, output_root = certified_split_module()
+            local strategy, temporaries = context.io, {}
+            local tmpname, run_batch = strategy.tmpname, strategy.run_batch
+            function strategy:tmpname()
+                local path, err = tmpname(self)
+                if path then temporaries[#temporaries + 1] = path end
+                return path, err
+            end
+            local batches = 0
+            function strategy:run_batch(commands, batch_options)
+                assert.equal(4, #commands)
+                assert.equal(2, batch_options.jobs)
+                batches = batches + 1
+                -- The real C preprocessor, not a returned fake result, rejects
+                -- the private source and supplies its diagnostic.
+                assert(self:write_file(commands[1][#commands[1] - 2],
+                    "#error generated_C_preprocessing_rejected\n"))
+                return run_batch(self, commands, batch_options)
+            end
+            local result
+            if boundary == "direct" then
+                local ok, err = driver.compile("mod", mod.ast, filename,
+                    { mod = true }, false, options, mod)
+                result = { ok = ok, err = err }
+            else
+                result = driver.compile_modules({ {
+                    modname = "mod", mod = mod, static_deps = { mod = true },
+                    options = options,
+                } }, boundary == "serial batch" and 1 or 2, false)[1]
+            end
+            assert.falsy(result.ok)
+            assert.matches("generated_C_preprocessing_rejected", result.err, 1, true)
+            assert.equal(1, batches)
+            assert.is_true(#temporaries >= 8)
+            for _, path in ipairs(temporaries) do assert.is_false(file_exists(path), path) end
+            for part = 0, 3 do
+                assert.is_false(file_exists(driver.part_object_filename(output_root .. "/mod", part)))
+            end
+            for name in lfs.dir(output_root) do
+                assert.is_nil(name:find(".tmp.", 1, true), name)
+            end
+            assert.is_nil(read_file(output_root .. "/mod.c"):find("titan_object_source_mod", 1, true))
+            assert.is_nil(mod.compiled)
+        end)
+    end
+
+    it("retires the primary and preprocessing scratch before propagating a strategy cancellation", function()
+        local context, mod, options, _, output_root = certified_split_module()
+        local token, temporaries = {}, {}
+        local tmpname = context.io.tmpname
+        function context.io:tmpname()
+            local path, err = tmpname(self)
+            if path then temporaries[#temporaries + 1] = path end
+            return path, err
+        end
+        function context.io:run_batch() error(token, 0) end
+        local called, err = pcall(driver.compile_modules, { {
+            modname = "mod", mod = mod, static_deps = { mod = true },
+            options = options,
+        } }, 2, false)
+        assert.is_false(called)
+        assert.equal(token, err)
+        assert.is_true(#temporaries >= 8)
+        for _, path in ipairs(temporaries) do assert.is_false(file_exists(path), path) end
+        for part = 0, 3 do
+            assert.is_false(file_exists(driver.part_object_filename(output_root .. "/mod", part)))
+        end
+        for name in lfs.dir(output_root) do
+            assert.is_nil(name:find(".tmp.", 1, true), name)
+        end
+        assert.is_nil(mod.compiled)
+    end)
+
+    for _, outcome in ipairs({ "failure", "cancellation" }) do
+        it("keeps relocated preprocessing " .. outcome .. " distinct from a certified hit", function()
+            local context, _, _, _, output_root = certified_split_module()
+            local policy = context.codegen_policy
+            assert(driver.close_resolver_context(context))
+            cleanup_context = nil
+            local moved = workspace .. "/semantic_moved"
+            assert(os.rename(output_root, moved))
+            driver.OUTPUT_ROOT = assert(driver.prepare_output_root(moved))
+            context = driver.new_resolver_context({
+                source_first = true, output_root = moved, jobs = 2,
+            })
+            context.codegen_policy = policy
+            cleanup_context = context
+            assert(driver.configure_foreign_c(context))
+            local strategy, temporaries = context.io, {}
+            local tmpname = strategy.tmpname
+            function strategy:tmpname()
+                local path, err = tmpname(self)
+                if path then temporaries[#temporaries + 1] = path end
+                return path, err
+            end
+            function strategy:run_batch(commands)
+                assert.equal(4, #commands)
+                if outcome == "cancellation" then return {}, 2 end
+                return { { ok = false, diagnostic = "relocated preprocessing rejected" } }
+            end
+            local source = {
+                kind = "flat", main = driver.TITAN_SOURCE_PATH .. "/mod.titan",
+                files = { driver.TITAN_SOURCE_PATH .. "/mod.titan" },
+                native_output = moved .. "/mod.titan",
+            }
+            assert(driver.incremental_configuration(context))
+            local called, verdict = pcall(incremental.certify_local, context, "mod", source)
+            if outcome == "failure" then
+                assert.is_true(called)
+                assert.equal("miss", verdict.status)
+                assert.equal("relocation", verdict.reason)
+                assert.matches("relocated preprocessing rejected", verdict.detail, 1, true)
+            else
+                assert.is_false(called)
+                assert.equal(2, verdict)
+                assert.equal(2, context.generated_c_cancelled_signal)
+                local propagate = jobs.propagate
+                finally(function() jobs.propagate = propagate end)
+                local delivered
+                jobs.propagate = function(signal) delivered = signal end
+                assert(driver.close_resolver_context(context))
+                assert.equal(2, delivered)
+                cleanup_context = nil
+            end
+            assert.is_true(#temporaries >= 8)
+            for _, path in ipairs(temporaries) do assert.is_false(file_exists(path), path) end
+        end)
+    end
 
     it("refuses user-owned .priv.h paths before mutating outputs", function()
         local stem = workspace .. "/protected_mod"

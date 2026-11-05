@@ -2266,6 +2266,11 @@ function driver.close_resolver_context(context)
             first_error = first_error or err
         end
     end
+    -- Semantic preprocessing shares this resolver's cleanup boundary, just
+    -- like deferred C-probe signals: deliver only after both owners retire.
+    local signal = context.generated_c_cancelled_signal
+    context.generated_c_cancelled_signal = nil
+    jobs.propagate(signal)
     if first_error then return nil, first_error end
     return true
 end
@@ -9286,7 +9291,9 @@ local function prepare_compile(
                 }
                 preprocessing[index] = { filename = filename, contents = contents }
             end
-            local semantics = incremental.preprocessed_identities(context, preprocessing)
+            local semantics, preprocessing_error =
+                incremental.preprocessed_identities(context, preprocessing)
+            if not semantics then return nil, preprocessing_error end
             for index, identity in ipairs(semantics) do native.generated_inputs[index].semantic = identity end
         end
         local metadata, metadata_error = metadata_code()

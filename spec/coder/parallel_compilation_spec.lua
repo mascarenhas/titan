@@ -5,6 +5,8 @@ local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local filesystem = require "spec.support.filesystem"
 local installed_prefix = require "spec.support.installed_prefix"
+local incremental = require "titan-compiler.incremental"
+local jobs = require "titan-compiler.jobs"
 local lfs = require "lfs"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local parser = require "titan-compiler.parser"
@@ -355,6 +357,211 @@ describe("parallel generated-C compilation", function()
             state_directory = nil
         end
     end)
+
+    it("counts only positional generated-C object inputs, not macro-map options", function()
+        local plain = workspace_directory .. "/plain.c"
+        local generated = source_root .. "/batch/one.c"
+        for _, filename in ipairs({ plain, generated }) do
+            local file = assert(io.open(filename, "wb"))
+            assert(file:write("int ordinary_input;\n"))
+            assert(file:close())
+        end
+        local prefix = { "env",
+            "TITAN_PARALLEL_TEST_STATE=" .. state_directory,
+            "TITAN_PARALLEL_TEST_EXPECTED=1",
+            "TITAN_PARALLEL_TEST_DELAY=0",
+            "TITAN_PARALLEL_TEST_FAIL=one",
+            platform.windows and "bash" or "sh", WRAPPER,
+            "-fmacro-prefix-map=" .. plain .. "=" .. generated }
+        local function command(arguments)
+            local argv = { table.unpack(prefix) }
+            for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+            return run(argv)
+        end
+        local ok, output = command({ "-E", "-P", plain, "-o",
+            workspace_directory .. "/plain.i" })
+        assert.truthy(ok, output)
+        assert.is_false(file_exists(state_directory .. "/commands"))
+        ok, output = command({ "-c", plain, "-o", workspace_directory .. "/plain.o" })
+        assert.truthy(ok, output)
+        assert.is_false(file_exists(state_directory .. "/commands"))
+        ok, output = command({ "-c", generated, "-o",
+            source_root .. "/batch/one.o" })
+        assert.falsy(ok)
+        assert.matches("parallel compiler sentinel: one", output, 1, true)
+        assert.equal("1\n", read_file(state_directory .. "/started"))
+        assert.equal("0\n", read_file(state_directory .. "/active"))
+        assert.is_false(file_exists(source_root .. "/batch/one.o"))
+    end)
+
+    local function semantic_context(cap)
+        local strategy = compiler_io.new_sync()
+        local tmpname = strategy.tmpname
+        local temporaries = {}
+        function strategy:tmpname()
+            local filename, err = tmpname(self)
+            if filename then temporaries[#temporaries + 1] = filename end
+            return filename, err
+        end
+        return { io = strategy, jobs = cap,
+            incremental_options = { compile_prefix = { "cc" } } }, temporaries
+    end
+
+    local function assert_retired(temporaries)
+        assert.is_true(#temporaries > 0)
+        for _, filename in ipairs(temporaries) do
+            assert.is_false(file_exists(filename), filename)
+        end
+    end
+
+    for _, cap in ipairs({ 1, 2 }) do
+        it("returns real semantic preprocessing failures and retires scratch at cap " .. cap, function()
+            local context, temporaries = semantic_context(cap)
+            local identities, err = incremental.preprocessed_identities(context, {
+                { filename = source_root .. "/batch/one.c",
+                    contents = "#error semantic_preprocessing_failure\n" },
+                { filename = source_root .. "/batch/two.c", contents = "int ordinary_input;\n" },
+            })
+            assert.is_nil(identities)
+            assert.matches("semantic_preprocessing_failure", err, 1, true)
+            assert_retired(temporaries)
+            assert.is_nil(context.generated_c_cancelled_signal)
+        end)
+    end
+
+    for _, item in ipairs({
+        { name = "table", value = {} }, { name = "false", value = false },
+        { name = "nil" },
+    }) do
+        for _, boundary in ipairs({ "run", "run_batch", "unlink" }) do
+            it("preserves the " .. item.name .. " semantic preprocessing error contract from " .. boundary, function()
+                local context, temporaries = semantic_context(2)
+                local strategy = context.io
+                if boundary == "unlink" then
+                    local preprocessed = false
+                    function strategy:run(argv)
+                        local file = assert(io.open(argv[#argv], "wb"))
+                        assert(file:write("int expanded;\n"))
+                        assert(file:close())
+                        preprocessed = true
+                        return { ok = true }
+                    end
+                    local unlink = strategy.unlink
+                    local raised = false
+                    function strategy:unlink(filename)
+                        local ok, err = unlink(self, filename)
+                        if preprocessed and not raised then raised = true; error(item.value, 0) end
+                        return ok, err
+                    end
+                else
+                    strategy[boundary] = function() error(item.value, 0) end
+                end
+                local called, result, diagnostic = pcall(incremental.preprocessed_identities, context, {
+                    { filename = source_root .. "/batch/one.c", contents = "int one;\n" },
+                    { filename = source_root .. "/batch/two.c", contents = "int two;\n" },
+                })
+                if item.value == nil then
+                    -- Lua 5.5 normalizes error(nil) before pcall sees it.
+                    assert.is_true(called)
+                    assert.is_nil(result)
+                    assert.equal("<no error object>", diagnostic)
+                else
+                    assert.is_false(called)
+                    assert.equal(item.value, result)
+                end
+                assert_retired(temporaries)
+            end)
+        end
+    end
+
+    it("keeps the original preprocessing diagnostic over ordinary cleanup noise", function()
+        local context, temporaries = semantic_context(1)
+        local unlink = context.io.unlink
+        local preprocessed = false
+        function context.io:run()
+            preprocessed = true
+            return { ok = false, diagnostic = "original preprocessing failure" }
+        end
+        function context.io:unlink(filename)
+            local ok, err = unlink(self, filename)
+            if preprocessed then return nil, "cleanup failure" end
+            return ok, err
+        end
+        local identities, err = incremental.preprocessed_identities(context, {
+            { filename = source_root .. "/batch/one.c", contents = "int one;\n" },
+        })
+        assert.is_nil(identities)
+        assert.equal("original preprocessing failure", err)
+        assert_retired(temporaries)
+    end)
+
+    it("retains a native preprocessing signal until resolver cleanup redelivers it", function()
+        local context, temporaries = semantic_context(2)
+        function context.io:run_batch() return {}, 2 end
+        local called, err = pcall(incremental.preprocessed_identities, context, {
+            { filename = source_root .. "/batch/one.c", contents = "int one;\n" },
+            { filename = source_root .. "/batch/two.c", contents = "int two;\n" },
+        })
+        assert.is_false(called)
+        assert.equal(2, err)
+        assert.equal(2, context.generated_c_cancelled_signal)
+        assert_retired(temporaries)
+        local service_closed, delivered = false, 0
+        context.probe_service = { close = function() service_closed = true; return true end }
+        local propagate = jobs.propagate
+        finally(function() jobs.propagate = propagate end)
+        jobs.propagate = function(signal)
+            if signal then
+                assert.is_true(service_closed)
+                assert_retired(temporaries)
+                assert.equal(2, signal)
+                delivered = delivered + 1
+            end
+        end
+        assert(driver.close_resolver_context(context))
+        assert.is_nil(context.generated_c_cancelled_signal)
+        assert(driver.close_resolver_context(context))
+        assert.equal(1, delivered)
+    end)
+
+    it("rejects ordinary scratch cleanup failure after successful preprocessing", function()
+        local context, temporaries = semantic_context(1)
+        local unlink = context.io.unlink
+        local preprocessed = false
+        function context.io:run(argv)
+            local file = assert(io.open(argv[#argv], "wb"))
+            assert(file:write("int expanded;\n"))
+            assert(file:close())
+            preprocessed = true
+            return { ok = true }
+        end
+        function context.io:unlink(filename)
+            local ok, err = unlink(self, filename)
+            if preprocessed then return nil, "semantic scratch cleanup failure" end
+            return ok, err
+        end
+        local identities, err = incremental.preprocessed_identities(context, {
+            { filename = source_root .. "/batch/one.c", contents = "int one;\n" },
+        })
+        assert.is_nil(identities)
+        assert.equal("semantic scratch cleanup failure", err)
+        assert_retired(temporaries)
+    end)
+
+    for _, macro in ipairs({ "__FILE__", "__BASE_FILE__" }) do
+        it("keeps expanded " .. macro .. " values in the semantic identity", function()
+            local context, temporaries = semantic_context(2)
+            local contents = "const char *path = " .. macro .. ";\n"
+            local inputs = {
+                { filename = source_root .. "/batch/one.c", contents = contents },
+                { filename = source_root .. "/batch/two.c", contents = contents },
+            }
+            local first = assert(incremental.preprocessed_identities(context, inputs))
+            assert.not_equal(first[1], first[2])
+            assert.same(first, assert(incremental.preprocessed_identities(context, inputs)))
+            assert_retired(temporaries)
+        end)
+    end
 
     it("batches only the driver C object commands", function()
         configure_counting_compiler("reverse")
