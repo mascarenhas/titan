@@ -170,6 +170,7 @@ local function compile_node(context, request, source, stem)
         -- decisions that cannot be represented by a positive dependency list.
         run(context, request, argv, "native-preprocess")
         incremental.invalidate_file(context, preprocessed)
+        incremental.invalidate_file(context, dependencies)
         local files = need(depfile.parse(incremental.file_contents(context, dependencies)))
         local recipe = { source = source, argv = request.compile_argv, toolchain = request.toolchain,
             authored = incremental.file_digest(context, source),
@@ -228,9 +229,9 @@ local function compile_node(context, request, source, stem)
         return { path = object, identity = identity, source = source, hit = false, cacheable = cacheable,
             dependencies = files }
     end)
-    -- Only invocation scratch is retired. Committed .o/.record nodes may be
-    -- shared by other final targets and remain reusable when this source is
-    -- absent from a later invocation.
+    -- Successful dependency files are build-owned provenance, including on
+    -- cache hits and uncacheable builds. Other final targets can still use
+    -- these committed nodes after a later invocation omits their sources.
     local cleanup_errors = {}
     local cleanup_cancelled
     local function retire(filename)
@@ -244,7 +245,7 @@ local function compile_node(context, request, source, stem)
     end
     retire(staged)
     retire(preprocessed)
-    retire(dependencies)
+    if not completed then retire(dependencies) end
     -- Only a begun, unfinished step ends as failed.
     if request.fail_step and began and not finished then
         request.fail_step(source)
@@ -298,6 +299,11 @@ function native.compile(context, request)
                 result[#result + 1] = compile_node(context, request, source, stem)
             end
         end
+        -- Compile-only builds have no final-link record. Retain their expected
+        -- authored inputs separately from unused objects in the native cache.
+        local inputs = {}
+        for _, object in ipairs(result) do inputs[#inputs + 1] = object.path end
+        need(certificate.write_record(context, paths.join(directory, "inputs"), { inputs = inputs }))
         return result
     end)
 end

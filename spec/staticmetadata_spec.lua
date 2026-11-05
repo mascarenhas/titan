@@ -2005,6 +2005,42 @@ return {
             assert.matches('archive member #2 .* name "lto.o": LLVM bitcode %(LTO%) object is not supported', bitcode_member_err)
         end)
 
+        it("opts into independent archive members for content audits without weakening explicit targets or validation", function()
+            local other_payload = assert(staticmetadata.render(
+                "pkg.other", ABI, 'Module("pkg.other",{}, {})'))
+            local full = wasm_object(PAYLOAD)
+            local scalar = wasm_object(other_payload, { features = false })
+            local bytes = archive({ ar_member("full.o/", full), ar_member("scalar.o/", scalar) })
+            local rejected, err = scan(bytes)
+            assert.is_nil(rejected)
+            assert.matches('name "scalar.o": target mismatch: Wasm features', err)
+
+            local audited = assert(scan(bytes, { independent_members = true }))
+            assert.equal(2, #audited.members)
+            assert.same({ "pkg.mod", "pkg.other" }, audited.key_order)
+            assert.equal("+bulk-memory +sign-ext", audited.members[1].fingerprint.features)
+            assert.equal("", audited.members[2].fingerprint.features)
+            assert(scan(archive({ ar_member("scalar.o/", scalar), ar_member("full.o/", full) }),
+                { independent_members = true }))
+            local target = assert(scan(full)).fingerprint
+            rejected, err = scan(bytes, { independent_members = true, target = target })
+            assert.is_nil(rejected)
+            assert.matches('name "scalar.o": target mismatch: Wasm features', err)
+
+            for _, invalid in ipairs({
+                { full, "duplicate logical metadata key" },
+                { "BC\192\222payload", "LLVM bitcode" },
+                { wasm_object(other_payload, { features = { { "+", "invalid feature" } } }),
+                    "invalid Wasm target feature name" },
+            }) do
+                rejected, err = scan(archive({
+                    ar_member("full.o/", full), ar_member("invalid.o/", invalid[1]),
+                }), { independent_members = true })
+                assert.is_nil(rejected)
+                assert.matches(invalid[2], err)
+            end
+        end)
+
         it("permits standalone -shared-mem SjLj feature differences only in non-threaded comparisons", function()
             local function fp(features)
                 return { format = "wasm", word_size = 32, linking_version = 2, features = features }
