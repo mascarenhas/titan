@@ -1081,6 +1081,16 @@ exercises both LF and CRLF output. Removing generated preamble lines must
 accept either ending: the driver's text-mode C writer uses native Windows
 newlines, while the emulated legacy files are written without translation.
 
+End-to-end compiler fixtures track the logical modules they generate and remove
+only those modules' providers (`.so`, `.dll`, `.dylib`, `.a`), objects and
+generated companions after each case. Use the tracked-module cleanup pattern in
+`spec/coder/coder_spec.lua`, including recursive directory removal and verbose-C
+retention, rather than extension globs: unrelated checker metadata DLLs may
+still be mapped in the process. Missing-module checker unit cases use the
+table-backed `helpers.run_checker_modules` with only their consumer source, so
+retained disk providers cannot replace an expected missing-module diagnostic.
+Filesystem resolver behavior remains the responsibility of the driver specs.
+
 ## Native line coverage
 
 The prepared SDK supports `titanc --test --coverage` with matching Clang/LLVM

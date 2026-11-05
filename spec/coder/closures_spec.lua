@@ -9,7 +9,53 @@ local temporary = require "spec.support.temporary"
 -- and spec/checker/closures_spec.lua; this file is the runtime oracle.
 local h = require 'spec.support.helpers'
 
-local run_coder = h.run_coder
+local lfs = require 'lfs'
+local generated_modules = {}
+
+local function run_coder(...)
+    generated_modules.test = true
+    return h.run_coder(...)
+end
+
+local function compile_and_read_c(code, name)
+    generated_modules[name or "test"] = true
+    return h.compile_and_read_c(code, name)
+end
+
+local function generate_modules(modules, ...)
+    for name in pairs(modules) do generated_modules[name] = true end
+    return h.generate_modules(modules, ...)
+end
+
+local function remove_generated(path)
+    if lfs.symlinkattributes(path, "mode") == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then
+                remove_generated(path .. "/" .. name)
+            end
+        end
+        assert(lfs.rmdir(path))
+    else
+        assert(os.remove(path))
+    end
+end
+
+local function clean()
+    -- Only this fixture's generated modules belong to its cleanup; checker
+    -- metadata providers from other owners may still be mapped on Windows.
+    for name in pairs(generated_modules) do
+        local stem = name:gsub("[.]", "/")
+        for _, suffix in ipairs({ ".o", ".so", ".dll", ".dylib", ".a", ".def",
+                ".dll.def", ".so.dSYM", ".dylib.dSYM", ".ffi.h", ".titan.h",
+                ".priv.h", ".parts", ".c" }) do
+            local path = stem .. suffix
+            if (suffix ~= ".c" or not h.verbose) and lfs.symlinkattributes(path) then
+                remove_generated(path)
+            end
+        end
+    end
+    generated_modules = {}
+end
 
 local function with_header(contents, fn)
     local header = temporary.name(".h")
@@ -47,10 +93,7 @@ local function captured_lambda_source(count)
 end
 
 describe("closures (end-to-end)", function()
-    after_each(function ()
-        os.execute("rm -rf *.o *.so *.dSYM")
-        if not h.verbose then os.execute("rm -f *.c") end
-    end)
+    after_each(clean)
 
     it("a counter closure increments a captured boxed integer", function()
         run_coder([[
@@ -776,7 +819,7 @@ describe("closures (end-to-end)", function()
 
     it("constructs lambdas and bound methods without Lua-stack assembly",
     function()
-        local csrc = h.compile_and_read_c([[
+        local csrc = compile_and_read_c([[
             record Counter
                 n: integer
             end
@@ -977,10 +1020,7 @@ describe("closures (end-to-end)", function()
 end)
 
 describe("closures inside methods (end-to-end)", function()
-    after_each(function ()
-        os.execute("rm -rf *.o *.so *.dSYM")
-        if not h.verbose then os.execute("rm -f *.c") end
-    end)
+    after_each(clean)
 
     it("a method's lambda mutates self's field (self captured by value)", function()
         run_coder([[
@@ -1036,13 +1076,10 @@ describe("closures inside methods (end-to-end)", function()
 end)
 
 describe("closures across modules (end-to-end)", function()
-    after_each(function ()
-        os.execute("rm -rf *.o *.so *.dSYM")
-        if not h.verbose then os.execute("rm -f *.c") end
-    end)
+    after_each(clean)
 
     it("passes a lambda across a source-linked import and calls it", function()
-        local ok, err = h.generate_modules({
+        local ok, err = generate_modules({
             mka = [[
                 function make(start: integer): function (integer): integer
                     local acc = start
@@ -1073,10 +1110,7 @@ end)
 -- sizeudata(0, sizeof(ctype)), nuvalue = 0, raw getudatamem, no barrier). These
 -- require the C FFI toolchain (cc/cpp/gcc), like the other foreign-import specs.
 describe("closures over foreign-typed boxes (end-to-end)", function()
-    after_each(function ()
-        os.execute("rm -rf *.o *.so *.dSYM")
-        if not h.verbose then os.execute("rm -f *.c") end
-    end)
+    after_each(clean)
 
     it("covers one captured and reassigned foreign-pointer raw box",
     function()
@@ -1115,7 +1149,7 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         -- The closure observes whether the box currently holds an open file (a
         -- non-NULL pointer) vs NULL across calls, and reassigns the box each call,
         -- exercising a NULL round-trip under generational GC churn.
-        local ok, err = h.generate_modules({
+        local ok, err = generate_modules({
             foo = [[
                 foreign import "stdio.h"
                 function make(name: string): function (string): integer
@@ -1195,7 +1229,7 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         -- boxed size_t against a fresh strlen and reassigns it (returning boolean,
         -- so no Typedef->integer cast is needed), round-tripping the raw box under
         -- generational GC churn.
-        local ok, err = h.generate_modules({
+        local ok, err = generate_modules({
             foo = [[
                 foreign import "string.h"
                 function make(s: string): function (string): (boolean)
@@ -1228,10 +1262,7 @@ end)
 
 describe("raw userdata allocation under Lua internal assertions (end-to-end)", function()
     local driver = require "titan-compiler.driver"
-    after_each(function ()
-        os.execute("rm -rf *.o *.so *.dSYM")
-        if not h.verbose then os.execute("rm -f *.c") end
-    end)
+    after_each(clean)
 
     -- Under -DLUAI_ASSERT, check_exp evaluates gco2u's operand twice. A
     -- generated `gco2u(luaC_newobj(...))` therefore allocated a second,
@@ -1247,7 +1278,7 @@ describe("raw userdata allocation under Lua internal assertions (end-to-end)", f
         local flags = { "-DLUAI_ASSERT" }
         for _, flag in ipairs(saved or {}) do flags[#flags + 1] = flag end
         driver.EXTRA_CPPFLAGS = flags
-        local ok, failure = pcall(h.run_coder, [[
+        local ok, failure = pcall(run_coder, [[
             function entry(...: integer): integer
                 return #{...}
             end
