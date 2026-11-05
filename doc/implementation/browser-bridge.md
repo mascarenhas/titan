@@ -219,6 +219,15 @@ protocol corruption, not an ordinary binding error. A fulfilled export promise
 never substitutes an application result. Zero results and one nil result are
 separate records; multiple results retain every trailing nil.
 
+The public reverse `call`/`Callable.call` promise always resolves with that
+existing decoded values Array, without an additional copy: `[]`, `[null]`,
+`[value]`, or the full multiple-result list. It must not return a sole raw
+value from an async function: JavaScript would assimilate a Promise/thenable
+stored in a JSHandle and could hold logical admission or disposal forever.
+Raw values remain untouched Array elements, including rejected Promises whose
+host rejection handling is still explicit. Lifecycle results, synchronous
+`call_handle` imports, and request success-argument mapping are unchanged.
+
 ## Signature and byte conversion
 
 `callable(callback: value)` inspects the original value once with

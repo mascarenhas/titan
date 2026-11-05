@@ -121,8 +121,9 @@ const instance = create({
 try {
   await instance.initialize();
   await instance.run([]);
-  console.log(await increment.call(5n)); // 5n
-  console.log(await read.call());       // 5n: the same capture cell
+  const [changed] = await increment.call(5n);
+  const [current] = await read.call();
+  console.log(changed, current); // 5n, 5n: the same capture cell
 } finally {
   await instance.dispose();
 }
@@ -133,13 +134,25 @@ Main's defers run when main returns; state finalizers run at explicit
 await disposal in `finally`.
 
 Callback arity and kinds are exact. Nil arguments are JavaScript `null`, not
-missing arguments. Zero results produce `undefined`, one nil result produces
-`null`, one byte string produces one `Uint8Array`, and multiple results
-produce a dense Array preserving every trailing nil. A `JSHandle` result
-unwraps the underlying JavaScript value; a `Callable` result becomes a branded
-instance/state-bound wrapper. A `JSHandle` parameter accepts an ordinary raw
-JavaScript value and creates a new state-owned unit; a `Callable` parameter
-requires the correct live branded wrapper.
+missing arguments. Both `instance.call()` and a callable wrapper's `call()`
+always resolve to the exact decoded result Array: `[]` for zero results,
+`[null]` for one nil, `[value]` for one value, and a dense Array preserving
+every trailing nil for multiple results. A byte result occupies one
+`Uint8Array` element. A `JSHandle` result unwraps the underlying JavaScript
+value into its element; a `Callable` result becomes a branded
+instance/state-bound wrapper. The bridge returns this existing decoded Array
+without another copy.
+
+The Array boundary keeps a Promise or arbitrary thenable in a `JSHandle`
+result opaque: it is `values[0]`, not an extra await or Promise-resolution
+step. A forever-pending value therefore cannot keep the completed call or
+disposal active. A rejected Promise still needs the host's explicit rejection
+handler. This does not change lifecycle method results, typed Titan-to-JS
+`call_handle`, or a request's success-argument mapping.
+
+A `JSHandle` parameter accepts an ordinary raw JavaScript value and creates a
+new state-owned unit; a `Callable` parameter requires the correct live branded
+wrapper.
 
 Cross-heap cycles are explicit ownership: a JavaScript object retaining a
 Titan callable which retains a `JSHandle` back to that object requires release
