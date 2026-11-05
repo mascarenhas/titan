@@ -261,7 +261,7 @@ local function publish_sdk_digests(destination, inventory, common_prefix)
     if not compiler then return nil end
     local relative = "lib/titan/" .. release .. "/" .. incremental.SDK_DIGESTS
     local manifest = destination .. "/" .. relative
-    if lfs.symlinkattributes(manifest) then assert(os.remove(manifest)) end
+    if lfs.symlinkattributes(manifest, "mode") then assert(os.remove(manifest)) end
     local search = package.cpath
     package.cpath = destination .. "/lib/lua/5.5/?." .. (windows and "dll" or "so")
     local loaded, support = pcall(require, "titan")

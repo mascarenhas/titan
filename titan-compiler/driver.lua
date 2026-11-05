@@ -13390,7 +13390,7 @@ function driver.publish_provider_bundle(
         if driver.IS_DARWIN then
             unchanged = same_file_tree(staged_dsym, public_dsym)
         else
-            unchanged = not lfs.symlinkattributes(public_dsym)
+            unchanged = not lfs.symlinkattributes(public_dsym, "mode")
         end
     end
     if unchanged then
