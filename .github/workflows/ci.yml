@@ -482,7 +482,6 @@ jobs:
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 
-
       - name: Run the browser real-toolchain gate
         env:
           TITAN_ROOT: ${{ github.workspace }}/.lua
