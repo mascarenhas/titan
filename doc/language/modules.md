@@ -273,39 +273,92 @@ local banner = string.rep("=", 3)
 An initializer cannot evaluate a reference to the current module's own
 variables, functions, or methods, even if the declaration is earlier, const,
 or reached through a type alias. This prevents a call from reading
-partially initialized module state. This includes own methods bound to a fresh
-receiver or captured by an Interface conversion. A type test does not capture
-methods. The compiler-generated record `new` and
+partially initialized module state. The compiler-generated record `new` and
 union-variant constructors are exceptions: their arguments are checked, and
 their bodies only allocate and fill the nominal value. An own-module custom
-`new` or other user-written nominal function is not an exception.
+`new` or other user-written nominal function is not an exception, and neither
+is an own function or constructor used as a value.
 
 ```text
 x = 10
 y = x + 1                   -- rejected: reads an own-module variable
 z = compute()               -- rejected: calls an own-module function
+f = compute                 -- rejected: an own function value
 ```
 
-An anonymous function is permitted only as the whole initializer. Creating it
-does not execute its body, so that body may use the module's own declarations
-under the ordinary visibility rules. A lambda nested in a call, container,
-operator, or written cast is rejected, even when it does not capture module
-state: a callback could otherwise reenter the module during initialization.
-Parentheses around a lambda and implicit assignment adjustments do not change
-its whole-initializer position.
+Creating a callable does not run it. An initializer may therefore store an
+anonymous function, an own method bound to a receiver that obeys this rule
+(such as `Counter(0):current`), or an Interface value converted from an own
+record or union. It may store them directly or inside Arrays, Maps, record or
+union construction, operators, and written casts. A lambda's body may use the
+module's own declarations under the ordinary visibility rules, because it runs
+only when called. A value of an own record or union type that has methods
+counts as an own callable too: once the module converts that type to an
+Interface anywhere, other code can reach those methods through a
+[compiler-witnessed conversion](interfaces.md#coercion-is-not-consistency-or-subtyping)
+from `value`.
+
+Binding `Counter(0):current` evaluates only its receiver, so it is accepted. A
+named own function such as `compute` is an own-module declaration and is
+rejected even when the initializer only stores it.
 
 ```titan
-local value = 10
-local read = function(): integer
-    return value
+local seed: integer?
+
+record Counter
+    start: integer
+end
+
+function Counter:current(): integer
+    return self.start + seed
+end
+
+local callbacks = {function(): integer return seed end}
+local current = Counter(1):current
+
+do
+    seed = 41
 end
 ```
+
+A call that the initializer evaluates must not receive or invoke such a value,
+because the callee could run the module's own code before the module's
+variables are initialized. An own callable is rejected as an argument of an
+evaluated call, including one nested inside that argument's containers,
+constructors, operators, or casts, and as the called expression or the
+receiver of an Interface method call. This applies even to a lambda that
+captures nothing. Generated constructors only store their arguments, so they
+create no such exposure, but they do not hide an own callable from an
+enclosing call. The diagnostic for an anonymous function differs from the one
+for other own callables.
+
+```text
+a = Counter(1):current()                  -- rejected: invokes an own method
+b = sorter.sort({3, 1}, function(x: integer, y: integer): boolean
+        return x < y end)                 -- rejected: passes a lambda to a call
+c = registry.add({Counter(1):current})   -- rejected: nested in a call argument
+```
+
+Only own implementations count. An Interface declared by this module may
+dispatch to a method implemented by an imported record or union, and imported
+bound methods may be passed to calls.
+
+An imported generated record constructor stores its arguments without calling
+them only while its provider keeps the generated `new`. When an initializer
+stores an own callable through one, directly or nested in another stored
+argument, the compiled consumer therefore also requires the generated default
+constructor. A replacement provider that overrides `new` is rejected as
+incompatible when the consumer loads, before any of its initializers run; see
+[Replacing shared-library dependencies](binary-compatibility.md#private-record-fields-and-construction).
+Imported construction with callback-free arguments depends only on `new`'s
+signature, so such a consumer observes a compatible custom `new`.
 
 Initializers execute once per module instance, in declaration order. The
 checker does not evaluate calls at compile time; their observable effects and
 failures occur during module loading. Allocated results are rooted in the
 module's GC-traced state. Use the final [module initialization block](#module-initialization-block)
-when initialization must depend on the module's own state or callables.
+when initialization must read the module's own state or call its own
+callables.
 
 ## Importing other modules
 

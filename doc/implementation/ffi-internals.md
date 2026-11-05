@@ -84,7 +84,8 @@ header chain, which may augment the inherited C definitions.
 The module-variable dependency check in `checker/declarations.lua` accepts
 foreign member reads, C calls, and allocation/layout pseudo operations.
 It checks their evaluated operands just like ordinary expressions: a C
-callee does not make a same-module variable argument or a nested lambda safe.
+callee does not make a same-module variable argument safe, and like any other
+evaluated call it exposes lambdas and other own callables in its arguments.
 No foreign initializer is evaluated by the checker. Existing expression and
 call lowering executes it in the module's declaration-order `_init` path,
 with the usual checked numeric conversions and GC roots. Imported Titan
@@ -1131,10 +1132,11 @@ value because byte padding cannot recover that count. The userdata is anchored
 in a stack slot immediately after allocation, before any later operation can
 trigger a collection.
 
-The top-level constant-expression check admits these pseudo-constructors when
-all arguments are constant. The allocation still occurs once per module
-instance at initialization time, and the resulting `COwned` userdata is stored
-in a GC-traced module slot.
+Module-variable initializers may use these pseudo-constructors: `isconstructor`
+treats `Checker.CPseudoNew` like a generated constructor, so the call creates
+no call exposure while the dependency rule still checks its arguments. The
+allocation occurs once per module instance at initialization time, and the
+resulting `COwned` userdata is stored in a GC-traced module slot.
 
 Each distinct owned C pointee/count shape also gets a hidden module slot holding
 a metatable. New allocations stamp that metatable onto the `Udata`, and

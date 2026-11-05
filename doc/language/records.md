@@ -348,9 +348,13 @@ end
 An own-module overridden `new` is an own-function dependency and cannot be used
 in a module-variable initializer. An imported custom `new` is permitted because
 its module is already initialized. Every evaluated operand still follows the
-[initializer dependency rule](modules.md#initializer-dependencies). Use the
-module's final `do ... end` block for initialization that needs own-module
-state or callables.
+[initializer dependency rule](modules.md#initializer-dependencies). When an
+initializer stores a lambda or another own callable through an imported
+generated constructor, the compiled consumer also requires that constructor to
+remain generated; see [Replacing shared-library
+dependencies](binary-compatibility.md#private-record-fields-and-construction).
+Use the module's final `do ... end` block for initialization that needs
+own-module state or callables.
 
 The record declaration may appear before or after the module variable. The
 module-variable ordering restriction concerns only imports and other module

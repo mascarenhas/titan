@@ -84,8 +84,8 @@ These expressions execute during module loading in declaration order, not
 at compile time. Their operands must follow the
 [module-initializer dependency rule](modules.md#initializer-dependencies):
 no evaluated reference to an own-module variable, function, or method, and no
-nested lambda passed as a callback. The ordinary C safety and lifetime
-contracts still apply.
+lambda or other own callable passed to the call. The ordinary C safety and
+lifetime contracts still apply.
 
 The compiler prepares `A.ffi.h` from those includes and any `foreign type`
 typedef declarations before checking Titan signatures. A module defining foreign functions also gets `A.titan.h` for their

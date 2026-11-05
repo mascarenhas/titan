@@ -115,10 +115,10 @@ Initialized const and mutable `TopLevelVar` nodes share the
 in `checker/declarations.lua`. This is a runtime initialization-safety rule,
 not constant folding: foreign values/calls and earlier imported members/calls
 are valid, while evaluating a reference to an own-module variable, function,
-or method is not. A whole-initializer lambda is exempt because its body runs
-later; a nested lambda is rejected so an initializer cannot pass a callback
-that reenters its own module. Implicit checker coercions preserve that
-whole-lambda position; written casts do not.
+or method is not. Lambdas, bound own methods, own Interface implementations,
+and own method-bearing record/union values may be stored because creating them
+runs no body; they are rejected only where a call evaluated by the initializer
+could invoke them.
 
 Every initializer-less `TopLevelVar` requires an explicit nil-bearing type;
 the checker replaces `value == nil` with a checked `ExpNil`. A const one also

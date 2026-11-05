@@ -262,22 +262,59 @@ without creating value symbols. Alias resolution and cycle detection are in
    see only earlier imports and module variables (see the symbol-table rules
    above), followed by initializer-dependency validation.
 
-Initializer validation operates on the checked expression, not its source
-spelling or compile-time evaluability. Foreign references/calls and imported
-members/calls are safe dependencies. Current-module variable and callable
-declarations are not, including nominal functions reached through aliases;
-method calls and bound-method references also check the resolved method owner.
-The selective conversion/adapter-plan walk also checks concrete methods
-captured by Interface conversions, including open-run and nested field
-conversions. An `is` satisfaction test creates no wrapper and contributes no
-captured-method dependency.
-Only validated generated nominal constructors bypass the own-callable rule,
-and every evaluated argument, receiver, key, value, and spread bound is still
-checked. A lambda is accepted only as the entire initializer, after peeling
-implicit coercions; its body is not evaluated by initialization. Nested
-lambdas are rejected rather than inspecting their bodies, closing the callback
-path into partially initialized module state. Written casts do not preserve
-the whole-lambda exemption.
+Initializer validation (`initializer_error` in `checker/declarations.lua`)
+operates on the checked expression, not its source spelling or compile-time
+evaluability. It applies two separate predicates.
+
+**Own data** is a dependency wherever it occurs, stored or evaluated: a
+reference to a current-module variable, function, static, or source foreign
+function, including a nominal function reached through an alias, a custom
+constructor, or a generated constructor used as a value. A call is rejected
+when its resolved method or selected declaration is own.
+`initializer_own_declaration` classifies declarations; an Interface's abstract
+method requirement is not an own declaration. Only a direct callee that
+`isconstructor` validates (a generated record/union constructor whose
+synthesized metadata matches the owner projection, or a C allocation
+pseudo-constructor) escapes the own-declaration test. Foreign
+references/calls and imported members/calls are safe dependencies.
+
+**Own callables** are dependencies only when call-exposed. Each visit reports
+whether the expression's value can carry one: a lambda, a bound
+`Ast.ExpMethodRef` whose method is own, an `_*adjustment`/`_*conversion`/
+`_*adapter` plan containing an `interface_implementation` with an own concrete
+method, or a value whose type is an own record or union with own methods
+(`own_nominal_callable`). The last case is latent: another body, even one
+that never runs, can publish an Interface witness, and an imported callee can
+then reach the methods through a dynamic `value` projection. A call's callee
+expression, including a method-call receiver such as an Interface-dispatch
+receiver, is always exposed, and so are all arguments of a call that is not a
+validated generated constructor. Exposure is inherited by every nested
+container, constructor, operator, cast, index, spread, and adjustment, and is
+never reset; a generated constructor neither creates nor clears it. A scalar
+result (nil, boolean, number, or string) reports no stored callable to its
+enclosing expression, so an imported generated constructor receiving
+`#{lambda}` or `Own(1).number` needs no constructor proof; the operands are
+still checked under the exposure in force. An exposed lambda reports `module
+variable initializer cannot expose an anonymous function to a call`; other
+exposed callables report the general own-reference diagnostic. Lambda bodies
+are never traversed, and an `is` satisfaction test creates no wrapper, so its
+plan is not scanned.
+
+Completed visits are memoized in two caches, one per exposure state, so a
+node first reached as stored is still checked when a shared plan or argument
+list later reaches it exposed. Errors are never cached as success, and the
+direct-callee constructor exemption is not memoized as an ordinary value use.
+Conversion-plan facts are exposure-independent and cached per complete root
+query.
+
+When the arguments of an imported generated record constructor carry an own
+callable, the visitor marks the call `_binary_initializer_constructor`.
+`binary_collect_usage` turns that mark into the record's `literal` usage, so a
+replacement provider that overrides `new` fails compatibility checking before
+the consumer initializes; see [construction
+proofs](binary-compatibility.md#construction-and-closed-union-proofs).
+Callback-free imported construction keeps only its `new` signature
+requirement.
 
 Constness is an exact boolean on local declarations, record fields, module
 variables, and Array types. An omitted mutable initializer (local or module
@@ -903,8 +940,8 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   ([the FFI chapter](../language/ffi.md)), a method reference on a non-record
   receiver or to a missing method, and using a record type or a module as a
   value. A top-level `local x = function … end` passes initializer-dependency
-  validation because constructing the whole-initializer closure does not read
-  the body; `x` is a reassignable module variable.
+  validation because constructing the closure does not run the body; `x` is a
+  reassignable module variable.
 * **Conditions are not coerced.** `if`/`while`/`repeat` conditions are
   checked with a Boolean context but never `trycoerce`d or `checkmatch`ed:
   any type is a legal condition, and truthiness is the coder's problem.

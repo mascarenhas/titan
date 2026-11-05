@@ -523,9 +523,9 @@ end
 The one visibility frontier is a top-level *module-variable declaration*: it
 sees only ordinary Titan imports and other module variables written earlier, while seeing all
 record/union owners, Interfaces, aliases, and callable declarations wherever
-they appear. Visibility does not permit an initializer to refer to its own
-module's functions or methods. Calls to visible imported members and foreign
-functions are allowed. See the
+they appear. Visibility does not permit an initializer to reference its own
+module's functions or to call its methods. Calls to visible imported members
+and foreign functions are allowed. See the
 [initializer dependency rule](modules.md#initializer-dependencies) and
 [declaration order and visibility](modules.md#declaration-order-and-visibility).
 
