@@ -425,7 +425,6 @@ end
                 "2:transient",
                 "2:types in declaration of module variable seed do not match, " ..
                     "expected foreign int but found invalid type",
-                "2:top level variable initialization must be constant",
                 "7:rejected", "7:" .. returned,
               }, source = header_module([[
 local seed: foreign int = ffi.spec_flaky_value() + ffi.spec_flaky_value()

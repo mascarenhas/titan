@@ -426,17 +426,15 @@ describe("closures (top-level lambda initializer is sound)", function()
         ]])
     end)
 
-    it("still rejects a genuinely non-const top-level initializer (a = b)", function()
-        -- Reading another module variable's value during init is unsound (b may
-        -- not be initialized yet), so it must still be rejected.
-        assert_type_error("top level variable initialization must be constant", [[
+    it("still rejects an own-module variable dependency (a = b)", function()
+        assert_type_error("module variable initializer cannot reference", [[
             b = 1
             a = b
         ]])
     end)
 
     it("rejects record constructors whose arguments read module state", function()
-        assert_type_error("top level variable initialization must be constant", [[
+        assert_type_error("module variable initializer cannot reference", [[
             record R
                 x: integer
             end
@@ -455,7 +453,7 @@ describe("closures (top-level lambda initializer is sound)", function()
     end)
 
     it("rejects map initializers whose keys read module state", function()
-        assert_type_error("top level variable initialization must be constant", [[
+        assert_type_error("module variable initializer cannot reference", [[
             key = 1
             local m = { [key] = 42 }
         ]])
@@ -570,22 +568,16 @@ describe("bound method references (obj:m)", function()
         end)
     end)
 
-    it("accepts a top-level method-ref initializer with a const receiver", function()
-        -- Binding `obj:m` evaluates the receiver now to capture self; a
-        -- constructor call with const args is itself a sound (const) receiver,
-        -- so the whole bind is a sound top-level initializer.
-        assert_type_check([[
+    it("rejects an own-method initializer even with a fresh receiver", function()
+        assert_type_error("module variable initializer cannot reference", [[
             record Adder base: integer end
             function Adder:add(x: integer): integer return self.base + x end
             local f = Adder.new(1):add
         ]])
     end)
 
-    it("rejects a top-level method-ref initializer with a non-const receiver", function()
-        -- The receiver here reads another module variable (`a`, an ExpVar), so
-        -- binding `a:add` at init time may read a not-yet-initialized variable:
-        -- still unsound, still rejected.
-        assert_type_error("top level variable initialization must be constant", [[
+    it("rejects a top-level method-ref initializer reading a module variable", function()
+        assert_type_error("module variable initializer cannot reference", [[
             record Adder base: integer end
             function Adder:add(x: integer): integer return self.base + x end
             a = Adder.new(1)

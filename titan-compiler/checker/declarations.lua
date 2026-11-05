@@ -470,9 +470,6 @@ function isconstructor(node)
     if not decl then
         return false
     end
-    if decl._tag == "Checker.CPseudoNew" then
-        return true
-    end
     if decl._tag ~= "Type.StaticMethod"
        or decl.varargtype or decl.flexrettype
        or #decl.rettypes ~= 1
@@ -508,100 +505,159 @@ function isconstructor(node)
     return false
 end
 
--- Verify if an expression is constant
-function isconst(node)
-    local tag = node._tag
-    if tag == "Ast.ExpNil" or
-       tag == "Ast.ExpBool" or
-       tag == "Ast.ExpInteger" or
-       tag == "Ast.ExpFloat" or
-       tag == "Ast.ExpString" then
+local function initializer_own_declaration(decl, modname)
+    if not decl or decl._foreign_namespace then return false end
+    local tag = decl._tag
+    if tag == "Ast.TopLevelVar" or tag == "Ast.TopLevelFunc"
+       or tag == "Ast.TopLevelForeignFunc"
+       or tag == "Ast.TopLevelStatic" or tag == "Ast.TopLevelMethod" then
         return true
-
-    elseif tag == "Ast.ExpInitList" then
-        local const = true
-        for _, field in ipairs(node.fields) do
-            if type(field.name) == "table" then
-                const = const and isconst(field.name)
-            end
-            const = const and isconst(field.exp)
-        end
-        return const
-
-    elseif tag == "Ast.ExpCall" then
-        if isconstructor(node.exp) then
-            local const = true
-            for _, arg in ipairs(call_argument_expressions(node.args)) do
-                const = const and isconst(arg)
-            end
-            if const and node._nominal_constructor
-               and node._nominal_constructor.kind == "record" then
-                -- A replacement custom `new` would invalidate this proof even
-                -- when its callable signature remains unchanged.
-                node._binary_constant_constructor = true
-            end
-            return const
-        else
-            return false
-        end
-
-    elseif tag == "Ast.ExpVar" then
-        return node.var and node.var._decl
-            and node.var._decl._tag == "Type.CPseudoSize"
-
-    elseif tag == "Ast.ExpConcat" then
-        local const = true
-        for _, exp in ipairs(node.exps) do
-            const = const and isconst(exp)
-        end
-        return const
-
-    elseif tag == "Ast.ExpUnop" then
-        return isconst(node.exp)
-
-    elseif tag == "Ast.ExpBinop" then
-        return isconst(node.lhs) and isconst(node.rhs)
-
-    elseif tag == "Ast.ExpCast" or tag == "Ast.ExpIs" then
-        return isconst(node.exp)
-
-    elseif tag == "Ast.ExpAdjust" then
-        -- Parenthesizing a call adds an adjustment node that keeps only its
-        -- first result. It does not change whether evaluating the expression
-        -- reads module state during initialization.
-        return isconst(node.exp)
-
-    elseif tag == "Ast.ExpFunction" then
-        -- `isconst` here gates top-level (module) variable initializers, whose
-        -- real requirement is soundness: an initializer runs during module init
-        -- in declaration order, so it must not read a not-yet-initialized module
-        -- variable's value. Constructing a lambda reads no module variable's
-        -- value — the body executes only when the closure is later called — so a
-        -- lambda is always a sound top-level initializer. (This also enables a
-        -- module-level `local f = function ... end`: a module *variable* holding
-        -- a function, so calls to `f` go through the first-class value-call path
-        -- and `f` can be reassigned at runtime — a runtime-replaceable module
-        -- function, at the cost of static dispatch.)
-        return true
-
-    elseif tag == "Ast.ExpMethodRef" then
-        -- Binding `obj:method` evaluates the receiver `obj` now (at init time) to
-        -- capture self, so it is a sound top-level initializer exactly when
-        -- reading the receiver is sound.
-        return isconst(node.exp)
-
-    elseif tag == "Ast.ExpDots" or tag == "Ast.ExpDotsIndex"
-           or tag == "Ast.ExpDotsLen" or tag == "Ast.ExpSubset"
-           or tag == "Ast.ExpSpread" or tag == "Ast.ExpSpreadIndex" then
-        -- Vararg and spread/subset syntax is expression-list machinery and is
-        -- never a compile-time module initializer, even when its subject is
-        -- constant. The expression checker emits the more specific scope and
-        -- placement diagnostics for these forms.
-        return false
-
-    else
-        error("impossible")
+    elseif tag == "Type.ModuleVariable" or tag == "Type.ModuleMember" then
+        return decl.modname == modname
+    elseif tag == "Type.StaticMethod" or tag == "Type.Method" then
+        return nominal_module(decl.fqtn) == modname
     end
+    return false
+end
+
+-- Initialization safety is a dependency rule, not constant folding. Follow the
+-- existing expression/variable shapes without entering declaration backrefs.
+function initializer_error(root, modname)
+    local whole = root
+    while whole._tag == "Ast.ExpCast" and whole._implicit_coercion do
+        whole = whole.exp
+    end
+    if whole._tag == "Ast.ExpFunction" then
+        -- Typed sinks may transparently wrap the whole lambda. Its body and
+        -- callable adjustments execute later, not during initialization.
+        return nil
+    end
+
+    local dependency =
+        "module variable initializer cannot reference this module's variables, functions, or methods"
+    local seen_nodes, seen_plans = {}, {}
+    local function visit_plan(plan)
+        if type(plan) ~= "table" or seen_plans[plan] then return nil end
+        seen_plans[plan] = true
+        if plan._tag then return nil end
+        if plan.kind == "interface_implementation" then
+            for _, mapping in ipairs(plan.methods) do
+                if initializer_own_declaration(mapping.concrete, modname) then
+                    return dependency
+                end
+            end
+        end
+        for _, child in pairs(plan) do
+            local err = visit_plan(child)
+            if err then return err end
+        end
+    end
+
+    local function visit(node, constructor)
+        if not node or seen_nodes[node] then return nil end
+        seen_nodes[node] = true
+        -- Use binary_collect_usage's selective plan convention. Interface
+        -- conversion can capture own methods without a written :method, even
+        -- in an open argument or nested field conversion.
+        if node._tag ~= "Ast.ExpIs" then
+            -- `is` may prove structural satisfaction, but does not construct
+            -- the Interface wrapper or capture its concrete methods.
+            for key, child in pairs(node) do
+                if type(key) == "string" and key:sub(1, 1) == "_"
+                   and (key:match("adjustment$") or key:match("conversion$")
+                        or key:match("adapter$")) then
+                    local err = visit_plan(child)
+                    if err then return err end
+                end
+            end
+        end
+
+        local tag = node._tag
+        if tag == "Ast.ExpNil" or tag == "Ast.ExpBool"
+           or tag == "Ast.ExpInteger" or tag == "Ast.ExpFloat"
+           or tag == "Ast.ExpString" or tag == "Ast.ExpForeignType" then
+            return nil
+
+        elseif tag == "Ast.ExpInitList" then
+            for _, field in ipairs(node.fields) do
+                local err = type(field.name) == "table" and visit(field.name)
+                    or nil
+                if err then return err end
+                err = visit(field.exp)
+                if err then return err end
+            end
+
+        elseif tag == "Ast.ExpCall" then
+            if initializer_own_declaration(node._method, modname)
+               or initializer_own_declaration(node.args._decl, modname) then
+                return dependency
+            end
+            -- The exemption belongs only to a direct generated-constructor
+            -- call, not a first-class reference to an own constructor.
+            local err = visit(node.exp, isconstructor(node.exp))
+            if err then return err end
+            for _, arg in ipairs(call_argument_expressions(node.args)) do
+                err = visit(arg)
+                if err then return err end
+            end
+
+        elseif tag == "Ast.ExpVar" then
+            local var = node.var
+            if not constructor
+               and initializer_own_declaration(var._decl, modname) then
+                return dependency
+            elseif var._tag == "Ast.VarDot" then
+                return visit(var.exp)
+            elseif var._tag == "Ast.VarBracket" then
+                return visit(var.exp1) or visit(var.exp2)
+            end
+            assert(var._tag == "Ast.VarName")
+
+        elseif tag == "Ast.ExpConcat" then
+            for _, exp in ipairs(node.exps) do
+                local err = visit(exp)
+                if err then return err end
+            end
+
+        elseif tag == "Ast.ExpBinop" then
+            return visit(node.lhs) or visit(node.rhs)
+
+        elseif tag == "Ast.ExpAdjust" and node._adjusted_spread then
+            return visit(node._adjusted_spread)
+
+        elseif tag == "Ast.ExpCast" or tag == "Ast.ExpUnop"
+               or tag == "Ast.ExpIs" or tag == "Ast.ExpAdjust"
+               or tag == "Ast.ExpExtra" or tag == "Ast.ExpDotsIndex" then
+            return visit(node.exp)
+
+        elseif tag == "Ast.ExpFunction" then
+            return "anonymous function must be the whole module variable initializer"
+
+        elseif tag == "Ast.ExpMethodRef" then
+            if initializer_own_declaration(node._decl, modname)
+               or initializer_own_declaration(node._method, modname) then
+                return dependency
+            end
+            return visit(node.exp)
+
+        elseif tag == "Ast.ExpSubset" or tag == "Ast.ExpSpread" then
+            return visit(node.exp) or visit(node.first) or visit(node.last)
+
+        elseif tag == "Ast.ExpSpreadIndex" then
+            return visit(node.spread)
+
+        elseif tag == "Ast.ExpUnionInit" then
+            for _, exp in ipairs(node.values) do
+                local err = visit(exp)
+                if err then return err end
+            end
+
+        elseif tag ~= "Ast.ExpDots" and tag ~= "Ast.ExpDotsLen" then
+            error("invalid module initializer expression " .. tostring(tag))
+        end
+        return nil
+    end
+    return visit(root)
 end
 
 -- Return the name given the toplevel node
@@ -877,9 +933,9 @@ toplevel_visitor = util.make_visitor({
         -- generated setter rejects every attempted Lua write.
         node._lua_write_dynamic_plan =
             maybe3.from_optional(types.dynamic_coercion(node._type))
-        if not isconst(node.value) then
-            checker.typeerror(errors, node.value.loc,
-                "top level variable initialization must be constant")
+        local err = initializer_error(node.value, st.modname)
+        if err then
+            checker.typeerror(errors, node.value.loc, "%s", err)
         end
     end,
 

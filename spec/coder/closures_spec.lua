@@ -928,17 +928,15 @@ describe("closures (end-to-end)", function()
         ]])
     end)
 
-    it("a module var initialized with a const-receiver bound method ref runs", function()
-        -- The receiver is a constructor call with a const arg, which `isconst`
-        -- accepts; the bound method-ref initializer evaluates that receiver at
-        -- module-init time, captures self, and stores the bound closure into a
-        -- `_mod` upvalue (gc store, barriered). Calling it later applies the
-        -- method against the captured receiver.
+    it("stores an own bound method from the final module initializer", function()
         run_coder([[
             record Adder base: integer end
             function Adder:add(x: integer): integer return self.base + x end
-            local f = Adder.new(100):add
+            local f: (function(integer): integer)?
             function apply(x: integer): integer return f(x) end
+            do
+                f = Adder.new(100):add
+            end
         ]], [[
             assert(test.apply(5) == 105)
             assert(test.apply(7) == 107)
@@ -946,8 +944,8 @@ describe("closures (end-to-end)", function()
     end)
 
     it("brands module-initializer lambdas and bound method refs before use", function()
-        -- Both closures are constructed while _init is evaluating module
-        -- variables. Their exact type tags must already be published then;
+        -- Both closures are constructed during _init. Their exact type tags
+        -- must already be published then;
         -- otherwise a later compatible non-exact call mistakes them for plain
         -- Lua callables and applies the coercive result boundary.
         run_coder([[
@@ -956,7 +954,7 @@ describe("closures (end-to-end)", function()
 
             local lambda: function (): value =
                 function (): value return 2.0 end
-            local bound: function (): value = Source.new():get
+            local bound: (function (): value)?
 
             function call_lambda_as_integer(): integer
                 local f: function (): integer = lambda
@@ -966,6 +964,10 @@ describe("closures (end-to-end)", function()
             function call_bound_as_integer(): integer
                 local f: function (): integer = bound
                 return f()
+            end
+
+            do
+                bound = Source.new():get
             end
         ]], [[
             local ok_lambda = pcall(test.call_lambda_as_integer)

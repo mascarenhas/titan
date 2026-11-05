@@ -114,12 +114,11 @@ calls to a separate provider use its callable implementation; fused-storage
 calls keep direct construction to preserve their ownership contract, and
 therefore reject a replacement constructor override.
 
-Generated record calls accepted by `isconst` as constant module variable
-initializers also require this capability. The checker marks each accepted
-call with `_binary_constant_constructor`, including nested constructor calls,
-and usage collection keeps that proof requirement. Lambda bodies and computed
-`do` initializers do not participate in this constant-expression proof;
-ordinary calls there depend only on `new`'s signature.
+An ordinary imported constructor call in a module-variable initializer depends
+only on `new`'s callable signature, just like a call in a function body or final
+`do` block. The imported module has already initialized, so its custom
+constructor is a valid initialization dependency. Raw literals and
+fused-storage calls retain their separate construction-capability requirement.
 
 A `case` whose non-fallthrough proof depends on complete variant coverage
 ([case checking and control flow](unions.md#case-checking-and-control-flow)) is marked

@@ -447,9 +447,7 @@ describe("C FFI operator type checking", function()
                     foreign import "]]
                         .. definition_header .. [["
                 ]])
-                assert.falsy(ok)
-                assert.match("initialization must be constant", err)
-                assert.falsy(err:find("incomplete", 1, true))
+                assert.truthy(ok, err)
             end
 
             local ok, err = run_checker([[

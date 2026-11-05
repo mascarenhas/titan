@@ -82,6 +82,14 @@ const version = "0.6.0"
 local const retries: integer = 3
 ```
 
+Const module initializers follow the same
+[dependency rule as mutable module variables](modules.md#module-variables):
+they may read foreign values, call foreign functions, and use members of
+earlier imports, but cannot evaluate a reference to the current module's own
+variables, functions, or methods. `const` makes the binding read-only; it does
+not require compile-time evaluation. A lambda is permitted only as the whole
+initializer, not inside a call, container, or written cast.
+
 An initializer-less const module variable must have an explicit type from the
 same missing-nil domain as an initializer-less mutable local. It starts as the
 corresponding nil/NULL representation:

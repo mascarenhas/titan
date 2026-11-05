@@ -413,9 +413,10 @@ declarations — see [Functions](functions.md#recursion-and-declaration-order)).
 
 ## Lambdas in module-variable initializers
 
-A lambda is a valid module-variable initializer. Constructing the closure does
-not execute its body or read the values mentioned there, so the ordinary
-module-initialization frontier remains sound:
+A lambda is valid only as the **whole** module-variable initializer.
+Parentheses and implicit assignment adjustments preserve that position.
+Constructing the closure does not execute its body or read the values
+mentioned there, so the ordinary module-initialization frontier remains sound:
 
 ```titan
 local transform = function (x: integer): integer return x + 1 end
@@ -431,11 +432,13 @@ end
 
 This declares an ordinary function-typed module variable, not a named function.
 It is initialized once with a fresh closure, can be reassigned later, and calls
-through it use the first-class function path. The usual initializer rule still
-rejects an expression that immediately reads a module variable whose value is
-not visible at that point. Putting the read of an **already name-visible** module
-variable in the lambda body defers its value access until the closure is called;
-it does not make a later module variable or import visible.
+through it use the first-class function path. The
+[initializer dependency rule](modules.md#initializer-dependencies) rejects
+evaluated references to the module's own variables and callables, and also
+rejects a lambda nested in a call, container, operator, or written cast. Putting
+the read of an **already name-visible** module variable in the whole lambda's
+body defers its value access until the closure is called; it does not make a
+later module variable or import visible.
 
 ## Bound method references
 
@@ -443,7 +446,12 @@ A method *named but not called* is a function value with the receiver
 bound in. Writing `obj:method` with **no argument list** yields a value
 whose type is the method's type with the implicit `self` removed, and
 calling that value runs the method on the nominal receiver `obj` was when the
-reference was taken:
+reference was taken.
+
+A bound-method initializer evaluates its receiver and captures its method
+immediately. It therefore cannot name an own-module method, even on a freshly
+constructed receiver. Imported methods are permitted when the receiver
+expression obeys the initializer dependency rule.
 
 ```titan
 record Adder

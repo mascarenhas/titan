@@ -110,6 +110,16 @@ checked after lvalue resolution and before `_assigned` bookkeeping, which keeps
 rejected closure and direct writes from incorrectly selecting mutable capture
 storage.
 
+Initialized const and mutable `TopLevelVar` nodes share the
+[initializer dependency check](checker.md#staged-top-level-collection-and-body-checking)
+in `checker/declarations.lua`. This is a runtime initialization-safety rule,
+not constant folding: foreign values/calls and earlier imported members/calls
+are valid, while evaluating a reference to an own-module variable, function,
+or method is not. A whole-initializer lambda is exempt because its body runs
+later; a nested lambda is rejected so an initializer cannot pass a callback
+that reenters its own module. Implicit checker coercions preserve that
+whole-lambda position; written casts do not.
+
 Every initializer-less `TopLevelVar` requires an explicit nil-bearing type;
 the checker replaces `value == nil` with a checked `ExpNil`. A const one also
 receives `_initializerless_const` and its owning `_module_name`

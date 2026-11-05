@@ -1226,7 +1226,7 @@ describe("C FFI type checking", function()
             local many = foreign int.new_array(count)
         ]])
         assert.falsy(ok)
-        assert.match("top level variable initialization must be constant", err)
+        assert.match("module variable initializer cannot reference", err)
     end)
 
     it("offers sizeof and alignof pseudo-members on C types", function()

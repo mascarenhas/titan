@@ -260,7 +260,24 @@ without creating value symbols. Alias resolution and cycle detection are in
 7. Module variables are checked in AST order. For each node the checker sets
    `st.initializer_order` to its `_toplevel_order`, so the annotation and RHS
    see only earlier imports and module variables (see the symbol-table rules
-   above), followed by the ordinary constant-expression validation.
+   above), followed by initializer-dependency validation.
+
+Initializer validation operates on the checked expression, not its source
+spelling or compile-time evaluability. Foreign references/calls and imported
+members/calls are safe dependencies. Current-module variable and callable
+declarations are not, including nominal functions reached through aliases;
+method calls and bound-method references also check the resolved method owner.
+The selective conversion/adapter-plan walk also checks concrete methods
+captured by Interface conversions, including open-run and nested field
+conversions. An `is` satisfaction test creates no wrapper and contributes no
+captured-method dependency.
+Only validated generated nominal constructors bypass the own-callable rule,
+and every evaluated argument, receiver, key, value, and spread bound is still
+checked. A lambda is accepted only as the entire initializer, after peeling
+implicit coercions; its body is not evaluated by initialization. Nested
+lambdas are rejected rather than inspecting their bodies, closing the callback
+path into partially initialized module state. Written casts do not preserve
+the whole-lambda exemption.
 
 Constness is an exact boolean on local declarations, record fields, module
 variables, and Array types. An omitted mutable initializer (local or module
@@ -885,9 +902,9 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   function as a value or binding a foreign method
   ([the FFI chapter](../language/ffi.md)), a method reference on a non-record
   receiver or to a missing method, and using a record type or a module as a
-  value. A top-level `local x = function … end` passes `isconst` because
-  constructing the closure does not read the body; `x` is a reassignable
-  module variable.
+  value. A top-level `local x = function … end` passes initializer-dependency
+  validation because constructing the whole-initializer closure does not read
+  the body; `x` is a reassignable module variable.
 * **Conditions are not coerced.** `if`/`while`/`repeat` conditions are
   checked with a Boolean context but never `trycoerce`d or `checkmatch`ed:
   any type is a legal condition, and truthiness is the coder's problem.
@@ -900,10 +917,11 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   `Ast.StatCase` checking, including binding scope, is specified in
   [Case checking and control flow](unions.md#case-checking-and-control-flow);
   missing variants are permitted, an unmatched `case` without `else` is a
-  no-op, and its non-fallthrough result is below. `isconst` recognizes a record/union
-  constructor only after its synthesized nominal metadata validates against
-  the owner projection, and only when all arguments are recursively constant;
-  an arbitrary static returning the owner is not a module constant.
+  no-op, and its non-fallthrough result is below. Initializer validation accepts
+  an own-module record/union constructor only after its synthesized nominal
+  metadata validates against the owner projection and all evaluated arguments
+  satisfy the dependency rule. An arbitrary own-module static returning the
+  owner is still an own-function dependency.
 * **Written `as` casts and `is` tests.** Both visitors call
   `check_explicit_cast_relation` (`checker/calls.lua`): it resolves the
   target, checks the operand under that target context, and stores a complete

@@ -69,6 +69,24 @@ inheritance follows transitive C includes, while access to private Titan
 declarations still requires a direct explicit source import. Ordinary imports
 and compiled providers do not grant this source-only visibility.
 
+Foreign values and calls may also initialize mutable and const module
+variables:
+
+```titan
+foreign import "limits.h"
+foreign import "stdlib.h"
+
+const maximum: integer = ffi.LLONG_MAX as integer
+local magnitude: integer = ffi.abs(-7)
+```
+
+These expressions execute during module loading in declaration order, not
+at compile time. Their operands must follow the
+[module-initializer dependency rule](modules.md#initializer-dependencies):
+no evaluated reference to an own-module variable, function, or method, and no
+nested lambda passed as a callback. The ordinary C safety and lifetime
+contracts still apply.
+
 The compiler prepares `A.ffi.h` from those includes and any `foreign type`
 typedef declarations before checking Titan signatures. A module defining foreign functions also gets `A.titan.h` for their
 checked declarations and local direct-call helpers. Generated `A.c` includes its own `.ffi.h` before
@@ -910,7 +928,7 @@ optionality on the type, as `handle: Handle?`. The C payload itself is never an 
 must be explicitly unwrapped before it adjusts to a C pointer.
 
 These pseudo-constructor calls are also valid module-variable initializers when
-their arguments are constant:
+their arguments satisfy the [dependency rule](modules.md#initializer-dependencies):
 
 ```titan
 local counter = foreign int.new()
@@ -918,8 +936,8 @@ local samples = foreign float.new_array(16)
 ```
 
 Each module instance performs the allocation once and keeps the owned userdata
-in its GC-traced module state. A `new_array` count that reads another module
-variable is not a constant initializer and is rejected.
+in its GC-traced module state. A `new_array` count may come from an imported
+module or a foreign call, but cannot read the current module's own variable.
 
 Passing a mutable owner to a C function expecting `T *`, `const T *`, or a
 permitted `void *` passes a pointer to the userdata payload. A counted owner

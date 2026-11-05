@@ -1564,6 +1564,35 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("executes foreign module-variable initializers in declaration order", function()
+        h.run_coder([[
+            foreign import "limits.h"
+            foreign import "spec/fixtures/module_initializers.h"
+            const maximum: integer = ffi.LLONG_MAX as integer
+            const macro: integer = ffi.INITIALIZER_MACRO
+            const enumeration: integer = ffi.INITIALIZER_ENUM
+            local native_value: integer = ffi.initializer_value
+            const field: integer = ffi.initializer_object.number
+            const indexed: integer = ffi.initializer_array[1]
+            const first: integer = ffi.initializer_mark(1)
+            local second: integer = (ffi.initializer_pointer(2))
+            const trace: integer = ffi.initializer_read_trace()
+            local storage = foreign int.new_array(ffi.initializer_count())
+            function count(): integer return #storage end
+        ]], [[
+            assert(test.maximum == math.maxinteger)
+            assert(test.macro == 17 and test.enumeration == 9)
+            assert(test.native_value == 23 and test.field == 11)
+            assert(test.indexed == 5)
+            assert(test.first == 1 and test.second == 2 and test.trace == 12)
+            collectgarbage("collect")
+            assert(test.count() == 3)
+            assert(not pcall(function() test.first = 9 end))
+            test.second = 9
+            assert(test.second == 9 and test.trace == 12)
+        ]])
+    end)
+
     it("rebases the Lua stack after direct and pointer foreign calls", function()
         with_header([[
             typedef struct TValue TValue;

@@ -53,6 +53,7 @@ end
 describe("const values (code generator)", function()
     after_each(function()
         clean_module("test")
+        clean_module("initializer_dep")
     end)
 
     it("nil-initializes omitted mutable scalar and GC locals", function()
@@ -100,6 +101,102 @@ describe("const values (code generator)", function()
             local answer, delayed = test.read()
             assert(answer == 42 and delayed == "ready")
         ]])
+    end)
+
+    it("executes imported initializers after the dependency and before the root block",
+       function()
+        local ok, err = h.generate_modules({
+            initializer_dep = [[
+                local ready = false
+                trace = ""
+                const seed = 100
+                function mark(number: integer): integer
+                    if not ready then raise "dependency not initialized" end
+                    trace = trace .. number
+                    return number
+                end
+                record Box number: integer end
+                function Box.new(number: integer): Box
+                    return {number = mark(number)}
+                end
+                function Box:read(): integer return self.number end
+                do ready = true end
+            ]],
+            test = [[
+                local dep = import "initializer_dep"
+                const first = dep.mark(1)
+                second = (dep.mark(2))
+                const box = dep.Box(3)
+                const method = dep.Box(4):read()
+                const bound = dep.Box(5):read
+                const values = {dep.mark(6), dep.mark(7)}
+                const indexed: integer = ({dep.mark(8)})[1]
+                const imported = dep.seed
+                const delayed: integer?
+                local lambda = function(): integer return first + second end
+                local erased: value = function(): integer return first end
+                function read(): integer return lambda() end
+                function read_erased(): integer
+                    local callback: function(): integer = erased
+                    return callback()
+                end
+                function trace(): string return dep.trace end
+                do delayed = dep.mark(9) end
+            ]],
+        }, "test")
+        assert.truthy(ok, err)
+        ok, err = h.call("test", [[
+            assert(test.first == 1 and test.second == 2)
+            assert(test.box.number == 3 and test.method == 4)
+            assert(test.bound() == 5)
+            assert(test.values[1] == 6 and test.values[2] == 7)
+            assert(test.indexed == 8 and test.imported == 100)
+            assert(test.delayed == 9 and test.trace() == "123456789")
+            collectgarbage("collect")
+            assert(test.read() == 3 and test.read_erased() == 1)
+            assert(test.bound() == 5)
+            assert(require("test") == test and test.trace() == "123456789")
+            assert(not pcall(function() test.first = 10 end))
+            assert(not pcall(function() test.delayed = 10 end))
+            test.second = 20
+            assert(test.read() == 21 and test.trace() == "123456789")
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("preserves named, surplus, multi-result, and spread evaluation during init",
+       function()
+        local ok, err = h.generate_modules({
+            initializer_dep = [[
+                trace = ""
+                function mark(number: integer): integer
+                    trace = trace .. number
+                    return number
+                end
+                function pair(first: integer, second: integer): integer
+                    return first * 10 + second
+                end
+                function zero(): integer return 0 end
+                function results(): (integer, integer)
+                    return mark(5), mark(6)
+                end
+            ]],
+            test = [[
+                local dep = import "initializer_dep"
+                const named = dep.pair {second = dep.mark(1), first = dep.mark(2)}
+                const discarded = dep.zero(dep.mark(3), dep.mark(4))
+                const multiple = dep.pair(dep.results())
+                const spread = dep.pair(...{dep.mark(7), dep.mark(8)})
+                function trace(): string return dep.trace end
+            ]],
+        }, "test")
+        assert.truthy(ok, err)
+        ok, err = h.call("test", [[
+            assert(test.named == 21 and test.discarded == 0)
+            assert(test.multiple == 56 and test.spread == 78)
+            assert(test.trace() == "12345678")
+        ]])
+        assert.truthy(ok, err)
     end)
 
     it("keeps const record fields read-only while mutable siblings work",

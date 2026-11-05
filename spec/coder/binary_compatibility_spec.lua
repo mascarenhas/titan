@@ -1247,7 +1247,7 @@ int main(void) {
         runs("assert(consumer.run() == 42)")
     end)
 
-    it("rejects overriding a constructor used in a constant module initializer", function()
+    it("uses a replacement imported constructor in a module initializer", function()
         local image = fixture("record Box n: integer end", [[
             local p = import "bc180_provider"
             box: p.Box = p.Box(41)
@@ -1258,7 +1258,7 @@ int main(void) {
             record Box n: integer end
             function Box.new(n: integer): Box return {n = n + 1} end
         ]], image)
-        rejects("Box.literal")
+        runs("assert(consumer.run() == 42)")
     end)
 
     it("requires raw construction authority for a DSO constructor with fused native storage", function()

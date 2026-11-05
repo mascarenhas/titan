@@ -115,7 +115,7 @@ describe("binary dependency usage", function()
         assert.same({}, tree._binary_usage.provider.records.Item.functions)
     end)
 
-    it("requires default construction for direct and nested constant initializers", function()
+    it("keeps imported initializer calls independent of default construction authority", function()
         for _, initializer in ipairs({
             "item: p.Item = p.Item(42)",
             "items: {p.Item} = {p.Item.new(42)}",
@@ -125,9 +125,21 @@ describe("binary dependency usage", function()
                 provider = [[record Item number: integer end]],
                 consumer = 'local p = import "provider"\n' .. initializer,
             })
-            assert.is_true(tree._binary_usage.provider.records.Item.literal)
+            assert.is_nil(tree._binary_usage.provider.records.Item.literal)
             assert.same({new = true}, tree._binary_usage.provider.records.Item.functions)
         end
+    end)
+
+    it("still requires literal authority for raw module-variable construction", function()
+        local tree = check({
+            provider = [[record Item number: integer end]],
+            consumer = [[
+                local p = import "provider"
+                const item: p.Item = {number = 42}
+            ]],
+        })
+        assert.is_true(tree._binary_usage.provider.records.Item.literal)
+        assert.same({}, tree._binary_usage.provider.records.Item.functions)
     end)
 
     it("keeps ordinary calls independent of default construction authority", function()

@@ -81,6 +81,16 @@ identity, and ABI slots retain their existing rules. The compiler does not
 copy an imported module's C namespace table: the consumer parses its own real
 header chain, which may augment the inherited C definitions.
 
+The module-variable dependency check in `checker/declarations.lua` accepts
+foreign member reads, C calls, and allocation/layout pseudo operations.
+It checks their evaluated operands just like ordinary expressions: a C
+callee does not make a same-module variable argument or a nested lambda safe.
+No foreign initializer is evaluated by the checker. Existing expression and
+call lowering executes it in the module's declaration-order `_init` path,
+with the usual checked numeric conversions and GC roots. Imported Titan
+members are likewise admissible because the loader initializes dependencies
+first; this does not widen the import frontier or source-private visibility.
+
 The resolver owns generated checking headers and their dependency graph; real
 header contents and search observations keep normal analysis invalidation,
 while temporary checking paths are not persistent dependencies. How checking
@@ -687,13 +697,12 @@ The checker has FFI-specific handling in a few narrow places:
   it is exposed while the member is a direct callee and is never manufactured
   as a `Type.Function` value. Completeness comes from the final module C
   environment, including headers written after an earlier module variable.
-* Top-level initializer validation recognizes `Checker.CPseudoNew` as a sound
-  constructor. `foreign T.new()` and `foreign T.new_array(count)` are accepted when their
-  actual argument list is constant; a count that reads module state is
-  rejected just like a non-constant record-constructor argument. The
+* Top-level initializer validation accepts `foreign T.new()` and
+  `foreign T.new_array(count)` when their arguments satisfy the dependency rule,
+  including imported members/calls and foreign values/calls. A count that reads
+  own-module state is rejected like any other own-variable dependency. The
   `Ast.ExpAdjust` introduced by parenthesizing a call is transparent to this
-  check. The same validator checks both expression-valued map keys and their
-  values in initializer lists.
+  check. Expression-valued Map keys and values are both checked.
 * `Ast.ExpCall` has explicit, separate branches for a direct foreign
   `Type.ModuleMember` whose type is `CFunction` and for a callee whose resolved
   type is `CPointer(CFunction(...))`. Both use the checker-local signature view

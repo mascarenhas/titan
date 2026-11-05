@@ -120,9 +120,8 @@ than that sequence, with one deliberate frontier for module variables:
   and macros from foreign directives written later. They still see every record, union,
   Interface, type alias, ordinary function, method, nominal function, and
   synthesized constructor, wherever those declarations occur. This visibility
-  does not make a non-constant
-  initializer legal; the separate [constant-expression
-  rule](#initializers-must-be-constant) still applies.
+  does not make every visible declaration legal in an initializer: the separate
+  [initialization-dependency rule](#initializer-dependencies) still applies.
 
   ```lua
   -- Titan
@@ -160,8 +159,8 @@ than that sequence, with one deliberate frontier for module variables:
 ## Module initialization block
 
 After its declarations, a module may have one root `do ... end` block for
-computed initialization that cannot be expressed by constant module-variable
-initializers:
+computed initialization that depends on the module's own variables or
+callables:
 
 ```titan
 local ready: boolean = false
@@ -242,49 +241,71 @@ it as a member of the module value; mutable writes are type-checked at run time
 and const writes are rejected — see
 [Module variables from Lua](lua-interop.md#module-variables-from-lua)).
 
-### Initializers must be constant
+### Initializer dependencies
 
-The initializer of a module variable must be a compile-time constant
-expression. The allowed forms are:
+A mutable or const module-variable initializer runs when the module is loaded,
+not at compile time. It may use:
 
-* `nil`, boolean, integer, float, and string literals;
-* array, map, and record [constructor expressions](expressions.md)
-  whose elements, keys, values, and fields are themselves constant;
-* calls to a record's `new` constructor with constant arguments;
-* calls to a compiler-synthesized union-variant constructor with a constant
-  payload, or no payload for an empty variant;
-* calls to an imported C type's `.new()` or `.new_array(count)` pseudo-
-  constructor, with a constant `count`;
-* concatenations, unary operators, binary operators, `as` casts, and `is`
-  type tests applied to constant operands.
+* literals and Array, Map, record, or union construction;
+* foreign constants, variables, fields, indices, and function calls;
+* visible imported-module members, including variables, functions, constructors,
+  and methods; and
+* ordinary operators, casts, type tests, indexing, and calls composed from those
+  expressions.
 
-Anything else — in particular any variable reference and any other
-function call — is rejected with the compile-time error
-`top level variable initialization must be constant`; a variable that
-needs a computed initial value must start from a constant placeholder
-and be assigned from a function at run time.
+Every expression evaluated by the initializer must obey the same rule,
+including call arguments, surplus arguments that are evaluated and discarded,
+container keys and values, and method receivers. Imported modules are fully
+initialized first, and cyclic imports are forbidden. An import must still be
+visible at the declaration; this rule does not change the earlier-import
+frontier or explicit-source-import visibility.
 
-```lua
--- Titan
-x = 10
-y = x + 1          -- error: top level variable initialization must be constant
-s = "a" .. "b"     -- ok: constant expression
-n = -(2 * 3)       -- ok: constant expression
+```titan
+local string = import "string"
+foreign import "limits.h"
+foreign import "stdlib.h"
+
+const maximum: integer = ffi.LLONG_MAX as integer
+local magnitude: integer = ffi.abs(-7)
+local banner = string.rep("=", 3)
 ```
 
-Record constructors are accepted by this rule, so
-`p: Point = { x = 1.0, y = 2.0 }` and `p = Point.new(1.0, 2.0)` both
-work as module-variable declarations. Owned C constructors work as well, for
-example `local state = c.State.new()` or
-`local slots = c.Slot.new_array(4)`. The constructors run once when that module
-instance initializes; the resulting objects are rooted in its GC-traced state.
-*Reassigning* such a variable with a constructor expression from inside
-a function works the same way — `p = { x = 30.0, y = 40.0 }` as a
-statement is equivalent to the initializer form. See
-[Records in module variables](records.md#records-in-module-variables).
-Genuine generated union constructors are accepted for the same reason.
-A user-written union function that happens to return a variant is still an
-ordinary function call and is not constant.
+An initializer cannot evaluate a reference to the current module's own
+variables, functions, or methods, even if the declaration is earlier, const,
+or reached through a type alias. This prevents a call from reading
+partially initialized module state. This includes own methods bound to a fresh
+receiver or captured by an Interface conversion. A type test does not capture
+methods. The compiler-generated record `new` and
+union-variant constructors are exceptions: their arguments are checked, and
+their bodies only allocate and fill the nominal value. An own-module custom
+`new` or other user-written nominal function is not an exception.
+
+```text
+x = 10
+y = x + 1                   -- rejected: reads an own-module variable
+z = compute()               -- rejected: calls an own-module function
+```
+
+An anonymous function is permitted only as the whole initializer. Creating it
+does not execute its body, so that body may use the module's own declarations
+under the ordinary visibility rules. A lambda nested in a call, container,
+operator, or written cast is rejected, even when it does not capture module
+state: a callback could otherwise reenter the module during initialization.
+Parentheses around a lambda and implicit assignment adjustments do not change
+its whole-initializer position.
+
+```titan
+local value = 10
+local read = function(): integer
+    return value
+end
+```
+
+Initializers execute once per module instance, in declaration order. Calls
+are not constant-folded or moved ahead of other declarations; their effects
+and failures occur during module loading. Allocated results are rooted in the
+module's GC-traced state. Use the final [module initialization block](#module-initialization-block)
+when initialization must depend on the module's own state or callables.
 
 ## Importing other modules
 

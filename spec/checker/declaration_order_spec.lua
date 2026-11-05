@@ -230,3 +230,303 @@ describe("top-level declaration order", function()
         ]])
     end)
 end)
+
+describe("module initializer dependencies (typechecker)", function()
+    it("accepts foreign constants, values, and calls for mutable and const slots",
+       function()
+        assert_check([[
+            foreign import "limits.h"
+            foreign import "stdlib.h"
+            foreign import "stdio.h"
+            local maximum: integer = ffi.LLONG_MAX as integer
+            const native_maximum = ffi.INT_MAX
+            const magnitude: integer = ffi.abs(-7)
+            local stream = ffi.stderr
+            const layout = foreign int.sizeof + foreign int.alignof
+            local values = {ffi.abs(-1) as integer, ffi.INT_MAX as integer}
+            foreign import "spec/fixtures/module_initializers.h"
+            const enumeration: integer = ffi.INITIALIZER_ENUM
+            local macro: integer = ffi.INITIALIZER_MACRO
+            const foreign_value: integer = ffi.initializer_value
+            local field: integer = ffi.initializer_object.number
+            const element: integer = ffi.initializer_array[1]
+            local indirect: integer = ffi.initializer_pointer(3)
+            local owned = foreign int.new_array(ffi.initializer_count())
+        ]])
+    end)
+
+    it("does not mistake the foreign namespace for a module named ffi", function()
+        local ok, err = run_checker_modules({
+            ffi = [[
+                foreign import "stdlib.h"
+                const magnitude: integer = ffi.abs(-7)
+            ]],
+        }, "ffi")
+        assert.truthy(ok, err)
+    end)
+
+    it("accepts imported values, calls, aliases, methods, and bound methods",
+       function()
+        local ok, err = run_checker_modules({
+            dep = [[
+                const seed = 4
+                record Box number: integer end
+                type Alias = Box
+                function Box.new(number: integer): Box
+                    return {number = number}
+                end
+                function Box:read(): integer return self.number end
+                function make(): Box return Box.new(seed) end
+                function twice(number: integer): integer return number * 2 end
+            ]],
+            main = [[
+                local dep = import "dep"
+                type Alias = dep.Alias
+                const seed = dep.seed
+                local direct = dep.twice(dep.seed)
+                const called = (dep.twice(3))
+                const spread = dep.twice(...{3})
+                local callable = dep.twice
+                local box = dep.make()
+                const custom = Alias(5)
+                const member = dep.make().number
+                local method = dep.make():read()
+                const bound = dep.make():read
+                local array = {dep.seed, dep.twice(3)}
+                const indexed: integer = ({dep.twice(4)})[1]
+                local map: {integer: integer} = {[dep.twice(1)] = dep.seed}
+                const cast = dep.twice(2) as float
+                local test = dep.make() is dep.Box
+            ]],
+        }, "main")
+        assert.truthy(ok, err)
+    end)
+
+    it("preserves whole lambdas through implicit coercions and parentheses",
+       function()
+        assert_check([[
+            local seed = 4
+            local read = (function(): integer return seed end)
+            const optional: (function(): integer)? =
+                function(): integer return seed end
+            local erased: value = function(): integer return seed end
+            local adjusted: function(integer, integer): integer =
+                function(number: integer): integer return number + seed end
+        ]])
+    end)
+
+    it("preserves generated record and union construction through aliases",
+       function()
+        assert_check([[
+            type Alias = Box
+            const box = Alias {number = 4}
+            local nested: {Box} = {Box(1), Alias.new(2)}
+            record Box number: integer end
+            union Result
+                Some(number: integer)
+                None()
+            end
+            type Choice = Result
+            const present = Choice.Some(3)
+            local absent = Result.None()
+        ]])
+    end)
+
+    local dependencies = {
+        {"an earlier variable", [[local bad = seed]]},
+        {"a const variable", [[const bad = fixed]]},
+        {"a nested variable", [[local bad = {seed + 1}]]},
+        {"a map key", [[local bad: {integer: integer} = {[seed] = 1}]]},
+        {"a cast operand", [[local bad = seed as float]]},
+        {"a type-test operand", [[local bad = seed is integer]]},
+        {"an indexed container", "local bad: integer = values[1]"},
+        {"an index expression", "local bad: integer = ({1, 2})[seed]"},
+        {"a function call", [[local bad = own()]]},
+        {"a function value", [[const bad = own]]},
+        {"a function inside a container", [[local bad = {own}]]},
+        {"a generated constructor value", [[local bad = Box.new]]},
+        {"a static call", [[local bad = Box.make()]]},
+        {"an aliased static call", [[local bad = Alias.make()]]},
+        {"an aliased static reference", [[local bad = Alias.make]]},
+        {"a method call", [[local bad = Box(1):read()]]},
+        {"a bound method", [[const bad = Alias(1):read]]},
+        {"a constructor argument", [[local bad = Box(seed)]]},
+        {"a named constructor argument", [[local bad = Box {number = seed}]]},
+        {"a foreign-call argument", [[local bad = ffi.abs(seed)]]},
+        {"a spread subject", "local bad = {...values}"},
+        {"a spread lower bound", "local bad = {...{1, 2}[seed, 2]}"},
+        {"an adjusted spread upper bound", "local bad = (...{1, 2}[1, seed])"},
+        {"a source foreign call", [[local bad = own_foreign()]]},
+        {"a source foreign pointer", [[local bad = own_foreign as foreign function(): int]]},
+    }
+    for _, case in ipairs(dependencies) do
+        it("rejects " .. case[1] .. " from its own module", function()
+            assert_error("module variable initializer cannot reference", [[
+                foreign import "stdlib.h"
+                local seed = 1
+                const fixed = 2
+                local values = {1, 2}
+                record Box number: integer end
+                type Alias = Box
+                function own(): integer return seed end
+                local foreign function own_foreign(): int return 1 end
+                function Box.make(): Box return {number = seed} end
+                function Box:read(): integer return self.number end
+            ]] .. case[2])
+        end)
+    end
+
+    for _, expression in ipairs({"Box(1)", "Box.new(1)", "Alias(1)",
+                                 "Alias.new {number = 1}"}) do
+        it("rejects an own custom constructor through " .. expression,
+           function()
+            assert_error("module variable initializer cannot reference", [[
+                record Box number: integer end
+                type Alias = Box
+                function Box.new(number: integer): Box
+                    return {number = number}
+                end
+                local bad = ]] .. expression)
+        end)
+    end
+
+    local nested_lambdas = {
+        {"a call argument", "dep.apply(function(): integer return 1 end)"},
+        {"a surplus argument", "dep.zero(function(): integer return 1 end)"},
+        {"a spread subject", "dep.zero(...{function(): integer return 1 end})"},
+        {"a named argument", "dep.apply {callback = function(): integer return 1 end}"},
+        {"an Array", "{function(): integer return 1 end}"},
+        {"a Map value", "{callback = function(): integer return 1 end}"},
+        {"a written cast", "(function(): integer return 1 end) as value"},
+        {"an immediate call", "(function(): integer return 1 end)()"},
+        {"an operator", "true and function(): integer return 1 end"},
+    }
+    for _, case in ipairs(nested_lambdas) do
+        it("rejects a lambda nested in " .. case[1], function()
+            local ok, err = run_checker_modules({
+                dep = [[
+                    function apply(callback: function(): integer): integer
+                        return callback()
+                    end
+                    function zero(): integer return 0 end
+                ]],
+                main = 'local dep = import "dep"\nlocal bad = ' .. case[2],
+            }, "main")
+            assert.falsy(ok)
+            assert.match("anonymous function must be the whole module variable initializer",
+                err)
+        end)
+    end
+
+    it("checks own references in imported-call arguments and discarded extras",
+       function()
+        for _, expression in ipairs({
+            "dep.take(seed)",
+            "dep.take {number = seed}",
+            "dep.zero(seed)",
+            "dep.take(1, own)",
+            "dep.make():take(seed)",
+            "dep.take(1, ...values)",
+        }) do
+            local ok, err = run_checker_modules({
+                dep = [[
+                    record Box number: integer end
+                    function take(number: integer): integer return number end
+                    function zero(): integer return 0 end
+                    function make(): Box return Box(1) end
+                    function Box:take(number: integer): integer return number end
+                ]],
+                main = [[
+                    local dep = import "dep"
+                    local seed = 1
+                    local values = {1}
+                    function own(): integer return seed end
+                    local bad = ]] .. expression,
+            }, "main")
+            assert.falsy(ok)
+            assert.match("module variable initializer cannot reference", err)
+        end
+    end)
+
+    it("rejects own methods captured by implicit Interface conversions", function()
+        for _, expression in ipairs({
+            "dep.read(Box(1))",
+            "dep.read {reader = Box(1)}",
+            "dep.read_holder({reader = Box(1)})",
+            "dep.read_many(Box(1))",
+            "dep.read_many(...{Box(1)})",
+        }) do
+            local ok, err = run_checker_modules({
+                dep = [[
+                    interface Reader function read(): integer end
+                    record Holder const reader: Reader end
+                    function read(reader: Reader): integer return reader:read() end
+                    function read_holder(holder: Holder): integer
+                        return holder.reader:read()
+                    end
+                    function read_many(...: Reader): integer return ...[1]:read() end
+                ]],
+                main = [[
+                    local dep = import "dep"
+                    record Box number: integer end
+                    function Box:read(): integer return self.number end
+                    local bad = ]] .. expression,
+            }, "main")
+            assert.falsy(ok)
+            assert.match("module variable initializer cannot reference", err)
+        end
+    end)
+
+    it("keeps imported concrete methods safe through an own Interface", function()
+        local ok, err = run_checker_modules({
+            dep = [[
+                record Box number: integer end
+                function Box:read(): integer return self.number end
+            ]],
+            main = [[
+                local dep = import "dep"
+                interface Reader function read(): integer end
+                const reader: Reader = dep.Box(7)
+            ]],
+        }, "main")
+        assert.truthy(ok, err)
+    end)
+
+    it("does not treat an Interface satisfaction test as method capture", function()
+        local ok, err = run_checker_modules({
+            dep = [[interface Reader function read(): integer end]],
+            main = [[
+                local dep = import "dep"
+                local seed = 1
+                record Box number: integer end
+                function Box:read(): integer return seed end
+                const satisfies = Box(1) is dep.Reader
+            ]],
+        }, "main")
+        assert.truthy(ok, err)
+    end)
+
+    it("preserves source-only visibility in imported initializer expressions",
+       function()
+        local modules = {
+            dep = [[
+                local const secret = 7
+                local function read(): integer return secret end
+            ]],
+            main = [[
+                local dep = import "dep.titan"
+                const visible = dep.read() + dep.secret
+            ]],
+        }
+        local ok, err = run_checker_modules(modules, "main", {interface = "source"})
+        assert.truthy(ok, err)
+        modules.main = [[
+            local dep = import "dep"
+            const hidden = dep.read() + dep.secret
+        ]]
+        ok, err = run_checker_modules(modules, "main", {interface = "source"})
+        assert.falsy(ok)
+        assert.match("member 'read' not found", err)
+        assert.match("member 'secret' not found", err)
+    end)
+end)
