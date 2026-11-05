@@ -1043,6 +1043,43 @@ A `validation` build names `validation` instead.
 
 ## Limits
 
+Before publishing a program or test image, or executing a provider's protocol
+image, `titanc` enforces these WebAssembly byte bounds:
+
+| Encoded artifact | Maximum bytes |
+| --- | ---: |
+| One function body, including its local-declaration vector | 7,654,321 |
+| Complete `.wasm` image | 1,073,741,824 (1 GiB) |
+
+Equality is accepted. A function's preceding body-length LEB is not part of
+its body size; all sections, including custom sections, count toward the
+image size. These are the [WebAssembly JavaScript Interface
+limits](https://webassembly.github.io/spec/js-api/index.html#limits), not a
+promise of available host memory. Engines may exhaust resources, or reject
+other WebAssembly limits, below these two bounds.
+
+An oversized function is diagnosed with its Wasm name (or its zero-based
+function index when unnamed), measured body bytes and maximum. The diagnostic
+also reports the first mapped source location within that body, such as:
+
+```text
+browser image function "example_run" (Wasm index 42) body is 7654322 bytes, exceeds maximum of 7654321 bytes; first mapped source "example.browser.titan":12:3
+browser image is 1073741825 bytes, exceeds maximum of 1073741824 bytes
+```
+
+Source locations come from the final source map, not from interpreting a
+mangled function name. An unmapped or native function without source metadata
+reports `source unavailable` and the reason; a native function with a mapping
+can name its C source. A nonempty `sourceRoot` is shown separately, as recorded
+in the map. Rejection happens before publication and leaves any previously
+published `.mjs`, `.wasm` and `.wasm.map` unchanged. Titan does not split an
+oversized function by hand or automatically outline it.
+
+Startup memory is measured separately from static byte size. The
+[implementation measurements](../implementation/browser-target.md#build-time-image-bounds)
+qualify the original large-function regression and a complete standard-library
+test image on Linux and macOS; they are not a startup-memory guarantee.
+
 A browser program runs with these fixed sizes:
 
 | Resource | Size | When it runs out |

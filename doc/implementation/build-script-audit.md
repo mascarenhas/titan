@@ -244,28 +244,30 @@ the three aggregate `--c-source` helpers, and `-X $(STDLIB_EXTRA_OBJECTS)`
 ### Browser core stdlib suite
 
 `titan-stdlib-browser-test` is a phony test goal (so it defaults to the
-`validation` profile) that needs the installed compiler, the native standard
-provider, the browser SDK, emsdk, Node 26+ with JSPI, and a JSPI-capable headless Chromium. Expanding
-its recipe first evaluates `TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK`,
-which stops Make unless every browser root belongs to exactly one image of
-`TITAN_STDLIB_BROWSER_TEST_IMAGES`, and the recipe rejects a byte budget that
-is not a positive decimal integer. Under `BROWSER_SDK_ENV`, with
-`TITAN_PATH_0_6` pointing at the installed browser SDK, it runs one installed
-`titanc -q --target browser --test --incremental` invocation per image over
-that image's `TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_<image>`, with
-`--c-source spec/fixtures/browser_runtime/close.c`. The images go to `images/`
-under `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`), beside
-the roots files, member table, and logs, while every invocation shares the
-compiler output tree `objects/` below it, which the recipe leaves for titanc to
-create and mark. Each build is followed by the image's size and closure checks;
-then comes the inventory check of `scripts/check_browser_stdlib.lua`; then the
-SDK's `titan-browser-run` for
-every image under Node and Chromium through `scripts/run_browser_stdlib.sh`,
-which keeps each image's stdout and stderr in separate logs, and only the
-stdout reports are audited, as one owner union per engine. `TITAN_FILTER` is
-forwarded as one `--filter=` argument. The
-recipe and its artifacts are described in [the browser
-standard library](browser-target.md#test-owners-and-the-browser-suite).
+`validation` profile) needing the installed compiler, native standard provider,
+browser SDK, emsdk, Node 26+ with JSPI and a JSPI-capable headless Chromium.
+Its root check rejects an empty or duplicate `TITAN_STDLIB_BROWSER_TEST_ROOTS`
+inventory before build setup. Under `BROWSER_SDK_ENV`, with `TITAN_PATH_0_6`
+pointing at the installed browser SDK, one installed
+`titanc -q --target browser --test --incremental` invocation compiles every
+root with `--c-source spec/fixtures/browser_runtime/close.c`.
+
+The image is `images/stdlib.mjs` with its `.wasm` and `.wasm.map`, below
+`$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`); compiler
+output stays in `objects/`, which titanc creates and marks. The target writes
+`roots.txt`, prints the build duration, checks the dependency closure and
+native/browser member inventory, and writes `members.md`. There is no separate
+suite byte budget: the compiler's [general image
+bounds](browser-target.md#build-time-image-bounds) apply.
+
+The SDK's `titan-browser-run` executes the complete image under Node and
+Chromium through `scripts/run_browser_stdlib.sh`. The `stdlib.<engine>.log`
+and `stdlib.<engine>.stderr.log` streams remain separate, and only stdout is
+audited. `TITAN_FILTER` is forwarded as one `--filter=` argument. Each engine
+must select at least one case, and an unfiltered run must execute every
+owner, with complete status/count/timing accounting and narrowly classified
+skips. [The browser suite](browser-target.md#test-owners-and-the-browser-suite)
+describes the artifact and audit contracts.
 
 ## Make job pool and titanc recipes
 

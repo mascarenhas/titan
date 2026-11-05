@@ -346,18 +346,18 @@ or extra renderer-memory feature is applied.
 
 After step 7, `browser-stdlib` runs:
 
-8. **Partitioned browser core stdlib suite.** With emsdk sourced and
+8. **Complete browser core stdlib suite.** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
    unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
-   builds the browser-portable stdlib owners into the manifest's four
-   validation-profile test images, checks each image against the 32,000,000-byte
-   budget and the dependency closure, checks the native/browser member
-   inventory, runs every image under Node and then Chromium (`TITAN_NODE` and
-   the pinned `TITAN_CHROME` from the earlier steps), and requires a nonzero
-   case count for every owner across the images
+   builds all fifteen browser-portable owners into one validation-profile
+   `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
+   checks dependency closure and the native/browser member inventory, then
+   runs the image under Node and Chromium using the pinned `TITAN_NODE` and
+   `TITAN_CHROME`. Each engine must execute every owner with complete nonzero
+   status/count/timing accounting
    ([browser test owners](browser-target.md#test-owners-and-the-browser-suite)).
-   Each image's stdout report and stderr under each engine go to separate logs
-   in `out/browser-stdlib/`.
+   Stdout and stderr stay separate in `out/browser-stdlib/stdlib.<engine>.log`
+   and `stdlib.<engine>.stderr.log`.
 9. **Strict gate.** With the same `TITAN_ROOT`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN`, and `TITAN_PROBE_CACHE_DISABLE` settings
    as the `browser-toolchain` gate, the prefix's installed `busted -c -o gtest
