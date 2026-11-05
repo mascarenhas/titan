@@ -2601,9 +2601,12 @@ resumer can immediately destroy a dead coroutine without freeing storage
 that an engine activation still touches. Never-started destruction just
 removes its record. Raw minicoro destruction of a live parked context rejects
 its gate with a private retirement exception and awaits its engine lifetime
-before returning to the C allocator. Titan abandoned-stack cleanup does not
-use that shortcut: its existing floor/TRANSFER_UNWIND protocol runs defers,
-Lua close handlers and error retirement to terminal completion first.
+before returning to the C allocator. Only then is the C context pointer
+cleared. A failed initialization has no context to retire, and repeated
+uninitialization or destroy-after-uninit cannot retire one twice.
+Titan abandoned-stack cleanup does not use that shortcut: its existing
+floor/TRANSFER_UNWIND protocol runs defers, Lua close handlers and error
+retirement to terminal completion first.
 
 ### The reentry guard
 

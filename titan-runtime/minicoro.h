@@ -1733,7 +1733,10 @@ static mco_result _mco_create_context(mco_coro* co, mco_desc* desc) {
 }
 
 static void _mco_destroy_context(mco_coro* co) {
-  titan_mco_destroy((uintptr_t)co);
+  if(co->context) {
+    titan_mco_destroy((uintptr_t)co);
+    co->context = NULL;
+  }
 }
 
 static MCO_FORCE_INLINE void _mco_init_desc_sizes(mco_desc* desc, size_t stack_size) {

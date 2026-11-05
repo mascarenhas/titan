@@ -48,7 +48,11 @@ export async function lifecycle(context, paths) {
       };
       native = await image.factory(options);
       const entry = native._titan_browser_entry;
-      native._titan_browser_entry = (...args) => entry(...args).finally(() => { retired = true; });
+      native._titan_browser_entry = (...args) => {
+        const reentry = driver.owner;
+        const result = entry(...args);
+        return reentry ? result : result.finally(() => { retired = true; });
+      };
       return native;
     }, {locateFile: image.locateFile, stdout: () => { deliveries++; }, stderr: () => { deliveries++; }});
     try {

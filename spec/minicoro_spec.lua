@@ -846,18 +846,26 @@ static mco_coro *make(void (*entry)(mco_coro *)) {
 }
 int main(void) {
   mco_set_tag_comparator(same);
+  mco_coro failed;
+  mco_desc invalid = mco_desc_init(NULL, 262144);
+  assert(mco_init(&failed, &invalid) == MCO_INVALID_ARGUMENTS);
+  assert(mco_uninit(&failed) == MCO_SUCCESS);
   mco_coro *idle = make(parked);
+  assert(mco_uninit(idle) == MCO_SUCCESS);
+  assert(mco_uninit(idle) == MCO_SUCCESS);
   assert(mco_destroy(idle) == MCO_SUCCESS && ran == 0);
   mco_coro *single = make(parked);
   assert(mco_resume(single, tag) == MCO_SUCCESS && ran == 1);
+  assert(mco_uninit(single) == MCO_SUCCESS);
   assert(mco_destroy(single) == MCO_SUCCESS && continued == 0);
   inner = make(parked);
   mco_coro *handler = make(outer);
   assert(mco_resume(handler, tag) == MCO_SUCCESS);
   assert(mco_status(inner) == MCO_STACKED && ran == 2);
+  assert(mco_uninit(handler) == MCO_SUCCESS);
   assert(mco_destroy(handler) == MCO_SUCCESS);
   assert(mco_destroy(inner) == MCO_SUCCESS && continued == 0);
-  puts("minicoro JSPI retirement: unstarted=1 suspended=1 stacked=2 continued=0");
+  puts("minicoro JSPI retirement: unstarted=1 suspended=1 stacked=2 continued=0 repeated_uninit=3 failed_init=1");
   return 0;
 }
 ]]
