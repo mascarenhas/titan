@@ -381,7 +381,6 @@ WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.native.titan titan/websocke
 	titan/websocket/utf8.titan titan/websocket/native.titan
 JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
-JSON_TITAN_HEADERS := titan/json/native.h
 PROTOBUF_TITAN_SOURCES := titan/protobuf/protobuf.titan titan/protobuf/encoder.titan \
 	titan/protobuf/decoder.titan titan/protobuf/schema.titan
 THREAD_TITAN_SOURCES := titan/thread/thread.native.titan titan/thread/channel.titan \

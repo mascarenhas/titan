@@ -112,6 +112,11 @@ _Noreturn void _longjmp(jmp_buf, int);
 #define TITAN_COROUTINE_STACK_SIZE (2 * 1024 * 1024)
 #endif
 
+/* Zero leaves JSON writer depth controlled only by its configured max_depth. */
+#ifndef TITAN_JSON_WRITER_DEPTH_LIMIT
+#define TITAN_JSON_WRITER_DEPTH_LIMIT 0
+#endif
+
 /* The bottom boundary of a Titan coroutine's Lua thread. `lj` is the first
 ** member, so the boundary pointer is also the record pointer. The bounds are
 ** integer addresses of the real coroutine stack, never of this object.

@@ -1145,8 +1145,8 @@ end
         local profile = fixtures.profile()
         for _, case in ipairs({
             { header = "transfer.h", macro = "TITAN_CODEC_DEPTH_LIMIT", native = 128, browser = 43 },
-            { header = root .. "/titan/json/native.h", macro = "TITAN_JSON_WRITER_DEPTH_LIMIT",
-                native = 9223372036854775807, browser = 103 },
+            { header = "titan.h", macro = "TITAN_JSON_WRITER_DEPTH_LIMIT",
+                native = 0, browser = 103 },
         }) do
             for _, browser in ipairs({ false, true }) do
                 local types, err = cdriver.process_file(case.header, {

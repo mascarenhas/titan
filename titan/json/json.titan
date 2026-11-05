@@ -7,7 +7,9 @@ local string = import "string"
 local math = import "math"
 local peg = import "peg"
 local iteration = import "iteration"
-foreign import "native.h"
+foreign import "titan.h"
+
+local writer_depth_limit: integer = 0
 
 --- Structured JSON failure with a stable code, path, and optional source position.
 -- @field code Stable failure category or grammar label.
@@ -197,5 +199,10 @@ function decode(source: string, target: reflect.Type?, ...: DecodeOption): value
 end
 
 do
+  writer_depth_limit = math.maxinteger
+  if ffi.TITAN_JSON_WRITER_DEPTH_LIMIT > 0 and
+      ffi.TITAN_JSON_WRITER_DEPTH_LIMIT < writer_depth_limit then
+    writer_depth_limit = ffi.TITAN_JSON_WRITER_DEPTH_LIMIT
+  end
   JSON_PATTERN = build_json_pattern()
 end

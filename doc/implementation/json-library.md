@@ -126,17 +126,19 @@ configured stack, and rejection at an explicit smaller JSON budget. Width and
 nesting tests cover separate boundaries.
 
 On the browser target the writer's effective budget is
-`min(max_depth, TITAN_JSON_WRITER_DEPTH_LIMIT)`. `titan/json/native.h` (listed
-in the Makefile's `JSON_TITAN_HEADERS` and packaged in the source rock)
-defines the macro as `LUA_MAXINTEGER` unless the target defines it, so native
-builds keep every positive `max_depth`; the browser descriptor defines it as
-103, half the 206 levels the writer completed on Chromium under the
-`validation` profile before the engine stack ran out ([browser nesting
-limits](browser-target.md#nesting-limits)). `encode_value` in
+`min(max_depth, TITAN_JSON_WRITER_DEPTH_LIMIT)`. The existing SDK header
+`titan.h` defaults the macro to zero, meaning no target-imposed writer cap.
+The main module imports that header and, in its sole final initializer,
+caches `math.maxinteger` as the writer limit, narrowing it only when the target
+define is positive and smaller. Native builds therefore retain every positive
+`max_depth`. The browser descriptor defines the macro as 103, half the 206
+levels the writer completed on Chromium under the `validation` profile before
+the engine stack ran out
+([browser nesting limits](browser-target.md#nesting-limits)). `encode_value` in
 `titan/json/writer.titan` clamps its private per-call settings once, after
 `validate_settings`: a zero or negative `max_depth` is still `invalid_option`,
 the last repeated option still wins, a smaller setting still binds, and a
-larger one is lowered to the define, so a deeper value raises the ordinary
+setting above the cached limit is lowered to it. A deeper value raises the ordinary
 `limit_exceeded` (`value exceeds max_depth`). The default of 32 and the
 parser's budgets are the same on every target: decoding settings are never
 clamped, and the parser is bounded by `max_depth` and by the

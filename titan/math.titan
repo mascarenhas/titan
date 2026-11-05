@@ -14,7 +14,6 @@ foreign import "time.h"
 foreign import "stdint.h"
 foreign import "string.h"
 foreign import "locale.h"
-foreign import "limits.h"
 
 --- The circle constant pi as a float.
 -- @usage standard-library-math.md
@@ -22,12 +21,14 @@ pi: float = 3.141592653589793238462643383279502884
 --- Positive floating-point infinity.
 -- @usage standard-library-math.md
 huge: float = 1e999
---- Largest representable Titan integer for this installation.
+-- Logical right shift clears the sign bit of the all-ones integer.
+--- Largest representable Titan integer.
 -- @usage standard-library-math.md
-maxinteger: integer = 0
---- Smallest representable Titan integer for this installation.
+const maxinteger: integer = ~0 >> 1
+-- The sign bit alone is the two's-complement minimum.
+--- Smallest representable Titan integer.
 -- @usage standard-library-math.md
-mininteger: integer = 0
+const mininteger: integer = 1 << 63
 
 local record RandomState
   local first: integer
@@ -568,9 +569,5 @@ function tointeger(candidate: value): integer?
 end
 
 do
-  -- Foreign constants are not Titan constant expressions, so publish the
-  -- target's actual limits during the module's one-time initializer.
-  maxinteger = ffi.LLONG_MAX as integer
-  mininteger = ffi.LLONG_MIN as integer
   randomseed()
 end

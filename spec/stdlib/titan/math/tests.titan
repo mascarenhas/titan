@@ -125,6 +125,29 @@ function test_automatic_and_argumentless_seeding(_context: test.Context)
               "argumentless seeds did not reproduce their first draw")
 end
 
+function test_integer_extremes(_: test.Context)
+  local maximum: integer = mathlib.maxinteger
+  local minimum: integer = mathlib.mininteger
+  test.assert(maximum == (1 << 62) + ((1 << 62) - 1))
+  test.assert(minimum == -maximum - 1)
+  test.assert(numeric_tag(maximum) == 1 and numeric_tag(minimum) == 1)
+  test.assert(maximum > 0 and minimum < 0)
+  test.assert(maximum + 1 == minimum and minimum - 1 == maximum,
+              "integer bounds are not the wrapping arithmetic extremes")
+  test.assert(~maximum == minimum)
+end
+
+function test_integer_bounds_are_read_only(_: test.Context)
+  test.assert(lua_helper([=[
+    local titan_math = require "titan.math"
+    local maximum, minimum = titan_math.maxinteger, titan_math.mininteger
+    local max_ok = pcall(function() titan_math.maxinteger = 0 end)
+    local min_ok = pcall(function() titan_math.mininteger = 0 end)
+    return not max_ok and not min_ok and
+      titan_math.maxinteger == maximum and titan_math.mininteger == minimum
+  ]=]) as boolean, "Lua writes replaced a const integer bound")
+end
+
 function test_typed_surface_and_constants(_context: test.Context)
   -- These declarations keep the original typed probe's exact result shape.
   local absolute: float = mathlib.abs(-2)
