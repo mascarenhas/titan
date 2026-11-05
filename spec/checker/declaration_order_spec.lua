@@ -237,11 +237,9 @@ describe("module initializer dependencies (typechecker)", function()
         assert_check([[
             foreign import "limits.h"
             foreign import "stdlib.h"
-            foreign import "stdio.h"
             local maximum: integer = ffi.LLONG_MAX as integer
             const native_maximum = ffi.INT_MAX
             const magnitude: integer = ffi.abs(-7)
-            local stream = ffi.stderr
             const layout = foreign int.sizeof + foreign int.alignof
             local values = {ffi.abs(-1) as integer, ffi.INT_MAX as integer}
             foreign import "spec/fixtures/module_initializers.h"
@@ -251,6 +249,7 @@ describe("module initializer dependencies (typechecker)", function()
             local field: integer = ffi.initializer_object.number
             const element: integer = ffi.initializer_array[1]
             local indirect: integer = ffi.initializer_pointer(3)
+            local pointer = ffi.initializer_pointer
             local owned = foreign int.new_array(ffi.initializer_count())
         ]])
     end)
