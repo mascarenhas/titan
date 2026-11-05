@@ -334,11 +334,12 @@ whose oracle is the automatic bootstrap itself compile and supervise a separate
 standalone child without `--no-uv-bootstrap`.
 
 A parent can share an immutable fixture, such as a compiled child program,
-across its subtests and register its filesystem cleanup with `Context:cleanup`.
-Each child should still own its mutable result files and any fresh process,
-Runtime, or descriptors required by the behavior under test. With explicit
-Runtime ownership, filesystem cleanup may start a new session; it cannot use
-that session to retire resources left live in an earlier one.
+across its subtests and remove it in `Context:cleanup`. Each child should still
+own its mutable result files and any fresh process, Runtime, or descriptors
+required by the behavior under test. A synchronous removal needs no Runtime.
+With explicit Runtime ownership, an asynchronous filesystem cleanup may
+instead start a new session, but it cannot use that session to retire
+resources left live in an earlier one.
 
 ## Running and filtering
 
