@@ -966,8 +966,8 @@ describe("module initializer implicit Map call exposure", function()
     local provider_source = [[
         registry: {value: value} = {}
         integers: {integer: value} = {}
-        dynamic: value = {}
-        callable: value = {}
+        dynamic: value = ({} as {value: value})
+        callable: value = ({} as {value: value})
     ]]
     local declarations = [[
         local dep = import "map_initializer_implicit_provider"

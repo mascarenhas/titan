@@ -642,8 +642,8 @@ describe("initializer implicit user-code dispatch", function()
     local provider = [[
         registry: {value: value} = {}
         integers: {integer: value} = {}
-        dynamic: value = {}
-        callable: value = {}
+        dynamic: value = ({} as {value: value})
+        callable: value = ({} as {value: value})
         flag = false
         record Scalar number: integer end
         record Holder callback: function(): integer end
