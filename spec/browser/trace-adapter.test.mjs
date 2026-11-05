@@ -8,6 +8,7 @@ import vm from 'node:vm';
 
 const source = await readFile(new URL('../../titan-runtime/browser/titan-browser-trace.js', import.meta.url), 'utf8');
 const stacks = JSON.parse(await readFile(new URL('../fixtures/browser_trace_adapter/stacks.json', import.meta.url), 'utf8'));
+const currentStacks = JSON.parse(await readFile(new URL('../fixtures/browser_trace_adapter/stacks-jspi-current.json', import.meta.url), 'utf8'));
 const identity = 'a'.repeat(64);
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 function vlq(number) {
@@ -104,9 +105,20 @@ for (const [name, stack] of Object.entries(stacks)) {
         assert.equal(result.records[0][1], 39);
         assert.equal(result.records[0][2], isJsc ? 2 : 3);
         assert.equal(result.records[0][0] > 0, !isJsc);
-        assert.equal(result.truncated, isDepth || isV8Default);
+        // Historical JSC snapshots ended at its then-hidden 100-frame ceiling.
+        // That old bound cannot be inferred from current JSC's frame dialect.
+        assert.equal(result.truncated, (isDepth && !isJsc) || isV8Default);
+        if (isDepth && isJsc) assert.equal(api.parse(stack, 512, 100).truncated, true,
+            'the recorded 100-frame input still reaches an explicit host limit');
     });
 }
+
+for (const row of currentStacks.cases) test('current JSPI parser: ' + row.name, () => {
+    const {api} = adapter();
+    const result = api.parse(row.stack, row.capacity, row.limit);
+    assert.deepEqual(JSON.parse(JSON.stringify(result.records)), row.expectedRecords);
+    assert.equal(result.truncated, row.truncated);
+});
 
 test('mixed warm/cold JSC always uses bracketed indexes and never invents lines', () => {
     const {api} = adapter();
@@ -115,9 +127,12 @@ test('mixed warm/cold JSC always uses bracketed indexes and never invents lines'
     assert.equal(api.lookup(0, 1, 2).base, 'one.browser.titan');
 });
 
-for (const count of [511, 512, 513]) test('raw capacity boundary ' + count, () => {
+for (const [engine, wasm] of [
+    ['V8', '    at leaf (wasm://wasm/image:wasm-function[1]:0x6e)'],
+    ['JSC', 'leaf@image.wasm:wasm-function[1]'],
+]) for (const count of [511, 512, 513]) test(`${engine} raw capacity boundary ${count}`, () => {
     const {api} = adapter();
-    const stack = 'Error\n' + Array.from({length: count}, () => '    at leaf (wasm://wasm/image:wasm-function[1]:0x6e)').join('\n');
+    const stack = (engine === 'V8' ? 'Error\n' : '') + Array(count).fill(wasm).join('\n');
     const result = api.parse(stack, 512, 640);
     assert.equal(result.records.length, Math.min(count, 512));
     assert.equal(result.truncated, count > 512);
@@ -141,9 +156,9 @@ test('recorded V8 frame accounting ignores titles containing @ or apparent locat
     }
 });
 
-for (const [engine, wasm, ceiling] of [
-    ['JSC', 'leaf@image.wasm:wasm-function[1]', 100],
-    ['SpiderMonkey', 'leaf@image.wasm:wasm-function[1]:0x6e', 128],
+for (const [engine, wasm, ceiling, limit] of [
+    ['JSC explicit host limit', 'leaf@image.wasm:wasm-function[1]', 100, 100],
+    ['SpiderMonkey engine ceiling', 'leaf@image.wasm:wasm-function[1]:0x6e', 128, 640],
 ]) for (const [form, frame] of [
     ['URL without line', 'foo@http://host/app.js'],
     ['debugger eval', '@debugger eval code'],
@@ -151,24 +166,36 @@ for (const [engine, wasm, ceiling] of [
     ['named location without line', 'bareName@native'],
     ['anonymous without location', '@'],
 ]) for (const count of [ceiling - 1, ceiling]) {
-    test(`${engine} counts ${form} at synchronous ceiling boundary ${count}`, () => {
+    test(`${engine} counts ${form} at boundary ${count}`, () => {
         const {api} = adapter();
         const stack = [wasm, ...Array(count - 1).fill(frame), '', '  '].join('\n');
-        const result = api.parse(stack, 512, 640);
+        const result = api.parse(stack, 512, limit);
         assert.equal(result.records.length, 1, 'JS-only forms never become Wasm records');
         assert.equal(result.truncated, count === ceiling);
     });
 }
 
-for (const count of [127, 128]) test(`SpiderMonkey excludes no-location async ancestry after ${count} current frames`, () => {
+for (const cause of ['async', 'promise callback', 'VoidFunction', 'setTimeout handler', 'other host task']) {
+    for (const count of [127, 128]) test(`SpiderMonkey excludes ${cause} ancestry after ${count} current frames`, () => {
+        const {api} = adapter();
+        const current = ['leaf@image.wasm:wasm-function[1]:0x6e',
+            ...Array(count - 1).fill('foo@http://host/app.js')];
+        const history = [cause + '*saved@debugger eval code', ...Array(100).fill('bareName@'),
+            'old@image.wasm:wasm-function[3]:0x91'];
+        const result = api.parse([...current, ...history].join('\n'), 512, 640);
+        assert.equal(result.records.length, 1, 'saved Wasm ancestry is excluded too');
+        assert.equal(result.truncated, count === 128, 'only synchronous frames reach the ceiling');
+    });
+}
+
+test('asterisks in Wasm names or JS URLs are not saved-parent boundaries', () => {
     const {api} = adapter();
-    const current = ['leaf@image.wasm:wasm-function[1]:0x6e',
-        ...Array(count - 1).fill('foo@http://host/app.js')];
-    const history = ['async*saved@debugger eval code', ...Array(100).fill('bareName@'),
-        'old@image.wasm:wasm-function[3]:0x91'];
-    const result = api.parse([...current, ...history].join('\n'), 512, 640);
-    assert.equal(result.records.length, 1, 'saved Wasm ancestry is excluded too');
-    assert.equal(result.truncated, count === 128, 'only synchronous frames reach the ceiling');
+    const stack = ['image*.wasm.leaf@http://host/image*.wasm:wasm-function[1]:0x6e',
+        'host@http://host/app*.js:1:2',
+        'image*.wasm.outer@http://host/image*.wasm:wasm-function[3]:0x91'].join('\n');
+    const result = api.parse(stack, 512, 640);
+    assert.deepEqual(JSON.parse(JSON.stringify(result.records)), [[110, 1, 3], [145, 3, 3]]);
+    assert.equal(result.truncated, false);
 });
 
 test('capture uses the C-declared capacity rather than a duplicated fixed limit', () => {

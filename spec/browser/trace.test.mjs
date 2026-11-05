@@ -71,7 +71,7 @@ export async function run(context) {
   }
   const emit = record => context.stdout(encoder.encode(JSON.stringify({engine: context.engine, ...record}) + "\n"));
   emit({verdict:"PASS", degraded, manifestCases:selected.length, nativeExecutions,
-    fidelity:webkit ? "function-level/no-line; 100-frame engine ceiling" : firefox ? "file/line; 128-frame engine ceiling" : "file/line; 512-record capacity"});
+    fidelity:webkit ? "function-level/no-line; 512-record capacity" : firefox ? "file/line; 128-frame engine ceiling" : "file/line; 512-record capacity"});
 }
 
 export async function executeRow(context, row, degraded, recordCost, isolated = false,
@@ -238,12 +238,12 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
           context.assert(frameCount(trace, ": in trace_cases." + name) === 1,
             "ordinary deep trace omitted/duplicated " + name);
         }
-        context.assert(terminalMarker(trace, truncated, webkit), "ordinary deep trace has invalid engine truncation");
-      } else if (webkit || firefox) {
-        context.assert(count >= 40 && count < (webkit ? 100 : 128) && occurrences(trace, truncated) === 1,
+        context.assert(!trace.includes(truncated), "ordinary deep trace was spuriously truncated");
+      } else if (firefox) {
+        context.assert(count >= 40 && count < 128 && occurrences(trace, truncated) === 1,
           "engine-ceiling trace was not bounded/marked");
       } else if (depth === 460) {
-        context.assert(count === 461 && !trace.includes(truncated), "near512 real V8 capture was incomplete");
+        context.assert(count === 461 && !trace.includes(truncated), "near512 real capture was incomplete");
       } else context.assert(count >= 450 && count < 512 && occurrences(trace, truncated) === 1,
         "capacity trace was not bounded/marked");
       emit({depth, retainedTitanRecursions: count, truncated: trace.includes(truncated)});

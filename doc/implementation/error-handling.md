@@ -334,11 +334,13 @@ JSC cold/none:  N@wasm-function[N]
 The display prefix before `(` or `@` is never trusted for symbolization; the
 parser extracts the bracketed decimal function index `N` (never treating JSC's
 leading decimal number before `@` as a line) and, on V8 and SpiderMonkey, the
-hexadecimal module-relative byte offset `0xPC`. On Firefox, SpiderMonkey may
-append saved asynchronous ancestry after a frame line starting with `async*`
-(which can repeat earlier suspended Wasm activations after `emscripten_sleep`);
-the parser stops at the first `async*` boundary so only the current synchronous
-stack is captured, and parent coroutine traces come exclusively from
+hexadecimal module-relative byte offset `0xPC`. SpiderMonkey may append saved
+asynchronous ancestry after a JavaScript frame prefixed by an async cause and
+`*`, such as `async*`, `promise callback*`, `VoidFunction*`, or
+`setTimeout handler*`. The parser stops before that boundary, excluding both
+the saved JavaScript and Wasm frames from capture. It recognizes Wasm frames
+first, so an asterisk in an image name is not a boundary; asterisk-bearing URLs
+are not cause prefixes either. Parent coroutine traces come exclusively from
 `TITAN_TRACE_APPEND_KEY`.
 
 Header flag `TRUNCATED` is set when more Wasm frames exist beyond `capacity`,
@@ -346,17 +348,18 @@ when the synchronous stack reaches the effective `stackTraceLimit` (counting
 `at ` frame lines on V8-shaped stacks — so V8's `Error` title line never counts
 even when its message contains `@` — and `@`-containing frame lines on
 SpiderMonkey/JSC stacks, which have no title line and may include location-free
-builtin frames such as `forEach@[native code]`, while excluding Firefox's
-`async*` ancestry), or when a surveyed engine ceiling is reached:
+builtin frames such as `forEach@[native code]`, while excluding SpiderMonkey's
+saved asynchronous ancestry), or when Firefox's engine ceiling is reached:
 
 * **V8 (Node, Chromium, Chrome)** honors `Object.defineProperty` on
   `Error.stackTraceLimit` up to the 512-record capacity.
 * **SpiderMonkey (Firefox)** enforces a 128-frame synchronous capture ceiling
   regardless of `Error.stackTraceLimit`; captures reaching that ceiling set
   `TRUNCATED`.
-* **JavaScriptCore (Playwright WebKit and Safari)** keeps a hidden 100-frame
-  capture limit that `Object.defineProperty` on `Error.stackTraceLimit` does not
-  raise; captures reaching 100 frames set `TRUNCATED`. In addition, deleting
+* **JavaScriptCore (Playwright WebKit and Safari)** uses the same 512-record
+  capacity and effective host limit. Current WebKit captures exceed the
+  100-frame ceiling of older surveyed releases; that historical ceiling is not
+  inferred from the no-PC frame format. Deleting
   `Error.stackTraceLimit` in JavaScriptCore causes `new Error().stack` to
   evaluate to `undefined` for the remainder of that realm even after the
   property is redefined with `Object.defineProperty` (unlike V8 and
