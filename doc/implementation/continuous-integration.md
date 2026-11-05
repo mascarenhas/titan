@@ -19,8 +19,8 @@ two `test-linux-compiler` shard pairs, `native-coverage`, the
 [`browser-playwright`](#browser-playwright-job) matrix (`validation` and
 `production` profiles across `chromium`, `firefox`, and `webkit`) start in
 parallel. Preparation has a 30-minute timeout, compiler pairs 45 minutes,
-native coverage and the browser jobs 60 minutes, and the independent cold
-sanitizer build 75 minutes.
+native coverage and the `browser-playwright` cells 60 minutes, and the
+`browser-toolchain` gate and the independent cold sanitizer build 75 minutes.
 
 Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
 The native coverage, sanitizer, and browser jobs each use a four-vCPU runner

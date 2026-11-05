@@ -643,17 +643,19 @@ Asyncify-expanded functions is separate follow-up work.
 emsdk, Node 24, and a headless Chromium. It:
 
 1. writes `roots.txt` (every browser root) and `<image>.roots.txt` (each
-   image's owners), then builds each image in manifest order into one output
-   tree, `$(TITAN_OUTPUT_DIR)/browser-stdlib`, as `images/<image>.mjs` with its
-   `.wasm` and `.wasm.map`. Each image is one installed `titanc -q --target
-   browser --test --incremental --tree spec/stdlib/titan` invocation over that
-   image's roots, with `--c-source spec/fixtures/browser_runtime/close.c` (the
-   browser helper of `coroutine.tests`), under `BROWSER_SDK_ENV` with
-   `TITAN_PATH_0_6` set to the installed browser SDK directory. The target
-   prints each image's build time, then runs `check_browser_stdlib.lua size`
-   (the image against the budget; an oversized image fails with a request to
-   repartition its owners) and `check_browser_stdlib.lua closure` (the output
-   tree, the installed browser `titan.a`, and that image's `.wasm`);
+   image's owners) in `$(TITAN_OUTPUT_DIR)/browser-stdlib`, then builds each
+   image in manifest order as `images/<image>.mjs` there, with its `.wasm` and
+   `.wasm.map`. Each image is one installed `titanc -q --target browser --test
+   --incremental --tree spec/stdlib/titan` invocation over that image's roots,
+   with `--output` naming that directory's `objects/` subdirectory, so every
+   image shares one compiler output tree. The invocation adds `--c-source
+   spec/fixtures/browser_runtime/close.c` (the browser helper of
+   `coroutine.tests`) and runs under `BROWSER_SDK_ENV` with `TITAN_PATH_0_6`
+   set to the installed browser SDK directory. The target prints each image's
+   build time, then runs `check_browser_stdlib.lua size` (the image against
+   the budget; an oversized image fails with a request to repartition its
+   owners) and `check_browser_stdlib.lua closure` (the `objects/` tree, the
+   installed browser `titan.a`, and that image's `.wasm`);
 2. runs `check_browser_stdlib.lua inventory` once against the installed native
    and browser providers and writes `members.md`;
 3. for `node` and then `chromium`, runs every image with
@@ -683,12 +685,19 @@ is in the middle of a report line, and a merged log then splits that line; the
 expected Lua warnings (`Lua warning: error in coroutine cleanup ...`) are such
 writes, and the validator rejects a split report. Warnings
 stay visible in the `.stderr.log` files and on the console; nothing is
-filtered out. `out/browser-stdlib/` therefore holds `images/` (each image's
-`.mjs`, `.wasm`, and `.wasm.map`), `roots.txt`, the `<image>.roots.txt` files,
-`members.md`, and the per-image, per-engine stdout and stderr logs. The
+filtered out. `out/browser-stdlib/` therefore holds `objects/` (titanc's output
+tree), `images/` (each image's `.mjs`, `.wasm`, and `.wasm.map`), `roots.txt`,
+the `<image>.roots.txt` files, `members.md`, and the per-image, per-engine
+stdout and stderr logs. The target never writes into `objects/`: titanc creates
+it and its `.titan-target` marker on a cold run, because a browser output root
+without a marker must be empty when titanc first claims it ([output
+roots](#output-roots-and-the-target-marker)), and the suite directory already
+holds `images/` and the roots files by then.
+`spec/coder/browser_stdlib_closure_spec.lua` runs the target with one owner
+from a cold and then a warm directory and checks this layout. The
 [`browser-toolchain` job](continuous-integration.md#browser-toolchain-job)
-runs the target unfiltered after the SDK is built and uploads those files
-when the job fails.
+runs the target unfiltered after the SDK is built and uploads everything but
+`objects/` when the job fails.
 
 ### Initialization and fidelity gate
 

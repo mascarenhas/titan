@@ -252,11 +252,14 @@ which stops Make unless every browser root belongs to exactly one image of
 is not a positive decimal integer. Under `BROWSER_SDK_ENV`, with
 `TITAN_PATH_0_6` pointing at the installed browser SDK, it runs one installed
 `titanc -q --target browser --test --incremental` invocation per image over
-that image's `TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_<image>` into
-`$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`), with
-`--c-source spec/fixtures/browser_runtime/close.c`, each followed by the
-image's size and closure checks; then the inventory check of
-`scripts/check_browser_stdlib.lua`; then the SDK's `titan-browser-run` for
+that image's `TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_<image>`, with
+`--c-source spec/fixtures/browser_runtime/close.c`. The images go to `images/`
+under `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`), beside
+the roots files, member table, and logs, while every invocation shares the
+compiler output tree `objects/` below it, which the recipe leaves for titanc to
+create and mark. Each build is followed by the image's size and closure checks;
+then comes the inventory check of `scripts/check_browser_stdlib.lua`; then the
+SDK's `titan-browser-run` for
 every image under Node and Chromium through `scripts/run_browser_stdlib.sh`,
 which keeps each image's stdout and stderr in separate logs, and only the
 stdout reports are audited, as one owner union per engine. `TITAN_FILTER` is
