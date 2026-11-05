@@ -1180,7 +1180,7 @@ describe("Windows compiler path integration", function()
         end
 
         local sources = {
-            { modname = "app", output = "C:/project/build/app.titan", c_parts = 1 },
+            { modname = "app", output = "C:/project/build/app.titan", c_parts = 2 },
         }
         local ok, err = driver.validate_program_output_paths(
             sources, "C:/project/build/bin/app.exe",
@@ -4396,7 +4396,14 @@ describe("source foreign-header planning", function()
             end
             assert(os.remove(filename))
             assert(lfs.mkdir(filename))
-            local ok, err = driver.validate_foreign_header_plan(plan)
+            local original_symlinkattributes = lfs.symlinkattributes
+            lfs.symlinkattributes = function(path, field)
+                assert.equal("mode", field)
+                return original_symlinkattributes(path, field)
+            end
+            local called, ok, err = pcall(driver.validate_foreign_header_plan, plan)
+            lfs.symlinkattributes = original_symlinkattributes
+            assert.is_true(called, ok)
             assert.is_nil(ok)
             assert.matches("refusing to overwrite user-owned", err, 1, true)
             assert.equal("directory", lfs.symlinkattributes(filename, "mode"))

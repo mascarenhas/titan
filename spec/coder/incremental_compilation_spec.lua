@@ -4,6 +4,7 @@ local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local filesystem = require "spec.support.filesystem"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local incremental = require "titan-compiler.incremental"
@@ -1179,13 +1180,14 @@ os.exit(result.ok and 0 or result.status or 1)
                         output .. '/user-owned.h"\r\n\0preserve every byte\n'
                     write(output .. relative, replacement)
                     local moved = workspace .. "/moved output"
+                    local destination = paths.from_slash(moved .. relative)
                     assert(os.rename(output, moved))
                     for _, item in pairs(saved) do item.path = moved .. item.path:sub(#output + 1) end
                     local ok, text = compile("-o", moved, "--incremental", "--source-first",
                         "--c-parts", "2", "-v", APP)
                     assert.is_false(ok, text)
                     assert.matches("refusing to overwrite user-owned generated-header path", text, 1, true)
-                    assert.matches(moved .. relative, text, 1, true)
+                    assert.matches(destination, text, 1, true)
                     -- An incomplete receipt proves local relocation ran before
                     -- output preflight refused; aborts do not print decisions.
                     assert.is_false(assert(decode(read(moved .. receipt_relative))).complete)
@@ -1196,7 +1198,7 @@ os.exit(result.ok and 0 or result.status or 1)
                     ok, text = compile("-o", moved, "--source-first", "--c-parts", "2", "-v", APP)
                     assert.is_false(ok, text)
                     assert.matches("refusing to overwrite user-owned generated-header path", text, 1, true)
-                    assert.matches(moved .. relative, text, 1, true)
+                    assert.matches(destination, text, 1, true)
                     assert.equal(replacement, read(moved .. relative))
                     no_native_compile(text)
                     for _, item in pairs(saved) do

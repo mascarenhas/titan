@@ -10,6 +10,7 @@ local jobs = require "titan-compiler.jobs"
 local lfs = require "lfs"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local parser = require "titan-compiler.parser"
+local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local process = require "titan-compiler.process"
 local types = require "titan-compiler.types"
@@ -804,7 +805,7 @@ describe("parallel generated-C compilation", function()
                 return bytes, err
             end
             for _, macro in ipairs({ "__FILE__", "__BASE_FILE__", "__FILE_NAME__" }) do
-                local input = { filename = source_root .. "/batch/one.c",
+                local input = { filename = paths.from_slash(source_root .. "/batch/one.c"),
                     contents = "const char *path = " .. macro .. ";\n" }
                 local first = assert(incremental.preprocessed_identities(context, { input }))
                 local expected = macro == "__FILE_NAME__" and "one.c" or input.filename

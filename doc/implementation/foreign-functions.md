@@ -396,8 +396,10 @@ A required path may be replaced only when byte zero begins the exact marker for
 its header kind: `ffiheaders.MARKER` for `.ffi.h` or
 `ffiheaders.FOREIGN_MARKER` for `.titan.h`. The shared
 `ffiheaders.check_destination` check refuses a user file, a wrong-kind or
-displaced marker, a symlink, a directory, or another unowned object. Incremental
-relocation applies the same check before comparing, adopting, or writing
+displaced marker, a symlink, a directory, or another unowned object. Fresh
+header-kind checks use LuaFileSystem's scalar `mode` query; its table form can
+fail while resolving Windows directory destinations. Incremental relocation
+applies the same ownership check before comparing, adopting, or writing
 descriptor headers, recursive source-dependency helpers, and the module's own
 persisted foreign-header recipe. It also checks split-unit `.priv.h` contents
 against the existing `coder.PRIVATE_HEADER_MARKER` before rebinding or adopting

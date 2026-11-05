@@ -8622,11 +8622,12 @@ end
 
 local function validate_generated_header_entry(entry)
     local marker = entry.marker or ffiheaders.FOREIGN_MARKER
-    local attr = lfs.symlinkattributes(entry.filename)
-    local existing = attr and attr.mode == "file"
+    -- LFS table queries can fail on Windows directory destinations.
+    local mode = lfs.symlinkattributes(entry.filename, "mode")
+    local existing = mode == "file"
         and util.get_file_contents(entry.filename) or nil
     local owned, err = ffiheaders.check_destination(
-        entry.filename, marker, attr and attr.mode, existing)
+        entry.filename, marker, mode, existing)
     if entry.contents and err then return nil, err end
     entry.managed = entry.contents ~= nil or owned and true or false
     return true
@@ -9080,20 +9081,20 @@ local function prepare_compile(
     end
     -- Preflight an existing private header before any invalidation or file
     -- write.
-    local priv_attr = lfs.symlinkattributes(priv_header_path)
+    local priv_mode = lfs.symlinkattributes(priv_header_path, "mode")
     local priv_owned = false
-    if priv_attr and priv_attr.mode == "file" then
+    if priv_mode == "file" then
         local existing = util.get_file_contents(priv_header_path)
         priv_owned = existing and existing:sub(1, #driver.PRIVATE_HEADER_MARKER)
             == driver.PRIVATE_HEADER_MARKER or false
     end
-    if generated.private_header and priv_attr then
-        local existing = priv_attr.mode == "file"
+    if generated.private_header and priv_mode then
+        local existing = priv_mode == "file"
             and util.get_file_contents(priv_header_path) or nil
         local owned = existing and
             existing:sub(1, #driver.PRIVATE_HEADER_MARKER)
                 == driver.PRIVATE_HEADER_MARKER
-        if priv_attr.mode ~= "file" or not owned then
+        if priv_mode ~= "file" or not owned then
             return nil, "refusing to overwrite user-owned generated-header path '"
                 .. priv_header_path .. "'"
         end
@@ -12775,8 +12776,8 @@ function driver.validate_program_output_paths(
             ok, err = add_output(priv_path,
                 "generated private header for " .. owner, "file")
             if not ok then return nil, err end
-            local priv_attr = lfs.symlinkattributes(priv_path)
-            if priv_attr and priv_attr.mode == "file" then
+            local priv_mode = lfs.symlinkattributes(priv_path, "mode")
+            if priv_mode == "file" then
                 local existing = util.get_file_contents(priv_path)
                 if not existing or existing:sub(1, #driver.PRIVATE_HEADER_MARKER)
                    ~= driver.PRIVATE_HEADER_MARKER then
