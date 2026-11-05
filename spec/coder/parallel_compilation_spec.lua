@@ -385,6 +385,15 @@ describe("parallel generated-C compilation", function()
         ok, output = command({ "-c", plain, "-o", workspace_directory .. "/plain.o" })
         assert.truthy(ok, output)
         assert.is_false(file_exists(state_directory .. "/commands"))
+        -- -E wins over -c in either position; neither spelling is an object job.
+        for _, arguments in ipairs({
+            { "-E", "-c", generated, "-o", workspace_directory .. "/phase.i" },
+            { "-c", generated, "-E", "-o", workspace_directory .. "/phase.i" },
+        }) do
+            ok, output = command(arguments)
+            assert.truthy(ok, output)
+            assert.is_false(file_exists(state_directory .. "/commands"))
+        end
         ok, output = command({ "-c", generated, "-o",
             source_root .. "/batch/one.o" })
         assert.falsy(ok)

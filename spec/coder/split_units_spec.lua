@@ -1319,14 +1319,15 @@ print("VARIANT_OK")
         write_file(wrapper, string.format([[
 #!/bin/sh
 compile=no
+preprocess=no
 source=
 previous=
 for arg in "$@"; do
   test "$previous" != -c || source=$arg
-  case "$arg" in -c) compile=yes ;; -E) compile=no ;; esac
+  case "$arg" in -c) compile=yes ;; -E) preprocess=yes ;; esac
   previous=$arg
 done
-test "$compile" = yes || exit 94
+test "$compile" = yes && test "$preprocess" = no || exit 94
 case "$source" in
   %q.c) part=0 ;;
   %q.part1.c) part=1 ;;

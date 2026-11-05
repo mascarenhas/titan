@@ -1198,16 +1198,17 @@ describe("generated-C batches under a parent Make", function()
 state=${TITAN_PARALLEL_TEST_STATE:?}
 leaf=
 compile=no
+preprocess=no
 previous=
 for argument in "$@"; do
     if [ "$previous" = -c ]; then
         case "$argument" in */batch/*.c) leaf=${argument##*/}; leaf=${leaf%.c} ;; esac
     fi
-    case "$argument" in -c) compile=yes ;; -E) compile=no ;; esac
+    case "$argument" in -c) compile=yes ;; -E) preprocess=yes ;; esac
     previous=$argument
 done
 # Compiler identification, preprocessing and other probes use the real compiler.
-test "$compile" = yes && test -n "$leaf" || exec cc "$@"
+test "$compile" = yes && test "$preprocess" = no && test -n "$leaf" || exec cc "$@"
 cleanup() {
     kill "$sleeper" 2>/dev/null
     sleep 1

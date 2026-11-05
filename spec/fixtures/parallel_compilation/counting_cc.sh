@@ -3,6 +3,7 @@ set -eu
 
 state=${TITAN_PARALLEL_TEST_STATE:?}
 phase=other
+preprocess=no
 source=
 mapped_source=
 previous=
@@ -10,11 +11,12 @@ for argument in "$@"; do
     if [ "$previous" = -c ]; then source=$argument; fi
     case "$argument" in
         -c) phase=compile ;;
-        -E) phase=preprocess ;;
+        -E) preprocess=yes ;;
         -fmacro-prefix-map=*) mapped_source=${argument#-fmacro-prefix-map=}; mapped_source=${mapped_source#*=} ;;
     esac
     previous=$argument
 done
+if [ "$preprocess" = yes ]; then phase=preprocess; fi
 
 # Compile controls observe only the positional input after -c, never an
 # option ending in a generated filename. Semantic-preprocessing controls
