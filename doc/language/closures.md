@@ -436,11 +436,13 @@ It is initialized once with a fresh closure, can be reassigned later, and calls
 through it use the first-class function path. The
 [initializer dependency rule](modules.md#initializer-dependencies) rejects
 references to the module's own variables and functions, and rejects a lambda
-that a call evaluated by the initializer could invoke: one passed to that
-call, directly or nested in its arguments, or called immediately. Putting
-the read of an **already name-visible** module variable in the lambda's body
-defers its value access until the closure is called; it does not make a later
-module variable or import visible.
+that an explicit or implicit call evaluated by the initializer could invoke:
+one passed to that call, directly or nested in its arguments, used as a
+potential Map-metamethod operand, or called immediately. Storing one in a fresh
+ordinary Map does not itself call it. Putting the read of an **already
+name-visible** module variable in the lambda's body defers its value access
+until the closure is called; it does not make a later module variable or
+import visible.
 
 ## Bound method references
 
@@ -454,7 +456,8 @@ A bound-method initializer evaluates its receiver once and stores the method
 without calling it. The receiver must obey the initializer dependency rule:
 `Adder.new(100):add` is accepted, while a receiver that reads an own module
 variable is rejected. A bound own-module method may be stored, but it is
-rejected where a call evaluated by the initializer could invoke it. Imported
+rejected where an explicit or implicit call evaluated by the initializer could
+invoke it, including as a key passed to an imported Map's `__index`. Imported
 methods follow the same receiver rule.
 
 ```titan

@@ -223,6 +223,41 @@ describe("binary dependency usage", function()
         assert.is_nil(tree._binary_usage.provider.records.Holder.literal)
     end)
 
+    it("retains spread-callable facts only for delivered constructor arguments", function()
+        for _, initializer in ipairs({
+            "local held = p.Holder(...{" .. callback .. "})",
+            "local held = p.Holder(...{[1] = " .. callback .. "})",
+            "local held = p.Holder((...{" .. callback .. "}))",
+            "local held = p.Holder {item = (...{" .. callback .. "})}",
+        }) do
+            local tree = check({
+                provider = [[record Holder item: function(): integer end]],
+                consumer = 'local p = import "provider"\nlocal seed: integer?\n' ..
+                    initializer,
+            })
+            assert.is_true(tree._binary_usage.provider.records.Holder.literal)
+        end
+        for _, initializer in ipairs({
+            "local held = p.Scalar(1, " .. callback .. ")",
+            "local held = p.Scalar(1, ...{" .. callback .. "})",
+            "local held = p.Scalar(...{1 as value, (" .. callback .. ") as value})",
+            "local held = p.Scalar(#{" .. callback .. "})",
+            "local held = p.Outer(p.Scalar(1, ...{" .. callback .. "}))",
+        }) do
+            local tree = check({
+                provider = [[
+                    record Scalar number: integer end
+                    record Outer item: Scalar end
+                ]],
+                consumer = 'local p = import "provider"\nlocal seed: integer?\n' ..
+                    initializer,
+            })
+            assert.is_nil(tree._binary_usage.provider.records.Scalar.literal)
+            local outer = tree._binary_usage.provider.records.Outer
+            if outer then assert.is_nil(outer.literal) end
+        end
+    end)
+
     it("still requires literal authority for raw module-variable construction", function()
         local tree = check({
             provider = [[record Item number: integer end]],

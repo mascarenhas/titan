@@ -82,10 +82,13 @@ The flag also removes the provider's `literal` capability (`binarycompat.lua`
 `nominal`). Raw literals, calls whose fresh native arguments are fused into the
 record allocation, and imported generated calls through which a module-variable
 initializer stores own callables (marked `_binary_initializer_constructor`)
-require that capability. A replacement provider that overrides `new` therefore
-rejects those consumers, while other imported calls, including callback-free
-module-variable initializers, depend only on `new`'s signature and run the
-provider's implementation. Local, source-linked, and archive-linked
+require that capability. The initializer proof uses delivered fixed/formal
+values, not discarded surplus or spread setup; all evaluated computations
+still undergo the dependency check, including implicit Map calls. A
+replacement provider that overrides `new` therefore rejects those consumers,
+while other imported calls, including callback-free stored module-variable
+initializers, depend only on `new`'s signature and run the provider's
+implementation. Local, source-linked, and archive-linked
 generated constructors may still be inlined; the final link's static-dependency
 classification chooses call or inline. The complete rule is
 in [Construction and closed-union

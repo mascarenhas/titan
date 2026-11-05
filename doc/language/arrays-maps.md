@@ -460,6 +460,24 @@ This is different from deterministic Array length. Maps keyed by `float`,
 `#`, even when some run-time keys happen to be integers. The metatable does not
 broaden that static rule.
 
+### Module-variable initializers
+
+Map metatables also matter to the [initializer dependency
+rule](modules.md#initializer-dependencies). A potentially metatable-bearing
+Map read exposes its Map and key to `__index`; Map/Map or Map/`value`
+comparison exposes both operands to `__eq`; integer-Map length and spread
+expose their Map receiver to `__len` or `__index`. An own lambda, bound method,
+or other own callable cannot reach these implicit calls during initialization,
+even through a nested container or generated constructor.
+
+Fresh ordinary Map literals have no metatable, and their entries are filled
+with raw stores. Operations proved to stay on such fresh values remain legal,
+including equality and length of callable-bearing literals. Casts and boxing
+preserve their origin rather than introducing a metatable. Raw
+`value`/`value` equality and canonical Array indexing/length do not acquire Map
+dispatch. In every case, computations nested in the operands and any exposure
+from an enclosing call are still checked.
+
 ## Lua representation and interoperation
 
 At a Lua-visible boundary the two container kinds are deliberately distinct:

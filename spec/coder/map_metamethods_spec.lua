@@ -5,11 +5,18 @@ local h = require "spec.support.helpers"
 
 local csrc
 
-local function clean()
-    for _, suffix in ipairs({ ".c", ".o", ".so", ".a" }) do
-        os.remove("test" .. suffix)
+local function clean_module(name)
+    for _, suffix in ipairs({
+        ".c", ".o", ".so", ".dll", ".dll.def", ".dylib", ".a",
+        ".ffi.h", ".titan.h",
+    }) do
+        os.remove(name .. suffix)
     end
-    os.execute("rm -rf test.so.dSYM")
+    os.execute("rm -rf " .. name .. ".so.dSYM " .. name .. ".dylib.dSYM")
+end
+
+local function clean()
+    clean_module("test")
 end
 
 local function generated_function(source, marker)
@@ -948,6 +955,178 @@ describe("Map metamethod-aware code generation", function()
             })
             assert(test.stack_length(length_grow, "rooted") ==
                 "rooted:17:rooted")
+        ]])
+        assert.truthy(ok, err)
+    end)
+end)
+
+describe("module initializer implicit Map call exposure", function()
+    local provider = "map_initializer_implicit_provider"
+    local consumer = "map_initializer_implicit_consumer"
+    local provider_source = [[
+        registry: {value: value} = {}
+        integers: {integer: value} = {}
+        dynamic: value = {}
+        callable: value = {}
+    ]]
+    local declarations = [[
+        local dep = import "map_initializer_implicit_provider"
+        local seed: integer?
+        record Box number: integer end
+        function Box:read(): integer return seed end
+    ]]
+
+    after_each(function()
+        clean_module(provider)
+        clean_module(consumer)
+    end)
+
+    local cases = {
+        {
+            name = "__index keys",
+            initializer = "result: integer = dep.registry[Box(1):read]",
+            metatable = [[
+                __index = function(_, key) return key() end,
+            ]],
+        },
+        {
+            name = "__eq operands",
+            initializer = [[
+                result = dep.registry ==
+                    ({["k"] = Box(1):read} as {value: value})
+            ]],
+            metatable = [[
+                __eq = function(_, other) return other.k() == 42 end,
+            ]],
+        },
+    }
+    for _, case in ipairs(cases) do
+        it("rejects initializer implicit Map exposure through " .. case.name,
+           function()
+            local ok, err = h.build_so_chain({
+                {name = provider, src = provider_source},
+                {name = consumer, src = declarations .. case.initializer ..
+                    "\ndo seed = 42 end\n"},
+            })
+            if ok then
+                -- Pre-fix reproduction: the real imported Map is initialized,
+                -- then Lua installs the metatable before loading the consumer.
+                local ran, observed = h.call("string", [[
+                    local dep = require "map_initializer_implicit_provider"
+                    setmetatable(dep.registry, {
+                        ]] .. case.metatable .. [[
+                    })
+                    local loaded, failure =
+                        pcall(require, "map_initializer_implicit_consumer")
+                    assert(not loaded, "own callback was not entered during initialization")
+                    assert(type(failure) == "string", "missing initialization diagnostic")
+                    assert(failure:find("expected integer but found nil", 1, true), failure)
+                    return failure
+                ]])
+                assert.truthy(ran, observed)
+                err = "unsafe initializer was accepted and entered its own callback: " ..
+                    observed
+            end
+            assert.falsy(ok, err)
+            assert.match("module variable initializer cannot", err)
+        end)
+    end
+
+    it("executes callback-free imported metamethods without exposing raw equality", function()
+        local ok, err = h.build_so_chain({
+            {name = provider, src = provider_source},
+            {name = consumer, src = declarations .. [[
+                local indexed: integer = dep.registry["answer"]
+                local length = #dep.integers
+                local called = (dep.callable as function(integer): integer)(41)
+                local raw_equal = dep.dynamic ==
+                    ({["k"] = Box(1):read} as value)
+                local fresh_index = ({["k"] = Box(1):read} as {value: value})[
+                    function(): integer return seed end]
+                local finite = {...dep.integers[1, 2]}
+                local open = {...dep.integers}
+                local adjusted: integer = (...dep.integers)
+                function run(): boolean
+                    return indexed == 42 and length == 2 and called == 42
+                        and not raw_equal and fresh_index == nil and seed == 42
+                        and #finite == 2 and finite[1] == 41 and finite[2] == 42
+                        and #open == 2 and open[1] == 41 and open[2] == 42
+                        and adjusted == 41
+                end
+                do seed = 42 end
+            ]]},
+        })
+        assert.truthy(ok, err)
+        ok, err = h.call("string", [[
+            local dep = require "map_initializer_implicit_provider"
+            local indexed, measured, called, projected = 0, 0, 0, 0
+            setmetatable(dep.registry, {
+                __index = function(_, key)
+                    assert(key == "answer")
+                    indexed = indexed + 1
+                    return 42
+                end,
+            })
+            setmetatable(dep.integers, {
+                __len = function()
+                    measured = measured + 1
+                    return 2
+                end,
+                __index = function(_, key)
+                    assert(key == 1 or key == 2)
+                    projected = projected + 1
+                    return 40 + key
+                end,
+            })
+            setmetatable(dep.callable, {
+                __call = function(_, number)
+                    called = called + 1
+                    return number + 1
+                end,
+            })
+            setmetatable(dep.dynamic, {
+                __eq = function() error("raw value equality called __eq") end,
+            })
+            local consumer = require "map_initializer_implicit_consumer"
+            assert(consumer.run())
+            assert(indexed == 1 and measured == 3 and called == 1 and projected == 5)
+        ]])
+        assert.truthy(ok, err)
+    end)
+
+    it("preserves fresh callable-bearing Map operations in native initialization", function()
+        local fn = "function(): integer return seed end"
+        local map = '({["k"] = ' .. fn .. "} as {value: value})"
+        local integers = "({[1] = " .. fn .. "} as {integer: value})"
+        local ok, err = h.build_so_chain({
+            {name = consumer, src = declarations:gsub(
+                'local dep = import "map_initializer_implicit_provider"', "") .. [[
+                local equal = ]] .. map .. " == " .. map .. [[
+                local unequal = ]] .. map .. " ~= " .. map .. [[
+                local boxed = ]] .. map .. " == (" .. map .. [[ as value)
+                local selected_and = (true and ]] .. map .. ") == " .. map .. [[
+                local selected_or = (nil or ]] .. map .. ") == " .. map .. [[
+                local length = #]] .. integers .. [[
+                local cast_length = #((]] .. integers .. [[ as value) as {integer: value})
+                local selected_length = #(nil or ]] .. integers .. [[)
+                local array_length = #{Box(1):read}
+                local raw_equal = (]] .. map .. " as value) == (" .. map .. [[ as value)
+                local callable_view = ]] .. map .. " == (((" .. map .. [[
+                    as value) as function(): integer) as value)
+                function run(): boolean
+                    return not equal and unequal and not boxed
+                        and not selected_and and not selected_or
+                        and length == 1 and cast_length == 1 and selected_length == 1
+                        and array_length == 1 and not raw_equal and not callable_view
+                        and seed == 42
+                end
+                do seed = 42 end
+            ]]},
+        })
+        assert.truthy(ok, err)
+        ok, err = h.call("string", [[
+            local consumer = require "map_initializer_implicit_consumer"
+            assert(consumer.run())
         ]])
         assert.truthy(ok, err)
     end)

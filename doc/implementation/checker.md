@@ -287,18 +287,44 @@ method, or a value whose type is an own record or union with own methods
 that never runs, can publish an Interface witness, and an imported callee can
 then reach the methods through a dynamic `value` projection. A call's callee
 expression, including a method-call receiver such as an Interface-dispatch
-receiver, is always exposed, and so are all arguments of a call that is not a
-validated generated constructor. Exposure is inherited by every nested
-container, constructor, operator, cast, index, spread, and adjustment, and is
-never reset; a generated constructor neither creates nor clears it. A scalar
-result (nil, boolean, number, or string) reports no stored callable to its
-enclosing expression, so an imported generated constructor receiving
-`#{lambda}` or `Own(1).number` needs no constructor proof; the operands are
-still checked under the exposure in force. An exposed lambda reports `module
-variable initializer cannot expose an anonymous function to a call`; other
-exposed callables report the general own-reference diagnostic. Lambda bodies
-are never traversed, and an `is` satisfaction test creates no wrapper, so its
-plan is not scanned.
+receiver, is always exposed, and so are all evaluated arguments of a call
+that is not a validated generated constructor, including discarded surplus.
+Exposure is inherited by every nested container, constructor, operator, cast,
+index, spread, and adjustment, and is never reset; a generated constructor
+neither creates nor clears it. An exposed lambda reports `module variable
+initializer cannot expose an anonymous function to a call`; other exposed
+callables report the general own-reference diagnostic. Lambda bodies are
+never traversed, and an `is` satisfaction test creates no wrapper, so its plan
+is not scanned.
+
+Implicit calls strengthen the same exposure state. A potentially
+metatable-bearing Map read exposes its base and key; Map/Map and Map/`value`
+equality in either orientation expose both operands; integer-Map length and
+spread expose the receiver. Equality uses the original checked
+`ComparisonPlan.left` and `.right`, because gradual injection may already have
+boxed the Map operand to `value`. Length and spread use the actual checked
+Map branch, not Array backing operations. Supported primitive ordering,
+arithmetic, and concatenation do not add Lua operator dispatch. Map literal
+filling uses raw stores into a fresh table, not `__newindex`; statement writes,
+generic-for close/iteration, and explicit tostring calls remain subject to
+their ordinary call boundaries.
+
+`fixed_metatable_origin` memoizes a separate result-origin fact: primitive
+results, fresh literal containers and closures, and validated generated
+constructor results cannot supply an arbitrary imported table metatable.
+Transparent casts/adjustments and `and`/`or` preserve that fact only when the
+possible result origins are fixed. Unknown imported values and ordinary call
+results stay unknown; a Function type alone proves nothing about `__call`.
+This is not an `isconst` bypass: every operand computation is still visited,
+and a fixed origin never clears inherited exposure.
+
+A scalar result (nil, boolean, number, or string) reports no stored callable
+to its enclosing expression, so an imported generated constructor receiving
+`#{lambda}` or `Own(1).number` needs no constructor proof. The effect-only
+`ExpSpread` carrier is the exception to scalar clearing: although stamped
+`Type.Nil`, it retains its callable fact for shared `ExpSpreadIndex`
+deliveries. An adjusted spread visits both its setup carrier and its delivered
+projection, matching code generation.
 
 Completed visits are memoized in two caches, one per exposure state, so a
 node first reached as stored is still checked when a shared plan or argument
@@ -307,14 +333,19 @@ direct-callee constructor exemption is not memoized as an ordinary value use.
 Conversion-plan facts are exposure-independent and cached per complete root
 query.
 
-When the arguments of an imported generated record constructor carry an own
-callable, the visitor marks the call `_binary_initializer_constructor`.
-`binary_collect_usage` turns that mark into the record's `literal` usage, so a
-replacement provider that overrides `new` fails compatibility checking before
-the consumer initializes; see [construction
-proofs](binary-compatibility.md#construction-and-closed-union-proofs).
-Callback-free imported construction keeps only its `new` signature
-requirement.
+When a delivered stored argument of an imported generated record constructor
+carries an own callable, the visitor marks the call
+`_binary_initializer_constructor`. `binary_collect_usage` turns that mark
+into the record's `literal` usage, so a replacement provider that overrides
+`new` fails compatibility checking before the consumer initializes; see
+[construction proofs](binary-compatibility.md#construction-and-closed-union-proofs).
+Every evaluated argument is checked for effects, but storage facts come only
+from the adjustment's fixed/formal slots (or normalized named arguments).
+`_arg_adjustment` and `_generic_arg_adjustment` are not result-conversion plans:
+discarded surplus and setup carriers must not create a stored-callable result
+or a literal requirement by themselves. Callback-free stored construction
+keeps only its `new` signature requirement. An implicit call computed inside
+an argument is checked independently of this storage proof.
 
 Constness is an exact boolean on local declarations, record fields, module
 variables, and Array types. An omitted mutable initializer (local or module

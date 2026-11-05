@@ -84,8 +84,10 @@ These expressions execute during module loading in declaration order, not
 at compile time. Their operands must follow the
 [module-initializer dependency rule](modules.md#initializer-dependencies):
 no evaluated reference to an own-module variable, function, or method, and no
-lambda or other own callable passed to the call. The ordinary C safety and
-lifetime contracts still apply.
+lambda or other own callable exposed to an explicit or implicit call. Map
+metamethods in an operand are checked even when the outer operation is a C
+allocation pseudo-constructor. The ordinary C safety and lifetime contracts
+still apply.
 
 The compiler prepares `A.ffi.h` from those includes and any `foreign type`
 typedef declarations before checking Titan signatures. A module defining foreign functions also gets `A.titan.h` for their
@@ -938,6 +940,8 @@ local samples = foreign float.new_array(16)
 Each module instance performs the allocation once and keeps the owned userdata
 in its GC-traced module state. A `new_array` count may come from an imported
 module or a foreign call, but cannot read the current module's own variable.
+Allocation itself invokes no user callback; it does not exempt calls or Map
+metamethod dispatch used to compute its operands.
 
 Passing a mutable owner to a C function expecting `T *`, `const T *`, or a
 permitted `void *` passes a pointer to the userdata payload. A counted owner

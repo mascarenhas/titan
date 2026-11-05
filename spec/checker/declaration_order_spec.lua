@@ -637,3 +637,122 @@ describe("module initializer dependencies (typechecker)", function()
         assert.match("member 'secret' not found", err)
     end)
 end)
+
+describe("initializer implicit user-code dispatch", function()
+    local provider = [[
+        registry: {value: value} = {}
+        integers: {integer: value} = {}
+        dynamic: value = {}
+        callable: value = {}
+        flag = false
+        record Scalar number: integer end
+        record Holder callback: function(): integer end
+        function consume(number: integer): integer return number end
+    ]]
+    local declarations = [[
+        local dep = import "implicit_provider"
+        local seed: integer?
+        record Box number: integer end
+        function Box:read(): integer return seed end
+        interface Reader function read(): integer end
+    ]]
+    local fn = "function(): integer return seed end"
+    local own_map = '({["k"] = Box(1):read} as {value: value})'
+    local selected_map =
+        "((dep.flag and ({[1] = Box(1):read} as {integer: value})) or dep.integers)"
+    local unsafe = {
+        {"a lambda Map key", "dep.registry[" .. fn .. "]"},
+        {"a bound-method Map key", "dep.registry[Box(1):read]"},
+        {"a latent nominal Map key", "dep.registry[Box(1)]"},
+        {"an Interface Map key", "dep.registry[Box(1) as Reader]"},
+        {"a nested Map key", 'dep.registry[{["callback"] = ' .. fn .. "}]"},
+        {"a generated-constructor Map key", "dep.registry[dep.Holder(" .. fn .. ")]"},
+        {"an adjusted spread Map key", "dep.registry[(...{" .. fn .. "})]"},
+        {"Map/Map equality", "dep.registry == " .. own_map},
+        {"Map/Map inequality", "dep.registry ~= " .. own_map},
+        {"right-hand Map equality", own_map .. " == dep.registry"},
+        {"Map/value comparison adjustment", "dep.registry == (" .. own_map .. " as value)"},
+        {"value/Map comparison adjustment", "(" .. own_map .. " as value) == dep.registry"},
+        {"an imported value Map comparison", "dep.dynamic == " .. own_map},
+        {"a constructor argument computation", "dep.Scalar(dep.registry[Box(1):read] as integer)"},
+        {"a discarded constructor computation", "dep.Scalar(1, dep.registry[Box(1):read])"},
+        {"a named constructor computation", "dep.Holder {callback = dep.registry[Box(1):read]}"},
+        {"a container computation", "{dep.registry[Box(1):read]}"},
+        {"a potentially metatable-bearing length receiver", "#" .. selected_map},
+        {"an open Map-spread receiver", "{..." .. selected_map .. "}"},
+        {"a finite Map-spread receiver", "dep.Scalar(..." .. selected_map .. ")"},
+        {"a ranged Map-spread receiver", "{..." .. selected_map .. "[1, 1]}"},
+        {"a spread-bound computation",
+            "{...dep.integers[1, dep.registry[Box(1):read] as integer]}"},
+        {"an imported __call argument",
+            "(dep.callable as function(value): integer)(Box(1):read)"},
+        {"a real call's discarded lambda", "dep.consume(1, " .. fn .. ")"},
+        {"a real call's discarded Array-spread callback", "dep.consume(1, ...{" .. fn .. "})"},
+        {"a real call's discarded Map-spread callback", "dep.consume(1, ...{[1] = " .. fn .. "})"},
+    }
+    for _, case in ipairs(unsafe) do
+        it("rejects implicit exposure through " .. case[1], function()
+            local ok, err = run_checker_modules({
+                implicit_provider = provider,
+                main = declarations .. "\nlocal result = " .. case[2],
+            }, "main")
+            assert.falsy(ok)
+            assert.match("module variable initializer cannot", err)
+            local count = 0
+            for _ in err:gmatch("[^\n]+") do count = count + 1 end
+            assert.equal(1, count, err)
+        end)
+    end
+
+    local fresh_map = '({["k"] = ' .. fn .. "} as {value: value})"
+    local integer_map = "({[1] = " .. fn .. "} as {integer: value})"
+    local floor = {
+        {"fresh Map equality", fresh_map .. " == " .. fresh_map},
+        {"fresh Map inequality", fresh_map .. " ~= " .. fresh_map},
+        {"boxed fresh Map equality", fresh_map .. " == (" .. fresh_map .. " as value)"},
+        {"fresh Map equality through and", "(true and " .. fresh_map .. ") == " .. fresh_map},
+        {"fresh Map equality through or", "(nil or " .. fresh_map .. ") == " .. fresh_map},
+        {"fresh integer-Map length", "#" .. integer_map},
+        {"fresh integer-Map length through casts",
+            "#((" .. integer_map .. " as value) as {integer: value})"},
+        {"fresh integer-Map length through selection", "#(nil or " .. integer_map .. ")"},
+        {"fresh Array length", "#{" .. fn .. "}"},
+        {"raw value equality", "(" .. fresh_map .. " as value) == (" .. fresh_map .. " as value)"},
+        {"a callable view of a fresh Map",
+            fresh_map .. " == (((" .. fresh_map .. " as value) as function(): integer) as value)"},
+    }
+    for _, case in ipairs(floor) do
+        it("preserves the baseline non-dispatch floor for " .. case[1], function()
+            assert_check("local seed: integer?\nlocal result = " .. case[2])
+        end)
+    end
+
+    it("keeps imported raw value equality and callback-free metamethod operands legal",
+       function()
+        local ok, err = run_checker_modules({
+            implicit_provider = provider,
+            main = declarations .. [[
+                local index: integer = dep.registry["answer"]
+                local length = #dep.integers
+                local called = (dep.callable as function(integer): integer)(41)
+                local raw = dep.dynamic ==
+                    ({["k"] = Box(1):read} as value)
+                local fresh = ({["k"] = Box(1):read} as {value: value})[
+                    function(): integer return seed end]
+            ]],
+        }, "main")
+        assert.truthy(ok, err)
+    end)
+
+    it("does not invent Lua operators for unsupported checked operand types", function()
+        assert_error("relational expression with two", [[
+            local result = {["k"] = 1} < {["k"] = 2}
+        ]])
+        assert_error("instead of a number", [[
+            local result = {["k"] = 1} + {["k"] = 2}
+        ]])
+        assert_error("cannot concatenate", [[
+            local result = {["k"] = 1} .. {["k"] = 2}
+        ]])
+    end)
+end)

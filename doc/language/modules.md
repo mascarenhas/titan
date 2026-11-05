@@ -321,16 +321,16 @@ do
 end
 ```
 
-A call that the initializer evaluates must not receive or invoke such a value,
-because the callee could run the module's own code before the module's
-variables are initialized. An own callable is rejected as an argument of an
-evaluated call, including one nested inside that argument's containers,
-constructors, operators, or casts, and as the called expression or the
-receiver of an Interface method call. This applies even to a lambda that
-captures nothing. Generated constructors only store their arguments, so they
-create no such exposure, but they do not hide an own callable from an
-enclosing call. The diagnostic for an anonymous function differs from the one
-for other own callables.
+An explicit or implicit call that the initializer evaluates must not receive
+or invoke such a value, because it could run the module's own code before the
+module's variables are initialized. An own callable is rejected as an argument
+of an evaluated call, including one nested inside that argument's containers,
+constructors, operators, casts, or spreads, and as the called expression or
+the receiver of an Interface method call. This applies even to a lambda that
+captures nothing. Generated constructors only store their delivered arguments,
+so they create no such exposure, but they do not hide an own callable from an
+enclosing call or make an argument's implicit calls safe. The diagnostic for
+an anonymous function differs from the one for other own callables.
 
 ```text
 a = Counter(1):current()                  -- rejected: invokes an own method
@@ -338,6 +338,26 @@ b = sorter.sort({3, 1}, function(x: integer, y: integer): boolean
         return x < y end)                 -- rejected: passes a lambda to a call
 c = registry.add({Counter(1):current})   -- rejected: nested in a call argument
 ```
+
+Map operations can call Lua metamethods without written call syntax. A read
+from a potentially metatable-bearing Map exposes both the Map and its key;
+Map/Map and Map/`value` equality in either orientation expose both operands;
+integer-Map length and spread expose the Map receiver. For example, given an
+imported `registry: {value: value}`, these initializers are rejected:
+
+```text
+keyed = dep.registry[Counter(1):current]  -- __index could call the key
+equal = dep.registry ==                -- __eq could call the stored method
+    ({["read"] = Counter(1):current} as {value: value})
+```
+
+Fresh ordinary Map literals have no metatable, so operations proved to use
+only such fresh values do not create this exposure. Casts and boxing do not
+attach a metatable. Array indexing and length, raw `value`/`value` equality,
+and the supported primitive arithmetic, ordering, and concatenation
+operations do not dispatch arbitrary Lua metamethods. Their operand
+computations still obey the rule, and none clears exposure inherited from an
+enclosing call. See [Maps](arrays-maps.md#maps) for the precise dispatch rules.
 
 Only own implementations count. An Interface declared by this module may
 dispatch to a method implemented by an imported record or union, and imported
@@ -347,11 +367,14 @@ An imported generated record constructor stores its arguments without calling
 them only while its provider keeps the generated `new`. When an initializer
 stores an own callable through one, directly or nested in another stored
 argument, the compiled consumer therefore also requires the generated default
-constructor. A replacement provider that overrides `new` is rejected as
-incompatible when the consumer loads, before any of its initializers run; see
-[Replacing shared-library dependencies](binary-compatibility.md#private-record-fields-and-construction).
-Imported construction with callback-free arguments depends only on `new`'s
-signature, so such a consumer observes a compatible custom `new`.
+constructor. Only values delivered to stored parameter slots create this
+requirement, not discarded surplus values or spread setup alone. Every written
+argument still evaluates and must obey the dependency rule. A replacement
+provider that overrides `new` is rejected as incompatible when the consumer
+loads, before any of its initializers run; see [Replacing shared-library
+dependencies](binary-compatibility.md#private-record-fields-and-construction).
+Imported construction with callback-free stored arguments depends only on
+`new`'s signature, so such a consumer observes a compatible custom `new`.
 
 Initializers execute once per module instance, in declaration order. The
 checker does not evaluate calls at compile time; their observable effects and

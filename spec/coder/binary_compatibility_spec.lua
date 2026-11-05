@@ -1261,6 +1261,34 @@ int main(void) {
         runs("assert(consumer.run() == 42)")
     end)
 
+    for _, expression in ipairs({
+        "p.Box(41, function(): integer return seed end)",
+        "p.Box(41, ...{function(): integer return seed end})",
+        "p.Box(...{41 as value, (function(): integer return seed end) as value})",
+    }) do
+        it("keeps discarded initializer callbacks out of stored-constructor proof: " ..
+           expression, function()
+            local image = fixture([[
+                record Box number: integer end
+                record Outer item: Box end
+            ]], [[
+                local p = import "bc180_provider"
+                local seed: integer?
+                local held = p.Outer(]] .. expression .. [[)
+                function run(): integer return held.item.number end
+                do seed = 42 end
+            ]])
+            runs("assert(consumer.run() == 41)")
+            replace([[
+                record Box number: integer end
+                record Outer item: Box end
+                function Box.new(number: integer): Box return {number = number + 1} end
+                function Outer.new(item: Box): Outer return {item = item} end
+            ]], image)
+            runs("assert(consumer.run() == 42)")
+        end)
+    end
+
     it("requires non-invoking default construction for a stored initializer callback", function()
         local image = fixture([[
             record Holder callback: function(): integer end
@@ -1319,6 +1347,20 @@ int main(void) {
 
     local callback = "function(): integer return seed end"
     local stored_callback_cases = {
+        {
+            name = "an Array-spread callback",
+            field_type = "function(): integer",
+            initial = "...{" .. callback .. "}",
+            read = "return held.item()",
+            invoke = "item()",
+        },
+        {
+            name = "a Map-spread callback",
+            field_type = "function(): integer",
+            initial = "...{[1] = " .. callback .. "}",
+            read = "return held.item()",
+            invoke = "item()",
+        },
         {
             name = "an Array callback",
             field_type = "{function(): integer}",

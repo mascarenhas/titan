@@ -86,6 +86,8 @@ foreign member reads, C calls, and allocation/layout pseudo operations.
 It checks their evaluated operands just like ordinary expressions: a C
 callee does not make a same-module variable argument safe, and like any other
 evaluated call it exposes lambdas and other own callables in its arguments.
+Implicit Map calls nested in operands strengthen exposure under the same
+initializer check; the outer C operation cannot hide them.
 No foreign initializer is evaluated by the checker. Existing expression and
 call lowering executes it in the module's declaration-order `_init` path,
 with the usual checked numeric conversions and GC roots. Imported Titan
@@ -1133,10 +1135,12 @@ in a stack slot immediately after allocation, before any later operation can
 trigger a collection.
 
 Module-variable initializers may use these pseudo-constructors: `isconstructor`
-treats `Checker.CPseudoNew` like a generated constructor, so the call creates
-no call exposure while the dependency rule still checks its arguments. The
-allocation occurs once per module instance at initialization time, and the
-resulting `COwned` userdata is stored in a GC-traced module slot.
+treats `Checker.CPseudoNew` like a generated constructor, so allocation itself
+creates no call exposure. The dependency rule still checks every evaluated
+operand, including its implicit Map dispatch, without clearing exposure from
+an enclosing call. The allocation occurs once per module instance at
+initialization time, and the resulting `COwned` userdata is stored in a
+GC-traced module slot.
 
 Each distinct owned C pointee/count shape also gets a hidden module slot holding
 a metatable. New allocations stamp that metatable onto the `Udata`, and

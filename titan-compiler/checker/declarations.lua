@@ -580,6 +580,58 @@ function initializer_error(root, modname)
         return known
     end
 
+    local fixed_origins = {}
+    local function fixed_metatable_origin(node)
+        if not node then return false end
+        local known = fixed_origins[node]
+        if known ~= nil then return known end
+        local tag = node._tag
+        local result = node._type and node._type._tag
+        if result == "Type.Nil" or result == "Type.Boolean"
+           or result == "Type.Integer" or result == "Type.Float"
+           or result == "Type.String" then
+            known = true
+        elseif tag == "Ast.ExpInitList" or tag == "Ast.ExpFunction"
+           or tag == "Ast.ExpMethodRef" or tag == "Ast.ExpUnionInit" then
+            -- Fresh Maps have no metatable; the other constructors create
+            -- primitive values or objects with compiler-owned metatables.
+            known = true
+        elseif tag == "Ast.ExpCast" or tag == "Ast.ExpAdjust" then
+            known = fixed_metatable_origin(node.exp)
+        elseif tag == "Ast.ExpCall" then
+            known = isconstructor(node.exp)
+        elseif tag == "Ast.ExpBinop"
+           and (node.op == "and" or node.op == "or") then
+            known = fixed_metatable_origin(node.lhs)
+                and fixed_metatable_origin(node.rhs)
+        else
+            known = false
+        end
+        fixed_origins[node] = known
+        return known
+    end
+    local function map_receiver_exposed(node)
+        return node and node._type and node._type._tag == "Type.Map"
+            and not fixed_metatable_origin(node)
+    end
+    local function map_equality_exposed(node)
+        if node._c_operator or (node.op ~= "==" and node.op ~= "~=") then
+            return false
+        end
+        local comparison = maybe3.get_checked(node._comparison, "comparison")
+        if not comparison then return false end
+        -- Match codebinaryop's original ComparisonPlan types: gradual
+        -- injection can already have changed both operand AST types to value.
+        local left = types.normalize(comparison.left)
+        local right = types.normalize(comparison.right)
+        local leftmap, rightmap = left._tag == "Type.Map", right._tag == "Type.Map"
+        local dispatch = (leftmap and rightmap)
+            or (leftmap and right._tag == "Type.Value")
+            or (rightmap and left._tag == "Type.Value")
+        return dispatch and not (fixed_metatable_origin(node.lhs)
+            and fixed_metatable_origin(node.rhs))
+    end
+
     local visit
     local function visit_list(exps, call_exposed)
         local has_callable = false
@@ -608,6 +660,7 @@ function initializer_error(root, modname)
         if node._tag ~= "Ast.ExpIs" then
             for key, child in pairs(node) do
                 if type(key) == "string" and key:sub(1, 1) == "_"
+                   and key ~= "_arg_adjustment" and key ~= "_generic_arg_adjustment"
                    and (key:match("adjustment$") or key:match("conversion$")
                         or key:match("adapter$")) then
                     has_callable = own_plan_callable(child) or has_callable
@@ -648,17 +701,27 @@ function initializer_error(root, modname)
             -- invoking position independently of the result's destination.
             err = visit(node.exp, true, generated)
             if err then return err end
-            err, child_callable = visit_list(
-                call_argument_expressions(node.args), expose_args)
+            -- Every written expression still evaluates, including discarded
+            -- surplus and setup carriers. Only delivered formal values are
+            -- stored by a generated constructor and justify its literal proof.
+            err = visit_list(call_argument_expressions(node.args), expose_args)
             if err then return err end
-            argument_callable = argument_callable or child_callable
             if generated then
                 local nominal = node._nominal_constructor
-                if argument_callable and nominal and nominal.kind == "record"
-                   and nominal_module(nominal.owner.name) ~= modname then
-                    -- A replaceable provider must retain the default body
-                    -- when initializer safety relies on storing a callback.
-                    node._binary_initializer_constructor = true
+                argument_callable = false
+                if nominal then
+                    local fixed = node._arg_adjustment
+                        and node._arg_adjustment.fixed
+                        or call_argument_expressions(node.args)
+                    for index = 1, #nominal.slots do
+                        err, child_callable = visit(fixed[index], expose_args)
+                        if err then return err end
+                        argument_callable = argument_callable or child_callable
+                    end
+                    if argument_callable and nominal.kind == "record"
+                       and nominal_module(nominal.owner.name) ~= modname then
+                        node._binary_initializer_constructor = true
+                    end
                 end
                 has_callable = has_callable or argument_callable
             end
@@ -671,10 +734,11 @@ function initializer_error(root, modname)
             elseif var._tag == "Ast.VarDot" then
                 err, child_callable = visit(var.exp, call_exposed)
             elseif var._tag == "Ast.VarBracket" then
-                err, child_callable = visit(var.exp1, call_exposed)
+                local exposed = call_exposed or map_receiver_exposed(var.exp1)
+                err, child_callable = visit(var.exp1, exposed)
                 if err then return err end
                 has_callable = has_callable or child_callable
-                err, child_callable = visit(var.exp2, call_exposed)
+                err, child_callable = visit(var.exp2, exposed)
             else
                 assert(var._tag == "Ast.VarName")
             end
@@ -685,18 +749,27 @@ function initializer_error(root, modname)
             has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpBinop" then
-            err, child_callable = visit(node.lhs, call_exposed)
+            local exposed = call_exposed or map_equality_exposed(node)
+            err, child_callable = visit(node.lhs, exposed)
             if err then return err end
             has_callable = has_callable or child_callable
-            err, child_callable = visit(node.rhs, call_exposed)
+            err, child_callable = visit(node.rhs, exposed)
             has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpAdjust" and node._adjusted_spread then
-            err, child_callable = visit(node._adjusted_spread, call_exposed)
+            err = visit(node._adjusted_spread, call_exposed)
+            if err then return err end
+            err, child_callable = visit(node.exp, call_exposed)
             has_callable = has_callable or child_callable
 
-        elseif tag == "Ast.ExpCast" or tag == "Ast.ExpUnop"
-               or tag == "Ast.ExpIs" or tag == "Ast.ExpAdjust"
+        elseif tag == "Ast.ExpUnop" then
+            local exposed = call_exposed
+                or (node.op == "#" and not node._c_operator
+                    and map_receiver_exposed(node.exp))
+            err, child_callable = visit(node.exp, exposed)
+            has_callable = has_callable or child_callable
+
+        elseif tag == "Ast.ExpCast" or tag == "Ast.ExpIs" or tag == "Ast.ExpAdjust"
                or tag == "Ast.ExpExtra" or tag == "Ast.ExpDotsIndex" then
             err, child_callable = visit(node.exp, call_exposed)
             has_callable = has_callable or child_callable
@@ -716,7 +789,9 @@ function initializer_error(root, modname)
             has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpSubset" or tag == "Ast.ExpSpread" then
-            err, child_callable = visit(node.exp, call_exposed)
+            local exposed = call_exposed
+                or (node._spread_kind == "map" and map_receiver_exposed(node.exp))
+            err, child_callable = visit(node.exp, exposed)
             if err then return err end
             has_callable = has_callable or child_callable
             err = visit(node.first, call_exposed)
@@ -740,9 +815,10 @@ function initializer_error(root, modname)
         local result = node._type
         while result and result._tag == "Type.Option" do result = result.base end
         local result_tag = result and result._tag
-        if result_tag == "Type.Nil" or result_tag == "Type.Boolean"
-           or result_tag == "Type.Integer" or result_tag == "Type.Float"
-           or result_tag == "Type.String" then
+        if tag ~= "Ast.ExpSpread"
+           and (result_tag == "Type.Nil" or result_tag == "Type.Boolean"
+                or result_tag == "Type.Integer" or result_tag == "Type.Float"
+                or result_tag == "Type.String") then
             has_callable = false
         end
         if not constructor then seen[node] = has_callable and true or false end
