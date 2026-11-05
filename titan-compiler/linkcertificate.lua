@@ -525,7 +525,7 @@ local function output_snapshot(context, output)
     if output.executable and not platform.windows then
         need((stat.mode & 0x49) ~= 0, "output is not executable: " .. filename)
     end
-    local result = { path = filename, kind = stat.kind, mode = stat.mode }
+    local result = { path = output_path(context, filename), kind = stat.kind, mode = stat.mode }
     if stat.kind == "file" then
         result.identity = incremental.file_digest(context, filename)
     else
@@ -955,18 +955,21 @@ function certificate.check(context, ticket)
     if not validated and type(valid) ~= "string" then error(valid, 0) end
     if not validated or not valid then return false, "link record schema" end
     if record.input ~= ticket.input then return false, "link inputs changed" end
-    for _, input in ipairs(record.native) do
-        input.path = relocation.rebind(context, input.path, record.roots)
-    end
-    local function rebind_outputs(outputs)
-        for _, output in ipairs(outputs) do
-            output.path = relocation.rebind(context, output.path, record.roots)
-            if output.entries then rebind_outputs(output.entries) end
-        end
-    end
-    rebind_outputs(record.outputs)
     if #record.outputs ~= #ticket.outputs then return false, "link output set changed" end
     local called, current = pcall(function()
+        -- Rebinding changes owned prefixes, not the producer's path convention:
+        -- native inputs use absolute spellings and output snapshots use output_path,
+        -- including recursive directory members and Windows separator/case handling.
+        for _, input in ipairs(record.native) do
+            input.path = absolute(context, relocation.rebind(context, input.path, record.roots))
+        end
+        local function rebind_outputs(outputs)
+            for _, output in ipairs(outputs) do
+                output.path = output_path(context, relocation.rebind(context, output.path, record.roots))
+                if output.entries then rebind_outputs(output.entries) end
+            end
+        end
+        rebind_outputs(record.outputs)
         return { outputs = (function()
             local result = {}
             for _, output in ipairs(ticket.outputs) do result[#result + 1] = output_snapshot(context, output) end

@@ -1276,14 +1276,20 @@ relink.
 2. **Read-only check (`linkcertificate.check`, `linkcertificate.lua`).**
    Verifies `ticket.cacheable`, decodes `<ticket.record>`, checks
    `record_valid` (`schema`, `digest`, `canonicalization`, and an optional
-   closed `roots` map), checks `record.input == ticket.input`, rebinds the
-   recorded `native` and output paths from `record.roots` to the current
-   compiler-owned roots, checks `#record.outputs == #ticket.outputs`,
-   takes a fresh `output_snapshot` of every path in `ticket.outputs` (verifying
-   non-symlink `file`/`directory` kind, `mode`, non-Windows executable bit
-   `mode & 0x49 ~= 0`, recursive `.dSYM` directory entries, and SHA-256 content
-   digests), and rechecks the digests of `record.native` (a file whose precise
-   observation is unchanged reuses its recorded digest). When all digests match, `check`
+   closed `roots` map), checks `record.input == ticket.input` and
+   `#record.outputs == #ticket.outputs`, and rebinds the recorded `native` and
+   output paths from `record.roots` to the current compiler-owned roots.
+   Rebound native inputs use the same absolute spelling as `certificate.files`;
+   rebound outputs use the same `output_path` canonicalization as fresh
+   snapshots, including recursive directory members. On Windows, output paths
+   therefore retain the producer's forward-slash, lowercase convention rather
+   than acquiring the current root's case. Canonicalization resolves ancestors,
+   not the output leaf. A fresh `output_snapshot` of every path in
+   `ticket.outputs` still verifies non-symlink `file`/`directory` kind, `mode`,
+   the non-Windows executable bit `mode & 0x49 ~= 0`, recursive `.dSYM` entries,
+   and SHA-256 content digests. The check also rechecks `record.native` digests
+   (a file whose precise observation is unchanged reuses its recorded digest).
+   When all digests match, `check`
    returns `true`, `titanc` prints `Titan link hit <target>` under `-v`, and
    the invocation finishes.
 3. **Pre-mutation invalidation (`linkcertificate.invalidate`,

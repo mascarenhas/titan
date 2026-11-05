@@ -272,10 +272,14 @@ end
 describe("incremental and separate compilation (CLI)", function()
     before_each(function()
         compiler_root, sdk_root, compiler_environment = nil, nil, {}
-        workspace = assert(compiler_io.new_sync():tmpname())
+        local strategy = compiler_io.new_sync()
+        workspace = assert(strategy:tmpname())
         assert(os.remove(workspace))
         if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
         mkdir(workspace)
+        -- Owned-root relocation needs physical roots, not a temporary-directory
+        -- alias such as Darwin's /tmp. Keep intentional symlinks in each case.
+        workspace = assert(strategy:realpath(workspace))
     end)
 
     after_each(function()
@@ -1025,7 +1029,9 @@ os.exit(result.ok and 0 or result.status or 1)
                 assert(driver.windows_program_paths(APP, nil, nil, moved_output)).executable
                 or moved_output .. "/" .. APP
             local _, runtime_output, why, status = run({ "env",
-                "TITAN_PATH_0_6=" .. moved_output .. ";" .. moved_sdk .. "/lib/titan/0.6",
+                "TITAN_PATH_0_6=" ..
+                    (platform.windows and moved_output .. "/lib/titan/0.6;" or "") ..
+                    moved_output .. ";" .. moved_sdk .. "/lib/titan/0.6",
                 "PATH=" .. moved_sdk .. "/bin" .. (platform.windows and ";" or ":") ..
                     (os.getenv("PATH") or ""), executable })
             assert.equal("exit", why, runtime_output)
@@ -1136,7 +1142,37 @@ os.exit(result.ok and 0 or result.status or 1)
                 functions[#functions + 1] = main(42)
                 local stem = source(APP, table.concat(functions))
                 local arguments = { "-c", "--c-parts", "2" }
-                if covered then arguments[#arguments + 1] = "--coverage" end
+                if covered then
+                    local cc = os.getenv("TITAN_COVERAGE_TEST_CC") or driver.CC
+                    local version_argv = assert(driver.split_shell_words(cc))
+                    version_argv[#version_argv + 1] = "--version"
+                    local available, banner = run(version_argv)
+                    assert.is_true(available, banner)
+                    local clang = banner:lower():find("clang", 1, true) ~= nil
+                    local backend = os.getenv("TITAN_COVERAGE_TEST_BACKEND") or
+                        (clang and "llvm-gcov" or "gcc-gcov")
+                    local gcov = os.getenv("TITAN_COVERAGE_TEST_GCOV") or
+                        (clang and "llvm-cov gcov" or "gcov")
+                    local prepared, reason = coverage.prepare({
+                        CC = cc, EMIT_LINE_DIRECTIVES = true,
+                        split_shell_words = driver.split_shell_words,
+                    }, { coverage_backend = backend, coverage_gcov = gcov }, compiler_io.new_sync())
+                    if not prepared then
+                        if os.getenv("TITAN_COVERAGE_TEST_REQUIRED") == "1" or
+                            os.getenv("TITAN_COVERAGE_TEST_CC") or
+                            os.getenv("TITAN_COVERAGE_TEST_GCOV") or
+                            os.getenv("TITAN_COVERAGE_TEST_BACKEND") then
+                            assert.is_nil(reason, reason)
+                        end
+                        pending("native coverage tools unavailable: " .. reason)
+                        return
+                    end
+                    compiler_environment.CC = cc
+                    for _, value in ipairs({ "--coverage", "--coverage-backend", backend,
+                        "--coverage-gcov", gcov }) do
+                        arguments[#arguments + 1] = value
+                    end
+                end
                 arguments[#arguments + 1] = APP
                 certified(table.unpack(arguments))
                 local object = object_path(stem)
@@ -1228,6 +1264,8 @@ os.exit(result.ok and 0 or result.status or 1)
                 end
                 build()
                 local old, moved = workspace, workspace .. "-moved-adjacent"
+                -- Windows cannot rename the directory holding this process's cwd.
+                assert(lfs.chdir(previous))
                 assert(os.rename(old, moved))
                 workspace = moved
                 assert(lfs.chdir(workspace))

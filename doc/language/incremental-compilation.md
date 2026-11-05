@@ -62,7 +62,8 @@ paths remain relative, together with its output tree and an identical SDK
 prefix, does not by itself recompile certified objects. Source-adjacent builds
 without `-o` miss conservatively when moved; the user source tree is not
 treated as a compiler-owned root. Equivalent spellings of one
-`--output` or `--exe` destination reuse the existing objects and link record.
+`--output` or `--exe` destination reuse the existing objects and link record,
+including Windows output-path separator and case variants.
 
 The compiler identifies its SDK prefix, its own source checkout when running
 from source, and the selected output root by relative paths within those
