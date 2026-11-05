@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-/* Authored C frames deliberately remain live across Titan's fiber switches.
+/* Authored C frames deliberately remain live across Titan coroutine switches.
  * Volatile canaries and the post-call check prevent tail-call elimination. */
 static unsigned int active_frames, peak_frames, waits, close_mask, bad_close;
 static unsigned int close_counts[6];

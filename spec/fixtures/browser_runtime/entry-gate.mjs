@@ -28,13 +28,6 @@ export async function run(context) {
       module = await image.factory({...options, titanBrowserAttach(state) {
         bridge = state;
         options.titanBrowserAttach(state);
-      }, titanBrowserSafePoint(pending) {
-        if (timer === "responsive" && pending && waitStart === undefined) {
-          context.assert(bridge.safe(), "responsiveness window began on a live compiled stack");
-          waitStart = performance.now();
-          startTimers();
-        }
-        return options.titanBrowserSafePoint(pending);
       }});
       return module;
     };
@@ -46,15 +39,16 @@ export async function run(context) {
     await instance.initialize();
     const before = performance.now();
     if (timer === "busy") startTimers();
+    else if (timer === "responsive") { waitStart = performance.now(); startTimers(); }
     let settled = false;
     let running;
     try {
       if (inspect) {
-        const snapshot = () => ({liveDepth: bridge.liveDepth, continuing: bridge.continuing,
-          suspensionPending: bridge.suspensionPending, blocked: bridge.blocked,
+        const snapshot = () => ({owner: bridge.owner, current: bridge.current,
+          contexts: bridge.contexts.size, blocked: bridge.blocked,
           completionCount: bridge.completionCount, terminalFailure: String(bridge.terminalFailure)});
         const beforeGuard = snapshot();
-        const admittedGuard = module._titan_browser_gate_guarded();
+        const admittedGuard = await module._titan_browser_gate_guarded();
         emit({guardAdmission: String(admittedGuard), before: beforeGuard, after: snapshot()});
         context.assert(admittedGuard === 1,
           "admitted guarded export did not execute its real nonlocal unwind: " + String(admittedGuard));
@@ -67,18 +61,22 @@ export async function run(context) {
             context.assert(!settled, "entry completed instead of returning to JS with parked owners");
             const observed = module._titan_browser_gate_observe() >>> 0;
             context.assert((observed & 255) > 0, "no retained authored FFI frames at outer suspension");
-            context.assert(module._titan_browser_gate_guarded() === -1, "raw C guard admitted a new unwind while suspended");
+            let directRejected = false;
+            try { await module._titan_browser_gate_guarded(); }
+            catch (error) { directRejected = error.code === "TITAN_BROWSER_REENTRY"; }
+            context.assert(directRejected && bridge.owner && !bridge.safe(),
+              "direct export admitted a new entry between JSPI continuations");
             let wrapperRejected = false;
             try { await instance.run([]); }
             catch (error) {
               wrapperRejected = error.name === "TitanBrowserError" && error.code === "TITAN_BROWSER_REENTRY" &&
-                error.message === "browser instance is suspended; reentry is not allowed";
+                error.message === "browser instance is active; reentry is not allowed";
             }
             context.assert(wrapperRejected, "JS wrapper did not reject suspension reentry exactly");
             context.assert((module._titan_browser_gate_observe() >>> 0) === observed,
               "guard refusal mutated the admitted run");
             emit({item: 1, hostReturnBeforeCompletion: true, parkedFFIFrames: observed & 255});
-            emit({item: 8, wrapperRejected, rawResult: -1, observeCallable: true});
+            emit({item: 8, wrapperRejected, rawResult: "rejected", observeCallable: true});
             resolve();
           } catch (error) { reject(error); }
         }, 5));
@@ -87,7 +85,7 @@ export async function run(context) {
       const finished = performance.now();
       const hostElapsed = finished - before;
       if (timer === "responsive") context.assert(waitStart !== undefined,
-        "responsiveness case never reached a fully-unwound outer wait");
+        "responsiveness case did not establish its admitted-entry window");
       const waitElapsed = waitStart === undefined ? null : finished - waitStart;
       const elapsed = timer === "responsive" ? waitElapsed : hostElapsed;
       context.assert(result.kind === "returned" && result.status === 0, "native gate did not complete successfully");

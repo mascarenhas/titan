@@ -162,8 +162,9 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
     if (closed) return Promise.reject(failure('STATE', stateMessage));
     if (typeof WebAssembly.promising !== 'function' ||
         typeof WebAssembly.Suspending !== 'function') {
-      return Promise.reject(failure('CAPABILITY',
+      initialized = Promise.reject(failure('CAPABILITY',
         'Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)'));
+      return initialized;
     }
     options = {
       stdin: () => null,

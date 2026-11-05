@@ -1,6 +1,4 @@
--- Keep recovery phases in bounded frames: Asyncify expands a large frame with
--- many guarded packets and protected regions beyond V8's function-size limit.
--- Each helper still owns and consumes its exact guarded local packet slot.
+-- Each recovery phase owns and consumes its exact guarded local packet slot.
 local function tse_decode_scalar_without_allocating(candidate: value, label: string): value
   local raw = tse_transfer.encode_message(candidate)
   defer tse_transfer.discard_message(raw)

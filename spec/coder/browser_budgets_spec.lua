@@ -99,39 +99,25 @@ describe("browser measured delivered budget limits", function()
                     results[key] = { ok, log, status }
                     return ok, log, status
                 end
-                local function measure(image, mode, unit, ceiling, expected_safe)
+                local function measure(image, mode, unit, ceiling)
                     local m_started = hrtime()
-                    local low, high, failure_log, failure_status
-                    if expected_safe then
-                        local ok_low, log_low = probe(image, mode, expected_safe)
-                        local ok_high, log_high, status_high = probe(image, mode, expected_safe + unit)
-                        if ok_low and not ok_high then
-                            if mode:find("shadow", 1, true) then
-                                assert.truthy(log_low:find("leaf_free=0", 1, true), log_low)
-                            end
-                            low, high = expected_safe, expected_safe + unit
-                            failure_log, failure_status = log_high, status_high
-                        end
+                    local low, high = unit, unit * 2
+                    local failure_log, failure_status
+                    local ok, log = probe(image, mode, low)
+                    assert.is_true(ok, log)
+                    while true do
+                        local status
+                        ok, log, status = probe(image, mode, high)
+                        if not ok then failure_log, failure_status = log, status; break end
+                        low, high = high, high * 2
+                        assert.truthy(high <= ceiling, "budget probe never reached its real limit: " .. mode)
                     end
-                    if not low then
-                        low = unit
-                        local ok, log = probe(image, mode, low)
-                        assert.is_true(ok, log)
-                        high = low * 2
-                        while true do
-                            local status
-                            ok, log, status = probe(image, mode, high)
-                            if not ok then failure_log, failure_status = log, status; break end
-                            low, high = high, high * 2
-                            assert.truthy(high <= ceiling, "budget probe never reached its real limit: " .. mode)
-                        end
-                        while high - low > unit do
-                            local middle = ((low + high) // (2 * unit)) * unit
-                            local status
-                            ok, log, status = probe(image, mode, middle)
-                            if ok then low = middle
-                            else high, failure_log, failure_status = middle, log, status end
-                        end
+                    while high - low > unit do
+                        local middle = ((low + high) // (2 * unit)) * unit
+                        local status
+                        ok, log, status = probe(image, mode, middle)
+                        if ok then low = middle
+                        else high, failure_log, failure_status = middle, log, status end
                     end
                     local attribution = limit_failure(failure_status, failure_log, mode)
                     io.stdout:write(string.format("BUDGET LIMIT assertions=%d engine=%s image=%s mode=%s largest_safe=%d first_failing=%d unit=%d category=%s status=%d elapsed_ms=%.2f\n",

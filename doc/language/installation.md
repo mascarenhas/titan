@@ -113,8 +113,8 @@ compiler or other native tools, pass them explicitly to each LuaRocks command.
 | Perl | Only with `OPENSSL_MODE=bundled`. |
 | `clang-format` | Only for `titanc --pretty-print`. |
 | Emscripten 6.0.13 | Only for `titanc --target browser`, its [browser Lua, and the browser SDK](#the-browser-lua-and-sdk). |
-| Node 24 | Only for the browser target: building the browser SDK, publishing browser libraries, and linking and running browser programs. emsdk 6.0.13 ships one. |
-| Chrome, Chromium, or the Chrome for Testing headless shell | Only for running browser programs in a browser engine. |
+| Node 26+ with WebAssembly JSPI | Only for browser SDK/library publication and browser program linking/execution; use `TITAN_NODE` or `PATH`, not emsdk's bundled Node 24. |
+| JSPI-capable Chrome, Chromium, or Chrome for Testing headless shell | Only for running programs through the browser engine in `titan-browser-run`. |
 
 Install them with your package manager:
 
@@ -436,7 +436,7 @@ the test suite, see the [repository workflow](../implementation/repository-workf
 
 ### The browser Lua and SDK
 
-The [browser target](browser-target.md) needs Emscripten 6.0.13, Node 24, a
+The [browser target](browser-target.md) needs Emscripten 6.0.13, Node 26+, a
 browser build of the Lua fork, and the browser SDK, all in the same prefix as
 Titan; running programs and tests in headless Chrome with `titan-browser-run`
 also needs Chrome or Chromium. The rock's installation needs none of them:
@@ -468,12 +468,11 @@ after installing the matching Lua; native Lua and native providers are unchanged
 loader, runner, and standard library into `lib/titan-browser/0.6/`, and writes
 the SDK digest manifest last. It compiles them under the `TITAN_BUILD_PROFILE`
 in effect (`production` unless set; see [browser build
-profiles](browser-target.md#build-profiles)). It needs Node 24 to check the standard library
-before publishing it: `make browser-sdk` uses `TITAN_NODE` when set and
-nonempty, otherwise places emsdk's bundled Node directory ahead of `PATH` when
-`EMSDK` is set, and otherwise uses `node` on `PATH` (`browser provider
-validation requires Node 24: <reason>; set TITAN_NODE to a Node 24
-executable`). In a [separate
+profiles](browser-target.md#build-profiles)). It needs Node 26+ with JSPI to
+check the standard library before publishing it. `make browser-sdk` uses
+nonempty `TITAN_NODE`, otherwise `node` on `PATH`; emsdk's bundled Node is not
+substituted. A refusal says `browser provider validation requires Node 26 or
+newer: <reason>; set TITAN_NODE to a Node 26 or newer executable`. In a [separate
 rocks tree](#a-separate-rocks-tree), pass both roots: `make browser-sdk
 PREFIX="$PREFIX" ROCKS_TREE="$ROCKS_TREE"` copies the verified browser Lua from
 `PREFIX` into `ROCKS_TREE` before it builds.

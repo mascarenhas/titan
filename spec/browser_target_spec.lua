@@ -172,7 +172,6 @@ describe("browser target descriptor", function()
         contains(flags, "-sWASM_LEGACY_EXCEPTIONS=1")
         contains(flags, "-DTITAN_TARGET_BROWSER=1")
         contains(flags, "-DTITAN_COROUTINE_STACK_SIZE=262144")
-        contains(flags, "-DMCO_ASYNCFY_STACK_SIZE=65536")
         assert.same(fixtures.target_defines, browser.export(descriptor.target_defines))
         assert.is_nil(flags:find("-fPIC", 1, true))
         assert.is_nil(flags:find("-flto", 1, true))
@@ -221,7 +220,6 @@ describe("browser target descriptor", function()
         { "missing C99 flag", function(data) remove_flag(data, "--std=c99") end },
         { "missing target define", function(data) remove_flag(data, "-DTITAN_TARGET_BROWSER=1") end },
         { "missing coroutine stack define", function(data) remove_flag(data, "-DTITAN_COROUTINE_STACK_SIZE=262144") end },
-        { "missing fiber Asyncify stack define", function(data) remove_flag(data, "-DMCO_ASYNCFY_STACK_SIZE=65536") end },
         { "inconsistent target defines", function(data) data.target_defines = { "-DTITAN_TARGET_BROWSER=1" } end },
         { "missing Lua define", function(data) remove_flag(data, "-DLUA_USE_BROWSER") end },
         { "missing longjmp mode", function(data) remove_flag(data, "-sSUPPORT_LONGJMP=wasm") end },
@@ -1152,7 +1150,7 @@ end
         end
     end
 
-    it("exposes 2 MiB TITAN_COROUTINE_STACK_SIZE by default in titan.h and 256 KiB / 64 KiB under browser target defines", function()
+    it("exposes a 2 MiB native coroutine stack and a 256 KiB browser linear stack", function()
         local strategy = compiler_io.new_sync()
         local root = assert(strategy:cwd())
         local prefix = require("spec.support.installed_prefix").active()
@@ -1178,14 +1176,10 @@ end
             profile, browser_types.TITAN_COROUTINE_STACK_SIZE.macro_expression))
         assert.equal(262144, tonumber(browser_stack.value))
 
-        local asyncfy_stack = assert(csemantics.evaluate_macro_expression(
-            profile, browser_types.MCO_ASYNCFY_STACK_SIZE.macro_expression))
-        assert.equal(65536, tonumber(asyncfy_stack.value))
         assert.is_nil(browser_types.MCO_DEFAULT_STACK_SIZE)
         assert.is_nil(browser_types.MCO_MIN_STACK_SIZE)
         local mco_source = assert(strategy:read_file(runtime_dir .. "/minicoro.h"))
         contains(mco_source, "#ifndef MCO_MIN_STACK_SIZE\n#define MCO_MIN_STACK_SIZE 32768")
-        contains(mco_source, "#ifndef MCO_ASYNCFY_STACK_SIZE\n#define MCO_ASYNCFY_STACK_SIZE 16384")
 
         local coro_source = assert(strategy:read_file(root .. "/titan/coroutine.titan"))
         contains(coro_source, 'foreign import "titan.h"')
@@ -1193,7 +1187,7 @@ end
         assert.is_nil(coro_source:find("local STACK_SIZE =", 1, true))
     end)
 
-    it("exposes native defaults and browser codec and JSON writer depth limits through FFI headers", function()
+    it("shares the native codec depth policy and has no target JSON writer cap", function()
         local strategy = compiler_io.new_sync()
         local root = assert(strategy:cwd())
         local prefix = require("spec.support.installed_prefix").active()
@@ -1201,21 +1195,19 @@ end
         local lua_dir = prefix .. "/src/lua-5.5.1"
         if not strategy:stat(lua_dir .. "/lua.h") then lua_dir = root .. "/lua-5.5.1/src" end
         local profile = fixtures.profile()
-        for _, case in ipairs({
-            { header = "transfer.h", macro = "TITAN_CODEC_DEPTH_LIMIT", native = 128, browser = 43 },
-            { header = "titan.h", macro = "TITAN_JSON_WRITER_DEPTH_LIMIT",
-                native = 0, browser = 103 },
-        }) do
-            for _, browser in ipairs({ false, true }) do
-                local types, err = cdriver.process_file(case.header, {
-                    compiler_include_dirs = { lua_dir, runtime_dir },
-                    cppflags = browser and { table.unpack(fixtures.target_defines) } or {},
-                })
-                assert.truthy(types, err)
-                local limit = assert(csemantics.evaluate_macro_expression(
-                    profile, types[case.macro].macro_expression))
-                assert.equal(browser and case.browser or case.native, tonumber(limit.value))
-            end
+        for _, browser in ipairs({ false, true }) do
+            local flags = browser and { table.unpack(fixtures.target_defines) } or {}
+            local types, err = cdriver.process_file("transfer.h", {
+                compiler_include_dirs = { lua_dir, runtime_dir }, cppflags = flags,
+            })
+            assert.truthy(types, err)
+            local limit = assert(csemantics.evaluate_macro_expression(
+                profile, types.TITAN_CODEC_DEPTH_LIMIT.macro_expression))
+            assert.equal(128, tonumber(limit.value))
+            local runtime = assert(cdriver.process_file("titan.h", {
+                compiler_include_dirs = { lua_dir, runtime_dir }, cppflags = flags,
+            }))
+            assert.is_nil(runtime.TITAN_JSON_WRITER_DEPTH_LIMIT)
         end
     end)
 end)

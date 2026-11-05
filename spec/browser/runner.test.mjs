@@ -785,19 +785,53 @@ test("fulfilled ccall without completion still reports the protocol failure", {t
     try {
         await assert.rejects(instance.run(), {
             code: "TITAN_BROWSER_PROTOCOL",
-            message: "browser entry returned without completion or suspension",
+            message: "browser entry returned without completion",
         });
     } finally { await instance.dispose(); }
 });
 
-test("completion and quiescence still settle a pending internal ccall promise", {timeout: 1000}, async () => {
-    const instance = create(entryOutcomeFactory(options => {
-        options.titanBrowserComplete(0, 17, new Uint8Array(0), 1);
-        return new Promise(() => {});
-    }));
+test("loader refuses missing JSPI before instantiation and shares its failure promise", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(WebAssembly, "promising");
+    let calls = 0;
+    const instance = create(() => { calls++; });
+    let initializing;
     try {
-        assert.deepEqual(await instance.run(), {
-            kind: "returned", status: 17, bytes: new Uint8Array(0),
+        Object.defineProperty(WebAssembly, "promising", {...descriptor, value: undefined});
+        initializing = instance.initialize();
+        assert.equal(instance.initialize(), initializing);
+    } finally {
+        if (descriptor) Object.defineProperty(WebAssembly, "promising", descriptor);
+        else delete WebAssembly.promising;
+    }
+    try {
+        await assert.rejects(initializing, {
+            code: "TITAN_BROWSER_CAPABILITY",
+            message: "Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)",
         });
+        assert.equal(calls, 0);
     } finally { await instance.dispose(); }
+});
+
+test("completion waits for terminal promise retirement and ignores its numeric value", {timeout: 1000}, async () => {
+    let release;
+    const retired = new Promise(resolve => { release = resolve; });
+    const instance = create(entryOutcomeFactory(options => {
+        options.titanBrowserComplete(0, 17, new Uint8Array([0, 255]), 1);
+        return retired;
+    }));
+    let settled = false, disposed = false;
+    const running = instance.run();
+    running.finally(() => { settled = true; });
+    try {
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(settled, false, "copied completion released an unretired engine entry");
+        const disposing = instance.dispose().then(() => { disposed = true; });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(disposed, false, "disposal dropped an admitted continuation");
+        release(-923);
+        assert.deepEqual(await running, {
+            kind: "returned", status: 17, bytes: new Uint8Array([0, 255]),
+        });
+        await disposing;
+    } finally { release(-923); await instance.dispose(); }
 });

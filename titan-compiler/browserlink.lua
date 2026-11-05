@@ -174,7 +174,7 @@ local owned = { SUPPORT_LONGJMP = true, WASM_LEGACY_EXCEPTIONS = true,
     EXPORTED_FUNCTIONS = true, EXPORTED_RUNTIME_METHODS = true,
     INCOMING_MODULE_JS_API = true, ASSERTIONS = true, STACK_OVERFLOW_CHECK = true,
     TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
-    TITAN_CODEC_DEPTH_LIMIT = true, TITAN_JSON_WRITER_DEPTH_LIMIT = true,
+    TITAN_CODEC_DEPTH_LIMIT = true,
     BINARYEN_EXTRA_PASSES = true }
 -- `origin` is "compile" for a caller's compile extras and "link" otherwise, so
 -- one owned option is reported by the diagnostic that owns it: the compile

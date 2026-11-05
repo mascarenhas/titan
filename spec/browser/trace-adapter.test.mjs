@@ -85,17 +85,26 @@ for (const [name, stack] of Object.entries(stacks)) {
     test('recorded parser: ' + name, () => {
         const {api} = adapter();
         const result = api.parse(stack, 512, name.includes('-default') && /^(node|chrom)/.test(name) ? 10 : 200);
+        if (name.includes('-jspi-')) {
+            // These raw V8 captures come from capture-jspi.mjs driving the real
+            // native post-resume trace case, not from renamed old snapshots.
+            const expected = Array.from(stack.matchAll(/wasm-function\[(\d+)\]:(0x[0-9a-f]+)/gi),
+                match => [Number.parseInt(match[2], 16), Number(match[1]), 3]);
+            assert.ok(expected.length > 0, 'JSPI capture has no actual Wasm frames');
+            assert.deepEqual(JSON.parse(JSON.stringify(result.records)), expected);
+            assert.equal(result.truncated, false);
+            return;
+        }
         const isJsc = /^(webkit|safari)/.test(name);
         const isDepth = name.includes('-depth-');
         const isV8Default = name.includes('-default') && /^(node|chrom)/.test(name);
         const expected = isV8Default ? 9 : isDepth ? (isJsc ? 99 : name.startsWith('firefox') ? 127 : 199)
-            : name.includes('-fiber-') || name.includes('-longjmp-before-') ? 54 : name.includes('-longjmp-after-') ? 53 : 51;
+            : name.includes('-longjmp-before-') ? 54 : name.includes('-longjmp-after-') ? 53 : 51;
         assert.equal(result.records.length, expected);
         assert.equal(result.records[0][1], 39);
         assert.equal(result.records[0][2], isJsc ? 2 : 3);
         assert.equal(result.records[0][0] > 0, !isJsc);
         assert.equal(result.truncated, isDepth || isV8Default);
-        if (name.includes('-fiber-')) assert.equal(result.records.at(-1)[1], 84, 'fiber chain ends at current dynCall, not saved async ancestry');
     });
 }
 

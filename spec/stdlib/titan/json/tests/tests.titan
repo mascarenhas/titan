@@ -7,25 +7,10 @@ local math = import "math"
 local gc = import "gc"
 foreign import "titan.h"
 
-local JSON_WRITER_DEPTH_LIMIT = 0
-
-local function writer_depth_limit(requested: integer): integer
-  if requested > JSON_WRITER_DEPTH_LIMIT then return JSON_WRITER_DEPTH_LIMIT end
-  return requested
-end
-
 local function check_nested_encoding(subject: value, expected: string, depth: integer,
                                      null_value: value)
-  if depth <= writer_depth_limit(depth) then
-    test.assert(json.encode(subject, json.EncodeOption.max_depth(depth),
-      json.EncodeOption.null_value(null_value)) == expected)
-  else
-    local failure = expect_json_error(function()
-      json.encode(subject, json.EncodeOption.max_depth(depth),
-        json.EncodeOption.null_value(null_value))
-    end)
-    test.assert(failure.code == "limit_exceeded" and failure.message == "value exceeds max_depth")
-  end
+  test.assert(json.encode(subject, json.EncodeOption.max_depth(depth),
+    json.EncodeOption.null_value(null_value)) == expected)
 end
 
 local function expect_json_error(action: function (): ()): json.Error
@@ -41,10 +26,3 @@ local function expect_json_error(action: function (): ()): json.Error
   return caught
 end
 
-do
-  JSON_WRITER_DEPTH_LIMIT = math.maxinteger
-  if ffi.TITAN_JSON_WRITER_DEPTH_LIMIT > 0 and
-      ffi.TITAN_JSON_WRITER_DEPTH_LIMIT < JSON_WRITER_DEPTH_LIMIT then
-    JSON_WRITER_DEPTH_LIMIT = ffi.TITAN_JSON_WRITER_DEPTH_LIMIT
-  end
-end

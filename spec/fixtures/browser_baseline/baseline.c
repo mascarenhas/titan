@@ -3,8 +3,7 @@
  *
  * baseline_now reports seconds from the engine's monotonic clock (a wall clock,
  * unlike os.clock's CPU time, so a suspension is counted at its real cost).
- * baseline_sleep takes the outer Asyncify suspension path; Asyncify-off cells
- * never call it.
+ * baseline_sleep suspends the promising entry through a JSPI import.
  */
 #include <emscripten.h>
 

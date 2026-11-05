@@ -227,7 +227,7 @@ local platform = require "titan-compiler.platform"
 local SDK_ASSETS = { "libtitan.a", "titan-browser-library.js", "titan-browser-trace.js",
     "titan-browser.mjs", "titan-browser-run", "titan-browser-run.mjs",
     "titan-browser-node-worker.mjs", "titan-browser-page.mjs" }
-local NODE_OK = { path = "/opt/node24/bin/node", version = "v24.19.0", ok = true }
+local NODE_OK = { path = "/opt/node26/bin/node", version = "v26.13.0", ok = true }
 local CHROME_OK = { path = "/opt/chrome/chrome-headless-shell",
     version = "Google Chrome for Testing 156.0.8078.80", ok = true }
 
@@ -370,8 +370,8 @@ assert(type(base.tools.cc[1]) == "string" and type(base.record_path) == "string"
 local info = assert(toolchain.detect({ node = true, chrome = true }))
 assert(info.prefix == base.prefix and info.record_path == base.record_path,
     "extended detection changed the compile-only fields")
-assert(info.node.path == "/opt/node24/bin/node", tostring(info.node.path))
-assert(info.node.version == "v24.19.0", tostring(info.node.version))
+assert(info.node.path == "/opt/node26/bin/node", tostring(info.node.path))
+assert(info.node.version == "v26.13.0", tostring(info.node.version))
 assert(info.chrome.path == "/opt/chrome/chrome-headless-shell", tostring(info.chrome.path))
 assert(info.chrome.version == "Google Chrome for Testing 156.0.8078.80",
     tostring(info.chrome.version))
@@ -386,14 +386,14 @@ print("capabilities-ok")
         if posix_only() then return end
         local root = fixture_prefix()
         install_probe(root, { path = "/usr/bin/node", version = "v22.23.4",
-            ok = false, reason = "\"/usr/bin/node\" reports v22.23.4; expected Node 24" },
+            ok = false, reason = "\"/usr/bin/node\" reports v22.23.4; expected Node 26 or newer" },
             CHROME_OK)
         local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason, malformed = toolchain.detect({ node = true })
 assert(found == nil, "an unusable Node must not be a capability")
 assert(malformed == nil, "an explained refusal is an absence, not corruption")
-assert(reason:find("expected Node 24", 1, true), tostring(reason))
+assert(reason:find("expected Node 26 or newer", 1, true), tostring(reason))
 local pending_info, pending_reason = toolchain.require({ node = true })
 assert(pending_info == nil, "non-strict require must pend")
 assert(pending_reason:match("^browser toolchain unavailable: "), tostring(pending_reason))
@@ -424,12 +424,12 @@ assert(file:write('#!/bin/sh\ncat "$(dirname "$0")/probe.json"\n')); assert(file
 assert(os.execute("chmod 755 '" .. path .. "'"))
 local probe = assert(io.open(os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
             version.TITAN_LIBRARY_VERSION .. [[/probe.json", "wb"))
-assert(probe:write('{"node":{"path":"/opt/node24/bin/node","version":"v24.19.0",' ..
+assert(probe:write('{"node":{"path":"/opt/node26/bin/node","version":"v26.13.0",' ..
     '"ok":true,"reason":null},"chrome":{"path":null,"version":null,' ..
     '"ok":false,"reason":"chromium missing"}}\n'))
 assert(probe:close())
 local found = assert(toolchain.detect({ node = true }))
-assert(found.node.version == "v24.19.0", tostring(found.node.version))
+assert(found.node.version == "v26.13.0", tostring(found.node.version))
 print("retry-ok")
 ]])
         assert.is_true(retry_ok, retry_output)
@@ -440,14 +440,14 @@ print("retry-ok")
         if posix_only() then return end
         local root = fixture_prefix()
         install_probe(root, { path = "/usr/bin/node", version = nil, ok = false,
-            reason = "first line of the diagnostic\nsecond line: expected Node 24" },
+            reason = "first line of the diagnostic\nsecond line: expected Node 26 or newer" },
             CHROME_OK)
         local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason, malformed = toolchain.detect({ node = true })
 assert(found == nil, "a refusal is not a capability")
 assert(malformed == nil, "escaped text is not corruption")
-assert(reason == "first line of the diagnostic\nsecond line: expected Node 24",
+assert(reason == "first line of the diagnostic\nsecond line: expected Node 26 or newer",
     string.format("%q", tostring(reason)))
 print("escaped-reason-ok")
 ]])
@@ -462,13 +462,13 @@ print("escaped-reason-ok")
         local directory = sdk_directory(root)
         local cases = {
             { name = "success without a path",
-                node = '{"path":null,"version":"v24.19.0","ok":true,"reason":null}',
+                node = '{"path":null,"version":"v26.13.0","ok":true,"reason":null}',
                 requested = "node" },
             { name = "success with an empty version",
                 node = '{"path":"/opt/node","version":"","ok":true,"reason":null}',
                 requested = "node" },
             { name = "success with a reason",
-                node = '{"path":"/opt/node","version":"v24.19.0","ok":true,"reason":"why"}',
+                node = '{"path":"/opt/node","version":"v26.13.0","ok":true,"reason":"why"}',
                 requested = "node" },
             { name = "failure without a reason",
                 node = '{"path":null,"version":null,"ok":false,"reason":null}',
@@ -477,11 +477,11 @@ print("escaped-reason-ok")
                 node = '{"path":null,"version":null,"ok":false,"reason":""}',
                 requested = "node" },
             { name = "unrequested peer is corrupt",
-                node = '{"path":"/opt/node","version":"v24.19.0","ok":true,"reason":null}',
+                node = '{"path":"/opt/node","version":"v26.13.0","ok":true,"reason":null}',
                 chrome = '{"path":"/opt/chrome","version":null,"ok":true,"reason":null}',
                 requested = "node" },
             { name = "raw control byte in a string",
-                node = '{"path":"/opt/\1node","version":"v24.19.0","ok":true,"reason":null}',
+                node = '{"path":"/opt/\1node","version":"v26.13.0","ok":true,"reason":null}',
                 requested = "node" },
         }
         for _, case in ipairs(cases) do
@@ -521,7 +521,7 @@ local file = assert(io.open(os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
             version.TITAN_LIBRARY_VERSION .. [[/probe.json", "wb"))
 assert(file:write(os.getenv("PROBE_JSON"))); assert(file:close())
 local info = assert(toolchain.detect({ node = true }))
-assert(info.node.version == "v24.19.0", tostring(info.node.version))
+assert(info.node.version == "v26.13.0", tostring(info.node.version))
 print("repaired-ok")
 ]])
         assert.is_true(repaired_ok, repaired_output)
@@ -533,14 +533,14 @@ print("repaired-ok")
         local root = fixture_prefix()
         files.write(sdk_directory(root) .. "/titan-browser-run",
             "#!/bin/sh\n" ..
-            "echo 'titan-browser-run: Node 24 is required (node not found)' >&2\n" ..
+            "echo 'titan-browser-run: Node 26 or newer is required (node not found)' >&2\n" ..
             "exit 75\n")
         make_executable(sdk_directory(root) .. "/titan-browser-run")
         local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason = toolchain.require({ node = true })
 assert(found == nil, "a failed probe must not be a capability")
-assert(reason:find("Node 24 is required", 1, true), tostring(reason))
+assert(reason:find("Node 26 or newer is required", 1, true), tostring(reason))
 print("probe-failure-ok")
 ]])
         assert.is_true(ok, output)
@@ -658,7 +658,7 @@ local function probes()
     return count
 end
 local node = assert(toolchain.detect({ node = true }))
-assert(node.node.version == "v24.19.0", tostring(node.node.version))
+assert(node.node.version == "v26.13.0", tostring(node.node.version))
 assert(probes() == 1, "the first query probes once: " .. probes())
 local missing, reason = toolchain.detect({ chrome = true })
 assert(missing == nil and reason == "chromium missing", tostring(reason))
@@ -667,7 +667,7 @@ assert(probes() == 2, "an unavailable peer is probed again: " .. probes())
 local directory = os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
             version.TITAN_LIBRARY_VERSION .. [["
 local probe = assert(io.open(directory .. "/probe.json", "wb"))
-assert(probe:write('{"node":{"path":"/opt/node24/bin/node","version":"v24.19.0",' ..
+assert(probe:write('{"node":{"path":"/opt/node26/bin/node","version":"v26.13.0",' ..
     '"ok":true,"reason":null},"chrome":{"path":"/opt/chrome/chrome-headless-shell",' ..
     '"version":"Google Chrome for Testing 156.0.8078.80","ok":true,"reason":null}}\n'))
 assert(probe:close())

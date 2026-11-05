@@ -17,9 +17,6 @@ local RECORD_KEYS = { "fork_revision", "archive_sha256", "headers_sha256",
 local TARGET_DEFINES = {
     "-DTITAN_TARGET_BROWSER=1",
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
-    "-DTITAN_CODEC_DEPTH_LIMIT=43",
-    "-DTITAN_JSON_WRITER_DEPTH_LIMIT=103",
-    "-DMCO_ASYNCFY_STACK_SIZE=65536",
 }
 -- One object profile per build profile (D26). `production` optimizes as native
 -- production does and accepts the frames inlining costs, keeping the object
@@ -317,7 +314,7 @@ function M.trace_option(flag)
 end
 
 -- A compile-side spelling the build profile owns: the optimization, debug and
--- frame choices, and the post-Asyncify pass list. Both `-sKEY[=VALUE]` and the
+-- frame choices, and the trace-preserving Binaryen pass list. Both `-sKEY[=VALUE]` and the
 -- two-token `-s KEY[=VALUE]` spellings count, with or without a value, and
 -- `-sNO_KEY...` is the same setting.
 function M.owned_compile_option(flags, index)
