@@ -5463,7 +5463,7 @@ printf '%s\n' "${schedule[@]}"
                 pending("POSIX process groups and TERM/KILL signal supervision")
                 return
             end
-            local function run_case(command, expected_ok, expected_code)
+            local function run_case(command, expected_ok, expected_code, expected_why)
                 local started = os.time()
                 local ok, output, why, code = run_argv({
                     "bash",
@@ -5476,7 +5476,7 @@ printf '%s\n' "${schedule[@]}"
                 local elapsed = os.time() - started
                 assert.equal(expected_ok, ok, output)
                 if expected_code then
-                    assert.equal("exit", why)
+                    assert.equal(expected_why or "exit", why)
                     assert.equal(expected_code, code)
                 end
                 assert.is_true(elapsed < 10,
@@ -5484,6 +5484,8 @@ printf '%s\n' "${schedule[@]}"
                     tostring(elapsed) .. " seconds")
             end
 
+            run_case('exit 7', false, 7)
+            run_case('kill -TERM "$$"', false, 15, "signal")
             run_case('(trap "" TERM; sleep 12) & wait', false, 124)
             run_case('(trap "" TERM; sleep 12) & exit 0', true)
         end)
