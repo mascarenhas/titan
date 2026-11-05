@@ -642,6 +642,8 @@ describe("initializer implicit user-code dispatch", function()
     local provider = [[
         registry: {value: value} = {}
         integers: {integer: value} = {}
+        maybe_registry: ({value: value})? = ({} as {value: value})
+        maybe_integers: ({integer: value})? = ({} as {integer: value})
         dynamic: value = ({} as {value: value})
         callable: value = ({} as {value: value})
         flag = false
@@ -660,9 +662,13 @@ describe("initializer implicit user-code dispatch", function()
     local own_map = '({["k"] = Box(1):read} as {value: value})'
     local selected_map =
         "((dep.flag and ({[1] = Box(1):read} as {integer: value})) or dep.integers)"
+    local selected_optional_map =
+        "((dep.flag and (({[1] = Box(1):read} as {integer: value}) " ..
+        "as ({integer: value})?)) or dep.maybe_integers)"
     local unsafe = {
         {"a lambda Map key", "dep.registry[" .. fn .. "]"},
         {"a bound-method Map key", "dep.registry[Box(1):read]"},
+        {"an Option-forced Map key", "dep.maybe_registry[Box(1):read]"},
         {"a latent nominal Map key", "dep.registry[Box(1)]"},
         {"an Interface Map key", "dep.registry[Box(1) as Reader]"},
         {"a nested Map key", 'dep.registry[{["callback"] = ' .. fn .. "}]"},
@@ -682,6 +688,10 @@ describe("initializer implicit user-code dispatch", function()
         {"an open Map-spread receiver", "{..." .. selected_map .. "}"},
         {"a finite Map-spread receiver", "dep.Scalar(..." .. selected_map .. ")"},
         {"a ranged Map-spread receiver", "{..." .. selected_map .. "[1, 1]}"},
+        {"an Option-forced length receiver", "#" .. selected_optional_map},
+        {"an Option-forced open Map-spread receiver", "{..." .. selected_optional_map .. "}"},
+        {"an Option-forced finite Map-spread receiver", "dep.Scalar(..." .. selected_optional_map .. ")"},
+        {"an Option-forced ranged Map-spread receiver", "{..." .. selected_optional_map .. "[1, 1]}"},
         {"a spread-bound computation",
             "{...dep.integers[1, dep.registry[Box(1):read] as integer]}"},
         {"an imported __call argument",
@@ -706,10 +716,13 @@ describe("initializer implicit user-code dispatch", function()
 
     local fresh_map = '({["k"] = ' .. fn .. "} as {value: value})"
     local integer_map = "({[1] = " .. fn .. "} as {integer: value})"
+    local optional_map = "(" .. fresh_map .. " as ({value: value})?)"
     local floor = {
         {"fresh Map equality", fresh_map .. " == " .. fresh_map},
         {"fresh Map inequality", fresh_map .. " ~= " .. fresh_map},
         {"boxed fresh Map equality", fresh_map .. " == (" .. fresh_map .. " as value)"},
+        {"fresh optional Map equality", optional_map .. " == " .. optional_map},
+        {"fresh Option/Map equality", optional_map .. " == " .. fresh_map},
         {"fresh Map equality through and", "(true and " .. fresh_map .. ") == " .. fresh_map},
         {"fresh Map equality through or", "(nil or " .. fresh_map .. ") == " .. fresh_map},
         {"fresh integer-Map length", "#" .. integer_map},
@@ -734,9 +747,16 @@ describe("initializer implicit user-code dispatch", function()
             main = declarations .. [[
                 local index: integer = dep.registry["answer"]
                 local length = #dep.integers
+                local optional_index: integer = dep.maybe_registry["answer"]
+                local optional_length = #dep.maybe_integers
+                local optional_spread = {...dep.maybe_integers}
                 local called = (dep.callable as function(integer): integer)(41)
                 local raw = dep.dynamic ==
                     ({["k"] = Box(1):read} as value)
+                local optional_raw = dep.maybe_registry ==
+                    ({["k"] = Box(1):read} as {value: value})
+                local options_raw = dep.maybe_registry ==
+                    (({["k"] = Box(1):read} as {value: value}) as ({value: value})?)
                 local fresh = ({["k"] = Box(1):read} as {value: value})[
                     function(): integer return seed end]
             ]],

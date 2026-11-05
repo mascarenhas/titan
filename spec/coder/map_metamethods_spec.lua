@@ -966,6 +966,8 @@ describe("module initializer implicit Map call exposure", function()
     local provider_source = [[
         registry: {value: value} = {}
         integers: {integer: value} = {}
+        maybe_registry: ({value: value})? = ({} as {value: value})
+        maybe_integers: ({integer: value})? = ({} as {integer: value})
         dynamic: value = ({} as {value: value})
         callable: value = ({} as {value: value})
     ]]
@@ -1038,9 +1040,16 @@ describe("module initializer implicit Map call exposure", function()
             {name = consumer, src = declarations .. [[
                 local indexed: integer = dep.registry["answer"]
                 local length = #dep.integers
+                local optional_index: integer = dep.maybe_registry["answer"]
+                local optional_length = #dep.maybe_integers
+                local optional_spread = {...dep.maybe_integers}
                 local called = (dep.callable as function(integer): integer)(41)
                 local raw_equal = dep.dynamic ==
                     ({["k"] = Box(1):read} as value)
+                local optional_raw_equal = dep.maybe_registry ==
+                    ({["k"] = Box(1):read} as {value: value})
+                local options_raw_equal = dep.maybe_registry ==
+                    (({["k"] = Box(1):read} as {value: value}) as ({value: value})?)
                 local fresh_index = ({["k"] = Box(1):read} as {value: value})[
                     function(): integer return seed end]
                 local finite = {...dep.integers[1, 2]}
@@ -1048,6 +1057,10 @@ describe("module initializer implicit Map call exposure", function()
                 local adjusted: integer = (...dep.integers)
                 function run(): boolean
                     return indexed == 42 and length == 2 and called == 42
+                        and optional_index == 42 and optional_length == 2
+                        and #optional_spread == 2 and optional_spread[1] == 41
+                        and optional_spread[2] == 42
+                        and not optional_raw_equal and not options_raw_equal
                         and not raw_equal and fresh_index == nil and seed == 42
                         and #finite == 2 and finite[1] == 41 and finite[2] == 42
                         and #open == 2 and open[1] == 41 and open[2] == 42
@@ -1066,6 +1079,7 @@ describe("module initializer implicit Map call exposure", function()
                     indexed = indexed + 1
                     return 42
                 end,
+                __eq = function() error("raw option equality called __eq") end,
             })
             setmetatable(dep.integers, {
                 __len = function()
@@ -1078,6 +1092,8 @@ describe("module initializer implicit Map call exposure", function()
                     return 40 + key
                 end,
             })
+            setmetatable(dep.maybe_registry, getmetatable(dep.registry))
+            setmetatable(dep.maybe_integers, getmetatable(dep.integers))
             setmetatable(dep.callable, {
                 __call = function(_, number)
                     called = called + 1
@@ -1089,7 +1105,7 @@ describe("module initializer implicit Map call exposure", function()
             })
             local consumer = require "map_initializer_implicit_consumer"
             assert(consumer.run())
-            assert(indexed == 1 and measured == 3 and called == 1 and projected == 5)
+            assert(indexed == 2 and measured == 5 and called == 1 and projected == 7)
         ]])
         assert.truthy(ok, err)
     end)
