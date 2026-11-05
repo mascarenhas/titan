@@ -10,6 +10,7 @@ local objectmetadata = require "titan-compiler.objectmetadata"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local graphcodec = require "titan-compiler.graphcodec"
 local relocation = require "titan-compiler.relocation"
+local ffiheaders = require "titan-compiler.ffiheaders"
 local default_io = require("titan-compiler.io").new_sync()
 local incremental = {}
 
@@ -1647,15 +1648,21 @@ local function rebound_record(context, record, roots, materialized_roots)
     end
     inputs(record.c_header_dependencies)
     local visited, companions, outputs = {}, {}, {}
-    local function write(filename, contents)
+    local function write(filename, contents, marker)
         local stat, err = context.io:lstat(filename)
         if err then required(nil, err, filename) end
-        if stat then
-            assert(stat.kind == "file", "nonregular generated header: " .. filename)
-            if context.io:read_file(filename) == contents then
-                companions[#companions + 1] = filename
-                return
-            end
+        local existing = stat and stat.kind == "file"
+            and required(context.io:read_file(filename)) or nil
+        local _, ownership_error = ffiheaders.check_destination(
+            filename, marker, stat and stat.kind, existing)
+        if ownership_error then required(nil, ownership_error) end
+        if contents == nil then
+            if existing == nil then return end
+            contents = relocation.generated(context, existing, materialized_roots)
+        end
+        if existing == contents then
+            companions[#companions + 1] = filename
+            return
         end
         mkdir(context, paths.dirname(filename))
         required(context.io:write_file(filename, contents))
@@ -1677,12 +1684,8 @@ local function rebound_record(context, record, roots, materialized_roots)
         local filename = relocation.resolve(context, item.identity)
         if platform.is_absolute(filename) then
             outputs[item.modname] = filename:gsub("%.ffi%.h$", ".titan.h")
-            write(filename, item.contents)
-            local helper = outputs[item.modname]
-            local stat = context.io:lstat(helper)
-            if stat and stat.kind == "file" then
-                write(helper, relocation.generated(context, required(context.io:read_file(helper)), materialized_roots))
-            end
+            write(filename, item.contents, ffiheaders.MARKER)
+            write(outputs[item.modname], nil, ffiheaders.FOREIGN_MARKER)
         end
     end
     descriptor(record.ffi_header_descriptor)
@@ -1690,9 +1693,10 @@ local function rebound_record(context, record, roots, materialized_roots)
     if native.foreign_header then
         native.foreign_header.prefix = relocation.generated(context, native.foreign_header.prefix, roots)
         local own = assert(outputs[record.type.name], "missing generated header output")
-        write(own, require("titan-compiler.ffiheaders").foreign_contents(
+        write(own, ffiheaders.foreign_contents(
             native.foreign_header, own:gsub("%.titan%.h$", ".ffi.h"),
-            function(name) return assert(outputs[name], "missing source header output: " .. name) end))
+            function(name) return assert(outputs[name], "missing source header output: " .. name) end),
+            ffiheaders.FOREIGN_MARKER)
     end
     if native.coverage then
         for index, filename in ipairs(native.coverage.files or {}) do
@@ -1763,6 +1767,9 @@ local function check_relocation(context, record, stem)
     if native.private_header then
         local filename = stem .. native.private_header
         local contents = required(context.io:read_file(filename))
+        -- check_parts already requires this companion to be a regular file.
+        required(ffiheaders.check_destination(filename,
+            require("titan-compiler.coder").PRIVATE_HEADER_MARKER, "file", contents))
         local rebound = relocation.generated(context, contents, receipt.roots)
         if rebound ~= contents then
             required(context.io:write_file(filename, rebound))

@@ -1128,6 +1128,126 @@ os.exit(result.ok and 0 or result.status or 1)
             for _, filename in ipairs(headers) do assert.equal(timestamp, lfs.attributes(filename, "modification")) end
         end)
 
+        describe("relocated companion destination ownership", function()
+            local function fixture()
+                local compiler = private_compiler()
+                local generator = compiler .. "/titan-compiler/coder/generate.lua"
+                local configured, replacements = read(generator):gsub(
+                    "(coder%.DEFAULT_SPLIT_THRESHOLD%s*=)[^\n]+", "%1 0")
+                assert.equal(1, replacements)
+                write(generator, configured)
+                local nested, middle = NAMESPACE .. ".owned_nested", NAMESPACE .. ".owned_middle"
+                local stems = {
+                    [nested] = source(nested, [[
+                        local foreign function bump(item: int): int return item + 1 end
+                        function anchor(value: integer): integer return value end
+                    ]]),
+                    [middle] = source(middle, 'local dep = import "' .. nested .. [[.titan"
+                        function answer(): integer return dep.bump(40) as integer end
+                    ]]),
+                    [APP] = source(APP, 'local dep = import "' .. middle .. [[.titan"
+                        local foreign function bump(item: int): int return item + 1 end
+                        function main(args: {string}): integer
+                            return bump(dep.answer() as foreign int) as integer
+                        end
+                    ]]),
+                }
+                local output = workspace .. "/build"
+                compiled("-o", output, "--incremental", "--source-first", "--c-parts", "2", "-v", APP)
+                local saved = remember_objects(stems)
+                return output, saved, nested
+            end
+
+            for _, target in ipairs({
+                { owner = "root", suffix = ".ffi.h" },
+                { owner = "root", suffix = ".titan.h" },
+                { owner = "recursive dependency", suffix = ".ffi.h" },
+                { owner = "recursive dependency", suffix = ".titan.h" },
+                { owner = "root", suffix = ".priv.h" },
+            }) do
+                it("preserves a user-replaced " .. target.owner .. " " .. target.suffix ..
+                    " through relocation and fresh-path refusal", function()
+                    local output, saved, nested = fixture()
+                    local name = target.owner == "root" and APP or nested
+                    local relative = "/" .. name:gsub("%.", "/") .. target.suffix
+                    assert.is_true(exists(output .. relative))
+                    local receipt_relative = "/" .. APP .. ".relocation"
+                    local decode = require("titan-compiler.graphcodec").decode
+                    assert.is_true(assert(decode(read(output .. receipt_relative))).complete)
+                    local replacement = '/* user replacement */\r\n#include "' ..
+                        output .. '/user-owned.h"\r\n\0preserve every byte\n'
+                    write(output .. relative, replacement)
+                    local moved = workspace .. "/moved output"
+                    assert(os.rename(output, moved))
+                    for _, item in pairs(saved) do item.path = moved .. item.path:sub(#output + 1) end
+                    local ok, text = compile("-o", moved, "--incremental", "--source-first",
+                        "--c-parts", "2", "-v", APP)
+                    assert.is_false(ok, text)
+                    assert.matches("refusing to overwrite user-owned generated-header path", text, 1, true)
+                    assert.matches(moved .. relative, text, 1, true)
+                    -- An incomplete receipt proves local relocation ran before
+                    -- output preflight refused; aborts do not print decisions.
+                    assert.is_false(assert(decode(read(moved .. receipt_relative))).complete)
+                    assert.equal(replacement, read(moved .. relative))
+                    no_native_compile(text)
+                    -- The relocation miss falls back to ordinary ownership
+                    -- preflight; a later forced fresh build must refuse too.
+                    ok, text = compile("-o", moved, "--source-first", "--c-parts", "2", "-v", APP)
+                    assert.is_false(ok, text)
+                    assert.matches("refusing to overwrite user-owned generated-header path", text, 1, true)
+                    assert.matches(moved .. relative, text, 1, true)
+                    assert.equal(replacement, read(moved .. relative))
+                    no_native_compile(text)
+                    for _, item in pairs(saved) do
+                        assert.equal(item.bytes, read(item.path))
+                        assert.equal(item.timestamp, lfs.attributes(item.path, "modification"))
+                    end
+                end)
+            end
+
+            for _, missing in ipairs({ false, true }) do
+                it("repairs and reuses " .. (missing and "missing" or "marked") ..
+                    " companions after moving the output root", function()
+                    local output, saved, nested = fixture()
+                    if missing then
+                        for _, suffix in ipairs({ ".ffi.h", ".titan.h" }) do
+                            assert(os.remove(output .. "/" .. APP .. suffix))
+                        end
+                        assert(os.remove(output .. "/" .. nested:gsub("%.", "/") .. ".ffi.h"))
+                    end
+                    local moved = workspace .. "/moved output"
+                    assert(os.rename(output, moved))
+                    for _, item in pairs(saved) do item.path = moved .. item.path:sub(#output + 1) end
+                    local text = compiled("-o", moved, "--incremental", "--source-first",
+                        "--c-parts", "2", "-v", APP)
+                    decisions(text, saved, {})
+                    no_native_compile(text)
+                    for _, name in ipairs({ APP, nested }) do
+                        for _, suffix in ipairs({ ".ffi.h", ".titan.h", ".priv.h" }) do
+                            local filename = moved .. "/" .. name:gsub("%.", "/") .. suffix
+                            assert.is_true(exists(filename), filename)
+                            assert.is_nil(read(filename):find(output .. "/", 1, true), filename)
+                        end
+                    end
+                    local executable = platform.windows and
+                        assert(driver.windows_program_paths(APP, nil, nil, moved)).executable
+                        or moved .. "/" .. APP
+                    local _, runtime_output, why, status = run({ "env",
+                        "TITAN_PATH_0_6=" ..
+                            (platform.windows and moved .. "/lib/titan/0.6;" or "") ..
+                            moved .. ";" .. prefix .. "/lib/titan/0.6",
+                        "PATH=" .. prefix .. "/bin" .. (platform.windows and ";" or ":") ..
+                            (os.getenv("PATH") or ""), executable })
+                    assert.equal("exit", why, runtime_output)
+                    assert.equal(42, status, runtime_output)
+                    text = compiled("-o", moved, "--incremental", "--source-first",
+                        "--c-parts", "2", "-v", APP)
+                    decisions(text, saved, {})
+                    no_native_compile(text)
+                end)
+            end
+        end)
+
         for _, covered in ipairs({ false, true }) do
             it("certifies raw generated-C prefixes for split modules" ..
                 (covered and " after coverage conversion" or ""), function()

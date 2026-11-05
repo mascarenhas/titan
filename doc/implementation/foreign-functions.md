@@ -392,14 +392,24 @@ walking the same decorated foreign-function bodies again. Every plan is
 ownership-validated before any plan is written and is also included in the
 CLI's general output-path preflight.
 
-A required path may be replaced only when its first bytes are
-the applicable generated-header marker (`driver.FFI_HEADER_MARKER` or
-`driver.FOREIGN_HEADER_MARKER`); a user file, symlink, directory, or other
-unowned object is refused. For a source module with no remaining foreign
-declaration, a banner-owned old companion is removed and an unowned same path is
-left alone. Each final companion is written to a sibling stage, normalized and
-optionally formatted, then renamed over its owned destination only after the
-selected steps succeed. All final
+A required path may be replaced only when byte zero begins the exact marker for
+its header kind: `ffiheaders.MARKER` for `.ffi.h` or
+`ffiheaders.FOREIGN_MARKER` for `.titan.h`. The shared
+`ffiheaders.check_destination` check refuses a user file, a wrong-kind or
+displaced marker, a symlink, a directory, or another unowned object. Incremental
+relocation applies the same check before comparing, adopting, or writing
+descriptor headers, recursive source-dependency helpers, and the module's own
+persisted foreign-header recipe. It also checks split-unit `.priv.h` contents
+against the existing `coder.PRIVATE_HEADER_MARKER` before rebinding or adopting
+them; their existing regular-file requirement remains in force.
+
+Missing `.ffi.h` descriptors and a module's own persisted `.titan.h` recipe can
+be materialized again. A refused destination remains untouched through the
+relocation miss and subsequent fresh-build preflight. For a source module with
+no remaining foreign declaration, a marker-owned old companion is removed and
+an unowned same path is left alone. Fresh publication writes each final companion
+to a sibling stage, normalizes and optionally formats it, then renames it over
+its owned destination only after the selected steps succeed. All final
 companions are published before any source object is compiled, and
 `driver.compile` retains a single-module fallback for direct programmatic
 callers.

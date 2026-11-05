@@ -8,6 +8,7 @@ local cpp = require "c-parser.cpp"
 local version = require "titan-compiler.version"
 local platform = require "titan-compiler.platform"
 local relocation = require "titan-compiler.relocation"
+local ffiheaders = require "titan-compiler.ffiheaders"
 local paths = require "titan-compiler.path"
 
 local function fixture_path(path)
@@ -1944,6 +1945,170 @@ describe("incremental local certification", function()
         return ctx, saved, source, files
     end
 
+    local function companion_fixture()
+        local ctx, saved, source, files = fixture()
+        local cert = saved.object_metadata.certificate
+        cert.roots, cert.stem = { output = fixture_path("/out") }, "<titan:output>/main"
+        -- Split sidecars carry no module record, and every scan has a complete,
+        -- matching target fingerprint, as in the sidecar digest-cache fixture.
+        objectmetadata.read = function(_, path)
+            if path == fixture_path("/out/main.o") then return saved end
+        end
+        staticmetadata.scan_bytes = function()
+            return { kind = "object", fingerprint = {
+                format = "coff", word_size = 64, endian = "little", machine = 0x8664 } }
+        end
+        local function descriptor(name, dependencies)
+            return { modname = name, identity = "<titan:output>/" .. name .. ".ffi.h",
+                contents = ffiheaders.MARKER .. "\n/* " .. name .. " */\n",
+                roots = cert.roots, dependencies = dependencies or {} }
+        end
+        local nested = descriptor("nested")
+        local middle = descriptor("middle", { nested })
+        saved.ffi_header_descriptor = descriptor("main", { middle })
+        saved.object_metadata.foreign_header = {
+            prefix = ffiheaders.FOREIGN_MARKER .. "\n", body = "/* own helper */\n",
+            source_headers = { "middle" },
+        }
+        saved.object_metadata.private_header = ".priv.h"
+        saved.object_metadata.parts[2] = { index = 1, c_suffix = ".part1.c", object_suffix = ".part1.o" }
+        cert.codegen.c_parts = 2
+        ctx.incremental_options.codegen_options = function() return cert.codegen end
+        cert.generated[2] = { bytes = 9, sha256 = sha256.hex("generated"), semantic = "expanded" }
+        files[fixture_path("/out/main.part1.c")] = "generated"
+        files[fixture_path("/out/main.part1.o")] = "part object"
+        for _, item in ipairs({ saved.ffi_header_descriptor, middle, nested }) do
+            files[fixture_path("/out/" .. item.modname .. ".ffi.h")] = item.contents
+            files[fixture_path("/out/" .. item.modname .. ".titan.h")] =
+                ffiheaders.FOREIGN_MARKER .. '\n#include "' ..
+                fixture_path("/old-out/" .. item.modname .. ".ffi.h") .. '"\n'
+        end
+        -- This unchanged helper exercises adoption without a write.
+        files[fixture_path("/out/nested.titan.h")] =
+            ffiheaders.FOREIGN_MARKER .. "\n/* unchanged helper */\n"
+        files[fixture_path("/out/main.priv.h")] =
+            require("titan-compiler.coder").PRIVATE_HEADER_MARKER ..
+            '\n#include "' .. fixture_path("/old-out/main.ffi.h") .. '"\n'
+        -- Return to the object's creation roots from a prior materialization.
+        -- This isolates companion ownership from native semantic preprocessing.
+        ctx.relocation_roots = { output = fixture_path("/old-out") }
+        incremental.record_materialization(ctx, fixture_path("/out/main"), cert)
+        ctx.relocation_roots = cert.roots
+        return ctx, saved, source, files
+    end
+
+    for _, missing in ipairs({ false, true }) do
+        it("reuses objects while repairing " .. (missing and "missing" or "marked") ..
+            " recursive companions", function()
+            local ctx, saved, source, files = companion_fixture()
+            if missing then
+                files[fixture_path("/out/main.ffi.h")] = nil
+                files[fixture_path("/out/main.titan.h")] = nil
+                files[fixture_path("/out/nested.ffi.h")] = nil
+            end
+            local result = incremental.certify_local(ctx, "main", source)
+            assert.equal("hit", result.status, result.detail)
+            local function check(item)
+                local filename = fixture_path("/out/" .. item.modname .. ".ffi.h")
+                assert.equal(item.contents, files[filename])
+                for _, dependency in ipairs(item.dependencies) do check(dependency) end
+            end
+            check(saved.ffi_header_descriptor)
+            for _, suffix in ipairs({ "main.titan.h", "middle.titan.h", "main.priv.h" }) do
+                assert.is_nil(files[fixture_path("/out/" .. suffix)]:find("/old-out/", 1, true))
+            end
+            assert.is_nil(ctx.io.writes[fixture_path("/out/nested.titan.h")])
+            if not missing then assert.is_nil(ctx.io.writes[fixture_path("/out/main.ffi.h")]) end
+            local writes = {}
+            for path, count in pairs(ctx.io.writes) do writes[path] = count end
+            assert.equal("hit", incremental.certify_local(ctx, "main", source).status)
+            assert.same(writes, ctx.io.writes)
+            assert.same({}, ctx.io.commands)
+        end)
+    end
+
+    local companions = {
+        { name = "main.ffi.h", marker = ffiheaders.MARKER },
+        { name = "middle.ffi.h", marker = ffiheaders.MARKER },
+        { name = "nested.ffi.h", marker = ffiheaders.MARKER },
+        { name = "main.titan.h", marker = ffiheaders.FOREIGN_MARKER },
+        { name = "middle.titan.h", marker = ffiheaders.FOREIGN_MARKER },
+        { name = "nested.titan.h", marker = ffiheaders.FOREIGN_MARKER },
+        { name = "main.priv.h", marker = require("titan-compiler.coder").PRIVATE_HEADER_MARKER },
+    }
+    for _, companion in ipairs(companions) do
+        for _, replacement in ipairs({ "user bytes", "wrong marker", "shifted marker" }) do
+            it("refuses " .. replacement .. " before relocating or adopting " .. companion.name, function()
+                local ctx, _, source, files = companion_fixture()
+                local filename = fixture_path("/out/" .. companion.name)
+                local contents = "/* user replacement */\r\n\0preserved\n"
+                if replacement == "wrong marker" then
+                    contents = (companion.marker == ffiheaders.MARKER and
+                        ffiheaders.FOREIGN_MARKER or ffiheaders.MARKER) .. "\n"
+                elseif replacement == "shifted marker" then
+                    contents = " " .. companion.marker .. "\n"
+                end
+                files[filename] = contents
+                local result = incremental.certify_local(ctx, "main", source)
+                assert.equal("miss", result.status)
+                assert.equal("relocation", result.reason)
+                assert.matches("refusing to overwrite user-owned", result.detail, 1, true)
+                assert.matches(filename, result.detail, 1, true)
+                assert.equal(contents, files[filename])
+                assert.is_nil(ctx.io.writes[filename])
+            end)
+        end
+        for _, kind in ipairs({ "directory", "symlink", "socket" }) do
+            it("refuses a " .. kind .. " at relocation companion " .. companion.name, function()
+                local ctx, _, source, files = companion_fixture()
+                local filename = fixture_path("/out/" .. companion.name)
+                local original = files[filename]
+                local lstat = ctx.io.lstat
+                function ctx.io:lstat(path)
+                    if path == filename then return { kind = kind } end
+                    return lstat(self, path)
+                end
+                local result = incremental.certify_local(ctx, "main", source)
+                assert.equal(companion.name == "main.priv.h" and "parts" or "relocation", result.reason)
+                assert.matches(filename, result.detail, 1, true)
+                assert.equal(original, files[filename])
+                assert.is_nil(ctx.io.reads[filename])
+                assert.is_nil(ctx.io.writes[filename])
+            end)
+        end
+    end
+
+    for _, name in ipairs({ "main.ffi.h", "nested.titan.h", "main.priv.h" }) do
+        for _, operation in ipairs({ "lstat", "read_file" }) do
+            for _, signal in ipairs({ false, true }) do
+                it("preserves " .. (signal and "cancellation" or "I/O failure") ..
+                    " from " .. operation .. " of companion " .. name, function()
+                    local ctx, _, source, files = companion_fixture()
+                    local filename = fixture_path("/out/" .. name)
+                    local contents = files[filename]
+                    local failure = signal and {} or "companion " .. operation .. " failed"
+                    local original = ctx.io[operation]
+                    ctx.io[operation] = function(self, path, ...)
+                        if path == filename then return nil, failure end
+                        return original(self, path, ...)
+                    end
+                    local ok, result = pcall(incremental.certify_local, ctx, "main", source)
+                    if signal then
+                        assert.is_false(ok)
+                        assert.equal(failure, result)
+                    else
+                        assert.is_true(ok)
+                        assert.equal(operation == "lstat" and name == "main.priv.h"
+                            and "parts" or "relocation", result.reason)
+                        assert.matches(failure, result.detail, 1, true)
+                    end
+                    assert.equal(contents, files[filename])
+                    assert.is_nil(ctx.io.writes[filename])
+                end)
+            end
+        end
+    end
+
     it("returns the primary and ordered validated object inventory without native commands", function()
         local ctx, _, source = fixture()
         local result = incremental.certify_local(ctx, "main", source)
@@ -1959,7 +2124,7 @@ describe("incremental local certification", function()
         local cert = saved.object_metadata.certificate
         cert.roots, cert.stem = { output = fixture_path("/old-out") }, "<titan:output>/main"
         saved.ffi_header_descriptor = { modname = "main", identity = "<titan:output>/main.ffi.h",
-            contents = "generated environment", dependencies = {} }
+            contents = ffiheaders.MARKER .. "\ngenerated environment", dependencies = {} }
         ctx.relocation_roots = cert.roots
         incremental.record_materialization(ctx, fixture_path("/out/main"), cert)
         ctx.relocation_roots = { output = fixture_path("/out") }
@@ -1970,7 +2135,7 @@ describe("incremental local certification", function()
         end
         local result = incremental.certify_local(ctx, "main", source)
         assert.equal("relocation", result.reason)
-        assert.matches("nonregular generated header", result.detail, 1, true)
+        assert.matches("refusing to overwrite user-owned", result.detail, 1, true)
         assert.equal("relocation", incremental.certify_local(ctx, "main", source).reason)
     end)
 
@@ -1994,7 +2159,8 @@ describe("incremental local certification", function()
                     identity = version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. paths.normalize(path) }
             end
             saved.c_header_dependencies = { inputs[1] }
-            local contents = 'const char *path = "' .. fixture_path("/MovedSDK/KeepCase") .. '";\n'
+            local contents = ffiheaders.MARKER .. '\nconst char *path = "' ..
+                fixture_path("/MovedSDK/KeepCase") .. '";\n'
             local nested = { modname = "nested", identity = "<titan:output>/nested.ffi.h",
                 contents = contents, roots = cert.roots, search_inputs = { inputs[3] }, dependencies = {} }
             saved.ffi_header_descriptor = {
