@@ -290,25 +290,47 @@ for (const engine of ["node", "chromium"]) {
             const passed = await run(["--engine", engine, "--cdp", cdp, "--grace", "20", image,
                 "--", "--filter=^runner_image[.]test_bytes$"]);
             assert.equal(passed.status, 0, passed.stderr.toString());
-            const expected = Buffer.concat([
+            const prefix = Buffer.concat([
                 Buffer.from("[==========] Running Titan tests.\n[ RUN      ] runner_image.test_bytes\n"),
                 Buffer.from([0, 255, 195, 40, 116, 97, 105, 108]),
-                Buffer.from("[       OK ] runner_image.test_bytes\n[==========] 1 test ran.\n[  PASSED  ] 1 test.\n"),
             ]);
-            assert.deepEqual(passed.stdout, expected);
+            assert.deepEqual(passed.stdout.subarray(0, prefix.length), prefix);
+            const tail = passed.stdout.subarray(prefix.length).toString("latin1");
+            const timing = /^\[       OK \] runner_image\.test_bytes \(([0-9]+\.[0-9]{2}) ms\)\n\[----------\] runner_image \(([0-9]+\.[0-9]{2}) ms total\)\n\[==========\] 1 test ran\. \(([0-9]+\.[0-9]{2}) ms total\)\n\[  PASSED  \] 1 test\.\n$/.exec(tail);
+            assert.ok(timing && timing[0] === tail, tail);
+            assert.equal(timing[1], timing[2], "single owner total differs from its root case");
+            assert.ok(Number(timing[3]) >= Number(timing[2]), "run wall time excluded its case");
             const rawStderr = engine === "node" ? passed.stderr : Buffer.from(passed.stderr.toString("latin1")
                 .replace(/titan-browser-run: (?:Chromium|cleanup:)[^\n]*\n/g, ""), "latin1");
             assert.deepEqual(rawStderr, Buffer.from([0, 254, 226, 40, 116, 97, 105, 108]));
             const failed = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", image,
                 "--", "--filter=^runner_image[.]test_failure$"]);
             assert.equal(failed.status, 1, failed.stderr.toString());
-            assert.ok(failed.stdout.includes(Buffer.from("[==========] 1 test ran.\n")));
+            const failureOutput = failed.stdout.toString("latin1");
+            assert.match(failureOutput, /^\[  FAILED  \] runner_image\.test_failure \([0-9]+\.[0-9]{2} ms\)$/m);
+            assert.match(failureOutput, /^\[----------\] runner_image \([0-9]+\.[0-9]{2} ms total\)$/m);
+            assert.match(failureOutput, /^\[==========\] 1 test ran\. \([0-9]+\.[0-9]{2} ms total\)$/m);
+            assert.ok(failed.stdout.includes(Buffer.from("[  FAILED  ] runner_image.test_failure\n")));
             assert.ok(failed.stdout.includes(Buffer.from("[  FAILED  ] 1 test.\n")));
+            const skipped = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", image,
+                "--", "--filter=^runner_image[.]test_skip"]);
+            assert.equal(skipped.status, 0, skipped.stderr.toString());
+            const skipOutput = skipped.stdout.toString("latin1");
+            const skipTiming = /^\[==========\] Running Titan tests\.\n\[ RUN      \] runner_image\.test_skip\n\[  SKIPPED \] runner_image\.test_skip\.never \(parent skipped: unsupported: timing fixture\) \(0\.00 ms\)\n\[  SKIPPED \] runner_image\.test_skip \(unsupported: timing fixture\) \(([0-9]+\.[0-9]{2}) ms\)\n\[----------\] runner_image \(([0-9]+\.[0-9]{2}) ms total\)\n\[==========\] 2 tests ran\. \(([0-9]+\.[0-9]{2}) ms total\)\n\[  PASSED  \] 0 tests\.\n\[  SKIPPED \] 2 tests\.\n$/.exec(skipOutput);
+            assert.ok(skipTiming && skipTiming[0] === skipOutput, skipOutput);
+            assert.equal(skipTiming[1], skipTiming[2]);
+            assert.ok(Number(skipTiming[3]) >= Number(skipTiming[2]));
+            const empty = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", image,
+                "--", "--filter=^absent$"]);
+            assert.equal(empty.status, 0, empty.stderr.toString());
+            const emptyOutput = empty.stdout.toString("latin1");
+            const emptyTiming = /^\[==========\] Running Titan tests\.\n\[==========\] 0 tests ran\. \([0-9]+\.[0-9]{2} ms total\)\n\[  PASSED  \] 0 tests\.\n$/.exec(emptyOutput);
+            assert.ok(emptyTiming && emptyTiming[0] === emptyOutput, emptyOutput);
             const invalid = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", image, "--", "--unknown"]);
             assert.equal(invalid.status, 2, invalid.stderr.toString());
             assert.equal(invalid.stdout.toString(), "error: unknown option '--unknown'\n" +
                 "Usage: <test-executable> [-h|--help] [-v|--verbose] [-f PATTERN|--filter=PATTERN]...\n");
-            if (engine === "chromium") for (const result of [passed, failed, invalid]) await cleanChromium(result);
+            if (engine === "chromium") for (const result of [passed, failed, skipped, empty, invalid]) await cleanChromium(result);
         });
         test(`failure categories and bounded cleanup (${engine}/${cdp})`, { skip: !supported }, async t => {
             if (engine === "chromium" && !await chromium(t)) return;

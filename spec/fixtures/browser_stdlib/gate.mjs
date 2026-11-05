@@ -31,11 +31,27 @@ export async function run(context) {
       return {result, stdout: join(stdout), stderr: join(stderr)};
     } finally { await instance.dispose(); }
   }
+  function timedLine(bytes, prefix, total) {
+    let found = false;
+    for (let offset = 0; offset + prefix.length <= bytes.length; offset++) {
+      if (offset > 0 && bytes[offset - 1] !== 10) continue;
+      if (!prefix.every((byte, index) => byte === bytes[offset + index])) continue;
+      context.assert(!found, "duplicate timed native report");
+      found = true;
+      const ending = bytes.indexOf(10, offset + prefix.length);
+      context.assert(ending >= 0, "unterminated timed native report");
+      const suffix = Array.from(bytes.subarray(offset + prefix.length, ending),
+        byte => String.fromCharCode(byte)).join("");
+      const grammar = total ? /^[0-9]+\.[0-9]{2} ms total\)$/ : /^[0-9]+\.[0-9]{2} ms\)$/;
+      context.assert(grammar.test(suffix), "missing or malformed native wall time");
+    }
+    context.assert(found, "missing timed native report");
+  }
   function passed(observed) {
     context.assert(observed.result.kind === "returned" && observed.result.status === 0,
       "initializer image failed through the Titan completion channel");
-    context.assert(occurrences(observed.stdout, text("[==========] 1 test ran.\n")) === 1 &&
-      occurrences(observed.stdout, text("[  PASSED  ] 1 test.\n")) === 1,
+    timedLine(observed.stdout, text("[==========] 1 test ran. ("), true);
+    context.assert(occurrences(observed.stdout, text("[  PASSED  ] 1 test.\n")) === 1,
       "initializer image did not execute its one native Titan test");
     context.assert(observed.stderr.length === 0, "initializer image emitted unexpected stderr");
   }
@@ -59,11 +75,13 @@ export async function run(context) {
   const fullName = join([text("fidelity_test.test_binary_failure_after_coroutine_owner."), binary("name")]);
   const runLine = join([text("[ RUN      ] "), fullName, text("\n")]);
   const failureLine = join([text("[  FAILED  ] "), fullName, text("\n")]);
+  const timedFailure = join([text("[  FAILED  ] "), fullName, text(" (")]);
   const message = join([text(": "), binary("message"), text("\n")]);
   context.assert(occurrences(observed.stdout, runLine) === 1,
     "test name was not reported byte-exact on the run line");
-  context.assert(occurrences(observed.stdout, failureLine) === 2,
-    "test name was not reported byte-exact on the failure and summary lines");
+  timedLine(observed.stdout, timedFailure, false);
+  context.assert(occurrences(observed.stdout, failureLine) === 1,
+    "test name was not reported byte-exact on the final failure summary line");
   context.assert(occurrences(observed.stdout, message) === 1,
     "test failure message was not reported byte-exact");
   // The real coroutine owner intentionally reports one cleanup warning.

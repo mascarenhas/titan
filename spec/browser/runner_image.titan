@@ -18,3 +18,10 @@ end
 function test_failure(_context: test.Context)
   test.assert(false, "runner deliberate failure")
 end
+
+function test_skip(context: test.Context)
+  context:run("never", function (_: test.Context)
+    raise "skipped browser parent invoked its child"
+  end)
+  test.skip("unsupported: timing fixture")
+end
