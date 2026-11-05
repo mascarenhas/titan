@@ -695,9 +695,14 @@ roots](#output-roots-and-the-target-marker)), and the suite directory already
 holds `images/` and the roots files by then.
 `spec/coder/browser_stdlib_closure_spec.lua` runs the target with one owner
 from a cold and then a warm directory and checks this layout. The
-[`browser-toolchain` job](continuous-integration.md#browser-toolchain-job)
+[`browser-stdlib` job](continuous-integration.md#browser-stdlib-job)
 runs the target unfiltered after the SDK is built and uploads everything but
-`objects/` when the job fails.
+`objects/` when the job fails. Chrome for Testing 156 caps a sandboxed
+renderer's data segment at 8 GiB on a host with at most 16 GiB of physical
+memory, below the 13 to 14 GiB the `protobuf` image needs during startup, so
+on such a host that image crashes before its first case unless Chromium runs
+with `--enable-features=HigherRendererMemoryLimit`, which doubles the cap; the
+job passes it through a `TITAN_CHROME` wrapper.
 
 ### Initialization and fidelity gate
 
@@ -3418,5 +3423,13 @@ including `LUAI_MAXCCALLS`; a record without them fails. Each real case is
 pending when a capability is absent; `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` turns
 absence into a failure, and a present but malformed SDK or probe result always
 fails.
-The Linux CI job that runs them is described in
-[Continuous integration](continuous-integration.md#browser-toolchain-job).
+Two Linux CI jobs run these files with the real toolchain:
+[`browser-toolchain`](continuous-integration.md#browser-toolchain-job) runs
+`spec/wasm_toolchain_spec.lua`, `spec/coder/browser_toolchain_spec.lua`, and
+the trace-map, trace-entry, and budget files beside the loader, runner,
+trace-adapter, and Node trace suites, and
+[`browser-stdlib`](continuous-integration.md#browser-stdlib-job) runs the
+provider, incremental, image, protocol, SDK, stdlib closure, entry and stdlib
+gate, fixture, and minicoro files after the browser core stdlib suite. The
+Playwright trace gate runs in
+[`browser-playwright`](continuous-integration.md#browser-playwright-job).
