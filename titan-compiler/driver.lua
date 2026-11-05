@@ -9268,6 +9268,7 @@ local function prepare_compile(
         end
         if certify then
             native.generated_inputs = {}
+            local preprocessing = {}
             for index, part in ipairs(generated_parts) do
                 local filename = driver.part_c_filename(stem, part.index)
                 local contents, err = util.get_file_contents(filename)
@@ -9275,9 +9276,11 @@ local function prepare_compile(
                 native.generated_inputs[index] = {
                     spelling = filename,
                     bytes = #contents, sha256 = incremental.digest(context, "generated-c", contents),
-                    semantic = incremental.preprocessed_identity(context, filename, contents),
                 }
+                preprocessing[index] = { filename = filename, contents = contents }
             end
+            local semantics = incremental.preprocessed_identities(context, preprocessing)
+            for index, identity in ipairs(semantics) do native.generated_inputs[index].semantic = identity end
         end
         local metadata, metadata_error = metadata_code()
         if not metadata then return nil, metadata_error end

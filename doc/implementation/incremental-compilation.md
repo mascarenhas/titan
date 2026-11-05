@@ -690,12 +690,15 @@ provider bindings likewise retain the relative selected input and its
 content/interface evidence.
 
 Compilation saves each generated part's formatted, coverage-converted C
-prefix before source-record injection. `incremental.preprocessed_identity`
+prefix before source-record injection. `incremental.preprocessed_identities`
 preprocesses that metadata-free prefix once, using the effective compile
 prefix, its actual quoted-include directory, and a macro-prefix mapping from
 the private temporary to the actual generated filename. The resulting digest
 keeps expanded C values, including `__FILE__` and `__BASE_FILE__`; it does not
 substitute roots inside expanded strings.
+Parts of one module run through the existing `io.run_batch` slot budget when
+the strategy supports it; custom synchronous runners retain their own
+execution boundary unless they also supply a batch override.
 
 When a certificate's original roots differ, local certification rebinds only
 its explicit header-input and generated-descriptor fields, recreates current

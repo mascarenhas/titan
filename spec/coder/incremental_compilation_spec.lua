@@ -1019,6 +1019,15 @@ os.exit(result.ok and 0 or result.status or 1)
             saved[APP].path = moved_output .. "/" .. APP .. ".o"
             local output = compiled("-o", moved_output, "--incremental", "--source-first",
                 "-v", "--c-source", workspace .. "/helper.c", APP)
+            local executable = platform.windows and
+                assert(driver.windows_program_paths(APP, nil, nil, moved_output)).executable
+                or moved_output .. "/" .. APP
+            local _, runtime_output, why, status = run({ "env",
+                "TITAN_PATH_0_6=" .. moved_output .. ";" .. moved_sdk .. "/lib/titan/0.6",
+                "PATH=" .. moved_sdk .. "/bin" .. (platform.windows and ";" or ":") ..
+                    (os.getenv("PATH") or ""), executable })
+            assert.equal("exit", why, runtime_output)
+            assert.equal(42, status, runtime_output)
             decisions(output, saved, {})
             no_native_compile(output)
             assert.matches("Titan link hit", output, 1, true)
@@ -1031,6 +1040,11 @@ os.exit(result.ok and 0 or result.status or 1)
             decisions(output, saved, {})
             no_native_compile(output)
             assert.equal(original_receipt, read(receipt))
+            local generated = moved_output .. "/" .. APP .. ".c"
+            write(generated, "/* changed generated prefix */\n" .. read(generated))
+            output = compiled("-o", moved_output, "--incremental", "--source-first",
+                "-v", "--c-source", workspace .. "/helper.c", APP)
+            decisions(output, saved, { [APP] = "parts" })
             -- Force only the authored module through checking to observe actual
             -- persistent baseline/candidate hits in its moved SDK namespace.
             output = compiled("-o", moved_output, "-c", "-v", APP)

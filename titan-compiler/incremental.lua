@@ -10,6 +10,7 @@ local objectmetadata = require "titan-compiler.objectmetadata"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local graphcodec = require "titan-compiler.graphcodec"
 local relocation = require "titan-compiler.relocation"
+local default_io = require("titan-compiler.io").new_sync()
 local incremental = {}
 
 local function state(context)
@@ -412,24 +413,56 @@ end
 
 -- Temporary translation units use the actual generated filename for macro
 -- expansion. Expanded C strings remain semantic input, unlike #line markers.
-function incremental.preprocessed_identity(context, filename, contents)
+function incremental.preprocessed_identities(context, inputs)
     local opts = options(context)
-    local temporary = required(context.io:tmpname())
+    local temporaries, outputs, commands = {}, {}, {}
     local ok, result = pcall(function()
-        required(context.io:write_file(temporary, contents))
-        local argv = append({ table.unpack(opts.compile_prefix) }, {
-            "-iquote", paths.dirname(absolute(context, filename)),
-            "-fmacro-prefix-map=" .. temporary .. "=" .. filename,
-            "-E", "-P", "-x", "c", temporary })
-        local expanded = run(context, argv)
+        for index, input in ipairs(inputs) do
+            local source = required(context.io:tmpname())
+            temporaries[#temporaries + 1] = source
+            local output = required(context.io:tmpname())
+            temporaries[#temporaries + 1] = output
+            outputs[index] = output
+            required(context.io:write_file(source, input.contents))
+            commands[index] = append({ table.unpack(opts.compile_prefix) }, {
+                "-iquote", paths.dirname(absolute(context, input.filename)),
+                "-fmacro-prefix-map=" .. source .. "=" .. input.filename,
+                "-E", "-P", "-x", "c", source, "-o", output })
+        end
+        local results
+        local cap = context.jobs or 1
+        if #commands > 1 and cap > 1 and type(context.io.run_batch) == "function"
+            and (context.io.run_batch ~= default_io.run_batch or context.io.run == default_io.run) then
+            local cancelled
+            results, cancelled = context.io:run_batch(commands, { jobs = cap })
+            if cancelled then error("generated-C preprocessing interrupted by signal " .. tostring(cancelled), 0) end
+        else
+            results = {}
+            for index, argv in ipairs(commands) do results[index] = context.io:run(argv) end
+        end
+        local identities = {}
+        for index, output in ipairs(outputs) do
+            local native = results and results[index]
+            required(native and native.ok, native and (native.diagnostic or native.output)
+                or "generated-C preprocessing returned no result")
+            local expanded = required(context.io:read_file(output))
+            identities[index] = incremental.digest(context, "generated-c-semantics", expanded)
+        end
         local counters = state(context).counters
-        counters.relocation_preprocesses = (counters.relocation_preprocesses or 0) + 1
-        return incremental.digest(context, "generated-c-semantics", expanded)
+        counters.relocation_preprocesses = (counters.relocation_preprocesses or 0) + #commands
+        return identities
     end)
-    local removed, err = context.io:unlink(temporary)
-    incremental.invalidate_file(context, temporary)
+    local cleanup_failure, cleanup_cancelled
+    for _, filename in ipairs(temporaries) do
+        local called, removed, err = pcall(context.io.unlink, context.io, filename)
+        if not called and type(removed) ~= "string" then cleanup_cancelled = removed
+        elseif not called or not removed then cleanup_failure = tostring(err or removed) end
+        incremental.invalidate_file(context, filename)
+    end
+    if not ok and type(result) ~= "string" then error(result, 0) end
+    if cleanup_cancelled then error(cleanup_cancelled, 0) end
     if not ok then error(result, 0) end
-    required(removed, err, temporary)
+    if cleanup_failure then error(cleanup_failure, 0) end
     return result
 end
 
@@ -1682,7 +1715,7 @@ local function check_relocation(context, record, stem)
     end
     local headers = check_headers(context, record)
     if headers.status ~= "hit" then return headers end
-    local sources, evidence = {}, {
+    local evidence = {
         roots = context.relocation_roots, object = incremental.file_digest(context, stem .. ".o") }
     for index, part in ipairs(native.parts) do
         local path, input = stem .. part.c_suffix, cert.generated[index]
@@ -1690,11 +1723,6 @@ local function check_relocation(context, record, stem)
             or type(input.sha256) ~= "string" or type(input.semantic) ~= "string" then
             return miss("record-schema", "invalid generated-C semantics")
         end
-        local bytes = incremental.file_contents(context, path):sub(1, input.bytes)
-        if incremental.digest(context, "generated-c", bytes) ~= input.sha256 then
-            return miss("parts", path .. ": generated source changed")
-        end
-        sources[index] = relocation.generated(context, bytes, cert.roots)
         evidence[index] = incremental.file_digest(context, path)
     end
     evidence.companions = {}
@@ -1710,11 +1738,21 @@ local function check_relocation(context, record, stem)
     if stat and stat.kind == "file" and context.io:read_file(receipt, 65) == key then
         return { status = "hit" }
     end
+    local preprocessing = {}
     for index, part in ipairs(native.parts) do
+        local input, path = cert.generated[index], stem .. part.c_suffix
+        local bytes = incremental.file_contents(context, path):sub(1, input.bytes)
+        if incremental.digest(context, "generated-c", bytes) ~= input.sha256 then
+            return miss("parts", path .. ": generated source changed")
+        end
+        local source = relocation.generated(context, bytes, cert.roots)
         local spelling = relocation.rebind(context,
             cert.generated[index].spelling or (stem .. part.c_suffix), cert.roots)
-        if incremental.preprocessed_identity(context, spelling, sources[index])
-            ~= cert.generated[index].semantic then
+        preprocessing[index] = { filename = spelling, contents = source }
+    end
+    local current = incremental.preprocessed_identities(context, preprocessing)
+    for index, identity in ipairs(current) do
+        if identity ~= cert.generated[index].semantic then
             return miss("c-input", "relocated generated-C semantics")
         end
     end
