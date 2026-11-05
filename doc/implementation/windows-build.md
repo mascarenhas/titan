@@ -1081,15 +1081,18 @@ exercises both LF and CRLF output. Removing generated preamble lines must
 accept either ending: the driver's text-mode C writer uses native Windows
 newlines, while the emulated legacy files are written without translation.
 
-End-to-end compiler fixtures track the logical modules they generate and remove
-only those modules' providers (`.so`, `.dll`, `.dylib`, `.a`), objects and
-generated companions after each case. Use the tracked-module cleanup pattern in
-`spec/coder/coder_spec.lua`, including recursive directory removal and verbose-C
-retention, rather than extension globs: unrelated checker metadata DLLs may
-still be mapped in the process. Missing-module checker unit cases use the
-table-backed `helpers.run_checker_modules` with only their consumer source, so
-retained disk providers cannot replace an expected missing-module diagnostic.
-Filesystem resolver behavior remains the responsibility of the driver specs.
+An end-to-end compiler fixture should track the logical modules it generates
+and, after each case, remove only those modules' providers (`.so`, `.dll`,
+`.dylib`, `.a`), objects, and generated companions. Follow the tracked-module
+cleanup in `spec/coder/coder_spec.lua` and `spec/coder/closures_spec.lua`,
+including recursive directory removal and retention of generated C in verbose
+mode, rather than extension globs: a `*.so` glob misses Windows `.dll`
+providers, and a broader glob could reach unrelated checker metadata DLLs that
+are still mapped in the process. Missing-module checker unit cases use the
+table-backed `run_checker_modules` helper (`spec/support/helpers.lua`) with
+only their consumer source, so a provider left on disk cannot replace an
+expected missing-module diagnostic. Filesystem resolver behavior remains the
+responsibility of the driver specs.
 
 ## Native line coverage
 
