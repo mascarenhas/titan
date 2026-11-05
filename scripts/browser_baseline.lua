@@ -31,6 +31,7 @@ local repository = assert(lfs.currentdir())
 package.path = repository .. "/?.lua;" .. repository .. "/?/init.lua;" .. package.path
 
 local compiler_io = require "titan-compiler.io"
+local browser_target = require "titan-compiler.browsertarget"
 local platform = require "titan-compiler.platform"
 local version = require "titan-compiler.version"
 local sha256 = require "titan-compiler.sha256"
@@ -227,7 +228,7 @@ local function build_lua_cell(cell, out, plan)
     -- build a different configuration than the one the record describes.
     assert(#lua_defines > 0,
         "browser Lua record lacks lua_defines; reinstall the browser Lua fork")
-    local argv = { emcc, "-I", repository .. "/lua-5.5.1/src" }
+    local argv = browser_target.compiler_argv({ emcc, "-I", repository .. "/lua-5.5.1/src" })
     for _, define in ipairs(lua_defines) do argv[#argv + 1] = define end
     for _, source in ipairs(sources_for_interpreter()) do
         argv[#argv + 1] = source
@@ -421,7 +422,7 @@ local receipt = {
     toolchain = {
         host = version_line({ "uname", "-srm" }),
         commit = version_line({ "git", "-C", repository, "rev-parse", "HEAD" }),
-        emcc = version_line({ emcc, "--version" }),
+        emcc = version_line(browser_target.compiler_argv({ emcc, "--version" })),
         emcc_path = emcc,
         node = version_line({ node, "--version" }),
         node_path = node,

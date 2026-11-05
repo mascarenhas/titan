@@ -1005,6 +1005,8 @@ The check covers `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`,
 browser target does not support TITAN_EXTRA_CFLAGS flag "-flto"
 ```
 
+Browser tool spawns clear ambient `EMCC_CFLAGS`; deliberate EH overrides through opaque argument channels (`@file`, `-mllvm`, `-Xclang`, or `-Xlinker`) are unsupported and are not parsed by this check.
+
 `-fno-lto` is accepted. Environment settings meant for native builds, such as
 `TITAN_EXTRA_CFLAGS=-O0 -fno-lto -march=native`, must be cleared for browser
 invocations.
@@ -1138,10 +1140,10 @@ a walk over a deep record graph with `reflect`, has no library limit; under
   (see [traces](#traces)).
 * Lua's C-call limit is 100 instead of native Lua's 200, which also bounds
   nested `pcall`, metamethod, coroutine-resume, and parser depth (see [Lua's
-  C-call limit](#luas-c-call-limit)). Deep mixed Lua/Titan recursion raises
-  the catchable `C stack overflow` error before it can exhaust the engine's
-  JavaScript stack, as measured on Node, Chromium, Firefox, and WebKit under
-  both build profiles.
+  C-call limit](#luas-c-call-limit)). The four-engine headroom measurements
+  used the previous JavaScript-SJLJ lowering; Wasm-EH error, GC, and unwind
+  qualification covers Node 24 and Chromium 156, not a new four-engine,
+  two-profile recursion-ceiling matrix.
 * A loader instance runs `main` once; sinks must be synchronous.
 * Only Linux and macOS hosts are supported; `Makefile.win` offers neither
   `lua-browser` nor `browser-sdk`.

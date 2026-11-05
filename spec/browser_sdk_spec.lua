@@ -518,6 +518,79 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         end
     end)
 
+    it("clears ambient EMCC_CFLAGS in fork browser entrypoints and reuse without changing native goals", function()
+        local info, why = toolchain.require()
+        if not info then pending(why) return end
+        local root = new_workspace("-lua-browser-ambient")
+        local temp_lua = paths.join(root, "lua-5.5.1")
+        local temp_prefix = paths.join(root, "prefix")
+        for _, name in ipairs({ "Makefile", "src", "tools" }) do
+            copy_tree(strategy, paths.join(repository, "lua-5.5.1", name), paths.join(temp_lua, name))
+        end
+        local revision = assert(assert(strategy:read_file(info.record_path)):match("fork_revision=([0-9a-f]+)"))
+        local guarded_cc = paths.join(root, "guarded-emcc")
+        local native_cc = paths.join(root, "native-cc")
+        assert(strategy:write_file(guarded_cc, [[#!/bin/sh
+set -eu
+[ -z "${EMCC_CFLAGS:-}" ] || { echo "ambient EMCC_CFLAGS reached browser compiler" >&2; exit 91; }
+exec "$TITAN_TEST_REAL_EMCC" "$@"
+]]))
+        assert(strategy:write_file(native_cc, [[#!/bin/sh
+set -eu
+[ "${EMCC_CFLAGS-}" = "$TITAN_TEST_EXPECT_EMCC_CFLAGS" ] || { echo "native environment changed" >&2; exit 92; }
+exec cc "$@"
+]]))
+        assert(strategy:run({ "chmod", "0755", guarded_cc, native_cc }).ok)
+        for _, ambient in ipairs({ "-sWASM_LEGACY_EXCEPTIONS=0", "-sSUPPORT_LONGJMP=emscripten" }) do
+            local env = {
+                PATH = paths.dirname(info.tools.cc[1]) .. ":" .. (os.getenv("PATH") or ""),
+                EMCC_CFLAGS = ambient, TITAN_TEST_EXPECT_EMCC_CFLAGS = ambient,
+                TITAN_TEST_REAL_EMCC = info.tools.cc[1], FORK_REVISION = revision, CCACHE_DISABLE = "1",
+            }
+            local function run_make(directory, arguments)
+                local argv = { "make", "--no-print-directory", "-C", directory }
+                for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+                return run_with_env(strategy, env, argv)
+            end
+            local compiled = run_make(paths.join(temp_lua, "src"), {
+                "-B", "browser", "BROWSER_CC=" .. guarded_cc,
+            })
+            assert.is_true(compiled.ok, compiled.output)
+            local config = run_make(paths.join(temp_lua, "src"), {
+                "-s", "browser-config", "BROWSER_CC=" .. guarded_cc,
+            })
+            assert.is_true(config.ok, config.output)
+            local config_text, replacements = config.output:gsub("browser_src= %.\n",
+                "browser_src= " .. paths.join(temp_lua, "src") .. "\n")
+            assert.equal(1, replacements)
+            local config_path = paths.join(root, "browser-config")
+            assert(strategy:write_file(config_path, config_text))
+            local installed = run_with_env(strategy, env, {
+                "sh", "-c", 'exec sh "$1" "$2" < "$3"', "sh",
+                paths.join(temp_lua, "tools/install-browser.sh"),
+                paths.join(temp_prefix, "lib/browser"), config_path,
+            })
+            assert.is_true(installed.ok, installed.output)
+            local delegated = run_make(temp_lua, {
+                "install-browser", "PREFIX=" .. temp_prefix, "BROWSER_CC=" .. guarded_cc,
+            })
+            assert.is_true(delegated.ok, delegated.output)
+            local archive = paths.join(temp_prefix, "lib/browser/liblua.a")
+            local before = assert(strategy:stat(archive))
+            local reused = run_with_env(strategy, env, {
+                "make", "--no-print-directory", "lua-browser", "PREFIX=" .. temp_prefix,
+                "LUA_DIR=" .. temp_lua, "LUA_BROWSER_CC=" .. guarded_cc,
+            })
+            assert.is_true(reused.ok, reused.output)
+            assert.same(before, assert(strategy:stat(archive)))
+            local record = assert(strategy:read_file(paths.join(temp_prefix, "lib/browser/liblua-config.txt")))
+            contains(record, "sjlj=wasm\n")
+            contains(record, "-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1")
+            local native = run_make(paths.join(temp_lua, "src"), { "-B", "lapi.o", "CC=" .. native_cc })
+            assert.is_true(native.ok, native.output)
+        end
+    end)
+
     it("installs browser-sdk into an empty differing ROCKS_TREE, verifies archives/digests/stack size, and keeps compiler SDK emsdk-free", function()
         local info, why = toolchain.require({ node = true })
         if not info then pending(why) return end

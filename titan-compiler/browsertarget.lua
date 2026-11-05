@@ -52,6 +52,14 @@ function M.object_flags(build_profile)
     return flags
 end
 
+-- All browser compiler execution goes through this argv policy, including
+-- probes and coordinator jobs. Keep the frozen tools.cc as the raw executable.
+function M.compiler_argv(cc)
+    local argv = { "env", "EMCC_CFLAGS=" }
+    for _, argument in ipairs(cc) do argv[#argv + 1] = argument end
+    return argv
+end
+
 local function hex(value, length)
     return type(value) == "string" and #value == length and not value:find("[^0-9a-f]")
 end
@@ -400,7 +408,9 @@ local function tools(context)
             return nil, "browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on PATH)" .. INSTALL
         end
     end
-    local result = strategy:run({ cc, "--version" }, { stderr_to_stdout = true })
+    local command = M.compiler_argv({ cc })
+    command[#command + 1] = "--version"
+    local result = strategy:run(command, { stderr_to_stdout = true })
     local found = type(result) == "table" and type(result.output) == "string" and
         result.output:match("emcc[^\n]- (%d+%.%d+%.%d+)") or "unknown"
     if type(result) ~= "table" or not result.ok or found ~= M.EMSCRIPTEN_VERSION then
@@ -611,10 +621,11 @@ function M.build(context, inputs)
             if not resolved then return nil, resolve_error end
             includes[index] = resolved
         end
-        local provisional = { io = context.io, compiler_argv = tool.cc, compile_flags = flags,
+        local compiler = M.compiler_argv(tool.cc)
+        local provisional = { io = context.io, compiler_argv = compiler, compile_flags = flags,
             language_mode = "c99", language_flag = false, cppflags = {}, cflags = {}, include_dirs = includes }
         local profile_inputs, profile_error = cdriver.target_profile_inputs({ io = context.io,
-            cache_adapter = context.cache_adapter, compiler = tool.cc, language_flag = false,
+            cache_adapter = context.cache_adapter, compiler = compiler, language_flag = false,
             compiler_include_dirs = includes, compile_flags = flags, language_mode = "c99" })
         if not profile_inputs then return nil, profile_error end
         local profile

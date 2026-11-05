@@ -1740,7 +1740,7 @@ local function compiler_argv(include_extra_compile_flags, context, user_c_helper
     if context and context.target == "browser" then
         local descriptor, err = driver.context_target_descriptor(context)
         if not descriptor then return nil, err end
-        local args = { table.unpack(descriptor.tools.cc) }
+        local args = driver._browser_target.compiler_argv(descriptor.tools.cc)
         append_argv(args, descriptor.compile_flags)
         return args
     end
@@ -1915,7 +1915,9 @@ function driver.toolchain_descriptor(context)
         local descriptor, err = driver.context_target_descriptor(context)
         if not descriptor then return nil, err end
         return {
-            io = context.io, compiler_argv = { table.unpack(descriptor.tools.cc) },
+            io = context.io, compiler_argv = driver._browser_target.compiler_argv(descriptor.tools.cc),
+            -- `env` is the launch wrapper; emcc remains a physical tool input.
+            stage_tools = { descriptor.tools.cc[1] },
             compile_flags = { table.unpack(descriptor.compile_flags) },
             language_mode = "c99", language_flag = false, cppflags = {}, cflags = {},
             include_dirs = { table.unpack(descriptor.include_dirs) },

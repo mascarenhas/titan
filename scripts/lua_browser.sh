@@ -14,6 +14,8 @@
 #     exists in lua-5.5.1/src/browser/liblua.a, matches it as well).
 
 set -eu
+# Reuse probes run emcc directly before entering the fork's Make/install paths.
+unset EMCC_CFLAGS
 
 fail() {
 	printf 'lua-browser: %s\n' "$*" >&2

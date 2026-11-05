@@ -1166,7 +1166,7 @@ recovery, selection snapshots, or finalization) ever sees one.
 
 ## Unsupported flags
 
-A browser invocation rejects these flags wherever they appear:
+A browser invocation rejects these explicitly spelled flags:
 
 `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-pie`, `-shared`, `-dynamiclib`,
 `-rdynamic`, `-pthread`, `-flto`, `-flto=*`, `-ffat-lto-objects`, `-march=*`,
@@ -1185,6 +1185,8 @@ and accepted. Bare and `=1` longjmp settings select the wrong mode and are
 rejected; bare legacy EH and `NO_WASM_LEGACY_EXCEPTIONS=0` mean legacy EH is
 enabled. Inside the record, the same check reports
 `invalid field "cflags": browser target does not support cflags flag "<flag>"`.
+
+Browser tool spawns clear ambient `EMCC_CFLAGS`; deliberate EH overrides through opaque argument channels (`@file`, `-mllvm`, `-Xclang`, or `-Xlinker`) are unsupported and are not parsed by this check.
 
 Emscripten has no fat Wasm objects: `-flto` produces bare LLVM bitcode with no
 data segments to read. The descriptor never adds LTO and the Wasm reader
@@ -2431,6 +2433,12 @@ another commit.
 
 ### Choosing 100
 
+The measurements in this subsection and [Engine stack per
+construct](#engine-stack-per-construct) used the previous JavaScript-SJLJ
+lowering. They record why 100 was chosen, not the current Wasm-EH engine
+ceilings; 100 is retained until the recursive Lua/C shapes are requalified
+across engines and build profiles.
+
 The value had to be greater than 10 (otherwise `LUAI_MAXCCALLS / 10 * 11` is 0
 and every overflow escalates to error-in-error-handling), at least 20 in
 practice so overflow handling and the two reserved finalizer slots stay
@@ -2444,18 +2452,17 @@ construct on Node, and `pcall`, `coroutine.resume`, and mixed recursion in both
 profiles), so levels and counts differ only by the starting count (2 in the
 mixed fixture, 3 in the construct probe).
 
-The lowest ceiling is 204 counts (201 levels): nested `pcall` and nested
-`coroutine.resume` on V8 (Node and Chromium), validation, assertions 2. Half of
-it is 102, and the maintainer chose 100 (D33). No construct can then reach
-more than 100 counts, against an engine ceiling of 204, a 2.04× margin; the
-fork's comment quotes 2.08×, 204 against the 98 counts at which the mixed
-fixture trips. At
+The lowest historical ceiling was 204 counts (201 levels): nested `pcall` and
+nested `coroutine.resume` on V8 (Node and Chromium), validation, assertions 2.
+Half of it is 102, and the maintainer chose 100 (D33). Against that measured
+ceiling, a limit of 100 gave a 2.04× margin, or 2.08× against the 98 counts at
+which the mixed fixture tripped. At
 Lua's default 200, the same `pcall` chain tripped at 195 levels (198 counts),
 a 1.03× margin, and mixed recursion passed 195 levels and tripped at 196 on
 all four engines in both assertion modes, as a catchable error.
 
-Validation ceilings with Lua's limit out of the way (deepest passing level;
-`-DLUAI_MAXCCALLS=60000`):
+Historical JavaScript-SJLJ validation ceilings with Lua's limit out of the way
+(deepest passing level; `-DLUAI_MAXCCALLS=60000`):
 
 | Engine | Assertions | Mixed Lua/Titan | Nested `pcall` | Nested `coroutine.resume` |
 | --- | ---: | ---: | ---: | ---: |

@@ -76,7 +76,7 @@ local function fake_context(options)
     function strategy:run(argv)
         calls[#calls + 1] = { table.unpack(argv) }
         if argv[1] == "uname" then return { started = true, ok = true, output = options.uname or "Linux\n" } end
-        if argv[2] == "--version" then
+        if argv[#argv] == "--version" then
             return { started = true, ok = true, output = "emcc (Emscripten) " .. (options.version or "6.0.13") .. "\n" }
         end
         for index, flag in ipairs(argv) do
@@ -165,7 +165,7 @@ describe("browser target descriptor", function()
         assert.has_error(function() table.insert(descriptor.compile_flags, "-flto") end,
             "browser target descriptor is immutable")
         assert.equal(2, #calls)
-        assert.equal("--version", calls[1][2])
+        assert.same({ "env", "EMCC_CFLAGS=", descriptor.tools.cc[1], "--version" }, calls[1])
         local flags = table.concat(calls[2], " ")
         contains(flags, "-c")
         contains(flags, "-sSUPPORT_LONGJMP=wasm")

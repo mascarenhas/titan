@@ -8,6 +8,7 @@ local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local repository = assert(lfs.currentdir())
+local paths = require "titan-compiler.path"
 local workspace
 
 local function read(filename)
@@ -21,6 +22,7 @@ local function run(info, code, ...)
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1", info.prefix .. "/bin/lua", "-E", "-e",
         string.format("package.path=%q..package.path;", repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. code }
+    if info.emcc_cflags then table.insert(argv, 2, "EMCC_CFLAGS=" .. info.emcc_cflags) end
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
     local result = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
     return result.started and result.ok, result.output or result.diagnostic or ""
@@ -51,7 +53,8 @@ end
 
 local function cli(info, ...)
     return run(info, "", repository .. "/titanc",
-        "--target", "browser", "-q", "--tree", workspace .. "/source", "--output", workspace .. "/out", ...)
+        "--target", "browser", "-q", "--tree", workspace .. "/source",
+        "--output", info.output or workspace .. "/out", ...)
 end
 
 local function wasm_object(filename)
@@ -100,6 +103,84 @@ assert(driver.close_resolver_context(context))
         assert.equal("object_fixture", object.metadata.module)
         local entry = assert(objectmetadata.read(bytes, "direct browser object"))
         assert.equal("object_fixture", entry.type.name)
+    end)
+
+    it("clears ambient EMCC_CFLAGS across browser compiler routes without changing native identity", function()
+        local info, why = toolchain.require({ node = true, sdk = true })
+        if not info then pending(why) return end
+        prepare()
+        files.write(workspace .. "/source/ambient.h", "int ambient_helper(void);\n")
+        files.write(workspace .. "/source/ambient.c", [[
+#include <setjmp.h>
+int ambient_helper(void) {
+    jmp_buf saved;
+    if (setjmp(saved) == 0) longjmp(saved, 7);
+    return 7;
+}
+]])
+        files.write(workspace .. "/source/ambient.titan", [[
+foreign import "ambient.h"
+function main(args: {string}): integer
+    local result: integer = ffi.ambient_helper()
+    if result ~= 7 then return 1 end
+    raise "ambient caught"
+catch
+    return 0
+end
+]])
+        for index, ambient in ipairs({ "-sWASM_LEGACY_EXCEPTIONS=0", "-sSUPPORT_LONGJMP=emscripten" }) do
+            local output = workspace .. "/ambient-out-" .. index
+            local image = output .. "/ambient.mjs"
+            local poisoned = { prefix = info.prefix, output = output, emcc_cflags = ambient }
+            local checked = string.format([[
+local driver = require "titan-compiler.driver"
+local incremental = require "titan-compiler.incremental"
+assert(os.getenv("EMCC_CFLAGS") == %q)
+local native = driver.new_resolver_context()
+local before = assert(driver.toolchain_descriptor(native))
+local native_identity = assert(incremental.toolchain_identity(native, before))
+local browser = driver.new_resolver_context({target="browser", output_root=%q})
+local descriptor = assert(driver.context_target_descriptor(browser))
+local toolchain = assert(driver.toolchain_descriptor(browser))
+assert(#descriptor.tools.cc == 1)
+assert(toolchain.compiler_argv[1] == "env" and toolchain.compiler_argv[2] == "EMCC_CFLAGS=")
+assert(toolchain.stage_tools[1] == descriptor.tools.cc[1])
+local identity, details = incremental.toolchain_identity(browser, toolchain)
+assert(identity, details)
+local compiler = assert(browser.io:realpath(descriptor.tools.cc[1]))
+local found = false
+for _, tool in ipairs(details.tools) do if tool.path == compiler then found = true end end
+assert(found, "emcc physical identity was lost behind env")
+local after = assert(driver.toolchain_descriptor(native))
+assert(table.concat(before.compiler_argv, "\0") == table.concat(after.compiler_argv, "\0"))
+assert(incremental.toolchain_identity(native, after) == native_identity)
+assert(after.stage_tools == nil)
+assert(os.getenv("EMCC_CFLAGS") == %q)
+local inherited = native.io:run({"sh", "-c", 'printf "%%s" "$EMCC_CFLAGS"'})
+assert(inherited.ok and inherited.output == os.getenv("EMCC_CFLAGS"))
+assert(driver.close_resolver_context(browser))
+assert(driver.close_resolver_context(native))
+]], ambient, output, ambient)
+            local ok, log = run(poisoned, checked)
+            assert.is_true(ok, log)
+            ok, log = cli(poisoned, "--incremental", "--jobs", "2",
+                "--c-source", workspace .. "/source/ambient.c", "--exe", image, "ambient")
+            assert.is_true(ok, log)
+            local wat = output .. "/ambient.wat"
+            local disassembled = compiler_io.new_sync():run({
+                paths.join(paths.dirname(info.tools.clang[1]), "wasm-dis"),
+                output .. "/ambient.wasm", "-o", wat,
+            }, { stderr_to_stdout = true })
+            assert.is_true(disassembled.ok, disassembled.output)
+            local instructions = read(wat)
+            assert.truthy(instructions:find("(try ", 1, true), "legacy Wasm EH try was not emitted")
+            assert.is_nil(instructions:find("(try_table", 1, true), "ambient flags changed the EH encoding")
+            assert.is_nil(instructions:match('%(import [^\n]-"invoke_'), "ambient flags restored JS SJLJ")
+            local executed = compiler_io.new_sync():run({
+                info.sdk_root .. "/titan-browser-run", "--engine", "node", "--root", output, image,
+            }, { stderr_to_stdout = true })
+            assert.is_true(executed.ok, executed.output)
+        end
     end)
 
     it("compiles real standard stream macro values through emcc", function()

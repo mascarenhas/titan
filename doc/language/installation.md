@@ -229,9 +229,9 @@ make luarocks
 luarocks make
 ```
 
-- The Lua fork is the `lua-5.5.1` submodule, which pins the fork revision that this
-  Titan expects. For Titan 0.6.0 that is the revision tagged `v5.5.1-1`, the same one
-  the default installation downloads. If you cloned without `--recurse-submodules`,
+- The Lua fork is the `lua-5.5.1` submodule, which pins the exact fork commit
+  this checkout builds; that may be newer than `v5.5.1-1`, the release used
+  by the native default installation. If you cloned without `--recurse-submodules`,
   run `git submodule update --init --recursive`.
 - `make lua` builds the fork and installs it under `PREFIX`. It picks Lua's
   `linux-readline` target on Linux, `macosx` on macOS, and `linux` elsewhere.
