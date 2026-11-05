@@ -196,7 +196,7 @@ Interfaces, owned or union C types), private members, or hooks stays entirely
 reflective, as does a nominal whose decoder frame would exceed 64 directory
 entries: a record's fields, or one union selector plus the largest variant's
 parts. Each entry is 32 bytes at up to `TITAN_CODEC_DEPTH_LIMIT` nesting
-levels (128 natively, 43 on the browser target). The union selector
+levels (128 on both native and browser targets). The union selector
 validates the complete wire message but stores only the one recognized
 occurrence; zero, repeated, replaced, or non-message variants hand back to the
 reflective decoder after that validation. One shared parts directory serves

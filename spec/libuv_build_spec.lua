@@ -6202,7 +6202,7 @@ printf '%s\n' "${schedule[@]}"
             end
             for _, contract in ipairs({
                 "browser-loader.log", "browser-guard.log",
-                "node --test spec/browser/runner.test.mjs",
+                '"$TITAN_NODE" --test spec/browser/runner.test.mjs',
                 "--js-test spec/browser/loader.test.mjs",
             }) do
                 assert.equal(1, count_literal(browser_job, contract), contract)

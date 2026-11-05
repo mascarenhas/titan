@@ -130,8 +130,8 @@ describe("browser measured delivered budget limits", function()
                 -- checked, non-yielding shadow-stack overrun in each context.
                 measure("budget", "main-titan", 1, 65536)
                 measure("budget", "main-shadow", 16, 4194304)
-                measure("budget", "fiber-titan", 1, 65536)
-                measure("budget", "fiber-shadow", 16, 1048576)
+                measure("budget", "coroutine-titan", 1, 65536)
+                measure("budget", "coroutine-shadow", 16, 1048576)
                 -- Live Wasm locals now belong to JSPI engine continuations;
                 -- there is no separate instrumentation-data buffer or budget.
                 measure("budget", "outer-wait", 1, 65536)

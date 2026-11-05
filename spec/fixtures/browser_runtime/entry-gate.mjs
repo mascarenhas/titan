@@ -6,14 +6,18 @@ export async function run(context) {
   context.assert(gatePath && finalPath, "gate image paths are required");
   const gateImage = await context.image(gatePath);
   const finalImage = await context.image(finalPath);
-  const emit = record => context.stdout(encoder.encode(JSON.stringify({engine: context.engine, ...record}) + "\n"));
+  const provenItems = new Set();
+  let nativeCases = 0;
+  const emit = record => {
+    if (record.item !== undefined) provenItems.add(record.item);
+    context.stdout(encoder.encode(JSON.stringify({engine: context.engine, ...record}) + "\n"));
+  };
 
   async function execute(image, args, selected, inspect = false, timer = null) {
     let module;
     let bridge;
     let output = "";
     const tickTimes = [];
-    let waitStart;
     let frames = 0;
     let raf;
     let interval;
@@ -38,8 +42,7 @@ export async function run(context) {
     });
     await instance.initialize();
     const before = performance.now();
-    if (timer === "busy") startTimers();
-    else if (timer === "responsive") { waitStart = performance.now(); startTimers(); }
+    if (timer) startTimers();
     let settled = false;
     let running;
     try {
@@ -83,18 +86,16 @@ export async function run(context) {
       }
       const result = await running;
       const finished = performance.now();
-      const hostElapsed = finished - before;
-      if (timer === "responsive") context.assert(waitStart !== undefined,
-        "responsiveness case did not establish its admitted-entry window");
-      const waitElapsed = waitStart === undefined ? null : finished - waitStart;
-      const elapsed = timer === "responsive" ? waitElapsed : hostElapsed;
+      const elapsed = finished - before;
       context.assert(result.kind === "returned" && result.status === 0, "native gate did not complete successfully");
       if (selected !== null) {
         context.assert(output.includes(`[==========] ${selected} test${selected === 1 ? "" : "s"} ran.`),
           `native selection did not run exactly ${selected} cases`);
         context.assert(output.includes(`[  PASSED  ] ${selected} test${selected === 1 ? "" : "s"}.`),
           "native gate did not pass every selected case");
+        nativeCases += selected;
       }
+      for (const match of output.matchAll(/GATE item=(\d+)/g)) provenItems.add(Number(match[1]));
       if (inspect) {
         const observed = module._titan_browser_gate_observe() >>> 0;
         context.assert((observed & 255) === 0, "authored FFI frames did not retire");
@@ -103,8 +104,7 @@ export async function run(context) {
         context.assert((observed >>> 16) === 2578, "gate did not perform exactly 2578 real waits");
         emit({item: 9, closeMask: (observed >>> 8) & 63, duplicateOrContinuation: 0, waits: observed >>> 16});
       }
-      return {elapsed, hostElapsed, waitElapsed, windowStart: waitStart, windowEnd: finished,
-        tickTimes, frames, output};
+      return {elapsed, started: before, finished, tickTimes, frames, output};
     } finally {
       clearInterval(interval);
       if (raf !== undefined) cancelAnimationFrame(raf);
@@ -115,12 +115,14 @@ export async function run(context) {
 
   // MODULARIZE is exercised before the expensive gate, in the same realm with
   // the same imported factory (never a cache-busting import or new process).
+  let repeatedInstantiation = 0;
   for (let cycle = 0; cycle < 3; cycle++) {
     await execute(gateImage, ["--filter=^entry_gate%.test_06_"], 1);
+    repeatedInstantiation++;
     await context.tick();
     await context.gc();
   }
-  emit({repeatedInstantiation: 3, factoryIdentityStable: gateImage.factory === (await context.image(gatePath)).factory});
+  emit({repeatedInstantiation, factoryIdentityStable: gateImage.factory === (await context.image(gatePath)).factory});
   context.assert(gateImage.factory === (await context.image(gatePath)).factory, "image factory was not cached");
 
   await execute(gateImage, ["--filter=^entry_gate%.test_0[1-9]_"], 9, true);
@@ -128,11 +130,11 @@ export async function run(context) {
   // Isolate responsiveness from busy work and from initialization time.
   const responsive = await execute(gateImage, ["--filter=^entry_gate%.test_07_"], 1, false, "responsive");
   const ideal = responsive.elapsed / 10;
-  const boundaries = [responsive.windowStart, ...responsive.tickTimes, responsive.windowEnd];
+  const boundaries = [responsive.started, ...responsive.tickTimes, responsive.finished];
   const gaps = boundaries.slice(1).map((time, index) => time - boundaries[index]);
   const maxGap = Math.max(0, ...gaps);
-  emit({item: 7, elapsedMs: responsive.elapsed, fullHostWindowMs: responsive.hostElapsed,
-    waitWindowMs: responsive.waitElapsed, ticks: responsive.tickTimes.length, idealTicks: ideal,
+  emit({item: 7, elapsedMs: responsive.elapsed,
+    ticks: responsive.tickTimes.length, idealTicks: ideal,
     ratio: responsive.tickTimes.length / ideal, maxGapMs: maxGap, animationFrames: responsive.frames,
     thresholds: {minimumRatio: 0.75, maximumRatio: 1.25, maximumGapMs: 100}});
   context.assert(responsive.tickTimes.length >= ideal * 0.75 && responsive.tickTimes.length <= ideal * 1.25,
@@ -143,7 +145,7 @@ export async function run(context) {
   const busy = await execute(gateImage, ["--filter=^entry_gate%.test_negative_busy_"], 1, false, "busy");
   emit({negative: "busy_wait", elapsedMs: busy.elapsed, ticks: busy.tickTimes.length, animationFrames: busy.frames});
   context.assert(busy.elapsed >= 140 && busy.tickTimes.length === 0, "busy-wait control did not block timers");
-  await execute(gateImage, ["--filter=^entry_gate%.test_negative_fiber_"], 1);
+  await execute(gateImage, ["--filter=^entry_gate%.test_negative_coroutine_"], 1);
 
   for (const [args, status] of [[[], 0], [["nonzero"], 7], [["two"], 2]]) {
     const instance = context.create(finalImage.factory, {locateFile: finalImage.locateFile,
@@ -151,9 +153,9 @@ export async function run(context) {
     try {
       const result = await instance.run(args);
       context.assert(result.kind === "returned" && result.status === status && result.bytes.length === 0,
-        "final fiber switch lost Titan completion status");
-      emit({item: 6, finalAction: "fiber_switch", completionStatus: result.status, ccallResultAsserted: false});
+        "final coroutine transfer lost Titan completion status");
+      emit({item: 6, finalAction: "coroutine_transfer", completionStatus: result.status, ccallResultAsserted: false});
     } finally { await instance.dispose(); }
   }
-  emit({verdict: "PASS", items: 9, nativeCases: 15, waitForms: ["emscripten_sleep", "EM_ASYNC_JS/setTimeout"]});
+  emit({verdict: "PASS", items: provenItems.size, nativeCases, waitForms: ["emscripten_sleep", "EM_ASYNC_JS/setTimeout"]});
 }

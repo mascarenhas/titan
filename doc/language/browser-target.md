@@ -374,13 +374,11 @@ link writes the source map and keeps the WebAssembly `name` section
 [traces](#traces). Every Titan frame that a trace shows is therefore
 attributed to its `.titan` file and line as that section describes, and a
 deployed program needs its `<stem>.wasm.map` next to `<stem>.wasm`, in either
-profile. Production images are smaller: on the trace-gate fixtures, measured
-with emsdk 6.0.13, about 39% smaller for the test image and about 37% smaller
-for the program image. No like-for-like speed comparison between the two
-profiles has been measured. The implementation manual's [measurement
-table](../implementation/browser-target.md#measurements) records the exact
-sizes, link times, engine ceilings, and micro-benchmarks, with their caveats,
-and [traces](#traces) shows what an optimized trace looks like.
+profile. The implementation manual's [historical measurement
+table](../implementation/browser-target.md#measurements) records pre-JSPI
+sizes, link times, engine ceilings, and micro-benchmarks. Those results do not
+predict the current backend's image sizes or relative profile speeds.
+[Traces](#traces) shows what an optimized trace looks like.
 
 **Test images keep their frames.** Under `production`, `titanc --test`
 compiles each test module (a module that declares discovered `test_`
@@ -498,10 +496,10 @@ in two steps:
   records match the archive's metadata.
 
 A failed check publishes nothing and leaves an existing archive unchanged. The
-second step needs Node 24 and the browser SDK:
+second step needs Node 26 or newer with JSPI and the browser SDK:
 
 ```text
-browser provider validation requires Node 24: node not found (TITAN_NODE unset; not on PATH); set TITAN_NODE to a Node 24 executable
+browser provider validation requires Node 26 or newer: node not found (TITAN_NODE unset; not on PATH); set TITAN_NODE to a Node 26 or newer executable
 selected static provider failed executable-context protocol validation (browser runner exit 21)
 ```
 
@@ -614,7 +612,7 @@ without running more WebAssembly code. Invalid arguments to `create` and
 ## Testing with `titan-browser-run`
 
 `titan-browser-run` is the test runner for browser images. It runs a program
-or test image from the command line, under Node 24 or in headless Chrome or
+or test image from the command line, under Node 26 or newer or in headless Chrome or
 Chromium, through the same loader that a page uses, and turns the result into
 an exit status, so that test suites and continuous integration can check
 browser builds. Web pages do not use it.
@@ -647,7 +645,7 @@ stdout and stderr exactly, and writes its own messages, all starting with
 
 | Option | Meaning |
 | --- | --- |
-| `--engine node` | Run under Node 24 (the default). |
+| `--engine node` | Run under Node 26 or newer with JSPI (the default). |
 | `--engine chromium` | Run in a new headless Chrome or Chromium. |
 | `--timeout MS` | Wall-clock limit for the whole run, in milliseconds; default 30000. |
 | `--grace MS` | Time to keep watching after the program completes, to catch late traps and aborts; default 1500. |
@@ -942,10 +940,11 @@ The browser modules follow the target's C facts and its fixed limits:
   clock functions when it initializes, as on a native target. Explicit seeds
   produce the same sequence as on a native target.
 * **Coroutines.** Each coroutine has a 256 KiB C stack instead of 2 MiB, so
-  deep recursion inside a coroutine fails sooner, and about 5,400 coroutines
-  fit in memory ([limits](#limits)).
-* **Nesting.** `protobuf`, `transfer`, and `json.encode` accept less nesting
-  than on a native target ([nesting limits](#nesting-limits)).
+  deep recursion inside a coroutine can exhaust its stack sooner. The number
+  of live coroutines also depends on the program's other memory use
+  ([limits](#limits)).
+* **Nesting.** `protobuf`, `transfer`, and `json.encode` use the same library
+  nesting policies as native targets ([nesting limits](#nesting-limits)).
 
 ## Dependencies and the browser Titan path
 
@@ -980,11 +979,10 @@ TITAN_PATH_0_6='out-browser' titanc --target browser -o out-app app.main_lib
 ## Compiler and linker flags
 
 The browser target compiles with Titan's own Emscripten settings, the Lua
-defines from the build record, and five target defines that C headers can
-test: `TITAN_TARGET_BROWSER=1`, `TITAN_COROUTINE_STACK_SIZE=262144`,
-`TITAN_CODEC_DEPTH_LIMIT=43`, `TITAN_JSON_WRITER_DEPTH_LIMIT=103` (the
-[nesting limits](#nesting-limits)), and `MCO_ASYNCFY_STACK_SIZE=65536`. `-I`,
-`-D`, and `--cflag` options and
+defines from the build record, and two target defines that C headers can
+test: `TITAN_TARGET_BROWSER=1` and `TITAN_COROUTINE_STACK_SIZE=262144`.
+The [library nesting policies](#nesting-limits) need no browser-specific
+defines. `-I`, `-D`, and `--cflag` options and
 `TITAN_EXTRA_CPPFLAGS`/`TITAN_EXTRA_CFLAGS` are added after them, as for
 native builds. Flags that only make sense for a native target are rejected
 rather than ignored:
@@ -1141,9 +1139,9 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 * Lua's C-call limit is 100 instead of native Lua's 200, which also bounds
   nested `pcall`, metamethod, coroutine-resume, and parser depth (see [Lua's
   C-call limit](#luas-c-call-limit)). The four-engine headroom measurements
-  used the previous JavaScript-SJLJ lowering; Wasm-EH error, GC, and unwind
-  qualification covers Node 24 and Chromium 156, not a new four-engine,
-  two-profile recursion-ceiling matrix.
+  used the previous JavaScript-SJLJ lowering; JSPI/Wasm-EH error, GC, and
+  unwind qualification covers Node 26.13.0 and Chromium 156, not a new
+  four-engine, two-profile recursion-ceiling matrix.
 * A loader instance runs `main` once; sinks must be synchronous.
 * Only Linux and macOS hosts are supported; `Makefile.win` offers neither
   `lua-browser` nor `browser-sdk`.

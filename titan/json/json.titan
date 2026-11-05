@@ -7,7 +7,6 @@ local string = import "string"
 local math = import "math"
 local peg = import "peg"
 local iteration = import "iteration"
-foreign import "titan.h"
 
 --- Structured JSON failure with a stable code, path, and optional source position.
 -- @field code Stable failure category or grammar label.

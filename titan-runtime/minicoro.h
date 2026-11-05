@@ -38,12 +38,12 @@ Most platforms are supported through different methods:
 | Windows      | x86_64           | Windows fibers    |
 | Linux        | x86_64/i686      | ucontext          |
 | Mac OS X     | x86_64/ARM/ARM64 | ucontext          |
-| WebAssembly  | N/A              | Emscripten fibers |
+| WebAssembly  | N/A              | JSPI continuations |
 | Raspberry Pi | ARM              | ucontext          |
 | RISC-V       | rv64/rv32        | ucontext          |
 
 The assembly method is used by default if supported by the compiler and CPU,
-otherwise ucontext or fiber method is used as a fallback.
+otherwise ucontext, Windows fibers, or JSPI is used on the corresponding platform.
 
 The assembly method is very efficient, it just take a few cycles
 to create, resume, yield or destroy a coroutine.

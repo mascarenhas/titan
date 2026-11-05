@@ -3,6 +3,8 @@ export async function run(context) {
   context.assert(context.args.length === 1, 'pass the entry-lifetimes image');
   const image = await context.image(context.args[0]);
   const hops = [], checks = [];
+  const observed = {entries: 0, parked: 0, resumed: 0, independentCloses: 0,
+    allocationCleanup: 0, earlySinks: 0};
   const peers = [0, 1].map(id => {
     const peer = {id, phase: 0, module: null, driver: null, deliveries: 0, lifetimes: null};
     peer.instance = context.create(async options => {
@@ -27,10 +29,13 @@ export async function run(context) {
       peer.module = await image.factory(options);
       return peer.module;
     }, {locateFile: image.locateFile, stdout: bytes => {
-      context.assert(peer.driver.safe() && !peer.driver.owner && peer.phase === 3,
+      const safe = peer.driver.safe() && !peer.driver.owner && peer.phase === 3;
+      if (!safe) observed.earlySinks++;
+      context.assert(safe,
         'allocation-finalizer output escaped before its logical entry retired');
       context.equalBytes(bytes, encoder.encode('allocation-cleanup\n'));
       peer.deliveries++;
+      observed.allocationCleanup++;
     }});
     return peer;
   });
@@ -46,20 +51,25 @@ export async function run(context) {
           'a completed promised entry retained execution ownership');
         context.assert(peer.module._titan_browser_gate_observe() === phase,
           'state-neutral observer changed the entry lifetime');
+        observed.entries++;
         const contexts = [...peer.driver.contexts.values()].filter(item => item.id !== 0);
         if (phase === 1) {
           context.assert(contexts.length === 5 && contexts.every(item => item.gate && item.lifetime),
             'first entry did not leave ordinary and stacked real continuations parked');
           peer.lifetimes = contexts.map(item => [item, item.lifetime]);
+          observed.parked += contexts.length;
         } else if (phase === 2) {
           context.assert(peer.lifetimes.every(([item, lifetime]) =>
             peer.driver.contexts.get(item.id) === item && item.lifetime === lifetime),
             'a later C entry replaced an existing engine continuation lifetime');
-          context.assert(contexts.filter(item => item.finished).length === 4,
+          const resumed = contexts.filter(item => item.finished).length;
+          context.assert(resumed === 4,
             'second entry did not retire the ordinary and stacked continuations');
+          observed.resumed += resumed;
         } else {
           context.assert(contexts.length === 0 && peer.deliveries === 1,
             'independent-state close did not retire every continuation/allocation');
+          observed.independentCloses++;
         }
       }));
       await Promise.all(checks);
@@ -68,9 +78,10 @@ export async function run(context) {
     context.assert(switches >= 4, 'two instances did not interleave their private JSPI hops');
     context.assert(peers.every(peer => hops.some(hop => hop.id === peer.id && hop.phase === 3)),
       'allocation-triggered cleanup did not perform private handoffs in both instances');
-    context.stdout(encoder.encode('ENTRY-LIFETIMES ' + JSON.stringify({instances: 2, entries: 6,
-      parked: 10, resumed: 8, independentCloses: 2, allocationCleanup: 2,
-      privateHops: hops.length, interleavedSwitches: switches, earlySinks: 0}) + '\n'));
+    context.stdout(encoder.encode('ENTRY-LIFETIMES ' + JSON.stringify({instances: peers.length,
+      entries: observed.entries, parked: observed.parked, resumed: observed.resumed,
+      independentCloses: observed.independentCloses, allocationCleanup: observed.allocationCleanup,
+      privateHops: hops.length, interleavedSwitches: switches, earlySinks: observed.earlySinks}) + '\n'));
   } finally {
     await Promise.all(peers.map(peer => peer.instance.dispose()));
     for (const peer of peers) peer.module = peer.driver = peer.lifetimes = null;

@@ -5,7 +5,6 @@ local reflect = import "reflect"
 local string = import "string"
 local math = import "math"
 local gc = import "gc"
-foreign import "titan.h"
 
 local function check_nested_encoding(subject: value, expected: string, depth: integer,
                                      null_value: value)

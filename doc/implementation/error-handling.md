@@ -349,7 +349,7 @@ SpiderMonkey/JSC stacks, which have no title line and may include location-free
 builtin frames such as `forEach@[native code]`, while excluding Firefox's
 `async*` ancestry), or when a surveyed engine ceiling is reached:
 
-* **V8 (Node 24, Chromium, Chrome)** honors `Object.defineProperty` on
+* **V8 (Node, Chromium, Chrome)** honors `Object.defineProperty` on
   `Error.stackTraceLimit` up to the 512-record capacity.
 * **SpiderMonkey (Firefox)** enforces a 128-frame synchronous capture ceiling
   regardless of `Error.stackTraceLimit`; captures reaching that ceiling set

@@ -272,7 +272,7 @@ describe("browser image profile and SDK readiness", function()
         local descriptor = fixtures.descriptor()
         local gate = assert(browserlink.profile(descriptor, { purpose = "gate", assertions = 0 }))
         assert.truthy(table.concat(gate.link_flags, " "):find('"_titan_browser_gate_guarded","_titan_browser_gate_observe"', 1, true))
-        for _, options in ipairs({ { purpose = "program", assertions = 2, asyncify = false },
+        for _, options in ipairs({
             { purpose = "protocol", assertions = 2, optimization = "O2" },
             { purpose = "program", assertions = 2, budgets = {} },
             { purpose = "gate", assertions = 1 }, { purpose = "program", assertions = 2, unknown = true },

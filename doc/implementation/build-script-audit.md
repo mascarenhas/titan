@@ -245,7 +245,7 @@ the three aggregate `--c-source` helpers, and `-X $(STDLIB_EXTRA_OBJECTS)`
 
 `titan-stdlib-browser-test` is a phony test goal (so it defaults to the
 `validation` profile) that needs the installed compiler, the native standard
-provider, the browser SDK, emsdk, Node 24, and a headless Chromium. Expanding
+provider, the browser SDK, emsdk, Node 26+ with JSPI, and a JSPI-capable headless Chromium. Expanding
 its recipe first evaluates `TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK`,
 which stops Make unless every browser root belongs to exactly one image of
 `TITAN_STDLIB_BROWSER_TEST_IMAGES`, and the recipe rejects a byte budget that

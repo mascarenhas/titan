@@ -380,10 +380,10 @@ no member is omitted, stubbed, or made to raise "unavailable", and none of
 them has a `.browser.titan` or `.native.titan` variant. Their foreign imports
 are libc, Lua, the Titan SDK headers, and LPegLabel only, and the
 target-dependent values they need come from target C defines rather than
-whole-file variants: `TITAN_COROUTINE_STACK_SIZE` for `coroutine`, the two
-[nesting-limit](#nesting-limits) defines for `protobuf`/`transfer` and `json`,
-and `_WIN32` (which `emcc` never defines) through `titan/path_platform.h`
-for `path`.
+whole-file variants: `TITAN_COROUTINE_STACK_SIZE` for `coroutine`, and
+`_WIN32` (which `emcc` never defines) through `titan/path_platform.h` for
+`path`. The [library nesting policies](#nesting-limits) are shared with
+native targets and need no browser-specific defines.
 
 The other thirteen standard modules are absent at compile time: their
 canonical mains are the `native` variants `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
@@ -566,7 +566,7 @@ delivered.
 | `math` | yes | none | `math.tests`, including automatic and argumentless seeding | calls `randomseed()` | none |
 | `test` | yes | none | `test.tests`, and every other owner through the runner | loads the Lua trace and pattern helpers when the Lua `string` library is open | none |
 | `reflect` | yes | none | `reflect.tests` | metatable, hydration, brand, and tag tables | none |
-| `json` | yes | none | `json.tests` | caches the writer depth limit, then builds the JSON pattern | none |
+| `json` | yes | none | `json.tests` | builds the JSON pattern | none |
 | `protobuf` | yes | none | `protobuf.tests`, including both raw index writers and the reservation failure | caches the nominal registry, sets up the ephemeron, validates the codec handoff | `write_resource_index`, `write_resource_index_bytes` |
 | `transfer` | yes | none | `transfer.tests` (same-instance behavior), including all three raw exports | installs protobuf's packet-context provider and nominal loader, the ephemerons, and `closure_fields` | `copy_message`, `discard_message`, `transfer_load_module` |
 | `peg` | yes | none | `peg.tests` | `_initialize_native()` | none |
@@ -655,8 +655,8 @@ for a three-image partition exceeded the budget (`reflect.tests` with
 `protobuf.tests` at 32,984,970 bytes, `protobuf.tests` with `coroutine.tests`
 at 34,633,460, and `transfer.tests` with `reflect.tests` at 32,556,174), and
 the four measure between about 23.1 MB and 28.8 MB on Linux and macOS. The
-engine-internal cause is not established; the size limit of V8 and
-Asyncify-expanded functions is separate follow-up work.
+engine-internal cause is not established. These measurements used the earlier
+Asyncify backend; they do not establish a V8 image-size ceiling for JSPI.
 
 `make titan-stdlib-browser-test` (a test goal, so it defaults to the
 `validation` profile) needs the installed native provider, the browser SDK,
@@ -723,12 +723,9 @@ holds `images/` and the roots files by then.
 from a cold and then a warm directory and checks this layout. The
 [`browser-stdlib` job](continuous-integration.md#browser-stdlib-job)
 runs the target unfiltered after the SDK is built and uploads everything but
-`objects/` when the job fails. Chrome for Testing 156 caps a sandboxed
-renderer's data segment at 8 GiB on a host with at most 16 GiB of physical
-memory, below the 13 to 14 GiB the `protobuf` image needs during startup, so
-on such a host that image crashes before its first case unless Chromium runs
-with `--enable-features=HigherRendererMemoryLimit`, which doubles the cap; the
-job passes it through a `TITAN_CHROME` wrapper.
+`objects/` when the job fails. It uses Chrome for Testing with the normal
+sandbox and no `HigherRendererMemoryLimit` wrapper. The older Asyncify
+protobuf-startup footprint is not a requirement of current JSPI images.
 
 ### Initialization and fidelity gate
 
@@ -744,7 +741,7 @@ purpose and assertions 2, and runs them through `gate.mjs` under
   disposed three times from one cached factory, with a tick and a collection
   between cycles; and
 * `fidelity_test.titan` imports the real `coroutine.tests` owner, so its
-  browser cases create fibers first, then writes a marker with NUL, `0xFF`,
+  browser cases create coroutines first, then writes a marker with NUL, `0xFF`,
   and invalid UTF-8 bytes to stderr and fails a child case whose name and
   message carry the same bytes. The gate requires status 1 through the
   Titan-owned completion channel, the exact name on the run, failure, and
@@ -1224,7 +1221,8 @@ flags](#object-flags)).
 `trace_option` flags in the normalized compile and link extras and final link
 extras unless `options.purpose` is `baseline`, `minicoro`, or `budget`, as well
 as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
-`NO_` prefix, of `SUPPORT_LONGJMP`, `WASM_LEGACY_EXCEPTIONS`, `ASYNCIFY` and every `ASYNCIFY_*` setting,
+`NO_` prefix, of `SUPPORT_LONGJMP`, `WASM_LEGACY_EXCEPTIONS`, `ASYNCIFY`,
+every `ASYNCIFY_*` setting, `JSPI`, every `JSPI_*` setting,
 `BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
 `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
@@ -1772,11 +1770,11 @@ asserts, as native `--test` keeps its own (D25):
 * **No Binaryen inlining.** The `test` purpose adds
   `--skip-pass=inlining-optimizing` to `BINARYEN_EXTRA_PASSES`. `--skip-pass`
   is a `wasm-opt` option, not a pass: it disables the named pass wherever it
-  runs, including inside the `-O3` pipeline before `--asyncify`, so its place
-  after `--asyncify` in the argv does not matter. The pipeline's pass is named
-  `inlining-optimizing`; `--skip-pass=inlining` disables nothing. With the
-  skip, `inlining-optimizing` took 3.7e-07 s against 0.010 s without it, and
-  the output differed.
+  runs in the selected optimization pipeline; its position relative to other
+  pass arguments does not matter. The pipeline's pass is named
+  `inlining-optimizing`; `--skip-pass=inlining` disables nothing. An earlier
+  pass-timing control measured 3.7e-07 s with the skip against 0.010 s without
+  it, and the output differed.
 * **No duplicate-function folding (D31).** With only inlining skipped, four
   production test-image rows lost frames: `test_selected_contributor_locations`
   and `test_locations_before_after_yield` (`locations.browser.titan`), and
@@ -1993,7 +1991,7 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    with `browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)` so
    that `x_titan_image`, `x_titan_function_imports`,
    `x_titan_function_ranges`, and `x_titan_function_names` are bound to the
-   final post-Asyncify `.wasm`;
+   final linked `.wasm`;
 6. run `before_commit` (which invalidates the link record);
 7. validate that any existing destination in `{ <stem>.wasm.map, <stem>.wasm,
    <stem>.mjs }` is a regular file (`browser output '<path>' is not a regular
@@ -2047,7 +2045,7 @@ name, and a zero-length argument need not have a valid pointer. The return
 value is admission only, never the program's result: `-1` while another call
 is active or when `titan_browser_entry_allowed()` refuses ([Reentry
 guard](#the-reentry-guard)), `-2` after the one permitted run, and `0` after an
-admitted run. A refusal allocates nothing and switches no fiber.
+admitted run. A refusal allocates nothing and transfers no coroutine context.
 
 An admitted run:
 
@@ -2149,7 +2147,7 @@ system or JavaScript library (such as `-lidbfs.js`) that the static archive
 resolver cannot inventory still links: its flag text remains in `link_flags`
 within `browsertrace.identity` while the CLI marks the native link policy
 uncacheable and withholds the link record and reuse. No timestamps, random
-staging paths, inodes, process IDs, or pre-Asyncify Wasm digests enter the
+staging paths, inodes, process IDs, or intermediate Wasm digests enter the
 hash. `browsertrace.declaration(identity)` then appends:
 
 ```c
@@ -2161,11 +2159,11 @@ const char *titan_browser_trace_identity(void) {
 
 `_titan_browser_trace_identity` is exported in every Titan-entry profile and
 accessed in `titan-browser-trace.js` with a static property lookup
-`wasmExports['titan_browser_trace_identity']` so Emscripten export minification
-preserves it. Calling it returns the Wasm memory address of the 65-byte
-NUL-terminated ASCII string.
+`wasmExports['titan_browser_trace_identity']`; the pinned JSPI linker keeps
+export names stable. Calling it returns the Wasm memory address of the
+65-byte NUL-terminated ASCII string.
 
-After `emcc` finishes linking and running Asyncify/optimization,
+After `emcc` finishes linking and optimization,
 `browsertrace.rewrite(wasm, bytes, identity, origin)` calls
 `staticmetadata.browser_trace_image(wasm, origin)` (which reuses the bounded
 section and LEB128 reader primitives in `staticmetadata.lua`, accepting valid
@@ -2534,8 +2532,8 @@ after `--asyncify` raised the Node mixed ceiling from 318 to 334, removing
 validation. The only post-Asyncify measurement in production removed D18's
 pair: without it the `-O3` mixed ceiling stays at or above 1,200 levels, the
 `.wasm` is 14 KB smaller, the map 33 KB larger, and the maximum 102 locals
-instead of 100 (D34, [why the cleanup is
-load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)).
+instead of 100 (D34; see the [historical instrumentation
+measurements](#historical-instrumentation-measurements)).
 
 ### The regression
 
@@ -2912,7 +2910,7 @@ harness failure.
 **Playwright supervisor (`spec/browser/playwright-run.mjs`).** To run the same
 portable `run(context)` host tests (or a standalone Titan image with `--image`)
 across Playwright-managed `chromium`, `firefox`, and `webkit`
-(`playwright@1.56.1`), `spec/browser/playwright-run.mjs` parses `--engine
+(`playwright@1.64.1`), `spec/browser/playwright-run.mjs` parses `--engine
 chromium|firefox|webkit [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
 [--allow-degraded-trace] [--image] FILE [-- ARG...]` (defaults: `timeout`
 300000 ms, `grace` 1500 ms, `sdk` `<repo>/titan-runtime/browser/`), loads
