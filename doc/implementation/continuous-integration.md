@@ -206,10 +206,12 @@ own Codecov upload. Both jobs begin with the same seven steps
    6.0.13` are idempotent, so a restored installation only re-verifies. The
    step sources `emsdk_env.sh` and requires `emcc --version` to report exactly
    6.0.13.
-2. **Node 24.** The job selects the Node bundled with the pinned emsdk,
-   requires its `--version` to start with `v24.`, and exports it as
-   `TITAN_NODE` and on `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
-   only action runtimes, so it does not select this Node.
+2. **Node 26.** `actions/setup-node@v6` installs Node 26.13.0 independently
+   of emsdk's bundled Node. The job checks that exact version and the unflagged
+   `WebAssembly.promising` and `WebAssembly.Suspending` APIs, then exports its
+   executable as `TITAN_NODE`. Browser commands use that path even after
+   `emsdk_env.sh` changes `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
+   only action runtimes, not the runtime that executes Titan images.
 3. **Chrome for Testing.** `ubicloud/cache@v4` restores the headless shell
    under `ubuntu-24.04-<arch>-chrome-headless-shell-156.0.8078.80-<sha256>-v1`
    (the ZIP digest is part of the cache key so re-pinning cannot restore an
@@ -414,7 +416,7 @@ After step 7, `browser-stdlib` runs:
 ## `browser-playwright` job
 
 `browser-playwright` (`browser traces (${{ matrix.profile }}, ${{
-matrix.engine }}, Playwright 1.56.1)`) runs the multi-engine browser trace gate
+matrix.engine }}, Playwright 1.64.1)`) runs the multi-engine browser trace gate
 on Linux across a six-cell `fail-fast: false` matrix (`profile: [validation,
 production]` × `engine: [chromium, firefox, webkit]`), each on a four-vCPU
 runner with a 60-minute timeout after `build-compiler`:
@@ -429,17 +431,18 @@ runner with a 60-minute timeout after `build-compiler`:
    `TITAN_BUILD_PROFILE=production`).
 2. **Native and browser SDK installation.** Each cell runs `"$PREFIX/bin/luarocks"
    make` with `EMSDK` unset and no `emcc` on `PATH`, restores the cached
-   `.emsdk` (`ubuntu-24.04-<arch>-emsdk-6.0.13-v1`), activates Emscripten 6.0.13
-   and its bundled Node 24 (`TITAN_NODE`), and runs `make lua-browser
-   PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`, asserting
-   `$PREFIX/lib/titan-browser/0.6/titan-browser-trace.js`.
+   `.emsdk` (`ubuntu-24.04-<arch>-emsdk-6.0.13-v1`), activates Emscripten 6.0.13,
+   and separately installs and qualifies Node 26.13.0 as `TITAN_NODE`. It runs
+   `make lua-browser PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`,
+   asserting `$PREFIX/lib/titan-browser/0.6/titan-browser-trace.js`.
 3. **Playwright engine provisioning and supervisor check.** `ubicloud/cache@v4`
    restores `PLAYWRIGHT_BROWSERS_PATH` (`.playwright-browsers`) under
-   `ubuntu-24.04-<arch>-playwright-1.56.1-<engine>-v1`; `npm install --prefix
+   `ubuntu-24.04-<arch>-playwright-1.64.1-<engine>-v1`; `npm install --prefix
    "$TITAN_PLAYWRIGHT_ROOT"` (`out/playwright-tools`) installs
-   `playwright@1.56.1`; `playwright/cli.js install --with-deps
-   "$TITAN_TRACE_ENGINE"` provisions the cell's browser and host libraries; and
-   `TITAN_PLAYWRIGHT_TEST_ENGINES="$TITAN_TRACE_ENGINE" node --test
+   `playwright@1.64.1`, whose engines are Chromium 156.0.8078.4, Firefox 157.0,
+   and WebKit 27.2. `playwright/cli.js install --with-deps
+   "$TITAN_TRACE_ENGINE"` provisions the cell's browser and host libraries;
+   `TITAN_PLAYWRIGHT_TEST_ENGINES="$TITAN_TRACE_ENGINE" "$TITAN_NODE" --test
    spec/browser/playwright-runner.test.mjs` verifies the supervisor against that
    managed engine (`$RUNNER_TEMP/browser-playwright-supervisor.log`).
 4. **Staged trace gate (`assertions-2` and `assertions-0`).** `lua -E

@@ -6241,14 +6241,25 @@ printf '%s\n' "${schedule[@]}"
                 renderer_wrapper_index < renderer_sandbox)
             assert.falsy(browser_stdlib_job:find("--no-sandbox", 1, true))
             assert.falsy(browser_stdlib_job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true))
-            local browser_node = named_step(browser_job,
-                "Select Node 24 from the pinned Emscripten SDK")
-            assert.truthy(browser_node:find('echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"',
-                1, true), browser_node)
-            assert.truthy(browser_node:find("version=$(", 1, true), browser_node)
+            for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job }) do
+                assert.truthy(job:find('TITAN_NODE_VERSION: "26.13.0"', 1, true))
+                local install_node = named_step(job, "Install the pinned Node 26 runtime")
+                assert.truthy(install_node:find("uses: actions/setup-node@v6", 1, true))
+                assert.truthy(install_node:find(
+                    "node-version: ${{ env.TITAN_NODE_VERSION }}", 1, true))
+                local browser_node = named_step(job, "Select and qualify Node 26")
+                for _, contract in ipairs({
+                    'node_bin=$(command -v node)',
+                    'test "$version" = "v$TITAN_NODE_VERSION"',
+                    "WebAssembly.promising", "WebAssembly.Suspending",
+                    'echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"',
+                }) do
+                    assert.truthy(browser_node:find(contract, 1, true), contract)
+                end
+            end
             local browser_gate_index = assert(browser_job:find("gate_specs=(", 1, true))
             local browser_runner_index = assert(browser_job:find(
-                "node --test spec/browser/runner.test.mjs", browser_gate_index, true))
+                '"$TITAN_NODE" --test spec/browser/runner.test.mjs', browser_gate_index, true))
             local browser_upload_index = assert(browser_job:find(
                 "name: browser-toolchain-failure", browser_runner_index, true))
             assert.is_true(browser_gate_index < browser_runner_index and
@@ -6328,7 +6339,7 @@ printf '%s\n' "${schedule[@]}"
                 'spec/fixtures/browser_trace_adapter/filter.c titan-runtime/titan.c',
                 'TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE="$output/lifecycle-$assertions.mjs"',
                 'TITAN_BROWSER_TRACE_FILTER_IMAGE="$output/filter-$assertions.mjs"',
-                'node --test spec/browser/trace-adapter.test.mjs',
+                '"$TITAN_NODE" --test spec/browser/trace-adapter.test.mjs',
                 'spec/browser/playwright-runner.test.mjs',
             }) do
                 assert.truthy(trace_units:find(contract, 1, true),
@@ -6342,7 +6353,7 @@ printf '%s\n' "${schedule[@]}"
                 "timeout-minutes: 60",
                 "profile: [validation, production]",
                 "engine: [chromium, firefox, webkit]",
-                'TITAN_PLAYWRIGHT_VERSION: "1.56.1"',
+                'TITAN_PLAYWRIGHT_VERSION: "1.64.1"',
                 "PLAYWRIGHT_BROWSERS_PATH:",
                 "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
                 "playwright-${{ env.TITAN_PLAYWRIGHT_VERSION }}-${{ matrix.engine }}-v1",

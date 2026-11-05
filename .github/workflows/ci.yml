@@ -265,7 +265,7 @@ jobs:
   # loader/runner/trace suites; SDK and stdlib integrations run in parallel.
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   browser-toolchain:
-    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 24)
+    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 26)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-4
@@ -282,6 +282,7 @@ jobs:
       # pin and the installation root must not use that prefix.
       TITAN_EMSDK_VERSION: "6.0.13"
       TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
+      TITAN_NODE_VERSION: "26.13.0"
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Chrome for Testing 156.0.8078.80, the version verified for #329. The
@@ -338,22 +339,20 @@ jobs:
             sed -n 's/.*) \([0-9][0-9.]*\).*/\1/p' | head -n 1)
           test "$installed" = "$TITAN_EMSDK_VERSION"
 
-      # FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 only affects action runtimes, so the
-      # job selects Node 24 explicitly and states the major it will use.
-      - name: Select Node 24 from the pinned Emscripten SDK
+      # The Emscripten SDK still bundles Node 24 for its own tools. Browser
+      # images use the separately pinned, unflagged JSPI runtime.
+      - name: Install the pinned Node 26 runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.TITAN_NODE_VERSION }}
+
+      - name: Select and qualify Node 26
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          node_bin=$(find "$TITAN_EMSDK_ROOT/node" -maxdepth 3 -type f \
-            -name node -perm -u+x | sort | head -n 1)
-          test -n "$node_bin" || {
-            echo "no bundled Node under $TITAN_EMSDK_ROOT/node" >&2; exit 1; }
+          node_bin=$(command -v node)
           version=$("$node_bin" --version)
-          case $version in
-            v24.*) ;;
-            *) echo "$node_bin reports $version; expected Node 24" >&2; exit 1 ;;
-          esac
+          test "$version" = "v$TITAN_NODE_VERSION"
+          "$node_bin" -e 'if (typeof WebAssembly.promising !== "function" || typeof WebAssembly.Suspending !== "function") throw new Error("Node requires unflagged JSPI")'
           echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"
-          echo "$(dirname "$node_bin")" >> "$GITHUB_PATH"
           "$node_bin" --version
 
       - name: Restore the pinned Chrome for Testing headless shell
@@ -642,7 +641,7 @@ jobs:
           TITAN_BROWSER_LOADER_IMAGE: ${{ github.workspace }}/out/browser/loader/assertions-2/fidelity.mjs
         run: |
           set -euo pipefail
-          node --test spec/browser/runner.test.mjs \
+          "$TITAN_NODE" --test spec/browser/runner.test.mjs \
             2>&1 | tee "$RUNNER_TEMP/browser-runner.log"
 
       - name: Run the browser trace adapter and supervisor units
@@ -668,8 +667,8 @@ jobs:
               -o "$output/lifecycle-$assertions.mjs"
             emcc "${trace_flags[@]}" -sASSERTIONS="$assertions" \
               -Wall -Wno-unused-function -DTITAN_TARGET_BROWSER=1 \
-              -DTITAN_COROUTINE_STACK_SIZE=262144 -DMCO_ASYNCFY_STACK_SIZE=65536 \
-              $lua_defines -sSUPPORT_LONGJMP=emscripten \
+              -DTITAN_COROUTINE_STACK_SIZE=262144 \
+              $lua_defines -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1 \
               -sEXPORTED_FUNCTIONS='["_trace_filter_case","_trace_filter_status","_titan_browser_trace_identity"]' \
               -sEXPORTED_RUNTIME_METHODS='["HEAPU8"]' \
               -I"$PREFIX/lib/browser/include" -Ititan-runtime -I"$PREFIX/include" \
@@ -677,7 +676,7 @@ jobs:
               "$PREFIX/lib/browser/liblua.a" -o "$output/filter-$assertions.mjs"
             TITAN_BROWSER_TRACE_LIFECYCLE_IMAGE="$output/lifecycle-$assertions.mjs" \
               TITAN_BROWSER_TRACE_FILTER_IMAGE="$output/filter-$assertions.mjs" \
-              node --test spec/browser/trace-adapter.test.mjs \
+              "$TITAN_NODE" --test spec/browser/trace-adapter.test.mjs \
               spec/browser/playwright-runner.test.mjs \
               2>&1 | tee -a "$RUNNER_TEMP/browser-trace-units.log"
           done
@@ -696,7 +695,7 @@ jobs:
             --root "$output" --js-test "$output/trace.test.mjs" \
             2>&1 | tee "$RUNNER_TEMP/browser-trace-node.log"
           TITAN_TRACE_OUTPUT="$output" TITAN_TRACE_RUNNER="$runner" \
-            node --input-type=module <<'JS' \
+            "$TITAN_NODE" --input-type=module <<'JS' \
             2>&1 | tee "$RUNNER_TEMP/browser-trace-node-policy.log"
           import {readFileSync} from 'node:fs';
           import {spawnSync} from 'node:child_process';
@@ -732,7 +731,7 @@ jobs:
   # above without sharing a mutable prefix or depending on that sibling job.
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   browser-stdlib:
-    name: browser SDK and core stdlib (ubuntu-24.04, emsdk 6.0.13, Node 24)
+    name: browser SDK and core stdlib (ubuntu-24.04, emsdk 6.0.13, Node 26)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-4
@@ -749,6 +748,7 @@ jobs:
       # pin and the installation root must not use that prefix.
       TITAN_EMSDK_VERSION: "6.0.13"
       TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
+      TITAN_NODE_VERSION: "26.13.0"
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Chrome for Testing 156.0.8078.80, the version verified for #329. The
@@ -805,22 +805,20 @@ jobs:
             sed -n 's/.*) \([0-9][0-9.]*\).*/\1/p' | head -n 1)
           test "$installed" = "$TITAN_EMSDK_VERSION"
 
-      # FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 only affects action runtimes, so the
-      # job selects Node 24 explicitly and states the major it will use.
-      - name: Select Node 24 from the pinned Emscripten SDK
+      # The Emscripten SDK still bundles Node 24 for its own tools. Browser
+      # images use the separately pinned, unflagged JSPI runtime.
+      - name: Install the pinned Node 26 runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.TITAN_NODE_VERSION }}
+
+      - name: Select and qualify Node 26
         run: |
-          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          node_bin=$(find "$TITAN_EMSDK_ROOT/node" -maxdepth 3 -type f \
-            -name node -perm -u+x | sort | head -n 1)
-          test -n "$node_bin" || {
-            echo "no bundled Node under $TITAN_EMSDK_ROOT/node" >&2; exit 1; }
+          node_bin=$(command -v node)
           version=$("$node_bin" --version)
-          case $version in
-            v24.*) ;;
-            *) echo "$node_bin reports $version; expected Node 24" >&2; exit 1 ;;
-          esac
+          test "$version" = "v$TITAN_NODE_VERSION"
+          "$node_bin" -e 'if (typeof WebAssembly.promising !== "function" || typeof WebAssembly.Suspending !== "function") throw new Error("Node requires unflagged JSPI")'
           echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"
-          echo "$(dirname "$node_bin")" >> "$GITHUB_PATH"
           "$node_bin" --version
 
       - name: Restore the pinned Chrome for Testing headless shell
@@ -1038,7 +1036,7 @@ jobs:
   # Each matrix cell owns its prefix, browser installation and output tree;
   # assertions 2 and 0 are both built by the portable trace-gate builder.
   browser-playwright:
-    name: browser traces (${{ matrix.profile }}, ${{ matrix.engine }}, Playwright 1.56.1)
+    name: browser traces (${{ matrix.profile }}, ${{ matrix.engine }}, Playwright 1.64.1)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-4
@@ -1059,10 +1057,11 @@ jobs:
       LUA_CC: gcc-14
       TITAN_EMSDK_VERSION: "6.0.13"
       TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
+      TITAN_NODE_VERSION: "26.13.0"
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       TITAN_ROOT: ${{ github.workspace }}/.lua
-      TITAN_PLAYWRIGHT_VERSION: "1.56.1"
+      TITAN_PLAYWRIGHT_VERSION: "1.64.1"
       TITAN_PLAYWRIGHT_ROOT: ${{ github.workspace }}/out/playwright-tools
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
       TITAN_TRACE_ENGINE: ${{ matrix.engine }}
@@ -1126,7 +1125,7 @@ jobs:
           restore-keys: |
             ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
 
-      - name: Install Emscripten and select its Node 24
+      - name: Install Emscripten
         run: |
           set -euo pipefail
           if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
@@ -1138,14 +1137,19 @@ jobs:
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
           emcc --version
           emcc --version | grep -q " $TITAN_EMSDK_VERSION "
-          node_bin="$EMSDK_NODE"
-          test -x "$node_bin"
-          case $("$node_bin" --version) in
-            v24.*) ;;
-            *) echo "pinned emsdk must supply Node 24" >&2; exit 1 ;;
-          esac
+
+      - name: Install the pinned Node 26 runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.TITAN_NODE_VERSION }}
+
+      - name: Select and qualify Node 26
+        run: |
+          node_bin=$(command -v node)
+          version=$("$node_bin" --version)
+          test "$version" = "v$TITAN_NODE_VERSION"
+          "$node_bin" -e 'if (typeof WebAssembly.promising !== "function" || typeof WebAssembly.Suspending !== "function") throw new Error("Node requires unflagged JSPI")'
           echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"
-          echo "${node_bin%/node}" >> "$GITHUB_PATH"
           "$node_bin" --version
 
       - name: Install browser Lua and SDK
@@ -1167,14 +1171,14 @@ jobs:
           npm install --prefix "$TITAN_PLAYWRIGHT_ROOT" --no-save \
             --package-lock=false --no-audit --no-fund \
             "playwright@$TITAN_PLAYWRIGHT_VERSION"
-          node "$TITAN_PLAYWRIGHT_ROOT/node_modules/playwright/cli.js" \
+          "$TITAN_NODE" "$TITAN_PLAYWRIGHT_ROOT/node_modules/playwright/cli.js" \
             install --with-deps "$TITAN_TRACE_ENGINE"
 
       - name: Exercise the Playwright supervisor on this managed engine
         run: |
           set -euo pipefail
           TITAN_PLAYWRIGHT_TEST_ENGINES="$TITAN_TRACE_ENGINE" \
-            node --test spec/browser/playwright-runner.test.mjs \
+            "$TITAN_NODE" --test spec/browser/playwright-runner.test.mjs \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-supervisor.log"
 
       - name: Build the portable trace gate for both assertion modes
@@ -1187,7 +1191,7 @@ jobs:
       - name: Run full Chromium and Firefox or reduced-fidelity WebKit traces
         run: |
           set -euo pipefail
-          node spec/browser/playwright-run.mjs \
+          "$TITAN_NODE" spec/browser/playwright-run.mjs \
             --engine "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 \
             --sdk "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT" \
             "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
@@ -1196,7 +1200,7 @@ jobs:
       - name: Require explicit degraded-mode opt-in and preserve original failures
         run: |
           set -euo pipefail
-          node --input-type=module <<'JS' \
+          "$TITAN_NODE" --input-type=module <<'JS' \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-policy.log"
           import {readFileSync} from 'node:fs';
           import {spawnSync} from 'node:child_process';
@@ -1214,7 +1218,7 @@ jobs:
               throw new Error(`${row.name}: degraded trace was not a harness failure (${result.status})`);
           }
           JS
-          node spec/browser/playwright-run.mjs \
+          "$TITAN_NODE" spec/browser/playwright-run.mjs \
             --engine "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 \
             --allow-degraded-trace --sdk "$PREFIX/lib/titan-browser/0.6" \
             --root "$TITAN_TRACE_OUTPUT" \
@@ -1248,7 +1252,7 @@ jobs:
             --root "$TITAN_TRACE_OUTPUT" --js-test "$TITAN_TRACE_OUTPUT/trace.test.mjs" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-trace.log"
           TITAN_TRACE_OUTPUT="$TITAN_TRACE_OUTPUT" TITAN_TRACE_RUNNER="$runner" \
-            node --input-type=module <<'JS' \
+            "$TITAN_NODE" --input-type=module <<'JS' \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-node-policy.log"
           import {readFileSync} from 'node:fs';
           import {spawnSync} from 'node:child_process';
