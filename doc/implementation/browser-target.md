@@ -847,14 +847,13 @@ in this order; the first failure is reported:
     cross-checks the baseline features against the actual toolchain.
 
 The Lua archive itself is hash-verified, not feature-compared. Objects keep
-their exact canonical `target_features` string in `fingerprint.features`,
-including the standalone `-shared-mem` token that LLVM's
-`WebAssemblyLowerEmscriptenEHSjLj` pass records in each translation unit that
-calls `setjmp` or `longjmp`, such as Lua's `ldo.o`, a Titan module with a
-`catch`, or authored C that uses them. Fingerprint comparison ignores that one
-token, and only it: two feature lists match when they are equal, or when both
-are canonical and become equal after dropping the standalone `-shared-mem`
-token from each, provided neither carries any other `shared-mem` or `atomics`
+their exact canonical `target_features` string in `fingerprint.features`.
+Wasm-SJLJ objects share the `+exception-handling` baseline even when only some
+translation units use `setjmp`. The older JavaScript-SJLJ lowering additionally
+marked such units with standalone `-shared-mem`. The general object reader
+still ignores that token, and only it, for comparison: both feature lists must
+be canonical and become equal after dropping the standalone token, and neither
+may carry any other `shared-mem` or `atomics`
 entry (`+shared-mem`, `=shared-mem`, `+atomics`, `-atomics`, or `=atomics`).
 Every other feature, including a lookalike name such as
 `-shared-mem+atomics`, still matches exactly

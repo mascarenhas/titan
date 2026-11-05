@@ -344,7 +344,7 @@ EOF
 	done <"$tmp/record_body"
 	[ "$rec_count" -eq 10 ] || return 1
 
-	expected_features="+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
+	expected_features="+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
 	[ "$rec_fork_revision" = "$revision" ] || return 1
 	[ "$rec_emscripten_version" = "$cfg_emscripten" ] || return 1
 	[ "$rec_target" = "$cfg_target" ] || return 1

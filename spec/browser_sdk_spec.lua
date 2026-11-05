@@ -817,7 +817,7 @@ end
         contains(run_test.output, "[  PASSED  ] 1 test.")
 
         -- 3b. Publish a browser library from a catch-bearing Titan module plus a setjmp C helper
-        -- alongside non-setjmp counterparts, verifying raw per-object -shared-mem retention and archive compatibility.
+        -- alongside non-setjmp counterparts: Wasm SJLJ uses the same EH fingerprint without JS-SJLJ's -shared-mem marker.
         local sjlj_src = paths.join(root, "sjlj-src")
         local sjlj_out = paths.join(root, "sjlj-out")
         files.mkdir(paths.join(sjlj_src, "sjlj_pkg"))
@@ -897,9 +897,9 @@ end
         local plain_helper_obj = assert(staticmetadata.classify_object(
             assert(strategy:read_file(plain_c_obj)), "plain_helper.o", expected_fp))
 
-        assert.equal(fixtures.features .. " -shared-mem", catcher_obj.fingerprint.features)
+        assert.equal(fixtures.features, catcher_obj.fingerprint.features)
         assert.equal(fixtures.features, plain_mod_obj.fingerprint.features)
-        assert.equal(fixtures.features .. " -shared-mem", sjlj_helper_obj.fingerprint.features)
+        assert.equal(fixtures.features, sjlj_helper_obj.fingerprint.features)
         assert.equal(fixtures.features, plain_helper_obj.fingerprint.features)
 
         local sjlj_archive_path = paths.join(sjlj_out, "sjlj_pkg.a")

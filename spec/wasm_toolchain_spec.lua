@@ -263,7 +263,7 @@ extern int foo __asm__("foo bar");
 int *p = &foo;
 ]], "wb"))
         run_tool(strategy, info.tools.clang, {
-            "--target=wasm32-unknown-emscripten", "-x", "c",
+            "--target=wasm32-unknown-emscripten", "-mexception-handling", "-x", "c",
             "-c", spaced_c, "-o", spaced_obj,
         })
         local spaced_bytes = assert(util.get_file_contents(spaced_obj, "rb"))
