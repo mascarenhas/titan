@@ -693,8 +693,8 @@ function initval(typ --[[:table]])
 end
 
 -- C declarations for values and temporaries. Recovery homes are selected by
--- _local_cvardecl: ordinary values use spill/reload storage, while address-
--- exposed non-GC scalars use the same volatile object throughout the call.
+-- _local_cvardecl: address-exposed locals retain one volatile C object, while
+-- other values use their existing spill/reload storage.
 function cvardecl(ctx, typ, name, quals)
     if types.is_direct_c(typ) then
         local decl_type = typ

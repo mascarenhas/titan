@@ -1,0 +1,325 @@
+foreign import "spec/fixtures/error_handling/aggregate_recovery.h"
+
+local function check(condition: boolean, message: string)
+  if not condition then raise message end
+end
+
+local function acquire_then_raise(out: foreign *recovery_resource)
+  ffi.recovery_acquire(out)
+  raise "resource acquired"
+end
+
+local function resource_case()
+  defer ffi.recovery_finish()
+  local resource = foreign recovery_resource.new()
+  local caught = false
+  do
+    acquire_then_raise(resource)
+  catch
+    caught = true
+    check(resource.allocation ~= nil and resource.marker == 37,
+      "raising callee lost the acquired native resource")
+    check(ffi.recovery_dispose(resource) == 1, "resource was not disposed exactly once")
+  end
+  check(caught, "resource callee did not raise")
+end
+
+local function pair_checked(out: foreign *recovery_pair, bad: integer): foreign unsigned char
+  ffi.recovery_pair_write(out)
+  return bad
+end
+
+local function pair_case(): integer
+  local pair = foreign recovery_pair.new()
+  do
+    pair_checked(pair, -1)
+    return -1
+  catch
+    return pair.first as integer + pair.last as integer
+  end
+  return -2
+end
+
+local function pair_parameter(pair: foreign recovery_pair): integer
+  do
+    pair_checked(pair, -1)
+    return -1
+  catch
+    return pair.first as integer + pair.last as integer
+  end
+  return -2
+end
+
+local function union_then_raise(out: foreign *recovery_cell)
+  ffi.recovery_cell_write(out)
+  raise "union written"
+end
+
+local function union_case(): integer
+  local cell = foreign recovery_cell.new()
+  do
+    union_then_raise(cell as foreign *recovery_cell)
+  catch
+    return cell.count as integer
+  end
+  return -1
+end
+
+local function array_checked(out: foreign *int, bad: integer): foreign unsigned char
+  ffi.recovery_array_write(out)
+  return bad
+end
+
+local function array_case(): integer
+  local values = foreign int.new_array(3)
+  do
+    array_checked(values, -1)
+    return -1
+  catch
+    return values[0] as integer + values[1] as integer + values[2] as integer
+  end
+  return -2
+end
+
+local function matrix_then_raise(out: foreign *recovery_row)
+  ffi.recovery_matrix_write(out)
+  raise "matrix written"
+end
+
+local function matrix_case(): integer
+  local matrix = foreign recovery_row.new_array(2)
+  do
+    matrix_then_raise(matrix)
+  catch
+    return matrix[0][1] as integer + matrix[1][0] as integer
+  end
+  return -1
+end
+
+local function row_then_raise(out: foreign *int)
+  out[0] = 3
+  out[1] = 5
+  raise "row written"
+end
+
+local function subarray_case(): integer
+  local holder = foreign recovery_holder.new()
+  local matrix = foreign recovery_row.new_array(2)
+  do
+    ffi.recovery_array_error(L, holder.items)
+  catch
+    check(holder.items[0] == 3 and holder.items[2] == 13,
+      "foreign array-field decay lost its owning aggregate")
+  end
+  do
+    array_checked(holder.items, -1)
+  catch
+    check(holder.items[1] == 5, "Titan array-field decay lost its owning aggregate")
+  end
+  do
+    -- A nested array element decays without taking the whole matrix address.
+    row_then_raise(matrix[0] as foreign *int)
+  catch
+    return holder.items[1] as integer + matrix[0][1] as integer
+  end
+  return -1
+end
+
+local function fam_case(): integer
+  local packet = foreign recovery_packet.new(2)
+  do
+    ffi.recovery_packet_error(L, packet)
+  catch
+    return packet.tag as integer + packet.items[0] as integer
+      + packet.items[1] as integer + #packet.items
+  end
+  return -1
+end
+
+local function value_then_raise(out: foreign *TValue, fresh: foreign int)
+  ffi.recovery_gc_store_value(L, out, fresh)
+  raise "Titan GC value written"
+end
+
+local function pointer_then_raise(out: foreign *(*Udata), fresh: foreign int)
+  ffi.recovery_gc_store_pointer(L, out, fresh)
+  raise "Titan GC pointer written"
+end
+
+local function value_case(fresh: integer, ordinary: boolean, marked: boolean)
+  ffi.recovery_gc_begin(L)
+  local out: foreign TValue = nil
+  ffi.recovery_gc_old_value(L, out)
+  local caught = false
+  do
+    if marked then
+      defer ffi.recovery_gc_note_finally()
+      if ordinary then value_then_raise(out, fresh)
+      else ffi.recovery_gc_value_error(L, out, fresh) end
+    else
+      if ordinary then value_then_raise(out, fresh)
+      else ffi.recovery_gc_value_error(L, out, fresh) end
+    end
+  catch
+    caught = true
+    check(ffi.recovery_gc_closed() == 1, "TValue did not force full GC inside close")
+    check(ffi.recovery_gc_old_collected() == 1, "TValue retained its obsolete GC root during close")
+    if fresh == 0 then
+      check(ffi.recovery_gc_is_nil(out) ~= 0, "TValue clearing was rolled back")
+    else
+      check(ffi.recovery_gc_new_collected() == 0, "fresh TValue was collected during close")
+      check(ffi.recovery_gc_value_kind(out) == 2, "TValue lost the freshly stored object")
+    end
+  end
+  check(caught, "TValue callee did not raise")
+end
+
+local function pointer_case(fresh: integer, ordinary: boolean, marked: boolean)
+  ffi.recovery_gc_begin(L)
+  local out: foreign *Udata
+  ffi.recovery_gc_old_pointer(L, out)
+  local caught = false
+  do
+    if marked then
+      defer ffi.recovery_gc_note_finally()
+      if ordinary then pointer_then_raise(out, fresh)
+      else ffi.recovery_gc_pointer_error(L, out, fresh) end
+    else
+      if ordinary then pointer_then_raise(out, fresh)
+      else ffi.recovery_gc_pointer_error(L, out, fresh) end
+    end
+  catch
+    caught = true
+    check(ffi.recovery_gc_closed() == 1, "Udata pointer did not force full GC inside close")
+    check(ffi.recovery_gc_old_collected() == 1, "Udata pointer retained its obsolete GC root during close")
+    if fresh == 0 then
+      check(out == nil, "Udata pointer clearing was rolled back")
+    else
+      check(ffi.recovery_gc_new_collected() == 0, "fresh Udata pointer was collected during close")
+      check(ffi.recovery_gc_pointer_kind(out) == 2, "Udata pointer lost the freshly stored object")
+    end
+  end
+  check(caught, "Udata pointer callee did not raise")
+end
+
+local function value_parameter(out: foreign TValue)
+  do
+    ffi.recovery_gc_value_error(L, out, 1)
+  catch
+    check(ffi.recovery_gc_new_collected() == 0, "TValue parameter lost its root before close")
+    check(ffi.recovery_gc_value_kind(out) == 2, "TValue parameter restored its prior bytes")
+  end
+end
+
+local function later_gc_declaration()
+  ffi.recovery_gc_begin(L)
+  defer ffi.recovery_gc_note_finally()
+  do
+    ffi.recovery_gc_empty_error(L)
+  catch
+  end
+  -- The defer tail predeclares this home before the earlier error landing.
+  local later: foreign TValue = nil
+  do
+    value_then_raise(later, 1)
+  catch
+    check(ffi.recovery_gc_closed() == 2, "predeclared GC home missed its close boundaries")
+    check(ffi.recovery_gc_new_collected() == 0, "later GC declaration was not rooted before close")
+    check(ffi.recovery_gc_value_kind(later) == 2, "later GC declaration lost its written value")
+  end
+end
+
+local function write_value_then_return(out: foreign *TValue)
+  ffi.recovery_gc_old_value(L, out)
+end
+
+local function write_pointer_then_return(out: foreign *(*Udata))
+  ffi.recovery_gc_old_pointer(L, out)
+end
+
+local function normal_gc_commits()
+  ffi.recovery_gc_begin(L)
+  local item: foreign TValue = nil
+  local pointer: foreign *Udata
+  do
+    write_value_then_return(item)
+    write_pointer_then_return(pointer)
+    ffi.recovery_gc_collect(L)
+    check(ffi.recovery_gc_finalized_count(1) == 0,
+      "normally returning Titan GC writer did not publish its roots")
+    raise "normal GC commits"
+  catch
+    check(error == "normal GC commits", "normal GC commit failed before its recovery check")
+    check(ffi.recovery_gc_value_kind(item) == 1
+      and ffi.recovery_gc_pointer_kind(pointer) == 1,
+      "normally returning Titan GC writer lost its values")
+  end
+end
+
+local function scalars_then_raise(number: foreign *long double,
+                                 code: foreign *recovery_code,
+                                 pointer: foreign *(*void))
+  ffi.recovery_scalars_write(number, code, pointer)
+  raise "scalar C storage written"
+end
+
+local function scalar_kinds()
+  local number: foreign long double = 1.5
+  local code = ffi.RECOVERY_INITIAL
+  local pointer: foreign *void
+  local caught = false
+  do
+    scalars_then_raise(number, code, pointer)
+  catch
+    caught = true
+    check(number == 4.5 and code == ffi.RECOVERY_WRITTEN and pointer ~= nil,
+      "floating, enum, or pointer recovery home lost its write")
+  end
+  check(caught, "scalar C callee did not raise")
+end
+
+function main(_args: {string}): integer
+  resource_case()
+  scalar_kinds()
+  normal_gc_commits()
+  check(pair_case() == 18, "checked return lost a struct write")
+  local pair = foreign recovery_pair.new()
+  check(pair_parameter(pair) == 18, "struct parameter lost its address write")
+  local pair_lambda = function(item: foreign recovery_pair): integer
+    do
+      pair_checked(item, -1)
+    catch
+      return item.first as integer + item.last as integer
+    end
+    return -1
+  end
+  check(pair_lambda(pair) == 18, "struct lambda parameter lost its address write")
+  check(union_case() == 19, "union local lost its address write")
+  check(array_case() == 21, "fixed array lost an inlined write")
+  check(matrix_case() == 40, "nested array typedef lost its address write")
+  check(subarray_case() == 10, "subarray decay lost its root write")
+  check(fam_case() == 99, "FAM backing lost its full-extent write")
+  for fresh = 0, 1 do
+    for _, ordinary in {false, true} do
+      for _, marked in {false, true} do
+        value_case(fresh, ordinary, marked)
+        pointer_case(fresh, ordinary, marked)
+      end
+    end
+  end
+  ffi.recovery_gc_begin(L)
+  value_parameter(nil)
+  ffi.recovery_gc_begin(L)
+  local pointer_lambda = function(out: foreign *Udata)
+    do
+      ffi.recovery_gc_pointer_error(L, out, 1)
+    catch
+      check(ffi.recovery_gc_new_collected() == 0, "GC lambda parameter was not rooted before close")
+      check(ffi.recovery_gc_pointer_kind(out) == 2, "GC lambda parameter lost its address write")
+    end
+  end
+  pointer_lambda(nil)
+  later_gc_declaration()
+  ffi.printf("AGGREGATE-RECOVERY OK\n")
+  return 0
+end

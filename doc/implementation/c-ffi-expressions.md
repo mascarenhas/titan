@@ -665,54 +665,57 @@ address-exposed scalars are documented in
 [setjmp-sensitive local/parameter spills](error-handling.md#setjmp-sensitive-localparameter-spills).
 This section covers the C-storage specifics.
 
-The write analysis traces C field and index lvalues to their root declaration,
-consumes `_c_mutated_decls` from mutable foreign calls, and adds
-`coder._titan_call_aggregate_out_decls` for ordinary Titan calls: every
-automatic aggregate or fixed array whose contextual mutable address (implicit
-or written `as` address cast, or decay to a non-const pointer parameter) is
-passed directly as an argument. A marked non-GC aggregate or fixed array gets
-a volatile byte spill (`spill_decl_init`/`spill_decl_zero` in
-`coder/flow.lua`):
+The write analysis traces C field and index lvalues to their inline root
+declaration. It consumes `_c_mutated_decls` from foreign calls, including
+direct, nested and field-array decay, and
+`coder._titan_call_mutable_out_decls` from ordinary Titan calls. A tracked
+mutable address counts as a possible in-call write even if the callee raises.
+Const and captured bindings retain their existing mutable-address rejection.
 
-```c
-unsigned char volatile _spill_local_x[sizeof(_local_x)];
-```
+A recovery-sensitive address-exposed declaration uses its actual volatile C
+object, with the same declaration escape barrier as scalar homes. Structs and
+unions keep their exact layout. Fixed and nested arrays remain real arrays,
+including typedef extents; only true array parameters undergo C's parameter
+adjustment. An automatic FAM qualifies its aligned union backing, covering the
+complete extended extent. Call lowering casts away only this implementation
+qualifier from the checked outgoing pointer type. It adds no allocation,
+boxing, aggregate snapshot or cleanup forwarding shim.
 
-`coder._aggregate_spill_copy` copies the object representation with explicit
-byte loops, preserving volatile accesses rather than casting volatility away
-through `memcpy`. It commits:
+The live object is authoritative on both normal and nonlocal exits. A raising
+callee's completed writes are not rolled back. This replaces the former
+aggregate policy that committed bytes only after a normal call return and
+restored the previous snapshot on error.
 
-- after zero initialization;
-- after whole-object, field, and element writes;
-- after a mutable foreign call returns normally;
-- after an ordinary Titan call that received its mutable address returns
-  normally (`codecall` in `coder/calls.lua`). A call that passes no tracked
-  aggregate address emits no commit.
+Exact `TValue` and `Udata *` are GC-bearing direct-C values rather than ordinary
+PODs. Their C homes are stable too, while their existing Lua slots remain the
+traced owners. Normal calls publish updated roots; every error landing commits
+the current home **before** `luaD_closeprotected`, `titan_unwind_close` or an
+unwind guard can run a close/finalizer/collector. These commits cannot allocate.
+See [mutable GC out-parameters](values-and-gc.md#mutable-gc-out-parameters).
+Automatic aggregates and arrays still reject embedded GC-bearing storage;
+this change does not introduce a new untraced aggregate representation.
 
-Recovery reloads the last committed bytes before Titan reads the object. An
-automatic FAM's `_c_backing_storage` supplies the address and byte extent of
-the complete extended backing.
+Non-address-exposed automatic aggregates retain volatile byte spills.
+`coder._aggregate_spill_copy` commits their object representation after
+completed direct writes and restores it on recovery. An automatic FAM's
+`_c_backing_storage` supplies the address and full extended byte extent.
 
 Boundaries of the guarantee:
 
-- A call that mutates an aggregate and then exits nonlocally commits no partial
-  bytes.
-- Mutation through an untracked raw alias, or asynchronously from C, is outside
-  the guarantee.
-- Storage reached only through a pointer local is never spilled or restored:
-  the walk stops at the first pointer, so reads after recovery observe current
-  memory. Code that lets C commit state during a protected region (for example a
-  native registrar writing a wait cell) therefore holds that cell as automatic
-  storage plus a pointer local instead of rolling its bytes back.
-- Address escape alone does not exempt a non-volatile automatic object from
-  ISO C's `setjmp` rule.
-- An `automatic_array_borrow` declaration preserves only its pointer value
-  under the scalar rules (an ordinary scalar spill, or the volatile home when
-  its mutable address is exposed); its backing bytes are never snapshotted.
-  Writes through the pointer stay in the live backing, and capturing the
-  pointer does not extend the backing's lifetime.
-- Foreign function bodies have no spill protocol, because they cannot
-  establish a Titan recovery boundary.
+- Raw aliases whose target Titan does not track, and asynchronous C writes,
+  remain outside the synchronous mutable-out analysis. Foreign callers and
+  callees retain their lifetime, rooting and ABI obligations.
+- Pointer/owned dereferences stop inline-root tracking. GC-owned nominal
+  fields and externally owned memory are not automatic byte-spill storage.
+- An `automatic_array_borrow` declaration preserves its pointer value, using a
+  canonical home if that pointer object's mutable address is exposed. Its
+  backing bytes are never snapshotted, and capturing the pointer does not
+  extend their block lifetime.
+- Raw foreign function bodies cannot establish Titan recovery boundaries and
+  do not gain a spill protocol.
+- The supported GCC/Clang qualifier and optimizer contract, including its
+  ISO-C caveat, is described in
+  [error handling](error-handling.md#setjmp-sensitive-localparameter-spills).
 
 ## C operator traits
 

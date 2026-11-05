@@ -813,12 +813,12 @@ are true:
 * it is assigned in a protected body whose error path can later read it from a
   catch, finally, or handled post-try path; or it is assigned in a catch that
   has its own protected boundary and its finally can read it. A contextual
-  mutable C-address conversion of a scalar counts as a possible write, including
-  for an ordinary Titan call that can raise.
+  mutable C-address conversion counts as a possible write, including an
+  ordinary Titan call that can raise and direct mutable array decay.
 
-Marked GC-typed Decls use their existing reserved Lua stack slots as the stable
-storage. Assignments keep the slot current, and protected recovery reloads the
-C auto from the slot after `_base` and the reserved top have been restored.
+GC-typed Decls without a mutable C address use their reserved Lua slots as
+stable recovery storage. Assignments keep the slot current, and recovery
+reloads the C auto after `_base` and the reserved top have been restored.
 Lua's GC is non-moving, so pointers to GC objects remain valid; only pointers
 to Lua stack locations are recomputed from saved offsets such as `_base_off`.
 
@@ -834,11 +834,11 @@ volatile lua_Integer _spill_local_n_1;
 reloads the C auto from it in the recovery arm before catch, finally, or
 post-try code can read it. `push_spillscope`/`pop_spillscope`
 (`coder/statements.lua`) track lexical spill scopes, so a recovery boundary
-reloads only spills whose Decls are currently in C scope. C aggregates use byte
-spills; see
+reloads only spills whose Decls are currently in C scope. Non-address-exposed
+C aggregates keep byte spills; see
 [longjmp-safe aggregate spills](c-ffi-expressions.md#longjmp-safe-aggregate-spills).
 
-A non-GC scalar whose **mutable** C address is taken anywhere in the function
+An eligible direct-C local or parameter whose **mutable** address is taken
 instead uses **one genuinely volatile automatic object** as its canonical
 recovery home, plus a compiler escape barrier at its declaration:
 
@@ -848,13 +848,27 @@ __asm__ __volatile__("" : : "r"(&(_local_raw_1)) : "memory");
 ```
 
 `coder._decl_volatile_home` selects this home for a marked, address-taken,
-unboxed, non-GC, non-aggregate Decl, including one marked by an earlier
-protected region. `coder._local_cvardecl` applies the qualifier to locals and
-parameters (including lambda parameters); no second spill or reload is emitted.
-The callee receives the address of that very object. The top-level qualifier is
-removed from the outgoing address type, not from the object; native signatures
-and ABI are unchanged. `spill_decl_init` and `spill_decl_zero` emit the escape
-barrier for every volatile home, including parameters and predeclared locals.
+unboxed direct-C Decl: integers, floating types, enums, pointers, structs,
+unions, fixed arrays and automatic FAM backing, including typedef spellings.
+`coder._local_cvardecl` qualifies locals and parameters, including lambda
+parameters. Automatic arrays retain their real extent rather than undergoing
+parameter adjustment; FAM storage qualifies its aligned backing union. There
+is no second byte snapshot or recovery reload. The outgoing pointer type
+removes the implementation's top-level qualifier without changing the native
+signature or ABI. `spill_decl_init` and `spill_decl_zero` emit the declaration
+escape barrier.
+
+Exact Lua `TValue` and `Udata *` out-parameters additionally retain their
+existing traced Lua slots. A normal return publishes their current values
+immediately. Every longjmp landing publishes the volatile C homes into those
+slots **before** closing Lua frames, running `__close` or entering an unwind
+helper that can collect. The publication restores the stack base and uses
+nonallocating `setslot` stores; it never reloads an older root into the home.
+This applies to the initial landing, the re-armed close landing and the unwind
+finally guard. Defer-tail predeclarations zero these C homes and reserve their
+root slots before an earlier landing can visit them. Foreign writers retain
+their existing obligation to root fresh GC objects through the handoff; see
+[mutable GC out-parameters](values-and-gc.md#mutable-gc-out-parameters).
 
 Rules for changing this code:
 
@@ -877,21 +891,24 @@ Rules for changing this code:
   The default Lua build has no LTO IR, so `lua_error` and its nonlocal exit stay
   opaque. Whole-program LTO that exposes Lua's error machinery, or new optimizer
   behavior, requires requalifying this design.
-* **Cost and scope.** The barrier emits no instruction but is a compiler memory
-  barrier once per declaration (including each loop iteration that redeclares
-  it). The home adds loads and stores, not allocation, copying, or calls. It
-  does not cover untracked aliases or asynchronous C writes.
-* **Regression.** The coder spec builds
-  `spec/fixtures/error_handling/scalar_recovery.titan` as a native executable at
-  `-O2` and `-O3` with the driver's default inlining thresholds: a
-  checked-return callee writes through the scalar's address and then raises,
-  and only the catch reads the local.
+* **Cost and scope.** The escape barrier emits no instruction and runs once per
+  declaration, including a redeclaring loop iteration. The home needs no heap
+  allocation or per-call aggregate snapshot. GC out-parameters publish into
+  already reserved root slots. This does not track retained raw aliases or
+  asynchronous C writes.
+* **Regressions.** `spec/fixtures/error_handling/scalar_recovery.titan` exercises
+  an inlined checked-return failure with no normal-path read. The companion
+  `aggregate_recovery.titan` covers structs, unions, arrays and FAMs, scalar
+  kinds, parameters and lambdas, plus fresh `TValue`/`Udata *` publication and
+  cleared old-root collection during a full GC in `__close`. The owning coder
+  specs compile the native fixtures at `-O2` and `-O3`.
 
-A C aggregate has no such in-call home. Passing its mutable address directly
-to an ordinary Titan call counts as a protected write, and its byte spill is
-committed only after the call returns normally, so a callee that raises
-leaves the pre-call bytes; see
-[longjmp-safe aggregate spills](c-ffi-expressions.md#longjmp-safe-aggregate-spills).
+This is a semantics change from the earlier aggregate policy: a callee that
+wrote through a tracked mutable address and then raised previously caused the
+caller to restore its pre-call bytes. Recovery now retains the actual writes,
+so an acquired resource remains visible to its cleanup and a transferred
+resource cannot be restored for a second release. Locals without an exposed
+mutable C address retain their existing spill/reload behavior.
 
 The variadic descriptor structs follow the same rule. Their C-stack records
 contain counts and pointers to GC objects or typed C arrays, not pointers to Lua

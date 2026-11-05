@@ -260,13 +260,10 @@ local function mutable_address_operand(node)
     return nil
 end
 
--- Automatic C aggregates whose mutable address an ordinary Titan call passes
--- directly as an argument. As with `_c_mutated_decls` on a mutable foreign
--- call, each counts as a write for spill analysis, and `codecall` commits its
--- byte spill after the call returns normally. A callee that raises commits
--- nothing, so recovery restores the bytes from before the call.
+-- Direct mutable C out-arguments of an ordinary Titan call. Their actual
+-- local storage, including array-decay roots, must survive a raising callee.
 -- Implementation notes: doc/implementation/c-ffi-expressions.md#longjmp-safe-aggregate-spills
-function coder._titan_call_aggregate_out_decls(node)
+function coder._titan_call_mutable_out_decls(node)
     local decls = {}
     if node._direct_foreign_reference or node._c_pointer_call then
         return decls
@@ -287,8 +284,9 @@ function coder._titan_call_aggregate_out_decls(node)
             operand = exp
         end
         local decl = operand and coder._lvalue_root_decl(operand)
-        if decl and not seen[decl] and types.is_c_aggregate(decl._type) then
+        if decl and not seen[decl] and types.is_direct_c(decl._type) then
             seen[decl] = true
+            decl._c_address_taken = operand.loc
             table.insert(decls, decl)
         end
     end
@@ -339,13 +337,12 @@ function coder._collect_writes_exp(node, out)
         for _, decl in ipairs(node._c_mutated_decls or {}) do
             set_add(out, decl)
         end
-        for _, decl in ipairs(coder._titan_call_aggregate_out_decls(node)) do
+        for _, decl in ipairs(coder._titan_call_mutable_out_decls(node)) do
             set_add(out, decl)
         end
     end
-    -- An ordinary Titan callee can mutate an automatic scalar through a
-    -- contextual C address, then raise instead of returning. Such writes must
-    -- reach the recovery home during the call, not a post-call spill update.
+    -- Taking a mutable C address is a possible in-call write, including GC
+    -- representations whose existing Lua root must be refreshed on recovery.
     if node._tag == "Ast.ExpCast" then
         local adjustment = node._adjustment
         local written = node._written_cast
@@ -355,8 +352,7 @@ function coder._collect_writes_exp(node, out)
             or written and written.coercion
         if coercion and coercion.op == "mutable_c_address" then
             local decl = coder._lvalue_root_decl(node.exp)
-            if decl and not types.is_gc(decl._type)
-               and not types.is_c_aggregate(decl._type) then
+            if decl and types.is_direct_c(decl._type) then
                 set_add(out, decl)
             end
         end
@@ -797,14 +793,17 @@ end
 -- Implementation notes: doc/implementation/error-handling.md#setjmp-sensitive-localparameter-spills
 function coder._decl_volatile_home(decl)
     return decl and decl._needs_spill and decl._c_address_taken
-        and not decl._boxed and not types.is_gc(decl._type)
-        and not types.is_c_aggregate(decl._type)
-        and not decl._c_backing_storage
+        and not decl._boxed and types.is_direct_c(decl._type)
 end
 
 function coder._local_cvardecl(ctx, decl)
-    return cvardecl(ctx, decl._type, decl._cvar,
-        coder._decl_volatile_home(decl) and { "volatile" } or nil)
+    local quals = coder._decl_volatile_home(decl) and { "volatile" } or nil
+    local plan = decl._c_allocation_plan
+    if quals and plan and plan.storage == "automatic_array" then
+        -- This is real array storage, not an adjusted array parameter.
+        return coder._render_c_declaration(decl._type, decl._cvar, quals)
+    end
+    return cvardecl(ctx, decl._type, decl._cvar, quals)
 end
 
 function decl_needs_spill(decl)
@@ -813,7 +812,10 @@ function decl_needs_spill(decl)
 end
 
 function register_spill_decl(ctx, decl)
-    if not decl_needs_spill(decl) then return end
+    if not decl_needs_spill(decl)
+       and not (coder._decl_volatile_home(decl) and types.is_gc(decl._type)) then
+        return
+    end
     if ctx.spill_decl_seen and ctx.spill_decl_seen[decl] then return end
     ctx.spill_decl_seen = ctx.spill_decl_seen or {}
     ctx.spill_decl_seen[decl] = true
@@ -876,6 +878,7 @@ end
 
 function spill_decl_init(ctx, decl)
     if coder._decl_volatile_home(decl) then
+        register_spill_decl(ctx, decl)
         return volatile_home_escape(decl)
     end
     if not decl_needs_spill(decl) then return "" end
@@ -908,6 +911,7 @@ end
 
 function spill_decl_zero(ctx, decl)
     if coder._decl_volatile_home(decl) then
+        register_spill_decl(ctx, decl)
         return volatile_home_escape(decl)
     end
     if not decl_needs_spill(decl) then return "" end
@@ -943,6 +947,21 @@ function spill_update(decl)
         SPILL = spill_cvar(decl),
         CVAR = decl._cvar,
     })
+end
+
+-- A mutable GC out-parameter has a stable C address and an existing traced
+-- Lua slot. Publish its current value before any recovery close can collect.
+function coder._spill_address_roots(ctx)
+    local roots = {}
+    for _, decl in ipairs(ctx.active_spill_decls or {}) do
+        if coder._decl_volatile_home(decl) and types.is_gc(decl._type) then
+            table.insert(roots, setslot(decl._type,
+                assert(decl._slot, "mutable GC home has no root"), decl._cvar))
+        end
+    end
+    if #roots == 0 then return "" end
+    return "/* publish mutable GC homes before recovery can collect */\n"
+        .. "_base = restorestack(L, _base_off);\n" .. table.concat(roots, "\n")
 end
 
 function spill_reload(ctx)

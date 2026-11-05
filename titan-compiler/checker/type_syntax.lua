@@ -719,10 +719,10 @@ function is_mutable_c_address_source(source)
 end
 
 function mark_mutable_c_address_source(source)
-    if source._tag == "Ast.ExpVar" and source.var._tag == "Ast.VarName"
-       and source.var._decl then
-        source.var._decl._assigned = true
-        source.var._decl._c_address_taken = source.loc
+    local decl = inline_c_storage_decl(source)
+    if decl then
+        decl._assigned = true
+        decl._c_address_taken = source.loc
     end
 end
 
