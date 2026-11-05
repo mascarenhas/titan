@@ -125,8 +125,8 @@ with:
 * `-DLUA_USE_POSIX -DLUA_USE_BROWSER`, without `LUA_USE_DLOPEN` or readline,
   and `-DLUAI_MAXCCALLS=100` ([the browser C-call
   limit](#the-browser-c-call-limit));
-* `-sSUPPORT_LONGJMP=emscripten` in `SYSCFLAGS`, with `MYCFLAGS` passed
-  through and `CMCFLAGS` applied to every browser object;
+* `-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` in `SYSCFLAGS`,
+  with `MYCFLAGS` passed through and `CMCFLAGS` applied to every browser object;
 * browser `LUA_PATH_DEFAULT`/`LUA_CPATH_DEFAULT` rooted at the empty
   `LUA_ROOT`, without the executable-relative `!/../` root; and
 * its own object directory, `src/browser/obj`, separate from the native build.
@@ -135,8 +135,9 @@ with:
 needed and installs it. It writes only below `<root>/lib/browser`, never runs
 a host Lua interpreter, and refuses an effective configuration that would make
 the record false: a missing or wrong `emcc`, an effective `LUA_USE_DLOPEN`, a
-missing `LUA_USE_POSIX`/`LUA_USE_BROWSER`, a longjmp mode other than the
-recorded one, or position-independent flags. `fork_revision` comes from the
+missing `LUA_USE_POSIX`/`LUA_USE_BROWSER`, a longjmp mode other than `wasm`,
+a missing or disabled explicit legacy EH setting, native exception-lowering
+overrides, or position-independent flags. `fork_revision` comes from the
 fork tree's own `.git`; a tarball build must pass
 `FORK_REVISION=<40-hex commit>`. The fork's README documents the installer's
 own failure modes and the record's byte formats.
@@ -145,6 +146,26 @@ Titan pins the fork commit through the gitlink and the `v5.5.1-1` release, not
 through the record's copy of the revision. `archive_sha256` is stable for one
 commit, flag set, and Emscripten build, because `emar` archives are
 deterministic.
+
+### Wasm-EH longjmp contract
+
+Emscripten 6.0.13 is pinned to `SUPPORT_LONGJMP=wasm` and
+`WASM_LEGACY_EXCEPTIONS=1` at both compile and link time. This is the pin's
+**legacy** Wasm exception instruction encoding, not the standardized encoding;
+the toolchain labels Wasm longjmp experimental. Lua, the runtime, generated
+Titan C, authored C helpers, and providers all use the same settings. A link
+flag alone cannot change old objects that contain JavaScript SJLJ calls.
+
+The existing record carries `sjlj=wasm`, the explicit encoding in `cflags`,
+and `+exception-handling` in `wasm_features`. No record, metadata, or cache
+schema version changes: these facts and the descriptor's compile flags already
+participate in identities, so prior JavaScript-SJLJ records and objects cannot
+qualify as this target. `make lua-browser` rebuilds a stale installation.
+Asyncify remains the independently selected coroutine backend in this stage.
+Wasm EH catches language longjmp transfers, not engine traps, engine stack
+overflow, or arbitrary JavaScript exceptions. Native builds and
+`LUAI_MAXCCALLS=100` on the browser are unchanged.
+
 
 ### `make lua-browser`
 
@@ -734,19 +755,18 @@ The deliberately failing case lives outside every suite root.
 
 ### Nesting limits
 
-An engine stack overflow on the browser is not recoverable: Emscripten's
-`invoke_*` wrappers rethrow the engine `RangeError` past every Titan `catch`,
-the loader rejects with the error as `cause`, and the completion channel never
-fires. Every Titan method or closure call is an indirect call, which leaves
-WebAssembly through an `invoke_*` import, re-enters through `dynCall_*`, and
-passes Asyncify's wrapper, so one reflective protobuf level costs two
-WebAssembly and twelve JavaScript frames. A nesting-bounded library operation
-therefore gets a browser value from a target define, at most half of the
-lowest ceiling measured across engines and build profiles (the rule that set
-the [browser C-call limit](#the-browser-c-call-limit)), so over-deep input
-raises the module's ordinary catchable error with headroom to spare in the
-measured configurations. The counters cover only the library's own traversal,
-not stack the caller already uses. Native values are unchanged.
+An engine stack overflow on the browser is not recoverable: it bypasses Titan
+`catch`, the loader rejects with the engine error as `cause`, and the completion
+channel never fires. The measurements below predate the
+[Wasm-EH longjmp cutover](#wasm-eh-longjmp-contract): JavaScript SJLJ left
+WebAssembly through `invoke_*`, re-entered through `dynCall_*`, and passed
+Asyncify's wrapper. Those trampolines are not the current Wasm-EH longjmp
+path. The existing limits remain conservative until all traversal shapes are
+remeasured across engines and build profiles. Their target defines are at most
+half of the lowest historical ceiling, so over-deep input raises an ordinary
+catchable error in the measured configurations. The counters cover only the
+library's own traversal, not stack the caller already uses. Native values are
+unchanged.
 
 | Bound | Define (browser value) | Native default | Lowest measured ceiling | Browser limit |
 | --- | --- | --- | --- | --- |
@@ -810,7 +830,7 @@ headers_sha256=<digest of the installed Lua headers>
 emscripten_version=6.0.13
 target=wasm32-unknown-emscripten
 wasm_features=<canonical sorted feature list>
-sjlj=emscripten
+sjlj=wasm
 lua_defines=<sorted unique -D list>
 numeric=integer=<C type>,float=<C type>
 cflags=<effective compile flags>
@@ -849,18 +869,20 @@ in this order; the first failure is reported:
    duplicate keys.
 4. Field syntax: missing, non-text, or empty fields, then the three
    hexadecimal fields.
-5. The fixed fields: `sjlj` must be `emscripten` (Titan's mode, because
-   `titan.h` mirrors `lua_longjmp`), `target` must be
+5. The fixed fields: `sjlj` must be `wasm` (matching Lua and `titan.h`),
+   `target` must be
    `wasm32-unknown-emscripten`, and `emscripten_version` must equal the pin,
    which step 2 already compared with the running `emcc`.
 6. `wasm_features` is a canonical list equal to the expected baseline
-   `+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue
-   +mutable-globals +nontrapping-fptoint +reference-types +sign-ext`.
+   `+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling
+   +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext`.
 7. `lua_defines` is canonical, sorted, and unique, and equals the sorted
    unique `-D` tokens of `cflags`.
 8. The effective `-sSUPPORT_LONGJMP` mode of `cflags` (the last setting, in
    either the joined or the split `-s SUPPORT_LONGJMP=` spelling; a bare
-   setting or `=1` means `emscripten`) equals `sjlj`.
+   setting or `=1` means `emscripten`) equals `sjlj`. The effective explicit
+   `WASM_LEGACY_EXCEPTIONS` setting must be 1; joined, split, bare, and boolean
+   `NO_` aliases are checked in compiler order.
 9. `cflags` contains no unsupported flag.
 10. `archive_sha256` matches `liblua`.
 11. `headers_sha256` matches the headers in `lua_source`.
@@ -882,9 +904,10 @@ entry (`+shared-mem`, `=shared-mem`, `+atomics`, `-atomics`, or `=atomics`).
 Every other feature, including a lookalike name such as
 `-shared-mem+atomics`, still matches exactly
 ([Static compiled modules](static-compiled-modules.md#relocatable-webassembly)).
-A Wasm-exceptions mode
-would need coordinated Lua, Titan, and generated-code settings; the `sjlj` and
-`wasm_features` checks and the unsupported `-fwasm-exceptions` flag reject it.
+The exact EH encoding is additionally pinned by the explicit legacy setting
+in `cflags`; the feature name alone does not distinguish the encodings.
+Native exception switches remain unsupported: Wasm SJLJ is selected by
+`SUPPORT_LONGJMP=wasm`, not by enabling C++ exceptions with `-fwasm-exceptions`.
 
 ### Record diagnostics
 
@@ -1001,7 +1024,7 @@ context-owned (`context.target_profile`), never stored in the frozen graph.
    `--std=c99`, then `-O1 -fno-inline -fno-optimize-sibling-calls`
    (`validation`) or `-O3` (`production`), then `-Wall`,
    `-Wno-unused-but-set-variable`, `-Wno-unused-function`,
-   `-gline-tables-only`, and `-sSUPPORT_LONGJMP=emscripten`;
+   `-gline-tables-only`, `-sSUPPORT_LONGJMP=wasm`, and `-sWASM_LEGACY_EXCEPTIONS=1`;
 2. the record's `lua_defines`, in record order;
 3. the ordered `target_defines`: `-DTITAN_TARGET_BROWSER=1`,
    `-DTITAN_COROUTINE_STACK_SIZE=262144`, `-DTITAN_CODEC_DEPTH_LIMIT=43`,
@@ -1200,19 +1223,21 @@ A browser invocation rejects these flags wherever they appear:
 
 `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-pie`, `-shared`, `-dynamiclib`,
 `-rdynamic`, `-pthread`, `-flto`, `-flto=*`, `-ffat-lto-objects`, `-march=*`,
-`-mcpu=*`, `-mtune=*`, `-m32`, `-m64`, `-fwasm-exceptions`, and any
-`-sSUPPORT_LONGJMP` setting other than `emscripten` (joined
-`-sSUPPORT_LONGJMP=<mode>` or split `-s SUPPORT_LONGJMP=<mode>`).
+`-mcpu=*`, `-mtune=*`, `-m32`, `-m64`, `-f[no-]wasm-exceptions`,
+`-m[no-]exception-handling`, `-m[no-]legacy-exception-handling`, and any
+`-sSUPPORT_LONGJMP` setting other than `wasm` or `-sWASM_LEGACY_EXCEPTIONS`
+setting other than 1 (joined, split, bare, and boolean `NO_` aliases included).
 
 The diagnostic is `browser target does not support <origin> flag "<flag>"`,
 where `<origin>` is `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`,
 `TITAN_EXTRA_LDFLAGS`, `--cflag` (the normalized compile extras, and
 per-request `extra_compile_flags`), `--ldflag` (the normalized link extras),
-or `compile_flags` for direct `browsertarget.build` inputs. A split longjmp
-setting quotes both words. Flags are never dropped silently. `-fno-lto` is
-harmless and accepted, as are the bare and `=1` longjmp spellings. Inside the
-record, the same check reports `invalid field "cflags": browser target does
-not support cflags flag "<flag>"`.
+or `compile_flags` for direct `browsertarget.build` inputs. A split setting
+quotes both words. Flags are never dropped silently. `-fno-lto` is harmless
+and accepted. Bare and `=1` longjmp settings select the wrong mode and are
+rejected; bare legacy EH and `NO_WASM_LEGACY_EXCEPTIONS=0` mean legacy EH is
+enabled. Inside the record, the same check reports
+`invalid field "cflags": browser target does not support cflags flag "<flag>"`.
 
 Emscripten has no fat Wasm objects: `-flto` produces bare LLVM bitcode with no
 data segments to read. The descriptor never adds LTO and the Wasm reader
@@ -1250,7 +1275,7 @@ flags](#object-flags)).
 `trace_option` flags in the normalized compile and link extras and final link
 extras unless `options.purpose` is `baseline`, `minicoro`, or `budget`, as well
 as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
-`NO_` prefix, of `SUPPORT_LONGJMP`, `ASYNCIFY` and every `ASYNCIFY_*` setting,
+`NO_` prefix, of `SUPPORT_LONGJMP`, `WASM_LEGACY_EXCEPTIONS`, `ASYNCIFY` and every `ASYNCIFY_*` setting,
 `BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
 `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
@@ -1611,7 +1636,7 @@ flag list.
 | `<level>`, then `-fno-inline -fno-optimize-sibling-calls` except for a production `program`, then `-gsource-map -g2` | the level is the `optimization` override or else the descriptor's last `-O` flag (`-O1` for validation, `-O3` for production), so the link optimizes like its objects; a production program accepts the frames that inlining costs, while every other profile and purpose keeps the frame flags ([Link flags per purpose](#link-flags-per-purpose)); `-gsource-map -g2` writes the source map and keeps the Wasm `name` section in every profile |
 | `-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals`, plus `,--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` for a production `test` image | D18's post-Asyncify local cleanup, in every Titan-entry profile (`entry == "titan"`, omitted for `lua-main`); `emcc` runs `BINARYEN_EXTRA_PASSES` after `--asyncify` ([pass order](#binaryen-pass-order)). At link `-O1`, `emcc` runs no other Binaryen pass, and Asyncify inflated large coroutine functions (`coroutine_tests_ℳ_unwind_innermost_frame_titan`, from 1,072 to 126,402 locals) past V8's 50,000-local WebAssembly validation limit (`local count too large`); `simplify-locals,reorder-locals` kept that function at 1,396 locals (module maximum 3,431) without inlining or dropping physical frames or line mappings. The same passes set the validation profile's per-level engine-stack cost ([why they are load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)), and the two skips keep a production test image's frames ([test images](#test-images)) |
 | `-sASYNCIFY=1` | minicoro's Emscripten fiber backend refuses to create fibers without Asyncify, and Asyncify carries the outer suspension. Indirect calls keep the default conservative instrumentation: closures and the module ABI call through function pointers, so there are no `ASYNCIFY_IGNORE_INDIRECT`, `ASYNCIFY_ONLY`, or `ASYNCIFY_REMOVE` lists. `-sASYNCIFY=0` only for a control. |
-| `-sSUPPORT_LONGJMP=<sjlj>` | the record's verified longjmp mode, `emscripten`, matching `liblua.a` and `titan.h` |
+| `-sSUPPORT_LONGJMP=<sjlj> -sWASM_LEGACY_EXCEPTIONS=1` | the record's verified longjmp mode, `wasm`, with Emscripten 6.0.13's legacy EH encoding, matching every object and `liblua.a` |
 | `-sSTACK_SIZE=1048576`, `-sASYNCIFY_STACK_SIZE=65536` | the main C stack and the outer Asyncify data budget ([Budgets](#budgets)); the second only with Asyncify |
 | `-sINITIAL_MEMORY=16777216 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
@@ -1734,11 +1759,12 @@ object prefix:
 
 | Profile | Owned object flags |
 | --- | --- |
-| `validation` | `--std=c99 -O1 -fno-inline -fno-optimize-sibling-calls -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=emscripten` |
-| `production` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=emscripten` |
+| `validation` | `--std=c99 -O1 -fno-inline -fno-optimize-sibling-calls -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` |
+| `production` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` |
 
-`validation` is #330's frozen profile, flag for flag. The production level is
-the one constant `PRODUCTION_LEVEL = "-O3"`, the native production level,
+`validation` retains #330's physical-frame settings with the coordinated
+Wasm-EH longjmp change. The production level is the one constant
+`PRODUCTION_LEVEL = "-O3"`, the native production level,
 chosen over `-O2` by [measurement](#measurements) (D34). Both profiles keep
 `-gline-tables-only` ([why not `-g2`](#compile-prefix-and-target-defines)),
 the warnings, and the longjmp mode; the record's `lua_defines` and the target
@@ -2355,8 +2381,8 @@ Before finalizing the stack parser and WebKit renderer, a synthetic C/JS survey
 (324 raw stack captures across nine call topologies, named and `name`-stripped
 binaries, and default versus raised `Error.stackTraceLimit`) was recorded with
 Emscripten 6.0.13 and `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map
--g2` (today's validation link flags) plus the base Asyncify/longjmp link
-profile across six engines:
+-g2` (the validation frame flags), with the historical JavaScript-SJLJ
+Asyncify profile across six engines:
 
 | Engine | Version | Platform |
 | --- | --- | --- |
@@ -2624,8 +2650,8 @@ import and re-enter it through `dynCall_*` under Asyncify's wrapper; for
 of the protected call in `luaD_rawrunprotected`, which runs Lua's `setjmp`.
 The two levels differ in their WebAssembly frames, and the protected-call
 level's frames cost 4,904 − 2,913 ≈ 2 KB more per count. The trampoline's
-JavaScript half cannot be removed while
-Titan closures may suspend (`ASYNCIFY_IGNORE_INDIRECT` would be unsound).
+JavaScript half was a consequence of that historical SJLJ lowering. Wasm EH
+removes it without using the unsound `ASYNCIFY_IGNORE_INDIRECT` shortcut.
 
 Two validation levers were measured and not adopted: adding `--coalesce-locals`
 after `--asyncify` raised the Node mixed ceiling from 318 to 334, removing
@@ -2662,10 +2688,9 @@ recursion from reaching one.
 
 ### Direction: JSPI
 
-WebAssembly JavaScript Promise Integration (stack switching at link) is the
-recorded long-term direction. It would remove Asyncify, and with it most of
-the per-level engine-stack cost. It depends on engine support (WebKit's is
-pending) and is a separate design; #343 does not adopt it.
+WebAssembly JavaScript Promise Integration is a separate coroutine-backend
+change. Wasm-EH longjmp removes the protected-call JavaScript trampolines
+without changing Asyncify's fiber backend or its suspension semantics.
 
 ## Completion and output channels
 
@@ -2726,9 +2751,9 @@ external admission. The guarded exports are `titan_browser_entry` and, in
 gate images, `titan_browser_gate_guarded`; non-suspending exports such as
 `malloc`, `free`, and `titan_browser_gate_observe` stay callable.
 
-The library keeps two depths. `liveDepth` counts every live compiled entry,
-including the internal `invoke_*`/`dynCall_*` reentries of the longjmp
-lowering, and governs safe delivery. `admissionDepth`, the named Titan-facing
+The library keeps two depths. `liveDepth` counts every live compiled entry
+(including internal reentries in older JavaScript-SJLJ images) and governs
+safe delivery. `admissionDepth`, the named Titan-facing
 admission depth, counts only live guarded exports. During a rewind,
 `continuing` holds the admission depth of the admitted continuation (one more
 when the rewound function is itself guarded). `titan_browser_entry_allowed`
@@ -2736,8 +2761,8 @@ when the rewound function is itself guarded). `titan_browser_entry_allowed`
 exact depth, or when the instance is not blocked, has no terminal failure, has
 not completed, has no pending suspension, and the caller is the only live
 guarded export (`admissionDepth == 1`; without Asyncify, in control images,
-the depth condition is dropped). Keeping the internal longjmp reentries out of
-`admissionDepth` is what lets a ready raw guarded call through while a
+the depth condition is dropped). Keeping internal compiled-entry accounting
+out of `admissionDepth` lets a ready raw guarded call through while a
 suspended one is refused. The C entry consults this import after its own
 active and used flags, and the loader checks the same state before it
 marshals anything.

@@ -458,6 +458,12 @@ compile settings, and the digests of the installed archive and headers all
 match; otherwise it rebuilds. It refuses a missing or different `emcc`, and
 Lua settings that the record could not describe truthfully.
 
+The browser compile and link contract is
+`-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1`: Emscripten 6.0.13's
+legacy Wasm exception encoding. A previous JavaScript-SJLJ archive or a record
+without the explicit encoding setting is not reused. Rebuild the browser SDK
+after installing the matching Lua; native Lua and native providers are unchanged.
+
 `make browser-sdk` uses the installed `titanc` to build the browser runtime,
 loader, runner, and standard library into `lib/titan-browser/0.6/`, and writes
 the SDK digest manifest last. It compiles them under the `TITAN_BUILD_PROFILE`

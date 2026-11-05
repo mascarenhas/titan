@@ -420,6 +420,9 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local clean_liblua_bytes = assert(strategy:read_file(liblua))
         local clean_record_bytes = assert(strategy:read_file(record))
         local clean_luah_bytes = assert(strategy:read_file(lua_h))
+        contains(clean_record_bytes, "sjlj=wasm\n")
+        contains(clean_record_bytes, "+exception-handling")
+        contains(clean_record_bytes, "-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1")
 
         -- 2. Warm matching configuration is reused without touching installed or object files,
         -- and explicit empty LUA_BROWSER_MYCFLAGS= overrides ambient MYCFLAGS.
@@ -446,14 +449,18 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.equal(clean_liblua_bytes, assert(strategy:read_file(liblua)))
         assert.equal(clean_record_bytes, assert(strategy:read_file(record)))
 
-        -- 4. Malformed records (missing final LF, extra comment, CR, NUL, invalid UTF-8) are rejected
-        -- by the reuse check and regenerated cleanly.
+        -- 4. Malformed records and records for the previous JS-SJLJ or implicit
+        -- EH encoding configuration are rejected and regenerated cleanly.
         for _, bad_record in ipairs({
             clean_record_bytes:sub(1, -2),
             clean_record_bytes .. "# trailing comment not allowed\n",
             (clean_record_bytes:gsub("\n", "\r\n", 1)),
             clean_record_bytes:sub(1, -2) .. "\0\n",
             clean_record_bytes:sub(1, -2) .. "\255\n",
+            (clean_record_bytes:gsub("sjlj=wasm", "sjlj=emscripten")),
+            (clean_record_bytes:gsub(" %-sWASM_LEGACY_EXCEPTIONS=1", "")),
+            (clean_record_bytes:gsub("WASM_LEGACY_EXCEPTIONS=1", "WASM_LEGACY_EXCEPTIONS=0")),
+            (clean_record_bytes:gsub(" %+exception%-handling", "")),
         }) do
             assert(strategy:write_file(record, bad_record))
             local repaired = run_lua_browser()
@@ -478,7 +485,37 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         contains(updated_record, "fork_revision=" .. fork_rev)
         contains(updated_record, "lua_defines=-DLUAI_MAXCCALLS=100 -DLUA_USER_DEFAULT=1 -DLUA_USE_BROWSER -DLUA_USE_POSIX")
         contains(updated_record, "cflags=-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER " ..
-            "-DLUAI_MAXCCALLS=100 -sSUPPORT_LONGJMP=emscripten -DLUA_USER_DEFAULT=1")
+            "-DLUAI_MAXCCALLS=100 -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1 -DLUA_USER_DEFAULT=1")
+
+        local updated_liblua = assert(strategy:read_file(liblua))
+        -- Inspect wrong effective settings using the real installer and an
+        -- existing archive: rejection must precede installation, not bless it
+        -- with a new record. This does not rebuild a Lua archive per bad flag.
+        local configuration = paths.join(root, "rejected-config")
+        for _, flag in ipairs({ "-sSUPPORT_LONGJMP=emscripten", "-s SUPPORT_LONGJMP=emscripten",
+                "-sSUPPORT_LONGJMP", "-sNO_SUPPORT_LONGJMP=1",
+                "-sWASM_LEGACY_EXCEPTIONS=0", "-s WASM_LEGACY_EXCEPTIONS=0",
+                "-sNO_WASM_LEGACY_EXCEPTIONS", "-s NO_WASM_LEGACY_EXCEPTIONS=1",
+                "-mno-exception-handling" }) do
+            local config = run_with_env(strategy, base_env, {
+                "make", "-s", "--no-print-directory", "-C", paths.join(temp_lua, "src"),
+                "browser-config", "BROWSER_CC=" .. info.tools.cc[1], "MYCFLAGS=" .. flag,
+            })
+            assert.is_true(config.ok, config.output)
+            local config_text, replacements = config.output:gsub("browser_src= %.\n",
+                "browser_src= " .. paths.join(temp_lua, "src") .. "\n")
+            assert.equal(1, replacements)
+            assert(strategy:write_file(configuration, config_text))
+            local rejected = run_with_env(strategy, base_env, {
+                "sh", "-c", 'exec sh "$1" "$2" < "$3"', "sh",
+                paths.join(temp_lua, "tools/install-browser.sh"),
+                paths.join(temp_prefix, "lib/browser"), configuration,
+            })
+            assert.is_false(rejected.ok, rejected.output)
+            contains(rejected.output, "install-browser: the browser build")
+            assert.equal(updated_record, strategy:read_file(record))
+            assert.equal(updated_liblua, strategy:read_file(liblua))
+        end
     end)
 
     it("installs browser-sdk into an empty differing ROCKS_TREE, verifies archives/digests/stack size, and keeps compiler SDK emsdk-free", function()

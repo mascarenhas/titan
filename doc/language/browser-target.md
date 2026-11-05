@@ -200,6 +200,22 @@ headers. A matching commit alone is not enough; a changed setting or a
 damaged archive or header is rebuilt and reinstalled. `luarocks make` and
 `make browser-sdk` never run it.
 
+### Wasm-EH longjmp contract
+
+Browser Lua, Titan's runtime, generated C, and authored C helpers use
+`-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` on every compile and
+link. This pins Emscripten 6.0.13's legacy Wasm exception encoding; that
+toolchain labels Wasm longjmp experimental. Rebuild the browser Lua and SDK
+when moving from a JavaScript-SJLJ installation: setting only a final link
+flag cannot convert old objects. The existing record and descriptor identities
+distinguish the settings without a record-format change.
+
+This does not change `catch`, `defer`, coroutine cleanup, Asyncify's stack
+switching, or the browser C-call limit of 100. Engine traps and engine stack
+overflow remain fatal, not catchable Titan errors. Native targets are
+unchanged.
+
+
 The fork's own `install-browser` target does the same work without the
 reuse check, and is the command that the compiler's diagnostics name. From
 a source archive of the fork's release, which has no Git metadata, also pass
@@ -970,8 +986,12 @@ rather than ignored:
 
 `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-pie`, `-shared`, `-dynamiclib`,
 `-rdynamic`, `-pthread`, `-flto` and `-flto=...`, `-ffat-lto-objects`,
-`-march=...`, `-mcpu=...`, `-mtune=...`, `-m32`, `-m64`, `-fwasm-exceptions`,
-and an `-sSUPPORT_LONGJMP` setting other than `emscripten`.
+`-march=...`, `-mcpu=...`, `-mtune=...`, `-m32`, `-m64`,
+`-f[no-]wasm-exceptions`, `-m[no-]exception-handling`,
+`-m[no-]legacy-exception-handling`, an `-sSUPPORT_LONGJMP` setting other
+than `wasm`, or an explicit `-sWASM_LEGACY_EXCEPTIONS` setting other than 1.
+The check includes joined and split spellings, bare settings, and boolean
+`NO_` aliases; a bare longjmp setting or `=1` selects the wrong mode.
 
 The check covers `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`,
 `TITAN_EXTRA_LDFLAGS`, `--cflag`, and `--ldflag`, and names the source:
@@ -997,7 +1017,7 @@ their `-fno-` forms. Titan also owns `-gline-tables-only` (for object
 compilation), `-gsource-map`, `-g2`, and the WebAssembly optimizer's pass list
 `-sBINARYEN_EXTRA_PASSES` (for linking), and source `#line` directives
 (`--no-line-directives` and `TITAN_NO_LINE_DIRECTIVES=1`), together with
-Asyncify, the longjmp mode, the stack and memory sizes, the program lifecycle
+Asyncify, the longjmp mode and legacy EH encoding, the stack and memory sizes, the program lifecycle
 and exports, the filesystem layer, full-precision `long double` printing,
 assertions and stack checks, and the target defines. Other Emscripten `-s`
 settings, such as `-sWASM_BIGINT=1`, may
@@ -1038,16 +1058,13 @@ About 5,400 live coroutines fit in 2 GiB.
 Lua counts nested calls through its C API and stops them with its ordinary
 `C stack overflow` error when the count reaches its limit, `LUAI_MAXCCALLS`.
 The browser build of Lua sets that limit to 100; native builds keep Lua's 200.
-A JavaScript engine's stack is much smaller than a native C stack, and each
-level of such recursion costs it several WebAssembly and JavaScript frames.
-With Lua's default of 200, nested `pcall` came within a few levels of running
-V8's stack out first, which ends the run with an uncatchable `RangeError:
-Maximum call stack size exceeded` instead of a Lua error. At 100, the engine
-has about twice the room it needs even in the tightest case measured, nested
-`pcall` and coroutine resumes on V8 under `validation`, and Titan's tests
-check that mixed recursion and nested `pcall` past the limit raise the
-catchable error on Node, Chromium, Firefox, and WebKit under both build
-profiles. The [implementation
+The original JavaScript-SJLJ implementation used several WebAssembly and
+JavaScript frames per level; with Lua's default of 200, nested `pcall` came
+close to running V8's stack out before the catchable Lua error. Wasm EH removes
+those longjmp trampolines, but the conservative limit remains 100 until all
+recursive Lua/C shapes are requalified across engines and build profiles.
+The existing tests check that mixed recursion and nested `pcall` past the
+limit raise the catchable error. The [implementation
 manual](../implementation/browser-target.md#the-browser-c-call-limit) records
 the measurements.
 

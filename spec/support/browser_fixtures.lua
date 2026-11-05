@@ -8,8 +8,8 @@ local cprobe_cache = require "titan-compiler.cprobe_cache"
 local platform = require "titan-compiler.platform"
 local M = {}
 
-M.features = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue " ..
-    "+mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
+M.features = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling " ..
+    "+multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
 M.record_keys = { "fork_revision", "archive_sha256", "headers_sha256",
     "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
 M.banner = "# Lua 5.5.1 browser build record v1\n"
@@ -73,10 +73,11 @@ function M.record(overrides)
     local record = { fork_revision = string.rep("a", 40),
         archive_sha256 = sha256.hex(archive), headers_sha256 = sha256.hex(table.concat(header_lines)),
         emscripten_version = "6.0.13", target = "wasm32-unknown-emscripten",
-        wasm_features = M.features, sjlj = "emscripten",
+        wasm_features = M.features, sjlj = "wasm",
         lua_defines = "-DLUA_USE_BROWSER -DLUA_USE_POSIX",
         numeric = "integer=long long,float=double",
-        cflags = "-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER -sSUPPORT_LONGJMP=emscripten" }
+        cflags = "-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER " ..
+            "-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1" }
     for key, value in pairs(overrides or {}) do record[key] = value end
     local text = { M.banner }
     for _, key in ipairs(M.record_keys) do text[#text + 1] = key .. "=" .. record[key] .. "\n" end
@@ -100,7 +101,8 @@ for _, profile in pairs(M.object_flags) do
     profile[#profile + 1] = "-Wno-unused-but-set-variable"
     profile[#profile + 1] = "-Wno-unused-function"
     profile[#profile + 1] = "-gline-tables-only"
-    profile[#profile + 1] = "-sSUPPORT_LONGJMP=emscripten"
+    profile[#profile + 1] = "-sSUPPORT_LONGJMP=wasm"
+    profile[#profile + 1] = "-sWASM_LEGACY_EXCEPTIONS=1"
 end
 
 function M.descriptor(root, overrides)

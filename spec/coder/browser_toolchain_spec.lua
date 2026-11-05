@@ -152,7 +152,7 @@ end
         local dependency = workspace .. "/headers.d"
         local command = { table.unpack(info.tools.cc) }
         for _, argument in ipairs(toolchain.with_lua_defines(info,
-                { "--std=c99", "-O0", "-sSUPPORT_LONGJMP=emscripten" },
+                { "--std=c99", "-O0", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1" },
                 { "-DTITAN_TARGET_BROWSER=1",
                   "-I", info.prefix .. "/lib/browser/include", "-I", info.prefix .. "/include",
                   "-MD", "-MF", dependency, "-c", workspace .. "/out/object_fixture.c",

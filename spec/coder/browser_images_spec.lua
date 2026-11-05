@@ -201,7 +201,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({
             "-O1", "-fno-inline", "-fno-optimize-sibling-calls", "-gsource-map", "-g2",
             "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals",
-            "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
+            "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
             "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
@@ -225,7 +225,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({
             "-O3", "-gsource-map", "-g2",
             "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals",
-            "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
+            "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
             "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
@@ -329,6 +329,25 @@ describe("browser image profile and SDK readiness", function()
                         if flag == "-sPRINTF_LONG_DOUBLE=1" then count = count + 1 end
                     end
                     assert.equal(1, count)
+                    assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+                end
+            end
+        end
+    end)
+
+    it("pins legacy Wasm EH in every profile, purpose and entry", function()
+        for _, build_profile in ipairs({ "production", "validation" }) do
+            for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+                for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
+                    local plan = assert(browserlink.profile(fixtures.descriptor(nil, { build_profile = build_profile }),
+                        { purpose = purpose, assertions = 2, entry = entry }))
+                    local sjlj, legacy = 0, 0
+                    for _, flag in ipairs(plan.link_flags) do
+                        if flag == "-sSUPPORT_LONGJMP=wasm" then sjlj = sjlj + 1 end
+                        if flag == "-sWASM_LEGACY_EXCEPTIONS=1" then legacy = legacy + 1 end
+                    end
+                    assert.equal(1, sjlj)
+                    assert.equal(1, legacy)
                     assert.same(plan.link_flags, plan.identity_inputs.link_flags)
                 end
             end
@@ -506,6 +525,10 @@ describe("browser image profile and SDK readiness", function()
                 { "-sPRINTF_LONG_DOUBLE=0" },
                 { "-s", "PRINTF_LONG_DOUBLE=0" },
                 { "-sNO_PRINTF_LONG_DOUBLE=1" },
+                { "-sWASM_LEGACY_EXCEPTIONS=0" },
+                { "-s", "WASM_LEGACY_EXCEPTIONS=0" },
+                { "-sNO_WASM_LEGACY_EXCEPTIONS=1" },
+                { "-s", "NO_WASM_LEGACY_EXCEPTIONS" },
                 { "-DPRINTF_LONG_DOUBLE=0" },
                 { "-U", "PRINTF_LONG_DOUBLE" },
                 { "-DTITAN_CODEC_DEPTH_LIMIT=1000" },

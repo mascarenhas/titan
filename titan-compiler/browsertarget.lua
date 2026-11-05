@@ -9,8 +9,8 @@ local util = require "titan-compiler.util"
 local M = {}
 
 M.EMSCRIPTEN_VERSION = "6.0.13"
-local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue " ..
-    "+mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
+local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling " ..
+    "+multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
 local BANNER = "# Lua 5.5.1 browser build record v1\n"
 local RECORD_KEYS = { "fork_revision", "archive_sha256", "headers_sha256",
     "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
@@ -50,7 +50,8 @@ function M.object_flags(build_profile)
     flags[#flags + 1] = "-Wno-unused-but-set-variable"
     flags[#flags + 1] = "-Wno-unused-function"
     flags[#flags + 1] = "-gline-tables-only"
-    flags[#flags + 1] = "-sSUPPORT_LONGJMP=emscripten"
+    flags[#flags + 1] = "-sSUPPORT_LONGJMP=wasm"
+    flags[#flags + 1] = "-sWASM_LEGACY_EXCEPTIONS=1"
     return flags
 end
 
@@ -128,12 +129,21 @@ local function normalized_absolute(value)
         compiler_paths.to_slash(compiler_paths.normalize(value)) == compiler_paths.to_slash(value)
 end
 
-local function longjmp_mode(flags, index)
+-- Match emcc 6.0.13's joined/split settings, bare =1 and boolean NO_ aliases.
+local function setting_value(flags, index, name)
     local flag = flags[index]
-    if flag == "-sSUPPORT_LONGJMP" or
-        flag == "-s" and flags[index + 1] == "SUPPORT_LONGJMP" then return "emscripten" end
-    local mode = flag:match("^%-sSUPPORT_LONGJMP=(.*)$") or
-        flag == "-s" and (flags[index + 1] or ""):match("^SUPPORT_LONGJMP=(.*)$")
+    local setting = flag:match("^%-s(.+)$") or flag == "-s" and flags[index + 1]
+    if not setting then return nil end
+    local key, value = setting:match("^([%w_]+)=(.*)$")
+    if not key then key, value = setting, "1" end
+    if key == name then return value end
+    if key == "NO_" .. name then
+        return value == "0" and "1" or value == "1" and "0" or ""
+    end
+end
+
+local function longjmp_mode(flags, index)
+    local mode = setting_value(flags, index, "SUPPORT_LONGJMP")
     return mode == "1" and "emscripten" or mode
 end
 
@@ -226,11 +236,8 @@ local function validate(data, context)
     local tail, tail_error = check_owned_tail(data.compile_flags,
         #owned_flags + 1, data.trace_control == true, data.build_profile)
     if not tail then return nil, tail_error end
-    local seen, longjmp = {}, false
-    for index, flag in ipairs(data.compile_flags) do
-        seen[flag] = true
-        if longjmp_mode(data.compile_flags, index) == "emscripten" then longjmp = true end
-    end
+    local seen = {}
+    for _, flag in ipairs(data.compile_flags) do seen[flag] = true end
     local required = { "--std=c99", table.unpack(TARGET_DEFINES) }
     for _, flag in ipairs(defines) do required[#required + 1] = flag end
     for _, flag in ipairs(required) do
@@ -238,7 +245,6 @@ local function validate(data, context)
             return nil, "browser target descriptor is missing required compile flag " .. string.format("%q", flag)
         end
     end
-    if not longjmp then return nil, "browser target descriptor is missing required SUPPORT_LONGJMP setting" end
     if #data.include_dirs < 2 or data.include_dirs[1] ~= data.paths.lua_source or
         data.include_dirs[2] == data.paths.lua_source then
         return nil, "browser include roots must put verified Lua first and Titan runtime second"
@@ -295,7 +301,10 @@ end
 local UNSUPPORTED = { ["-fPIC"] = true, ["-fpic"] = true, ["-fPIE"] = true,
     ["-fpie"] = true, ["-pie"] = true, ["-shared"] = true, ["-dynamiclib"] = true,
     ["-rdynamic"] = true, ["-pthread"] = true, ["-ffat-lto-objects"] = true,
-    ["-m32"] = true, ["-m64"] = true, ["-fwasm-exceptions"] = true }
+    ["-m32"] = true, ["-m64"] = true, ["-fwasm-exceptions"] = true,
+    ["-fno-wasm-exceptions"] = true, ["-mexception-handling"] = true,
+    ["-mno-exception-handling"] = true, ["-mlegacy-exception-handling"] = true,
+    ["-mno-legacy-exception-handling"] = true }
 
 -- Optimization, inlining, sibling-call, frame-pointer and debug choices belong
 -- to the build profile; internal descriptors contain them and trailing user
@@ -328,10 +337,11 @@ function M.validate_flags(flags, origin)
     end
     for index, flag in ipairs(flags or {}) do
         local longjmp = longjmp_mode(flags, index)
+        local legacy = setting_value(flags, index, "WASM_LEGACY_EXCEPTIONS")
         if UNSUPPORTED[flag] or flag == "-flto" or flag:match("^%-flto=") or
             flag:match("^%-march=") or flag:match("^%-mcpu=") or flag:match("^%-mtune=") or
-            longjmp and longjmp ~= "emscripten" then
-            local rejected = longjmp and flag == "-s" and flag .. " " .. flags[index + 1] or flag
+            longjmp and longjmp ~= "wasm" or legacy and legacy ~= "1" then
+            local rejected = (longjmp or legacy) and flag == "-s" and flag .. " " .. flags[index + 1] or flag
             return nil, "browser target does not support " .. origin .. " flag " .. string.format("%q", rejected)
         end
     end
@@ -451,7 +461,7 @@ validate_record = function(record, paths)
             return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", item[1]) .. ": invalid hexadecimal value")
         end
     end
-    for _, item in ipairs({ { "sjlj", "emscripten" }, { "target", "wasm32-unknown-emscripten" },
+    for _, item in ipairs({ { "sjlj", "wasm" }, { "target", "wasm32-unknown-emscripten" },
             { "emscripten_version", M.EMSCRIPTEN_VERSION } }) do
         if record[item[1]] ~= item[2] then return nil, mismatch(paths, record, item[1], item[2]) end
     end
@@ -469,7 +479,7 @@ validate_record = function(record, paths)
     end
     local flags, flags_error = record_list(record, paths, "cflags")
     if not flags then return nil, flags_error end
-    local flag_defines, seen, longjmp = {}, {}, nil
+    local flag_defines, seen, longjmp, legacy = {}, {}, nil, nil
     for index, flag in ipairs(flags) do
         if flag:sub(1, 2) == "-D" and not seen[flag] then
             flag_defines[#flag_defines + 1] = flag
@@ -477,6 +487,8 @@ validate_record = function(record, paths)
         end
         local mode = longjmp_mode(flags, index)
         if mode then longjmp = mode end
+        local encoding = setting_value(flags, index, "WASM_LEGACY_EXCEPTIONS")
+        if encoding then legacy = encoding end
     end
     table.sort(flag_defines, util.bytewise_less)
     if table.concat(flag_defines, " ") ~= record.lua_defines then
@@ -484,6 +496,11 @@ validate_record = function(record, paths)
     end
     if longjmp ~= record.sjlj then
         return nil, mismatch(paths, record, "sjlj", longjmp or "<missing in cflags>")
+    end
+    if legacy ~= "1" then
+        return nil, record_error(paths, "is malformed",
+            "invalid field \"cflags\": required -sWASM_LEGACY_EXCEPTIONS=1, found " ..
+                string.format("%q", legacy or "<missing>"))
     end
     local supported, unsupported = M.validate_flags(flags, "cflags")
     if not supported then return nil, record_error(paths, "is malformed", "invalid field \"cflags\": " .. unsupported) end
