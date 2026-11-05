@@ -265,7 +265,7 @@ end
 
 local function scalar_kinds()
   local number: foreign long double = 1.5
-  local code = ffi.RECOVERY_INITIAL
+  local code: foreign recovery_code = ffi.RECOVERY_INITIAL
   local pointer: foreign *void
   local caught = false
   do
@@ -300,10 +300,10 @@ function main(_args: {string}): integer
   check(subarray_case() == 10, "subarray decay lost its root write")
   check(fam_case() == 99, "FAM backing lost its full-extent write")
   for fresh = 0, 1 do
-    for _, ordinary in {false, true} do
-      for _, marked in {false, true} do
-        value_case(fresh, ordinary, marked)
-        pointer_case(fresh, ordinary, marked)
+    for ordinary = 0, 1 do
+      for marked = 0, 1 do
+        value_case(fresh, ordinary ~= 0, marked ~= 0)
+        pointer_case(fresh, ordinary ~= 0, marked ~= 0)
       end
     end
   end
