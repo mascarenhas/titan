@@ -388,7 +388,9 @@ describe("browser providers", function()
         local calls = {}
         context.io.run = function(_, argv)
             calls[#calls + 1] = argv
-            assert.equal(context.target_descriptor.tools.cc[1], argv[1])
+            assert.equal("env", argv[1])
+            assert.equal("EMCC_CFLAGS=", argv[2])
+            assert.equal(context.target_descriptor.tools.cc[1], argv[3])
             return { started = true, ok = true, output = "", status = 0, why = "exit" }
         end
         local service = assert(driver.get_probe_service(context))
