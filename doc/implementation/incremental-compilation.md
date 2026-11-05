@@ -450,7 +450,7 @@ does not reject unknown extra keys:
 | `interface` | `{ public = <hex>, source = <hex> }` | Producer self digests computed from this module's coder outputs. |
 | `object_identity` | `<hex>` | Recipe digest over configuration, module name, stem, codegen options, generated C parts before record injection, and `.priv.h`. |
 | `roots` | `{ sdk?, compiler?, output? }` | Concrete original compiler-owned roots, used only to rebind named filesystem fields. |
-| `generated` | `{ { bytes, sha256, semantic }, ... }` | Per-part metadata-free generated-C prefix length and content/expanded-program digests. |
+| `generated` | `{ { spelling, bytes, sha256, semantic }, ... }` | Per-part generated-C filename at creation, metadata-free prefix length, and content/expanded-program digests. |
 
 ## Configuration, toolchain, and preamble certificates
 
@@ -671,24 +671,24 @@ one of these roots receives a root label and relative suffix; the most
 specific root wins. A symlinked root is not admitted as a relocatable binding.
 Neither a user source root nor an arbitrary external include/provider/tool
 directory becomes relocatable just because it appears in a command.
-The reuse-on-move guarantee requires an explicit `-o`/`--output` tree. Legacy
-source-adjacent builds have no owned output root and retain their conservative
-move miss; the user source directory is not added to the root map.
+The reuse-on-move guarantee requires an explicit `-o`/`--output` tree.
+Source-adjacent builds without it have no owned output root and miss
+conservatively when moved; the user source directory is not added to the root
+map.
 
 Configuration hashing applies this mapping to known path operands in the
 ordered compile argv, FFI include roots, the SDK root, and preamble dependency
-paths and realpaths. Preprocessed preamble bytes remain unchanged input.
+paths and realpaths. Preprocessed preamble bytes are hashed unchanged.
 Opaque flags and their separated operands, `-D` values, prefix-map options,
 runtime search paths, and external paths keep their exact bytes. Bare absolute
 argv elements are not inferred to be file operands; native source and link
-input/output files already have separate typed inventories. Browser certification derives a
-root-relative view of the frozen descriptor's SDK paths without changing its
-operational identity or external Emscripten tool selection. Native and browser
-probe directories remain separate.
-Browser final-link profiles still carry their operational target identity and
-SDK-dependent flag lists, so a moved browser SDK may conservatively miss its
-link certificate. Browser final-link relocation reuse is not part of the
-native guarantee described here.
+input/output files have separate typed inventories. Browser certification
+derives a root-relative view of the frozen descriptor's SDK paths without
+changing its operational identity or external Emscripten tool selection, and
+native and browser probes keep separate cache directories. Browser final-link
+profiles carry their operational target identity and SDK-dependent flag lists,
+so a moved browser SDK may miss its link certificate; browser final-link reuse
+after a move is outside the native guarantee described here.
 
 Generated FFI descriptor identities and their include operands use the same
 mapping, rather than embedding an output-root address into every probe
@@ -701,19 +701,19 @@ On Windows the rebound origin's realpath retains native path serialization,
 matching the I/O strategy that records and revalidates it. Concrete path case
 and semantic C strings are not folded or rewritten.
 
-Compilation saves each generated part's formatted, coverage-converted C
-prefix before source-record injection. A binary read supplies its byte count
-and digest; appending the primary source record uses binary read/write to
-preserve that prefix. Formatting and coverage conversion remain text
-operations before this boundary. `incremental.preprocessed_identities`
-preprocesses the metadata-free prefix once, using the effective compile prefix,
-its actual quoted-include directory, and a macro-prefix mapping from the
-private temporary to the actual generated filename. The resulting digest keeps
-expanded C values, including `__FILE__` and `__BASE_FILE__`; it does not
-substitute roots inside expanded strings.
-Parts of one module run through the existing `io.run_batch` slot budget when
-the strategy supports it; custom synchronous runners retain their own
-execution boundary unless they also supply a batch override.
+Compilation records each generated part's final C prefix, after formatting and
+any coverage line conversion, before source-record injection. A binary read
+supplies its byte count and digest; appending the primary source record uses
+binary read/write to preserve that prefix. Formatting and coverage conversion
+are text operations that precede this boundary.
+`incremental.preprocessed_identities` preprocesses the metadata-free prefix
+once, using the effective compile prefix, its actual quoted-include directory,
+and a macro-prefix mapping from the private temporary to the actual generated
+filename. The resulting digest keeps expanded C values, including `__FILE__`
+and `__BASE_FILE__`; it does not substitute roots inside expanded strings.
+Parts of one module run through `io.run_batch` under the invocation's job-slot
+budget when the strategy supports it; custom synchronous runners keep their
+own execution boundary unless they also supply a batch override.
 
 Certificates retain the roots at object creation. A separate materialization
 receipt records the roots used for the generated companions and is bound to
@@ -740,12 +740,15 @@ preprocessing.
 The disposable `<stem>.relocation` data-only receipt binds successful semantic
 comparison to the exact object/generated companion bytes and concrete current
 roots, so subsequent unchanged builds do not preprocess again. It also keeps
-materialization state distinct from immutable certificate roots. It cannot replace the
-ordinary source, configuration, header or dependency checks. Reused native
-objects keep their original debug and diagnostic path strings. Authored C
-nodes retain their normal preprocessing check, and final-link records rebind
-only named owned input/output paths; neither path changes nor missing output
-validation are ignored.
+materialization state distinct from immutable certificate roots. It cannot
+replace the ordinary source, configuration, header or dependency checks.
+Reused native objects keep their original debug and diagnostic path strings.
+Authored C nodes keep their ordinary preprocessing check over root-relative
+source, argv and dependency identities
+([`--c-source` nodes](build-coordinator.md#--c-source-compilation-and-records)).
+Final-link records rebind only named owned input and output paths before their
+ordinary validation, so a changed external path or a missing output still
+misses.
 
 ## Own-source content and folder membership
 

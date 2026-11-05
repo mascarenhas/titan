@@ -59,9 +59,9 @@ information, and tracebacks: changing an absolute user source path, or
 switching between relative and absolute spelling, rebuilds the affected
 modules. With an explicit `-o`/`--output` tree, moving a checkout whose source
 paths remain relative, together with its output tree and an identical SDK
-prefix, does not by itself recompile certified objects. Legacy source-adjacent
-builds without `-o` keep a conservative miss when moved; the user source tree
-is not treated as a compiler-owned root. Equivalent spellings of one
+prefix, does not by itself recompile certified objects. Source-adjacent builds
+without `-o` miss conservatively when moved; the user source tree is not
+treated as a compiler-owned root. Equivalent spellings of one
 `--output` or `--exe` destination reuse the existing objects and link record.
 
 The compiler identifies its SDK prefix, its own source checkout when running
@@ -75,23 +75,23 @@ A root reached through a symlink is not admitted to this relocation guarantee.
 
 On the first use after an owned root moves, `titanc` preprocesses the saved
 generated C against the current headers and roots before reusing its object.
-An observable path macro such as `__FILE__` or `__BASE_FILE__` must still
-match; a changed value rebuilds the module. A disposable `<stem>.relocation`
-receipt avoids repeating this extra work on later unchanged invocations.
-The receipt also tracks the roots used to materialize generated companions;
-moving back to an earlier root repairs those files without rewriting unchanged
-ones. A missing or interrupted materialization record causes a safe rebuild.
-The prefix's byte identity includes its stored line endings; appending metadata
-does not change that prefix, including on Windows.
-Reused objects retain their originally embedded diagnostic and debug paths;
-moving a tree does not rewrite object bytes or promise relocated debug
-locations.
+It reads those saved bytes exactly, including their line endings, and excludes
+the certificate data that `titanc` appends to the primary C file, so the check
+behaves the same on Windows. An observable path macro such as `__FILE__` or
+`__BASE_FILE__` must still match; a changed value rebuilds the module. A
+disposable `<stem>.relocation` receipt avoids repeating this extra work on
+later unchanged invocations. The receipt also tracks the roots used to
+materialize generated companions; moving back to an earlier root repairs
+those files without rewriting unchanged ones. A missing or interrupted
+materialization record causes a safe rebuild. Reused objects retain their
+originally embedded diagnostic and debug paths; moving a tree does not
+rewrite object bytes or promise relocated debug locations.
 
-Generated FFI environments use the same root-relative identity, so copying
-the SDK's probe cache retains its hits. Native and browser probes already
-use separate persistent cache directories. Within each directory, probe
-outcomes remain keyed by generated C source bytes, with the existing manual
-cache-refresh policy for toolchain and external header changes.
+Generated FFI environments use the same root-relative identity, so a copied
+SDK probe cache keeps its hits. Native and browser probes use separate
+persistent cache directories. Within each directory, probe outcomes are keyed
+by the generated C source bytes, and toolchain or external header changes
+follow the [manual cache-refresh policy](c-ffi-expressions.md#compiled-probe-cache).
 
 Use `--source-first` when source dependencies should take precedence over
 installed `.so`, `.a`, or `.dll` providers. This option still allows compiled
@@ -237,13 +237,12 @@ compiled with the invocation's effective native compile flags and toolchain
 identity (excluding Titan-only test-owner and coverage flags) into
 `<output>/.native/<hash>.o` alongside a `<hash>.record` certificate, where
 `<hash>` is derived from the C file's canonical path, relative to a recognized
-compiler-owned root when applicable. On each invocation,
-`titanc` preprocesses each C file and hashes the authored source,
-preprocessed output, transitive header contents, compile command, and
-toolchain identity. When `--incremental` is active and both the input digest
-and current `.o` bytes match the record, `titanc` reuses the object without
-compiling. Resulting objects are linked in `--c-source` command-line order
-before `-X` payloads.
+compiler-owned root when applicable. On each invocation, `titanc` preprocesses
+each C file and hashes the authored source, preprocessed output, transitive
+header contents, compile command, and toolchain identity. When `--incremental`
+is active and both the input digest and current `.o` bytes match the record,
+`titanc` reuses the object without compiling. Resulting objects are linked in
+`--c-source` command-line order before `-X` payloads.
 
 A build script that needs the compiled object itself, for example to copy a
 helper to a fixed path, should ask for it with `--print-c-objects` rather
