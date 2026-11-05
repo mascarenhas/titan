@@ -312,11 +312,17 @@ logical filenames.
    module's imported raw foreign binding slots; and
 5. every local direct-call helper body in declaration order.
 
-Before any generated companion is consumed or published, the driver applies
-required `#line` normalization. With `titanc --pretty-print` it additionally
-runs the configured `clang-format` with Titan's explicit style and include
-sorting disabled. Default builds do not invoke the formatter; either mode
-preserves the intentional include sequence above.
+Fresh source-foreign headers and restored recipes share
+`ffiheaders.foreign_contents`. It removes the blank physical lines after
+generated `#line` directives that fresh header publication already removes,
+preserving LF/CRLF spelling and all other recipe bytes. A replayed companion
+therefore has the same directive spacing before native preprocessing, rather
+than relying on a file-formatting step that direct restoration bypasses.
+The driver retains its final required normalization before publication. With
+`titanc --pretty-print` it additionally runs the configured `clang-format`
+with Titan's explicit style and include sorting disabled. Default builds do
+not invoke the formatter; either mode preserves the intentional include
+sequence above.
 
 Putting every prototype before every helper body supports calls among the
 module's foreign declarations. Include lines are normalized and deduplicated.

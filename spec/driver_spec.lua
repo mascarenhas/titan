@@ -4198,6 +4198,58 @@ describe("source foreign-header planning", function()
             coder.generate_ffi_header("case", {}))
     end)
 
+    for _, ending in ipairs({ { "LF", "\n" }, { "CRLF", "\r\n" } }) do
+        it("replays " .. ending[1] .. " foreign recipes with fresh-header directive spacing", function()
+            local newline = ending[2]
+            local prefix = driver.FOREIGN_HEADER_MARKER .. newline .. "#ifndef SAVED_HEADER" .. newline
+            local literal = 'const char *path = "C:\\\\root\\\\unchanged";'
+            local body = table.concat({
+                "static inline int saved(void) {",
+                '#line 7 "source.titan"',
+                "",
+                " \t",
+                "int item = 1;",
+                "",
+                literal,
+                "return item;",
+                "}",
+                "",
+            }, newline)
+            local recipe = { prefix = prefix, body = body, source_headers = { "dep" },
+                policy = { line_directives = true, coverage = false } }
+            local digest = ffiheaders.foreign_recipe_digest(recipe)
+            local includes = '#include "saved.ffi.h"\n#include "dep.titan.h"\n'
+            local replayed = ffiheaders.foreign_contents(recipe, "saved.ffi.h", function(name)
+                assert.equal("dep", name)
+                return "dep.titan.h"
+            end)
+            local expected_body = table.concat({
+                "static inline int saved(void) {",
+                '#line 7 "source.titan"',
+                "int item = 1;",
+                "",
+                literal,
+                "return item;",
+                "}",
+                "",
+            }, newline)
+            assert.equal(prefix .. "\n" .. includes .. expected_body, replayed)
+            assert.equal(body, recipe.body)
+            assert.equal(digest, ffiheaders.foreign_recipe_digest(recipe))
+
+            -- Model the fresh writer's text-mode read on either host without
+            -- changing the replayed header's independently asserted LF/CRLF bytes.
+            local fresh = (prefix .. "\n" .. includes .. body):gsub("\r\n", "\n")
+            local strategy = {
+                read_file = function() return fresh end,
+                write_file = function(_, _, contents) fresh = contents; return true end,
+                run = function() error("unexpected formatter execution") end,
+            }
+            assert.is_true(driver.format_generated_file("saved.titan.h", false, false, strategy))
+            assert.equal(fresh, (replayed:gsub("\r\n", "\n")))
+        end)
+    end
+
     it("plans dependency headers, writes owned outputs, and removes stale ones",
     function()
         local root = temporary.name()

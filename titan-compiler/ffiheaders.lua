@@ -85,7 +85,17 @@ function ffiheaders.foreign_contents(recipe, ffi_header, source_header)
     for _, modname in ipairs(recipe.source_headers) do
         includes[#includes + 1] = "#include " .. quote_header(source_header(modname))
     end
-    return recipe.prefix .. "\n" .. table.concat(includes, "\n") .. "\n" .. recipe.body
+    local contents = recipe.prefix .. "\n" .. table.concat(includes, "\n") .. "\n" .. recipe.body
+    -- Fresh header publication already removes blank lines after generated
+    -- #line directives. Replay bypasses that file-formatting step, so render
+    -- the same bytes here before either path reaches the native preprocessor.
+    -- Preserve LF/CRLF spelling and every other byte of the recipe.
+    local removed
+    repeat
+        contents, removed = contents:gsub(
+            "([ \t]*#line[^\n]*\n)[ \t]*\r?\n", "%1")
+    until removed == 0
+    return contents
 end
 
 local function render_includes(modname, includes, typedefs)

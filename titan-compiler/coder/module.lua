@@ -1,4 +1,5 @@
 local core = require "titan-compiler.coder.core"
+local ffiheaders = require "titan-compiler.ffiheaders"
 local _ENV = core
 
 preamble = [[
@@ -1336,7 +1337,7 @@ local function render_foreign_header(modname, ast, tlcontext, header_paths,
     local ffi_header = header_paths.ffi_header or ast._ffi_header_output
         or (ast._ffi_header and ast._ffi_header.filename)
         or (modname:gsub("[.]", "/") .. ".ffi.h")
-    local includes = { "#include " .. c_header_name(ffi_header) }
+    local source_paths = {}
     local source_headers = {}
     local seen = { [ffi_header] = true }
     for _, node in ipairs(ast) do
@@ -1347,7 +1348,7 @@ local function render_foreign_header(modname, ast, tlcontext, header_paths,
             if not seen[header] then
                 seen[header] = true
                 source_headers[#source_headers + 1] = node.modname
-                includes[#includes + 1] = "#include " .. c_header_name(header)
+                source_paths[node.modname] = header
             end
         end
     end
@@ -1407,15 +1408,15 @@ local function render_foreign_header(modname, ast, tlcontext, header_paths,
     -- live beside the canonical main source. The emission policy is part of
     -- the recipe: it decides the rendered bodies, and a change must invalidate
     -- an already prepared header through the certificate digests.
-    return prefix .. "\n" .. table.concat(includes, "\n") .. "\n" .. body,
-        { prefix = prefix, body = body, source_headers = source_headers,
-          policy = { line_directives = policy.line_directives,
-              coverage = policy.coverage } }
+    local recipe = { prefix = prefix, body = body, source_headers = source_headers,
+        policy = { line_directives = policy.line_directives, coverage = policy.coverage } }
+    return ffiheaders.foreign_contents(recipe, ffi_header, function(name)
+        return assert(source_paths[name])
+    end), recipe
 end
 
 -- Canonical identity of one foreign-header recipe (rendered text, source-header
 -- module list, emission policy); header paths are environment, not content.
-local ffiheaders = require "titan-compiler.ffiheaders"
 function coder._foreign_header_digest(recipe)
     return ffiheaders.foreign_recipe_digest(recipe)
 end
