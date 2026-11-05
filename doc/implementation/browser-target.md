@@ -740,7 +740,7 @@ not stack the caller already uses. Native values are unchanged.
 | Bound | Define (browser value) | Native default | Lowest measured ceiling | Browser limit |
 | --- | --- | --- | --- | --- |
 | `protobuf` reflective and generated codecs, `protobuf.schema`, `transfer` | `TITAN_CODEC_DEPTH_LIMIT` (43), in `titan-runtime/transfer.h` | 128 | 85 levels: reflective encoder, `validation`, Node and Chromium | 42 accepted levels |
-| `json.encode` | `TITAN_JSON_WRITER_DEPTH_LIMIT` (103), in `titan/json/native.h` | `LUA_MAXINTEGER` (no cap) | 206 levels: writer with a raised `max_depth`, `validation`, Chromium | `min(max_depth, 103)` |
+| `json.encode` | `TITAN_JSON_WRITER_DEPTH_LIMIT` (103), in `titan-runtime/titan.h` | 0 (no target cap; writer uses `math.maxinteger`) | 206 levels: writer with a raised `max_depth`, `validation`, Chromium | `min(max_depth, 103)` |
 
 `TITAN_CODEC_DEPTH_LIMIT` is a raw budget: `require_depth` in
 `titan/protobuf/protobuf.titan` and `titan_codec_depth` in `transfer.h` raise
@@ -749,9 +749,12 @@ one level deeper, so 128 accepts 127 records and 43 accepts 42 (a union whose
 selected variant has no parts is accepted at the budget itself; see the
 [protobuf nesting limit](protobuf-library.md#nesting-limit)). Both messages
 print the macro value (`protobuf: nesting exceeds <limit> levels`).
-`encode_value` in `titan/json/writer.titan` clamps the call's `max_depth` to
-the define after option validation, so only an encode whose setting exceeds
-103 is affected, and the writer's ordinary `limit_exceeded` (`value exceeds
+The JSON main initializer starts its cached writer limit at the const
+`math.maxinteger` and narrows it only for a positive target define. Zero is the
+SDK default and adds no native cap. `encode_value` in
+`titan/json/writer.titan` clamps the call's `max_depth` to that cached limit
+after option validation, so only a browser encode whose setting exceeds 103
+is affected, and the writer's ordinary `limit_exceeded` (`value exceeds
 max_depth`) fires; the default `max_depth` of 32 and every decode setting are
 unchanged. Both defines are profile-owned, so a `-D` or `-U` of either is
 rejected like the other target defines.
@@ -1021,8 +1024,8 @@ because all of them use the same prefix, so the standard library and C headers
 read target constants through `foreign import`: `titan/coroutine.titan` reads
 `ffi.TITAN_COROUTINE_STACK_SIZE` ([Coroutines](coroutines.md#stacks-and-backends)),
 `titan/protobuf/protobuf.titan` and `titan-runtime/transfer.h` read
-`TITAN_CODEC_DEPTH_LIMIT`, `titan/json/writer.titan` reads
-`ffi.TITAN_JSON_WRITER_DEPTH_LIMIT`, and the Emscripten fiber backend in
+`TITAN_CODEC_DEPTH_LIMIT`, `titan/json/json.titan` caches
+`ffi.TITAN_JSON_WRITER_DEPTH_LIMIT` from `titan.h`, and the Emscripten fiber backend in
 `minicoro.h` sizes its Asyncify buffers with `MCO_ASYNCFY_STACK_SIZE`. Each
 header keeps its native default under `#ifndef`, so native builds are
 unchanged. Because a measurement

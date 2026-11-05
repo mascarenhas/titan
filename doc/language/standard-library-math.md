@@ -45,8 +45,8 @@ function ult(left: integer, right: integer): boolean
 
 pi: float
 huge: float
-maxinteger: integer
-mininteger: integer
+const maxinteger: integer
+const mininteger: integer
 ```
 
 An integer argument is accepted where a `float` is required through Titan's
@@ -80,8 +80,11 @@ ordinary checked-FFI range error otherwise.
 `ult` compares two integers as unsigned 64-bit values. Thus `ult(0, -1)` is
 true and `ult(-1, 0)` is false.
 
-The constants have the Lua 5.5 meanings: `pi` is pi, `huge` is positive
+The numeric members have the Lua 5.5 meanings: `pi` is pi, `huge` is positive
 infinity, and `mininteger`/`maxinteger` bound Titan's 64-bit integer range.
+`math.maxinteger` is $2^{63} - 1$ and `math.mininteger` is $-2^{63}$ on both
+native and browser targets. These two integer bounds are const members:
+Titan assignments are rejected at compile time, and Lua writes raise an error.
 
 `math.type` is intentionally absent. Titan already represents integer and
 float as distinct static types, while its public dynamic numeric cast accepts

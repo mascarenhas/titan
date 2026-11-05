@@ -4,8 +4,8 @@ The public `titan.math` module is implemented in `titan/math.titan`. It does
 not call Lua functions or the Lua C API. It imports only C99 headers:
 `math.h` for ordinary calculations, `stdlib.h` (`strtod`) and `locale.h`
 (`localeconv`) for numeral conversion, `string.h` (`memcpy`) and `stdint.h`
-(`uint8_t`) for byte access and temporary buffers, `time.h` (`time`, `clock`)
-for weak default seeding, and `limits.h` for the integer bounds.
+(`uint8_t`) for byte access and temporary buffers, and `time.h` (`time`,
+`clock`) for weak default seeding.
 
 ## Fixed numeric signatures and C calls
 
@@ -38,12 +38,14 @@ sign bit and then uses signed comparison; this is the ordinary order-preserving
 mapping between unsigned and two's-complement signed 64-bit integers.
 
 An infinite Titan literal initializes `huge`; generated C lowers that literal
-to the target C infinity constant. The integer bounds come from
-`LLONG_MIN`/`LLONG_MAX` in `limits.h`, matching Titan's configured Lua integer
-representation without duplicating the target constants in Titan source.
-Because a foreign macro is not a Titan constant expression, the module's
-one-time root initializer assigns both exported bounds before seeding the
-random generator.
+to the target C infinity constant. The exported integer bounds are
+`const maxinteger: integer = ~0 >> 1` and
+`const mininteger: integer = 1 << 63`. Titan's logical right shift turns the
+all-ones integer into $2^{63} - 1$, while the sign bit alone represents
+$-2^{63}$. Both are constant expressions with type `integer` and the same
+values on native and browser targets. Their initialized const declarations
+prohibit later Titan assignments and Lua writes. The sole final root
+initializer seeds the random generator.
 
 ## xoshiro256**
 
