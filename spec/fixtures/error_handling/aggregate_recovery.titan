@@ -285,15 +285,15 @@ function main(_args: {string}): integer
   check(pair_case() == 18, "checked return lost a struct write")
   local pair = foreign recovery_pair.new()
   check(pair_parameter(pair) == 18, "struct parameter lost its address write")
-  local pair_lambda = function(item: foreign recovery_pair): integer
+  local pair_lambda = (function(item: foreign recovery_pair): integer
     do
       pair_checked(item, -1)
     catch
       return item.first as integer + item.last as integer
     end
     return -1
-  end
-  check(pair_lambda(pair) == 18, "struct lambda parameter lost its address write")
+  end)(pair)
+  check(pair_lambda == 18, "immediate struct lambda parameter lost its address write")
   check(union_case() == 19, "union local lost its address write")
   check(array_case() == 21, "fixed array lost an inlined write")
   check(matrix_case() == 40, "nested array typedef lost its address write")
