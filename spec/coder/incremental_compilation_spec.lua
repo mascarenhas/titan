@@ -988,6 +988,115 @@ os.exit(result.ok and 0 or result.status or 1)
     end)
 
     describe("certified input decisions", function()
+        it("reuses every object, native node, link and probe after owned-root relocation", function()
+            local sdk = private_sdk()
+            write(sdk .. "/include/relocation_probe.h", [[
+                static inline int relocation_answer(void) { return 42; }
+            ]])
+            local stem = source(APP, [[
+                foreign import "relocation_probe.h"
+                local math = import "math"
+                function main(args: {string}): integer
+                    local first: foreign *int = nil
+                    local second = first as foreign *double
+                    return math.abs(ffi.relocation_answer() as integer)
+                end
+            ]])
+            compiler_environment.TITAN_PROBE_CACHE_DISABLE = "0"
+            compiler_environment.TITAN_PREFIX = sdk
+            compiler_environment.TITAN_PATH_0_6 = sdk .. "/lib/titan/0.6"
+            write(workspace .. "/helper.c", "int relocation_native_helper(void) { return 17; }\n")
+            certified("--c-source", workspace .. "/helper.c", APP)
+            local saved = remember_objects({ [APP] = stem })
+            local old_output, moved_output = workspace .. "/build", workspace .. "/moved output"
+            local moved_sdk = workspace .. "/moved sdk"
+            assert(os.rename(sdk, moved_sdk))
+            assert(os.rename(old_output, moved_output))
+            assert.is_false(exists(sdk)); assert.is_false(exists(old_output))
+            sdk_root = moved_sdk
+            compiler_environment.TITAN_PREFIX = moved_sdk
+            compiler_environment.TITAN_PATH_0_6 = moved_sdk .. "/lib/titan/0.6"
+            saved[APP].path = moved_output .. "/" .. APP .. ".o"
+            local output = compiled("-o", moved_output, "--incremental", "--source-first",
+                "-v", "--c-source", workspace .. "/helper.c", APP)
+            decisions(output, saved, {})
+            no_native_compile(output)
+            assert.matches("Titan link hit", output, 1, true)
+            assert.is_nil(output:find("configuration options", 1, true), output)
+            local receipt = saved[APP].path:gsub("%.o$", ".relocation")
+            assert.is_true(exists(receipt))
+            local original_receipt = read(receipt)
+            output = compiled("-o", moved_output, "--incremental", "--source-first",
+                "-v", "--c-source", workspace .. "/helper.c", APP)
+            decisions(output, saved, {})
+            no_native_compile(output)
+            assert.equal(original_receipt, read(receipt))
+            -- Force only the authored module through checking to observe actual
+            -- persistent baseline/candidate hits in its moved SDK namespace.
+            output = compiled("-o", moved_output, "-c", "-v", APP)
+            assert.matches("[cprobe] baseline cache hit", output, 1, true)
+            assert.matches("[cprobe] candidate cache hit", output, 1, true)
+            assert.is_nil(output:find("[cprobe] baseline cache miss", 1, true), output)
+            assert.is_nil(output:find("[cprobe] candidate cache miss", 1, true), output)
+        end)
+
+        it("invalidates an observable foreign-header __FILE__ during SDK relocation", function()
+            local sdk = private_sdk()
+            write(sdk .. "/include/relocation_file.h", [[
+                #include <string.h>
+                static inline int relocation_answer(void) { return (int)strlen(__FILE__); }
+            ]])
+            local stem = source(APP, [[
+                foreign import "relocation_file.h"
+                function main(args: {string}): integer
+                    return ffi.relocation_answer() as integer
+                end
+            ]])
+            certified(APP)
+            local saved = remember_objects({ [APP] = stem })
+            local moved = workspace .. "/much longer moved SDK"
+            assert(os.rename(sdk, moved))
+            assert.is_false(exists(sdk))
+            sdk_root = moved
+            decisions(certified(APP), saved, { [APP] = "c-input relocated generated-C semantics" })
+            certified_exit(#(moved .. "/include/relocation_file.h"))
+        end)
+
+        it("invalidates an observable __BASE_FILE__ during output-root relocation", function()
+            write(workspace .. "/relocation_base.h", [[
+                #include <string.h>
+                static inline int relocation_base(void) { return (int)strlen(__BASE_FILE__); }
+            ]])
+            local stem = source(APP, [[
+                foreign import "relocation_base.h"
+                function main(args: {string}): integer
+                    return ffi.relocation_base() as integer
+                end
+            ]])
+            certified(APP)
+            local saved = remember_objects({ [APP] = stem })
+            local moved = workspace .. "/longer moved output"
+            assert(os.rename(workspace .. "/build", moved))
+            saved[APP].path = moved .. "/" .. APP .. ".o"
+            local text = compiled("-o", moved, "--incremental", "--source-first", "-v", APP)
+            decisions(text, saved, { [APP] = "c-input relocated generated-C semantics" })
+        end)
+
+        it("keeps absolute user source spelling significant during relocation", function()
+            source(APP, main(43))
+            certified("-c", APP)
+            local output = workspace .. "/build"
+            local old = workspace
+            local moved = workspace .. "-moved-source"
+            assert(os.rename(workspace, moved))
+            workspace = moved
+            local text = certified("-c", APP)
+            assert.matches("source%-set", text)
+            assert.is_nil(text:find("Titan object hit " .. APP, 1, true))
+            assert.is_false(exists(old))
+            assert.is_false(exists(output))
+        end)
+
         for _, publication in ipairs({ "copy", "hardlink", "symlink" }) do
             it("reuses objects after identical " .. publication .. " SDK publication", function()
                 if publication == "symlink" then

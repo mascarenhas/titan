@@ -9,6 +9,7 @@ local types = require "titan-compiler.types"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local graphcodec = require "titan-compiler.graphcodec"
+local relocation = require "titan-compiler.relocation"
 local incremental = {}
 
 local function state(context)
@@ -323,6 +324,8 @@ end
 -- verified evidence primes the persistent cache for the next invocation.
 function incremental.fresh_context(context)
     local fresh = { io = context.io, cache_adapter = context.cache_adapter }
+    fresh.relocation_roots, fresh.incremental_options =
+        context.relocation_roots, context.incremental_options
     local memo = state(context)
     state(fresh).parent = memo
     state(fresh).persistent = memo.persistent
@@ -405,6 +408,29 @@ end
 local function append(target, values)
     for _, value in ipairs(values or {}) do target[#target + 1] = value end
     return target
+end
+
+-- Temporary translation units use the actual generated filename for macro
+-- expansion. Expanded C strings remain semantic input, unlike #line markers.
+function incremental.preprocessed_identity(context, filename, contents)
+    local opts = options(context)
+    local temporary = required(context.io:tmpname())
+    local ok, result = pcall(function()
+        required(context.io:write_file(temporary, contents))
+        local argv = append({ table.unpack(opts.compile_prefix) }, {
+            "-iquote", paths.dirname(absolute(context, filename)),
+            "-fmacro-prefix-map=" .. temporary .. "=" .. filename,
+            "-E", "-P", "-x", "c", temporary })
+        local expanded = run(context, argv)
+        local counters = state(context).counters
+        counters.relocation_preprocesses = (counters.relocation_preprocesses or 0) + 1
+        return incremental.digest(context, "generated-c-semantics", expanded)
+    end)
+    local removed, err = context.io:unlink(temporary)
+    incremental.invalidate_file(context, temporary)
+    if not ok then error(result, 0) end
+    required(removed, err, temporary)
+    return result
 end
 
 local function physical_tool_identity(context, filename, stat)
@@ -729,7 +755,7 @@ function incremental.toolchain_identity(context, descriptor)
     local details = { preprocessor = preprocessor, banner = banner, tools = tools,
         stage_policy = stage_policy }
     if descriptor.target_identity ~= nil then
-        details.target_identity = descriptor.target_identity
+        details.target_identity = descriptor.certification_target_identity or descriptor.target_identity
     end
     local digest = incremental.digest(context, "toolchain", details)
     memo.toolchains[key] = { digest = digest, details = details }
@@ -1228,7 +1254,8 @@ function incremental.preamble_identity(context, value)
                 inputs[#inputs + 1] = { path = path, realpath = real, sha256 = digest }
             end
         end
-        return incremental.digest(context, "preamble", { expanded = expanded, inputs = inputs }), inputs
+        return incremental.digest(context, "preamble", {
+            expanded = expanded, inputs = relocation.files(context, inputs) }), inputs
     end)
     local removed, removeerr = context.io:unlink(dep)
     incremental.invalidate_file(context, dep)
@@ -1251,10 +1278,14 @@ function incremental.configuration(context, value)
             required(nil, toolchain_error)
         end
         local preamble = incremental.preamble_identity(context, opts)
-        local compile_options = { compile_prefix = opts.compile_prefix,
+        local ffi_dirs = {}
+        for index, path in ipairs(opts.extra_ffi_include_dirs or {}) do
+            ffi_dirs[index] = relocation.path(context, path)
+        end
+        local compile_options = { compile_prefix = relocation.argv(context, opts.compile_prefix),
             build_profile = opts.build_profile, emit_line_directives = opts.emit_line_directives,
-            pretty_print = opts.pretty_print, extra_ffi_include_dirs = opts.extra_ffi_include_dirs or {},
-            titan_root = opts.titan_root }
+            pretty_print = opts.pretty_print, extra_ffi_include_dirs = ffi_dirs,
+            titan_root = relocation.path(context, opts.titan_root) }
         local certificate = { compiler = compiler, toolchain = toolchain, preamble = preamble,
             options = incremental.digest(context, "compile-options", compile_options) }
         certificate.digest = incremental.digest(context, "configuration", certificate)
@@ -1290,8 +1321,8 @@ function incremental.producer_digests(context, entry, layouts, recipe)
     end
     local public = incremental.digest(context, "public-interface", {
         types.serialize_semantic(entry.type), layouts, helper })
-    local private = entry.source_manifest
-        or required(require("titan-compiler.sourceinterface").serialize(entry))
+    local private = not next(context.relocation_roots or {}) and entry.source_manifest
+        or required(require("titan-compiler.sourceinterface").serialize(entry, context))
     return { public = public,
         source = incremental.digest(context, "source-interface", { public, private }) }
 end
@@ -1324,10 +1355,16 @@ function incremental.make_certificate(context, entry, native, inputs)
     local source = assert(inputs.source, "precomputed own-source certificate is required")
     assert(type(source.sources) == "table" and (source.layout == "flat" or source.layout == "folder"),
         "make_certificate requires the exact parsed own-source certificate")
+    local providers = {}
+    for name, filename in pairs(native.providers or {}) do
+        providers[name] = relocation.path(context, filename)
+    end
     local result = { configuration = assert(context.incremental_configuration),
-        layout = source.layout, sources = source.sources, stem = inputs.stem,
+        layout = source.layout, sources = source.sources,
+        stem = relocation.path(context, inputs.stem),
+        roots = context.relocation_roots or {}, generated = native.generated_inputs or {},
         codegen = inputs.codegen, imports = {}, owners = {},
-        bindings = native.bindings or {}, providers = native.providers or {},
+        bindings = native.bindings or {}, providers = providers,
         interface = entry.interface_digests
             or incremental.producer_digests(context, entry, native.layouts, native.foreign_header) }
     local direct = {}
@@ -1388,6 +1425,10 @@ local function valid_certificate(value, modname)
         or type(value.interface.source) ~= "string" or type(value.object_identity) ~= "string" then
         return false
     end
+    if type(value.roots) ~= "table" or not dense(value.generated, function(part)
+        return type(part) == "table" and math.type(part.bytes) == "integer" and part.bytes >= 0
+            and type(part.sha256) == "string" and type(part.semantic) == "string"
+    end) or #value.generated == 0 then return false end
     local policy = value.codegen
     if math.type(policy.c_parts) ~= "integer" or policy.c_parts < 1
         or math.type(policy.split_threshold) ~= "integer" or policy.split_threshold < 0
@@ -1549,6 +1590,139 @@ local function check_headers(context, record)
     return { status = "hit" }
 end
 
+-- Rebind explicit filesystem fields only. Source paths, C values and foreign
+-- helper bodies are not a general graph/string relocation surface.
+local function rebound_record(context, record, roots)
+    local function inputs(list)
+        for _, input in ipairs(list or {}) do
+            input.path = relocation.rebind(context, input.path, roots)
+            if input.kind == "origin" then
+                local prefix = version.C_HEADER_ORIGIN_PROTOCOL .. ";real="
+                if input.identity:sub(1, #prefix) == prefix then
+                    input.identity = prefix .. relocation.rebind(context, input.identity:sub(#prefix + 1), roots)
+                end
+            end
+        end
+    end
+    inputs(record.c_header_dependencies)
+    local visited, companions, outputs = {}, {}, {}
+    local function write(filename, contents)
+        local stat, err = context.io:lstat(filename)
+        if err then required(nil, err, filename) end
+        if stat then
+            assert(stat.kind == "file", "nonregular generated header: " .. filename)
+            if context.io:read_file(filename) == contents then
+                companions[#companions + 1] = filename
+                return
+            end
+        end
+        mkdir(context, paths.dirname(filename))
+        required(context.io:write_file(filename, contents))
+        incremental.invalidate_file(context, filename)
+        companions[#companions + 1] = filename
+    end
+    local function descriptor(item)
+        if not item or visited[item] then return end
+        visited[item] = true
+        item.contents = relocation.generated(context, item.contents, roots)
+        item.roots = context.relocation_roots
+        for index, include in ipairs(item.direct_includes or {}) do
+            item.direct_includes[index] = relocation.includes(context, "#include " .. include, roots)
+                :match("^#include (.*)$")
+        end
+        inputs(item.search_inputs)
+        for _, dependency in ipairs(item.dependencies or {}) do descriptor(dependency) end
+        local filename = relocation.resolve(context, item.identity)
+        if platform.is_absolute(filename) then
+            outputs[item.modname] = filename:gsub("%.ffi%.h$", ".titan.h")
+            write(filename, item.contents)
+            local helper = outputs[item.modname]
+            local stat = context.io:lstat(helper)
+            if stat and stat.kind == "file" then
+                write(helper, relocation.generated(context, required(context.io:read_file(helper)), roots))
+            end
+        end
+    end
+    descriptor(record.ffi_header_descriptor)
+    local native = record.object_metadata
+    if native.foreign_header then
+        native.foreign_header.prefix = relocation.generated(context, native.foreign_header.prefix, roots)
+        local own = assert(outputs[record.type.name], "missing generated header output")
+        write(own, require("titan-compiler.ffiheaders").foreign_contents(
+            native.foreign_header, own:gsub("%.titan%.h$", ".ffi.h"),
+            function(name) return assert(outputs[name], "missing source header output: " .. name) end))
+    end
+    if native.coverage then
+        for index, filename in ipairs(native.coverage.files or {}) do
+            native.coverage.files[index] = relocation.rebind(context, filename, roots)
+        end
+        local anchors = {}
+        for filename, mapping in pairs(native.coverage.anchors or {}) do
+            anchors[relocation.rebind(context, filename, roots)] = mapping
+        end
+        native.coverage.anchors = anchors
+    end
+    return companions
+end
+
+local function check_relocation(context, record, stem)
+    local native, cert = record.object_metadata, record.object_metadata.certificate
+    if not relocation.changed(context, cert.roots) then return { status = "hit" } end
+    if #cert.generated ~= #native.parts then return miss("record-schema", "missing generated-C semantics") end
+    local companions = rebound_record(context, record, cert.roots)
+    if native.private_header then
+        local filename = stem .. native.private_header
+        local contents = required(context.io:read_file(filename))
+        local rebound = relocation.generated(context, contents, cert.roots)
+        if rebound ~= contents then
+            required(context.io:write_file(filename, rebound))
+            incremental.invalidate_file(context, filename)
+        end
+        companions[#companions + 1] = filename
+    end
+    local headers = check_headers(context, record)
+    if headers.status ~= "hit" then return headers end
+    local sources, evidence = {}, {
+        roots = context.relocation_roots, object = incremental.file_digest(context, stem .. ".o") }
+    for index, part in ipairs(native.parts) do
+        local path, input = stem .. part.c_suffix, cert.generated[index]
+        if type(input) ~= "table" or math.type(input.bytes) ~= "integer" or input.bytes < 0
+            or type(input.sha256) ~= "string" or type(input.semantic) ~= "string" then
+            return miss("record-schema", "invalid generated-C semantics")
+        end
+        local bytes = incremental.file_contents(context, path):sub(1, input.bytes)
+        if incremental.digest(context, "generated-c", bytes) ~= input.sha256 then
+            return miss("parts", path .. ": generated source changed")
+        end
+        sources[index] = relocation.generated(context, bytes, cert.roots)
+        evidence[index] = incremental.file_digest(context, path)
+    end
+    evidence.companions = {}
+    for index, filename in ipairs(companions) do
+        evidence.companions[index] = incremental.file_digest(context, filename)
+    end
+    -- A disposable receipt avoids repeating relocation preprocessing on later
+    -- unchanged builds. It is bound to the exact object/generated bytes and
+    -- concrete current roots; header/source/configuration checks still run.
+    local receipt = stem .. ".relocation"
+    local key = incremental.digest(context, "relocated-generated-c", evidence)
+    local stat = context.io:lstat(receipt)
+    if stat and stat.kind == "file" and context.io:read_file(receipt, 65) == key then
+        return { status = "hit" }
+    end
+    for index, part in ipairs(native.parts) do
+        local spelling = relocation.rebind(context,
+            cert.generated[index].spelling or (stem .. part.c_suffix), cert.roots)
+        if incremental.preprocessed_identity(context, spelling, sources[index])
+            ~= cert.generated[index].semantic then
+            return miss("c-input", "relocated generated-C semantics")
+        end
+    end
+    required(context.io:write_file(receipt .. ".tmp", key))
+    required(context.io:rename(receipt .. ".tmp", receipt))
+    return { status = "hit" }
+end
+
 function incremental.certify_local(context, modname, source)
     local opts = options(context)
     local stem = opts.stem(modname, source)
@@ -1583,7 +1757,7 @@ function incremental.certify_local(context, modname, source)
         end
         if not source_ok then return miss("source-content", source.main) end
         if sources.status ~= "hit" then return sources end
-        if cert.stem ~= stem then return miss("output-moved") end
+        if cert.stem ~= relocation.path(context, stem) then return miss("output-moved") end
         local codegen = opts.codegen_options(modname, record)
         for _, key in ipairs({ "c_parts", "split_threshold", "test_flags", "coverage" }) do
             if canonical(cert.codegen[key], {}) ~= canonical(codegen[key], {}) then
@@ -1596,6 +1770,8 @@ function incremental.certify_local(context, modname, source)
         stage = "coverage-artifacts"
         local covered = check_coverage(context, record.object_metadata, stem)
         if covered.status ~= "hit" then return covered end
+        local relocated = check_relocation(context, record, stem)
+        if relocated.status ~= "hit" then return relocated end
         stage = "c-input"
         local headers = check_headers(context, record)
         if headers.status ~= "hit" then return headers end
@@ -1696,6 +1872,7 @@ function incremental.verdict(record, plan)
         -- Providers also record selected direct imports that the native binding
         -- inventory does not use. Those still certify exact provider selection.
         local expected_provider = not linked and direct[name] and provider or nil
+        if expected_provider and plan.path then expected_provider = plan.path(expected_provider) end
         if (binding ~= nil and binding ~= expected)
             or cert.providers[name] ~= expected_provider then
             local before = tostring(binding) .. (cert.providers[name] and ("@" .. cert.providers[name]) or "")

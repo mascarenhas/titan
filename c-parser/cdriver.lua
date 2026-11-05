@@ -1,3 +1,4 @@
+local relocation = require "titan-compiler.relocation"
 local cdriver = {}
 
 local cpp = require("c-parser.cpp")
@@ -493,7 +494,7 @@ end
 -- every source-relative candidate and the selected absolute header is in this
 -- key. The cached parse tail contains only lookups made from that selected
 -- header; a caller's own source-relative observations are reconstructed below.
-local function process_cache_key(filename, include, ctx, cwd)
+local function process_cache_key(filename, include, ctx, cwd, options)
     local identity = encode_sequence({
         "titan-cdriver-process-v2",
         ctx.preprocessor_configuration_key,
@@ -503,6 +504,9 @@ local function process_cache_key(filename, include, ctx, cwd)
         include.resolved,
         include.include_kind,
         include.include_name,
+        (options.relocation_roots or {}).sdk or "",
+        (options.relocation_roots or {}).compiler or "",
+        (options.relocation_roots or {}).output or "",
     })
     -- The exact tuple above can include a complete compiler argv and forced
     -- header manifest. Retain a fixed-size collision-resistant identity rather
@@ -720,7 +724,7 @@ end
 -- module or a fingerprint of preprocessing conditions. Resolve/hash each
 -- encountered header pathname once; generated paths map to their stable source
 -- identity. Byte positions add a declaration site for anonymous/prototype tags.
-local function declaration_scope_resolver(ctx, generated, generated_files, cwd, strategy, record_origin)
+local function declaration_scope_resolver(ctx, generated, generated_files, cwd, strategy, record_origin, options)
     local starts, line_scopes, paths, identities, offset = {}, {}, {}, {}, 1
     for index, line in ipairs(ctx.output) do
         starts[index] = offset
@@ -742,7 +746,7 @@ local function declaration_scope_resolver(ctx, generated, generated_files, cwd, 
                     end
                     local recorded, record_error = record_origin(path, physical)
                     if not recorded then return nil, record_error end
-                    identity = "physical-header\0" .. physical
+                    identity = "physical-header\0" .. relocation.path(options, physical)
                 end
                 scope = identities[identity]
                 if not scope then
@@ -920,7 +924,7 @@ local function process_file_inner(filename, options)
     local search_prefix_length = #search_inputs
     local cache = process_cache_for(strategy)
     local cache_key = process_cache_key(
-        generated and generated.digest or filename, include, ctx, cwd)
+        generated and generated.digest or filename, include, ctx, cwd, options)
     include.c_header_graph_key = cache_key
     cache.lookups = cache.lookups + 1
     local restored_validated
@@ -1026,7 +1030,7 @@ local function process_file_inner(filename, options)
     local declaration_scope, declaration_scope_error = declaration_scope_resolver(
         ctx, generated, generated_files, cwd, strategy, function(path, real)
             return record_dependency(path, version.C_HEADER_ORIGIN_PROTOCOL .. ";real=" .. real, nil, "origin")
-        end)
+        end, options)
     if not declaration_scope then return nil, declaration_scope_error end
     -- Parsing is a fresh publication boundary. Coarse strategies freshly read;
     -- only explicitly precise observations can take the metadata fast path.

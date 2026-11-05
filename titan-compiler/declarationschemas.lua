@@ -127,7 +127,9 @@ local schemas = {
         contents = "string", direct_includes = "names", dependencies = "headers",
         typedef_declarations = "names",
         search_inputs = "inputs", digest = "string",
+        roots = "relocation?",
     },
+    relocation = { sdk = "string?", compiler = "string?", output = "string?" },
     include = {
         original = "string?", resolved = "string?", include_kind = "string?",
         include_name = "string?", rendered = "string", generated_header = "header?",

@@ -7,6 +7,7 @@ local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local version = require "titan-compiler.version"
 local util = require "titan-compiler.util"
+local relocation = require "titan-compiler.relocation"
 
 local certificate = {}
 local RECORD_LIMIT = 16 * 1024 * 1024
@@ -138,7 +139,7 @@ end
 local function record_valid(record)
     if not data_only(record) then return false end
     if not closed(record, { schema = true, digest = true, canonicalization = true, input = true,
-        outputs = true, native = true }) or record.schema ~= version.TITAN_LINK_RECORD_SCHEMA or
+        outputs = true, native = true, roots = true }) or record.schema ~= version.TITAN_LINK_RECORD_SCHEMA or
         record.digest ~= version.CERTIFICATE_DIGEST or
         record.canonicalization ~= version.CERTIFICATE_CANONICALIZATION or
         not digest_string(record.input) or not dense(record.outputs) or not valid_files(record.native) then
@@ -538,6 +539,18 @@ local function output_snapshot(context, output)
     return result
 end
 
+local function semantic_outputs(context, outputs)
+    local result = {}
+    for index, output in ipairs(outputs) do
+        local copy = {}
+        for key, value in pairs(output) do copy[key] = value end
+        copy.path = relocation.path(context, output.path)
+        if output.entries then copy.entries = semantic_outputs(context, output.entries) end
+        result[index] = copy
+    end
+    return result
+end
+
 -- Fallback deliberately has a finite grammar: an unknown option may name a
 -- file (or make a tool read one), so skipping it cannot certify a complete set.
 local INPUT_FREE_LINK_FLAGS = {
@@ -871,7 +884,7 @@ function certificate.prepare(context, spec)
         seen[key] = true
         outputs[#outputs + 1] = { path = filename, executable = output.executable or false,
             kind = output.kind or "file" }
-        keys[#keys + 1] = key
+        keys[#keys + 1] = relocation.path(context, key)
     end
     table.sort(keys, util.bytewise_less)
     local key = incremental.digest(context, "final-output-set", keys)
@@ -882,7 +895,8 @@ function certificate.prepare(context, spec)
     if browser then
         input.policy = {}
         for name, value in pairs(spec.policy or {}) do input.policy[name] = value end
-        input.policy.target = browser.identity
+        input.policy.target = incremental.digest(context, "relocatable-browser-target",
+            relocation.browser(context, require("titan-compiler.browsertarget").export(browser)))
     end
     for _, field in ipairs(FILE_FIELDS) do input[field] = certificate.files(context, spec[field]) end
     need(data_only(input), "link recipe must contain only acyclic data")
@@ -914,7 +928,19 @@ function certificate.prepare(context, spec)
     input.native_policy = { backend = policy.backend, cacheable = policy.cacheable,
         files = policy.files and certificate.files(context, policy.files) or nil }
     return { key = key, directory = directory, synthetic_directory = paths.join(directory, "synthetic"),
-        record = paths.join(directory, "record"), input = incremental.digest(context, "final-link", input),
+        record = paths.join(directory, "record"), input = (function()
+            local semantic = {}
+            for field, value in pairs(input) do semantic[field] = value end
+            semantic.argv = relocation.argv(context, input.argv)
+            semantic.outputs = semantic_outputs(context, outputs)
+            for _, field in ipairs(FILE_FIELDS) do
+                semantic[field] = relocation.files(context, input[field])
+            end
+            semantic.native_policy = { backend = input.native_policy.backend,
+                cacheable = input.native_policy.cacheable,
+                files = input.native_policy.files and relocation.files(context, input.native_policy.files) }
+            return incremental.digest(context, "final-link", semantic)
+        end)(),
         recipe = input, outputs = outputs, native_policy = policy, cacheable = policy.cacheable,
         dependency_argv = policy.argv,
         dependency_output = policy.capture_trace and policy.dependency_file or nil }
@@ -928,6 +954,16 @@ function certificate.check(context, ticket)
     if not validated and type(valid) ~= "string" then error(valid, 0) end
     if not validated or not valid then return false, "link record schema" end
     if record.input ~= ticket.input then return false, "link inputs changed" end
+    for _, input in ipairs(record.native) do
+        input.path = relocation.rebind(context, input.path, record.roots)
+    end
+    local function rebind_outputs(outputs)
+        for _, output in ipairs(outputs) do
+            output.path = relocation.rebind(context, output.path, record.roots)
+            if output.entries then rebind_outputs(output.entries) end
+        end
+    end
+    rebind_outputs(record.outputs)
     if #record.outputs ~= #ticket.outputs then return false, "link output set changed" end
     local called, current = pcall(function()
         return { outputs = (function()
@@ -982,6 +1018,7 @@ function certificate.commit(context, ticket)
         schema = version.TITAN_LINK_RECORD_SCHEMA, digest = version.CERTIFICATE_DIGEST,
         canonicalization = version.CERTIFICATE_CANONICALIZATION,
         input = ticket.input, outputs = outputs, native = native,
+        roots = context.relocation_roots,
     })
 end
 

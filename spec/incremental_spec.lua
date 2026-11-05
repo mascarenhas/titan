@@ -7,6 +7,7 @@ local cpreamble = require "titan-compiler.cpreamble"
 local cpp = require "c-parser.cpp"
 local version = require "titan-compiler.version"
 local platform = require "titan-compiler.platform"
+local relocation = require "titan-compiler.relocation"
 
 local function fixture_path(path)
     return platform.windows and "C:" .. path or path
@@ -124,6 +125,7 @@ end
 
 local function certificate()
     return { configuration = configuration(), layout = "flat",
+        roots = {}, generated = { { bytes = 9, sha256 = sha256.hex("generated"), semantic = "expanded" } },
         sources = { { path = fixture_path("/src/main.titan"), sha256 = sha256.hex("source") } },
         stem = fixture_path("/out/main"), codegen = { c_parts = 1, split_threshold = 0, test_flags = false },
         imports = {}, owners = {}, bindings = {}, providers = {},
@@ -894,6 +896,44 @@ describe("persistent precise digest cache", function()
         assert.equal(0, incremental.counters(ctx).file_hashes)
         assert(incremental.save_digest_cache(edited))
         assert.is_nil(ctx.io.renames)
+    end)
+end)
+
+describe("compiler-owned relocation paths", function()
+    local function owned(root)
+        return { relocation_roots = { sdk = fixture_path(root .. "/sdk"),
+            compiler = fixture_path(root .. "/source"), output = fixture_path(root .. "/source/out") } }
+    end
+
+    it("labels only complete owned path prefixes and preserves ordered path operands", function()
+        local first, second = owned("/first"), owned("/second")
+        local function arguments(root)
+            return { "cc", "-I" .. fixture_path(root .. "/source/vendor"),
+                "-isystem", fixture_path(root .. "/sdk/include"), "-I/external/one",
+                "-I/external/two", "-DROOT=" .. fixture_path("/first/sdk"),
+                "-ffile-prefix-map=" .. fixture_path("/first/sdk") .. "=semantic",
+                fixture_path(root .. "/source/out/native.o") }
+        end
+        assert.same(relocation.argv(first, arguments("/first")), relocation.argv(second, arguments("/second")))
+        assert.equal("<titan:output>/native.o", relocation.path(first, fixture_path("/first/source/out/native.o")))
+        assert.equal(fixture_path("/first/sdk-other/a.h"), relocation.path(first, fixture_path("/first/sdk-other/a.h")))
+        local reversed = arguments("/second")
+        reversed[5], reversed[6] = reversed[6], reversed[5]
+        assert.is_not.same(relocation.argv(first, arguments("/first")), relocation.argv(second, reversed))
+        local changed = arguments("/second")
+        changed[7] = "-DROOT=changed"
+        assert.is_not.same(relocation.argv(first, arguments("/first")), relocation.argv(second, changed))
+    end)
+
+    it("rebinds generated directives without rewriting path-valued C strings", function()
+        local first, second = owned("/first"), owned("/second")
+        local source = '#include "' .. fixture_path("/first/sdk/include/a.h") .. '"\n' ..
+            'const char *value = "' .. fixture_path("/first/sdk/value") .. '";\n'
+        local rebound = relocation.generated(second, source, first.relocation_roots)
+        assert.matches(fixture_path("/second/sdk/include/a.h"), rebound, 1, true)
+        assert.matches(fixture_path("/first/sdk/value"), rebound, 1, true)
+        assert.is_true(relocation.changed(second, first.relocation_roots))
+        assert.is_false(relocation.changed(second, second.relocation_roots))
     end)
 end)
 
@@ -1784,6 +1824,14 @@ describe("incremental dependency verdicts", function()
 
     it("rejects missing certificates before consulting a plan", function()
         assert.equal("record-schema", incremental.verdict({ object_metadata = {} }, {}).reason)
+    end)
+
+    it("rejects certificates without generated-C semantic evidence", function()
+        local saved = record()
+        saved.object_metadata.certificate.generated = {}
+        assert.equal("record-schema", incremental.verdict(saved, {}).reason)
+        saved.object_metadata.certificate.generated = nil
+        assert.equal("record-schema", incremental.verdict(saved, {}).reason)
     end)
 end)
 

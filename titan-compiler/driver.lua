@@ -1355,6 +1355,11 @@ function driver._new_resolver_context(options, target_descriptor)
             error(target_error, 0)
         end
     end
+    context.relocation_roots = require("titan-compiler.relocation").roots(context.io, {
+        sdk = configured_installation_root,
+        compiler = driver.SOURCE_CHECKOUT_ROOT,
+        output = context.output_root,
+    })
     context._target_initializing = nil
     return context
 end
@@ -1916,6 +1921,8 @@ function driver.toolchain_descriptor(context)
             include_dirs = { table.unpack(descriptor.include_dirs) },
             profile = context.target_profile, profile_identity = descriptor.profile_identity,
             target_identity = descriptor.identity,
+            certification_target_identity = incremental.digest(context, "relocatable-browser-target",
+                require("titan-compiler.relocation").browser(context, driver._browser_target.export(descriptor))),
         }
     end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
@@ -2128,6 +2135,7 @@ function driver.get_probe_service(context)
     service, err = cprobe.new_service({
         io = context.io,
         cache_adapter = context.cache_adapter,
+        relocation_roots = context.relocation_roots,
         header_observations = context.header_observations,
         file_digest = context_file_digest(context),
         process_trace = context.c_header_process_trace,
@@ -4886,8 +4894,7 @@ local function expected_codegen_options(policy, modname, native)
     }
 end
 
--- The absolute output stem a module's certificate records. A moved output
--- tree therefore misses instead of reusing objects whose paths changed.
+-- The physical output stem is used for I/O; certificates label its owned root.
 local function certified_stem(modname, source)
     return normalized_absolute_filename(driver.module_output_stem(
         source.native_output or source.main, modname))
@@ -4926,6 +4933,7 @@ function incremental_options(context)
         pretty_print = context.pretty_print == true,
         extra_ffi_include_dirs = context.extra_ffi_include_dirs or {},
         titan_root = driver.TITAN_ROOT or "",
+        relocation_roots = context.relocation_roots,
         preamble_path = preamble_probe_path(context),
         stem = certified_stem,
         codegen_options = function(modname, record)
@@ -5027,6 +5035,9 @@ local function resolver_plan(context, linked_names)
         local mod = certificate_dependency(context, name, linked_names)
         if not mod then return nil, "unavailable" end
         return incremental.interface_digest(context, mod, view)
+    end
+    function plan.path(filename)
+        return require("titan-compiler.relocation").path(context, filename)
     end
     return plan
 end
@@ -6862,6 +6873,9 @@ function driver.resolution_plan(context)
         driver.assert_target_context(context)
         local module = modules[name]
         return module and module.kind == "dynamic" and module.provider_file or nil
+    end
+    function plan.path(filename)
+        return require("titan-compiler.relocation").path(context, filename)
     end
     function plan.digest(name, view)
         driver.assert_target_context(context)
@@ -9222,11 +9236,6 @@ local function prepare_compile(
         for _, part in ipairs(generated_parts) do
             local part_c = driver.part_c_filename(stem, part.index)
             local part_code = driver.GENERATED_C_MARKER .. "\n" .. part.code
-            if not (options and options.coverage) and part.index == 0 then
-                local metadata, metadata_error = metadata_code()
-                if not metadata then return nil, metadata_error end
-                part_code = part_code .. metadata
-            end
             os.remove(part_c)
             local ok, err = util.set_file_contents(part_c, part_code)
             if not ok then return nil, err end
@@ -9251,15 +9260,32 @@ local function prepare_compile(
             end
             native.coverage = coverage.partial(coverage_parts,
                 entry.source_files, options.coverage_backend)
-            local metadata, metadata_error = metadata_code()
-            if not metadata then return nil, metadata_error end
-            converted_codes[1].code = converted_codes[1].code .. metadata
             for _, item in ipairs(converted_codes) do
                 local written, write_error =
                     util.set_file_contents(item.filename, item.code)
                 if not written then return nil, write_error end
             end
         end
+        if certify then
+            native.generated_inputs = {}
+            for index, part in ipairs(generated_parts) do
+                local filename = driver.part_c_filename(stem, part.index)
+                local contents, err = util.get_file_contents(filename)
+                if not contents then return nil, err end
+                native.generated_inputs[index] = {
+                    spelling = filename,
+                    bytes = #contents, sha256 = incremental.digest(context, "generated-c", contents),
+                    semantic = incremental.preprocessed_identity(context, filename, contents),
+                }
+            end
+        end
+        local metadata, metadata_error = metadata_code()
+        if not metadata then return nil, metadata_error end
+        local primary = driver.part_c_filename(stem, 0)
+        local contents, read_error = util.get_file_contents(primary)
+        if not contents then return nil, read_error end
+        local written, write_error = util.set_file_contents(primary, contents .. metadata)
+        if not written then return nil, write_error end
         if source_entry then
             source_entry.coverage = native.coverage
             source_entry.private_symbols = private_symbols
