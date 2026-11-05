@@ -470,6 +470,9 @@ function isconstructor(node)
     if not decl then
         return false
     end
+    if decl._tag == "Checker.CPseudoNew" then
+        return true
+    end
     if decl._tag ~= "Type.StaticMethod"
        or decl.varargtype or decl.flexrettype
        or #decl.rettypes ~= 1
@@ -515,7 +518,10 @@ local function initializer_own_declaration(decl, modname)
     elseif tag == "Type.ModuleVariable" or tag == "Type.ModuleMember" then
         return decl.modname == modname
     elseif tag == "Type.StaticMethod" or tag == "Type.Method" then
+        local owner = types.registry[decl.fqtn]
         return nominal_module(decl.fqtn) == modname
+            and not (tag == "Type.Method" and owner
+                and owner._tag == "Type.Interface")
     end
     return false
 end
@@ -523,68 +529,87 @@ end
 -- Initialization safety is a dependency rule, not constant folding. Follow the
 -- existing expression/variable shapes without entering declaration backrefs.
 function initializer_error(root, modname)
-    local whole = root
-    while whole._tag == "Ast.ExpCast" and whole._implicit_coercion do
-        whole = whole.exp
-    end
-    if whole._tag == "Ast.ExpFunction" then
-        -- Typed sinks may transparently wrap the whole lambda. Its body and
-        -- callable adjustments execute later, not during initialization.
-        return nil
-    end
-
     local dependency =
         "module variable initializer cannot reference this module's variables, functions, or methods"
-    local seen_nodes, seen_plans = {}, {}
-    local function visit_plan(plan)
-        if type(plan) ~= "table" or seen_plans[plan] then return nil end
-        seen_plans[plan] = true
-        if plan._tag then return nil end
+    local seen_nodes, seen_exposed_nodes, plan_callables = {}, {}, {}
+    local function visit_plan(plan, seen)
+        if type(plan) ~= "table" or plan._tag or seen[plan] then return false end
+        seen[plan] = true
         if plan.kind == "interface_implementation" then
             for _, mapping in ipairs(plan.methods) do
                 if initializer_own_declaration(mapping.concrete, modname) then
-                    return dependency
+                    return true
                 end
             end
         end
         for _, child in pairs(plan) do
-            local err = visit_plan(child)
-            if err then return err end
+            if visit_plan(child, seen) then return true end
         end
+        return false
+    end
+    local function own_plan_callable(plan)
+        if type(plan) ~= "table" or plan._tag then return false end
+        local known = plan_callables[plan]
+        if known == nil then
+            -- Cache a complete root query, not an unfinished child in a
+            -- recursive conversion graph. The fact is exposure-independent.
+            known = visit_plan(plan, {})
+            plan_callables[plan] = known
+        end
+        return known
     end
 
-    local function visit(node, constructor)
-        if not node or seen_nodes[node] then return nil end
-        seen_nodes[node] = true
-        -- Use binary_collect_usage's selective plan convention. Interface
-        -- conversion can capture own methods without a written :method, even
-        -- in an open argument or nested field conversion.
+    local visit
+    local function visit_list(exps, call_exposed)
+        local has_callable = false
+        for _, exp in ipairs(exps) do
+            local err, child_callable = visit(exp, call_exposed)
+            if err then return err end
+            has_callable = has_callable or child_callable
+        end
+        return nil, has_callable
+    end
+    visit = function(node, call_exposed, constructor)
+        if not node then return nil, false end
+        -- Shared projections must retain both exposure and stored-callable
+        -- facts. Only completed visits are memoized; errors are never cached
+        -- as success, and the direct-callee exemption is not a value use.
+        local seen = call_exposed and seen_exposed_nodes or seen_nodes
+        if not constructor and seen[node] ~= nil then
+            return nil, seen[node]
+        end
+        local has_callable = false
+        -- Use binary_collect_usage's selective plan convention. AST argument
+        -- expressions are mirrored in the ordinary children, not followed
+        -- through plan backrefs. An `is` proof constructs no wrapper.
         if node._tag ~= "Ast.ExpIs" then
-            -- `is` may prove structural satisfaction, but does not construct
-            -- the Interface wrapper or capture its concrete methods.
             for key, child in pairs(node) do
                 if type(key) == "string" and key:sub(1, 1) == "_"
                    and (key:match("adjustment$") or key:match("conversion$")
                         or key:match("adapter$")) then
-                    local err = visit_plan(child)
-                    if err then return err end
+                    has_callable = own_plan_callable(child) or has_callable
                 end
             end
         end
+        if call_exposed and has_callable then return dependency end
 
         local tag = node._tag
+        local err, child_callable = nil, false
         if tag == "Ast.ExpNil" or tag == "Ast.ExpBool"
            or tag == "Ast.ExpInteger" or tag == "Ast.ExpFloat"
            or tag == "Ast.ExpString" or tag == "Ast.ExpForeignType" then
-            return nil
+            -- No evaluated children.
 
         elseif tag == "Ast.ExpInitList" then
             for _, field in ipairs(node.fields) do
-                local err = type(field.name) == "table" and visit(field.name)
-                    or nil
+                if type(field.name) == "table" then
+                    err, child_callable = visit(field.name, call_exposed)
+                    if err then return err end
+                    has_callable = has_callable or child_callable
+                end
+                err, child_callable = visit(field.exp, call_exposed)
                 if err then return err end
-                err = visit(field.exp)
-                if err then return err end
+                has_callable = has_callable or child_callable
             end
 
         elseif tag == "Ast.ExpCall" then
@@ -592,13 +617,27 @@ function initializer_error(root, modname)
                or initializer_own_declaration(node.args._decl, modname) then
                 return dependency
             end
-            -- The exemption belongs only to a direct generated-constructor
-            -- call, not a first-class reference to an own constructor.
-            local err = visit(node.exp, isconstructor(node.exp))
+            local generated = isconstructor(node.exp)
+            local expose_args = call_exposed or not generated
+            local argument_callable = own_plan_callable(node._arg_adjustment)
+            if expose_args and argument_callable then return dependency end
+            -- The callee expression (including an Interface receiver) is an
+            -- invoking position independently of the result's destination.
+            err = visit(node.exp, true, generated)
             if err then return err end
-            for _, arg in ipairs(call_argument_expressions(node.args)) do
-                err = visit(arg)
-                if err then return err end
+            err, child_callable = visit_list(
+                call_argument_expressions(node.args), expose_args)
+            if err then return err end
+            argument_callable = argument_callable or child_callable
+            if generated then
+                local nominal = node._nominal_constructor
+                if argument_callable and nominal and nominal.kind == "record"
+                   and nominal_module(nominal.owner.name) ~= modname then
+                    -- A replaceable provider must retain the default body
+                    -- when initializer safety relies on storing a callback.
+                    node._binary_initializer_constructor = true
+                end
+                has_callable = has_callable or argument_callable
             end
 
         elseif tag == "Ast.ExpVar" then
@@ -607,57 +646,87 @@ function initializer_error(root, modname)
                and initializer_own_declaration(var._decl, modname) then
                 return dependency
             elseif var._tag == "Ast.VarDot" then
-                return visit(var.exp)
+                err, child_callable = visit(var.exp, call_exposed)
             elseif var._tag == "Ast.VarBracket" then
-                return visit(var.exp1) or visit(var.exp2)
+                err, child_callable = visit(var.exp1, call_exposed)
+                if err then return err end
+                has_callable = has_callable or child_callable
+                err, child_callable = visit(var.exp2, call_exposed)
+            else
+                assert(var._tag == "Ast.VarName")
             end
-            assert(var._tag == "Ast.VarName")
+            has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpConcat" then
-            for _, exp in ipairs(node.exps) do
-                local err = visit(exp)
-                if err then return err end
-            end
+            err, child_callable = visit_list(node.exps, call_exposed)
+            has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpBinop" then
-            return visit(node.lhs) or visit(node.rhs)
+            err, child_callable = visit(node.lhs, call_exposed)
+            if err then return err end
+            has_callable = has_callable or child_callable
+            err, child_callable = visit(node.rhs, call_exposed)
+            has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpAdjust" and node._adjusted_spread then
-            return visit(node._adjusted_spread)
+            err, child_callable = visit(node._adjusted_spread, call_exposed)
+            has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpCast" or tag == "Ast.ExpUnop"
                or tag == "Ast.ExpIs" or tag == "Ast.ExpAdjust"
                or tag == "Ast.ExpExtra" or tag == "Ast.ExpDotsIndex" then
-            return visit(node.exp)
+            err, child_callable = visit(node.exp, call_exposed)
+            has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpFunction" then
-            return "anonymous function must be the whole module variable initializer"
+            if call_exposed then
+                return "module variable initializer cannot expose an anonymous function to a call"
+            end
+            has_callable = true
 
         elseif tag == "Ast.ExpMethodRef" then
-            if initializer_own_declaration(node._decl, modname)
-               or initializer_own_declaration(node._method, modname) then
-                return dependency
-            end
-            return visit(node.exp)
+            has_callable = initializer_own_declaration(node._decl, modname)
+                or initializer_own_declaration(node._method, modname)
+                or has_callable
+            if call_exposed and has_callable then return dependency end
+            err, child_callable = visit(node.exp, call_exposed)
+            has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpSubset" or tag == "Ast.ExpSpread" then
-            return visit(node.exp) or visit(node.first) or visit(node.last)
+            err, child_callable = visit(node.exp, call_exposed)
+            if err then return err end
+            has_callable = has_callable or child_callable
+            err = visit(node.first, call_exposed)
+            if err then return err end
+            err = visit(node.last, call_exposed)
 
         elseif tag == "Ast.ExpSpreadIndex" then
-            return visit(node.spread)
+            err, child_callable = visit(node.spread, call_exposed)
+            has_callable = has_callable or child_callable
 
         elseif tag == "Ast.ExpUnionInit" then
-            for _, exp in ipairs(node.values) do
-                local err = visit(exp)
-                if err then return err end
-            end
+            err, child_callable = visit_list(node.values, call_exposed)
+            has_callable = has_callable or child_callable
 
         elseif tag ~= "Ast.ExpDots" and tag ~= "Ast.ExpDotsLen" then
             error("invalid module initializer expression " .. tostring(tag))
         end
-        return nil
+        if err then return err end
+        -- Operators or projections producing scalar values cannot carry a
+        -- callback to a constructor, even if their operands stored one.
+        local result = node._type
+        while result and result._tag == "Type.Option" do result = result.base end
+        local result_tag = result and result._tag
+        if result_tag == "Type.Nil" or result_tag == "Type.Boolean"
+           or result_tag == "Type.Integer" or result_tag == "Type.Float"
+           or result_tag == "Type.String" then
+            has_callable = false
+        end
+        if not constructor then seen[node] = has_callable and true or false end
+        return nil, has_callable
     end
-    return visit(root)
+    local err = visit(root, false)
+    return err
 end
 
 -- Return the name given the toplevel node

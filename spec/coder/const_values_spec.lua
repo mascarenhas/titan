@@ -204,6 +204,33 @@ describe("const values (code generator)", function()
         assert.truthy(ok, err)
     end)
 
+    it("dispatches imported implementations through own Interface requirements during init",
+       function()
+        local ok, err = h.generate_modules({
+            initializer_dep = [[
+                record Box number: integer end
+                function Box:read(): integer return self.number end
+            ]],
+            test = [[
+                local dep = import "initializer_dep"
+                interface Reader function read(): integer end
+                const stored: Reader = dep.Box(7)
+                const bound = (dep.Box(8) as Reader):read
+                const dispatched = (dep.Box(9) as Reader):read()
+                const called = ((dep.Box(10) as Reader):read)()
+                function read_stored(): integer return stored:read() end
+            ]],
+        }, "test")
+        assert.truthy(ok, err)
+        ok, err = h.call("test", [[
+            assert(test.bound() == 8)
+            assert(test.dispatched == 9 and test.called == 10)
+            collectgarbage("collect")
+            assert(test.read_stored() == 7 and test.bound() == 8)
+        ]])
+        assert.truthy(ok, err)
+    end)
+
     it("keeps const record fields read-only while mutable siblings work",
     function()
         h.run_coder([[

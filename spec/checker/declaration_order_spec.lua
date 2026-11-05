@@ -332,6 +332,46 @@ describe("module initializer dependencies (typechecker)", function()
         ]])
     end)
 
+    it("stores own bound methods and Interface implementations without invoking them",
+       function()
+        assert_check([[
+            local seed: integer?
+            record Box number: integer end
+            type Alias = Box
+            function Box:read(): integer return seed end
+            interface Reader function read(): integer end
+            const bound = Alias(1):read
+            const implicit: Reader = Box(2)
+            const explicit = Box(3) as Reader
+            const abstract_bound = (Box(4) as Reader):read
+            local methods = {Alias(5):read}
+            local readers: {Reader} = {Box(6)}
+            const erased = (Box(7):read) as value
+        ]])
+    end)
+
+    local stored_lambdas = {
+        {"an Array", "{function(): integer return seed end}"},
+        {"a Map value", '{["callback"] = function(): integer return seed end}'},
+        {"a written cast", "(function(): integer return seed end) as value"},
+        {"an operator", "true and function(): integer return seed end"},
+        {"a generated record", "Holder(function(): integer return seed end)"},
+        {"a named generated record", "Holder {callback = function(): integer return seed end}"},
+        {"a generated union", "Choice.Some(function(): integer return seed end)"},
+        {"a spread", "{...{function(): integer return seed end}}"},
+        {"a constructor spread", "Holder(...{function(): integer return seed end})"},
+        {"a C allocation count", "foreign int.new_array(#{function(): integer return seed end})"},
+    }
+    for _, case in ipairs(stored_lambdas) do
+        it("accepts a stored lambda in " .. case[1], function()
+            assert_check([[
+                local seed: integer?
+                record Holder callback: function(): integer end
+                union Choice Some(function(): integer) end
+                local stored = ]] .. case[2])
+        end)
+    end
+
     local dependencies = {
         {"an earlier variable", [[local bad = seed]]},
         {"a const variable", [[const bad = fixed]]},
@@ -349,7 +389,6 @@ describe("module initializer dependencies (typechecker)", function()
         {"an aliased static call", [[local bad = Alias.make()]]},
         {"an aliased static reference", [[local bad = Alias.make]]},
         {"a method call", [[local bad = Box(1):read()]]},
-        {"a bound method", [[const bad = Alias(1):read]]},
         {"a constructor argument", [[local bad = Box(seed)]]},
         {"a named constructor argument", [[local bad = Box {number = seed}]]},
         {"a foreign-call argument", [[local bad = ffi.abs(seed)]]},
@@ -390,19 +429,29 @@ describe("module initializer dependencies (typechecker)", function()
         end)
     end
 
-    local nested_lambdas = {
+    local exposed_lambdas = {
         {"a call argument", "dep.apply(function(): integer return 1 end)"},
         {"a surplus argument", "dep.zero(function(): integer return 1 end)"},
         {"a spread subject", "dep.zero(...{function(): integer return 1 end})"},
         {"a named argument", "dep.apply {callback = function(): integer return 1 end}"},
-        {"an Array", "{function(): integer return 1 end}"},
-        {"a Map value", "{callback = function(): integer return 1 end}"},
-        {"a written cast", "(function(): integer return 1 end) as value"},
-        {"an immediate call", "(function(): integer return 1 end)()"},
-        {"an operator", "true and function(): integer return 1 end"},
+        {"an Array argument", "dep.zero({function(): integer return 1 end})"},
+        {"a Map argument", 'dep.zero({["callback"] = function(): integer return 1 end})'},
+        {"a cast argument", "dep.zero((function(): integer return 1 end) as value)"},
+        {"an operator argument", "dep.zero(true and function(): integer return 1 end)"},
+        {"a generated-record argument", "dep.zero(Holder(function(): integer return 1 end))"},
+        {"a named generated-record argument", "dep.zero(Holder {callback = function(): integer return 1 end})"},
+        {"a generated-union argument", "dep.zero(Choice.Some(function(): integer return 1 end))"},
+        {"a nested constructor spread", "dep.zero(Holder(...{function(): integer return 1 end}))"},
+        {"a C allocation count argument", "dep.zero(foreign int.new_array(#{function(): integer return 1 end}))"},
+        {"an immediate callee", "(function(): integer return 1 end)()"},
+        {"a cast callee", "((function(): integer return 1 end) as function(): integer)()"},
+        {"an operator callee", "(true and function(): integer return 1 end)()"},
+        {"an indexed callee", "({function(): integer return 1 end})[1]()"},
+        {"a generated-record callee", "Holder(function(): integer return 1 end).callback()"},
+        {"a spread callee", "({...{function(): integer return 1 end}})[1]()"},
     }
-    for _, case in ipairs(nested_lambdas) do
-        it("rejects a lambda nested in " .. case[1], function()
+    for _, case in ipairs(exposed_lambdas) do
+        it("rejects a call-exposed lambda in " .. case[1], function()
             local ok, err = run_checker_modules({
                 dep = [[
                     function apply(callback: function(): integer): integer
@@ -410,10 +459,14 @@ describe("module initializer dependencies (typechecker)", function()
                     end
                     function zero(): integer return 0 end
                 ]],
-                main = 'local dep = import "dep"\nlocal bad = ' .. case[2],
+                main = [[
+                    local dep = import "dep"
+                    record Holder callback: function(): integer end
+                    union Choice Some(function(): integer) end
+                    local bad = ]] .. case[2],
             }, "main")
             assert.falsy(ok)
-            assert.match("anonymous function must be the whole module variable initializer",
+            assert.match("module variable initializer cannot expose an anonymous function to a call",
                 err)
         end)
     end
@@ -448,7 +501,7 @@ describe("module initializer dependencies (typechecker)", function()
         end
     end)
 
-    it("rejects own methods captured by implicit Interface conversions", function()
+    it("rejects own implementations exposed through Interface call arguments", function()
         for _, expression in ipairs({
             "dep.read(Box(1))",
             "dep.read {reader = Box(1)}",
@@ -477,6 +530,48 @@ describe("module initializer dependencies (typechecker)", function()
         end
     end)
 
+    local exposed_methods = {
+        "dep.ignore(Box(1):read)",
+        "dep.ignore({Box(1):read})",
+        "dep.ignore((true and Box(1):read) as value)",
+        "dep.ignore(Holder(Box(1):read))",
+        "dep.ignore(Holder {callback = Box(1):read})",
+        "dep.ignore(Holder(...{Box(1):read}))",
+        "dep.ignore((Box(1) as Reader):read)",
+        "dep.ignore(ReaderHolder(Box(1)))",
+        "(Box(1):read)()",
+        "((Box(1):read) as function(): integer)()",
+        "(true and Box(1):read)()",
+        "({Box(1):read})[1]()",
+        "Holder(Box(1):read).callback()",
+        "(Box(1) as Reader):read()",
+        "((Box(1) as Reader):read)()",
+        "(Box(1) as dep.Reader):read()",
+        "((Box(1) as dep.Reader):read)()",
+    }
+    for _, expression in ipairs(exposed_methods) do
+        it("rejects a call-exposed own implementation in " .. expression,
+           function()
+            local ok, err = run_checker_modules({
+                dep = [[
+                    interface Reader function read(): integer end
+                    function ignore(item: value): integer return 0 end
+                ]],
+                main = [[
+                    local dep = import "dep"
+                    local seed: integer?
+                    interface Reader function read(): integer end
+                    record Box number: integer end
+                    function Box:read(): integer return seed end
+                    record Holder callback: function(): integer end
+                    record ReaderHolder reader: Reader end
+                    local bad = ]] .. expression,
+            }, "main")
+            assert.falsy(ok)
+            assert.match("module variable initializer cannot reference", err)
+        end)
+    end
+
     it("keeps imported concrete methods safe through an own Interface", function()
         local ok, err = run_checker_modules({
             dep = [[
@@ -487,6 +582,9 @@ describe("module initializer dependencies (typechecker)", function()
                 local dep = import "dep"
                 interface Reader function read(): integer end
                 const reader: Reader = dep.Box(7)
+                const bound = (dep.Box(8) as Reader):read
+                const dispatched = (dep.Box(9) as Reader):read()
+                const called = ((dep.Box(10) as Reader):read)()
             ]],
         }, "main")
         assert.truthy(ok, err)

@@ -1261,6 +1261,167 @@ int main(void) {
         runs("assert(consumer.run() == 42)")
     end)
 
+    it("requires non-invoking default construction for a stored initializer callback", function()
+        local image = fixture([[
+            record Holder callback: function(): integer end
+        ]], [[
+            local p = import "bc180_provider"
+            local seed: integer?
+            local held = p.Holder(function(): integer return seed end)
+            function run(): integer return held.callback() end
+            do seed = 42 end
+        ]])
+        runs("assert(consumer.run() == 42)")
+        replace([[
+            record Holder callback: function(): integer end
+            function Holder.new(callback: function(): integer): Holder
+                callback()
+                return {callback = callback}
+            end
+        ]], image)
+        rejects("Holder.literal")
+    end)
+
+    local callback = "function(): integer return seed end"
+    local stored_callback_cases = {
+        {
+            name = "an Array callback",
+            field_type = "{function(): integer}",
+            initial = "{" .. callback .. "}",
+            read = "return held.item[1]()",
+            invoke = "item[1]()",
+        },
+        {
+            name = "a Map callback",
+            field_type = "{string: function(): integer}",
+            initial = '{["read"] = ' .. callback .. "}",
+            read = 'return held.item["read"]()',
+            invoke = 'item["read"]()',
+        },
+        {
+            name = "an erased callback",
+            field_type = "value",
+            initial = "(" .. callback .. ") as value",
+            read = "local f: function(): integer = held.item\nreturn f()",
+            invoke = "local f: function(): integer = item\nf()",
+        },
+        {
+            name = "an operator callback",
+            field_type = "function(): integer",
+            initial = "true and " .. callback,
+            read = "return held.item()",
+            invoke = "item()",
+        },
+        {
+            name = "an own bound method",
+            field_type = "function(): integer",
+            initial = "Own(1):read",
+            read = "return held.item()",
+            invoke = "item()",
+        },
+        {
+            name = "an own Interface implementation",
+            definitions = "interface Reader function read(): integer end\n",
+            field_type = "Reader",
+            initial = "Own(1)",
+            read = "return held.item:read()",
+            invoke = "item:read()",
+        },
+        {
+            name = "a nested own Interface implementation",
+            definitions = "interface Reader function read(): integer end\n",
+            field_type = "{Reader}",
+            initial = "{Own(1)}",
+            read = "return held.item[1]:read()",
+            invoke = "item[1]:read()",
+        },
+        {
+            name = "a nested generated record",
+            definitions = "record Inner item: function(): integer end\n",
+            field_type = "Inner",
+            initial = "p.Inner(" .. callback .. ")",
+            read = "return held.item.item()",
+            invoke = "item.item()",
+            inner_replacement = [[
+                record Inner item: function(): integer end
+                record Holder item: Inner end
+                function Inner.new(item: function(): integer): Inner
+                    item()
+                    return {item = item}
+                end
+            ]],
+        },
+        {
+            name = "a nested generated union",
+            definitions = "union Choice Some(function(): integer) end\n",
+            field_type = "Choice",
+            initial = "p.Choice.Some(" .. callback .. ")",
+            read = "case held.item when Some(f) then return f() end",
+            invoke = "case item when Some(f) then f() end",
+        },
+    }
+    for _, case in ipairs(stored_callback_cases) do
+        it("preserves non-invoking initializer construction for " .. case.name,
+           function()
+            local declarations = (case.definitions or "") ..
+                "record Holder item: " .. case.field_type .. " end\n"
+            local image = fixture(declarations, [[
+                local p = import "bc180_provider"
+                local seed: integer?
+                record Own number: integer end
+                function Own:read(): integer return seed end
+                local held = p.Holder(]] .. case.initial .. [[)
+                function run(): integer
+                    ]] .. case.read .. [[
+                end
+                do seed = 42 end
+            ]])
+            runs("assert(consumer.run() == 42)")
+            replace(declarations ..
+                "function Holder.new(item: " .. case.field_type .. "): Holder\n" ..
+                case.invoke .. "\nreturn {item = item}\nend\n", image)
+            rejects("Holder.literal")
+            if case.inner_replacement then
+                replace(case.inner_replacement, image)
+                rejects("Inner.literal")
+            end
+        end)
+    end
+
+    for _, expression in ipairs({
+        "p.external",
+        "(p.Box(42) as Reader):read",
+    }) do
+        it("keeps a safe imported callback replaceable through " .. expression,
+           function()
+            local declarations = [[
+                local ready = false
+                record Holder callback: function(): integer end
+                record Box number: integer end
+                function Box:read(): integer return self.number end
+                function external(): integer
+                    if not ready then raise "provider not initialized" end
+                    return 42
+                end
+            ]]
+            local image = fixture(declarations .. "do ready = true end", [[
+                local p = import "bc180_provider"
+                interface Reader function read(): integer end
+                local held = p.Holder(]] .. expression .. [[)
+                function run(): integer return held.callback() end
+            ]])
+            runs("assert(consumer.run() == 42)")
+            replace(declarations .. [[
+                function Holder.new(callback: function(): integer): Holder
+                    if callback() ~= 42 then raise "wrong imported callback" end
+                    return {callback = callback}
+                end
+                do ready = true end
+            ]], image)
+            runs("assert(consumer.run() == 42)")
+        end)
+    end
+
     it("requires raw construction authority for a DSO constructor with fused native storage", function()
         local image = fixture("record Buffer const data: foreign *int end", [[
             foreign import "spec/fixtures/nominal_allocation_probe.h"

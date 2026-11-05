@@ -568,8 +568,11 @@ describe("bound method references (obj:m)", function()
         end)
     end)
 
-    it("rejects an own-method initializer even with a fresh receiver", function()
-        assert_type_error("module variable initializer cannot reference", [[
+    it("accepts a top-level method-ref initializer with a const receiver", function()
+        -- Binding `obj:m` evaluates the receiver now to capture self; a
+        -- constructor call with const args is itself a sound (const) receiver,
+        -- so the whole bind is a sound top-level initializer.
+        assert_type_check([[
             record Adder base: integer end
             function Adder:add(x: integer): integer return self.base + x end
             local f = Adder.new(1):add
