@@ -337,7 +337,6 @@ displayed case times can differ by a final decimal place. Selection,
 registration order, cleanup/error precedence, counts, and exit statuses do
 not depend on timing.
 
-
 ## Trusted Lua helpers and traces
 
 `titan.test` imports `lua.h`, `lauxlib.h`, `titan/ffi.h`, `stdio.h`, and
@@ -810,24 +809,31 @@ it does not call their sum the elapsed time of the parallel run. When a group
 fails after producing complete final counts, the diagnostic report retains
 its run and owner timings as well.
 
-The stdout audit requires the new two-decimal timing suffixes, one owner total
-per executed owner, zero time for never-invoked child skips, and a run interval
-no shorter than its top-level owner intervals. It follows the nested
-`RUN`/outcome stack rather than inferring parenthood from dots in a custom
-case name. Owner totals are checked against top-level case times with only the
-rounding allowance implied by their displayed precision. Malformed, missing,
-duplicate, out-of-inventory, and inconsistent timing metadata fail the gate;
-old untimed execution output is not accepted. Ordinary `Context:log` lines
+The stdout audit requires a two-decimal timing suffix on every outcome, one
+owner total per executed owner, zero time for never-invoked child skips, and a
+run interval no shorter than its top-level owner intervals. It follows the
+nested `RUN`/outcome stack rather than inferring parenthood from dots in a
+custom case name. Owner totals are checked against top-level case times with
+only the rounding allowance implied by their displayed precision. Malformed,
+missing, duplicate, out-of-inventory, and inconsistent timing metadata fail the
+gate, and untimed execution output is rejected. Ordinary `Context:log` lines
 remain distinct from owner metadata because they include `<case>: <message>`.
-Portable text-line scanners accept LF or one CR immediately before an actual
-LF. They do not remove embedded CR, repeated CR, or a lone CR at EOF; appended
-iterator sentinels must not turn data into a fabricated CRLF boundary. The
-native timing assertion helper applies the same rule to captured Windows
-child output, so ordinary CRLF does not spuriously fail the assertion and
-re-emit its captured transcript through the parent text stream. Sanitizer guards
-represent their optional terminal CR through Bash ANSI-C quoting and test the
-actual workflow expression. Browser byte-fidelity fixtures retain their exact
-LF/binary-byte contracts rather than normalizing arbitrary captured bytes.
+
+The report scanners `validate` and `final_counts` in
+`spec/support/check_stdlib_test_output.lua`, which also audit browser stdout for
+`scripts/check_browser_stdlib.lua`, and that script's diagnostic outcome counter
+accept LF, or one CR immediately before an actual LF, as a line ending.
+Embedded CR, repeated CR, and a CR that ends an unterminated final line stay in
+the scanned text, so the strict grammar rejects them; an iterator's appended
+sentinel never turns data into a fabricated CRLF boundary. The private native
+timing assertion helper in `spec/stdlib/titan/test/host_tests.titan` scans only
+the LF-terminated rows of a complete captured child report and removes one CR
+before each such LF. Ordinary Windows CRLF therefore neither fails the assertion
+nor re-emits the captured transcript through the parent text stream; an
+unterminated final fragment is not scanned. Sanitizer guards represent their
+optional terminal CR through Bash ANSI-C quoting and test the actual workflow
+expression. Browser byte-fidelity fixtures retain their exact LF/binary-byte
+contracts rather than normalizing arbitrary captured bytes.
 
 ### Platform portability and complete execution
 

@@ -84,8 +84,9 @@ local function reported_hundredths(output: string, prefix: string,
   local duration = 0
   for row in string.gmatch(output, "([^\n]*)\n") do
     local line: string = row:group(1)
-    -- Only a CR immediately before this real LF is a Windows line ending.
-    -- Embedded/doubled CR and a lone CR at EOF remain malformed data.
+    -- Scan only LF-terminated rows of the complete runner report, dropping one
+    -- CR immediately before that LF. Embedded or doubled CR stays in the row
+    -- and fails the strict pattern; an unterminated final fragment is skipped.
     if string.sub(line, -1) == "\r" then line = string.sub(line, 1, -2) end
     if string.sub(line, 1, #prefix) == prefix then
       local match? = string.match(string.sub(line, #prefix + 1), expression)
@@ -223,7 +224,6 @@ function test_public_runner_reports_wall_times_and_owner_totals(
                 "empty run reported unexecuted owners")
   end)
 end
-
 
 function test_outside_runner_raises_readable_errors(_context: test.Context)
   assert_outside_runner_probe([==[

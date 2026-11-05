@@ -377,10 +377,11 @@ including runner output; it is not the sum of the displayed case or owner
 times. A zero-case or zero-selected run still reports its run time, but has no
 owner totals. Native Unix, Windows, and browser images under Node or Chromium
 use the same units, precision, and accounting.
-Report text uses the platform's line endings: native Windows may emit CRLF,
-while Unix and browser output uses LF. This does not change timing syntax;
-captured names, messages, and other payload bytes are not globally normalized.
 
+Report text uses the platform's line endings: native Windows may emit CRLF,
+while Unix and browser output uses LF. The timing syntax is the same either
+way, and the runner does not normalize bytes inside names, messages, or other
+payload text.
 
 Help exits with status 0. Invalid options or patterns exit 2. Any failed case
 makes the executable exit 1; all-pass, all-skip, zero-selected, and zero-test
