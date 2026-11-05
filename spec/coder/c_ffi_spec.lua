@@ -1600,8 +1600,11 @@ describe("C FFI code generation", function()
             const first: integer = ffi.initializer_mark(1)
             const second: integer = ffi.initializer_pointer(2)
             const trace: integer = ffi.initializer_read_trace()
+            const native_values: integer = ffi.initializer_value
+                + ffi.initializer_array[0] + ffi.initializer_object.number
         ]], [[
             assert(test.first == 1 and test.second == 2 and test.trace == 12)
+            assert(test.native_values == 37)
         ]])
     end)
 
