@@ -578,13 +578,13 @@ jobs:
               test -f "$output/$image.wasm.map"
             done
           done
-          # One image at the allowed measurement profile proves the guard
-          # survives export minification: baseline purpose, O2, assertions off.
+          # Exercise the guard in an optimized, assertions-off measurement
+          # image; correctness must not depend on debug assertions.
           optimized="$root/optimized"
           mkdir -p "$optimized"
-          # Emscripten 6.0.13 only reaches its static export minifier at OPT>=3
-          # or SHRINK>=1, so the approved harness link adds a shrink override;
-          # debug flags are supplied by the profile, which stays O2.
+          # Emscripten 6.0.13 excludes JSPI from import/export minification.
+          # Keep the shrink control, but assert stable exported names rather
+          # than claiming this JSPI image exercised minified names.
           TITAN_ROOT="$PREFIX" "$PREFIX/bin/lua" -E -e \
             "package.path='$GITHUB_WORKSPACE/?.lua;$GITHUB_WORKSPACE/?/init.lua;'..package.path; require('titan-compiler.driver').browser_link_options={purpose='baseline',optimization='O2',assertions=0}" \
             "$GITHUB_WORKSPACE/titanc" -q --target browser --incremental --no-uv-bootstrap \
