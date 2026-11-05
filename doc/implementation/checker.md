@@ -260,7 +260,99 @@ without creating value symbols. Alias resolution and cycle detection are in
 7. Module variables are checked in AST order. For each node the checker sets
    `st.initializer_order` to its `_toplevel_order`, so the annotation and RHS
    see only earlier imports and module variables (see the symbol-table rules
-   above), followed by the ordinary constant-expression validation.
+   above), followed by initializer-dependency validation.
+
+Initializer validation (`initializer_error` in `checker/declarations.lua`)
+operates on the checked expression, not its source spelling or compile-time
+evaluability. It applies two separate predicates.
+
+**Own data** is a dependency wherever it occurs, stored or evaluated: a
+reference to a current-module variable, function, static, or source foreign
+function, including a nominal function reached through an alias, a custom
+constructor, or a generated constructor used as a value. A call is rejected
+when its resolved method or selected declaration is own.
+`initializer_own_declaration` classifies declarations; an Interface's abstract
+method requirement is not an own declaration. Only a direct callee that
+`isconstructor` validates (a generated record/union constructor whose
+synthesized metadata matches the owner projection, or a C allocation
+pseudo-constructor) escapes the own-declaration test. Foreign
+references/calls and imported members/calls are safe dependencies.
+
+**Own callables** are dependencies only when call-exposed. Each visit reports
+whether the expression's value can carry one: a lambda, a bound
+`Ast.ExpMethodRef` whose method is own, an `_*adjustment`/`_*conversion`/
+`_*adapter` plan containing an `interface_implementation` with an own concrete
+method, or a value whose type is an own record or union with own methods
+(`own_nominal_callable`). The last case is latent: another body, even one
+that never runs, can publish an Interface witness, and an imported callee can
+then reach the methods through a dynamic `value` projection. A call's callee
+expression, including a method-call receiver such as an Interface-dispatch
+receiver, is always exposed, and so are all evaluated arguments of a call
+that is not a validated generated constructor, including discarded surplus.
+Exposure is inherited by every nested container, constructor, operator, cast,
+index, spread, and adjustment, and is never reset; a generated constructor
+neither creates nor clears it. An exposed lambda reports `module variable
+initializer cannot expose an anonymous function to a call`; other exposed
+callables report the general own-reference diagnostic. Lambda bodies are
+never traversed, and an `is` satisfaction test creates no wrapper, so its plan
+is not scanned.
+
+Implicit calls strengthen the same exposure state. A potentially
+metatable-bearing Map read exposes its base and key; Map/Map and Map/`value`
+equality in either orientation expose both operands; integer-Map length and
+spread expose the receiver. Equality uses the original checked
+`ComparisonPlan.left` and `.right`, because gradual injection may already have
+boxed the Map operand to `value`; a comparison with an Option plan operand
+keeps the raw option comparison and adds no dispatch. Length and spread use
+the actual checked Map branch (`#` on a `Type.Map` operand, a spread whose
+`_spread_kind` is `"map"`), not Array backing operations. Supported primitive
+ordering, arithmetic, and concatenation do not add Lua operator dispatch. Map
+literal filling uses raw stores into a fresh table, not `__newindex`. Map
+writes and generic-`for` loops, with their iteration and close calls, are
+statements, and converting a table to a string needs an explicit call such as
+`string.tostring`, so an initializer expression reaches them only through a
+call or lambda body that the rules above already cover.
+
+`fixed_metatable_origin` memoizes a separate result-origin fact: primitive
+results, fresh table constructors, lambdas, bound-method references, and
+validated generated-constructor results cannot supply an arbitrary imported
+table metatable. Casts, adjustments, and `and`/`or` preserve that fact only
+when every operand they can return is fixed. Unknown imported values and
+ordinary call results stay unknown; a Function type alone proves nothing about
+`__call`. A fixed origin only withholds new Map exposure: every operand
+computation is still visited, and a fixed origin never clears inherited
+exposure.
+
+A scalar result (nil, boolean, number, or string) reports no stored callable
+to its enclosing expression, so an imported generated constructor receiving
+`#{lambda}` or `Own(1).number` needs no constructor proof. `ExpSpread` nodes
+are exempt from this scalar clearing: the effect-only spread carrier is
+stamped `Type.Nil` but must keep its callable fact for the shared
+`ExpSpreadIndex` deliveries. An adjusted spread visits both its setup carrier
+and its delivered projection, matching code generation.
+
+Completed visits are memoized in two caches, one per exposure state, so a
+node first reached as stored is still checked when a shared plan or argument
+list later reaches it exposed. Errors are never cached as success, and the
+direct-callee constructor exemption is not memoized as an ordinary value use.
+Conversion-plan facts are exposure-independent and cached per complete root
+query.
+
+When a delivered stored argument of an imported generated record constructor
+carries an own callable, the visitor marks the call
+`_binary_initializer_constructor`. `binary_collect_usage` turns that mark
+into the record's `literal` usage, so a replacement provider that overrides
+`new` fails compatibility checking before the consumer initializes; see
+[construction proofs](binary-compatibility.md#construction-and-closed-union-proofs).
+Every written argument is still visited for own references and exposure, but
+storage facts come only from the constructor's parameter positions in
+`_arg_adjustment.fixed`, or in the written argument list when the call has no
+adjustment. `_arg_adjustment` and `_generic_arg_adjustment` are not
+result-conversion plans: discarded surplus and setup carriers must not create
+a stored-callable result or a literal requirement by themselves.
+Callback-free stored construction keeps only its `new` signature requirement.
+An implicit call computed inside an argument is checked independently of this
+storage proof.
 
 Constness is an exact boolean on local declarations, record fields, module
 variables, and Array types. An omitted mutable initializer (local or module
@@ -885,9 +977,9 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   function as a value or binding a foreign method
   ([the FFI chapter](../language/ffi.md)), a method reference on a non-record
   receiver or to a missing method, and using a record type or a module as a
-  value. A top-level `local x = function … end` passes `isconst` because
-  constructing the closure does not read the body; `x` is a reassignable
-  module variable.
+  value. A top-level `local x = function … end` passes initializer-dependency
+  validation because constructing the closure does not run the body; `x` is a
+  reassignable module variable.
 * **Conditions are not coerced.** `if`/`while`/`repeat` conditions are
   checked with a Boolean context but never `trycoerce`d or `checkmatch`ed:
   any type is a legal condition, and truthiness is the coder's problem.
@@ -900,10 +992,11 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   `Ast.StatCase` checking, including binding scope, is specified in
   [Case checking and control flow](unions.md#case-checking-and-control-flow);
   missing variants are permitted, an unmatched `case` without `else` is a
-  no-op, and its non-fallthrough result is below. `isconst` recognizes a record/union
-  constructor only after its synthesized nominal metadata validates against
-  the owner projection, and only when all arguments are recursively constant;
-  an arbitrary static returning the owner is not a module constant.
+  no-op, and its non-fallthrough result is below. Initializer validation accepts
+  an own-module record/union constructor only after its synthesized nominal
+  metadata validates against the owner projection and all evaluated arguments
+  satisfy the dependency rule. An arbitrary own-module static returning the
+  owner is still an own-function dependency.
 * **Written `as` casts and `is` tests.** Both visitors call
   `check_explicit_cast_relation` (`checker/calls.lua`): it resolves the
   target, checks the operand under that target context, and stores a complete

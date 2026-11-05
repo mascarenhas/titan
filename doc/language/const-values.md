@@ -82,6 +82,18 @@ const version = "0.6.0"
 local const retries: integer = 3
 ```
 
+Const module initializers follow the same
+[dependency rule as mutable module variables](modules.md#initializer-dependencies):
+they may read foreign values, call foreign functions, and use members of
+earlier imports, but cannot evaluate a reference to the current module's own
+variables, functions, or methods. `const` makes the binding read-only; it does
+not require compile-time evaluation. A lambda or another own callable, such as
+a bound own method, may be stored, but not passed to or invoked by an explicit
+or implicit call that the initializer evaluates. Implicit calls include the
+metamethods that indexing, equality, length, and spread can invoke on a
+potentially metatable-bearing Map; the dependency rule lists the operations,
+such as those on fresh Map literals, that cannot dispatch.
+
 An initializer-less const module variable must have an explicit type from the
 same missing-nil domain as an initializer-less mutable local. It starts as the
 corresponding nil/NULL representation:

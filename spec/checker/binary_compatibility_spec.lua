@@ -115,7 +115,7 @@ describe("binary dependency usage", function()
         assert.same({}, tree._binary_usage.provider.records.Item.functions)
     end)
 
-    it("requires default construction for direct and nested constant initializers", function()
+    it("keeps callback-free imported initializer calls independent of default authority", function()
         for _, initializer in ipairs({
             "item: p.Item = p.Item(42)",
             "items: {p.Item} = {p.Item.new(42)}",
@@ -125,9 +125,149 @@ describe("binary dependency usage", function()
                 provider = [[record Item number: integer end]],
                 consumer = 'local p = import "provider"\n' .. initializer,
             })
-            assert.is_true(tree._binary_usage.provider.records.Item.literal)
+            assert.is_nil(tree._binary_usage.provider.records.Item.literal)
             assert.same({new = true}, tree._binary_usage.provider.records.Item.functions)
         end
+    end)
+
+    local callback = "function(): integer return seed end"
+    local stored_callables = {
+        {"a lambda", callback},
+        {"an Array", "{" .. callback .. "}"},
+        {"a Map", '{["read"] = ' .. callback .. "}"},
+        {"a written cast", "(" .. callback .. ") as value"},
+        {"an operator", "true and " .. callback},
+        {"an own bound method", "Own(1):read"},
+        {"an own record", "Own(1)"},
+        {"an own union", "OwnChoice.Some()"},
+        {"an own Interface implementation", "Own(1) as p.Reader"},
+        {"a nested Interface implementation", '{["reader"] = Own(1) as p.Reader}'},
+        {"an imported generated record", "p.Inner(" .. callback .. ")"},
+        {"an own generated record", "LocalHolder(" .. callback .. ")"},
+        {"a generated union", "Choice.Some(" .. callback .. ")"},
+        {"a projected generated record", "p.Inner(" .. callback .. ").item"},
+    }
+    for _, case in ipairs(stored_callables) do
+        it("requires non-invoking default authority when an initializer stores " ..
+           case[1], function()
+            local tree = check({
+                provider = [[
+                    interface Reader function read(): integer end
+                    record Holder item: value end
+                    record Inner item: value end
+                ]],
+                consumer = [[
+                    local p = import "provider"
+                    local seed: integer?
+                    record Own number: integer end
+                    function Own:read(): integer return seed end
+                    union OwnChoice Some() end
+                    function OwnChoice:read(): integer return seed end
+                    record LocalHolder item: function(): integer end
+                    union Choice Some(function(): integer) end
+                    local held = p.Holder(]] .. case[2] .. [[)
+                ]],
+            })
+            assert.is_true(tree._binary_usage.provider.records.Holder.literal)
+            if case[2]:find("p.Inner", 1, true) then
+                assert.is_true(tree._binary_usage.provider.records.Inner.literal)
+            end
+        end)
+    end
+
+    it("keeps callback-free values and imported implementations replaceable",
+       function()
+        for _, expression in ipairs({
+            "p.external",
+            "p.ForeignBox(1)",
+            "p.ForeignBox(1):read",
+            "(p.ForeignBox(1) as Reader):read",
+            "#{" .. callback .. "}",
+            "Plain(1)",
+            "nil as Own?",
+            "Own(1).number",
+        }) do
+            local tree = check({
+                provider = [[
+                    record Holder item: value end
+                    function external(): integer return 42 end
+                    record ForeignBox number: integer end
+                    function ForeignBox:read(): integer return self.number end
+                ]],
+                consumer = [[
+                    local p = import "provider"
+                    local seed: integer?
+                    interface Reader function read(): integer end
+                    record Plain number: integer end
+                    record Own number: integer end
+                    function Own:read(): integer return seed end
+                    local held = p.Holder(]] .. expression .. [[)
+                ]],
+            })
+            assert.is_nil(tree._binary_usage.provider.records.Holder.literal)
+        end
+    end)
+
+    it("does not require a default body for a constructor deferred inside a lambda",
+       function()
+        local tree = check({
+            provider = [[record Holder item: function(): integer end]],
+            consumer = [[
+                local p = import "provider"
+                local seed: integer?
+                local factory = function(): p.Holder
+                    return p.Holder(function(): integer return seed end)
+                end
+            ]],
+        })
+        assert.is_nil(tree._binary_usage.provider.records.Holder.literal)
+    end)
+
+    it("retains spread-callable facts only for delivered constructor arguments", function()
+        for _, initializer in ipairs({
+            "local held = p.Holder(...{" .. callback .. "})",
+            "local held = p.Holder(...{[1] = " .. callback .. "})",
+            "local held = p.Holder((...{" .. callback .. "}))",
+            "local held = p.Holder {item = (...{" .. callback .. "})}",
+        }) do
+            local tree = check({
+                provider = [[record Holder item: function(): integer end]],
+                consumer = 'local p = import "provider"\nlocal seed: integer?\n' ..
+                    initializer,
+            })
+            assert.is_true(tree._binary_usage.provider.records.Holder.literal)
+        end
+        for _, initializer in ipairs({
+            "local held = p.Scalar(1, " .. callback .. ")",
+            "local held = p.Scalar(1, ...{" .. callback .. "})",
+            "local held = p.Scalar(...{1 as value, (" .. callback .. ") as value})",
+            "local held = p.Scalar(#{" .. callback .. "})",
+            "local held = p.Outer(p.Scalar(1, ...{" .. callback .. "}))",
+        }) do
+            local tree = check({
+                provider = [[
+                    record Scalar number: integer end
+                    record Outer item: Scalar end
+                ]],
+                consumer = 'local p = import "provider"\nlocal seed: integer?\n' ..
+                    initializer,
+            })
+            assert.is_nil(tree._binary_usage.provider.records.Scalar.literal)
+            local outer = tree._binary_usage.provider.records.Outer
+            if outer then assert.is_nil(outer.literal) end
+        end
+    end)
+
+    it("still requires literal authority for raw module-variable construction", function()
+        local tree = check({
+            provider = [[record Item number: integer end]],
+            consumer = [[
+                local p = import "provider"
+                const item: p.Item = {number = 42}
+            ]],
+        })
+        assert.is_true(tree._binary_usage.provider.records.Item.literal)
+        assert.same({}, tree._binary_usage.provider.records.Item.functions)
     end)
 
     it("keeps ordinary calls independent of default construction authority", function()

@@ -512,7 +512,7 @@ describe("unions (typechecker)", function()
             end
         ]])
 
-        assert_error("top level variable initialization must be constant", [[
+        assert_error("module variable initializer cannot reference", [[
             union Message
                 quit()
             end
@@ -524,7 +524,7 @@ describe("unions (typechecker)", function()
             local bad = Message.fake()
         ]])
 
-        assert_error("top level variable initialization must be constant", [[
+        assert_error("module variable initializer cannot reference", [[
             record Box
                 item: integer
             end

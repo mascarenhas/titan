@@ -167,7 +167,7 @@ describe("flexible return schemas (typechecker)", function()
         assert.same(method_record, types.registry["owner.MethodR"])
     end)
 
-    it("does not treat a flexible-return record function as a constant constructor", function()
+    it("rejects an own flexible-return record function in a module initializer", function()
         local ok, err = run_checker([[
             record Box
                 n: integer
@@ -180,7 +180,7 @@ describe("flexible return schemas (typechecker)", function()
             local box = Box.make()
         ]])
         assert.falsy(ok)
-        assert.match("top level variable initialization must be constant", err)
+        assert.match("module variable initializer cannot reference", err)
     end)
 
     it("rejects a public flexible tail that exposes a module-local record", function()

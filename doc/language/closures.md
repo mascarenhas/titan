@@ -413,9 +413,11 @@ declarations — see [Functions](functions.md#recursion-and-declaration-order)).
 
 ## Lambdas in module-variable initializers
 
-A lambda is a valid module-variable initializer. Constructing the closure does
-not execute its body or read the values mentioned there, so the ordinary
-module-initialization frontier remains sound:
+A lambda may initialize a module variable, and a stored lambda may also appear
+inside an Array, Map, record or union construction, operator, or written cast
+in that initializer. Constructing the closure does not execute its body or read
+the values mentioned there, so the ordinary module-initialization frontier
+remains sound:
 
 ```titan
 local transform = function (x: integer): integer return x + 1 end
@@ -431,11 +433,16 @@ end
 
 This declares an ordinary function-typed module variable, not a named function.
 It is initialized once with a fresh closure, can be reassigned later, and calls
-through it use the first-class function path. The usual initializer rule still
-rejects an expression that immediately reads a module variable whose value is
-not visible at that point. Putting the read of an **already name-visible** module
-variable in the lambda body defers its value access until the closure is called;
-it does not make a later module variable or import visible.
+through it use the first-class function path. The
+[initializer dependency rule](modules.md#initializer-dependencies) rejects
+references to the module's own variables and functions, and rejects a lambda
+that an explicit or implicit call evaluated by the initializer could invoke:
+one passed to that call, directly or nested in its arguments, used as a
+potential Map-metamethod operand, or called immediately. Storing one in a fresh
+ordinary Map does not itself call it. Putting the read of an **already
+name-visible** module variable in the lambda's body defers its value access
+until the closure is called; it does not make a later module variable or
+import visible.
 
 ## Bound method references
 
@@ -443,7 +450,15 @@ A method *named but not called* is a function value with the receiver
 bound in. Writing `obj:method` with **no argument list** yields a value
 whose type is the method's type with the implicit `self` removed, and
 calling that value runs the method on the nominal receiver `obj` was when the
-reference was taken:
+reference was taken.
+
+A bound-method initializer evaluates its receiver once and stores the method
+without calling it. The receiver must obey the initializer dependency rule:
+`Adder.new(100):add` is accepted, while a receiver that reads an own module
+variable is rejected. A bound own-module method may be stored, but it is
+rejected where an explicit or implicit call evaluated by the initializer could
+invoke it, including as a key passed to an imported Map's `__index`. Imported
+methods follow the same receiver rule.
 
 ```titan
 record Adder

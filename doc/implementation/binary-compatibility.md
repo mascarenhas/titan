@@ -114,12 +114,25 @@ calls to a separate provider use its callable implementation; fused-storage
 calls keep direct construction to preserve their ownership contract, and
 therefore reject a replacement constructor override.
 
-Generated record calls accepted by `isconst` as constant module variable
-initializers also require this capability. The checker marks each accepted
-call with `_binary_constant_constructor`, including nested constructor calls,
-and usage collection keeps that proof requirement. Lambda bodies and computed
-`do` initializers do not participate in this constant-expression proof;
-ordinary calls there depend only on `new`'s signature.
+An imported constructor call in a module-variable initializer normally depends
+only on `new`'s callable signature, just like a call in a function body or final
+`do` block: the imported module has already initialized, so its custom
+constructor is a valid initialization dependency. The exception is a generated
+record call whose delivered stored arguments carry an own callable (a lambda,
+bound own method, own Interface implementation, or own method-bearing
+record/union value, possibly nested in other stored arguments). The initializer
+checker accepts that storage only because generated construction does not call
+it, so it marks the call `_binary_initializer_constructor` and usage collection
+requests `literal` as well. A replacement that overrides `new` then fails
+compatibility checking before the consumer initializes, instead of invoking
+the callable against uninitialized module state. Nested generated constructors
+carry the requirement for both the outer and the inner record. Raw literals and
+fused-storage calls retain their separate construction-capability requirement.
+Every evaluated argument is still checked for own references and exposure, but
+discarded surplus and spread setup carriers do not independently request
+`literal`; only values delivered to the constructor's fixed parameters do. An
+implicit Map call evaluated inside an argument is checked separately and
+cannot be made safe by this storage capability.
 
 A `case` whose non-fallthrough proof depends on complete variant coverage
 ([case checking and control flow](unions.md#case-checking-and-control-flow)) is marked

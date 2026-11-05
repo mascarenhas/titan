@@ -219,8 +219,8 @@ describe("Titan type checker", function()
         assert_type_check([[ x11: integer = 10.1 ]])
     end)
 
-    it("catches non constant variable initialization in top level", function()
-        local assert_const = util.curry(assert_type_error, "must be constant")
+    it("rejects own-module dependencies in top-level initializers", function()
+        local assert_const = util.curry(assert_type_error, "module variable initializer cannot reference")
         assert_const([[ function f(): integer return 10 end x = f() ]])
         assert_const([[ x = 10 y = x ]])
         assert_const([[ x = 10 y = -x ]])
@@ -228,7 +228,7 @@ describe("Titan type checker", function()
         assert_const([[ x = 10 y = "a" .. x ]])
         assert_const([[ x = 10 y: float = x ]])
         assert_const([[ x = 10 y = {x} ]])
-        assert_const([[ x = ({1})[2] ]])
+        assert_type_check([[ x = ({1})[2] ]])
     end)
 
     it("catches variable not declared", function()
@@ -2797,8 +2797,8 @@ describe("Titan typecheck of records", function()
         assert.falsy(use.block.stats[1].exps[1]._nominal_constructor)
     end)
 
-    it("does not treat a same-signature custom constructor as a constant initializer", function()
-        assert_type_error("initialization must be constant", [[
+    it("rejects an own same-signature custom constructor in an initializer", function()
+        assert_type_error("module variable initializer cannot reference", [[
             record Box item: integer end
             function Box.new(item: integer): Box return { item = item + 1 } end
             local box = Box(1)

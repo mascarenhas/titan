@@ -120,9 +120,8 @@ than that sequence, with one deliberate frontier for module variables:
   and macros from foreign directives written later. They still see every record, union,
   Interface, type alias, ordinary function, method, nominal function, and
   synthesized constructor, wherever those declarations occur. This visibility
-  does not make a non-constant
-  initializer legal; the separate [constant-expression
-  rule](#initializers-must-be-constant) still applies.
+  does not make every visible declaration legal in an initializer: the separate
+  [initialization-dependency rule](#initializer-dependencies) still applies.
 
   ```lua
   -- Titan
@@ -160,8 +159,8 @@ than that sequence, with one deliberate frontier for module variables:
 ## Module initialization block
 
 After its declarations, a module may have one root `do ... end` block for
-computed initialization that cannot be expressed by constant module-variable
-initializers:
+computed initialization that depends on the module's own variables or
+callables:
 
 ```titan
 local ready: boolean = false
@@ -242,49 +241,153 @@ it as a member of the module value; mutable writes are type-checked at run time
 and const writes are rejected — see
 [Module variables from Lua](lua-interop.md#module-variables-from-lua)).
 
-### Initializers must be constant
+### Initializer dependencies
 
-The initializer of a module variable must be a compile-time constant
-expression. The allowed forms are:
+A mutable or const module-variable initializer runs when the module is loaded,
+not at compile time. It may use:
 
-* `nil`, boolean, integer, float, and string literals;
-* array, map, and record [constructor expressions](expressions.md)
-  whose elements, keys, values, and fields are themselves constant;
-* calls to a record's `new` constructor with constant arguments;
-* calls to a compiler-synthesized union-variant constructor with a constant
-  payload, or no payload for an empty variant;
-* calls to an imported C type's `.new()` or `.new_array(count)` pseudo-
-  constructor, with a constant `count`;
-* concatenations, unary operators, binary operators, `as` casts, and `is`
-  type tests applied to constant operands.
+* literals and Array, Map, record, or union construction;
+* foreign constants, variables, fields, indices, and function calls;
+* visible imported-module members, including variables, functions, constructors,
+  and methods; and
+* ordinary operators, casts, type tests, indexing, and calls composed from those
+  expressions.
 
-Anything else — in particular any variable reference and any other
-function call — is rejected with the compile-time error
-`top level variable initialization must be constant`; a variable that
-needs a computed initial value must start from a constant placeholder
-and be assigned from a function at run time.
+Every expression evaluated by the initializer must obey the same rule,
+including call arguments, surplus arguments that are evaluated and discarded,
+container keys and values, and method receivers. Imported modules are fully
+initialized first, and cyclic imports are forbidden. An import must still be
+visible at the declaration; this rule does not change the earlier-import
+frontier or explicit-source-import visibility.
 
-```lua
--- Titan
-x = 10
-y = x + 1          -- error: top level variable initialization must be constant
-s = "a" .. "b"     -- ok: constant expression
-n = -(2 * 3)       -- ok: constant expression
+```titan
+local string = import "string"
+foreign import "limits.h"
+foreign import "stdlib.h"
+
+const maximum: integer = ffi.LLONG_MAX as integer
+local magnitude: integer = ffi.abs(-7)
+local banner = string.rep("=", 3)
 ```
 
-Record constructors are accepted by this rule, so
-`p: Point = { x = 1.0, y = 2.0 }` and `p = Point.new(1.0, 2.0)` both
-work as module-variable declarations. Owned C constructors work as well, for
-example `local state = c.State.new()` or
-`local slots = c.Slot.new_array(4)`. The constructors run once when that module
-instance initializes; the resulting objects are rooted in its GC-traced state.
-*Reassigning* such a variable with a constructor expression from inside
-a function works the same way — `p = { x = 30.0, y = 40.0 }` as a
-statement is equivalent to the initializer form. See
-[Records in module variables](records.md#records-in-module-variables).
-Genuine generated union constructors are accepted for the same reason.
-A user-written union function that happens to return a variant is still an
-ordinary function call and is not constant.
+An initializer cannot evaluate a reference to the current module's own
+variables, functions, or methods, even if the declaration is earlier, const,
+or reached through a type alias. This prevents a call from reading
+partially initialized module state. The compiler-generated record `new` and
+union-variant constructors are exceptions: their arguments are checked, and
+their bodies only allocate and fill the nominal value. An own-module custom
+`new` or other user-written nominal function is not an exception, and neither
+is an own function or constructor used as a value.
+
+```text
+x = 10
+y = x + 1                   -- rejected: reads an own-module variable
+z = compute()               -- rejected: calls an own-module function
+f = compute                 -- rejected: an own function value
+```
+
+Creating a callable does not run it. An initializer may therefore store an
+anonymous function, an own method bound to a receiver that obeys this rule
+(such as `Counter(0):current`), or an Interface value converted from an own
+record or union. It may store them directly or inside Arrays, Maps, record or
+union construction, operators, and written casts. A lambda's body may use the
+module's own declarations under the ordinary visibility rules, because it runs
+only when called. A value of an own record or union type that has methods
+counts as an own callable too: once the module converts that type to an
+Interface anywhere, other code can reach those methods through a
+[compiler-witnessed conversion](interfaces.md#coercion-is-not-consistency-or-subtyping)
+from `value`.
+
+Binding `Counter(0):current` evaluates only its receiver, so it is accepted. A
+named own function such as `compute` is an own-module declaration and is
+rejected even when the initializer only stores it.
+
+```titan
+local seed: integer?
+
+record Counter
+    start: integer
+end
+
+function Counter:current(): integer
+    return self.start + seed
+end
+
+local callbacks = {function(): integer return seed end}
+local current = Counter(1):current
+
+do
+    seed = 41
+end
+```
+
+An explicit or implicit call that the initializer evaluates must not receive
+or invoke such a value, because it could run the module's own code before the
+module's variables are initialized. An own callable is rejected as an argument
+of an evaluated call, including one nested inside that argument's containers,
+constructors, operators, casts, or spreads, and as the called expression or
+the receiver of an Interface method call. This applies even to a lambda that
+captures nothing. Generated constructors only store their delivered arguments,
+so they create no such exposure, but they do not hide an own callable from an
+enclosing call or make an argument's implicit calls safe. The diagnostic for
+an anonymous function differs from the one for other own callables.
+
+```text
+a = Counter(1):current()                  -- rejected: invokes an own method
+b = sorter.sort({3, 1}, function(x: integer, y: integer): boolean
+        return x < y end)                 -- rejected: passes a lambda to a call
+c = registry.add({Counter(1):current})   -- rejected: nested in a call argument
+```
+
+Map operations can call Lua metamethods without written call syntax. A read
+from a potentially metatable-bearing Map exposes both the Map and its key;
+Map/Map and Map/`value` equality in either orientation expose both operands;
+integer-Map length and spread expose the Map receiver. For example, if an
+imported module `dep` declares `entries: {value: value}`, these initializers
+are rejected:
+
+```text
+keyed = dep.entries[Counter(1):current]   -- __index could call the key
+equal = dep.entries ==                    -- __eq could call the stored method
+    ({["read"] = Counter(1):current} as {value: value})
+```
+
+A fresh ordinary Map literal has no metatable. Indexing, length, or spread of
+such a literal cannot dispatch, and neither can equality between two of them,
+so these operations create no exposure even when the literals hold own
+callables. A cast or boxing neither attaches nor removes a metatable, and an
+`and`/`or` result stays fresh only when both operands are fresh or primitive.
+Array indexing and length, raw `value`/`value` equality, equality with an
+option operand, and the supported primitive arithmetic, ordering, and
+concatenation operations do not dispatch arbitrary Lua metamethods. Their
+operand computations still obey the rule, and none clears exposure inherited
+from an enclosing call. See [Maps](arrays-maps.md#maps) for the Map dispatch
+rules.
+
+Only own implementations count. An Interface declared by this module may
+dispatch to a method implemented by an imported record or union, and imported
+bound methods may be passed to calls.
+
+An imported generated record constructor stores its arguments without calling
+them only while its provider keeps the generated `new`. When an initializer
+stores an own callable through one, directly or nested in another stored
+argument, the compiled consumer therefore also requires the generated default
+constructor. Only values delivered to the constructor's parameters create this
+requirement; surplus arguments and spread elements that no parameter receives
+are not stored and create none, although every written argument still
+evaluates and must obey the dependency rule. A replacement provider that
+overrides `new` is rejected as incompatible when the consumer loads, before
+any of its initializers run; see [Replacing shared-library
+dependencies](binary-compatibility.md#private-record-fields-and-construction).
+Imported construction whose stored arguments are callback-free depends only on
+`new`'s signature, so such a consumer observes a compatible custom `new`.
+
+Initializers execute once per module instance, in declaration order. The
+checker does not evaluate calls at compile time; their observable effects and
+failures occur during module loading. Allocated results are rooted in the
+module's GC-traced state. Use the final [module initialization block](#module-initialization-block)
+when initialization must read the module's own state or call its own
+callables.
 
 ## Importing other modules
 

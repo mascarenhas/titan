@@ -118,11 +118,39 @@ end
 
 Adding the first private field or overriding `new` therefore rejects this
 literal consumer at load time. An override with the same signature can remain
-compatible with an ordinary `model.Point(...)` or `model.Point.new(...)` caller.
-A generated constructor call used in a constant module variable initializer
-also requires the default constructor, including when nested inside another
-constant expression. An override would invalidate the initializer's
-constant-expression guarantee, so that consumer rejects it at load time.
+compatible with an ordinary `model.Point(...)` or `model.Point.new(...)` caller,
+including a module-variable initializer such as
+`origin = model.Point(0.0, 0.0)`, which then stores whatever the replacement
+`new` returns.
+
+A module-variable initializer that stores an own callable through a generated
+constructor is different:
+
+```titan
+local events = import "events"
+
+local seed: integer?
+local handler = events.Handler(function(): integer return seed end)
+
+do
+    seed = 1
+end
+```
+
+The initializer is accepted only because generated construction stores the
+lambda without calling it. A replacement `Handler.new` could call it while
+`seed` is still nil, so this consumer also requires the default constructor and
+rejects an override at load time, before its initializers run. The same
+applies when the stored value is a bound own method, an Interface value with
+an own implementation, or a value of an own record or union type with methods,
+including when it is nested inside another stored argument. Only values
+delivered to the constructor's parameters create this requirement: surplus
+arguments and spread elements that no parameter receives do not, and neither
+do callback-free stored arguments. Every evaluated computation still follows
+the [initializer dependency rule](modules.md#initializer-dependencies);
+generated storage does not protect an own callable exposed to a Map
+metamethod while an argument is computed.
+
 A call that fuses fresh native storage into the record's own allocation also
 relies on the generated default and rejects an override; that construction
 preserves the buffer's lifetime as part of its record.
@@ -131,9 +159,9 @@ function and reads `x` or `y` can remain compatible. See
 [Native storage](nominal-storage.md) for storage and ownership rules.
 
 Providers built before the literal-construction capability was introduced need
-rebuilding for newly compiled literal, constant-initializer, or fused-storage
-consumers. Older consumer binaries only recorded a `new` dependency and do not
-enforce the override restriction.
+rebuilding for newly compiled literal, callback-storing initializer, or
+fused-storage consumers. Older consumer binaries only recorded a `new`
+dependency and do not enforce the override restriction.
 
 ## Private union variants and control flow
 

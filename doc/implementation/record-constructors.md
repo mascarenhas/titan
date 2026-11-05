@@ -55,7 +55,7 @@ Three checker paths treat only the generated `new` as a constructor:
 | --- | --- |
 | `_direct_nominal_constructor` (`checker/calls.lua`) | native field and tail allocation plans |
 | `record_constructor_parameter` (`checker/common.lua`) | mapping synthesized parameters to field declarations |
-| `isconstructor` (`checker/declarations.lua`) | accepting the call as a constant module-variable initializer |
+| `isconstructor` (`checker/declarations.lua`) | treating a direct call as non-invoking storage rather than an own-function dependency or call exposure in module-variable initializers |
 
 A custom constructor in its own module can allocate with a context-typed
 literal, which uses the ordinary layout, rooting, and write-barrier code
@@ -79,15 +79,19 @@ on an all-public record. A private custom `new` is simply absent from the
 public interface.
 
 The flag also removes the provider's `literal` capability (`binarycompat.lua`
-`nominal`). Raw literals, generated constructor calls that `isconst` accepts
-in a module-variable initializer (marked `_binary_constant_constructor`), and
-calls whose fresh native arguments are fused into the record allocation all
-require that capability. A replacement provider that overrides `new`
-therefore rejects those consumers, while ordinary calls depend only on `new`'s
-signature and run the provider's implementation. Local, source-linked, and
-archive-linked generated constructors may still be inlined; the final link's
-static-dependency classification chooses call or inline. The complete rule is
-in [Construction and closed-union
+`nominal`). Raw literals, calls whose fresh native arguments are fused into the
+record allocation, and imported generated calls through which a module-variable
+initializer stores own callables (marked `_binary_initializer_constructor`)
+require that capability. A replacement provider that overrides `new` therefore
+rejects those consumers, while other imported calls, including those in
+module-variable initializers that store no own callable, depend only on
+`new`'s signature and run the provider's implementation. The initializer mark
+considers only values delivered to the constructor's fixed parameters, not
+discarded surplus or spread setup carriers; every evaluated computation still
+undergoes the dependency check, including implicit Map calls. Local,
+source-linked, and archive-linked generated constructors may still be
+inlined; the final link's static-dependency classification chooses call or
+inline. The complete rule is in [Construction and closed-union
 proofs](binary-compatibility.md#construction-and-closed-union-proofs).
 
 ## Lua namespace calls

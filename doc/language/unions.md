@@ -165,11 +165,14 @@ A generated constructor reserves its variant name in the union's static
 function namespace. User-declared union functions may use named calls in the
 same declaration-based situations as record functions.
 
-A genuine generated variant constructor is also a constant-expression form
-when all supplied arguments are recursively constant (including empty variants), so it may initialize a module variable. The checker recognizes the
-validated synthesized constructor metadata, not merely any static returning
-the owner: a user-written union function that happens to return `Message` is
-still an ordinary nonconstant call.
+A genuine generated variant constructor, including one for an empty variant,
+may initialize a module variable: like a generated record constructor, it only
+stores its checked arguments, which follow the
+[initializer dependency rule](modules.md#initializer-dependencies). The checker
+recognizes the validated synthesized constructor metadata, not merely any
+static returning the owner: an own user-written union function that happens to
+return `Message` is an own-function dependency, while a union function imported
+from another module is an ordinary imported call.
 
 ## Payload types
 

@@ -718,30 +718,49 @@ end
 
     it("keeps shared contributors, logical sort order and the selected main's sole initializer", function()
         local folder = fixture.source .. "/ensemble"
+        fixtures.write(fixture.source .. "/initializer_trace.titan", [[
+foreign import "titan/ffi.h"
+local ready = false
+trace = 0
+function mark(digit: integer): integer
+    if not ready then raise "dependency not initialized" end
+    if ffi.lua_checkstack(L, 8192) == 0 then
+        raise "cannot grow initializer stack"
+    end
+    trace = trace * 10 + digit
+    return digit
+end
+do ready = true end
+]])
         fixtures.write(folder .. "/ensemble.titan", "this default main must never parse @@@")
         fixtures.write(folder .. "/ensemble." .. fixture.host .. ".titan", [[
 foreign import "stdio.h"
+local order = import "initializer_trace"
 local total = 0
 local calls = 0
 function main(args: {string}): integer
-    ffi.printf("%d:%d\n", total as foreign int, calls as foreign int)
+    local final: integer = settled
+    ffi.printf("%d:%d:%d:%d\n", total as foreign int, calls as foreign int,
+        order.trace as foreign int, final as foreign int)
     return 0
 end
 do
     total = first * 100 + second * 10 + third
     calls = calls + 1
+    settled = order.mark(4)
 end
 ]])
-        fixtures.write(folder .. "/a-common.titan", "local first = 1\n")
-        fixtures.write(folder .. "/a.titan", "local second = 2\n")
-        fixtures.write(folder .. "/a_extra.titan", "local third = 3\n")
+        fixtures.write(folder .. "/a-common.titan", "local first = order.mark(1)\n")
+        fixtures.write(folder .. "/a.titan",
+            "const settled: integer?\nlocal second = order.mark(2)\n")
+        fixtures.write(folder .. "/a_extra.titan", "local third = order.mark(3)\n")
         fixture:compiled({ "-q", "ensemble" })
         local result = fixture:program("ensemble", "ensemble__main")
-        assert.is_true(result.ok, result.output); assert.equal("123:1\n", result.output)
+        assert.is_true(result.ok, result.output); assert.equal("123:1:1234:4\n", result.output)
         assert(os.rename(folder .. "/a.titan", folder .. "/a.native.titan"))
         fixture:compiled({ "-q", "ensemble" })
         result = fixture:program("ensemble", "ensemble__main")
-        assert.is_true(result.ok, result.output); assert.equal("123:1\n", result.output)
+        assert.is_true(result.ok, result.output); assert.equal("123:1:1234:4\n", result.output)
         fixtures.write(folder .. "/a.native.titan", "do local forbidden = 1 end\n")
         result = fixture:compile({ "-q", "ensemble" })
         assert.is_false(result.ok)

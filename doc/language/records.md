@@ -328,7 +328,7 @@ source collaborator must call the constructor.
 ### Records in module variables
 
 A module variable can hold a record. A raw constructor expression or a call
-to the default generated constructor can be its constant initializer:
+to the default generated constructor can initialize it:
 
 ```titan
 p: Point = { x = 1.0, y = 2.0 }
@@ -345,9 +345,19 @@ function recenter()
 end
 ```
 
-An overridden `new` is an ordinary function call and cannot be used as a
-constant module-variable initializer. Perform computed initialization in the
-module's final `do ... end` block.
+An own-module overridden `new` is an own-function dependency and cannot be used
+in a module-variable initializer. An imported custom `new` is permitted because
+its module is already initialized. Every evaluated operand still follows the
+[initializer dependency rule](modules.md#initializer-dependencies), including
+implicit calls used to compute an argument. When an initializer stores a
+lambda or another own callable through an imported generated constructor, the
+compiled consumer also requires that constructor to remain generated. Only
+values delivered to the constructor's parameters create that requirement, not
+surplus arguments or spread elements that no parameter receives; see
+[Replacing shared-library
+dependencies](binary-compatibility.md#private-record-fields-and-construction).
+Use the module's final `do ... end` block for initialization that needs
+own-module state or callables.
 
 The record declaration may appear before or after the module variable. The
 module-variable ordering restriction concerns only imports and other module

@@ -110,6 +110,19 @@ checked after lvalue resolution and before `_assigned` bookkeeping, which keeps
 rejected closure and direct writes from incorrectly selecting mutable capture
 storage.
 
+Initialized const and mutable `TopLevelVar` nodes share the
+[initializer dependency check](checker.md#staged-top-level-collection-and-body-checking)
+in `checker/declarations.lua`. This is a runtime initialization-safety rule,
+not constant folding: foreign values/calls and earlier imported members/calls
+are valid, while evaluating a reference to an own-module variable, function,
+or method is not. Lambdas, bound own methods, own Interface implementations,
+and own method-bearing record/union values may be stored because creating them
+runs no body; they are rejected where an explicit or implicit call evaluated
+by the initializer could invoke them. The shared check classifies Map index,
+equality, length, and spread dispatch; an operation whose dispatching operands
+all have fixed origins creates no Map exposure. Constness adds no separate
+exception or exposure state.
+
 Every initializer-less `TopLevelVar` requires an explicit nil-bearing type;
 the checker replaces `value == nil` with a checked `ExpNil`. A const one also
 receives `_initializerless_const` and its owning `_module_name`

@@ -929,11 +929,9 @@ describe("closures (end-to-end)", function()
     end)
 
     it("a module var initialized with a const-receiver bound method ref runs", function()
-        -- The receiver is a constructor call with a const arg, which `isconst`
-        -- accepts; the bound method-ref initializer evaluates that receiver at
-        -- module-init time, captures self, and stores the bound closure into a
-        -- `_mod` upvalue (gc store, barriered). Calling it later applies the
-        -- method against the captured receiver.
+        -- The generated receiver is constructed during module initialization,
+        -- captured as self, and stored in the module's traced closure slot.
+        -- Binding does not execute the method body.
         run_coder([[
             record Adder base: integer end
             function Adder:add(x: integer): integer return self.base + x end
@@ -942,6 +940,44 @@ describe("closures (end-to-end)", function()
         ]], [[
             assert(test.apply(5) == 105)
             assert(test.apply(7) == 107)
+        ]])
+    end)
+
+    it("stores nested lambdas and own callable bindings until after initialization",
+       function()
+        run_coder([[
+            local seed: integer?
+            record Holder callback: function(): integer end
+            union Choice Some(function(): integer) end
+            record Box number: integer end
+            function Box:read(): integer return seed + self.number end
+            interface Reader function read(): integer end
+
+            local callbacks = {function(): integer return seed end}
+            local mapped = {["read"] = function(): integer return seed end}
+            local erased = (function(): integer return seed end) as value
+            local selected = true and function(): integer return seed end
+            local held = Holder(function(): integer return seed end)
+            local variant = Choice.Some(function(): integer return seed end)
+            local bound = Box(1):read
+            local reader: Reader = Box(2)
+
+            function read_all():
+                (integer, integer, integer, integer, integer, integer, integer, integer)
+                local dynamic: function(): integer = erased
+                case variant
+                when Some(callback) then
+                    return callbacks[1](), mapped["read"](), dynamic(),
+                        selected(), held.callback(), callback(), bound(), reader:read()
+                end
+            end
+            do seed = 42 end
+        ]], [[
+            collectgarbage("collect")
+            local values = table.pack(test.read_all())
+            assert(values.n == 8)
+            for index = 1, 6 do assert(values[index] == 42) end
+            assert(values[7] == 43 and values[8] == 44)
         ]])
     end)
 

@@ -87,10 +87,13 @@ The checker identifies genuine constructors by these markers, not by spelling;
 they are the union counterpart of `_record_constructor`. The constructor's
 `StaticMethod` publishes the ordered part names as `paramnames` (an empty list
 for an empty variant), so ordinary named-call checking supplies evaluation
-order, omissions, coercion, and generic inference. The module-constant
-classifier accepts a constructor call only when its nominal metadata validates
-against the owner/variant projection and its arguments are recursively
-constant; a user-written static that merely returns its owner is not constant.
+order, omissions, coercion, and generic inference. The module-initializer
+dependency check (`isconstructor` in `checker/declarations.lua`) treats a call
+as generated construction only when its nominal metadata validates against the
+owner/variant projection. Such a call stores its arguments, which are still
+checked by the dependency rule, rather than exposing them to a callee. A
+user-written static that merely returns its owner is an ordinary call; an own
+one is an own-function dependency.
 
 The type grammar allows at most one qualifier component. A local
 `Message.move` written as an `as`/`is` target reaches `Ast.TypeQualName` and

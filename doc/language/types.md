@@ -584,8 +584,8 @@ such as `y: integer? = 18`; their names do not accept `?`.
 Two other positions are inferred: the control variable of a numeric `for`
 takes the type of the start expression when not annotated (and must end
 up `integer` or `float`), and module variables without annotations are
-inferred from their compile-time-constant initializers with the same
-de-optionization rule — see [Modules](modules.md).
+inferred from their initializers with the same de-optionization rule.
+Their expressions follow the [module-initializer dependency rule](modules.md#initializer-dependencies).
 
 ## The `value` type in depth
 

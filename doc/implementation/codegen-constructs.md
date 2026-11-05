@@ -423,6 +423,19 @@ calling `luaV_equalobj` path restores `_base` before later stack-root use, and
 `~=` negates the already materialized result rather than redispatching or
 reevaluating either operand.
 
+### Initializer call exposure
+
+The initializer dependency checker mirrors these dispatch points: a possibly
+metatable-bearing read exposes the Map and key, the metamethod-aware Map/Map
+or Map/`value` equality selected by the original `ComparisonPlan` exposes both
+operands, and integer-Map length or spread exposes its receiver. Fresh
+`codemap` construction has no metatable and uses raw filling, so it creates no
+`__newindex` call and supports the checker's fixed-origin proof. Canonical
+Array backing operations and the raw `value`/`value` and Option comparisons do
+not add arbitrary metamethod calls. This classification changes no runtime
+lowering and never suppresses checking of nested computations; see
+[initializer validation](checker.md#staged-top-level-collection-and-body-checking).
+
 ## Records
 
 ### Construction and field access

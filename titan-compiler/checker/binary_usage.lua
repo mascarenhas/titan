@@ -171,11 +171,10 @@ function binary_collect_usage(tree, st, registry)
             local constructor = tag == "Ast.ExpCall"
                 and node._nominal_constructor
             if constructor and constructor.kind == "record"
-               and (node._binary_constant_constructor
+               and (node._binary_initializer_constructor
                     or next(constructor.allocation_plans) ~= nil) then
-                -- Constant-initializer proofs and fused native allocation
-                -- both rely on the generated default constructor, beyond
-                -- `new`'s ordinary callable contract.
+                -- Non-invoking initializer proofs and fused native storage
+                -- both require the generated body, not just `new`'s signature.
                 local used = nominal_usage(constructor.owner.name)
                 if used then used.literal = true end
             end
