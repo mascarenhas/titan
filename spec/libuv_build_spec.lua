@@ -6215,30 +6215,8 @@ printf '%s\n' "${schedule[@]}"
                 "make titan-stdlib-browser-test", stdlib_sdk, true))
             local stdlib_gate = assert(browser_stdlib_job:find("gate_specs=(", stdlib_suite, true))
             assert.is_true(stdlib_sdk < stdlib_suite and stdlib_suite < stdlib_gate)
-            local renderer_flag = "--enable-features=HigherRendererMemoryLimit"
-            local renderer_wrapper = step_containing(browser_stdlib_job, renderer_flag)
-            for _, contract in ipairs({
-                'wrapper="$RUNNER_TEMP/titan-stdlib-chrome"',
-                "printf '#!/usr/bin/env bash\\n",
-                'exec %q ' .. renderer_flag .. ' "$@"\\n',
-                '"$TITAN_CHROME" > "$wrapper"',
-                'chmod +x "$wrapper"',
-                'echo "TITAN_CHROME=$wrapper" >> "$GITHUB_ENV"',
-            }) do
-                assert.truthy(renderer_wrapper:find(contract, 1, true), contract)
-            end
-            assert.equal(1, count_literal(linux_workflow, renderer_flag))
-            assert.equal(1, count_literal(linux_workflow,
-                'wrapper="$RUNNER_TEMP/titan-stdlib-chrome"'))
-            assert.falsy(browser_job:find(renderer_flag, 1, true))
-            local renderer_install = assert(browser_stdlib_job:find(
-                "scripts/browser_extract_zip.py", 1, true))
-            local renderer_wrapper_index = assert(browser_stdlib_job:find(
-                'wrapper="$RUNNER_TEMP/titan-stdlib-chrome"', 1, true))
-            local renderer_sandbox = assert(browser_stdlib_job:find(
-                "grep -q 'id=\"sandbox\"' \"$log\"", 1, true))
-            assert.is_true(renderer_install < renderer_wrapper_index and
-                renderer_wrapper_index < renderer_sandbox)
+            assert.falsy(linux_workflow:find("HigherRendererMemoryLimit", 1, true))
+            assert.falsy(browser_stdlib_job:find("titan-stdlib-chrome", 1, true))
             assert.falsy(browser_stdlib_job:find("--no-sandbox", 1, true))
             assert.falsy(browser_stdlib_job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true))
             for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job }) do

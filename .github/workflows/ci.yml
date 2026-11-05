@@ -867,20 +867,6 @@ jobs:
           echo "TITAN_CHROME=$chrome" >> "$GITHUB_ENV"
           "$chrome" --version
 
-      # CfT 156 gives sandboxed renderers an 8 GiB RLIMIT_DATA on <=16 GiB
-      # hosts, but protobuf startup needs 13-14 GiB (D22). Double that
-      # renderer limit with Chrome's feature, without disabling the sandbox.
-      # GetProcessDataSizeLimit:
-      # https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/sandbox/policy/linux/sandbox_linux.cc
-      - name: Raise the browser stdlib renderer data limit
-        run: |
-          set -euo pipefail
-          wrapper="$RUNNER_TEMP/titan-stdlib-chrome"
-          printf '#!/usr/bin/env bash\nexec %q --enable-features=HigherRendererMemoryLimit "$@"\n' \
-            "$TITAN_CHROME" > "$wrapper"
-          chmod +x "$wrapper"
-          echo "TITAN_CHROME=$wrapper" >> "$GITHUB_ENV"
-
       # Ubuntu 24.04 enables kernel.apparmor_restrict_unprivileged_userns by
       # default, which kills Chrome's user-namespace sandbox before CDP can
       # attach ("CDP pipe closed before shutdown"). Chrome keeps its sandbox:

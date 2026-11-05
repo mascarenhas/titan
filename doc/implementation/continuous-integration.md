@@ -197,8 +197,7 @@ revision. Pins live in `TITAN_`-prefixed variables (`TITAN_EMSDK_VERSION`,
 `TITAN_EMSDK_ROOT`, `TITAN_CHROME_VERSION`, `TITAN_CHROME_SHA256`,
 `TITAN_CHROME_ROOT`), because `emsdk_env.sh` unsets every `EMSDK_*` variable it
 does not set itself, and each job sets `permissions.id-token: write` for its
-own Codecov upload. Both jobs begin with the same seven steps
-(`browser-stdlib` inserts [one more](#browser-stdlib-job) after step 3):
+own Codecov upload. Both jobs begin with the same seven steps:
 
 1. **Emscripten.** `ubicloud/cache@v4` restores `.emsdk` under the key
    `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
@@ -341,35 +340,9 @@ is emsdk-free); compiler shards never become browser SDK consumers.
 
 `browser-stdlib` (`browser SDK and core stdlib`) repeats steps 1–7 of the
 [`browser-toolchain` job](#browser-toolchain-job) on its own runner and
-prefix, with one step between the Chrome for Testing and user-namespace sandbox
-steps: `Raise the browser stdlib renderer data limit` writes
-`$RUNNER_TEMP/titan-stdlib-chrome`, a script that `exec`s the pinned headless
-shell with `--enable-features=HigherRendererMemoryLimit` ahead of its own
-arguments, and exports that script as `TITAN_CHROME`. Every later Chromium
-launch in the job (the sandbox check, the stdlib suite, and the gate files'
-runner launches) goes through the wrapper; `browser-toolchain` and
-`browser-playwright` launch Chromium with its default limit.
-
-The wrapper raises the renderer's data-segment limit. Chromium's Linux sandbox
-bounds a renderer with `RLIMIT_DATA` rather than `RLIMIT_AS`, because no
-address-space limit both fits V8's and WebAssembly's reservations and still
-blocks large-allocation exploits. In Chrome for Testing 156.0.8078.80,
-`GetProcessDataSizeLimit` in `sandbox/policy/linux/sandbox_linux.cc` picks the
-64-bit renderer limit from total physical memory: 8 GiB on a host with at most
-16 GiB, 16 GiB with at most 32 GiB, and 32 GiB above that, doubled when the
-`HigherRendererMemoryLimit` feature is enabled (`sandbox/policy/features.cc`
-declares it disabled by default). The sandbox only lowers an inherited limit,
-never raises it. On the job's 16GB runner the renderer therefore gets 8 GiB by
-default and 16 GiB through the wrapper. The `protobuf` suite image needs
-between 13 and 14 GiB of renderer data during startup, before its first case;
-its linear memory stays at its 16 MiB initial size, so the cost is the engine's
-startup work for that image. Measured with the sandbox on and the limit
-inherited from the launching process, the image's renderer crashes before the
-first case at 13 GiB even with a filter that selects no case, the image starts
-at 14 GiB, and all 199 of its cases pass at 16 GiB. At 8 GiB `protobuf` is the
-only image that fails, with `Chromium target crashed` (runner status 75) and no
-report; `core`, `reflection`, and `transfer` pass. The renderer keeps its
-seccomp and namespace sandbox, and the job passes no `--no-sandbox`.
+prefix. It uses the pinned Chrome for Testing executable with its default
+renderer-memory limits and enabled sandbox; no CI-only memory-limit wrapper
+or extra renderer-memory feature is applied.
 
 After step 7, `browser-stdlib` runs:
 
@@ -380,7 +353,7 @@ After step 7, `browser-stdlib` runs:
    validation-profile test images, checks each image against the 32,000,000-byte
    budget and the dependency closure, checks the native/browser member
    inventory, runs every image under Node and then Chromium (`TITAN_NODE` and
-   the wrapping `TITAN_CHROME` from the earlier steps), and requires a nonzero
+   the pinned `TITAN_CHROME` from the earlier steps), and requires a nonzero
    case count for every owner across the images
    ([browser test owners](browser-target.md#test-owners-and-the-browser-suite)).
    Each image's stdout report and stderr under each engine go to separate logs
