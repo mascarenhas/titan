@@ -7035,7 +7035,7 @@ printf '%s\n' "${schedule[@]}"
                     assert.equal(2, count_literal(step, label), label)
                 end
                 assert.truthy(step:find(
-                    "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\.$'",
+                    "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)$'",
                     1, true), step)
                 assert.truthy(step:find(
                     '"$TITAN_SANITIZER_LOG_DIR/$ownership_log.log"',
@@ -7053,7 +7053,7 @@ printf '%s\n' "${schedule[@]}"
                 assert.equal(2, count_literal(teardown_step, label), label)
             end
             for _, required in ipairs({
-                "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\.$'",
+                "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)$'",
                 '"$TITAN_SANITIZER_LOG_DIR/$teardown_log.log"',
                 "Teardown sanitizer filter ran no tests:",
                 "exit 1",
@@ -7576,6 +7576,40 @@ end)
             if not tested then error(test_error, 0) end
         end)
 
+    it("accepts timed sanitizer summaries and rejects empty or malformed selections", function()
+        if platform.windows then pending("Unix sanitizer grep guard"); return end
+        local patterns = {}
+        for pattern in read_file(".github/workflows/ci.yml"):gmatch("grep %-Eq '([^']+)'") do
+            if pattern:find("[==========]", 1, true) then patterns[#patterns + 1] = pattern end
+        end
+        assert.equal(4, #patterns)
+        local root = make_temp_dir()
+        local tested, failure = xpcall(function()
+            local path = root .. "/summary.log"
+            for _, pattern in ipairs(patterns) do
+                for _, example in ipairs({
+                    { "[==========] 1 test ran. (0.00 ms total)", true },
+                    { "[==========] 12 tests ran. (123.45 ms total)", true },
+                    { "[==========] 0 tests ran. (0.00 ms total)", false },
+                    { "[==========] 1 test ran.", false },
+                    { "[==========] 1 test ran. (-1.00 ms total)", false },
+                    { "[==========] 1 test ran. (1.0 ms total)", false },
+                    { "[==========] 1 test ran. (1.000 ms total)", false },
+                    { "[==========] 1 test ran. (nan ms total)", false },
+                    { "[==========] 1 test ran. (1e2 ms total)", false },
+                    { "[==========] 1 test ran. (1.00 ms)", false },
+                    { "[==========] 1 test ran. (1.00 ms total) trailing", false },
+                }) do
+                    write_file(path, example[1] .. "\n")
+                    local ok, output = run_argv({ "grep", "-Eq", pattern, path })
+                    assert.equal(example[2], ok, example[1] .. "\n" .. output)
+                end
+            end
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(failure, 0) end
+    end)
+
     it("runs parallel native stdlib owner groups, guards timing-sensitive owners, and audits the union",
         function()
             if platform.windows then
@@ -7631,7 +7665,7 @@ count=0
 for owner in "${owners[@]}"; do
     printf '[ RUN      ] %%s.test_case\n' "$owner"
     if [[ ${FAKE_FAIL_OWNER:-} == "$owner" ]]; then
-        printf '[  FAILED  ] %%s.test_case\n' "$owner"
+        printf '[  FAILED  ] %%s.test_case (1.00 ms)\n[----------] %%s (1.00 ms total)\n' "$owner" "$owner"
         acquire
         active=$(cat "$state/active")
         printf '%%s\n' "$((active - 1))" > "$state/active"
@@ -7640,13 +7674,13 @@ for owner in "${owners[@]}"; do
             printf '%%s\n' "$((done_count + 1))" > "$state/ordinary-done"
         fi
         release
-        printf '[==========] 1 test ran.\n[  PASSED  ] 0 tests.\n[  FAILED  ] 1 test.\n'
+        printf '[==========] %%s tests ran. (%%s.00 ms total)\n[  PASSED  ] %%s tests.\n[  FAILED  ] 1 test.\n[  FAILED  ] %%s.test_case\n' "$((count + 1))" "$((count + 1))" "$count" "$owner"
         exit 1
     fi
-    printf '[       OK ] %%s.test_case\n' "$owner"
+    printf '[       OK ] %%s.test_case (1.00 ms)\n[----------] %%s (1.00 ms total)\n' "$owner" "$owner"
     count=$((count + 1))
 done
-printf '[==========] %%s tests ran.\n' "$count"
+printf '[==========] %%s tests ran. (%%s.00 ms total)\n' "$count" "$count"
 printf '[  PASSED  ] %%s tests.\n' "$count"
 
 acquire

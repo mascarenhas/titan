@@ -1,6 +1,11 @@
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* Keep Darwin's dlfcn extensions (including RTLD_DEFAULT) visible alongside
+** the POSIX clock declarations, as in the other runtime translation units. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
 
 #include <stdlib.h>
 #include <stdint.h>
