@@ -153,13 +153,37 @@ reserves and appends four bytes into an owned `titan_protobuf_buffer`) and
 hooks).
 
 `Encoder:record_value` and `union_value` enforce public nominal and complete
-member visibility, active-path cycle detection, the 128-level depth limit, and
-the normal field and variant traversal with nested custom-hook dispatch. The
+member visibility, active-path cycle detection, the [nesting
+limit](#nesting-limit), and the normal field and variant traversal with
+nested custom-hook dispatch. The
 inspected-root helpers check the 2 GiB message limit after encoding. Root
 custom-hook and root resource-codec selection belong to `titan.transfer`;
 ordinary `protobuf.serialize` keeps its structural public-data rules. See the
 [owning API inventory](../language/standard-library-protobuf.md#api) and
 [transfer classification](transfer-library.md#flat-packets-and-direct-classification).
+
+## Nesting limit
+
+One budget, `TITAN_CODEC_DEPTH_LIMIT`, bounds every codec path. It is
+defined in `titan-runtime/transfer.h` as 128 unless the target defines it;
+the browser target's descriptor defines it as 43
+([browser nesting limits](browser-target.md#nesting-limits)), and
+`titan/protobuf/native.h` includes `transfer.h`, so `protobuf.titan` reads it
+as `ffi.TITAN_CODEC_DEPTH_LIMIT` through its existing `foreign import`. The reflective
+`require_depth` (used by the encoder, the decoder, and `schema`) and the
+generated codecs' `titan_codec_depth` (also used when their field reader skips
+a group) raise when a depth exceeds the budget, with `protobuf: nesting
+exceeds <budget> levels` built from the macro in both. The budget is raw:
+each record or union with fields probes them one level deeper, so 128 accepts
+a 127-record chain and 43 accepts 42, while a union whose selected variant has
+no parts probes nothing deeper and is accepted at the budget itself. There is
+no reflective-only limit and no separate `transfer` constant: `transfer`
+encodes and decodes through these paths, so the one define bounds it too.
+The boundary tests derive their depths and messages from the macro, so their
+subtest names follow the target (`encode_127_accepted`,
+`decode_128_rejected_by_both`, and `partless_union_at_128` natively;
+`encode_42_accepted`, `decode_43_rejected_by_both`, and
+`partless_union_at_43` in the browser).
 
 ## Generated nominal codecs
 
@@ -175,7 +199,8 @@ nominal with a field the reflective codec always rejects (callables, Maps,
 Interfaces, owned or union C types), private members, or hooks stays entirely
 reflective, as does a nominal whose decoder frame would exceed 64 directory
 entries: a record's fields, or one union selector plus the largest variant's
-parts. Each entry is 32 bytes at up to 128 nesting levels. The union selector
+parts. Each entry is 32 bytes at up to `TITAN_CODEC_DEPTH_LIMIT` nesting
+levels (128 natively, 43 on the browser target). The union selector
 validates the complete wire message but stores only the one recognized
 occurrence; zero, repeated, replaced, or non-message variants hand back to the
 reflective decoder after that validation. One shared parts directory serves
@@ -566,9 +591,15 @@ their defining modules, nominal names, and bytes. Closure reconstruction uses
 the codec to decode its snapshot against the receiving state's initialized types;
 no operation reads another state's reflection descriptors.
 
-Tests belong in `spec/stdlib/titan/protobuf/`, with transfer lifecycle cases in
-the Lua/async native owners and reflection/code-generation tests in their
-existing layers. Cover full-width scalars, binary strings, custom constructors,
+Tests belong in `spec/stdlib/titan/protobuf/`: `protobuf.tests` imports only
+the browser subset and runs on both targets, including the raw index writers
+and their reservation failure, while `protobuf.resource_tests` holds the
+`thread` endpoint cases. Same-instance packet cases are in `transfer.tests`,
+cross-state transfer lifecycle cases in the Lua/async/thread native owners,
+and reflection/code-generation tests in their existing layers. Keep depth
+cases target-derived (`ffi.TITAN_CODEC_DEPTH_LIMIT`), since the [nesting
+limit](#nesting-limit) differs on the browser target. Cover full-width
+scalars, binary strings, custom constructors,
 const fields, foreign aggregate projections, nil Array positions, graph
 rejection, unknown fields, merge rules, malformed inputs, and schema/wire
 agreement with an independent protobuf implementation. Foreign exportability

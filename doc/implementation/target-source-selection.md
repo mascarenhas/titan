@@ -396,12 +396,22 @@ effect, and the extension adds no target setting.
 
 ## Make inventories and audits
 
-The standard library has no target variants. The repository still prepares
-for them:
+The standard library's target variants are the canonical mains of its
+native-only modules: the flat `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
+and the folder mains `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`.
+These thirteen families have no default and no `browser` member, so for
+`browser` the resolver selects no main: the module is absent (an import
+reports `module 'titan.<name>' not found`), and the folder's contributors,
+which keep their plain names, are neither composed nor resolvable as flat
+modules. Native selection, logical names, and canonical output stems (such as
+`titan/uv/uv.titan.h`) are unchanged; only the physical main is a variant.
+The other thirteen standard modules have no variants and form the [browser
+standard library](browser-target.md#the-browser-standard-library).
 
 * The Makefile source lists (`UV_TITAN_SOURCES` and the other stdlib lists)
-  name every source explicitly. A variant is its own entry immediately after
-  its default, never a wildcard. The lists are audit inventories, not Make
+  name every source explicitly. A variant follows its default when the family
+  has one; a variant-only family lists just its variants, as each native-only
+  main does. There are no wildcards. The lists are audit inventories, not Make
   prerequisites: `titanc --incremental` certifies the module graph.
 * `spec/libuv_build_spec.lua` reads the inventory with `stdlib_source_files()`
   and groups it with `source_families()`, which uses
@@ -416,8 +426,9 @@ for them:
 * The native recipes that invoke `titanc` (`stdlib`, `stdlib-objects`,
   `titan-stdlib-test-objects`, `titan-stdlib-test-build`, the native fixture
   rule, and `titan-native-coverage-build`) unset `TITAN_TARGET`, as do the
-  Windows build and test scripts. See [Repository development
-  workflow](repository-workflow.md).
+  Windows build and test scripts; the browser recipes (`browser-sdk` and
+  `titan-stdlib-browser-test`) unset it too and pass `--target browser`
+  explicitly. See [Repository development workflow](repository-workflow.md).
 
 ## Validation
 
@@ -430,7 +441,11 @@ host's row, so the specs run unchanged on every platform:
   inactive files under a recording I/O strategy, terminal selected errors,
   precedence including folder-on-one-target, any-label privacy, reserved
   spellings), a stubbed `FreeBSD` host, cached-descriptor admission,
-  publication re-resolution, and logical split artifacts;
+  publication re-resolution, logical split artifacts, and the real standard
+  library's native-only mains (native selection with canonical output paths on
+  every native target, the ordinary missing-module diagnostic for each of the
+  thirteen modules on `browser`, and blocked folder contributors on every
+  target);
 * `spec/titanc_parallel_spec.lua`: the CLI vocabulary, flag precedence, empty
   values, validation order, and `--print-root`;
 * `spec/coder/folder_modules_spec.lua`: composition order, replaced mains,

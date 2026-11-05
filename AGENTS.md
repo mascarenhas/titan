@@ -155,7 +155,7 @@ Read the matching workflow before executing commands or changing build policy:
 | Production vs validation inputs, prefix isolation, effective flags | [Build profiles](doc/language/build-profiles.md) |
 | Test placement, shared helpers, fixture ownership, native aggregate | [Regression placement](doc/implementation/test-runner.md#regression-placement), [test-runner implementation](doc/implementation/test-runner.md), [repository workflow](doc/implementation/repository-workflow.md) |
 | Linux/macOS lanes, sharding, caches, sanitizer diagnostics | [Continuous integration](doc/implementation/continuous-integration.md) |
-| Real-Emscripten browser gate, `TITAN_REQUIRE_BROWSER_TOOLCHAIN`, `make lua-browser`, `make browser-sdk`, Node 24/Chrome/Playwright prerequisites, loader, runner, and trace suites | [Browser target validation](doc/implementation/browser-target.md#validation), [browser SDK](doc/implementation/browser-target.md#the-browser-sdk), [`browser-toolchain` job](doc/implementation/continuous-integration.md#browser-toolchain-job), [installation](doc/language/installation.md#the-browser-lua-and-sdk) |
+| Real-Emscripten browser gate, `TITAN_REQUIRE_BROWSER_TOOLCHAIN`, `make lua-browser`, `make browser-sdk`, `make titan-stdlib-browser-test` (browser core stdlib suite), Node 24/Chrome/Playwright prerequisites, loader, runner, and trace suites | [Browser target validation](doc/implementation/browser-target.md#validation), [browser SDK](doc/implementation/browser-target.md#the-browser-sdk), [browser standard library](doc/implementation/browser-target.md#the-browser-standard-library), [`browser-toolchain` job](doc/implementation/continuous-integration.md#browser-toolchain-job), [installation](doc/language/installation.md#the-browser-lua-and-sdk) |
 | Native coverage, source attribution, separate coverage objects | [Native coverage implementation](doc/implementation/native-coverage.md), [coverage commands](doc/language/native-coverage.md) |
 | Windows prerequisites, SDK, DLL providers/launchers, native tests | [Windows build](doc/implementation/windows-build.md), [Windows user guide](doc/language/windows-build.md) |
 
@@ -174,6 +174,7 @@ make busted-test BUSTED_FILTER='parser'              # installed compiler snapsh
 TITAN_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spec/parser_spec.lua
 make titan-stdlib-test                              # build and run the native aggregate
 make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse its built executable
+make titan-stdlib-browser-test                      # browser subset under Node and Chromium (emsdk, browser SDK)
 ```
 
 Default Busted and `luarocks test` use the installed compiler; the checkout

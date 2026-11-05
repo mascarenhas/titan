@@ -315,8 +315,9 @@ nonclaim does it parse the first flat or folder source match. Source roots are
 walked left to right; the folder-before-flat rule applies within each root,
 rather than comparing one representation across all roots. This applies
 equally to standard-library and application dependencies. In particular, a
-stray `./titan/uv/uv.native.titan` folder does not capture `import "uv"` while an
-installed compiled standard provider claims `titan.uv` on the binary path.
+stray `./titan/uv/` folder (with its `uv.native.titan` main) does not capture
+`import "uv"` while an installed compiled standard provider claims `titan.uv`
+on the binary path.
 
 An explicit `.titan` import arrives as `request.kind == "source-import"` and
 is source-required: the loader resolves it only through the tagged source

@@ -179,10 +179,13 @@ Inside the selected output directory, `titanc` maintains:
   inputs need not be read and hashed again, and `linker-feature` remembers
   whether the linker can report its inputs. All of them are rebuilt when
   missing.
-* `out/.native/<hash>.o` and `<hash>.record`: compiled objects and
-  certificates for `--c-source` inputs, keyed by canonical source path.
-  Preprocessed output and dependency files are temporary. Use
-  `--print-c-objects` to learn an object's path.
+* `out/.native/<hash>.o`, `<hash>.record`, and `<hash>.d`: compiled objects,
+  certificates, and the header dependency lists of successful compiles for
+  `--c-source` inputs, keyed by canonical source path, plus `inputs`, which
+  names the objects of the `--c-source` inputs of the latest successful
+  invocation that had any; an invocation without `--c-source` leaves it as is.
+  Preprocessed output is temporary. Use `--print-c-objects` to learn an
+  object's path.
 * `out/.titan-links/<key>/record`, `link.d`, and `synthetic/`: per-target
   final-link certificates, linker dependency reports, and the generated test
   runner (`<name>__test_runner.titan` and its C and object) and entrypoint

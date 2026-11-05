@@ -122,6 +122,13 @@ describe("certified app-owned C sources", function()
     end)
     after_each(function() remove(root) end)
 
+    local function assert_provenance(object)
+        local persisted = assert(depfile.parse(assert(context().io:read_file((object.path:gsub("%.o$", ".d"))))))
+        assert.same(object.dependencies, persisted)
+        local inventory = assert(certificate.read_record(context(), root .. "/.native/inputs"))
+        assert.same({ object.path }, inventory.inputs)
+    end
+
     it("preprocesses every invocation but compiles an unchanged node only once", function()
         local observed
         local function observe(phase, result, command)
@@ -140,6 +147,7 @@ describe("certified app-owned C sources", function()
         assert.is_nil(getmetatable(first.dependencies))
         for _, filename in ipairs(first.dependencies) do assert.is_string(filename) end
         assert.is_false(first.hit)
+        assert_provenance(first)
         local old = os.time() - 60
         assert(lfs.touch(first.path, old, old))
         phases = {}
@@ -148,6 +156,7 @@ describe("certified app-owned C sources", function()
         assert.is_table(observed)
         assert.same(observed, second.dependencies)
         assert.is_true(second.hit)
+        assert_provenance(second)
         assert.equal(first.path, second.path)
         assert.equal(first.identity, second.identity)
         assert.equal(old, lfs.attributes(second.path, "modification"))
@@ -158,8 +167,8 @@ describe("certified app-owned C sources", function()
         local function clean()
             for name in lfs.dir(root .. "/.native") do
                 if name ~= "." and name ~= ".." then
-                    assert.truthy(name:match("^[0-9a-f]+%.o$") or name:match("^[0-9a-f]+%.record$"),
-                        "retained native scratch: " .. name)
+                    assert.truthy(name:match("^[0-9a-f]+%.o$") or name:match("^[0-9a-f]+%.record$") or
+                        name:match("^[0-9a-f]+%.d$") or name == "inputs", "retained native scratch: " .. name)
                 end
             end
         end
@@ -175,6 +184,26 @@ describe("certified app-owned C sources", function()
         clean()
         assert.equal("file", lfs.attributes(first.path, "mode"))
         assert.equal("file", lfs.attributes(first.path:gsub("%.o$", ".record"), "mode"))
+    end)
+
+    it("retains actual header provenance for explicitly uncacheable native builds", function()
+        for _ = 1, 2 do
+            local object = assert(build(nil, true, nil, nil, { uncacheable = "opaque toolchain" }))[1]
+            assert.is_false(object.cacheable)
+            assert.is_false(object.hit)
+            assert.is_nil(lfs.symlinkattributes((object.path:gsub("%.o$", ".record"))))
+            assert_provenance(object)
+        end
+    end)
+
+    it("retains earlier node provenance when a later invocation requests different C sources", function()
+        local first = assert(build())[1]
+        local next_source = root .. "/another.c"
+        write(next_source, '#include "value.h"\nint another(void) { return VALUE; }\n')
+        local second = assert(build(nil, true, { next_source }))[1]
+        assert.same(first.dependencies,
+            assert(depfile.parse(assert(context().io:read_file((first.path:gsub("%.o$", ".d")))))))
+        assert_provenance(second)
     end)
 
     it("retires preprocessing scratch before propagating cancellation", function()

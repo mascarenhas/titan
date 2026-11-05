@@ -96,10 +96,19 @@ source root when `--output` is omitted), `titanc` also owns:
   ([Persistent digest cache](incremental-compilation.md#persistent-digest-cache));
 - `<domain>/.titan/linker-feature` (`linkcertificate.linker_backend`): the
   persisted GNU ld/LLD dependency-report probe result;
-- `<domain>/.native/<sha256(canonical-source-path)>.{o,record}`
-  (`nativeinputs.compile`): the compiled object and sidecar certificate
-  (`TITAN_NATIVE_RECORD_SCHEMA`) for each `--c-source` input, with
-  preprocessed output and dependency files as invocation scratch;
+- `<domain>/.native/<sha256(canonical-source-path)>.{o,record,d}`
+  (`nativeinputs.compile`): the compiled object, sidecar certificate
+  (`TITAN_NATIVE_RECORD_SCHEMA`), and preprocessor dependency file for each
+  `--c-source` input. The `.d` of a successful compile is kept as header
+  provenance on cache misses, hits, and uncacheable builds; preprocessed output,
+  staged objects, and the `.d` of a failed or cancelled compile are invocation
+  scratch;
+- `<domain>/.native/inputs` (`nativeinputs.compile`): a graph-codec record,
+  `{ inputs = { object_path, ... } }`, naming the objects of the `--c-source`
+  inputs of the latest successful `nativeinputs.compile` call, so build-owned
+  audits can tell current authored inputs from unused cache nodes. `titanc`
+  calls it only when `--c-source` is given, so a later invocation without
+  `--c-source` leaves the inventory unchanged;
 - `<domain>/.titan-links/<sha256(canonical-final-output-set)>/`
   (`linkcertificate.prepare`): the target's final-link certificate (`record`,
   `TITAN_LINK_RECORD_SCHEMA`), linker dependency output (`link.d`), and

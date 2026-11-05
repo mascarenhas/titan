@@ -2,6 +2,7 @@
 local staticmetadata = require "titan-compiler.staticmetadata"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local linkcertificate = require "titan-compiler.linkcertificate"
+local depfile = require "titan-compiler.depfile"
 local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
@@ -98,41 +99,141 @@ function M.check_image(bytes, origin)
 end
 
 function M.check_output(strategy, directory)
-    local entries, err = strategy:list(directory)
-    if not entries then return nil, err end
-    for _, name in ipairs(entries) do
-        local filename = directory .. "/" .. name
+    local root, err = strategy:realpath(directory)
+    if not root then return nil, err end
+    local seen = {}
+    local context = { io = strategy, cache_adapter = { sha256_binary = require("titan")._sha256_binary } }
+
+    local function check_dependencies(filename, required)
+        local dependencies = filename:gsub("%.o$", ".d")
+        local info, dependency_error = strategy:stat(dependencies)
+        if not info then
+            if required or dependency_error then
+                return nil, dependency_error or ("missing authored-C header provenance: " .. dependencies)
+            end
+            return true
+        end
+        local bytes
+        bytes, dependency_error = strategy:read_file(dependencies)
+        if not bytes then return nil, dependency_error end
+        local inputs
+        inputs, dependency_error = depfile.parse(bytes)
+        if not inputs or #inputs == 0 then
+            return nil, dependency_error or ("invalid authored-C header provenance: " .. dependencies)
+        end
+        for _, input in ipairs(inputs) do
+            local ok
+            ok, dependency_error = M.check_path(input)
+            if not ok then return nil, dependency_error end
+        end
+        return true
+    end
+
+    local function check_native(filename, required_headers)
+        local ok, native_error = M.check_path(filename)
+        if not ok then return nil, native_error end
+        local physical
+        physical, native_error = strategy:realpath(filename)
+        if not physical then return nil, native_error end
+        local normalized = physical:gsub("\\", "/")
+        if normalized:match("/%.native/[^/]+%.o$") then
+            ok, native_error = check_dependencies(physical, required_headers)
+            if not ok then return nil, native_error end
+        elseif required_headers then
+            return nil, "invalid authored-C input path: " .. filename
+        end
         local info
-        info, err = strategy:lstat(filename)
-        if not info then return nil, err end
-        if info.kind == "directory" then
-            local ok
-            ok, err = M.check_output(strategy, filename)
-            if not ok then return nil, err end
-        elseif info.kind == "file" and name:match("%.o$") then
+        info, native_error = strategy:stat(filename)
+        if not info then return nil, native_error end
+        local key = info.device ~= nil and info.inode ~= nil and
+            ("inode:" .. tostring(info.device) .. ":" .. tostring(info.inode)) or ("path:" .. physical)
+        local observation = table.concat({
+            tostring(info.size), tostring(info.mode),
+            tostring(info.modified_seconds), tostring(info.modified_nanoseconds),
+            tostring(info.changed_seconds), tostring(info.changed_nanoseconds), tostring(info.time_precision),
+        }, ":")
+        if seen[key] == observation then return true end
+        if filename:match("%.a$") then
+            -- libclang_rt.builtins.a includes __c_longjmp.o with a different
+            -- feature vector. This is a content audit, not provider ABI selection.
+            local scanned
+            scanned, native_error = staticmetadata.scan_archive(filename, { io = strategy, independent_members = true })
+            if not scanned then return nil, native_error end
+            ok, native_error = M.check_archive(filename, scanned)
+        else
             local bytes
-            bytes, err = strategy:read_file(filename)
-            if not bytes then return nil, err end
+            bytes, native_error = strategy:read_file(filename)
+            if not bytes then return nil, native_error end
             local object
-            object, err = staticmetadata.classify_object(bytes, filename)
-            if not object then return nil, err end
-            local ok
-            ok, err = check_object(object, bytes, filename)
-            if not ok then return nil, err end
-        elseif info.kind == "file" and name == "record" and directory:find("/.titan-links/", 1, true) then
-            local record
-            record, err = linkcertificate.read_record({
-                io = strategy, cache_adapter = { sha256_binary = require("titan")._sha256_binary },
-            }, filename)
-            if not record then return nil, err end
-            for _, input in ipairs(record.native or {}) do
+            object, native_error = staticmetadata.classify_object(bytes, filename)
+            if not object then return nil, native_error end
+            ok, native_error = check_object(object, bytes, filename)
+        end
+        if not ok then return nil, native_error end
+        seen[key] = observation
+        return true
+    end
+
+    local function visit(current)
+        local entries, visit_error = strategy:list(current)
+        if not entries then return nil, visit_error end
+        if current:gsub("\\", "/"):match("/%.native$") then
+            local inventory
+            inventory, visit_error = linkcertificate.read_record(context, current .. "/inputs")
+            if not inventory or type(inventory.inputs) ~= "table" then
+                return nil, visit_error or ("missing authored-C input inventory: " .. current)
+            end
+            local count = 0
+            for index, input in pairs(inventory.inputs) do
+                if math.type(index) ~= "integer" or index < 1 or index > #inventory.inputs or
+                        type(input) ~= "string" then
+                    return nil, "invalid authored-C input inventory: " .. current
+                end
+                count = count + 1
+            end
+            if count ~= #inventory.inputs then return nil, "invalid authored-C input inventory: " .. current end
+            for _, input in ipairs(inventory.inputs) do
                 local ok
-                ok, err = M.check_path(input.path)
-                if not ok then return nil, err end
+                ok, visit_error = check_native(input, true)
+                if not ok then return nil, visit_error end
             end
         end
+        for _, name in ipairs(entries) do
+            local filename = current .. "/" .. name
+            local info
+            info, visit_error = strategy:lstat(filename)
+            if not info then return nil, visit_error end
+            local ok
+            if info.kind == "directory" then
+                ok, visit_error = visit(filename)
+            elseif info.kind == "file" and name:match("%.o$") then
+                ok, visit_error = check_native(filename, false)
+            elseif info.kind == "file" and name == "record" and current:find("/.titan-links/", 1, true) then
+                local record
+                record, visit_error = linkcertificate.read_record(context, filename)
+                if not record then return nil, visit_error end
+                for _, input in ipairs(record.native or {}) do
+                    ok, visit_error = M.check_path(input.path)
+                    if not ok then return nil, visit_error end
+                    if input.path:match("%.o$") or input.path:match("%.a$") then
+                        local physical
+                        physical, visit_error = strategy:realpath(input.path)
+                        if not physical then return nil, visit_error end
+                        local authored = physical:sub(1, #root + 1) == root .. "/" and
+                            physical:gsub("\\", "/"):match("/%.native/[^/]+%.o$") ~= nil
+                        ok, visit_error = check_native(input.path, authored)
+                        if not ok then return nil, visit_error end
+                    end
+                end
+                ok = true
+            else
+                ok = true
+            end
+            if not ok then return nil, visit_error end
+        end
+        return true
     end
-    return true
+    return visit(directory)
 end
 
 -- Inventory public declarations, nominal fields, variants, methods and statics.

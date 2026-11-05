@@ -54,8 +54,12 @@ The implementation is spread over:
   `titan-browser.mjs`, and the runner `titan-browser-run` with
   `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, and
   `titan-browser-page.mjs`; and
-* the Make targets `lua-browser` (`scripts/lua_browser.sh`) and `browser-sdk`
-  (`scripts/browser_sdk.lua`).
+* the Make targets `lua-browser` (`scripts/lua_browser.sh`), `browser-sdk`
+  (`scripts/browser_sdk.lua`), and `titan-stdlib-browser-test`, with the
+  build-owned [standard-library checks](#the-browser-standard-library) in
+  `scripts/browser_stdlib.lua`, its command-line front end
+  `scripts/check_browser_stdlib.lua`, and the suite's stream-separating runner
+  wrapper `scripts/run_browser_stdlib.sh`.
 
 The source label and the target name are both `browser`. `wasm32` is a
 physical ABI and toolchain fact only: it never names a target, an SDK path
@@ -92,14 +96,16 @@ installs the compiler; (3) with only (1) and (2), `titanc --target browser`
 permits C-only work into owned `--output` directories: object compilation,
 and internal archive construction checked structurally; (4) `make
 browser-sdk` builds and installs the runtime archive, loader library and
-runner tool into `lib/titan-browser/<ver>/`; (5) it publishes the minimal
-stdlib provider and protocol-probes it against the runtime staged in step
-(4); (6) it writes the browser SDK digest manifest last. Missing browser-SDK
+runner tool into `lib/titan-browser/<ver>/`; (5) it publishes the [core
+stdlib provider](#the-browser-standard-library), protocol-probes it against
+the runtime staged in step (4), and checks its dependency closure; (6) it
+writes the browser SDK digest manifest last. Missing browser-SDK
 paths are diagnosed, naming `make browser-sdk`, only when a program or test
 is linked or when library-mode publication runs the executing protocol check;
 compile-only work needs only the verified Lua pieces.
 
-Step (4) also installs the browser LPegLabel archive. Every runtime and
+Step (4) also installs the browser LPegLabel archive, which step (5) links into
+the provider as its only native payload. Every runtime and
 LPegLabel object comes from `titanc --target browser -c --incremental
 --print-c-objects --c-source ...`, so Make never duplicates the descriptor's
 flags, and the archives go through the descriptor's `emar`/`emranlib` and the
@@ -229,8 +235,8 @@ prefix`.
 | `runner_module` | `titan-browser-run.mjs` | the runner's supervisor |
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
-| `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), staged for a later browser `peg` provider; no current image links it |
-| `provider` | `titan.a` | the browser standard provider, with exactly the roots `titan.test`, `titan.coroutine`, and `titan.gc` |
+| `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
+| `provider` | `titan.a` | the browser standard provider: the thirteen [core stdlib](#the-browser-standard-library) roots plus the five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
 
 None of the four runtime sources is compiled with `-fPIC`, LTO, or
@@ -264,8 +270,9 @@ check, and in `make browser-sdk` itself; object compilation never runs it.
 
 ### `make browser-sdk`
 
-`make browser-sdk PREFIX=<prefix> [ROCKS_TREE=<tree>]` is, apart from `make
-lua-browser`, the only Titan Make step that needs emsdk. It requires the
+`make browser-sdk PREFIX=<prefix> [ROCKS_TREE=<tree>]` is, with `make
+lua-browser` and `make titan-stdlib-browser-test`, one of the three Titan Make
+steps that need emsdk. It requires the
 installed compiler and common headers
 and the browser Lua; it never invokes `lua-browser`, the native standard
 library, or the native SDK build, and it clears ambient `LUA_PATH`,
@@ -273,8 +280,11 @@ library, or the native SDK build, and it clears ambient `LUA_PATH`,
 `TITAN_INSTALL_TREE` (then `PREFIX`); a missing compiler stops with
 `browser-sdk: installed titanc not found; run 'luarocks make' or 'make
 install-compiler-sdk' first`. Every child gets `TITAN_ROOT` set to the
-installation tree, `TITAN_PATH_0_6` set to the checkout, and an empty
-`TITAN_PATH`. When `TITAN_NODE` is unset or empty, the recipe unsets
+installation tree, `TITAN_PATH_0_6` set to the checkout, an empty
+`TITAN_PATH`, an empty `CPPFLAGS`, and `TITAN_EXTRA_CPPFLAGS` replaced by
+exactly `LPEGLABEL_CPPFLAGS` (`-I<checkout>/vendor/lpeglabel`); the ambient
+values of both are discarded, never appended to (`BROWSER_SDK_ENV`). When
+`TITAN_NODE` is unset or empty, the recipe unsets
 `TITAN_NODE` and, when `EMSDK` is set, prepends the first executable
 `$EMSDK/node/*/bin` directory to `PATH` ahead of any existing `node`. The
 build directory is `TITAN_BROWSER_BUILD_DIR` (default
@@ -299,15 +309,24 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    checks readiness with `browserlink.require_sdk` and
    `driver.browser_node_ready` against the staged runner.
 4. `titanc --target browser --output <build> --source-first --incremental
-   titan.test titan.coroutine titan.gc` publishes `<build>/titan.a` through
-   ordinary library mode, which runs the executing protocol check against the
-   runtime and runner staged in step 3. No `titan.a` or manifest exists yet,
-   and none is required.
+   -X <titan_bin>/libtitan-lpeglabel.a <BROWSER_STDLIB_ROOTS>` publishes
+   `<build>/titan.a` through ordinary library mode, which runs the executing
+   protocol check against the runtime and runner staged in step 3. The thirteen
+   roots and the payload are described in [the browser standard
+   library](#the-browser-standard-library). No `titan.a` or manifest exists
+   yet, and none is required.
 5. `browser_sdk.lua finalize` rescans the staged provider with the descriptor
-   fingerprint, revalidates it structurally, requires exactly the keys
-   `titan.coroutine`, `titan.gc`, and `titan.test` in that order, copies it to
-   `titan.a`, and finally writes `sdk-digests` with
-   `incremental.write_sdk_digests` and the existing schema.
+   fingerprint, revalidates it structurally, rejects `GOT.*` imports and
+   `dlopen`, `dlsym`, `dlerror`, or `backtrace_` references as step 3 does,
+   runs the [dependency-closure
+   check](#the-dependency-closure-check) over the staged provider, the
+   LPegLabel archive, and every object and link certificate under `<build>`,
+   requires exactly the thirteen keys `titan.coroutine`, `titan.gc`,
+   `titan.iteration`, `titan.json`, `titan.math`, `titan.path`, `titan.peg`,
+   `titan.protobuf`, `titan.reflect`, `titan.string`, `titan.test`,
+   `titan.transfer`, and `titan.url` in that order, copies it to `titan.a`, and
+   finally writes `sdk-digests` with `incremental.write_sdk_digests` and the
+   existing schema.
 
 The manifest records the browser `liblua.a` and its record, every browser Lua
 header, the four common Titan headers, and the ten other assets, hashed at
@@ -323,6 +342,437 @@ the tree is read or changed), then replaces the browser Lua headers in
 any missing common Titan header from `PREFIX`. Native Lua headers are never
 touched. A common header that is still missing stops with `missing installed
 header '<path>'; run 'luarocks make' or 'make install-compiler-sdk' first`.
+
+## The browser standard library
+
+The browser standard provider is a dependency-closed subset of the standard
+library, built from the shared `titan/` tree. The user contract is
+[the browser standard library](../language/browser-target.md#the-browser-standard-library)
+in the language manual.
+
+### Subset policy
+
+The candidates are the thirteen standard modules that reach neither `uv` nor
+`async` through their Titan imports: `coroutine`, `gc`, `iteration`, `math`,
+`test`, `reflect`, `json`, `protobuf`, `transfer`, `peg`, `string`, `url`, and
+`path`. All thirteen are delivered, each with its complete public interface:
+no member is omitted, stubbed, or made to raise "unavailable", and none of
+them has a `.browser.titan` or `.native.titan` variant. Their foreign imports
+are libc, Lua, the Titan SDK headers, and LPegLabel only, and the
+target-dependent values they need come from target C defines rather than
+whole-file variants: `TITAN_COROUTINE_STACK_SIZE` for `coroutine`, the two
+[nesting-limit](#nesting-limits) defines for `protobuf`/`transfer` and `json`,
+and `_WIN32` (which `emcc` never defines) through `titan/path_platform.h`
+for `path`.
+
+The other thirteen standard modules are absent at compile time: their
+canonical mains are the `native` variants `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
+and `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
+([Make inventories](target-source-selection.md#make-inventories-and-audits)).
+For `browser` the resolver finds no main, so an import reports the ordinary
+`module 'titan.<name>' not found`, and a contributor of a folder whose main is
+unselected stays blocked rather than resolving as a flat module. The plan for
+them is provisional:
+
+| Modules | Browser plan (provisional) |
+| --- | --- |
+| `async`, `timer` | browser compositions with a browser scheduler and outer suspension |
+| `io`, `os`, `lua` | browser compositions with `io.print`, streams, clocks, and Lua loading |
+| `http` | a browser composition; the only absent module that may bring llhttp into the browser closure |
+| `fs` | only together with a virtual filesystem |
+| `uv`, `net`, `ssl` | absent |
+| `websocket`, `sqlite3`, `thread` | absent; browser WebSocket, SQLite, and Worker-based threads are possible later additions |
+
+The subset has no raise-on-invoke members, no absence list, and no
+complete-interface parity gate. Output goes through
+Emscripten stdio only: `titan.test` writes with `putchar`/`fflush` and imports
+no Titan module, the generated runner imports only `titan.test` and the test
+owners, and the [loader](#the-loader)'s per-byte `Module.stdout`/`Module.stderr`
+hooks carry the bytes unchanged. No delivered module registers an async
+bootstrap hook, so the [entrypoint](#the-browser-entrypoint) calls `main`
+directly.
+
+### Provider recipe
+
+`BROWSER_STDLIB_ROOTS` in the `Makefile` names the thirteen logical roots, and
+[`make browser-sdk`](#make-browser-sdk) step 4 compiles them in one library-mode
+`titanc --target browser` invocation. The provider's native payload and
+include path are LPegLabel only:
+
+* `-X <titan_bin>/libtitan-lpeglabel.a` is the sole `-X` input. Its five
+  objects come from step 2's `--c-source` compilation with the descriptor's
+  object flags, so they carry neither the native `LPEGLABEL_CFLAGS`
+  `-fPIC` nor the host profile's LTO flags (`LPEGLABEL_BUILD_CFLAGS`); the
+  staging parser rejects any `GOT.*` import, and `titanc` rejects bitcode
+  members. `make browser-sdk TITAN_VERBOSE=1` prints the descriptor flags the
+  objects were compiled with.
+* `BROWSER_SDK_ENV` sets `TITAN_EXTRA_CPPFLAGS` to exactly
+  `LPEGLABEL_CPPFLAGS` and empties `CPPFLAGS`, replacing their ambient values.
+  No libuv, OpenSSL, llhttp, or SQLite include directory reaches the build, so
+  an accidental `#include <uv.h>` fails at FFI preprocessing instead of
+  finding a host header.
+
+The native standard library's single invocation, by contrast, passes every
+native archive in `STDLIB_EXTRA_OBJECTS` and concatenates every dependency's
+include path ([standard-library
+image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image));
+native link inputs come from invocation options, not module metadata, so the
+browser recipe states its closure explicitly. The published `titan.a` holds
+the thirteen module objects (with their split parts) and the five LPegLabel
+members.
+
+### The dependency-closure check
+
+`scripts/browser_stdlib.lua` rejects libuv, OpenSSL, llhttp, and SQLite by
+path, by symbol, and through the evidence each certified input carries:
+
+* **Paths** (`check_path`): a header named `uv.h`, `llhttp.h`, `sqlite3.h`, or
+  `sqlite3ext.h`, or below a `uv`, `libuv`, `openssl`, `llhttp`, or `sqlite3`
+  directory; and an archive named `libuv`, `libssl`, `libcrypto`,
+  `libopenssl`, `libllhttp`, `libsqlite3`, `libtitan-llhttp`, or
+  `libtitan-sqlite3` followed by `.`, `_`, or `-`.
+* **Symbols** (`check_symbol`): any name starting with `uv_`, `SSL_`,
+  `OPENSSL_`, `llhttp_`, or `sqlite3_` in the symbol and import inventories
+  that the relocatable-Wasm reader parses from each object, whether a function
+  or data, defined or undefined.
+* **Generated objects**: the C-header dependencies recorded in each object's
+  `.titan.source` metadata.
+* **Authored C**: each `.native/` directory must hold the `inputs` inventory
+  that the latest successful `nativeinputs.compile` call wrote ([`--c-source`
+  compilation](build-coordinator.md#--c-source-compilation-and-records)). Every
+  object it names needs a readable, nonempty `<stem>.d`, and every header path
+  in that file gets the path check, so a header that only contributes macros is
+  still caught. A missing or invalid inventory or `.d` fails closed: a missing
+  `.d` reports `missing authored-C header provenance`, and a missing inventory
+  reports the record reader's own error (`missing record`, or the I/O error).
+  The next successful build of those sources writes the evidence again. Unused
+  objects that older invocations left in the cache are checked by content but
+  need no `.d`.
+* **Link certificates**: every `native` input of every final-link record under
+  `.titan-links/` gets the path check, and every `.o` or `.a` among them,
+  inside or outside the output tree, is read and checked by content: archive
+  member names and each member's parsed Wasm symbol and import inventories,
+  plus the header metadata of objects that carry it. An authored-C object from
+  this output tree must also have its `.d`. Opaque third-party prebuilt inputs need
+  no header metadata; their contents are still checked.
+
+Each physical input is decoded once per `check_output` call. The key is its device and inode
+(or its real path where those are unavailable) together with its size, mode,
+and timestamps, so two different files with the same basename are both
+inspected, while hard-link aliases of one file are read once. The path check
+runs before deduplication. Referenced archives are scanned with
+`independent_members = true`, because a content audit must accept a toolchain
+archive whose members carry different feature vectors; provider lookup and
+target selection keep their strict scans ([relocatable
+WebAssembly](static-compiled-modules.md#relocatable-webassembly)).
+
+`check_archive` applies the path, symbol, and header checks to an archive and
+every member, `check_output` applies the generated-object, authored-C, and
+link-certificate checks to everything below an output root, and `check_image`
+checks a final `.wasm`: its imports, its exports, and every internal function
+name from the `name` section, so a dependency that dead-stripping left only
+internally is still found, and a missing name inventory fails. The check is
+owned by the SDK build and the subset suite (it is never part of `titanc`'s
+general link path): `browser_sdk.lua finalize` checks the staged provider, the
+LPegLabel archive, and the SDK build tree, and `titan-stdlib-browser-test`
+checks its output tree, the installed provider, and each of its test images.
+Admitting llhttp would be a deliberate change to these checks; no other
+relaxation is part of the policy.
+
+`spec/browser_stdlib_spec.lua` (emsdk-free) covers the path and symbol
+matrices, including every archive stem with `.a`, `_a.a`, `_1.48.a`,
+`-static.a`, and `.1.a` suffixes, and requires the `browser-sdk` environment
+and recipe to name no native-only dependency variable.
+`spec/coder/browser_stdlib_closure_spec.lua` holds the real-toolchain negative
+fixtures:
+
+* a compiled provider that `foreign import`s an injected `uv.h`, an injected
+  `libuv.a`, a neutrally named archive that defines `uv_closure_intruder`, an
+  image that keeps that function internally, and an image linked with
+  `-X libuv_a.a` whose selected object has no forbidden symbol but whose link
+  certificate names the archive;
+* an authored C file whose only forbidden header contributes a macro, rejected
+  on a cache miss, on a hit, and as an uncacheable node; deleting its `.d` or
+  the `.native/inputs` inventory fails closed, and a clean rebuild with an
+  unused legacy cache object passes;
+* external `.o` and `.a` inputs whose functions have neutral names, so the
+  image's function-name check passes, while a denied data symbol is defined,
+  or kept live as a weak undefined reference; the closure check rejects both,
+  even beside a clean input with the same basename. Replacing the payload with
+  a clean opaque prebuilt passes without header metadata, and hard-link aliases
+  certified by a second image are read once per physical file.
+
+`spec/staticmetadata_spec.lua` covers the `independent_members` scan option,
+and `spec/coder/native_inputs_spec.lua` the retained `.d` and `inputs`
+evidence. `spec/browser_sdk_spec.lua` builds the SDK with poisoned ambient
+`CPPFLAGS` and `TITAN_EXTRA_CPPFLAGS` (both name a missing forced header, so
+appending either fails) and requires the provider's non-compiler members to be
+exactly the five LPegLabel objects.
+
+### Interface-derived member inventory
+
+The member list is derived, never written by hand. `scripts/browser_stdlib.lua`
+reads the native and browser providers with `staticmetadata.scan_archive`,
+decodes each module interface with `driver.decode_module_interface`, and
+enumerates public top-level functions, variables, records, unions, Interfaces,
+and type aliases, plus their public fields, union variants, methods, and
+static functions. A `Type.CFunction` member is a raw `foreign function`
+export. A union variant's generated constructor counts once, as the variant.
+Each member is compared by kind, rendered signature, and
+`types.serialize_semantic` (which excludes documentation and includes
+named-call parameter metadata); machine layouts are separate provider metadata
+and are not compared. The inventory records no omissions or differences, so
+any difference between the native and browser interfaces fails.
+`check_browser_stdlib.lua inventory <native titan.a> <browser titan.a>
+[table]` prints `Browser stdlib inventory: <modules> modules, <members> public
+members, no differences.` and writes the Markdown member table;
+`titan-stdlib-browser-test` writes it to `out/browser-stdlib/members.md`.
+
+The raw `foreign function` exports of the subset are
+`protobuf.write_resource_index_bytes(dst, index)` (writes a four-byte
+little-endian index), `protobuf.write_resource_index(raw_buf, index)`
+(reserves and appends four bytes to a caller-owned buffer and returns 0 when
+the reservation fails), `transfer.copy_message`, `transfer.discard_message`,
+and `transfer.transfer_load_module`. All five are portable C and are
+delivered.
+
+### Inventory record
+
+| Module | Delivered | Omitted members | Browser test owners | Final initializer, verified by `init_<module>` and `init_subset` | Raw exports |
+| --- | --- | --- | --- | --- | --- |
+| `coroutine` | yes | none | `coroutine.tests` (the Lua-host cases are in the native contributor `tests/lua_boundary_test.native.titan`) | creates or checks the `titan.coroutine` registry metatable | none |
+| `gc` | yes | none | `gc.tests` | none | none |
+| `iteration` | yes | none | `iteration.tests` | none | none |
+| `math` | yes | none | `math.tests`, including automatic and argumentless seeding | publishes `maxinteger`/`mininteger` from `LLONG_MAX`/`LLONG_MIN`, then calls `randomseed()` | none |
+| `test` | yes | none | `test.tests`, and every other owner through the runner | loads the Lua trace and pattern helpers when the Lua `string` library is open | none |
+| `reflect` | yes | none | `reflect.tests` | metatable, hydration, brand, and tag tables | none |
+| `json` | yes | none | `json.tests` | builds the JSON pattern | none |
+| `protobuf` | yes | none | `protobuf.tests`, including both raw index writers and the reservation failure | caches the nominal registry, sets up the ephemeron, validates the codec handoff | `write_resource_index`, `write_resource_index_bytes` |
+| `transfer` | yes | none | `transfer.tests` (same-instance behavior), including all three raw exports | installs protobuf's packet-context provider and nominal loader, the ephemerons, and `closure_fields` | `copy_message`, `discard_message`, `transfer_load_module` |
+| `peg` | yes | none | `peg.tests` | `_initialize_native()` | none |
+| `string` | yes | none | `string.core_test`, `string.format_pack_test`, `string.regex_test` | target size, length-modifier, endianness, and alignment facts; the format and regex parsers | none |
+| `url` | yes | none | `url.tests` | builds the URL patterns | none |
+| `path` | yes | none | `path.tests` | separator from `TITAN_PATH_WINDOWS` (POSIX on the browser) | none |
+
+The subset includes, with their closure, every import of `titan.async` other
+than `uv` (`coroutine`, `gc`, `string`, `transfer`, and `iteration`) and the
+`reflect` and `gc` modules that inspect and root values. `transfer` covers
+verified same-instance data behavior only; no thread, native-resource, or
+JavaScript-handle feature is implied.
+
+Initialization audit:
+
+* **`math`.** The automatic seed has two components: `time(NULL) ~ clock()`
+  and a value drawn from the generator with `next_random()`, and
+  `set_random_seed` takes both. Emscripten's libc supplies `time` and `clock`
+  through `wasi_snapshot_preview1` without a JavaScript bridge, on Node and in
+  Chromium; its `clock()` measures elapsed time, not process CPU time, which is
+  an acceptable component of Lua's weak default seed. No delivered module
+  calls `getrandom()`, which does not link.
+* **`test`.** The browser entry opens the standard Lua libraries before any
+  module initializes, as the native runner does, so the helpers load eagerly.
+* **`string`.** The target facts are computed at run time: on wasm32,
+  `size_t` and `long` are 4 bytes, and the browser Lua's `lua_Integer` is
+  `long long`.
+* **Locale.** `math`, `string` (`format`), and `json` (`numbers`) import
+  `locale.h`. Emscripten's musl `localeconv` always returns the C locale's
+  `.` decimal point, so the alternate-locale parity cases in
+  `string.format_pack_test` and `json.tests` take their existing capability
+  skip.
+* **`transfer`.** Its nominal loader reaches `transfer_load_module`, which
+  loads a module through the image's static preload table.
+
+### Test owners and the browser suite
+
+Each browser test owner imports only delivered modules, owner-local support,
+and `support.common.titan`. Cases that need `lua`, `fs`, `thread`, or a host
+command live in native-only owners or contributors in the same source tree:
+`test.host_tests`, `reflect.lua_tests`, `json.lua_tests`,
+`protobuf.resource_tests`, and the `coroutine.tests` contributor
+`tests/lua_boundary_test.native.titan`. Same-instance `transfer` cases belong
+to `transfer.tests`; the Task, thread, and independent-state transfer cases
+belong to `async.tests` and `thread.tests`. Both suites share the browser
+roots and their portable cases, while target-selected contributors (such as
+`coroutine.tests`' `tests/close.browser.titan` and
+`tests/unwind_test.native.titan`) add cases to one target only.
+`spec/support/stdlib_test_modules.mk` lists the browser
+roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
+`TITAN_STDLIB_TEST_ROOTS`:
+
+```text
+coroutine.tests iteration.tests gc.tests math.tests peg.tests
+string.core_test string.format_pack_test string.regex_test url.tests path.tests
+test.tests reflect.tests json.tests protobuf.tests transfer.tests
+```
+
+The same manifest partitions those owners into test images, because one image
+holding all fifteen is too large for headless Chromium on mac-arm64:
+
+| Image (`TITAN_STDLIB_BROWSER_TEST_IMAGES`) | Owners (`TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_<image>`) |
+| --- | --- |
+| `core` | every browser root except the three images below |
+| `reflection` | `reflect.tests`, `json.tests` |
+| `protobuf` | `protobuf.tests` |
+| `transfer` | `transfer.tests` |
+
+`TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES` (32,000,000) caps each image's
+`.wasm`. Before the recipe runs, `TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK` stops
+Make if the image list is empty or repeats an image, if an image has no owners,
+or if a browser root is repeated, assigned twice, assigned to no image, or
+assigned without being a browser root. The budget must be a positive decimal
+integer of at most eight digits. Moving an owner between images is a manifest
+edit only.
+
+The budget is about half the smallest image measured to fail. With Emscripten
+6.0.13 and the pinned Chrome for Testing 156.0.8078.80, the single
+63,787,003-byte fifteen-owner validation image trapped the mac-arm64 headless
+Chromium renderer (`EXC_BREAKPOINT`/`SIGTRAP`) before any test ran, even with
+a filter that matched no case and with `--js-flags=--liftoff-only`, while Node
+and Linux Chromium ran it. A 55,932,427-byte image of the other fourteen owners
+and a 28,241,082-byte `transfer.tests` image passed there. The four images
+are the fewest found among the partitions tried: every owner pairing sampled
+for a three-image partition exceeded the budget (`reflect.tests` with
+`protobuf.tests` at 32,984,970 bytes, `protobuf.tests` with `coroutine.tests`
+at 34,633,460, and `transfer.tests` with `reflect.tests` at 32,556,174), and
+the four measure between about 23.1 MB and 28.8 MB on Linux and macOS. The
+engine-internal cause is not established; the size limit of V8 and
+Asyncify-expanded functions is separate follow-up work.
+
+`make titan-stdlib-browser-test` (a test goal, so it defaults to the
+`validation` profile) needs the installed native provider, the browser SDK,
+emsdk, Node 24, and a headless Chromium. It:
+
+1. writes `roots.txt` (every browser root) and `<image>.roots.txt` (each
+   image's owners), then builds each image in manifest order into one output
+   tree, `$(TITAN_OUTPUT_DIR)/browser-stdlib`, as `images/<image>.mjs` with its
+   `.wasm` and `.wasm.map`. Each image is one installed `titanc -q --target
+   browser --test --incremental --tree spec/stdlib/titan` invocation over that
+   image's roots, with `--c-source spec/fixtures/browser_runtime/close.c` (the
+   browser helper of `coroutine.tests`), under `BROWSER_SDK_ENV` with
+   `TITAN_PATH_0_6` set to the installed browser SDK directory. The target
+   prints each image's build time, then runs `check_browser_stdlib.lua size`
+   (the image against the budget; an oversized image fails with a request to
+   repartition its owners) and `check_browser_stdlib.lua closure` (the output
+   tree, the installed browser `titan.a`, and that image's `.wasm`);
+2. runs `check_browser_stdlib.lua inventory` once against the installed native
+   and browser providers and writes `members.md`;
+3. for `node` and then `chromium`, runs every image with
+   the SDK's `titan-browser-run --engine <engine> --timeout 300000 --grace
+   2000` through `scripts/run_browser_stdlib.sh`, forwarding a nonempty
+   `TITAN_FILTER` to each image as one `--filter=` argument. The wrapper saves
+   the runner's stdout in `<image>.<engine>.log` and its stderr in
+   `<image>.<engine>.stderr.log`, then replays both to the caller and returns
+   the runner's status. A failing image is reported and the remaining images
+   still run; and
+4. after each engine, audits only the stdout reports with
+   `check_browser_stdlib.lua output roots.txt <filter> <image> <log> <owners>...`,
+   which applies the native aggregate's union validator
+   (`spec/support/check_stdlib_test_output.lua`): each image's report is
+   checked against that image's owners, no case may appear in two images, and
+   an unfiltered run must report a nonzero case count for every browser root
+   across the union. A filtered run may leave an
+   image or owner with no selected case, but the union must select at least
+   one. It always prints one `Browser stdlib owner <root>: <n> cases` line per
+   root and a `Browser stdlib gate: selected=… passed=… skipped=… failed=…
+   owners=…/… images=…` summary (marked `(filtered)` when a filter applies),
+   even for a failed run. The target fails if any image failed under either
+   engine or if either audit failed.
+
+The streams stay separate because a case may write to stderr while the runner
+is in the middle of a report line, and a merged log then splits that line; the
+expected Lua warnings (`Lua warning: error in coroutine cleanup ...`) are such
+writes, and the validator rejects a split report. Warnings
+stay visible in the `.stderr.log` files and on the console; nothing is
+filtered out. `out/browser-stdlib/` therefore holds `images/` (each image's
+`.mjs`, `.wasm`, and `.wasm.map`), `roots.txt`, the `<image>.roots.txt` files,
+`members.md`, and the per-image, per-engine stdout and stderr logs. The
+[`browser-toolchain` job](continuous-integration.md#browser-toolchain-job)
+runs the target unfiltered after the SDK is built and uploads those files
+when the job fails.
+
+### Initialization and fidelity gate
+
+`spec/coder/browser_stdlib_gate_spec.lua` (a real-toolchain gate file) builds
+fifteen `--test` images from `spec/fixtures/browser_stdlib/` with the `test`
+purpose and assertions 2, and runs them through `gate.mjs` under
+`titan-browser-run --js-test` on Node and Chromium:
+
+* `init_<module>.titan`, one per delivered module, imports only that module
+  (and the `titan.test` runner every test image has) and must return status
+  0, run and pass exactly one case, and write nothing to stderr;
+* `init_subset.titan` imports all thirteen and is initialized, run, and
+  disposed three times from one cached factory, with a tick and a collection
+  between cycles; and
+* `fidelity_test.titan` imports the real `coroutine.tests` owner, so its
+  browser cases create fibers first, then writes a marker with NUL, `0xFF`,
+  and invalid UTF-8 bytes to stderr and fails a child case whose name and
+  message carry the same bytes. The gate requires status 1 through the
+  Titan-owned completion channel, the exact name on the run, failure, and
+  summary lines, the exact message, and exactly the expected stderr bytes.
+
+The deliberately failing case lives outside every suite root.
+
+### Nesting limits
+
+An engine stack overflow on the browser is not recoverable: Emscripten's
+`invoke_*` wrappers rethrow the engine `RangeError` past every Titan `catch`,
+the loader rejects with the error as `cause`, and the completion channel never
+fires. Every Titan method or closure call is an indirect call, which leaves
+WebAssembly through an `invoke_*` import, re-enters through `dynCall_*`, and
+passes Asyncify's wrapper, so one reflective protobuf level costs two
+WebAssembly and twelve JavaScript frames. A nesting-bounded library operation
+therefore gets a browser value from a target define, at most half of the
+lowest ceiling measured across engines and build profiles (the rule that set
+the [browser C-call limit](#the-browser-c-call-limit)), so over-deep input
+raises the module's ordinary catchable error with headroom to spare in the
+measured configurations. The counters cover only the library's own traversal,
+not stack the caller already uses. Native values are unchanged.
+
+| Bound | Define (browser value) | Native default | Lowest measured ceiling | Browser limit |
+| --- | --- | --- | --- | --- |
+| `protobuf` reflective and generated codecs, `protobuf.schema`, `transfer` | `TITAN_CODEC_DEPTH_LIMIT` (43), in `titan-runtime/transfer.h` | 128 | 85 levels: reflective encoder, `validation`, Node and Chromium | 42 accepted levels |
+| `json.encode` | `TITAN_JSON_WRITER_DEPTH_LIMIT` (103), in `titan/json/native.h` | `LUA_MAXINTEGER` (no cap) | 206 levels: writer with a raised `max_depth`, `validation`, Chromium | `min(max_depth, 103)` |
+
+`TITAN_CODEC_DEPTH_LIMIT` is a raw budget: `require_depth` in
+`titan/protobuf/protobuf.titan` and `titan_codec_depth` in `transfer.h` raise
+when a depth exceeds it, and the fields of the innermost message are probed
+one level deeper, so 128 accepts 127 records and 43 accepts 42 (a union whose
+selected variant has no parts is accepted at the budget itself; see the
+[protobuf nesting limit](protobuf-library.md#nesting-limit)). Both messages
+print the macro value (`protobuf: nesting exceeds <limit> levels`).
+`encode_value` in `titan/json/writer.titan` clamps the call's `max_depth` to
+the define after option validation, so only an encode whose setting exceeds
+103 is affected, and the writer's ordinary `limit_exceeded` (`value exceeds
+max_depth`) fires; the default `max_depth` of 32 and every decode setting are
+unchanged. Both defines are profile-owned, so a `-D` or `-U` of either is
+rejected like the other target defines.
+
+The measurements (Emscripten 6.0.13, Node 24.19.0, Chrome for Testing
+156.0.8078.80, `--test` images) sweep one subtest per depth over a record chain
+and take the last completed level:
+
+| Operation | `validation` Node | `validation` Chromium | `production` (both) |
+| --- | ---: | ---: | ---: |
+| `protobuf` reflective encode | 85 | 85 | ≥ 127 (module limit) |
+| `protobuf` generated encode and decode, reflective decode, `transfer` | ≥ 127 | ≥ 127 | ≥ 127 |
+| `json` writer, `max_depth(1000000)` | 274 | 206 | 512 passed, 640 failed |
+| `json` parser, `max_depth(1000000)` | 98 | 98 | 98 (PEG matching stack, ordinary error) |
+| caller-written `reflect` walk | 4,128 | 3,072 | ≥ 5,120 |
+
+At the default 984 KB V8 stack, a reflective protobuf level costs about
+11.9 KB of engine stack and a JSON writer level about 3.7 KB. Both levels make
+two Titan calls, so the difference is most likely frame size: `Encoder:field`
+is one large dispatch over every field kind, and each protobuf level also
+enters a `defer` region (the captured traces prove frame counts, not frame
+bytes). Everything else keeps
+its native bounds: the JSON parser stops at 98 containers through the
+target-independent PEG matching stack (400 entries), regular expressions at
+512 nested groups and 200 captures, PEG grammars at their 400-entry matching
+stack and 200 nested captures (raising `peg.set_max_stack` to 4,000,000 ran
+50,000 nested rules without a trap, because LPegLabel's VM keeps its own
+stack), and `reflect` has no library traversal. A caller-written reflective
+walk and a `json.decode` run after raising `peg.set_max_stack` are not bounded
+by a library limit.
 
 ## The Lua configuration record
 
@@ -500,7 +950,8 @@ strings without NUL, CR, or LF; paths are normalized absolute paths):
   trace_control = boolean,       -- the harness level hook; optional on import
   include_dirs = { string, ... },
   target_defines = { "-DTITAN_TARGET_BROWSER=1",
-    "-DTITAN_COROUTINE_STACK_SIZE=262144", "-DMCO_ASYNCFY_STACK_SIZE=65536" },
+    "-DTITAN_COROUTINE_STACK_SIZE=262144", "-DTITAN_CODEC_DEPTH_LIMIT=43",
+    "-DTITAN_JSON_WRITER_DEPTH_LIMIT=103", "-DMCO_ASYNCFY_STACK_SIZE=65536" },
   paths = <installed_paths(root, "browser")>,
   lua = { path = string, record = <the ten record fields>, record_sha256 = hex },
   profile_data = <csemantics.export_profile(profile)>, profile_identity = string,
@@ -530,7 +981,9 @@ context-owned (`context.target_profile`), never stored in the frozen graph.
    `-gline-tables-only`, and `-sSUPPORT_LONGJMP=emscripten`;
 2. the record's `lua_defines`, in record order;
 3. the ordered `target_defines`: `-DTITAN_TARGET_BROWSER=1`,
-   `-DTITAN_COROUTINE_STACK_SIZE=262144`, and `-DMCO_ASYNCFY_STACK_SIZE=65536`
+   `-DTITAN_COROUTINE_STACK_SIZE=262144`, `-DTITAN_CODEC_DEPTH_LIMIT=43`,
+   `-DTITAN_JSON_WRITER_DEPTH_LIMIT=103` ([nesting
+   limits](#nesting-limits)), and `-DMCO_ASYNCFY_STACK_SIZE=65536`
    (minicoro's own `ASYNCFY` spelling); and
 4. the normalized invocation compile extras: `driver.NATIVE_COMPILE_FLAGS`
    when `titanc` installed them (environment extras, then CLI `-I`, `-D`, and
@@ -550,7 +1003,7 @@ files and leaves the final `.wasm.map` without `.titan` source attributions;
 passes `-gsource-map -g2` to emit the source map and retain the Wasm `name`
 section. Lua's own `-O2` and debug policy in `liblua.a` stay independent
 because Lua C frames are filtered out of Titan traces. The host descriptor
-emits no new define. Validation requires all three target defines in this order
+emits no new define. Validation requires all five target defines in this order
 (`inconsistent browser target defines`) and requires each in
 `compile_flags` (`browser target descriptor is missing required compile flag
 "<flag>"`), so build, import, and fixtures agree. The target defines reach
@@ -558,8 +1011,12 @@ generated C, `--c-source` nodes, C probes, and FFI header preprocessing,
 because all of them use the same prefix, so the standard library and C headers
 read target constants through `foreign import`: `titan/coroutine.titan` reads
 `ffi.TITAN_COROUTINE_STACK_SIZE` ([Coroutines](coroutines.md#stacks-and-backends)),
-and the Emscripten fiber backend in `minicoro.h` sizes its Asyncify buffers
-with `MCO_ASYNCFY_STACK_SIZE`. Because a measurement
+`titan/protobuf/protobuf.titan` and `titan-runtime/transfer.h` read
+`TITAN_CODEC_DEPTH_LIMIT`, `titan/json/writer.titan` reads
+`ffi.TITAN_JSON_WRITER_DEPTH_LIMIT`, and the Emscripten fiber backend in
+`minicoro.h` sizes its Asyncify buffers with `MCO_ASYNCFY_STACK_SIZE`. Each
+header keeps its native default under `#ifndef`, so native builds are
+unchanged. Because a measurement
 optimization is part of the descriptor, probes, generated objects, authored C,
 and imported worker descriptors all compile and certify the same
 configuration, and an O1 and an O2 build need separate output trees.
@@ -772,9 +1229,9 @@ as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
 `BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
 `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
-`FILESYSTEM`, `MINIMAL_RUNTIME`, `EXPORTED_FUNCTIONS`,
+`FILESYSTEM`, `MINIMAL_RUNTIME`, `PRINTF_LONG_DOUBLE`, `EXPORTED_FUNCTIONS`,
 `EXPORTED_RUNTIME_METHODS`, `INCOMING_MODULE_JS_API`, `ASSERTIONS`,
-`STACK_OVERFLOW_CHECK`, and the three target defines, plus `--no-entry` and
+`STACK_OVERFLOW_CHECK`, and the target defines, plus `--no-entry` and
 `--js-library` (`--js-library=...` included). One owned option has one
 diagnostic, chosen by `origin`: compile extras (`origin == "compile"`) report
 `browser <profile> profile owns compile option "<flag>"`, the same message as
@@ -1033,8 +1490,11 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
   filename inside `Type.Module` remains an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
-modules `titan.test`, `titan.coroutine`, and `titan.gc` resolve from it, ahead
-of the Titan path and source.
+thirteen [core stdlib](#the-browser-standard-library) modules resolve from it,
+ahead of the Titan path and source. The native-only standard modules have no
+browser source either, so their imports fail with the ordinary
+`module 'titan.<name>' not found` diagnostic ([target source
+selection](target-source-selection.md#make-inventories-and-audits)).
 
 ## Library mode and structural validation
 
@@ -1130,6 +1590,7 @@ flag list.
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
 | `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
 | `-sFORCE_FILESYSTEM=1` | keeps Emscripten's filesystem and TTY layer in every image (see below) |
+| `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
 | `-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]` | the entry, the 64-hex image identity export, and heap allocation for argument marshalling; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
 | `-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]` | the Asyncify-aware call path and the heap view used by the loader |
 | `-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]` | the only module options the loader passes |
@@ -1154,6 +1615,42 @@ capture that console text, but Chromium did not, and neither kept the bytes
 exact. The flag restores the TTY layer, at no `.wasm` cost and 457 more `.mjs`
 bytes for images that already use stdio ([Baseline](#baseline)). User
 `FORCE_FILESYSTEM`, `FILESYSTEM`, and `MINIMAL_RUNTIME` settings are rejected.
+
+**Long-double formatting.** `-sPRINTF_LONG_DOUBLE=1` is set for every purpose
+and entry, including `lua-main`. Clang's wasm32 `long double` is IEEE
+binary128: `emcc -dM -E` predefines `__LDBL_MANT_DIG__` as 113 and
+`__SIZEOF_LONG_DOUBLE__` as 16. Emscripten 6.0.13 nevertheless defaults to
+`PRINTF_LONG_DOUBLE = false` (`src/settings.js`: it prints `long double` "as
+64-bit doubles, which saves libc code size"), so its default printf narrows
+every `%L` conversion to `double` while `strtold` still parses the full value.
+Titan writes `long double` text with `%La` in
+`titan_reflect_format_long_double` (`titan-runtime/titan.h`), which the
+generated native-field projections (`titan-compiler/coder/reflection.lua`)
+call for `reflect` projections and the `protobuf` and `transfer` codecs; under
+the default, a projected value no longer reads back equal to the original. The
+setting is profile-owned: `-sPRINTF_LONG_DOUBLE=0`, the split `-s` form,
+`NO_PRINTF_LONG_DOUBLE`, and the `-D`/`-U` spellings are rejected like the
+other owned settings. Because the link flags are part of `identity_inputs`,
+the setting relinks every certified image without a cache or certificate
+schema change; object flags and the descriptor are unchanged.
+
+Its cost, measured with the validation profile on Linux (three warm serial
+samples per image and mode, timing only the certified final `emcc` link; sizes
+were identical across samples):
+
+| Image | `.wasm` | `.mjs` | `.wasm.map` | Median final link |
+| --- | ---: | ---: | ---: | --- |
+| `spec/fixtures/browser_images/long_double.titan` program | +1,719 B (+0.167%) | +8 B | +1,159 B | 0.623 s → 0.666 s |
+| a test image of the ten browser owners from `coroutine.tests` through `path.tests` | +1,720 B (+0.006%) | +8 B | +1,175 B | 14.03 s → 15.72 s |
+
+The link times are observed warm medians, not a controlled estimate.
+`spec/coder/browser_images_spec.lua` checks the flag for every profile,
+purpose, and entry, rejects every override spelling, and formats
+`0x1.000000000000001p0` (1 + 2^-60) on Node and Chromium: the browser text
+must be `1.00000000000000000087`, and it must equal the native program's text
+when the native `long double` is wider than `double`. A host whose
+`long double` is as wide as `double`, such as macOS on Arm, has no extended
+native reference, so the test checks only the browser text there.
 
 **`HEAPU8`.** `HEAPU8` is a runtime export so that the loader can write
 arguments into heap memory and the completion import can copy its payload.
@@ -2761,10 +3258,12 @@ hosts`).
 
 * `spec/staticmetadata_spec.lua` — synthesized Wasm objects and archives:
   payload readback, padded LEB128, every malformed case, fingerprints and the
-  standalone `-shared-mem` rule, mixed formats and features, bitcode, and
+  standalone `-shared-mem` rule, mixed formats and features, bitcode, the
+  `independent_members` content-scan option (heterogeneous features accepted
+  only with the option and without an explicit target), and
   `incremental.native_input_kind`.
 * `spec/browser_target_spec.lua` — the descriptor with hand-made records and
-  fake tools: freezing, every record and tool diagnostic, the three target
+  fake tools: freezing, every record and tool diagnostic, the ordered target
   defines, flags, the two build profiles (the profile in the identity, the
   object profile built from the profile, the other profile's flags refused,
   every owned compile option and `BINARYEN_EXTRA_PASSES` spelling refused
@@ -2789,8 +3288,12 @@ hosts`).
   allocation failures, the libc drain, the stdio-only filesystem regression,
   dynamic-loading guards, three-file preflight reservation and repeated-link
   image identity, contributor-prologue `.wasm.map` attribution, image
-  inventories, measurement optimization, and the native libbacktrace and
-  fallback trace invariants. Its production-only pin (`keeps frame flags on
+  inventories, measurement optimization, the native libbacktrace and
+  fallback trace invariants, and [long-double
+  formatting](#the-link-profile) (`-sPRINTF_LONG_DOUBLE=1` for every profile,
+  purpose, and entry, every rejected override spelling, and the
+  `spec/fixtures/browser_images/long_double.titan` text compared on native,
+  Node, and Chromium). Its production-only pin (`keeps frame flags on
   test owners only and links a production test image as a test image`) is
   pending in a validation installation and runs in the production Chromium
   [`browser-playwright`](continuous-integration.md#browser-playwright-job)
@@ -2818,8 +3321,24 @@ hosts`).
   identical-archive reuse, probe cleanup, and archive-only consumers on both
   engines.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
-  `make browser-sdk` into an empty root, differing roots, digest order and
-  contents, and the standalone `-shared-mem` archive regression.
+  `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
+  `TITAN_EXTRA_CPPFLAGS`, the thirteen-module provider whose non-compiler
+  members are exactly the five LPegLabel objects, differing roots, digest
+  order and contents, and the standalone `-shared-mem` archive regression.
+* `spec/browser_stdlib_spec.lua` (emsdk-free) and
+  `spec/coder/browser_stdlib_closure_spec.lua` — the [dependency-closure
+  check](#the-dependency-closure-check) and its negative fixtures, the
+  interface-derived [member inventory](#interface-derived-member-inventory)
+  (raw foreign functions, nominal members, named-call metadata, unrecorded
+  differences), the image manifest (an exact owner partition and budget, and
+  rejection of incomplete, duplicate, empty, or unknown assignments and of
+  malformed budgets before any build), the byte budget at its exact boundary,
+  the CI failure artifact's image and per-engine log paths, the per-owner
+  audit of a failed run, the stdout-only audit of a run whose stderr arrives in
+  the middle of a report line, and the union audit, which fails when any image
+  fails.
+* `spec/coder/browser_stdlib_gate_spec.lua` — the [initialization and
+  fidelity gate](#initialization-and-fidelity-gate).
 * `spec/coder/browser_entry_gate_spec.lua` — the [entry gate](#the-entry-gate-decision).
 * `spec/coder/browser_fixtures_spec.lua` — the coroutine and GC behavior in
   the owning `coroutine.tests` and `gc.tests` modules built for the browser,
@@ -2874,10 +3393,12 @@ hosts`).
   contract](#test-images).
 
 The Busted files need emcc 6.0.13 and the installed browser Lua; the image,
-protocol, SDK, gate, fixture, budget, and minicoro files also need Node 24, a
-headless Chromium, and an installed browser SDK, which
-`spec/support/browser_toolchain.lua` discovers through `require({node=true,
-chrome=true, sdk=true})` and the runner's `--probe`. Its
+protocol, SDK, stdlib closure, entry and stdlib gate, fixture, budget, and
+minicoro files also need Node 24 and an installed browser SDK, and all of them
+except the stdlib closure file also need a headless Chromium.
+`spec/support/browser_toolchain.lua` discovers these through
+`require({node=true, chrome=true, sdk=true})` (or the subset a file needs)
+and the runner's `--probe`. Its
 `lua_defines(info)` reads the installed record's `lua_defines`, so specs that
 compile C against the browser Lua archive (`spec/wasm_toolchain_spec.lua` and
 `spec/coder/browser_toolchain_spec.lua`) use exactly the archive's macros,

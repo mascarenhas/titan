@@ -273,8 +273,11 @@ Contributor filenames never become modules or archive metadata keys.
 Makefile's `UV_TITAN_SOURCES`, not by a wildcard. The list is the source
 inventory the Busted audits read; the compiler's own incremental build
 certifies the module graph, so no listed source is a Make prerequisite of the
-standard-library build. Its variants, when a source gains them, are listed
-beside their default. The canonical `uv.native.titan` shares one
+standard-library build. Its main exists only as the `native` variant
+`uv.native.titan`, with no default, so the family lists just that variant
+([Make inventories](target-source-selection.md#make-inventories-and-audits))
+and the browser target selects no main and composes none of the
+contributors. That main shares one
 logical module with contributors for callbacks, constants, data records,
 addresses, descriptors, streams, TCP/UDP, DNS, processes, threading,
 synchronization, dynamic libraries, startup, and utilities. Exported records
