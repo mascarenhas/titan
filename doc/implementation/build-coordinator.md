@@ -1028,9 +1028,11 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
    `nativeinputs.compile` writes `<output_root>/.native/inputs` with the
    certificate graph codec: `{ inputs = { object_path, ... } }`, one entry per
    deduplicated source in request order. It names the authored inputs of the
-   latest successful invocation, including compile-only invocations and
-   uncacheable nodes that have no native or final-link certificate. A failed
-   invocation leaves the previous inventory in place.
+   latest successful `nativeinputs.compile` call, including compile-only
+   invocations and uncacheable nodes that have no native or final-link
+   certificate. `titanc` calls `nativeinputs.compile` only when the invocation
+   has `--c-source` inputs, so an invocation without them, like a failed one,
+   leaves the previous inventory in place.
 
 In `titanc`, `-c --c-source <file>` is permitted without Titan module names for
 standalone C helper preparation. Because the storage stem is derived from the

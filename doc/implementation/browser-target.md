@@ -432,26 +432,28 @@ path, by symbol, and through the evidence each certified input carries:
   `libopenssl`, `libllhttp`, `libsqlite3`, `libtitan-llhttp`, or
   `libtitan-sqlite3` followed by `.`, `_`, or `-`.
 * **Symbols** (`check_symbol`): any name starting with `uv_`, `SSL_`,
-  `OPENSSL_`, `llhttp_`, or `sqlite3_`, whether a function or data, defined or
-  undefined, and any such import.
+  `OPENSSL_`, `llhttp_`, or `sqlite3_` in the symbol and import inventories
+  that the relocatable-Wasm reader parses from each object, whether a function
+  or data, defined or undefined.
 * **Generated objects**: the C-header dependencies recorded in each object's
   `.titan.source` metadata.
 * **Authored C**: each `.native/` directory must hold the `inputs` inventory
-  that `nativeinputs.compile` writes ([`--c-source`
+  that the latest successful `nativeinputs.compile` call wrote ([`--c-source`
   compilation](build-coordinator.md#--c-source-compilation-and-records)). Every
   object it names needs a readable, nonempty `<stem>.d`, and every header path
   in that file gets the path check, so a header that only contributes macros is
-  still caught. A missing inventory or `.d`, or an invalid one, fails closed
-  (`missing authored-C header provenance`, `missing authored-C input
-  inventory`). The next successful build of those sources writes the evidence
-  again. Unused objects that older invocations left in the cache are
-  checked by content but need no `.d`.
+  still caught. A missing or invalid inventory or `.d` fails closed: a missing
+  `.d` reports `missing authored-C header provenance`, and a missing inventory
+  reports the record reader's own error (`missing record`, or the I/O error).
+  The next successful build of those sources writes the evidence again. Unused
+  objects that older invocations left in the cache are checked by content but
+  need no `.d`.
 * **Link certificates**: every `native` input of every final-link record under
   `.titan-links/` gets the path check, and every `.o` or `.a` among them,
   inside or outside the output tree, is read and checked by content: archive
-  member names and every member's defined and undefined symbols, plus the
-  header metadata of objects that carry it. An authored-C object from this
-  output tree must also have its `.d`. Opaque third-party prebuilt inputs need
+  member names and each member's parsed Wasm symbol and import inventories,
+  plus the header metadata of objects that carry it. An authored-C object from
+  this output tree must also have its `.d`. Opaque third-party prebuilt inputs need
   no header metadata; their contents are still checked.
 
 Each physical input is decoded once per `check_output` call. The key is its device and inode
@@ -628,19 +630,21 @@ Chromium renderer (`EXC_BREAKPOINT`/`SIGTRAP`) before any test ran, even with
 a filter that matched no case and with `--js-flags=--liftoff-only`, while Node
 and Linux Chromium ran it. A 55,932,427-byte image of the other fourteen owners
 and a 28,241,082-byte `transfer.tests` image passed there. The four images
-are the fewest that fit: every three-image pairing tried exceeded the budget
-(`protobuf` with `reflection` at 32,984,970 bytes, `protobuf` with
-`coroutine.tests` at 34,633,460, and `transfer` with `reflection` at
-32,556,174), and the four measure between about 23.1 MB and 28.8 MB on Linux
-and macOS. The engine-internal cause is not established; the size limit of
-V8 and Asyncify-expanded functions is separate follow-up work.
+are the fewest found among the partitions tried: every owner pairing sampled
+for a three-image partition exceeded the budget (`reflect.tests` with
+`protobuf.tests` at 32,984,970 bytes, `protobuf.tests` with `coroutine.tests`
+at 34,633,460, and `transfer.tests` with `reflect.tests` at 32,556,174), and
+the four measure between about 23.1 MB and 28.8 MB on Linux and macOS. The
+engine-internal cause is not established; the size limit of V8 and
+Asyncify-expanded functions is separate follow-up work.
 
 `make titan-stdlib-browser-test` (a test goal, so it defaults to the
 `validation` profile) needs the installed native provider, the browser SDK,
 emsdk, Node 24, and a headless Chromium. It:
 
-1. builds each image in manifest order into one output tree,
-   `$(TITAN_OUTPUT_DIR)/browser-stdlib`, as `images/<image>.mjs` with its
+1. writes `roots.txt` (every browser root) and `<image>.roots.txt` (each
+   image's owners), then builds each image in manifest order into one output
+   tree, `$(TITAN_OUTPUT_DIR)/browser-stdlib`, as `images/<image>.mjs` with its
    `.wasm` and `.wasm.map`. Each image is one installed `titanc -q --target
    browser --test --incremental --tree spec/stdlib/titan` invocation over that
    image's roots, with `--c-source spec/fixtures/browser_runtime/close.c` (the
@@ -652,8 +656,7 @@ emsdk, Node 24, and a headless Chromium. It:
    tree, the installed browser `titan.a`, and that image's `.wasm`);
 2. runs `check_browser_stdlib.lua inventory` once against the installed native
    and browser providers and writes `members.md`;
-3. writes `roots.txt` (every browser root) and `<image>.roots.txt` (each
-   image's owners) and, for `node` and then `chromium`, runs every image with
+3. for `node` and then `chromium`, runs every image with
    the SDK's `titan-browser-run --engine <engine> --timeout 300000 --grace
    2000` through `scripts/run_browser_stdlib.sh`, forwarding a nonempty
    `TITAN_FILTER` to each image as one `--filter=` argument. The wrapper saves

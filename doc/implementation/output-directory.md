@@ -105,8 +105,10 @@ source root when `--output` is omitted), `titanc` also owns:
   scratch;
 - `<domain>/.native/inputs` (`nativeinputs.compile`): a graph-codec record,
   `{ inputs = { object_path, ... } }`, naming the objects of the `--c-source`
-  inputs the latest successful invocation requested, so build-owned audits can
-  tell current authored inputs from unused cache nodes;
+  inputs of the latest successful `nativeinputs.compile` call, so build-owned
+  audits can tell current authored inputs from unused cache nodes. `titanc`
+  calls it only when `--c-source` is given, so a later invocation without
+  `--c-source` leaves the inventory unchanged;
 - `<domain>/.titan-links/<sha256(canonical-final-output-set)>/`
   (`linkcertificate.prepare`): the target's final-link certificate (`record`,
   `TITAN_LINK_RECORD_SCHEMA`), linker dependency output (`link.d`), and
