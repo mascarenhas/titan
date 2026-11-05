@@ -13941,9 +13941,20 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     local image_bytes
     image_bytes, err = context.io:read_file(staged_wasm)
     if not image_bytes then return nil, err end
-    local inventory
-    inventory, err = driver.browserlink.image_inventory(image_bytes)
-    if not inventory then return nil, err end
+    local inventory, oversized_body
+    inventory, err, oversized_body = driver.browserlink.image_inventory(image_bytes)
+    if not inventory then
+        if oversized_body then
+            local source_map, source_error = context.io:read_file(staged_map)
+            local location
+            if source_map then
+                location, source_error = browsertrace.function_source(source_map, oversized_body)
+            end
+            err = err .. (location and ("; first mapped source " .. location) or
+                ("; source unavailable (" .. tostring(source_error) .. ")"))
+        end
+        return nil, err
+    end
     local map_bytes
     map_bytes, err = context.io:read_file(staged_map)
     if not map_bytes then return nil, err end

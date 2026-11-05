@@ -333,16 +333,4 @@ function M.member_table(rows)
     return table.concat(out, "\n") .. "\n"
 end
 
-function M.check_image_size(size, budget, origin)
-    if math.type(budget) ~= "integer" or budget < 1 then
-        return nil, "browser stdlib image byte budget must be a positive integer"
-    end
-    if size > budget then
-        return nil, string.format(
-            "browser stdlib image %s is %d bytes, exceeds manifest budget of %d bytes; repartition its owners",
-            origin, size, budget)
-    end
-    return true
-end
-
 return M

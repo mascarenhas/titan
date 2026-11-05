@@ -119,9 +119,10 @@ local base64 = {}
 for index = 1, 64 do
     base64[("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"):byte(index)] = index - 1
 end
-local function mappings(map)
+local function mappings(map, range)
     local bytes, pos = map.mappings, 1
     local source, line, column, name, generated = 0, 0, 0, 0, 0
+    local first
     local function vlq()
         local result, scale = 0, 1
         for _ = 1, 7 do
@@ -169,15 +170,21 @@ local function mappings(map)
                     require_value(name >= 0 and name < #map.names, "source-map name index is out of range")
                 end
             end
+            if range and generated >= range[1] and generated < range[2] and
+                    (not first or generated == first.generated) then
+                first = count > 0 and { source = source, line = line, column = column,
+                    generated = generated } or nil
+            end
             if bytes:sub(pos, pos) == "," then
                 pos = pos + 1
                 require_value(pos <= #bytes and not bytes:sub(pos, pos):find("[,;]"), "empty source-map segment")
             end
         end
     end
+    return first
 end
 
-local function validate_map(map)
+local function validate_map(map, range)
     require_value(map.version == 3, "source-map version must be 3")
     require_value(map.sections == nil, "indexed source maps are unsupported")
     for _, key in ipairs({ "sources", "names" }) do
@@ -199,13 +206,34 @@ local function validate_map(map)
     for _, key in ipairs({ "x_titan_image", "x_titan_function_imports", "x_titan_function_ranges", "x_titan_function_names" }) do
         require_value(map[key] == nil, "source map already contains " .. key)
     end
-    mappings(map)
+    return mappings(map, range)
 end
 
 local function quote(value)
     return '"' .. value:gsub('[%z\1-\31\\"]', function(char)
         return string.format("\\u%04x", char:byte())
     end) .. '"'
+end
+
+-- Error-path attribution uses the same validated mapping walk as publication.
+-- Select only within this body: a preceding function's mapping is not evidence.
+function M.function_source(bytes, range)
+    local ok, result = pcall(function()
+        local map = json(bytes)
+        local first = validate_map(map, range)
+        require_value(first, "no mapped source within function body")
+        require_value(map.sources[first.source + 1] ~= "", "mapped source filename is empty")
+        local location = string.format("%q:%d:%d",
+            map.sources[first.source + 1], first.line + 1, first.column + 1)
+        if map.sourceRoot and map.sourceRoot ~= "" then
+            location = location .. string.format(" (sourceRoot %q)", map.sourceRoot)
+        end
+        return location
+    end)
+    if not ok then
+        return nil, type(result) == "table" and result.browsertrace or tostring(result)
+    end
+    return result
 end
 
 function M.rewrite(wasm, bytes, identity, origin)

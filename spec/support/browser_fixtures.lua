@@ -129,4 +129,39 @@ function M.descriptor(root, overrides)
     return M.identify(data)
 end
 
+-- A valid, named (or deliberately unnamed) final module just above the JS
+-- embedding body bound. Real-link rejection specs replace only staged bytes.
+function M.oversized_body(name, source)
+    local function leb(value)
+        local out = {}
+        repeat
+            local digit = value & 127
+            value = value >> 7
+            out[#out + 1] = string.char(digit | (value > 0 and 128 or 0))
+        until value == 0
+        return table.concat(out)
+    end
+    local function text(value) return leb(#value) .. value end
+    local function section(id, payload) return string.char(id) .. leb(#payload) .. payload end
+    local header = "\0asm\1\0\0\0" .. section(1, "\1\96\0\0") .. section(3, "\1\0")
+    local body = "\0" .. string.rep("\1", 7654320) .. "\11"
+    local prefix = "\1" .. leb(#body)
+    local start = #header + 1 + #leb(#prefix + #body) + #prefix
+    local wasm = header .. section(10, prefix .. body)
+    if name then wasm = wasm .. section(0, text("name") .. section(1, "\1\0" .. text(name))) end
+    local mappings = ""
+    if source then
+        local alphabet, value, digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", (start + 1) * 2, {}
+        repeat
+            local digit = value & 31
+            value = value >> 5
+            digits[#digits + 1] = alphabet:sub(digit + (value > 0 and 32 or 0) + 1,
+                digit + (value > 0 and 32 or 0) + 1)
+        until value == 0
+        mappings = table.concat(digits) .. "AyCM" -- source 0, line 42, column 7
+    end
+    return wasm, '{"version":3,"sources":[' .. (source and string.format("%q", source) or "") ..
+        '],"names":[],"mappings":"' .. mappings .. '"}'
+end
+
 return M

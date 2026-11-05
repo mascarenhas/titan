@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local trace = require "titan-compiler.browsertrace"
 local metadata = require "titan-compiler.staticmetadata"
+local browserlink = require "titan-compiler.browserlink"
 local compiler_io = require "titan-compiler.io"
 local paths = require "titan-compiler.path"
 local fixtures = require "spec.support.browser_fixtures"
@@ -174,6 +175,126 @@ describe("browser final trace map", function()
             assert(trace.rewrite(image(), map, ID))
         end
         rejected(image(), MAP, "identity", "UPPER")
+    end)
+end)
+
+describe("browser image byte limits", function()
+    local BODY, IMAGE = 7654321, 1073741824
+    local function module(sizes, labels, imports, padded)
+        local functions, code, label_entries = {}, {}, {}
+        for index, size in ipairs(sizes) do
+            functions[index] = "\0"
+            local length = leb(size)
+            if padded then
+                length = length:sub(1, -2) .. string.char(length:byte(-1) | 128) .. "\0"
+            end
+            -- One declared i32 local: all four vector/expression-boundary
+            -- bytes count, but the preceding length LEB does not.
+            code[index] = length .. "\1\1\127" .. string.rep("\1", size - 4) .. "\11"
+        end
+        for _, label in ipairs(labels or {}) do
+            label_entries[#label_entries + 1] = leb(label[1]) .. text(label[2])
+        end
+        return HEADER .. section(1, "\1\96\0\0") .. (imports or "") ..
+            section(3, leb(#sizes) .. table.concat(functions)) ..
+            section(10, leb(#sizes) .. table.concat(code)) ..
+            names(leb(#label_entries) .. table.concat(label_entries))
+    end
+    it("accepts image byte equality and rejects above it without allocating an image", function()
+        assert(browserlink.check_image_size(IMAGE - 1))
+        assert(browserlink.check_image_size(IMAGE))
+        local accepted, err = browserlink.check_image_size(IMAGE + 1)
+        assert.is_nil(accepted)
+        assert.equal("browser image is 1073741825 bytes, exceeds maximum of 1073741824 bytes", err)
+    end)
+    for _, size in ipairs({ BODY - 1, BODY }) do
+        it("accepts a body of " .. size .. " bytes including its local vector", function()
+            local inventory = assert(browserlink.image_inventory(module({ size }, nil, nil, true)))
+            assert.same({ imports = {}, exports = {} }, inventory)
+        end)
+    end
+    it("rejects the first oversize body with imports-first indexing and a quoted name", function()
+        local imports = section(2, "\6" .. text("env") .. text("left") .. "\0\0" ..
+            text("env") .. text("memory") .. "\2\1\1\2" ..
+            text("env") .. text("table") .. "\1\112\0\1" ..
+            text("env") .. text("global") .. "\3\127\0" ..
+            text("env") .. text("tag") .. "\4\0\0" ..
+            text("env") .. text("right") .. "\0\0")
+        local wasm = module({ BODY + 1, BODY + 2 },
+            { { 1, "wrong-import" }, { 2, 'z-first"body' }, { 3, "a-second-body" } }, imports)
+        local accepted, err, range = browserlink.image_inventory(wasm)
+        assert.is_nil(accepted)
+        assert.equal(string.format("browser image function %q (Wasm index 2) body is 7654322 bytes, exceeds maximum of 7654321 bytes",
+            'z-first"body'), err)
+        assert.equal(BODY + 1, range[2] - range[1])
+    end)
+    for _, labels in ipairs({ {}, { { 0, "" } } }) do
+        it("identifies an oversize unnamed body by its Wasm index", function()
+            local accepted, err = browserlink.image_inventory(module({ BODY + 1 }, labels))
+            assert.is_nil(accepted)
+            assert.equal("browser image function at Wasm index 0 body is 7654322 bytes, exceeds maximum of 7654321 bytes", err)
+        end)
+    end
+    it("preserves bounded-parser failures", function()
+        local accepted, err, range = browserlink.image_inventory("not Wasm")
+        assert.is_nil(accepted)
+        assert.matches("invalid final Wasm header", err, 1, true)
+        assert.is_nil(range)
+    end)
+end)
+
+describe("browser rejected-body source attribution", function()
+    local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    local function vlq(value)
+        value = value < 0 and -value * 2 + 1 or value * 2
+        local out = {}
+        repeat
+            local digit = value & 31
+            value = value >> 5
+            if value > 0 then digit = digit | 32 end
+            out[#out + 1] = alphabet:sub(digit + 1, digit + 1)
+        until value == 0
+        return table.concat(out)
+    end
+    local function map(mappings, extra)
+        return '{"version":3,"sources":["previous.c","actual.browser.titan"],"names":[],"mappings":"' ..
+            mappings .. '"' .. (extra or "") .. '}'
+    end
+    it("uses the first mapped instruction inside the body, never a preceding function", function()
+        local mappings = vlq(9) .. "AAA," .. vlq(2) .. vlq(1) .. vlq(41) .. vlq(6)
+        assert.equal('"actual.browser.titan":42:7',
+            assert(trace.function_source(map(mappings), { 10, 20 })))
+        assert.equal('"actual.browser.titan":42:7 (sourceRoot \"https://example.test/src/\")',
+            assert(trace.function_source(map(mappings, ',"sourceRoot":"https://example.test/src/"'), { 10, 20 })))
+    end)
+    it("handles unmapped same-offset replacements and the half-open end boundary", function()
+        local mappings = vlq(10) .. "AAA,A," .. vlq(2) .. vlq(1) .. vlq(4) .. vlq(2)
+        assert.equal('"actual.browser.titan":5:3',
+            assert(trace.function_source(map(mappings), { 10, 20 })))
+        local location, err = trace.function_source(map(vlq(20) .. "AAA"), { 10, 20 })
+        assert.is_nil(location)
+        assert.equal("no mapped source within function body", err)
+    end)
+    it("reports unavailable attribution for wholly unmapped, missing and empty source metadata", function()
+        for _, mappings in ipairs({ "", "AAAA", vlq(10) }) do
+            local location, err = trace.function_source(map(mappings), { 10, 20 })
+            assert.is_nil(location)
+            assert.equal("no mapped source within function body", err)
+        end
+        local location, err = trace.function_source(nil, { 10, 20 })
+        assert.is_nil(location)
+        assert.equal("source map is not a byte string", err)
+        location, err = trace.function_source('{"version":3,"sources":[""],"names":[],"mappings":"UAAA"}', { 10, 20 })
+        assert.is_nil(location)
+        assert.equal("mapped source filename is empty", err)
+    end)
+    it("validates the complete map before trusting a mapped location", function()
+        local location, err = trace.function_source(map(vlq(10) .. "AAA,!"), { 10, 20 })
+        assert.is_nil(location)
+        assert.equal("invalid source-map VLQ", err)
+        location, err = trace.function_source(map("AAAA", ',"sourceRoot":7'), { 0, 20 })
+        assert.is_nil(location)
+        assert.equal("invalid source-map sourceRoot", err)
     end)
 end)
 

@@ -13,14 +13,14 @@ describe("browser core stdlib build checks", function()
         scratch = {}
     end)
 
-    local function image_plan(overrides)
-        local file = temporary.name("-browser-images.mk")
+    local function root_plan(overrides)
+        local file = temporary.name("-browser-roots.mk")
         scratch[#scratch + 1] = file
         assert(strategy:write_file(file, [[
 include spec/support/stdlib_test_modules.mk
 .PHONY: plan
 plan:
-	@$(strip $(TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK)) printf '%s\n' 'budget=$(TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES)' 'roots=$(TITAN_STDLIB_BROWSER_TEST_ROOTS)' $(foreach image,$(TITAN_STDLIB_BROWSER_TEST_IMAGES),'image=$(image):$(strip $(TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_$(image)))')
+	@$(strip $(TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK)) printf '%s\n' 'roots=$(TITAN_STDLIB_BROWSER_TEST_ROOTS)'
 ]]))
         local argv = {"env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
             "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-f", file, "plan"}
@@ -28,105 +28,45 @@ plan:
         return strategy:run(argv, {stderr_to_stdout = true})
     end
 
-    it("declares an exact owner partition and byte budget in the browser manifest", function()
+    it("keeps all fifteen portable owners in the single-image root inventory", function()
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
-        local result = image_plan()
+        local result = root_plan()
         assert.is_true(result.ok, result.output)
-        assert.truthy(result.output:find("budget=32000000", 1, true),
-            "D14 deliberately pins the 32,000,000-byte browser image budget; do not loosen it to fit an oversized image")
-        local roots = {}
-        for root in assert(result.output:match("roots=([^\r\n]+)")):gmatch("%S+") do roots[root] = true end
-        local owners, images = {}, 0
-        for line in result.output:gmatch("[^\r\n]+") do
-            local image, members = line:match("^image=([%w_-]+):(.*)$")
-            if image then
-                images = images + 1
-                for owner in members:gmatch("%S+") do
-                    assert.is_true(roots[owner], owner)
-                    assert.is_nil(owners[owner], owner .. " occurs in two images")
-                    owners[owner] = image
-                end
-            end
+        local roots, count = {}, 0
+        for root in assert(result.output:match("roots=([^\r\n]+)")):gmatch("%S+") do
+            assert.is_nil(roots[root], root)
+            roots[root], count = true, count + 1
         end
-        local count = 0
-        for owner in pairs(roots) do assert.truthy(owners[owner], owner); count = count + 1 end
         assert.equal(15, count, "the audited browser inventory has 15 owners; change this deliberately")
-        assert.is_true(images >= 2)
+        assert.is_true(roots["transfer.tests"])
+        assert.is_true(roots["protobuf.tests"])
     end)
 
-    it("rejects incomplete, duplicate, empty and unknown browser image assignments", function()
+    it("rejects empty and duplicate owner inventories before build setup", function()
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
-        local base = {
-            "TITAN_STDLIB_BROWSER_TEST_ROOTS=first.tests second.tests",
-            "TITAN_STDLIB_BROWSER_TEST_IMAGES=first second",
-            "TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_first=first.tests",
-            "TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_second=second.tests",
-        }
-        assert.is_true(image_plan(base).ok)
-        for _, case in ipairs({
-            {2, "TITAN_STDLIB_BROWSER_TEST_IMAGES=", "image manifest is empty"},
-            {2, "TITAN_STDLIB_BROWSER_TEST_IMAGES=first first", "duplicate browser stdlib image"},
-            {2, "TITAN_STDLIB_BROWSER_TEST_IMAGES=first", "unassigned browser stdlib owner"},
-            {4, "TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_second=", "has no owners"},
-            {4, "TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_second=first.tests", "assigned more than once"},
-            {4, "TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_second=third.tests", "unknown browser stdlib owner"},
-            {1, "TITAN_STDLIB_BROWSER_TEST_ROOTS=first.tests first.tests", "duplicate browser stdlib owner inventory"},
-        }) do
-            local options = {table.unpack(base)}
-            options[case[1]] = case[2]
-            local rejected = image_plan(options)
-            assert.is_false(rejected.ok, rejected.output)
-            assert.truthy(rejected.output:find(case[3], 1, true), rejected.output)
-        end
-    end)
-
-    it("rejects malformed image budgets before build setup or linking", function()
-        if platform.windows then pending("browser suite Make target is Unix-only"); return end
-        -- A regular file cannot become the output directory: a regressed
-        -- preflight fails promptly at mkdir rather than starting a real link.
-        local guard = temporary.name("-browser-budget-preflight")
+        assert.is_true(root_plan({"TITAN_STDLIB_BROWSER_TEST_ROOTS=first.tests second.tests"}).ok)
+        local guard = temporary.name("-browser-root-preflight")
         scratch[#scratch + 1] = guard
-        local sentinel = "image budget validation must run before build setup\n"
+        local sentinel = "owner validation must precede build setup\n"
         assert(strategy:write_file(guard, sentinel))
-        for _, budget in ipairs({"", "0", "01", "-1", "abc", "32.0e6", "100000000"}) do
+        for _, case in ipairs({
+            { "", "browser stdlib owner inventory is empty" },
+            { "first.tests first.tests", "duplicate browser stdlib owner inventory" },
+        }) do
             local rejected = strategy:run({
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS",
                 "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "make", "--no-print-directory",
                 "-f", "Makefile", "titan-stdlib-browser-test",
                 "TITAN_BROWSER_TEST_BUILD_DIR=" .. guard,
-                "TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES=" .. budget,
+                "TITAN_STDLIB_BROWSER_TEST_ROOTS=" .. case[1],
             }, {stderr_to_stdout = true})
             assert.is_false(rejected.ok, rejected.output)
-            assert.truthy(rejected.output:find(
-                "browser stdlib image byte budget must be a positive decimal integer", 1, true),
-                rejected.output)
+            assert.truthy(rejected.output:find(case[2], 1, true), rejected.output)
             assert.equal(sentinel, assert(strategy:read_file(guard)))
         end
     end)
 
-    it("enforces the supplied image byte budget at its exact boundary", function()
-        assert.is_true(checks.check_image_size(32, 32, "fixture.wasm"))
-        local ok, err = checks.check_image_size(33, 32, "fixture.wasm")
-        assert.is_nil(ok)
-        assert.truthy(err:find("fixture.wasm is 33 bytes", 1, true), err)
-        assert.truthy(err:find("manifest budget of 32 bytes", 1, true), err)
-        assert.is_nil(checks.check_image_size(1, 0, "fixture.wasm"))
-        assert.is_nil(checks.check_image_size(1, 1.5, "fixture.wasm"))
-        local path = temporary.name("-browser-budget.wasm")
-        scratch[#scratch + 1] = path
-        assert(strategy:write_file(path, string.rep("x", 33)))
-        local lua = installed_prefix.active() .. "/bin/lua" .. (platform.windows and ".exe" or "")
-        local rejected = strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua",
-            "size", path, "32"}, {stderr_to_stdout = true})
-        assert.is_false(rejected.ok)
-        assert.truthy(rejected.output:find("exceeds manifest budget", 1, true), rejected.output)
-        local directory = strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua",
-            "size", ".", "32"}, {stderr_to_stdout = true})
-        assert.is_false(directory.ok)
-        assert.truthy(directory.output:find("must be a regular file", 1, true), directory.output)
-    end)
-
-    it("keeps partitioned image and per-engine evidence in the CI failure artifact", function()
+    it("keeps the image and per-engine evidence in the CI failure artifact", function()
         local complete = assert(strategy:read_file(".github/workflows/ci.yml"))
         local function job(name)
             local marker = "\n  " .. name .. ":\n"
@@ -285,7 +225,7 @@ plan:
 ]]))
         local lua = installed_prefix.active() .. "/bin/lua" .. (platform.windows and ".exe" or "")
         local result = strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua", "output",
-            roots, "test_fail", "fixture", log, roots},
+            roots, "test_fail", log},
             {stderr_to_stdout = true})
         assert.is_false(result.ok)
         assert.truthy(result.output:find("Browser stdlib owner fixture.tests: 1 cases", 1, true), result.output)
@@ -332,7 +272,7 @@ if arg[1] == "fail" then os.exit(7) end
         assert.equal(warning, assert(strategy:read_file(diagnostics)))
         assert.truthy(captured.output:find(warning, 1, true), captured.output)
         local audited = strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua",
-            "output", roots, "", "fixture", log, roots}, {stderr_to_stdout = true})
+            "output", roots, "", log}, {stderr_to_stdout = true})
         assert.is_true(audited.ok, audited.output)
         assert.truthy(audited.output:find("Browser stdlib owner fixture.tests: 1 cases", 1, true),
             audited.output)
@@ -345,111 +285,104 @@ if arg[1] == "fail" then os.exit(7) end
         assert.equal(warning, assert(strategy:read_file(diagnostics)))
     end)
 
-    it("audits the union of image reports and fails when any image fails", function()
+    it("audits one complete image with strict timing, owner, failure, skip and filter accounting", function()
         local function file(suffix, contents)
             local path = temporary.name(suffix)
             scratch[#scratch + 1] = path
             assert(strategy:write_file(path, contents))
             return path
         end
-        local function report(owner, failed)
-            return "[==========] Running Titan tests.\n[ RUN      ] " .. owner .. ".test_case\n" ..
-                (failed and "[  FAILED  ] " or "[       OK ] ") .. owner .. ".test_case (1.25 ms)\n" ..
-                "[----------] " .. owner .. " (1.25 ms total)\n" ..
-                "[==========] 1 test ran. (1.50 ms total)\n[  PASSED  ] " .. (failed and "0 tests.\n" or "1 test.\n") ..
-                (failed and "[  FAILED  ] 1 test.\n[  FAILED  ] " .. owner .. ".test_case\n" or "")
+        local function report(owners, outcome)
+            local rows = { "[==========] Running Titan tests." }
+            local failed, skipped = 0, 0
+            for index, owner in ipairs(owners) do
+                local name = owner .. ".test_case"
+                rows[#rows + 1] = "[ RUN      ] " .. name
+                if outcome == "failed" and index == #owners then
+                    rows[#rows + 1] = "[  FAILED  ] " .. name .. " (0.25 ms)"
+                    failed = failed + 1
+                elseif outcome == "skipped" and index == #owners then
+                    rows[#rows + 1] = "[  SKIPPED ] " .. name .. " (capability: fixture) (0.25 ms)"
+                    skipped = skipped + 1
+                else
+                    rows[#rows + 1] = "[       OK ] " .. name .. " (0.25 ms)"
+                end
+                rows[#rows + 1] = "[----------] " .. owner .. " (0.25 ms total)"
+            end
+            rows[#rows + 1] = "[==========] " .. #owners .. " tests ran. (1.00 ms total)"
+            rows[#rows + 1] = "[  PASSED  ] " .. (#owners - failed - skipped) .. " tests."
+            if skipped > 0 then rows[#rows + 1] = "[  SKIPPED ] " .. skipped .. " tests." end
+            if failed > 0 then
+                rows[#rows + 1] = "[  FAILED  ] " .. failed .. " tests."
+                rows[#rows + 1] = "[  FAILED  ] " .. owners[#owners] .. ".test_case"
+            end
+            return table.concat(rows, "\n") .. "\n"
         end
         local roots = file("-browser-roots.txt", "first.tests\nsecond.tests\n")
-        local first = file("-browser-first.log", report("first.tests", false))
-        local second = file("-browser-second.log", report("second.tests", false))
-        local first_roots = file("-browser-first.txt", "first.tests\n")
-        local second_roots = file("-browser-second.txt", "second.tests\n")
+        local log = file("-browser-stdlib.log", "")
         local lua = installed_prefix.active() .. "/bin/lua" .. (platform.windows and ".exe" or "")
-        local argv = {lua, "-E", "scripts/check_browser_stdlib.lua", "output", roots, "",
-            "first", first, first_roots, "second", second, second_roots}
-        local passed = strategy:run(argv, {stderr_to_stdout = true})
-        assert.is_true(passed.ok, passed.output)
-        assert.truthy(passed.output:find("selected=2 passed=2 skipped=0 failed=0 owners=2/2 images=2", 1, true),
-            passed.output)
-        assert.truthy(passed.output:find(
-            "Browser stdlib image first: 1 cases (1.50 ms total)", 1, true), passed.output)
-        assert.truthy(passed.output:find(
-            "Browser stdlib image second: 1 cases (1.50 ms total)", 1, true), passed.output)
-        assert.truthy(passed.output:find(
-            "Browser stdlib owner first.tests: 1 cases (1.25 ms total)", 1, true), passed.output)
-        assert.truthy(passed.output:find(
-            "Browser stdlib owner second.tests: 1 cases (1.25 ms total)", 1, true), passed.output)
-
-        assert(strategy:write_file(first, (report("first.tests", false):gsub("\n", "\r\n"))))
-        assert(strategy:write_file(second, (report("second.tests", false):gsub("\n", "\r\n"))))
-        local crlf = strategy:run(argv, {stderr_to_stdout = true})
-        assert.is_true(crlf.ok, crlf.output)
-        assert.truthy(crlf.output:find(
-            "selected=2 passed=2 skipped=0 failed=0 owners=2/2 images=2", 1, true), crlf.output)
-        assert(strategy:write_file(first, report("first.tests", false)))
-        for _, malformed in ipairs({
-            (report("second.tests", false):gsub("\n", "\r\r\n")),
-            (report("second.tests", false):gsub("1%.25 ms%)", "1.2\r5 ms)")),
-            (report("second.tests", false):gsub("\n$", "\r")),
+        local function audit(contents, filter)
+            assert(strategy:write_file(log, contents))
+            return strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua", "output",
+                roots, filter or "", log}, {stderr_to_stdout = true})
+        end
+        local complete = report({ "first.tests", "second.tests" })
+        for _, contents in ipairs({ complete, (complete:gsub("\n", "\r\n")) }) do
+            local passed = audit(contents)
+            assert.is_true(passed.ok, passed.output)
+            for _, expected in ipairs({
+                "Browser stdlib image stdlib: 2 cases (1.00 ms total)",
+                "Browser stdlib owner first.tests: 1 cases (0.25 ms total)",
+                "Browser stdlib owner second.tests: 1 cases (0.25 ms total)",
+                "selected=2 passed=2 skipped=0 failed=0 owners=2/2 images=1",
+            }) do assert.truthy(passed.output:find(expected, 1, true), passed.output) end
+        end
+        local failed = audit(report({ "first.tests", "second.tests" }, "failed"))
+        assert.is_false(failed.ok, failed.output)
+        assert.truthy(failed.output:find("selected=2 passed=1 skipped=0 failed=1 owners=2/2 images=1", 1, true), failed.output)
+        local skipped = audit(report({ "first.tests", "second.tests" }, "skipped"))
+        assert.is_true(skipped.ok, skipped.output)
+        assert.truthy(skipped.output:find("selected=2 passed=1 skipped=1 failed=0", 1, true), skipped.output)
+        local filtered = audit(report({ "first.tests" }), "^first[.]")
+        assert.is_true(filtered.ok, filtered.output)
+        assert.truthy(filtered.output:find("owners=1/2 images=1 (filtered)", 1, true), filtered.output)
+        for _, case in ipairs({
+            { report({}), "selected no cases", "^none$" },
+            { report({ "first.tests" }), "did not execute" },
+            { report({ "foreign.tests", "second.tests" }), "outside native root inventory" },
+            { report({ "first.tests", "first.tests" }), "duplicate" },
+            { complete:gsub("0%.25 ms%)", "0.2 ms)"), "malformed native case timing" },
+            { complete:gsub("%[----------%] second.tests %(0%.25 ms total%)\n", ""), "missing native owner timing" },
+            { complete:gsub("second.tests %(0%.25 ms total%)", "second.tests (0.25 ms total)\n[----------] second.tests (0.25 ms total)"), "duplicate native owner timing" },
+            { complete:gsub("second.tests %(0%.25 ms total%)", "foreign.tests (0.25 ms total)"), "timing outside native root inventory" },
+            { complete:gsub("0%.25 ms total", "9.00 ms total"), "differs from top-level cases" },
+            { complete:gsub("1%.00 ms total", "0.00 ms total"), "shorter than owner intervals" },
+            { complete .. "[       OK ] second.tests.test_case (0.25 ms)\n", "duplicate native result" },
+            { complete:gsub("%[       OK %] second.tests.test_case %(0%.25 ms%)\n", ""), "did not finish" },
+            { complete:gsub("ran%. %(1%.00 ms total%)", "ran."), "malformed native run timing" },
         }) do
-            assert(strategy:write_file(second, malformed))
-            local rejected = strategy:run(argv, {stderr_to_stdout = true})
+            local rejected = audit(case[1], case[3])
+            assert.is_false(rejected.ok, rejected.output)
+            assert.truthy(rejected.output:find(case[2], 1, true), rejected.output)
+        end
+        for _, malformed in ipairs({
+            (complete:gsub("\n", "\r\r\n")),
+            (complete:gsub("0%.25 ms%)", "0.2\r5 ms)")),
+            (complete:gsub("\n$", "\r")),
+            (complete:gsub("\n", "\r")),
+        }) do
+            local rejected = audit(malformed)
             assert.is_false(rejected.ok, rejected.output)
         end
-
         for _, suffix in ipairs({
-            "", " (-1.25 ms)", " (1.2 ms)", " (1.250 ms)", " (nan ms)",
-            " (inf ms)", " (1e2 ms)", " (1,25 ms)", " (1.25 ms total)",
+            "", " (-0.25 ms)", " (0.2 ms)", " (0.250 ms)", " (nan ms)",
+            " (inf ms)", " (1e2 ms)", " (0,25 ms)", " (0.25 ms total)",
         }) do
-            local malformed = report("second.tests", false):gsub(
-                "(%[       OK %] second.tests.test_case) %(1%.25 ms%)",
+            local malformed = complete:gsub("(%[       OK %] second.tests.test_case) %(0%.25 ms%)",
                 function(prefix) return prefix .. suffix end)
-            assert(strategy:write_file(second, malformed))
-            local rejected = strategy:run(argv, {stderr_to_stdout = true})
+            local rejected = audit(malformed)
             assert.is_false(rejected.ok, rejected.output)
             assert.truthy(rejected.output:find("malformed native case timing", 1, true), rejected.output)
         end
-        for _, replacement in ipairs({
-            {"%[----------%] second.tests %(1%.25 ms total%)\n", "", "missing native owner timing"},
-            {"%[----------%] second.tests %(1%.25 ms total%)", "[----------] second.tests (1.26 ms total)", "owner timing differs"},
-            {"ran%. %(1%.50 ms total%)", "ran.", "malformed native run timing"},
-            {"ran%. %(1%.50 ms total%)", "ran. (0.00 ms total)", "run timing is shorter"},
-        }) do
-            assert(strategy:write_file(second,
-                (report("second.tests", false):gsub(replacement[1], replacement[2]))))
-            local rejected = strategy:run(argv, {stderr_to_stdout = true})
-            assert.is_false(rejected.ok, rejected.output)
-            assert.truthy(rejected.output:find(replacement[3], 1, true), rejected.output)
-        end
-        assert(strategy:write_file(second, report("second.tests", false) ..
-            "[       OK ] second.tests.test_case (1.25 ms)\n"))
-        local duplicate = strategy:run(argv, {stderr_to_stdout = true})
-        assert.is_false(duplicate.ok, duplicate.output)
-        assert.truthy(duplicate.output:find("duplicate native result", 1, true), duplicate.output)
-
-        assert(strategy:write_file(second, report("first.tests", false)))
-        local foreign_case = strategy:run(argv, {stderr_to_stdout = true})
-        assert.is_false(foreign_case.ok, foreign_case.output)
-        assert.truthy(foreign_case.output:find(
-            "group second: result outside native root inventory", 1, true), foreign_case.output)
-
-        assert(strategy:write_file(second, (report("second.tests", true):gsub("\n", "\r\n"))))
-        local failed = strategy:run(argv, {stderr_to_stdout = true})
-        assert.is_false(failed.ok, failed.output)
-        assert.truthy(failed.output:find("selected=2 passed=1 skipped=0 failed=1 owners=2/2 images=2", 1, true),
-            failed.output)
-        assert.truthy(failed.output:find("group second: native test failure", 1, true), failed.output)
-
-        local empty = "[==========] Running Titan tests.\n[==========] 0 tests ran. (0.00 ms total)\n[  PASSED  ] 0 tests.\n"
-        assert(strategy:write_file(second, empty))
-        argv[6] = "^first[.]"
-        local filtered = strategy:run(argv, {stderr_to_stdout = true})
-        assert.is_true(filtered.ok, filtered.output)
-        assert.truthy(filtered.output:find("selected=1 passed=1 skipped=0 failed=0 owners=1/2 images=2 (filtered)", 1, true),
-            filtered.output)
-        assert(strategy:write_file(first, empty))
-        local none = strategy:run(argv, {stderr_to_stdout = true})
-        assert.is_false(none.ok, none.output)
-        assert.truthy(none.output:find("selected no cases", 1, true), none.output)
     end)
 end)

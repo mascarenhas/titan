@@ -1017,6 +1017,7 @@ end)
 describe("incremental configuration", function()
     local function configured()
         local ctx, files = native_context({ [fixture_path("/compiler/titan-compiler/driver.lua")] = "driver",
+            [fixture_path("/compiler/titan-compiler/browserlink.lua")] = "browser link policy",
             [fixture_path("/compiler/titan-compiler/checker/entry.lua")] = "checker",
             [fixture_path("/compiler/titan-compiler/coder/generate.lua")] = "coder",
             [fixture_path("/compiler/c-parser/cpp.lua")] = "parser", [fixture_path("/real/titanc")] = "real frontend",
@@ -1081,6 +1082,16 @@ describe("incremental configuration", function()
             "corrected macro registrar"
         local before, after = incremental.configuration(first),
             incremental.configuration(second)
+        assert.not_equal(before.compiler, after.compiler)
+        assert.not_equal(before.digest, after.digest)
+        assert.equal(before.options, after.options)
+    end)
+
+    it("invalidates compiler certificates after browser image limits change", function()
+        local first = configured()
+        local second, files = configured()
+        files[fixture_path("/compiler/titan-compiler/browserlink.lua")] = "updated browser image limits"
+        local before, after = incremental.configuration(first), incremental.configuration(second)
         assert.not_equal(before.compiler, after.compiler)
         assert.not_equal(before.digest, after.digest)
         assert.equal(before.options, after.options)
