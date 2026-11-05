@@ -441,6 +441,13 @@ local c_token = raw_string + quoted('"') + quoted("'")
     + identifier + P(1)
 local presumed_location = (c_token - location_reader)^0 * location_reader
 
+function incremental.has_presumed_location(expanded)
+    local candidate = expanded:find("__builtin_", 1, true)
+        or expanded:find("__PRETTY_FUNCTION__", 1, true)
+        or expanded:find("__FUNCSIG__", 1, true)
+    return candidate ~= nil and lpeg.match(presumed_location, expanded) ~= nil
+end
+
 -- Temporary translation units use the actual generated filename for macro
 -- expansion. Expanded C bytes remain strict semantic input. Native location
 -- readers also bind the part to its filename and all concrete owned roots:
@@ -489,10 +496,7 @@ function incremental.preprocessed_identities(context, inputs)
                 or "generated-C preprocessing returned no result")
             local expanded = required(context.io:read_file(output))
             local semantic = expanded
-            local may_read_location = expanded:find("__builtin_", 1, true)
-                or expanded:find("__PRETTY_FUNCTION__", 1, true)
-                or expanded:find("__FUNCSIG__", 1, true)
-            if may_read_location and lpeg.match(presumed_location, expanded) then
+            if incremental.has_presumed_location(expanded) then
                 semantic = { expanded = expanded, source = inputs[index].contents,
                     filename = inputs[index].filename, roots = context.relocation_roots or {} }
             end

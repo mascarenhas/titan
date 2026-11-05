@@ -1543,6 +1543,66 @@ os.exit(result.ok and 0 or result.status or 1)
             no_native_compile(text)
         end)
 
+        it("rebuilds a presumed-path C source after an SDK-only move while ordinary native nodes hit", function()
+            local sdk = private_sdk()
+            write(sdk .. "/include/native_location.h", [[
+                #define NATIVE_LOCATION(name) __builtin_ ## name ()
+                static inline const char *native_sdk_path(void) { return NATIVE_LOCATION(FILE); }
+            ]])
+            write(sdk .. "/include/native_control.h",
+                "static inline int native_sdk_control(void) { return 0; }\n")
+            write(workspace .. "/native_location_api.h", [[
+                int native_location_path(void);
+                int native_location_control(void);
+            ]])
+            local helper, control = workspace .. "/native_path.c", workspace .. "/native_control.c"
+            write(helper, [[
+                #include <stdio.h>
+                #include <native_location.h>
+                int native_location_path(void) { puts(native_sdk_path()); return 0; }
+            ]])
+            write(control, [[
+                #include <native_control.h>
+                int native_location_control(void) { return native_sdk_control(); }
+            ]])
+            local stem = source(APP, [[
+                foreign import "native_location_api.h"
+                function main(args: {string}): integer
+                    return (ffi.native_location_path() as integer) +
+                        (ffi.native_location_control() as integer)
+                end
+            ]])
+            local function build()
+                return certified("--c-source", helper, "--c-source", control, APP)
+            end
+            build()
+            local expected = (sdk .. "/include/native_location.h\n"):gsub("\\", "/")
+            assert.equal(expected, (certified_exit(0):gsub("\\", "/")))
+            local saved = remember_objects({ [APP] = stem })
+            local text = build()
+            decisions(text, saved, {})
+            no_native_compile(text)
+            assert.matches("Titan native hit " .. helper, text, 1, true)
+            assert.matches("Titan native hit " .. control, text, 1, true)
+            local moved = workspace .. "/much longer native SDK"
+            assert(os.rename(sdk, moved))
+            assert.is_false(exists(sdk))
+            sdk_root = moved
+            text = build()
+            -- The generated Titan part has declarations only; its object and
+            -- the location-free C node still hit at the fixed output root.
+            decisions(text, saved, {})
+            assert.matches("Titan native miss " .. helper, text, 1, true)
+            assert.matches("Titan native hit " .. control, text, 1, true)
+            expected = (moved .. "/include/native_location.h\n"):gsub("\\", "/")
+            assert.equal(expected, (certified_exit(0):gsub("\\", "/")))
+            text = build()
+            decisions(text, saved, {})
+            no_native_compile(text)
+            assert.matches("Titan native hit " .. helper, text, 1, true)
+            assert.matches("Titan native hit " .. control, text, 1, true)
+        end)
+
         it("keeps absolute user source spelling significant during relocation", function()
             source(APP, main(43))
             certified("-c", APP)

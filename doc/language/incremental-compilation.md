@@ -87,6 +87,8 @@ SDK-only move with a fixed output directory. This also covers filename, line,
 and column readers whose values preprocessing alone cannot certify.
 Signature readers can also contain anonymous C type locations and are guarded;
 unadorned function-name-only readers do not impose this restriction.
+Authored `--c-source` nodes use the same native-location classification, while
+continuing to preprocess on every invocation.
 
 A disposable `<stem>.relocation` receipt avoids repeating this extra work on
 later unchanged invocations. The receipt also tracks the roots used to

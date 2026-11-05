@@ -787,8 +787,13 @@ roots, so subsequent unchanged builds do not preprocess again. It also keeps
 materialization state distinct from immutable certificate roots. It cannot
 replace the ordinary source, configuration, header or dependency checks.
 Reused native objects keep their original debug and diagnostic path strings.
-Authored C nodes keep their ordinary preprocessing check over root-relative
-source, argv and dependency identities
+Authored C nodes keep their preprocessing check over root-relative source, argv
+and dependency identities, using the same `incremental.has_presumed_location`
+classifier. A cacheable node materializes the expanded bytes before requesting
+their file digest, so classification and strict byte fingerprinting share one
+read and hash. Only a location-bearing node adds its concrete source spelling
+and owned roots to its input identity; location-free nodes retain their
+existing hashes and move reuse. No extra native pass or record field is added
 ([`--c-source` nodes](build-coordinator.md#--c-source-compilation-and-records)).
 Final-link records rebind only named owned input and output paths before their
 ordinary validation, so a changed external path or a missing output still

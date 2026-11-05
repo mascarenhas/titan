@@ -173,6 +173,10 @@ local function compile_node(context, request, source, stem)
         incremental.invalidate_file(context, preprocessed)
         incremental.invalidate_file(context, dependencies)
         local files = need(depfile.parse(incremental.file_contents(context, dependencies)))
+        -- Materialize before requesting its digest so classification and the
+        -- strict preprocessed hash share one read/hash, not a streamed reread.
+        local location_sensitive = cacheable and incremental.has_presumed_location(
+            incremental.file_contents(context, preprocessed))
         local recipe = { source = source, argv = request.compile_argv, toolchain = request.toolchain,
             authored = incremental.file_digest(context, source),
             preprocessed = incremental.file_digest(context, preprocessed),
@@ -181,6 +185,9 @@ local function compile_node(context, request, source, stem)
             argv = relocation.argv(context, request.compile_argv), toolchain = request.toolchain,
             authored = recipe.authored, preprocessed = recipe.preprocessed,
             dependencies = relocation.files(context, recipe.dependencies) }
+        if location_sensitive then
+            semantic.locations = { source = source, roots = context.relocation_roots or {} }
+        end
         local input = cacheable and incremental.digest(context, "native-c-input", semantic) or nil
         local record = cacheable and certificate.read_record(context, sidecar) or nil
         if cacheable and request.incremental and native_record(record) and record.input == input and regular(context, object) then
