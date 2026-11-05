@@ -127,24 +127,43 @@ plan:
     end)
 
     it("keeps partitioned image and per-engine evidence in the CI failure artifact", function()
-        local workflow = assert(strategy:read_file(".github/workflows/ci.yml")):match(
-            "\n  browser%-toolchain:\n(.-)\n  browser%-playwright:")
-        assert.truthy(workflow, "missing browser-toolchain CI job")
-        local suite
-        for step in workflow:gmatch("\n      %- name:[^\n]*\n(.-)\n\n") do
-            if step:find("make titan-stdlib-browser-test", 1, true) then suite = step; break end
+        local complete = assert(strategy:read_file(".github/workflows/ci.yml"))
+        local function job(name)
+            local marker = "\n  " .. name .. ":\n"
+            local first = assert(complete:find(marker, 1, true), name)
+            local finish = complete:find("\n  [%w_-]+:%s*\n", first + #marker)
+                or (#complete + 1)
+            return complete:sub(first, finish - 1)
         end
-        assert.truthy(suite, "browser-toolchain must run the browser stdlib target")
+        local workflow = job("browser-stdlib")
+        assert.is_nil(job("browser-toolchain"):find("make titan-stdlib-browser-test", 1, true))
+        local suite, artifact
+        for first in workflow:gmatch("()\n      %- [^\n]*\n") do
+            local finish = workflow:find("\n      - ", first + 1, true) or (#workflow + 1)
+            local step = workflow:sub(first, finish - 1)
+            if step:find("make titan-stdlib-browser-test", 1, true) then
+                assert.is_nil(suite, "duplicate browser stdlib suite step")
+                suite = step
+            end
+            if step:find("name: browser-stdlib-failure", 1, true) then
+                assert.is_nil(artifact, "duplicate browser stdlib failure artifact")
+                artifact = step
+            end
+        end
+        assert.truthy(suite, "browser-stdlib must run the browser stdlib target")
         assert.truthy(suite:find("set -euo pipefail", 1, true), suite)
         assert.truthy(suite:find('tee "$RUNNER_TEMP/browser-stdlib.log"', 1, true), suite)
-        for _, path in ipairs({
+        assert.truthy(artifact, "browser-stdlib must retain its own failure evidence")
+        for _, contract in ipairs({
+            "if: failure()", "uses: actions/upload-artifact@v7", "retention-days: 7",
+            "${{ runner.temp }}/browser-*.log",
             "out/browser-stdlib/*.log", "out/browser-stdlib/images/*.mjs",
             "out/browser-stdlib/images/*.wasm", "out/browser-stdlib/images/*.wasm.map",
             "out/browser-stdlib/*roots.txt", "out/browser-stdlib/members.md",
         }) do
-            assert.truthy(workflow:find(path, 1, true), path)
+            assert.truthy(artifact:find(contract, 1, true), contract)
         end
-        assert.is_nil(workflow:find("out/browser-stdlib/\n", 1, true))
+        assert.is_nil(artifact:find("out/browser-stdlib/\n", 1, true))
     end)
 
     it("keeps native stdlib dependencies out of the browser provider recipe", function()
