@@ -83,6 +83,16 @@ C storage; a larger array is a protected Lua-owned allocation, not a raw
 malloc buffer leaked by longjmp. No stack-slot pointer is kept across a Lua
 allocation; indexes are reacquired from the current stack.
 
+After the last allocating/GC-capable argument or result conversion, dispatch
+rechecks every physical callable root and then queries every HANDLE/CALLABLE
+identity through the private nonthrowing
+`host_identity_live(state, slot, generation, kind)` import. A synchronous host
+release may invalidate a JS identity while its physical Lua root is correctly
+retained through the active operation; that becomes an ordinary protected
+error before success, not an exception in trusted completion decoding.
+The query runs no Lua, user callback or sink, and no later conversion can
+invalidate an earlier result between this boundary and synchronous copying.
+
 An ordinary error has one protected description/report conversion without a
 second errorhandler. It retains the raw `TITAN_BACKTRACE_KEY` trace already
 captured by Titan. If `__tostring` raises, a conservative fixed diagnostic is
@@ -115,6 +125,15 @@ initialized Titan module. The C list maps opaque host-issued state tokens to
 live state registries; no JavaScript application API exposes a `lua_State *`.
 Tokens distinguish reused state addresses. Callable root slots can be reused
 only with a new generation, and a released generation never revives.
+
+Original-closure root publication is transactional. The sole bridge
+`luaL_ref` and its generation-table insertion run in one protected worker.
+Any error after the reference commits removes that exact unpublished root
+before rethrowing. Stack space is reserved beforehand: `luaL_unref` only
+rewrites the already existing reference and free-list keys, so rollback does
+not allocate even when generation bookkeeping exhausted memory. Host metadata
+and the caller's identity are published only after success. Generation
+non-reuse and explicit successful-root lifetime do not change.
 
 Lua closes latest-finalized-first. The earliest registry therefore invalidates
 last, after coroutine unwinding and user/module finalizers. It marks closing,
@@ -183,20 +202,26 @@ intern table substituted for a closure root.
 | 52 | thrown-value generation |
 
 Potentially throwing imports always return normally after filling this
-zero-initialized response. Titan checks status and raises `browser.Error`
-after return, retaining the exact thrown JS value. Message/result-byte buffers
+zero-initialized response. With a real thrown-value unit, Titan checks status
+and raises `browser.Error` after return, retaining that exact value. A
+MEMORY/error response without a thrown unit instead raises an ordinary
+protected memory/diagnostic error before constructing an owner; zero
+slot/generation never reaches trusted adoption. Message/result-byte buffers
 are freed by `titan_browser_response_dispose` on every path. Unadopted HANDLE,
 REQUEST, and thrown-value units are released there too; wrappers clear fields
 when their completed Titan owner adopts a unit. Thus allocation while building
 a Titan owner/error cannot leak an unowned host slot.
 
 For reverse-call raw JSHandle arguments, the marshaler initially owns temporary
-slots. After registering its finalizer the Titan constructor invokes trusted
-`host_adopt(state, slot, generation)`. The marshaler must remove exactly that
-unit from its rollback set: a callback may store the owner and then raise, and
-failure must not invalidate the stored value. Slots never adopted are released
-on failed delivery. Trusted adoption, release, state, and callable-metadata
-imports are nonthrowing and never invoke Lua or sinks.
+slots. The Titan constructor rejects an absent identity, registers its inert
+finalizer, and checks the actual host unit again after that potentially
+allocating setup before trusted `host_adopt(state, slot, generation)`.
+The marshaler removes exactly that unit from its rollback set: a callback may
+store the owner and then raise, and failure must not invalidate the stored
+value. Slots never adopted are released on failed delivery. Trusted adoption,
+release, state and callable-metadata imports are nonthrowing. Close validates
+its potentially raising state access before clearing an owner's slot; a
+contained admission failure leaves the original ownership available for retry.
 
 ### `titan_browser_completion` — 48 bytes, alignment 8
 

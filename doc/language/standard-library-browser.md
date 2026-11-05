@@ -62,6 +62,10 @@ safe. An unreachable handle also has an allocation-free reachability
 finalizer. State disposal retires all remaining units, including units created
 by close-phase finalizers when Lua no longer registers new finalizers.
 
+Closing first validates state admission and only then relinquishes the unit.
+If that validation raises, a live `JSHandle` or `Request` still owns its
+reference and can be closed later. An already closed owner remains inert.
+
 A closed handle cannot be used as a target or queued argument. A handle from
 another instance or Lua state is rejected before application entry. Slot
 reuse cannot revive a closed handle. `null` and `undefined` are ordinary live
@@ -75,6 +79,11 @@ function must have fixed parameters and results made of nil, boolean, integer,
 float, byte string, `JSHandle`, or `Callable`. Lua functions, raw C functions,
 Options, open input/result tails, arbitrary `value`, Arrays, Maps, and other
 nominals are rejected before user invocation.
+
+Creation is transactional: a failure after reserving the original closure's
+root removes that unpublished root before raising. Dropping the caller's
+closure/capture references can therefore make them collectable without
+waiting for instance disposal.
 
 The bridge roots the original closure and its original capture cells in its
 Lua state's registry. Two exported closures sharing a mutable local keep
@@ -165,6 +174,12 @@ potentially throwing binding import catches the JavaScript exception and
 returns normally before Titan raises this ordinary error. The handle retains
 the exact thrown value, whether it is an Error object, string, null, undefined,
 or another value. `Error:close()` closes its thrown-value handle.
+
+If the bridge cannot produce a thrown-value unit, for example at its bounded
+handle-identity limit, it raises an ordinary protected memory/diagnostic error
+instead. It does not fabricate a `JSHandle`, adopt a zero identity, or poison
+an otherwise intact instance. A real returned unit remains rollback-owned
+until its finalized Titan owner has adopted it.
 
 A JavaScript-to-Titan failure rejects that call with copied message bytes and
 the original captured Titan trace. A following valid call on an intact
