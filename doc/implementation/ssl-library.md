@@ -335,3 +335,17 @@ In the aggregate they check that `close` and `abort` complete during the close.
 The allocator child's `state_close` scenario counts OpenSSL's live allocations
 through its `CRYPTO_set_mem_functions` hooks and requires a second such close
 to return to the balance after the first.
+
+The rejected-SNI case uses a 256-byte host name made of one- and two-byte
+labels. `configure_client` configures peer-name verification before SNI.
+OpenSSL 4 validates the name in `SSL_set1_host`: it accepts at most 256 bytes
+and rejects any label longer than 63 bytes, so a single 256-byte label would
+fail there as `ssl.connect.verify-host`. OpenSSL 3 copies the name without
+that validation. SNI configuration rejects a name that exceeds 255 bytes on
+both versions, so the short-label name passes verification setup and fails at
+SNI. Exactly 256 bytes is required: a shorter name is a valid SNI name, and a
+longer one fails verification setup on OpenSSL 4. The test therefore requires
+`OPENSSL` from `ssl.connect.sni` rather than accepting another configuration
+failure. The adopted TCP peer must read EOF before any bytes and finish
+successfully, proving that the failed configuration retired its transport
+without TLS traffic.
