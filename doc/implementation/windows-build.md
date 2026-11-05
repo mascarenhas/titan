@@ -1050,17 +1050,23 @@ partitions](test-runner.md#busted-partitions).
 
 ### Portable compiler fixtures
 
-Run the MSYS2 harness with `LC_ALL=C.UTF-8`, including when a fixture invokes
-`cygpath`: the plain `C` locale can lose non-ASCII path bytes. Fixture source
-and generated-C snapshots use binary-mode reads and writes, and child Lua
-commands select the SDK's `bin/lua.exe`. A child that loads compiler Lua from
-the checkout must also receive the selected SDK through `TITAN_ROOT`; otherwise
-it can select checkout-owned runtime inputs and attempt Unix Make/libbacktrace
-bootstrap instead of using the prepared Windows SDK.
+Run the MSYS2 harness with `LC_ALL=C.UTF-8`. `Makefile.win` converts its SDK,
+build-root, and LuaRocks configuration paths with `cygpath`, which can truncate
+non-ASCII paths under the plain `C` locale. The setting reaches those harness
+utilities, not fixture children: commands started through
+`titan-compiler/process.lua` run with `LANG=C` and `LC_ALL=C` unless the caller
+explicitly inherits the environment. Fixture source and generated-C snapshots
+use binary-mode reads and writes, and child Lua commands select the SDK's
+`bin/lua.exe`. A child that loads compiler Lua from the checkout must also
+receive the selected SDK through `TITAN_ROOT`; otherwise it can select
+checkout-owned runtime inputs and attempt Unix Make/libbacktrace bootstrap
+instead of using the prepared Windows SDK.
 
-Resolver and native-library lookup may return Windows separators. Where a test
-asserts only the selected file, compare with `path.to_slash` at the assertion,
-without changing production path spelling or weakening the rest of the result.
+Ordinary resolver paths already use `/`. Native-library lookup joins its
+candidates with Windows separators, and a root spelled in the extended `\\?\`
+namespace keeps its literal `\` spelling. Where a test asserts only the
+selected file, compare with `path.to_slash` at the assertion, without changing
+production path spelling or weakening the rest of the result.
 Pure generated-header fixtures use drive-qualified virtual output paths on
 Windows, so direct code generation and the driver's absolute header plans
 refer to the same location.
