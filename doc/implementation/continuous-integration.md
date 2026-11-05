@@ -430,10 +430,11 @@ runner with a 60-minute timeout after `build-compiler`:
    "$TITAN_TRACE_OUTPUT/trace.test.mjs"`
    (`$RUNNER_TEMP/browser-playwright-trace.log`) runs the full file/line,
    contributor, wrapper-family, merge-order, descriptor-safety,
-   pin/rethrow/clear, coroutine-append, Firefox `async*` cutoff and 128-frame
-   ceiling, held-storage nested capture, and merge-OOM guard-recovery checks on
-   `chromium` and `firefox`, and the reduced-fidelity no-line / 100-frame
-   counterpart on `webkit`. The gate reads the installation profile from
+   pin/rethrow/clear, coroutine-append, SpiderMonkey saved-parent cutoff and
+   128-frame ceiling, held-storage nested capture, and merge-OOM guard-recovery
+   checks on `chromium` and `firefox`, and the reduced-fidelity no-line
+   counterpart with the same 512-record capacity on `webkit`. The gate reads
+   the installation profile from
    `manifest.json`: every row is exact except a `production` cell's uncaught
    program rows, which use the [ordered-subsequence
    contract](browser-target.md#test-images) for inlined frames.

@@ -811,11 +811,7 @@ JavaScriptCore's `Error.stack` reports WebAssembly frames by function index
 without a bytecode offset, browser traces provide reduced, function-level
 fidelity: Titan frames appear in the same merged order with Lua frames and with
 the same Titan display names, rendered in the no-line form
-`<basename>: in <display name>`. Pages
-running in WebKit or Safari should not `delete Error.stackTraceLimit`: in
-JavaScriptCore, deleting that property makes `new Error().stack` return
-`undefined` for the rest of the realm even after the property is redefined, so
-subsequent traces fall back to Lua frames with the capture-failed marker below.
+`<basename>: in <display name>`.
 
 **Depth limits and truncation.** Browser captures have a 512-record WebAssembly
 capacity. Firefox's SpiderMonkey also caps synchronous captures at 128 frames;
@@ -1135,9 +1131,9 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 * Browser images require JSPI-capable Chrome/Chromium, Firefox, Safari/WebKit,
   or Node 26+. `titan-browser-run` drives Node and headless Chrome/Chromium.
 * On WebKit and Safari, traces have reduced, function-level fidelity
-  (`<basename>: in <display name>`, without line numbers, and a 100-frame
-  capture limit), and Firefox caps synchronous stack captures at 128 frames
-  (see [traces](#traces)).
+  (`<basename>: in <display name>`, without line numbers). Browser traces have
+  a 512-record WebAssembly capacity, and Firefox also caps synchronous stack
+  captures at 128 frames (see [traces](#traces)).
 * Lua's C-call limit is 100 instead of native Lua's 200, which also bounds
   nested `pcall`, metamethod, coroutine-resume, and parser depth (see [Lua's
   C-call limit](#luas-c-call-limit)). The four-engine headroom measurements

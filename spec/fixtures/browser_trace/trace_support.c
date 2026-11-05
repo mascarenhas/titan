@@ -7,22 +7,7 @@
 #include <string.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
-/* Only the test gate supplies this engine policy; no production engine API. */
-EM_JS(int, trace_fixture_ordinary_truncation_allowed, (void), {
-  return Module['traceFixtureWebKit'] === true;
-});
-EM_JS(int, trace_fixture_host_absent_limit, (void), {
-  return Module['traceFixtureAbsentLimit'] === true;
-});
-#else
-static int trace_fixture_ordinary_truncation_allowed(void) { return 0; }
-int trace_fixture_host_absent_limit(void) { return 0; }
 #endif
-
-int trace_fixture_ordinary_truncation(const char *trace, const char *marker) {
-  return trace_fixture_terminal_marker(trace, marker,
-    trace_fixture_ordinary_truncation_allowed());
-}
 
 static const char mixed_source[] =
   "local function lua_inner(action, c)\n"

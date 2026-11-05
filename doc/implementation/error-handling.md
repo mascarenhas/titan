@@ -359,13 +359,10 @@ saved asynchronous ancestry), or when Firefox's engine ceiling is reached:
 * **JavaScriptCore (Playwright WebKit and Safari)** uses the same 512-record
   capacity and effective host limit. Current WebKit captures exceed the
   100-frame ceiling of older surveyed releases; that historical ceiling is not
-  inferred from the no-PC frame format. Deleting
-  `Error.stackTraceLimit` in JavaScriptCore causes `new Error().stack` to
-  evaluate to `undefined` for the remainder of that realm even after the
-  property is redefined with `Object.defineProperty` (unlike V8 and
-  SpiderMonkey); `parse` rejects the non-string `.stack` as `CAPTURE_FAILED`, so
-  traces in a JSC realm where `Error.stackTraceLimit` was deleted take the
-  bounded Lua-only `(native Titan frames unavailable: capture failed)` fallback.
+  inferred from the no-PC frame format. An absent `Error.stackTraceLimit` is
+  temporarily installed for capture and removed again on restoration, just as
+  on other engines. Any non-string or unreadable `.stack` still follows the
+  `CAPTURE_FAILED` path; the engine name alone does not imply capture failure.
 
 When the C merge falls back to Lua-only `CallInfo` enumeration (`st.status !=
 0`, under `MAP_UNAVAILABLE` or `CAPTURE_FAILED`), browser enumeration in

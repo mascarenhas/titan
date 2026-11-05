@@ -16,6 +16,4 @@ int trace_fixture_order(const char *text, const char *first, const char *second)
 void trace_fixture_sleep(void);
 void trace_fixture_host_recover(void);
 void trace_fixture_handler(lua_State *L);
-int trace_fixture_ordinary_truncation(const char *trace, const char *marker);
-int trace_fixture_host_absent_limit(void);
 #endif

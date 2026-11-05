@@ -2295,7 +2295,10 @@ Asyncify profile across six engines:
 | Host Chrome / V8 | 156.0.8078.79 (V8 15.6.75.27) | Linux x64 |
 | Safari / JSC | 27.0.1 (macOS 27.0.1, build 26A434) | macOS arm64 (Apple M1) |
 
-The survey established six implementation facts:
+The survey recorded the following behavior on those versions and binaries.
+Its historical depth and descriptor observations are not universal engine
+rules; the current [capture contract](error-handling.md) follows the JSPI
+runtime and its current-engine tests.
 
 1. **V8 (Node, Chromium, host Chrome)** formats frames as
    `    at <module>.<func> (<url>:wasm-function[<N>]:0x<PC>)` when the `name`
@@ -2306,11 +2309,13 @@ The survey established six implementation facts:
 2. **SpiderMonkey (Firefox)** formats frames as
    `<name>@<url>:wasm-function[<N>]:0x<PC>` (with an empty `<name>` when
    stripped) and no `Error` title line. After an outer or fiber
-   `emscripten_sleep`, Firefox appends saved asynchronous ancestry starting at
-   a frame line prefixed with `async*` (such as `async*handleSleep@...`), which
-   repeats earlier suspended Wasm activations (`fiber_entry`, `survey_run`). The
-   parser must stop at the first `async*` line rather than merely skipping
-   JS-shaped lines.
+   `emscripten_sleep`, the surveyed Firefox appended saved asynchronous
+   ancestry starting at a frame line prefixed with `async*` (such as
+   `async*handleSleep@...`), repeating earlier suspended Wasm activations
+   (`fiber_entry`, `survey_run`). Current JSPI captures also expose
+   `VoidFunction*`, `promise callback*`, and `setTimeout handler*` causes.
+   The parser stops before any saved-JavaScript-parent cause boundary, rather
+   than merely skipping JS-shaped lines and retaining their saved Wasm callers.
 3. **JavaScriptCore (Playwright WebKit and Safari)** formats named frames as
    `<func>@<image>.wasm:wasm-function[<N>]` and stripped or cold frames as
    `<N>@wasm-function[<N>]`, with no `Error` title line and no bytecode offset
@@ -2327,23 +2332,20 @@ The survey established six implementation facts:
    fiber, the physical stack ends at `fiber_entry`, `_mco_main`,
    `_mco_wrap_main`, and `dynCall_vi`; the resumer's native frames are absent
    and are supplied by `TITAN_TRACE_APPEND_KEY`.
-5. **Effective depth limits (`Object.defineProperty` versus assignment).** Default
-   `Error.stackTraceLimit` is 10 on V8 (leaving 9 Wasm frames), 100 on JSC, and
-   absent on Firefox. Raising `Error.stackTraceLimit` via
-   `Object.defineProperty` (which avoids invoking host setters) raises V8's
-   capture depth as requested (615 frames captured for a 600-edge recursion at
-   limit 1000). On JSC, `Object.defineProperty` updates the visible property
-   value without updating JSC's hidden capture limit, which stays at 100 total
-   frames (whereas direct `=` assignment updates the hidden state but cannot be
-   used or restored through descriptors without side effects), and deleting
-   `Error.stackTraceLimit` makes `new Error().stack` return `undefined` for the
-   rest of that JSC realm even after `Object.defineProperty` redefines it (so
-   captures in a JSC realm where `Error.stackTraceLimit` was deleted return
-   `CAPTURE_FAILED`). On Firefox,
-   neither `Object.defineProperty` nor `=` assignment raises synchronous capture
-   past 128 frames. Both the 100-frame WebKit limit (D10) and the 128-frame
-   Firefox synchronous ceiling (D11) are therefore documented engine truncation
-   boundaries that set `TRUNCATED`.
+5. **Observed depth limits (`Object.defineProperty` versus assignment).** In
+   the surveyed versions, default `Error.stackTraceLimit` was 10 on V8
+   (leaving 9 Wasm frames), 100 on JSC, and absent on Firefox. Raising the
+   property through `Object.defineProperty` raised V8's capture depth as
+   requested (615 frames for a 600-edge recursion at limit 1000). On the
+   surveyed JSC builds it changed the visible property but not the hidden
+   100-frame limit, while direct assignment updated that hidden state.
+   Deleting the property made `.stack` return `undefined` even after descriptor
+   restoration. These observations motivated the original JSC 100-frame
+   inference and isolated-realm test. Current WebKit 27.2 honors the temporary
+   descriptor and captures normally after the property was absent; neither
+   historical workaround remains. Firefox's surveyed 128-frame synchronous
+   ceiling is still observed in current JSPI captures and still marks
+   truncation.
 6. **JS wrapper headroom.** In the 48-recursion survey cases, up to 12 non-Wasm
    frames interleaved with 54 Wasm frames on V8. Requesting 640 frames (512
    Wasm capacity + 128 headroom) covers normal wrapper overhead, and the
@@ -3205,10 +3207,11 @@ hosts`).
   process-group retirement, and path containment, over Node and both Chromium
   transports.
 * `spec/browser/trace-adapter.test.mjs` and
-  `spec/fixtures/browser_trace_adapter/{stacks.json,degraded.mjs,lifecycle.c,filter.c}`
+  `spec/fixtures/browser_trace_adapter/{stacks.json,stacks-jspi-current.json,degraded.mjs,lifecycle.c,filter.c}`
   — Node unit tests for the V8, SpiderMonkey, and JavaScriptCore stack parsers
-  (66 recorded survey samples, V8 title-line frame-shape filtering, and
-  caller-owned capacity bounds), `Error.stackTraceLimit` and
+  (historical survey and current JSPI captures, saved-parent cutoff, V8
+  title-line frame-shape filtering, and caller-owned capacity bounds),
+  `Error.stackTraceLimit` and
   `Error.prepareStackTrace` descriptor preservation (absent, data, accessor,
   non-writable, and non-configurable descriptors without invoking getters or
   setters or constructing an `Error` on unsafe descriptors), lookup boundary,
