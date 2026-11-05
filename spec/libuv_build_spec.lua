@@ -5795,6 +5795,12 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(macos_workflow:find(
                     "\n  " .. job_name .. ":", 1, true), job_name)
             end
+            assert.equal(1, count_literal(browser_job,
+                "\n    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 24)\n"),
+                browser_job)
+            assert.equal(1, count_literal(browser_stdlib_job,
+                "\n    name: browser SDK and core stdlib (ubuntu-24.04, emsdk 6.0.13, Node 24)\n"),
+                browser_stdlib_job)
             assert.equal(1, count_literal(macos_workflow, "\n  test-macos:"),
                 macos_workflow)
             assert.falsy(linux_workflow:find("\n  test-macos:", 1, true),
@@ -6161,6 +6167,38 @@ printf '%s\n' "${schedule[@]}"
                     'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"'), gate)
                 assert.truthy(gate:find('[[ ! -f $gate_spec ]]', 1, true), gate)
                 assert.truthy(gate:find('"${gate_specs[@]}"', 1, true), gate)
+                -- Both jobs reinstall the native compiler without Emscripten
+                -- and must retire every unregistered preparation copy.
+                local rocks = step_containing(job, '"$PREFIX/bin/luarocks" make')
+                for _, contract in ipairs({
+                    'test -z "${EMSDK:-}"', "! command -v emcc",
+                    'rm -rf "$PREFIX/share/lua/5.5/c-parser"',
+                }) do
+                    assert.truthy(rocks:find(contract, 1, true), contract)
+                end
+                -- A re-pinned ZIP digest must invalidate either job's cache.
+                local chrome_cache = step_containing(job,
+                    "path: ${{ env.TITAN_CHROME_ROOT }}")
+                assert.truthy(chrome_cache:find(
+                    "${{ env.TITAN_CHROME_SHA256 }}", 1, true), chrome_cache)
+                assert.falsy(chrome_cache:find("restore-keys:", 1, true),
+                    chrome_cache)
+                -- Keep Chrome sandboxed in both jobs; qualify the host
+                -- restriction and record the launch proof in its own step.
+                local sandbox = step_containing(job,
+                    "key=kernel.apparmor_restrict_unprivileged_userns")
+                for _, contract in ipairs({
+                    "key=kernel.apparmor_restrict_unprivileged_userns",
+                    "clone=/proc/sys/kernel/unprivileged_userns_clone",
+                    "df -h /dev/shm", 'sysctl -n "$key" 2>/dev/null',
+                    'if [ "$state" != "0" ]',
+                    "browser-chrome-sandbox.log", "--dump-dom",
+                }) do
+                    assert.truthy(sandbox:find(contract, 1, true), contract)
+                end
+                assert.falsy(job:find("--no-sandbox", 1, true), job)
+                assert.falsy(job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true),
+                    job)
             end
             local all_gate_specs = {}
             for _, group in ipairs({
@@ -6209,6 +6247,8 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(browser_stdlib_job:find(contract, 1, true), contract)
             end
             assert.falsy(browser_job:find("make titan-stdlib-browser-test", 1, true))
+            assert.falsy(browser_job:find("out/browser-stdlib/", 1, true),
+                browser_job)
             local stdlib_sdk = assert(browser_stdlib_job:find(
                 'make browser-sdk PREFIX="$PREFIX"', 1, true))
             local stdlib_suite = assert(browser_stdlib_job:find(
@@ -6246,51 +6286,6 @@ printf '%s\n' "${schedule[@]}"
                 "Build and run the browser trace gate under Node")
             assert.equal(1, count_literal(node_trace_gate,
                 "TITAN_ROOT: ${{ github.workspace }}/.lua"), node_trace_gate)
-            -- Emscripten must stay out of the ordinary native rock build, and
-            -- the unregistered preparation copies must not survive as backups.
-            local browser_rocks = named_step(browser_job,
-                "Install the native runtime and compiler with LuaRocks")
-            assert.truthy(browser_rocks:find('test -z "${EMSDK:-}"', 1, true),
-                browser_rocks)
-            assert.truthy(browser_rocks:find("! command -v emcc", 1, true),
-                browser_rocks)
-            assert.truthy(browser_rocks:find(
-                'rm -rf "$PREFIX/share/lua/5.5/c-parser"', 1, true),
-                browser_rocks)
-            -- A re-pinned ZIP digest must invalidate the restored browser.
-            local browser_chrome_cache = named_step(browser_job,
-                "Restore the pinned Chrome for Testing headless shell")
-            assert.truthy(browser_chrome_cache:find(
-                "${{ env.TITAN_CHROME_SHA256 }}", 1, true), browser_chrome_cache)
-            assert.falsy(browser_chrome_cache:find("restore-keys:", 1, true))
-            local browser_extract = named_step(browser_job,
-                "Install Chrome for Testing headless shell")
-            assert.truthy(browser_extract:find(
-                "scripts/browser_extract_zip.py", 1, true), browser_extract)
-            -- Chrome keeps its sandbox: the host restriction is relaxed instead,
-            -- the step is guarded when the sysctl is absent, and its state lands
-            -- in the failure artifact.
-            local browser_sandbox = named_step(browser_job,
-                "Allow Chrome's user-namespace sandbox on the CI host")
-            assert.truthy(browser_sandbox:find(
-                "key=kernel.apparmor_restrict_unprivileged_userns", 1, true),
-                browser_sandbox)
-            assert.truthy(browser_sandbox:find(
-                "clone=/proc/sys/kernel/unprivileged_userns_clone", 1, true),
-                browser_sandbox)
-            assert.truthy(browser_sandbox:find("df -h /dev/shm", 1, true),
-                browser_sandbox)
-            assert.truthy(browser_sandbox:find(
-                'sysctl -n "$key" 2>/dev/null', 1, true), browser_sandbox)
-            assert.truthy(browser_sandbox:find(
-                'if [ "$state" != "0" ]', 1, true), browser_sandbox)
-            assert.truthy(browser_sandbox:find(
-                "browser-chrome-sandbox.log", 1, true), browser_sandbox)
-            assert.truthy(browser_sandbox:find("--dump-dom", 1, true),
-                browser_sandbox)
-            assert.falsy(browser_job:find("--no-sandbox", 1, true), browser_job)
-            assert.falsy(browser_job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true),
-                browser_job)
             local browser_loader = named_step(browser_job,
                 "Run the portable loader suite under Node and Chromium")
             assert.truthy(browser_loader:find("for engine in node chromium",
