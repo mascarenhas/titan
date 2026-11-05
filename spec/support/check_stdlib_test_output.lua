@@ -15,8 +15,8 @@ end
 
 local function final_counts(contents)
     local counts, headers = { owner_times = {} }, 0
-    for raw_line in (contents .. "\n"):gmatch("([^\n]*)\n") do
-        local line = raw_line:gsub("\r$", "")
+    for raw_line, ending in (contents .. "\n"):gmatch("([^\n]*)\n()") do
+        local line = ending <= #contents + 1 and raw_line:gsub("\r$", "") or raw_line
         if line == "[==========] Running Titan tests." then headers = headers + 1 end
         local body, elapsed = timed_line(line, true)
         local owner = body and body:match("^%[----------%] ([%w_.]+)$")
@@ -71,8 +71,8 @@ local function validate(contents, roots, filtered, allow_empty)
                name:sub(#root + 2):match("^test_") then return root end
         end
     end
-    for raw_line in (contents .. "\n"):gmatch("([^\n]*)\n") do
-        local line = raw_line:gsub("\r$", "")
+    for raw_line, ending in (contents .. "\n"):gmatch("([^\n]*)\n()") do
+        local line = ending <= #contents + 1 and raw_line:gsub("\r$", "") or raw_line
         if line == "[==========] Running Titan tests." then
             if began then return nil, "duplicate native runner header" end
             began = true

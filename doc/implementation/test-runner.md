@@ -819,6 +819,15 @@ rounding allowance implied by their displayed precision. Malformed, missing,
 duplicate, out-of-inventory, and inconsistent timing metadata fail the gate;
 old untimed execution output is not accepted. Ordinary `Context:log` lines
 remain distinct from owner metadata because they include `<case>: <message>`.
+Portable text-line scanners accept LF or one CR immediately before an actual
+LF. They do not remove embedded CR, repeated CR, or a lone CR at EOF; appended
+iterator sentinels must not turn data into a fabricated CRLF boundary. The
+native timing assertion helper applies the same rule to captured Windows
+child output, so ordinary CRLF does not spuriously fail the assertion and
+re-emit its captured transcript through the parent text stream. Sanitizer guards
+represent their optional terminal CR through Bash ANSI-C quoting and test the
+actual workflow expression. Browser byte-fidelity fixtures retain their exact
+LF/binary-byte contracts rather than normalizing arbitrary captured bytes.
 
 ### Platform portability and complete execution
 

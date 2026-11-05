@@ -76,8 +76,8 @@ elseif action == "output" then
         -- Count only timed terminal outcomes, never the untimed final failure
         -- list or malformed/missing timing suffixes.
         for _, group in ipairs(groups) do
-            for raw_line in (group.contents .. "\n"):gmatch("([^\n]*)\n") do
-                local line = raw_line:gsub("\r$", "")
+            for raw_line, ending in (group.contents .. "\n"):gmatch("([^\n]*)\n()") do
+                local line = ending <= #group.contents + 1 and raw_line:gsub("\r$", "") or raw_line
                 local outcome = line:match("^(.-) %(%d+%.%d%d ms%)$")
                 local name = outcome and (outcome:match("^%[       OK %] (.+)$") or
                     outcome:match("^%[  FAILED  %] (.+)$"))

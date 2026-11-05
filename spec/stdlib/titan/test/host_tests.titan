@@ -82,7 +82,11 @@ local function reported_hundredths(output: string, prefix: string,
   end
   local found = false
   local duration = 0
-  for line in string.split(output, "\n") do
+  for row in string.gmatch(output, "([^\n]*)\n") do
+    local line: string = row:group(1)
+    -- Only a CR immediately before this real LF is a Windows line ending.
+    -- Embedded/doubled CR and a lone CR at EOF remain malformed data.
+    if string.sub(line, -1) == "\r" then line = string.sub(line, 1, -2) end
     if string.sub(line, 1, #prefix) == prefix then
       local match? = string.match(string.sub(line, #prefix + 1), expression)
       if match then
@@ -104,6 +108,16 @@ function test_public_runner_reports_wall_times_and_owner_totals(
   local filtered = ""
   local zero = ""
   local empty = ""
+  local boundary_prefix = "[       OK ] timing.fixture.case"
+  test.assert(reported_hundredths(boundary_prefix .. " (1.25 ms)\n",
+    boundary_prefix, false) == 125)
+  test.assert(reported_hundredths(boundary_prefix .. " (1.25 ms)\r\n",
+    boundary_prefix, false) == 125)
+  for malformed in string.split(" (1.25 ms)\r\r\n| (1.2\r5 ms)\n| (1.25 ms)\r", "[|]") do
+    common.assert_raises_contains(function ()
+      reported_hundredths(boundary_prefix .. malformed, boundary_prefix, false)
+    end, "missing two-decimal timing")
+  end
   runtime_test.run(function ()
     local workspace = fs.tmpname()
     fs.unlink(workspace)

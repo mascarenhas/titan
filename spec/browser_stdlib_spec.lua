@@ -380,6 +380,23 @@ if arg[1] == "fail" then os.exit(7) end
         assert.truthy(passed.output:find(
             "Browser stdlib owner second.tests: 1 cases (1.25 ms total)", 1, true), passed.output)
 
+        assert(strategy:write_file(first, (report("first.tests", false):gsub("\n", "\r\n"))))
+        assert(strategy:write_file(second, (report("second.tests", false):gsub("\n", "\r\n"))))
+        local crlf = strategy:run(argv, {stderr_to_stdout = true})
+        assert.is_true(crlf.ok, crlf.output)
+        assert.truthy(crlf.output:find(
+            "selected=2 passed=2 skipped=0 failed=0 owners=2/2 images=2", 1, true), crlf.output)
+        assert(strategy:write_file(first, report("first.tests", false)))
+        for _, malformed in ipairs({
+            (report("second.tests", false):gsub("\n", "\r\r\n")),
+            (report("second.tests", false):gsub("1%.25 ms%)", "1.2\r5 ms)")),
+            (report("second.tests", false):gsub("\n$", "\r")),
+        }) do
+            assert(strategy:write_file(second, malformed))
+            local rejected = strategy:run(argv, {stderr_to_stdout = true})
+            assert.is_false(rejected.ok, rejected.output)
+        end
+
         for _, suffix in ipairs({
             "", " (-1.25 ms)", " (1.2 ms)", " (1.250 ms)", " (nan ms)",
             " (inf ms)", " (1e2 ms)", " (1,25 ms)", " (1.25 ms total)",
@@ -416,7 +433,7 @@ if arg[1] == "fail" then os.exit(7) end
         assert.truthy(foreign_case.output:find(
             "group second: result outside native root inventory", 1, true), foreign_case.output)
 
-        assert(strategy:write_file(second, report("second.tests", true)))
+        assert(strategy:write_file(second, (report("second.tests", true):gsub("\n", "\r\n"))))
         local failed = strategy:run(argv, {stderr_to_stdout = true})
         assert.is_false(failed.ok, failed.output)
         assert.truthy(failed.output:find("selected=2 passed=1 skipped=0 failed=1 owners=2/2 images=2", 1, true),

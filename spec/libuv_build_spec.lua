@@ -1692,11 +1692,21 @@ done
         assert.equal(2, result.categories.capability)
         assert.equal(400, result.elapsed)
         assert.same({ ["first.tests"] = 125, ["second.tests"] = 250 }, result.owner_times)
+        local crlf = output:gsub("\n", "\r\n")
+        local crlf_result, crlf_error = validate(crlf, roots, false)
+        assert.truthy(crlf_result, crlf_error)
+        assert.same(result, crlf_result)
+        assert.same(final_counts(output), final_counts(crlf))
         local function rejects(contents, expected, inventory)
             local accepted, message = validate(contents, inventory or roots, false)
             assert.is_nil(accepted)
             assert.truthy(message:find(expected, 1, true), message)
         end
+        rejects(output:gsub("\n", "\r\r\n"), "malformed native run timing")
+        rejects(output:gsub("1%.25 ms%)", "1.2\r5 ms)"), "malformed native case timing")
+        assert.is_nil(final_counts(output:gsub("\n", "\r\r\n")))
+        assert.is_nil(validate(output .. "\r", roots, false))
+        assert.is_nil(final_counts(output .. "\r"))
         rejects(output:gsub("capability: locale unavailable", "no locale"), "unclassified native skip")
         rejects(output:gsub("capability:", "portability:"), "unfinished portability skips")
         rejects(output:gsub("3 tests ran", "4 tests ran"), "summary differs")
@@ -7035,7 +7045,7 @@ printf '%s\n' "${schedule[@]}"
                     assert.equal(2, count_literal(step, label), label)
                 end
                 assert.truthy(step:find(
-                    "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)$'",
+                    [[grep -Eq $'^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)\r?$']],
                     1, true), step)
                 assert.truthy(step:find(
                     '"$TITAN_SANITIZER_LOG_DIR/$ownership_log.log"',
@@ -7053,7 +7063,7 @@ printf '%s\n' "${schedule[@]}"
                 assert.equal(2, count_literal(teardown_step, label), label)
             end
             for _, required in ipairs({
-                "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)$'",
+                [[grep -Eq $'^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)\r?$']],
                 '"$TITAN_SANITIZER_LOG_DIR/$teardown_log.log"',
                 "Teardown sanitizer filter ran no tests:",
                 "exit 1",
@@ -7579,7 +7589,7 @@ end)
     it("accepts timed sanitizer summaries and rejects empty or malformed selections", function()
         if platform.windows then pending("Unix sanitizer grep guard"); return end
         local patterns = {}
-        for pattern in read_file(".github/workflows/ci.yml"):gmatch("grep %-Eq '([^']+)'") do
+        for pattern in read_file(".github/workflows/ci.yml"):gmatch("grep %-Eq (%$'[^']+')") do
             if pattern:find("==========", 1, true) then patterns[#patterns + 1] = pattern end
         end
         assert.equal(4, #patterns)
@@ -7590,6 +7600,13 @@ end)
                 for _, example in ipairs({
                     { "[==========] 1 test ran. (0.00 ms total)", true },
                     { "[==========] 12 tests ran. (123.45 ms total)", true },
+                    { "[==========] 1 test ran. (0.00 ms total)\r", true },
+                    { "[==========] 12 tests ran. (123.45 ms total)\r", true },
+                    { "[==========] 1 test ran. (1.00 ms total)\r\r", false },
+                    { "[==========] 1 test ran. (1.0\r0 ms total)", false },
+                    { "[==========] 1 test ran. (1.00 ms total)\t", false },
+                    { "[==========] 1 test ran. (1.00 ms total)\v", false },
+                    { "[==========] 1 test ran. (1.00 ms total)\f", false },
                     { "[==========] 0 tests ran. (0.00 ms total)", false },
                     { "[==========] 1 test ran.", false },
                     { "[==========] 1 test ran. (-1.00 ms total)", false },
@@ -7601,7 +7618,10 @@ end)
                     { "[==========] 1 test ran. (1.00 ms total) trailing", false },
                 }) do
                     write_file(path, example[1] .. "\n")
-                    local ok, output = run_argv({ "grep", "-Eq", pattern, path })
+                    local ok, output = run_argv({
+                        "bash", "-c", "grep -Eq " .. pattern .. ' "$1"',
+                        "sanitizer-summary", path,
+                    })
                     assert.equal(example[2], ok, example[1] .. "\n" .. output)
                 end
             end
