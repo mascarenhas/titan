@@ -301,9 +301,9 @@ local read = function(): integer
 end
 ```
 
-Initializers execute once per module instance, in declaration order. Calls
-are not constant-folded or moved ahead of other declarations; their effects
-and failures occur during module loading. Allocated results are rooted in the
+Initializers execute once per module instance, in declaration order. The
+checker does not evaluate calls at compile time; their observable effects and
+failures occur during module loading. Allocated results are rooted in the
 module's GC-traced state. Use the final [module initialization block](#module-initialization-block)
 when initialization must depend on the module's own state or callables.
 
