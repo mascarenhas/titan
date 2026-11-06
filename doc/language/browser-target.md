@@ -565,6 +565,8 @@ The instance has the following methods:
   Array; the call does not await or handle their rejections. Destructure a
   result explicitly, then separately await it if that is what the application
   intends.
+  Byte arguments are snapshotted synchronously before either method returns
+  its promise; later mutations do not change that call.
 * `notify(callable, ...args)` synchronously snapshots and enqueues one
   notification without entering Wasm. It copies byte arrays and keeps raw
   JavaScript values by reference. It does not allocate Wasm buffers or handle
@@ -691,6 +693,12 @@ Invalid `create` options throw `TypeError` synchronously. Arguments that do
 not match a callable's signature (a wrong count, a Number for an integer, a
 non-`Uint8Array` byte value) reject `call` or throw from `notify` with
 `TypeError`, as do invalid `run` arguments.
+
+Byte argument snapshots for `call`, `callable.call`, `notify` and `run` read
+native `Uint8Array` storage, including subarrays, subclasses and Node Buffers.
+Custom iterators, byte-view accessors and constructor/species hooks cannot
+substitute bytes. A Proxy around a byte array has no native TypedArray slots
+and is rejected with `TypeError`.
 
 The test runner reports observed aborts and traps even if a test catches their
 operation rejection. A completion-protocol error that the test explicitly

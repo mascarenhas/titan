@@ -53,14 +53,269 @@ function createHost(context, image, extra = {}) {
   return host;
 }
 
-async function nativeRun(context, host) {
-  const result = await host.instance.run([]);
+async function nativeRun(context, host, args = []) {
+  const result = await host.instance.run(args);
   context.assert(result.kind === 'returned' && result.status === 0,
     'native browser.tests failed:\n' + decode(join(host.stdout)) + decode(join(host.stderr)));
   const summary = decode(join(host.stdout)).match(/\[  PASSED  \] (\d+) tests?\./);
   context.assert(summary && Number(summary[1]) > 0, 'native test owner did not report its passing cases');
   context.assert(host.callbacks.size >= 26, 'native owner omitted published production Callables');
   return Number(summary[1]);
+}
+
+function admissionOutcome(context, promise) {
+  context.assert(promise instanceof Promise, 'argument inspection threw instead of returning a promise');
+  return promise.then(value => ({status: 'fulfilled', value}), error => ({status: 'rejected', error}));
+}
+
+function admissionDescription(outcome) {
+  if (!outcome) return {status: 'not-attempted'};
+  if (outcome.status === 'rejected') return {status: outcome.status,
+    code: outcome.error.code ?? outcome.error.name, message: outcome.error.message};
+  return {status: outcome.status, values: outcome.value.map(value =>
+    value instanceof Uint8Array ? Array.from(value) : typeof value === 'bigint' ? `${value}n` : value)};
+}
+
+async function argumentMaterialization(context, image) {
+  const engineFailures = [], host = createHost(context, image,
+    {onEngineFailure(event) { engineFailures.push(event); }});
+  try {
+    await host.instance.initialize();
+    const reads = [], checks = [];
+    const argv = new Proxy(['--verbose'], {
+      get(target, key, receiver) {
+        if (key === 'map' || key === 'length' || key === '0') {
+          reads.push(key);
+          checks.push(rejected(context, host.instance.call(undefined), 'REENTRY'));
+          checks.push(rejected(context, host.instance.drain(), 'REENTRY'));
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    await nativeRun(context, host, argv);
+    await Promise.all(checks);
+    context.assert(reads.includes('length') && reads.includes('0'),
+      'run argument regression did not inspect its real host Array');
+    context.assert(engineFailures.length === 0 && (await host.call('valid_after_failure'))[0] === 42n,
+      'run argument getter overwrote its published operation');
+
+    for (const trigger of ['prototype', 'iterator']) {
+      const hooks = [];
+      let nested;
+      const attempt = hook => {
+        hooks.push(hook);
+        if (hook === trigger && !nested) nested = admissionOutcome(context, host.call('allocation_gc'));
+      };
+      const bytes = new Proxy(binary(), {
+        getPrototypeOf(target) { attempt('prototype'); return Reflect.getPrototypeOf(target); },
+        get(target, key) {
+          if (key === Symbol.iterator) {
+            attempt('iterator');
+            return function* () { yield* binary(); };
+          }
+          if (key === 'length' || key === '0') attempt(key);
+          return Reflect.get(target, key, target);
+        },
+      });
+      const outer = await admissionOutcome(context, host.call('typed_echo', true, 7n, 7, bytes));
+      const attempted = await nested;
+      const following = await admissionOutcome(context, host.call('valid_after_failure'));
+      const report = {trigger, hooks, outer: admissionDescription(outer), nested: admissionDescription(attempted),
+        following: admissionDescription(following), engineFailures: engineFailures.map(event =>
+          ({kind: event.kind, code: event.cause.code, message: event.cause.message}))};
+      context.stdout(encode('BRIDGE-ADMISSION ' + JSON.stringify(report) + '\n'));
+      context.assert(outer.status === 'rejected' && outer.error instanceof TypeError,
+        'Proxy bytes did not receive an ordinary TypeError: ' + JSON.stringify(report));
+      context.assert(hooks.length === 0 && nested === undefined,
+        'byte admission invoked substituting Proxy hooks');
+      context.assert(engineFailures.length === 0 && following.status === 'fulfilled' && following.value[0] === 42n,
+        'byte argument inspection poisoned the instance or stranded its operation');
+      let error;
+      try { host.instance.notify(host.callbacks.get('typed_echo'), true, 7n, 7, bytes); }
+      catch (cause) { error = cause; }
+      context.assert(error instanceof TypeError && hooks.length === 0,
+        'notification byte admission invoked Proxy hooks or lost ordinary rejection');
+      await host.instance.drain();
+    }
+
+    const hooks = [], attempted = [];
+    const attempt = name => {
+      hooks.push(name);
+      attempted.push(admissionOutcome(context, host.call('valid_after_failure')));
+    };
+    class HookBytes extends Uint8Array {}
+    const backing = new Uint8Array([91, 92, ...binary(), 93]);
+    const bytes = new HookBytes(backing.buffer, 2, 4);
+    const native = {buffer: bytes.buffer, byteOffset: bytes.byteOffset,
+      byteLength: bytes.byteLength, length: bytes.length};
+    class HookConstructor {
+      static get [Symbol.species]() { attempt('species'); return Uint8Array; }
+    }
+    for (const [key, value] of [...Object.entries(native), ['constructor', HookConstructor],
+      ['slice', function() { attempt('slice-call'); return this; }],
+      [Symbol.iterator, function* () { attempt('iterator-call'); yield* binary(); }]]) {
+      Object.defineProperty(bytes, key, {get() { attempt(String(key)); return value; }});
+    }
+    const sources = [new Uint8Array(backing.buffer, 2, 4), bytes];
+    if (typeof globalThis.Buffer === 'function') {
+      sources.push(globalThis.Buffer.from([91, ...binary(), 93]).subarray(1, 5));
+    }
+    for (const source of sources) {
+      source.set(binary());
+      const copying = host.call('typed_echo', true, 8n, 8, source);
+      source.fill(90);
+      context.equalBytes((await copying)[3], binary(), 'native byte view was not snapshotted at call time');
+    }
+    bytes.set(binary());
+    host.instance.notify(host.callbacks.get('sdk_write'), bytes);
+    bytes.fill(90);
+    await host.instance.drain();
+    context.equalBytes(host.stdout.at(-1), binary(), 'native byte view was not snapshotted at notify time');
+    await host.instance.drain();
+    await Promise.all(attempted);
+    context.assert(hooks.length === 0, 'native byte copying consulted a substituting property/iterator/species');
+
+    let coercions = 0;
+    const coercing = {
+      [Symbol.toPrimitive]() { coercions++; attempt('scalar coercion'); return 1n; },
+      valueOf() { coercions++; attempt('scalar valueOf'); return 1n; },
+    };
+    for (const args of [[coercing, 1n, 1, binary()], [true, coercing, 1, binary()],
+      [true, 1n, coercing, binary()]]) {
+      const before = host.controls.snapshot().operationId;
+      await rejected(context, host.call('typed_echo', ...args), 'TypeError');
+      context.assert(host.controls.snapshot().operationId === before,
+        'boxed/coercing scalar reached Wasm');
+    }
+    context.assert(coercions === 0 && hooks.length === 0, 'strict scalar checks invoked host coercion');
+    const hostValues = await hostValueMaterialization(context, host);
+    context.assert(engineFailures.length === 0 && host.notificationErrors.length === 0 &&
+      (await host.call('valid_after_failure'))[0] === 42n,
+      'host-value materialization poisoned a later valid call or reported an unreturnable error');
+    return {proxyBytes: 2, nativeByteViews: sources.length, strictScalars: 3, runGetters: reads.length, ...hostValues};
+  } finally {
+    await host.instance?.dispose().catch(() => {});
+    host.releaseObservations();
+  }
+}
+
+async function hostValueMaterialization(context, host) {
+  const checks = [];
+  let byteReads = 0, lengthReads = 0;
+  const reads = host.ioReads.length;
+  host.input.push({
+    get bytes() {
+      byteReads++;
+      checks.push(rejected(context, host.call('valid_after_failure'), 'REENTRY'));
+      return binary();
+    },
+    get length() {
+      lengthReads++;
+      checks.push(rejected(context, host.instance.drain(), 'REENTRY'));
+      return 4;
+    },
+  });
+  await host.call('sdk_read', 4n);
+  await Promise.all(checks);
+  await host.instance.drain();
+  context.assert(byteReads > 0 && lengthReads > 0 && host.ioReads.length === reads + 1,
+    'counted stdin getters did not complete under their existing operation owner');
+  context.equalBytes(host.ioReads.at(-1), binary());
+
+  const source = gate(), successes = host.successes.length, failures = host.failures.length;
+  host.bindings.admission_result = formBinding({kind: 'detachable', promise: source.promise});
+  await host.call('start_request', encode('admission_result'));
+  let indexReads = 0, substitutions = 0, nested;
+  const result = [41n, binary()];
+  Object.defineProperty(result, '0', {get() {
+    indexReads++;
+    if (!nested) nested = admissionOutcome(context, host.call('valid_after_failure'));
+    return 41n;
+  }});
+  for (const [key, value] of [['map', Array.prototype.map], ['constructor', Array],
+    [Symbol.iterator, Array.prototype[Symbol.iterator]]]) {
+    Object.defineProperty(result, key, {get() { substitutions++; return value; }});
+  }
+  source.resolve(result);
+  await context.tick();
+  const called = await nested;
+  context.assert(indexReads === 1 && substitutions === 0 && called?.status === 'fulfilled' && called.value[0] === 42n,
+    'request completion did not materialize exact dense indices independently of its substituting hooks');
+  await host.instance.drain();
+  context.assert(host.successes.length === successes + 1 && host.successes.at(-1)[0] === 41n &&
+    host.failures.length === failures && host.controls.snapshot().requests === 0,
+    'reentering request-result getter lost or duplicated its terminal completion');
+  context.equalBytes(host.successes.at(-1)[1], binary());
+  await host.call('close_request');
+  delete host.bindings.admission_result;
+
+  const rejectedSource = gate();
+  let messageReads = 0, coercions = 0, rejectedNested;
+  const message = {[Symbol.toPrimitive](hint) {
+    context.assert(hint === 'string', 'host rejection used a non-string coercion');
+    coercions++;
+    if (!rejectedNested) rejectedNested = admissionOutcome(context, host.call('valid_after_failure'));
+    return 'host rejection reentry';
+  }};
+  const rejection = Object.freeze({get message() { messageReads++; return message; }});
+  host.bindings.admission_rejection = formBinding({kind: 'detachable', promise: rejectedSource.promise});
+  await host.call('start_request', encode('admission_rejection'));
+  rejectedSource.reject(rejection);
+  await context.tick();
+  const rejectedCall = await rejectedNested;
+  context.assert(messageReads > 0 && coercions === 1 && rejectedCall?.status === 'fulfilled' &&
+    rejectedCall.value[0] === 42n, 'request rejection message inspection lost its legitimate nested operation');
+  await host.instance.drain();
+  context.assert(host.failures.length === failures + 1 && host.failures.at(-1)[1] === rejection &&
+    host.successes.length === successes + 1 && host.controls.snapshot().requests === 0,
+    'reentering host rejection lost its original thrown identity or terminal retirement');
+  context.equalBytes(host.failures.at(-1)[0], encode('host rejection reentry'));
+  await host.call('close_request');
+  delete host.bindings.admission_rejection;
+  return {countedGetters: 1, completionGetters: 1, rejectionCoercions: 1};
+}
+
+async function disposalMaterialization(context, image) {
+  for (const ownership of ['detachable', 'listener']) {
+    const engineFailures = [], host = createHost(context, image,
+      {onEngineFailure(event) { engineFailures.push(event); }});
+    const terminal = gate();
+    let signals = 0, reentrant, observed;
+    const cancel = () => {
+      signals++;
+      reentrant = host.instance.dispose();
+      observed = admissionOutcome(context, reentrant);
+    };
+    try {
+      await host.instance.initialize();
+      await nativeRun(context, host);
+      await host.call('close_detached');
+      if (ownership === 'detachable') {
+        host.bindings.admission_dispose = formBinding({kind: 'detachable', promise: terminal.promise, cancel});
+        await host.call('start_request', encode('admission_dispose'));
+      } else {
+        host.bindings.listener = () => ({kind: 'listener', subscribe() { return cancel; }});
+        await host.call('start_listener');
+      }
+      const disposing = host.instance.dispose();
+      const outer = admissionOutcome(context, disposing);
+      context.assert(reentrant === disposing, ownership + ' cancellation reentered before dispose promise publication');
+      const [result, nested] = await Promise.all([outer, observed]);
+      context.assert(result.status === 'fulfilled' && nested?.status === 'fulfilled' && signals === 1 &&
+        host.controls.snapshot().requests === 0 && host.controls.snapshot().units === 0 &&
+        host.closes.length === 2 && engineFailures.length === 0 && host.notificationErrors.length === 0,
+        ownership + ' reentrant disposal duplicated cancellation/close or poisoned the engine');
+      terminal.resolve([91n, binary()]);
+      await context.tick();
+      context.assert(host.successes.length === 0 && host.failures.length === 0 && signals === 1,
+        ownership + ' late settlement revived a disposed request');
+    } finally {
+      terminal.resolve([91n, binary()]);
+      await host.instance?.dispose().catch(() => {});
+      host.releaseObservations();
+    }
+  }
+  return {cancel: 1, unregister: 1};
 }
 
 async function values(context, host, completions) {
@@ -1090,6 +1345,8 @@ export async function run(context) {
   const image = await context.image(context.args[0]);
   const failedImage = await context.image(context.args[1]);
   context.assert(!Object.hasOwn(image, 'factory') && typeof image.create === 'function', 'raw factory escaped context.image');
+  const materialization = {arguments: await argumentMaterialization(context, image),
+    disposal: await disposalMaterialization(context, image)};
   const engineFailures = [];
   const onEngineFailure = failure => { engineFailures.push(failure); };
   const first = createHost(context, image, {onEngineFailure}), second = createHost(context, image, {onEngineFailure});
@@ -1140,7 +1397,7 @@ export async function run(context) {
     context.stdout(encode('BRIDGE ' + JSON.stringify({verdict: 'PASS', nativeCases: counts,
       instances: 2, interleavedSwitches: switches, operations: completions.length, requestDrain: announcements,
       notifications: first.notifications.length, requests: first.successes.length + first.failures.length,
-      io, repairs, cleanup, identities, collectedTargets, finalizerDrains: 2}) + '\n'));
+      io, repairs, cleanup, identities, materialization, collectedTargets, finalizerDrains: 2}) + '\n'));
   } finally {
     unwatchFirst?.(); unwatchSecond?.(); unwatchCompletions?.();
     await Promise.all([first, second].map(host => host.instance?.dispose().catch(() => {})));

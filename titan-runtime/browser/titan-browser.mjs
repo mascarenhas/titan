@@ -3,6 +3,10 @@ const stateMessage = 'browser instance is not initialized';
 const maximumOperationId = (1n << 64n) - 1n;
 const maximumApplicationOperationId = maximumOperationId - 1n; // Reserve the final id for intact-state close.
 const wrapperRecords = new WeakMap();
+const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+const typedArrayTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag).get;
+const typedArrayLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'length').get;
+const typedArraySet = typedArrayPrototype.set;
 // titan/browser.h's asserted wasm32 layout and discriminants.
 const valueSize = 32;
 const kind = Object.freeze({nil: 0, boolean: 1, integer: 2, float: 3,
@@ -25,8 +29,12 @@ function deferred() {
 }
 
 function copiedBytes(value) {
-  if (!(value instanceof Uint8Array)) throw new TypeError('browser bytes must be a Uint8Array');
-  return new Uint8Array(value);
+  // Call/notify snapshot before publication: native slots cannot reenter through
+  // a Proxy, iterator, accessor, constructor or species hook.
+  if (typedArrayTag.call(value) !== 'Uint8Array') throw new TypeError('browser bytes must be a Uint8Array');
+  const copy = new Uint8Array(typedArrayLength.call(value));
+  typedArraySet.call(copy, value);
+  return copy;
 }
 
 function messageBytes(cause) {
@@ -1114,11 +1122,18 @@ class BrowserOwner {
             args = [];
           } else if (count === 1) args = [value];
           else {
-            if (!Array.isArray(value) || value.length !== count ||
-                !Array.from({length: count}, (_, index) => Object.hasOwn(value, index)).every(Boolean)) {
+            if (!Array.isArray(value) || value.length !== count) {
               throw new TypeError('multiple-argument completion requires an exact dense array');
             }
-            args = value;
+            // Host indices may reenter or dispose. Materialize under the request
+            // owner before emitRequest checks liveness and publishes a notification.
+            args = [];
+            for (let index = 0; index < count; ++index) {
+              if (!Object.hasOwn(value, index)) {
+                throw new TypeError('multiple-argument completion requires an exact dense array');
+              }
+              args.push(value[index]);
+            }
           }
           this.emitRequest(request, args);
         } catch (cause) { this.emitRequest(request, [messageBytes(cause), cause], true); }
@@ -1323,6 +1338,10 @@ class BrowserOwner {
 
   dispose() {
     if (this.disposed) return this.disposed;
+    // Cancellation may synchronously call dispose again; publish its stable
+    // promise before signalling any host owner.
+    const disposal = deferred();
+    this.disposed = disposal.promise;
     this.closing = true;
     this.state = this.terminal ? 'poisoned' : 'disposing';
     const error = failure('DISPOSED', 'browser instance is disposed');
@@ -1336,7 +1355,7 @@ class BrowserOwner {
       catch (cause) { this.retirementFailure ||= failure('HOST', 'browser host cancellation failed', cause); }
     }
     // The final drain's continuation is module-scoped, not an instance method.
-    this.disposed = retireOwner(this).then(finishDisposal);
+    disposal.resolve(retireOwner(this).then(finishDisposal));
     return this.disposed;
   }
 }

@@ -50,6 +50,14 @@ retirement. Public loader admission additionally spans marshaling, every
 contained C entry, and output flush. A sink or import cannot admit another
 application operation between contained entries.
 
+Before publishing an operation, reverse-call argument validation reads only
+bridge-owned Arrays, frozen descriptors, primitive tags and WeakMap identities.
+Byte snapshots use captured TypedArray tag/length getters and `set`, not the
+input's prototype, iterator, accessors, constructor or species. This keeps
+`call` and `notify` snapshots synchronous without a host-code gap before
+publication. The existing operation owner publishes its active token and
+promise before its deferred action can invoke host code.
+
 | Export | Operation kind | Role |
 | --- | --- | --- |
 | `titan_browser_initialize(uint64_t)` | INITIALIZE1 | Protected bootstrap, once |
@@ -288,6 +296,15 @@ route to `onNotificationError`; that observer is for a handler which failed.
 Detachable mailbox and guaranteed-terminal retained ownership, cancellation,
 listener removal, late-settlement dropping, FIFO batching, and disposal all
 remain with the JS bridge owner. No C import awaits host work.
+
+Multiple success arguments are read from an exact dense host Array under the
+already-published request owner, then materialized as a bridge-owned Array
+before checking cancellation and target liveness for notification publication.
+Host length/index/property checks may reenter during materialization, but no
+host Array method, iterator or index getter runs between the notification's
+liveness check and queue insertion.
+Disposal publishes its stable promise before signalling host cancellation or
+listener removal, so reentrant disposal joins the same retirement.
 
 The SDK also declares completion-carrying `host_write` and `host_read`.
 Streams are STDOUT1 and STDERR2. A write with success slot0 is copied append
