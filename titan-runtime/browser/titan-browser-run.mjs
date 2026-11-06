@@ -371,12 +371,20 @@ class ChromiumEngine {
             cdp.send = text => child.stdio[3].write(text + "\0");
         } else {
             let endpoint;
+            let malformedSince;
             while (!this.closing && !this.monitor.failure) {
                 try {
-                    const lines = (await readFile(join(this.profile, "DevToolsActivePort"), "utf8")).trim().split("\n");
-                    if (!/^\d+$/.test(lines[0]) || !lines[1]?.startsWith("/devtools/browser/")) throw new Error("invalid DevToolsActivePort");
-                    endpoint = `ws://127.0.0.1:${lines[0]}${lines[1]}`;
-                    break;
+                    const text = await readFile(join(this.profile, "DevToolsActivePort"), "utf8");
+                    const [port, websocketPath] = text.trim().split("\n");
+                    if (/^\d+$/.test(port) && websocketPath?.startsWith("/devtools/browser/")) {
+                        endpoint = `ws://127.0.0.1:${port}${websocketPath}`;
+                        break;
+                    }
+                    // Chromium creates the file before writing its endpoint.
+                    malformedSince ??= performance.now();
+                    if (performance.now() - malformedSince > 1000) {
+                        throw new Error(`invalid DevToolsActivePort: ${JSON.stringify(text)}`);
+                    }
                 } catch (error) { if (error.code !== "ENOENT") throw error; }
                 await delay(20);
             }
