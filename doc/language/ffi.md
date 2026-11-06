@@ -699,6 +699,10 @@ string's internal immutable byte buffer. No copy is made. The public conversion
 contract anchors the pointer only for the call; ordinary application code must
 not let C store, mutate, free, or reallocate it. Make a native copy or give the
 operation explicit native-owned storage when bytes must outlive the call.
+Literal arguments may use static C string storage instead. Their addresses are
+unspecified and need not equal those of same-content Titan strings; the contract
+is the bytes borrowed for the call, not pointer identity. A literal format such
+as `ffi.printf("ready\n")` remains a C literal for native format-warning checks.
 
 A few trusted standard-library bindings use a narrower reviewed native contract
 that is not inferred from this conversion: an API is known to borrow immutable,

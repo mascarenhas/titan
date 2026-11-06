@@ -235,6 +235,25 @@ function mutable_out_anchor(ctx, exp, target)
     return setslot(source._type, decl._slot, decl._cvar)
 end
 
+-- A literal has no evaluation effects. Preserve its byte spelling through
+-- pointer casts, but never peel a conversion that constructs a Titan string.
+function foreign_string_literal(node)
+    if node._tag == "Ast.ExpString" then
+        return c_string_literal(node.value)
+    elseif node._tag == "Ast.ExpCast" then
+        local target = types.resolve_c_typedef(node._type)
+        local source = types.resolve_c_typedef(node.exp._type)
+        if target._tag == "Type.CPointer"
+            or (target._tag == "Type.String" and source._tag == "Type.String") then
+            local literal = foreign_string_literal(node.exp)
+            if literal then
+                return target._tag == "Type.CPointer"
+                    and foreigncast(literal, node._type) or literal
+            end
+        end
+    end
+end
+
 function nativetoforeignexp(ctx, exp, cexp, target, projection)
     local stype = coder._resolve_cast_type(exp._type)
     local ttype = target and coder._resolve_cast_type(target) or nil
@@ -605,6 +624,14 @@ function coder._append_c_mutation_spills(node, poststats)
     end
 end
 
+local function code_frozen_foreign_arg(ctx, node, target)
+    local literal = foreign_string_literal(node)
+    if literal then return "", literal end
+    local stats, exp = codeforeignexp(ctx, node, target)
+    local declaration, name = newforeigntmp(ctx, target)
+    return table.concat({ stats, declaration, name .. " = " .. exp .. ";" }, "\n"), name
+end
+
 -- Lower one finite positional strict-C argument list in lexical order, but
 -- publish only the checker-selected fixed projections to the ABI. A spread
 -- carrier is setup/effect-only and therefore cannot occupy a C formal slot.
@@ -624,12 +651,9 @@ local function code_adjusted_foreign_args(
         local i = fixed_index[exp]
         if i then
             local target = assert(cfunc.params[i])
-            local cstat, cexp = codeforeignexp(ctx, exp, target)
-            local cdecl, cname = newforeigntmp(ctx, target)
+            local cstat, cexp = code_frozen_foreign_arg(ctx, exp, target)
             table.insert(castats, cstat)
-            table.insert(castats, cdecl)
-            table.insert(castats, cname .. " = " .. cexp .. ";")
-            anames[i] = cname
+            anames[i] = cexp
         else
             assert(discard_set[exp] or exp._discard_results,
                 "adjusted C argument is neither fixed nor effect-only")
@@ -684,12 +708,9 @@ function codeforeigncall(ctx, node)
             seen[index] = true
             local arg = node.args.args[index]
             local target = ftype.params[index]
-            local cstat, cexp = codeforeignexp(ctx, arg, target)
-            local cdecl, cname = newforeigntmp(ctx, target)
+            local cstat, cexp = code_frozen_foreign_arg(ctx, arg, target)
             table.insert(castats, cstat)
-            table.insert(castats, cdecl)
-            table.insert(castats, cname .. " = " .. cexp .. ";")
-            actuals[index] = cname
+            actuals[index] = cexp
             postbyindex[index] = mutable_out_anchor(ctx, arg, target)
         end
         for _, index in ipairs(node._named_arg_order) do

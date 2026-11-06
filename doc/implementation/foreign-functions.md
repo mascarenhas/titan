@@ -234,13 +234,16 @@ the `static inline` direct-call helper described in
 C does not specify the evaluation order of operands or call arguments, whereas
 Titan does. `_foreign_freeze` is the sequencing primitive: it emits an exact
 C declarator, evaluates the source once, applies the checker-selected target
-cast when needed, and assigns the result to a fresh temporary. The raw lowering
-uses it systematically:
+cast when needed, and assigns the result to a fresh temporary. A string literal
+needs no temporary because its evaluation has no effects. The raw lowering uses
+this primitive systematically:
 
-* unary and binary operands are frozen left to right before the C operator;
-* a call's callee is evaluated once, positional arguments are frozen in source
-  order, and named arguments are frozen in written order before their temporary
-  names are assembled in formal order;
+* nonliteral unary and binary operands are frozen left to right before the C operator;
+* a call's callee is evaluated once; nonliteral positional arguments are frozen
+  in source order, and nonliteral named arguments in written order before the
+  values are assembled in formal order. String literals stay inline through
+  pointer casts, using the ordinary C-literal byte escaping without introducing
+  evaluation effects;
 * a non-void C result is assigned to its own result temporary;
 * declaration targets are declared first, initializers are frozen left to
   right, and only then are the declared locals assigned;
