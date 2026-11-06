@@ -34,13 +34,14 @@ async function until(context, predicate, message) {
   context.assert(false, message);
 }
 
-async function collected(context, references, phase) {
+// Preparation must return before collection: a suspended frame can conservatively
+// retain a target it used earlier even after its visible local has been cleared.
+async function collected(context, references, phase, kinds = ['Module', 'ArrayBuffer', 'instance']) {
   for (let attempt = 0; attempt < 40; attempt++) {
     await context.tick(); await context.gc(); await context.tick();
     if (references.every(reference => reference.deref() === undefined)) return;
   }
   // weakTargets() returns Module then its heap buffer; finalizerDrain appends the facade.
-  const kinds = ['Module', 'ArrayBuffer', 'instance'];
   const survivors = references.flatMap((reference, index) => reference.deref() === undefined ? [] :
     [{kind: kinds[index], identity: `${phase}/target-${index}`}]);
   context.assert(false, `${phase}: ${survivors.length} native/instance targets survived acknowledged GC; targets=${JSON.stringify(survivors)}`);
@@ -451,6 +452,13 @@ async function notifications(context, host, completions) {
     host.notificationErrors.at(-1).error.code === 'TITAN_BROWSER_HANDLE',
     'released queued argument entered Lua or was not reported');
 
+  const references = await prepareNotificationCollection(context, host);
+  await collected(context, references, 'notifications(opaque argument)', ['Object']);
+  host.hooks.requestDrain = undefined;
+  return announcements;
+}
+
+async function prepareNotificationCollection(context, host) {
   let opaque = {queue: 'retire without delivery'};
   const reference = new WeakRef(opaque);
   const handleTarget = host.callbacks.get('handle_echo');
@@ -460,9 +468,7 @@ async function notifications(context, host, completions) {
   context.assert(host.controls.snapshot().slots === slots, 'raw JS notification input eagerly allocated a table slot');
   handleTarget.release();
   await host.instance.drain();
-  await collected(context, [reference], 'notifications(opaque argument)');
-  host.hooks.requestDrain = undefined;
-  return announcements;
+  return [reference];
 }
 
 async function requests(context, host) {
@@ -644,7 +650,7 @@ async function stdio(context, host) {
   return {writes: host.ioDone - beforeDone, maximumInflight: maximum, reads: host.ioReads.length};
 }
 
-async function retainedDisposal(context, host) {
+async function prepareRetainedDisposal(context, host) {
   await host.call('close_detached');
   const request = gate(), input = gate();
   let cancellations = 0;
@@ -673,11 +679,16 @@ async function retainedDisposal(context, host) {
   context.assert(host.controls.snapshot().units === 0 && host.controls.snapshot().requests === 0,
     'retained disposal leaked state-owned units');
   host.releaseObservations();
+  return references;
+}
+
+async function retainedDisposal(context, host) {
+  const references = await prepareRetainedDisposal(context, host);
   await collected(context, references, 'retainedDisposal');
   return references.length;
 }
 
-async function detachableDisposal(context, host) {
+async function prepareDetachableDisposal(context, host) {
   const input = gate();
   host.input.push({kind: 'detachable', promise: input.promise});
   await host.call('sdk_read', 16n);
@@ -702,38 +713,49 @@ async function detachableDisposal(context, host) {
   context.assert(host.successes.length === successes && host.ioReads.length === reads && host.unregisters === 2,
     'disposed listener/stdin admitted late application work');
   host.releaseObservations();
-  await collected(context, references, 'detachableDisposal');
-  context.assert(retainedPromise instanceof Promise && opaquePromise instanceof Promise && emitters.length === 2,
-    'collection test did not keep external never-settling work/opaque Promise/listener continuations alive');
-  return references.length;
+  return {references, retainedPromise, opaquePromise, emitters};
 }
 
-async function interruptedSink(context, image) {
+async function detachableDisposal(context, host) {
+  const prepared = await prepareDetachableDisposal(context, host);
+  await collected(context, prepared.references, 'detachableDisposal');
+  context.assert(prepared.retainedPromise instanceof Promise && prepared.opaquePromise instanceof Promise &&
+    prepared.emitters.length === 2,
+    'collection test did not keep external never-settling work/opaque Promise/listener continuations alive');
+  return prepared.references.length;
+}
+
+async function prepareInterruptedSink(context, image) {
   const host = createHost(context, image);
   await host.instance.initialize();
   await nativeRun(context, host);
   await host.call('close_detached');
   const output = gate();
-  let calls = 0;
-  host.sinks.stdout = () => { calls++; return output.promise; };
+  const observation = {calls: 0};
+  host.sinks.stdout = () => { observation.calls++; return output.promise; };
   const interrupted = rejected(context, host.call('sdk_write', binary()), 'DISPOSED');
-  await until(context, () => calls === 1, 'pending output sink was not entered');
+  await until(context, () => observation.calls === 1, 'pending output sink was not entered');
   const references = host.controls.weakTargets();
   let disposal = host.instance.dispose();
   await interrupted;
   await rejected(context, disposal, 'DISPOSED');
-  context.assert(calls === 1 && host.closes.length === 2 && host.ioDone === 0 && host.ioFailures.length === 0,
+  context.assert(observation.calls === 1 && host.closes.length === 2 && host.ioDone === 0 && host.ioFailures.length === 0,
     'pending-sink disposal overlapped finalizer output or delivered application completion');
   disposal = undefined; // Its completed Error observation is not the pending sink under test.
   host.releaseObservations();
-  await collected(context, references, 'interruptedSink');
-  output.resolve();
-  await context.tick();
-  context.assert(calls === 1, 'late sink settlement revived its terminal stream');
-  return references.length;
+  return {references, output, observation};
 }
 
-async function finalizerDrain(context, image, fail) {
+async function interruptedSink(context, image) {
+  const prepared = await prepareInterruptedSink(context, image);
+  await collected(context, prepared.references, 'interruptedSink');
+  prepared.output.resolve();
+  await context.tick();
+  context.assert(prepared.observation.calls === 1, 'late sink settlement revived its terminal stream');
+  return prepared.references.length;
+}
+
+async function prepareFinalizerDrain(context, image) {
   const host = createHost(context, image);
   await host.instance.initialize(); // Its real initializer coroutine must unwind even without main.
   const output = gate();
@@ -749,15 +771,21 @@ async function finalizerDrain(context, image, fail) {
     instance.trace.reason === trace.reason, 'owner-free drain discarded its final trace snapshot');
   host.releaseObservations();
   instance = undefined;
-  await collected(context, references, `finalizerDrain(${fail ? 'reject' : 'resolve'})`); // The unresolved disposal promise remains held above.
+  return {host, output, references, disposal};
+}
+
+async function finalizerDrain(context, image, fail) {
+  const prepared = await prepareFinalizerDrain(context, image);
+  // Keep the unresolved disposal and host sink promises, but not their preparation frame.
+  await collected(context, prepared.references, `finalizerDrain(${fail ? 'reject' : 'resolve'})`);
   const cause = new Error('finalizer sink rejection');
   if (fail) {
-    output.reject(cause);
-    const error = await captureRejection(context, disposal, 'SINK');
+    prepared.output.reject(cause);
+    const error = await captureRejection(context, prepared.disposal, 'SINK');
     context.assert(error.cause === cause, 'owner-free disposal drain replaced its eventual sink failure');
-  } else { output.resolve(); await disposal; }
-  context.equalBytes(join(host.stdout), encode('bridge-finalizer\n'));
-  return references.length;
+  } else { prepared.output.resolve(); await prepared.disposal; }
+  context.equalBytes(join(prepared.host.stdout), encode('bridge-finalizer\n'));
+  return prepared.references.length;
 }
 
 async function cleanupFailures(context, image) {
@@ -1000,54 +1028,59 @@ async function operationIdentities(context, image) {
   }
 }
 
+async function prepareImportDisposal(context, image, ownership) {
+  const host = createHost(context, image);
+  let disposal, marker, signals = 0, late;
+  const terminal = gate(), cancelFailure = new Error('late classified cancellation failed');
+  try {
+    await host.instance.initialize();
+    await nativeRun(context, host);
+    await host.call('close_detached');
+    const references = host.controls.weakTargets();
+    if (ownership === 'retained') {
+      host.bindings.dispose_request = () => {
+        disposal = host.instance.dispose(); marker = watch(disposal);
+        return {kind: 'retained', promise: terminal.promise,
+          cancel() { signals++; throw cancelFailure; }};
+      };
+      await rejected(context, host.call('start_request', encode('dispose_request')), 'DISPOSED');
+      await context.tick();
+      context.assert(!marker.settled && host.closes.length === 0 && signals === 1 &&
+        host.controls.snapshot().requests === 1, 'throwing cancellation retired a live retained operation');
+      terminal.resolve([88n, binary()]);
+      let error = await captureRejection(context, disposal, 'HOST');
+      context.assert(error.cause === cancelFailure, 'late cancellation error was lost by disposal');
+      error = undefined;
+    } else {
+      host.bindings.listener = () => ({kind: 'listener', subscribe(emit) {
+        late = emit;
+        disposal = host.instance.dispose(); marker = watch(disposal);
+        emit(87n, binary());
+        return () => { signals++; emit(86n, binary()); };
+      }});
+      await rejected(context, host.call('start_listener'), 'DISPOSED');
+      await disposal;
+      late(85n, binary());
+    }
+    await context.tick();
+    context.assert(signals === 1 && host.successes.length === 0 && host.failures.length === 0 &&
+      host.closes.length === 2 && host.controls.snapshot().requests === 0 &&
+      host.controls.snapshot().units === 0, 'import disposal skipped unregister/terminal retirement or delivered application work');
+    disposal = undefined; // Outcome assertions are complete; retain only the intended host work.
+    host.releaseObservations();
+    return {references, terminal, late};
+  } finally {
+    await host.instance?.dispose().catch(() => {});
+    host.releaseObservations();
+  }
+}
+
 async function disposalFromImport(context, image) {
   let targets = 0;
   for (const ownership of ['retained', 'listener']) {
-    const host = createHost(context, image);
-    let disposal, marker, signals = 0, late;
-    const terminal = gate(), cancelFailure = new Error('late classified cancellation failed');
-    try {
-      await host.instance.initialize();
-      await nativeRun(context, host);
-      await host.call('close_detached');
-      const references = host.controls.weakTargets();
-      if (ownership === 'retained') {
-        host.bindings.dispose_request = () => {
-          disposal = host.instance.dispose(); marker = watch(disposal);
-          return {kind: 'retained', promise: terminal.promise,
-            cancel() { signals++; throw cancelFailure; }};
-        };
-        await rejected(context, host.call('start_request', encode('dispose_request')), 'DISPOSED');
-        await context.tick();
-        context.assert(!marker.settled && host.closes.length === 0 && signals === 1 &&
-          host.controls.snapshot().requests === 1, 'throwing cancellation retired a live retained operation');
-        terminal.resolve([88n, binary()]);
-        let error = await captureRejection(context, disposal, 'HOST');
-        context.assert(error.cause === cancelFailure, 'late cancellation error was lost by disposal');
-        error = undefined;
-      } else {
-        host.bindings.listener = () => ({kind: 'listener', subscribe(emit) {
-          late = emit;
-          disposal = host.instance.dispose(); marker = watch(disposal);
-          emit(87n, binary());
-          return () => { signals++; emit(86n, binary()); };
-        }});
-        await rejected(context, host.call('start_listener'), 'DISPOSED');
-        await disposal;
-        late(85n, binary());
-      }
-      await context.tick();
-      context.assert(signals === 1 && host.successes.length === 0 && host.failures.length === 0 &&
-        host.closes.length === 2 && host.controls.snapshot().requests === 0 &&
-        host.controls.snapshot().units === 0, 'import disposal skipped unregister/terminal retirement or delivered application work');
-      disposal = undefined; // Outcome assertions are complete; retain only the intended host work.
-      host.releaseObservations();
-      await collected(context, references, `disposalFromImport(${ownership})`);
-      targets += references.length;
-    } finally {
-      await host.instance?.dispose().catch(() => {});
-      host.releaseObservations();
-    }
+    const prepared = await prepareImportDisposal(context, image, ownership);
+    await collected(context, prepared.references, `disposalFromImport(${ownership})`);
+    targets += prepared.references.length;
   }
   return targets;
 }

@@ -315,3 +315,10 @@ state/argument revalidation, notification batches, disposal, sinks, requests,
 and WeakRef ownership with real linked images. Test-only C instrumentation
 may hand explicit frozen controls to a supplied fixture binding; the generated
 application API never exposes the raw Emscripten Module or factory.
+
+Each collection case prepares and releases its targets in a helper frame that
+returns before the driver performs at most forty acknowledged-GC checks. The waiting
+frame keeps the WeakRefs and the deliberately retained host promises or listener
+continuations, not locals that formerly held the targets. This keeps a suspended
+fixture frame from conservatively retaining an otherwise retired object. The
+target set and collection oracle are the same on every engine.
