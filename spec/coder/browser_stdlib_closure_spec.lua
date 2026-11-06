@@ -91,7 +91,7 @@ describe("browser stdlib real-toolchain closure", function()
         assert.truthy(empty.output:find("selected no cases", 1, true), empty.output)
     end)
 
-    it("rejects a certified injected libuv header, an archive payload and an internal image symbol", function()
+    it("rejects a certified injected libuv header, an archive payload and an authored-C output symbol", function()
         local info, why = toolchain.require({ node = true, sdk = true })
         if not info then pending(why); return end
         workspace = temporary.name("-browser-stdlib-closure")
@@ -118,7 +118,7 @@ end
         assert.truthy(err:find("uv.h", 1, true), err)
         assert.truthy(err:find("forbidden browser stdlib dependency", 1, true), err)
 
-        write("raw.c", "__attribute__((noinline)) int uv_closure_intruder(void) { return 0; }\n")
+        write("raw.c", "int uv_closure_intruder(void) { return 0; }\n")
         write("raw.h", "int uv_closure_intruder(void);\n")
         run({ info.tools.cc[1], "-c", workspace .. "/raw.c", "-o", workspace .. "/raw.o" })
         run({ info.tools.ar[1], "rcs", workspace .. "/libuv.a", workspace .. "/raw.o" })
@@ -140,7 +140,7 @@ end
         run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser", "--incremental",
             "--tree", workspace, "--output", workspace .. "/image-out", "--exe", workspace .. "/image-out/intruder.mjs",
             "--c-source", workspace .. "/raw.c", "image_intruder" })
-        ok, err = checks.check_image(assert(strategy:read_file(workspace .. "/image-out/intruder.wasm")), "intruder.wasm")
+        ok, err = checks.check_output(strategy, workspace .. "/image-out")
         assert.is_nil(ok)
         assert.truthy(err:find("uv_closure_intruder", 1, true), err)
 
