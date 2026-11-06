@@ -756,8 +756,9 @@ semantic certificate. Raised non-string values retain their identity after all
 scratch-removal attempts, with the original exceptional outcome taking
 precedence over cleanup noise. A caught native batch signal is retained on the
 resolver context and raised as a non-string value, so certification cannot
-demote cancellation to a miss. `driver.close_resolver_context` redelivers it
-under the restored signal action after closing the header and probe owners.
+demote cancellation to a miss. A later successful batch does not clear that
+pending signal. `driver.close_resolver_context` redelivers it under the restored
+signal action after closing the header and probe owners.
 
 Certificates retain the roots at object creation. A separate materialization
 receipt records the roots used for the generated companions and is bound to

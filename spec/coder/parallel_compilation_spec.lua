@@ -556,6 +556,41 @@ describe("parallel generated-C compilation", function()
         assert.equal(1, delivered)
     end)
 
+    it("does not clear a pending preprocessing signal after a successful batch", function()
+        local context, temporaries = semantic_context(2)
+        local signal = {}
+        local batches = 0
+        function context.io:run_batch(commands)
+            batches = batches + 1
+            if batches == 1 then return {}, signal end
+            local results = {}
+            for index, argv in ipairs(commands) do
+                assert(self:write_file(argv[#argv], "int expanded;\n"))
+                results[index] = { ok = true }
+            end
+            return results
+        end
+        local inputs = {
+            { filename = source_root .. "/batch/one.c", contents = "int one;\n" },
+            { filename = source_root .. "/batch/two.c", contents = "int two;\n" },
+        }
+        local called, err = pcall(incremental.preprocessed_identities, context, inputs)
+        assert.is_false(called)
+        assert.equal(signal, err)
+        assert.equal(2, #assert(incremental.preprocessed_identities(context, inputs)))
+        assert.equal(signal, context.generated_c_cancelled_signal)
+        assert_retired(temporaries)
+        local propagate, delivered = jobs.propagate, {}
+        finally(function() jobs.propagate = propagate end)
+        jobs.propagate = function(value)
+            if value then delivered[#delivered + 1] = value end
+        end
+        assert(driver.close_resolver_context(context))
+        assert(driver.close_resolver_context(context))
+        assert.same({ signal }, delivered)
+        assert.equal(signal, delivered[1])
+    end)
+
     it("rejects ordinary scratch cleanup failure after successful preprocessing", function()
         local context, temporaries = semantic_context(1)
         local unlink = context.io.unlink

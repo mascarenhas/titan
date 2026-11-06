@@ -481,9 +481,11 @@ function incremental.preprocessed_identities(context, inputs)
         local cap = context.jobs or 1
         if #commands > 1 and cap > 1 and type(context.io.run_batch) == "function"
             and (context.io.run_batch ~= default_io.run_batch or context.io.run == default_io.run) then
-            results, context.generated_c_cancelled_signal = context.io:run_batch(commands, { jobs = cap })
-            if context.generated_c_cancelled_signal then
-                error(context.generated_c_cancelled_signal, 0)
+            local signal
+            results, signal = context.io:run_batch(commands, { jobs = cap })
+            if signal then
+                context.generated_c_cancelled_signal = signal
+                error(signal, 0)
             end
         else
             results = {}
