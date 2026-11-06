@@ -39,7 +39,11 @@ async function collected(context, references, phase) {
     await context.tick(); await context.gc(); await context.tick();
     if (references.every(reference => reference.deref() === undefined)) return;
   }
-  context.assert(false, `${phase}: ${references.filter(reference => reference.deref()).length} native/instance targets survived acknowledged GC`);
+  // weakTargets() returns Module then its heap buffer; finalizerDrain appends the facade.
+  const kinds = ['Module', 'ArrayBuffer', 'instance'];
+  const survivors = references.flatMap((reference, index) => reference.deref() === undefined ? [] :
+    [{kind: kinds[index], identity: `${phase}/target-${index}`}]);
+  context.assert(false, `${phase}: ${survivors.length} native/instance targets survived acknowledged GC; targets=${JSON.stringify(survivors)}`);
 }
 
 function createHost(context, image, extra = {}) {
