@@ -576,6 +576,7 @@ test("port discovery retries partial files and bounds malformed content", { skip
         try {
             const chrome = join(directory, "chrome");
             const connected = join(directory, "connected");
+            const retired = join(directory, "retired");
             await writeFile(chrome, `#!${process.execPath}
                 const {writeFileSync} = require("node:fs");
                 const {join} = require("node:path");
@@ -585,6 +586,12 @@ test("port discovery retries partial files and bounds malformed content", { skip
                 } else {
                     const profile = process.argv.find(arg => arg.startsWith("--user-data-dir=")).slice(16);
                     const path = join(profile, "DevToolsActivePort");
+                    let publishedAt;
+                    process.on("SIGTERM", () => {
+                        if (publishedAt !== undefined) writeFileSync(${JSON.stringify(retired)},
+                            String(performance.now() - publishedAt));
+                        process.exit(0);
+                    });
                     const server = net.createServer(socket => {
                         writeFileSync(${JSON.stringify(connected)}, "connected");
                         socket.destroy();
@@ -592,15 +599,17 @@ test("port discovery retries partial files and bounds malformed content", { skip
                     server.listen(0, "127.0.0.1", () => {
                         const port = server.address().port;
                         const initial = ${JSON.stringify(initial)};
-                        if (initial !== "missing") writeFileSync(path,
-                            initial === "garbage" ? "nonsense\\n" : initial === "port" ? port + "\\n" : "");
+                        if (initial !== "missing") {
+                            publishedAt = performance.now();
+                            writeFileSync(path,
+                                initial === "garbage" ? "nonsense\\n" : initial === "port" ? port + "\\n" : "");
+                        }
                         if (initial === "empty" || initial === "port") setTimeout(() => {
                             writeFileSync(path, port + "\\n/devtools/browser/ready\\n");
                         }, 60);
                     });
                 }
             `, {mode: 0o755});
-            const before = performance.now();
             const result = await run(["--engine", "chromium", "--chrome", chrome, "--cdp", "port",
                 "--timeout", initial === "missing" ? "500" : "4000", "--grace", "0",
                 "--root", root, "--js-test", fixture]);
@@ -612,7 +621,8 @@ test("port discovery retries partial files and bounds malformed content", { skip
                 assert.doesNotMatch(stderr, /invalid DevToolsActivePort/);
             } else if (initial === "garbage") {
                 assert.ok(stderr.includes('invalid DevToolsActivePort: "nonsense\\n"'), stderr);
-                assert.ok(performance.now() - before >= 1000, "malformed file was not retried");
+                assert.ok(Number(await readFile(retired, "utf8")) >= 1000,
+                    "malformed file was not retried before Chromium cleanup began");
                 assert.doesNotMatch(stderr, /timed out after/);
             } else {
                 assert.match(stderr, /timed out after 500 ms/);
