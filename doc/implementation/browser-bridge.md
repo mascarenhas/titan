@@ -306,6 +306,11 @@ liveness check and queue insertion.
 Disposal publishes its stable promise before signalling host cancellation or
 listener removal, so reentrant disposal joins the same retirement.
 
+Drain rechecks each detached entry's request cancellation before invoking it:
+cancellation can remove entries from the live queue, not the already-detached
+batch. A normally settled one-shot marks its request retired before delivery;
+retirement alone does not cancel that queued completion.
+
 The SDK also declares completion-carrying `host_write` and `host_read`.
 Streams are STDOUT1 and STDERR2. A write with success slot0 is copied append
 admission and remains usable during close. Otherwise write success has no

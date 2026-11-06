@@ -700,8 +700,10 @@ class BrowserOwner {
       try {
         for (const notification of batch) {
           if (this.closing) break;
-          const {record, args} = notification;
-          if (record.released || this.states.get(record.state) === 'closed') continue;
+          const {record, args, request} = notification;
+          // Cancellation filters the live queue, not this detached batch.
+          // Normally settled one-shots are retired too, but still deliver.
+          if (request?.cancelled || record.released || this.states.get(record.state) === 'closed') continue;
           try { await this.invoke(record, this.snapshotArguments(record, args)); }
           catch (cause) {
             if (this.terminal) throw this.terminal;

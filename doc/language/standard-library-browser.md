@@ -257,6 +257,9 @@ A listener binding returns
 `emit(...args)` calls enqueue; they do not enter Titan inline. Events remain
 ordered until the request is closed. Unregister is idempotent and stops new
 admission before captured owners retire.
+Cancelling or closing a listener from one of its callbacks also suppresses its
+remaining events in the current detached batch. A normally settled one-shot
+request still delivers its queued success or failure notification.
 
 The host explicitly calls `drain()` to deliver one detached FIFO batch.
 Imports which enqueue more work add it to the next batch. No implicit timer,

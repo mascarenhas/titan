@@ -819,6 +819,57 @@ async function requests(context, host) {
   await host.call('close_request');
 }
 
+async function listenerBatchCancellation(context, image) {
+  for (const close of [false, true]) {
+    const mode = close ? 'close' : 'cancel';
+    const engineFailures = [], host = createHost(context, image,
+      {onEngineFailure(event) { engineFailures.push(event); }});
+    try {
+      await host.instance.initialize();
+      await nativeRun(context, host);
+      await host.call('close_detached');
+
+      const settled = gate();
+      host.bindings.batch_once = formBinding({kind: 'detachable', promise: settled.promise});
+      await host.call('start_request', encode('batch_once'));
+      settled.resolve([29n, binary()]);
+      await context.tick();
+      context.assert(host.controls.snapshot().requests === 0 && host.successes.length === 0,
+        'one-shot control did not retire before its queued completion');
+      await host.instance.drain();
+      context.assert(host.successes.length === 1 && host.successes[0][0] === 29n,
+        'normally settled one-shot completion was dropped with its retired request');
+      context.equalBytes(host.successes[0][1], binary());
+      await host.call('close_request');
+
+      await host.call('stop_listener_on_success', close);
+      await host.call('start_listener'); // subscribe queues 31 before returning.
+      context.assert(host.listeners.size === 1, 'listener regression did not register one emitter');
+      const [emit] = host.listeners;
+      emit(32n, binary());
+      context.assert(host.successes.length === 1, 'queued listener events entered before drain');
+      await host.instance.drain();
+      context.assert(host.successes.length === 2 && host.successes[1][0] === 31n,
+        mode + ' from the first listener callback did not suppress the detached second event');
+      context.equalBytes(host.successes[1][1], binary());
+      context.assert(host.unregisters === 1 && host.listeners.size === 0 &&
+        host.controls.snapshot().requests === 0, mode + ' did not unregister and retire the listener once');
+      emit(33n, binary());
+      await context.tick(); await host.instance.drain();
+      context.assert(host.successes.length === 2 && host.unregisters === 1 &&
+        host.notificationErrors.length === 0 && engineFailures.length === 0,
+        mode + ' admitted a late event or reported a callback/engine failure');
+      await host.call('close_request');
+      context.assert((await host.call('valid_after_failure'))[0] === 42n,
+        mode + ' during drain left the instance unusable');
+    } finally {
+      await host.instance?.dispose().catch(() => {});
+      host.releaseObservations();
+    }
+  }
+  return {cancel: 1, close: 1, settledOneShots: 2};
+}
+
 async function stdio(context, host) {
   const cause = new Error('latched C-stdio append failure');
   host.sinks.stdout = () => { throw cause; };
@@ -1347,6 +1398,7 @@ export async function run(context) {
   context.assert(!Object.hasOwn(image, 'factory') && typeof image.create === 'function', 'raw factory escaped context.image');
   const materialization = {arguments: await argumentMaterialization(context, image),
     disposal: await disposalMaterialization(context, image)};
+  const listenerCancellation = await listenerBatchCancellation(context, image);
   const engineFailures = [];
   const onEngineFailure = failure => { engineFailures.push(failure); };
   const first = createHost(context, image, {onEngineFailure}), second = createHost(context, image, {onEngineFailure});
@@ -1397,7 +1449,7 @@ export async function run(context) {
     context.stdout(encode('BRIDGE ' + JSON.stringify({verdict: 'PASS', nativeCases: counts,
       instances: 2, interleavedSwitches: switches, operations: completions.length, requestDrain: announcements,
       notifications: first.notifications.length, requests: first.successes.length + first.failures.length,
-      io, repairs, cleanup, identities, materialization, collectedTargets, finalizerDrains: 2}) + '\n'));
+      io, repairs, cleanup, identities, materialization, listenerCancellation, collectedTargets, finalizerDrains: 2}) + '\n'));
   } finally {
     unwatchFirst?.(); unwatchSecond?.(); unwatchCompletions?.();
     await Promise.all([first, second].map(host => host.instance?.dispose().catch(() => {})));

@@ -332,10 +332,14 @@ end
 local pending: browser.Request?
 
 function test_export_requests_and_listeners(_: test.Context)
+  local stop_after_success: boolean?
   local completion = browser.callable(function(number: integer, bytes: string)
     local observer = browser.binding("request_success")
     defer observer:close()
     browser.call_void(observer, {browser.Argument.is_integer(number), browser.Argument.is_bytes(bytes)})
+    if stop_after_success ~= nil then
+      if stop_after_success then pending:close() else pending:cancel() end
+    end
   end)
   local failure = browser.callable(function(message: string, thrown: browser.JSHandle)
     defer thrown:close()
@@ -353,6 +357,7 @@ function test_export_requests_and_listeners(_: test.Context)
     defer target:close()
     pending = browser.listen(target, {}, completion, failure)
   end)
+  publish("stop_listener_on_success", function(should_close: boolean) stop_after_success = should_close end)
   publish("cancel_request", function() if pending ~= nil then pending:cancel() end end)
   publish("close_request", function() if pending ~= nil then pending:close() end end)
 end
