@@ -1276,7 +1276,7 @@ os.exit(result.ok and 0 or result.status or 1)
                     local clang = banner:lower():find("clang", 1, true) ~= nil
                     local backend = os.getenv("TITAN_COVERAGE_TEST_BACKEND") or
                         (clang and "llvm-gcov" or "gcc-gcov")
-                    local gcov = os.getenv("TITAN_COVERAGE_TEST_GCOV") or
+                    local gcov = os.getenv("TITAN_COVERAGE_TEST_GCOV") or os.getenv("GCOV") or
                         (clang and "llvm-cov gcov" or "gcov")
                     local prepared, reason = coverage.prepare({
                         CC = cc, EMIT_LINE_DIRECTIVES = true,
