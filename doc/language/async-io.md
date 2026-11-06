@@ -1245,12 +1245,12 @@ no cleanup shielding and does not hold back Task publication.
   `prepare_external_wait`, `wait_external` or `wait_external_cleanup` are
   withdrawn the same way: their `unregister` function runs inside a finalizer,
   so it must not yield.
-- The callbacks write `context` through a pointer that Titan does not track. If
-  the calling function keeps the context in automatic storage and a `defer` or
-  `catch` reads it after an error, declare a pointer local
-  (`local cell: foreign *T = storage`) and access the context only through it.
-  Recovery restores an aggregate read by value there to the bytes Titan last
-  wrote, discarding the callbacks' writes
+- A callback that later writes through a retained `context` pointer is not a
+  tracked synchronous out-argument. Keep the underlying storage and every
+  callback dependency alive through native completion; neither a borrowed
+  pointer nor caught-error recovery extends that lifetime or authorizes
+  asynchronous access after the block ends. Mutable out-arguments passed
+  directly to C or Titan calls retain the callee's writes after a raise
   ([C storage after a caught error](c-ffi-expressions.md#c-storage-after-a-caught-error)).
 
 #### Native retirement capabilities

@@ -14,8 +14,8 @@ export async function run(context) {
   };
 
   async function execute(image, args, selected, inspect = false, timer = null) {
-    let module;
-    let bridge;
+    let controls;
+    let completed = false;
     let output = "";
     const tickTimes = [];
     let frames = 0;
@@ -28,15 +28,9 @@ export async function run(context) {
         raf = requestAnimationFrame(frame);
       }
     }
-    const factory = async options => {
-      module = await image.factory({...options, titanBrowserAttach(state) {
-        bridge = state;
-        options.titanBrowserAttach(state);
-      }});
-      return module;
-    };
-    const instance = context.create(factory, {
+    const instance = image.create({
       locateFile: image.locateFile,
+      bindings: {__titanTest(value) { controls = value; }},
       stdout(chunk) { output += decoder.decode(chunk, {stream: true}); context.stdout(chunk); },
       stderr: context.stderr,
     });
@@ -47,12 +41,14 @@ export async function run(context) {
     let running;
     try {
       if (inspect) {
-        const snapshot = () => ({owner: bridge.owner, current: bridge.current,
-          contexts: bridge.contexts.size, blocked: bridge.blocked,
-          completionCount: bridge.completionCount, terminalFailure: String(bridge.terminalFailure)});
+        context.assert(controls, "native initializer omitted its test-owned observations");
+        const snapshot = () => {
+          const state = controls.snapshot();
+          return {...state, operationId: state.operationId.toString()};
+        };
         const beforeGuard = snapshot();
-        const admittedGuard = await module._titan_browser_gate_guarded();
-        emit({guardAdmission: String(admittedGuard), before: beforeGuard, after: snapshot()});
+        const admittedGuard = await controls.guarded();
+        emit({guardStatus: String(admittedGuard), before: beforeGuard, after: snapshot()});
         context.assert(admittedGuard === 1,
           "admitted guarded export did not execute its real nonlocal unwind: " + String(admittedGuard));
       }
@@ -62,12 +58,13 @@ export async function run(context) {
         await new Promise((resolve, reject) => setTimeout(async () => {
           try {
             context.assert(!settled, "entry completed instead of returning to JS with parked owners");
-            const observed = module._titan_browser_gate_observe() >>> 0;
+            const observed = controls.observe() >>> 0;
             context.assert((observed & 255) > 0, "no retained authored FFI frames at outer suspension");
             let directRejected = false;
-            try { await module._titan_browser_gate_guarded(); }
+            try { await controls.rawGuarded(); }
             catch (error) { directRejected = error.code === "TITAN_BROWSER_REENTRY"; }
-            context.assert(directRejected && bridge.owner && !bridge.safe(),
+            const snapshot = controls.snapshot();
+            context.assert(directRejected && snapshot.owner && !snapshot.safe,
               "direct export admitted a new entry between JSPI continuations");
             let wrapperRejected = false;
             try { await instance.run([]); }
@@ -76,7 +73,7 @@ export async function run(context) {
                 error.message === "browser instance is active; reentry is not allowed";
             }
             context.assert(wrapperRejected, "JS wrapper did not reject suspension reentry exactly");
-            context.assert((module._titan_browser_gate_observe() >>> 0) === observed,
+            context.assert((controls.observe() >>> 0) === observed,
               "guard refusal mutated the admitted run");
             emit({item: 1, hostReturnBeforeCompletion: true, parkedFFIFrames: observed & 255});
             emit({item: 8, wrapperRejected, rawResult: "rejected", observeCallable: true});
@@ -96,20 +93,21 @@ export async function run(context) {
         nativeCases += selected;
       }
       for (const match of output.matchAll(/GATE item=(\d+)/g)) provenItems.add(Number(match[1]));
-      if (inspect) {
-        const observed = module._titan_browser_gate_observe() >>> 0;
+      completed = true;
+      return {elapsed, started: before, finished, tickTimes, frames, output};
+    } finally {
+      clearInterval(interval);
+      if (raf !== undefined) cancelAnimationFrame(raf);
+      await instance.dispose();
+      if (inspect && completed) {
+        const observed = controls.observe() >>> 0;
         context.assert((observed & 255) === 0, "authored FFI frames did not retire");
         context.assert(((observed >>> 8) & 63) === 63, "lua_close omitted a retained nested defer");
         context.assert((observed & (1 << 14)) === 0, "lua_close repeated a defer or entered abandoned continuation/catch");
         context.assert((observed >>> 16) === 2578, "gate did not perform exactly 2578 real waits");
         emit({item: 9, closeMask: (observed >>> 8) & 63, duplicateOrContinuation: 0, waits: observed >>> 16});
       }
-      return {elapsed, started: before, finished, tickTimes, frames, output};
-    } finally {
-      clearInterval(interval);
-      if (raf !== undefined) cancelAnimationFrame(raf);
-      await instance.dispose();
-      module = bridge = undefined;
+      controls = undefined;
     }
   }
 
@@ -122,8 +120,8 @@ export async function run(context) {
     await context.tick();
     await context.gc();
   }
-  emit({repeatedInstantiation, factoryIdentityStable: gateImage.factory === (await context.image(gatePath)).factory});
-  context.assert(gateImage.factory === (await context.image(gatePath)).factory, "image factory was not cached");
+  emit({repeatedInstantiation, creatorIdentityStable: gateImage.create === (await context.image(gatePath)).create});
+  context.assert(gateImage.create === (await context.image(gatePath)).create, "image creator was not cached");
 
   await execute(gateImage, ["--filter=^entry_gate%.test_0[1-9]_"], 9, true);
 
@@ -148,13 +146,13 @@ export async function run(context) {
   await execute(gateImage, ["--filter=^entry_gate%.test_negative_coroutine_"], 1);
 
   for (const [args, status] of [[[], 0], [["nonzero"], 7], [["two"], 2]]) {
-    const instance = context.create(finalImage.factory, {locateFile: finalImage.locateFile,
+    const instance = finalImage.create({locateFile: finalImage.locateFile,
       stdout: context.stdout, stderr: context.stderr});
     try {
       const result = await instance.run(args);
       context.assert(result.kind === "returned" && result.status === status && result.bytes.length === 0,
         "final coroutine transfer lost Titan completion status");
-      emit({item: 6, finalAction: "coroutine_transfer", completionStatus: result.status, ccallResultAsserted: false});
+      emit({item: 6, finalAction: "coroutine_transfer", completionStatus: result.status, exportResultAsserted: false});
     } finally { await instance.dispose(); }
   }
   emit({verdict: "PASS", items: provenItems.size, nativeCases, waitForms: ["emscripten_sleep", "EM_ASYNC_JS/setTimeout"]});

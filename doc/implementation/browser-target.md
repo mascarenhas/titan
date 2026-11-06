@@ -3,13 +3,14 @@
 `titanc --target browser` compiles Titan modules and authored C to
 relocatable WebAssembly objects with Emscripten, publishes library-mode
 providers as self-describing Wasm archives, and links programs and tests into
-an ES-module factory (`.mjs`), its WebAssembly binary (`.wasm`), and its
-extended source map (`.wasm.map`). A web page or application loads the image
-through a Titan-owned loader, and tests and command-line workflows run it
-under Node 26+, headless Chromium (`titan-browser-run`), and Playwright
-Chromium, Firefox, and WebKit. The user contract is in the [browser-target
-chapter](../language/browser-target.md) of
-the language manual.
+a self-contained ES module (`.mjs`), its WebAssembly binary (`.wasm`), and its
+extended source map (`.wasm.map`). The module embeds Titan's loader and
+exports one default `create(options)` function, which web pages and
+applications import directly. Tests and command-line workflows run the same
+images under Node 26+, headless Chromium (`titan-browser-run`), and
+Playwright Chromium, Firefox, and WebKit. The user contract is in the
+[browser-target chapter](../language/browser-target.md) of the language
+manual.
 
 The implementation is spread over:
 
@@ -20,15 +21,17 @@ The implementation is spread over:
 * `titan-compiler/browserlink.lua`, which owns the SDK asset layout
   (`sdk_assets`), the SDK readiness check (`require_sdk`), the link profile
   (`profile`), the owned-option check for user link extras
-  (`validate_extras`), and the final-image import/export reader
-  (`image_inventory`);
+  (`validate_extras`), the final-image byte bound and import/export reader
+  (`check_image_size`, `image_inventory`), and the loader embedding transform
+  (`embed`);
 * `titan-compiler/browsertrace.lua`, which computes the content-derived image
   identity before entrypoint compilation, reads the final `.wasm` function
   imports, code-section body ranges, and `name` section with the bounded Wasm
   reader, validates the standard v3 `.wasm.map`, and rewrites it with Titan's
   `x_titan_*` trace extensions;
-* `titan-compiler/browserentry.lua`, the protected entry, reporting,
-  Lua-close, and libc-drain wrapper that every browser image shares;
+* `titan-compiler/browserentry.lua`, the generated initialize, main, and close
+  exports that bind each image's workers to the shared protected bridge
+  runtime;
 * `titan-compiler/driver.lua`, which owns `installed_paths(root, target)`,
   context initialization and activation, the semantic-cache generation, the
   probe-cache and output-root isolation, worker transport, browser provider
@@ -48,12 +51,16 @@ The implementation is spread over:
   host-only paths compile out under `TITAN_TARGET_BROWSER`, and the runtime
   headers `titan.h`, `titan/ffi.h`, and `transfer.h`, which carry a `__wasm__`
   include branch;
+* the browser-only bridge runtime `titan-runtime/browser/titan-browser.c`, its
+  installed contract `titan/browser.h`, and the browser-only module
+  `titan/browser.browser.titan` ([browser bridge runtime](browser-bridge.md));
 * `titan-runtime/browser/`: the private C/JS trace adapter header
   `titan-browser-trace.h`, the Emscripten JavaScript libraries
-  `titan-browser-library.js` and `titan-browser-trace.js`, the loader
-  `titan-browser.mjs`, and the runner `titan-browser-run` with
-  `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, and
-  `titan-browser-page.mjs`; and
+  `titan-browser-library.js`, `titan-browser-bridge.js`, and
+  `titan-browser-trace.js`, the loader source `titan-browser.mjs` that
+  `browserlink.embed` places in every image, and the runner
+  `titan-browser-run` with `titan-browser-run.mjs`,
+  `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`; and
 * the Make targets `lua-browser` (`scripts/lua_browser.sh`), `browser-sdk`
   (`scripts/browser_sdk.lua`), and `titan-stdlib-browser-test`, with the
   build-owned [standard-library checks](#the-browser-standard-library) in
@@ -248,31 +255,32 @@ prefix`.
 
 | Key | File | Contents |
 | --- | --- | --- |
-| `runtime` | `libtitan.a` (`paths.libtitan`) | `titan.o`, `minicoro.o`, `titan_path.o`, `ltitanlib.o`, compiled for the browser |
+| `runtime` | `libtitan.a` (`paths.libtitan`) | `titan.o`, `minicoro.o`, `titan_path.o`, `ltitanlib.o`, `titan-browser.o`, compiled for the browser |
 | `js_library` | `titan-browser-library.js` | the Emscripten `--js-library` with the completion and admission imports ([channels](#completion-and-output-channels)) |
+| `bridge_library` | `titan-browser-bridge.js` | the Emscripten `--js-library` implementing the protected typed bridge imports and host ownership operations |
 | `trace_library` | `titan-browser-trace.js` | the Emscripten `--js-library` with the eager `.wasm.map` run-dependency loader, lookup index, and `Error.stack` capture/symbolization imports ([Browser trace backend](error-handling.md#browser-trace-backend)) |
-| `loader` | `titan-browser.mjs` | the [loader](#the-loader) |
+| `loader` | `titan-browser.mjs` | the [loader](#the-loader) source embedded into generated images, not a deployment import |
 | `runner` | `titan-browser-run` | the [runner](#the-runner)'s POSIX shell launcher (mode 0755) |
 | `runner_module` | `titan-browser-run.mjs` | the runner's supervisor |
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
-| `provider` | `titan.a` | the browser standard provider: the thirteen [core stdlib](#the-browser-standard-library) roots plus the five LPegLabel members |
+| `provider` | `titan.a` | the browser standard provider: thirteen shared core roots, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
 
-None of the four runtime sources is compiled with `-fPIC`, LTO, or
+None of the five runtime sources is compiled with `-fPIC`, LTO, or
 libbacktrace; their host-only paths compile out under the browser target
 define ([Runtime guards](#runtime-guards)). Neither the native `lib/titan/<ver>`
 nor the native Lua headers are ever written; the common Titan headers
-`include/{minicoro.h,titan.h,transfer.h}` and `include/titan/ffi.h` are the
-native SDK's own files.
+`include/{minicoro.h,titan.h,transfer.h}` and
+`include/titan/{ffi.h,browser.h}` are the native SDK's own files.
 
 ### Readiness and the missing-SDK diagnostic
 
 `browserlink.require_sdk(context, descriptor, install)` checks, in the order
-`runtime`, `js_library`, `trace_library`, `loader`, `runner`, `runner_module`,
-`node_worker`, `page`, that each asset is a regular file that `context.io` can
-open and read
+`runtime`, `js_library`, `bridge_library`, `trace_library`, `loader`, `runner`,
+`runner_module`, `node_worker`, `page`, that each asset is a regular file that
+`context.io` can open and read
 (a bounded read of at most one byte). It executes nothing, reads no manifest, and does
 not require `lpeglabel`, `provider`, or `sdk_digests`: the initial provider
 publication runs before either exists. The first missing asset returns:
@@ -317,7 +325,7 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    an interrupted run cannot leave a manifest describing old files, and creates
    `titan_bin`.
 2. `titanc --target browser --output <build> -c --incremental
-   --print-c-objects` compiles the four runtime sources and the five
+   --print-c-objects` compiles the five runtime sources and the five
    LPegLabel sources as `--c-source` nodes; Make reads the certified object
    paths from stdout.
 3. `browser_sdk.lua stage-runtime` builds `libtitan.a` and
@@ -331,7 +339,7 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
 4. `titanc --target browser --output <build> --source-first --incremental
    -X <titan_bin>/libtitan-lpeglabel.a <BROWSER_STDLIB_ROOTS>` publishes
    `<build>/titan.a` through ordinary library mode, which runs the executing
-   protocol check against the runtime and runner staged in step 3. The thirteen
+   protocol check against the runtime and runner staged in step 3. The fourteen
    roots and the payload are described in [the browser standard
    library](#the-browser-standard-library). No `titan.a` or manifest exists
    yet, and none is required.
@@ -341,15 +349,15 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    runs the [dependency-closure
    check](#the-dependency-closure-check) over the staged provider, the
    LPegLabel archive, and every object and link certificate under `<build>`,
-   requires exactly the thirteen keys `titan.coroutine`, `titan.gc`,
-   `titan.iteration`, `titan.json`, `titan.math`, `titan.path`, `titan.peg`,
-   `titan.protobuf`, `titan.reflect`, `titan.string`, `titan.test`,
-   `titan.transfer`, and `titan.url` in that order, copies it to `titan.a`, and
+   requires exactly fourteen keys, in bytewise order: `titan.browser`,
+   `titan.coroutine`, `titan.gc`, `titan.iteration`, `titan.json`, `titan.math`,
+   `titan.path`, `titan.peg`, `titan.protobuf`, `titan.reflect`, `titan.string`,
+   `titan.test`, `titan.transfer`, and `titan.url`; copies it to `titan.a`; and
    finally writes `sdk-digests` with `incremental.write_sdk_digests` and the
    existing schema.
 
 The manifest records the browser `liblua.a` and its record, every browser Lua
-header, the four common Titan headers, and the ten other assets, hashed at
+header, the five common Titan headers, and the other browser assets, hashed at
 their installed destinations; the manifest never records itself. Every copy
 goes through a temporary file and a rename. A missing or invalid manifest is
 a digest-reuse miss, never evidence that the runtime is unavailable.
@@ -372,7 +380,7 @@ in the language manual.
 
 ### Subset policy
 
-The candidates are the thirteen standard modules that reach neither `uv` nor
+The thirteen shared standard modules reach neither `uv` nor
 `async` through their Titan imports: `coroutine`, `gc`, `iteration`, `math`,
 `test`, `reflect`, `json`, `protobuf`, `transfer`, `peg`, `string`, `url`, and
 `path`. All thirteen are delivered, each with its complete public interface:
@@ -384,6 +392,12 @@ whole-file variants: `TITAN_COROUTINE_STACK_SIZE` for `coroutine`, and
 `_WIN32` (which `emcc` never defines) through `titan/path_platform.h` for
 `path`. The [library nesting policies](#nesting-limits) are shared with
 native targets and need no browser-specific defines.
+
+The provider adds a fourteenth root, the browser-only `titan.browser` in
+`titan/browser.browser.titan`, with no native placeholder. It imports only
+`gc` and `reflect`; its [protected C runtime](browser-bridge.md) lives in the
+browser runtime archive, not in a native-only dependency or a second coroutine
+driver.
 
 The other thirteen standard modules are absent at compile time: their
 canonical mains are the `native` variants `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
@@ -414,7 +428,7 @@ directly.
 
 ### Provider recipe
 
-`BROWSER_STDLIB_ROOTS` in the `Makefile` names the thirteen logical roots, and
+`BROWSER_STDLIB_ROOTS` in the `Makefile` names the fourteen logical roots, and
 [`make browser-sdk`](#make-browser-sdk) step 4 compiles them in one library-mode
 `titanc --target browser` invocation. The provider's native payload and
 include path are LPegLabel only:
@@ -438,7 +452,7 @@ include path ([standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image));
 native link inputs come from invocation options, not module metadata, so the
 browser recipe states its closure explicitly. The published `titan.a` holds
-the thirteen module objects (with their split parts) and the five LPegLabel
+the fourteen module objects (with their split parts) and the five LPegLabel
 members.
 
 ### The dependency-closure check
@@ -542,11 +556,15 @@ Each member is compared by kind, rendered signature, and
 `types.serialize_semantic` (which excludes documentation and includes
 named-call parameter metadata); machine layouts are separate provider metadata
 and are not compared. The inventory records no omissions or differences, so
-any difference between the native and browser interfaces fails.
+any difference between the native and browser interfaces of a shared module
+fails, and so does a shared browser module without a native counterpart.
+The browser-only `titan.browser` is the one reviewed exception: it has no
+native interface to compare, so the inventory skips it.
 `check_browser_stdlib.lua inventory <native titan.a> <browser titan.a>
 [table]` prints `Browser stdlib inventory: <modules> modules, <members> public
-members, no differences.` and writes the Markdown member table;
-`titan-stdlib-browser-test` writes it to `out/browser-stdlib/members.md`.
+members, no differences.`, counting the compared shared modules, and writes
+the Markdown member table; `titan-stdlib-browser-test` writes it to
+`out/browser-stdlib/members.md`.
 
 The raw `foreign function` exports of the subset are
 `protobuf.write_resource_index_bytes(dst, index)` (writes a four-byte
@@ -573,6 +591,10 @@ delivered.
 | `string` | yes | none | `string.core_test`, `string.format_pack_test`, `string.regex_test` | target size, length-modifier, endianness, and alignment facts; the format and regex parsers | none |
 | `url` | yes | none | `url.tests` | builds the URL patterns | none |
 | `path` | yes | none | `path.tests` | separator from `TITAN_PATH_WINDOWS` (POSIX on the browser) | none |
+
+The table covers the thirteen shared modules. The provider's browser-only
+`titan.browser` has no native counterpart; its owners and tests are described
+in [browser bridge runtime](browser-bridge.md#test-layers).
 
 The subset includes, with their closure, every import of `titan.async` other
 than `uv` (`coroutine`, `gc`, `string`, `transfer`, and `iteration`) and the
@@ -700,12 +722,12 @@ fifteen `--test` images from `spec/fixtures/browser_stdlib/` with the `test`
 purpose and assertions 2, and runs them through `gate.mjs` under
 `titan-browser-run --js-test` on Node and Chromium:
 
-* `init_<module>.titan`, one per delivered module, imports only that module
-  (and the `titan.test` runner every test image has) and must return status
-  0, run and pass exactly one case, and write nothing to stderr;
+* `init_<module>.titan`, one for each of the thirteen shared modules, imports
+  only that module (and the `titan.test` runner every test image has) and must
+  return status 0, run and pass exactly one case, and write nothing to stderr;
 * `init_subset.titan` imports all thirteen and is initialized, run, and
-  disposed three times from one cached factory, with a tick and a collection
-  between cycles; and
+  disposed three times through one cached image creator, with a tick and a
+  collection between cycles; and
 * `fidelity_test.titan` imports the real `coroutine.tests` owner, so its
   browser cases create coroutines first, then writes a marker with NUL, `0xFF`,
   and invalid UTF-8 bytes to stderr and fails a child case whose name and
@@ -713,7 +735,10 @@ purpose and assertions 2, and runs them through `gate.mjs` under
   Titan-owned completion channel, the exact name on the run, failure, and
   summary lines, the exact message, and exactly the expected stderr bytes.
 
-The deliberately failing case lives outside every suite root.
+The deliberately failing case lives outside every suite root. The browser-only
+`titan.browser` needs explicit JavaScript bindings, so the
+[bridge gates](browser-bridge.md#test-layers) initialize and exercise it
+instead of this gate.
 
 ### Nesting limits
 
@@ -1382,8 +1407,9 @@ output root and each held lock domain again and reserves every
   also records `browser_profile`, the link profile's `identity_inputs`, and
   for library mode `browser_probe`, the runner's `--probe` report of the Node
   (and Chrome) that the executing check uses. The `runtime` file field lists
-  the eight required SDK assets (`libtitan.a`, `titan-browser-library.js`,
-  `titan-browser-trace.js`, the loader, and the four runner files) plus the
+  the nine required SDK assets (`libtitan.a`, `titan-browser-library.js`,
+  `titan-browser-bridge.js`, `titan-browser-trace.js`, the loader, and the four
+  runner files) plus the
   browser `liblua.a` and its record, all certified by content, so changing any
   of them relinks while object certificates still hit.
 * **Backends.** `linkcertificate.linker_backend` selects by link kind
@@ -1455,7 +1481,7 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
   filename inside `Type.Module` remains an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
-thirteen [core stdlib](#the-browser-standard-library) modules resolve from it,
+fourteen [core stdlib](#the-browser-standard-library) modules resolve from it,
 ahead of the Titan path and source. The native-only standard modules have no
 browser source either, so their imports fail with the ordinary
 `module 'titan.<name>' not found` diagnostic ([target source
@@ -1545,7 +1571,7 @@ flag list.
 | --- | --- |
 | `<level>`, then `-fno-inline -fno-optimize-sibling-calls` except for a production `program`, then `-gsource-map -g2` | the level is the `optimization` override or else the descriptor's last `-O` flag (`-O1` for validation, `-O3` for production), so the link optimizes like its objects; a production program accepts the frames that inlining costs, while every other profile and purpose keeps the frame flags ([Link flags per purpose](#link-flags-per-purpose)); `-gsource-map -g2` writes the source map and keeps the Wasm `name` section in every profile |
 | `-sBINARYEN_EXTRA_PASSES=--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` only for a production `test` image | retain distinct physical functions for test traces; JSPI needs no instrumentation-local cleanup passes |
-| `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"] -sJSPI_EXPORTS=["titan_browser_entry","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports. The `gate` purpose adds its guarded export and `emscripten_sleep`; the interpreter baseline promises `main`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
+| `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"] -sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke","titan_browser_release_callable","titan_browser_close","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports for the five Lua-running bridge entries and the private coroutine entry. The `gate` purpose adds its guarded export and `emscripten_sleep`; the interpreter baseline promises `main`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
 | `-sSUPPORT_LONGJMP=<sjlj> -sWASM_LEGACY_EXCEPTIONS=1` | the record's verified longjmp mode, `wasm`, with Emscripten 6.0.13's legacy EH encoding, matching every object and `liblua.a` |
 | `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
 | `-sINITIAL_MEMORY=16777216 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
@@ -1553,10 +1579,10 @@ flag list.
 | `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
 | `-sFORCE_FILESYSTEM=1` | keeps Emscripten's filesystem and TTY layer in every image (see below) |
 | `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
-| `-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]` | the entry, the 64-hex image identity export, and heap allocation for argument marshalling; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
-| `-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]` | the promised entry call and current heap view used by the loader |
-| `-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]` | the only module options the loader passes |
-| `--js-library <sdk>/titan-browser-library.js`, `--js-library <sdk>/titan-browser-trace.js` | the completion/admission and eager trace-map/stack-capture imports (omitted for `lua-main`) |
+| `-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke","_titan_browser_release_callable","_titan_browser_close","_titan_browser_alloc","_titan_browser_free","_titan_browser_trace_identity"]` | the five promised bridge entries, the plain C-only buffer allocation and release used for argument marshalling, and the 64-hex image identity export; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
+| `-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]` | the current heap view used by the loader, which calls the owner-wrapped exports directly rather than through `ccall` |
+| `-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]` | the only Emscripten module options the loader passes; the owner callbacks read by Titan's own JavaScript libraries are private Module properties |
+| `--js-library <sdk>/titan-browser-library.js`, `--js-library <sdk>/titan-browser-bridge.js`, `--js-library <sdk>/titan-browser-trace.js` | the completion/admission owner, the typed bridge imports, and the eager trace-map/stack-capture imports (all omitted for `lua-main`) |
 | `-sASSERTIONS=<0\|2> -sSTACK_OVERFLOW_CHECK=2` | assertions are selectable; linear-stack bounds/cookies are restored on every JSPI context transition in either mode |
 
 `compile_flags` is empty without an override. `identity_inputs` is plain data,
@@ -1959,7 +1985,15 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    that `x_titan_image`, `x_titan_function_imports`,
    `x_titan_function_ranges`, and `x_titan_function_names` are bound to the
    final linked `.wasm`;
-6. run `before_commit` (which invalidates the link record);
+6. read the installed loader and call `browserlink.embed` on the staged
+   `.mjs`, removing the pinned Emscripten trailing default factory export and
+   enclosing the loader implementation before installing default
+   `create(options)`. Both the loader and bridge-library digests participate
+   in image/certificate identity without a version change. Recognizable
+   `new URL(..., import.meta.url)` expressions name both sibling assets, and
+   caller `locateFile` still overrides their resolution. A malformed transform
+   fails while all predecessors are untouched. Then run `before_commit`
+   (which invalidates the link record);
 7. validate that any existing destination in `{ <stem>.wasm.map, <stem>.wasm,
    <stem>.mjs }` is a regular file (`browser output '<path>' is not a regular
    file`) and reserve a sibling `.old` backup path for each before touching any
@@ -2049,89 +2083,54 @@ maximum startup-memory guarantees.
 
 ## The browser entrypoint
 
-`browserentry.contents(worker, options)` renders the shared C wrapper around a
-`static int titan_browser_worker(lua_State *L)` that returns one Lua integer
-status. `driver.browser_c_image_contents(worker, options)` exposes it to the
-protocol probe and to test-owned C images; `options` adds `declarations`, the
-report's `program_name` (default `titan`), and `state_status`, the status for
-a state-allocation failure (default 1). The wrapper exports one function:
+`browserentry.contents(worker, options)` renders the persistent C export
+wrappers. `driver.browser_c_image_contents` is the same boundary for protocol
+and test-owned C images. Options supply declarations, a protected initializer
+(empty for C-only controls), a program name, and the state-allocation status.
+The installed [`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout)
+defines initialize, main, invoke, physical callable release, close, and the
+typed completion channel.
 
-```c
-int titan_browser_entry(int argc, const unsigned char *const *argv,
-                        const size_t *lengths);
-```
+Initialization creates the owner Lua state and its earliest bridge registry,
+then enters the image initializer under the shared protected gateway. Main
+runs once on that initialized state and leaves it live. Each contained C entry
+receives a nonzero unsigned 64-bit operation id, echoes it with its expected
+operation kind in exactly one completion, and returns only an admission code.
+The loader waits for both completion and physical promised-entry retirement.
 
-and imports two JavaScript functions from `titan-browser-library.js`:
+`argv` and `lengths` have `argc` elements, exclude the program name, and carry
+byte strings; zero-length arguments need no valid data pointer. The main
+worker constructs the normal string Array and calls `main(args)`, or the
+existing registered bootstrap hook when enabled. Its low 32 result bits have
+the documented signed application-status interpretation.
 
-```c
-void titan_browser_complete(int kind, int status,
-                            const unsigned char *bytes, size_t length);
-int titan_browser_entry_allowed(void);
-```
+Lua-running workers reserve stack space nonraisingly, save/restore the exact
+top, install `errorhandler`, and run under `lua_pcall`. Error conversion has a
+separate protected report without recapturing the original trace. Completion
+copies rooted byte results, messages, and traces before the stack is restored,
+so no separate native copy has to outlive the state.
 
-`argv` and `lengths` have `argc` elements, the arguments exclude the program
-name, and a zero-length argument need not have a valid pointer. The return
-value is admission only, never the program's result: `-1` while another call
-is active or when `titan_browser_entry_allowed()` refuses ([Reentry
-guard](#the-reentry-guard)), `-2` after the one permitted run, and `0` after an
-admitted run. A refusal allocates nothing and transfers no coroutine context.
+Disposal holds the same execution owner while closing the state directly,
+never by a pcall on the state being freed. The registry invalidates last,
+after coroutine cleanup and finalizers. A warning callback installed before
+user initialization sends finalizer warnings to stderr. Both libc streams are
+flushed, preserving an earlier application error; the loader owns final copied
+stream drainage. Scope defers run when main returns or raises; state
+finalizers run at explicit disposal.
 
-An admitted run:
-
-1. creates the state with `luaL_newstate`, outside any protection; the fresh
-   state's guaranteed `LUA_MINSTACK` (20) slots cover the three nonallocating
-   setup pushes of `errorhandler`, the worker, and the argument block without
-   a `lua_checkstack` call. A state-allocation failure completes with kind 1,
-   the configured state status, and the static payload `not enough memory for
-   state`;
-2. calls the worker under `lua_pcall` with `errorhandler` as message handler,
-   so the Lua libraries, the searcher, the preloads, every module
-   initializer, and `main` run inside one protected boundary, and an ordinary
-   failure anywhere returns there instead of panicking or aborting;
-3. on success, takes the worker's integer result as the status: its low 32
-   bits read as a signed 32-bit integer;
-4. on failure, sets kind 1 and status 1 and reports under a second
-   `lua_pcall` without a message handler, so that converting the error object
-   cannot recapture or overwrite the original trace. The report converts the
-   value like `lua.c` (string, `__tostring`, or `(error object is a <type>
-   value)`), strips the synthetic bootstrap chunk prefix, roots a
-   length-aware copy of the message, and writes `<progname>: <message>` and,
-   when a trace exists, `stack traceback:` followed by each raw trace line
-   after a newline and a tab, to stderr with `fwrite`, so embedded NUL bytes
-   survive. A throwing `__tostring` or a failed report completes with
-   `error while reporting browser failure` (also written to stderr), and a
-   failed copy of the message with `not enough memory to copy browser error`;
-   otherwise the message is copied to `malloc`ed storage that outlives the
-   state;
-5. closes the state, so finalizers and `__close` handlers still write output;
-6. drains libc explicitly: `fflush(stdout)`, then `fflush(stderr)`, both
-   always attempted. A run that had succeeded becomes kind 1, status 1 with
-   `cannot flush browser stdout` or, when only stderr failed, `cannot flush
-   browser stderr`; an already failed run keeps its first error;
-7. calls `titan_browser_complete` exactly once, frees the copied message after
-   that synchronous call returns, and clears the active flag.
-
-Neither the wrapper nor its report ever calls `exit`. The pin, rethrow, and
-bootstrap-hook semantics are the native ones; the native `main` template and
-its `exit(EXIT_FAILURE)` paths are unchanged.
-
-`driver.browser_entrypoint_contents(modname, program_name, options)` supplies
-the program worker. It opens the Lua libraries, installs the Titan searcher,
-and preloads the support module (`luaopen_titan` as `titan`) and the main
-module, then requires the main module and retrieves `main`. It builds the
-argument Array with the string-element writer and `lua_pushlstring` for each
-argument, so arguments are byte strings and `args[1]` is the first. It then
-calls `main(args)`, or `hook(main, args)` when a bootstrap hook is registered
-under `TITAN_MAIN_BOOTSTRAP_KEY` and `--no-uv-bootstrap` was not given. Unlike
-the native `pmain`, it publishes no `argc`/`argv` registry values, because no
-browser `uv` module exists. `<progname>` is the last component of the main
-module's name, or of the first test root's name for a test image.
+`driver.browser_entrypoint_contents` supplies the separate initializer and
+main workers: open libraries, install the Titan searcher/preloads and require
+the root during initialization; retrieve the initialized module from the
+ordinary loaded table and invoke main later. Native `main`/`pmain` templates
+are unchanged. See [browser bridge runtime](browser-bridge.md) for the exact
+C layout, state/capture roots, independent-state construction, errors, and
+close admission.
 
 ## Runtime guards
 
 The browser `libtitan.a` contains exactly `titan.o`, `minicoro.o`,
-`titan_path.o`, and `ltitanlib.o`; no archive or image references `dlopen`,
-`dlsym`, `dlerror`, or libbacktrace. Static images resolve modules through
+`titan_path.o`, `ltitanlib.o`, and `titan-browser.o`; no archive or image
+references `dlopen`, `dlsym`, `dlerror`, or libbacktrace. Static images resolve modules through
 provider symbol tables (`TitanModuleProvider.symbols`, the explicit-provider
 discipline Windows also uses) and `package.preload`. Under
 `TITAN_TARGET_BROWSER` the host-only paths compile out and raise a browser
@@ -2169,9 +2168,11 @@ effective link flags (including user link extras and final dependency flags),
 and ordered `{ path, digest }` groups (normalized via
 `linkcertificate.canonical_path` and `incremental.file_digest`) for all user
 objects, provider archives, `--c-source` extra objects, resolved `-L`/`-l`
-static archives (`linkcertificate.browser_trace_libraries`), and the five
-runtime/Lua/JS-library inputs (`libtitan.a`, `liblua.a`, `liblua-config.txt`,
-`titan-browser-library.js`, and `titan-browser-trace.js`). An `emcc`-only
+static archives (`linkcertificate.browser_trace_libraries`), and the seven
+runtime, Lua, and JavaScript inputs (`libtitan.a`, `liblua.a`,
+`liblua-config.txt`, `titan-browser-library.js`, `titan-browser-bridge.js`,
+`titan-browser-trace.js`, and the loader source `titan-browser.mjs`). An
+`emcc`-only
 system or JavaScript library (such as `-lidbfs.js`) that the static archive
 resolver cannot inventory still links: its flag text remains in `link_flags`
 within `browsertrace.identity` while the CLI marks the native link policy
@@ -2265,11 +2266,13 @@ sum of the six retained typed arrays' `byteLength`s (`pcs`, `sources`, `lines`,
 degraded). When the map is missing, malformed, missing `x_titan_*` extensions,
 or mismatched with the instantiated `.wasm`, `state` is `'degraded'`, `reason`
 records the failure, and one `console.warn('Titan browser trace: ' + reason)`
-is emitted at load time. Ordinary web pages still run in degraded mode;
-`titan-browser-run` and `spec/browser/playwright-run.mjs` inspect
-`Module['titanBrowserTrace']` through `observeFactory` after initialization and
-fail the run as a harness error (`degraded browser trace: <reason>`) unless
-`--allow-degraded-trace` was passed.
+is emitted at load time. Embeddings default to permitting degraded mode.
+With `requireTrace: true`, `BrowserOwner.initializeEntry` checks the public
+map snapshot after factory readiness, before its first Lua initialization
+entry. It saves an ordinary initialization failure with status 1 and message
+bytes, but no Titan trace because Lua was never entered. The runner and
+Playwright shared page pass `requireTrace: !allowDegradedTrace`; no wrapper
+owns another lifecycle or admits a gap between initialization and main.
 
 Observed trace cost for #330, when both installations still linked what is now
 the validation profile, on the representative compiled trace-gate image
@@ -2604,22 +2607,29 @@ suspends. It does not catch engine traps or change the conservative
 
 ## Completion and output channels
 
-`titan-browser-library.js` owns one private `$TitanBrowser` per generated
-factory. An initialization callback attaches it through
+`titan-browser-library.js` owns one private `$TitanBrowser` execution owner
+per instantiated Module. An initialization callback attaches it through
 `Module.titanBrowserAttach`; `titanBrowserSafePoint`, `titanBrowserTrap`,
 and `titanBrowserComplete` are the other internal owner callbacks.
+`titan-browser-bridge.js` keeps no instance state of its own: each import
+reaches its Module's `titanBrowserBridge` loader owner.
 
-**Completion.** `titan_browser_complete` copies `(kind, status, bytes, count)`
-through `HEAPU8.slice` while C owns the source bytes. This record alone owns
-application status and payload. The promised export's fulfillment proves
-engine retirement, not Titan success: the loader waits for both and never
-substitutes a promise value, `onExit`, or Emscripten keepalive state.
+**Completion.** The bridge library's `titan_browser_complete(pointer)` passes
+the [completion record](browser-bridge.md#fixed-wasm32-layout) to the loader
+owner, which validates its operation identity and kind against the pending
+entry and copies its results, message, and raw trace with `HEAPU8.slice`
+while C still owns and roots them. This record alone owns application status
+and values. The promised export's fulfillment proves engine retirement, not
+Titan success: the loader waits for both and never substitutes a promise
+value, `onExit`, or Emscripten keepalive state.
 
 **Output.** Per-byte stdout/stderr hooks only buffer bytes, ignoring null
-flush notifications. Stdin returns null. No user sink or unrelated
-notification runs during an internal coroutine transfer, including a
-collector finalizer's cleanup. `safe()` means that the whole logical entry
-has released its owner; buffered streams are delivered only then.
+flush notifications. C `stdin` returns null, which is end of file. No user
+sink or unrelated notification runs during an internal coroutine transfer,
+including a collector finalizer's cleanup. `safe()` means that the contained
+C entry has released its owner; the loader delivers buffered streams only
+after its whole logical operation retires ([output, disposal, and
+observation](#output-disposal-and-observation)).
 
 ### JSPI coroutine contexts
 
@@ -2655,109 +2665,200 @@ retirement to terminal completion first.
 
 ### The reentry guard
 
-`TitanBrowser.enter(call)` is the direct internal logical-entry hook. It
-acquires admission before invoking a promised Wasm export and keeps it
-through all internal microtasks, collector cleanup and terminal handoffs.
-Concurrent entry rejects with `TITAN_BROWSER_REENTRY`, `browser instance is
-active; reentry is not allowed`. Blocked, failed or completed instances
-refuse new admission. `titan_browser_entry_allowed` consumes the one initial
-C admission; JSPI continuation wakes do not re-enter that C preamble.
+`TitanBrowser.enter(call, id, kind)` is the internal hook for each contained
+C entry. It acquires the execution owner before invoking a promised Wasm
+export, installs the pending `{id, kind}` record, and keeps the owner through
+all internal microtasks, collector cleanup and terminal handoffs. Another
+entry while the owner is held rejects with `TITAN_BROWSER_REENTRY`, `browser
+instance is active; reentry is not allowed`; a blocked or poisoned owner
+rejects with its saved terminal failure or `TITAN_BROWSER_DISPOSED`. No
+lifetime counter refuses later entries: the loader's [logical
+operations](#logical-operations-and-protected-entries) decide which entries a
+public method contains. `titan_browser_entry_allowed(id, kind)` normalizes the
+unsigned identity and admits the C preamble once, only for the pending
+identity and kind; JSPI continuation wakes do not re-enter that preamble.
 
-Initialization wraps the general Module exports `titan_browser_entry` and
-the gate's `titan_browser_gate_guarded` with this hook. Static
-`wasmExports[...]` accesses retain the explicit identity. Emscripten 6.0.13
-disables import/export minification for JSPI, including O2/shrink controls;
-the optimized guard fixture asserts that pinned naming contract. The driver's
+Initialization wraps the five state-entering exports
+(`titan_browser_initialize`, `titan_browser_entry`, `titan_browser_invoke`,
+`titan_browser_release_callable`, and `titan_browser_close`) and the gate's
+`titan_browser_gate_guarded` with this hook. Static `wasmExports[...]`
+accesses retain the explicit identity. Emscripten 6.0.13 disables
+import/export minification for JSPI, including O2/shrink controls; the
+optimized guard fixture asserts that pinned naming contract. The driver's
 lexical engine-entry export remains private; its published Module alias
-always rejects outside use. C-only state-neutral exports such as malloc,
-free, trace identity and the gate observer remain synchronous.
+always rejects outside use. C-only state-neutral exports
+(`titan_browser_alloc`, `titan_browser_free`, the trace identity, and the gate
+observer) remain synchronous.
 
-`poison(cause)` permanently blocks admission and rejects known parked engine
-gates after a fatal error. It never calls C to free or reuse compromised
-allocations. An external import can remain unresolved after abort; disposal
-drops the unusable instance instead of claiming normal cleanup.
+`poison(cause)` permanently blocks admission, rejects known parked engine
+gates, and poisons the loader owner after a fatal error. It never calls C to
+free or reuse compromised allocations. An external import can remain
+unresolved after abort; disposal drops the unusable instance instead of
+claiming normal cleanup.
 
 ## The loader
 
-`titan-browser.mjs` exports `create(factory, {stdout, stderr, locateFile} =
-{})`, where `factory` is the default export of a generated `.mjs`. It has no
-Node-specific imports and works in both engines. The returned object is
-frozen and has exactly `initialize`, `run`, and `dispose`; it exposes no
-Module, memory, or general call bridge. `create` throws `TypeError` for a
-non-function factory or sink. The channels own the caller's sinks; the
-instance keeps no other reference to them.
+`titan-browser.mjs` is a compiler/SDK input, not a deployment import. Its
+`create(factory, options)` implementation is enclosed in each generated image
+by `browserlink.embed`; the image exports only default `create(options)`.
+There is no public raw Emscripten factory, Module, memory view, or separate
+loader entry point. The source has no Node-specific imports.
 
-* **`initialize()`** calls the factory once with the per-byte hooks, `stdin`,
-  `onAbort`, the internal callbacks, and `locateFile` when given, and returns
-  the same Promise on every call. It runs no Titan code. A factory result
-  without the attached library, a `ccall` function, or a `HEAPU8` view fails
-  with `browser image does not provide Titan channels`. A factory that
-  settles after disposal is dropped and never re-rooted.
-* **`run(args = [])`** rejects with `TITAN_BROWSER_STATE` after disposal,
-  with `TITAN_BROWSER_REENTRY` while a run is active, and with
-  `TITAN_BROWSER_STATE` after the one admitted run or after any terminal
-  failure, including a failed initialization. Otherwise it reserves the
-  admission synchronously, before awaiting initialization. It encodes string
-  arguments as UTF-8 and copies `Uint8Array` arguments, `malloc`s each one,
-  rereading `HEAPU8` after every allocation, then writes the pointer and
-  length arrays (little-endian 32-bit) through a `DataView` built after the
-  last allocation. It calls `ccall('titan_browser_entry', 'number',
-  ['number', 'number', 'number'], [argc, argv, lengths], {async: true})` with
-  numeric arguments only, because `ccall`'s stack-based string and array
-  conversion cannot own byte arguments across a suspension or a large
-  allocation.
-* **`dispose()`** is idempotent. It closes admission synchronously, even
-  while initialization or a run is pending, waits for an intact active run to
-  become quiet (disposal is not cancellation), frees the argument storage, and
-  drops the Module, buffers, and callbacks. After a trap or abort it drops the
-  unusable Module without calling `free` or waiting for an internal `ccall`
-  Promise that may never settle, while still observing that Promise's
-  rejection.
+The owner's private mutable Module input is a fresh null-prototype dictionary
+with the existing channels and bridge callbacks assigned explicitly.
+Emscripten can add instance-bound accessors to it; a cached object-literal
+AllocationSite and boilerplate map can otherwise retain a disposed Module
+through those accessors while the public creator remains cached. This needs
+no extra input copy, engine-specific setting, or change to the public options.
 
-**Settlement.** The run Promise settles in one place. A normal run settles
-only after the copied completion, fulfillment of the promised native entry,
-a safe point and freeing of argument storage; it resolves to `{kind: "returned" | "failed",
-status, bytes}`. A sink failure, protocol failure, trap, or abort rejects
-instead, and the first failure wins:
+`BrowserOwner` owns persistent lifecycle and public admission. The frozen
+public object exposes `initialize`, `run`, `call`, `notify`, `drain`, `dispose`,
+and a read-only frozen trace snapshot. General entry methods reserve logical
+admission synchronously and return promises even for state, reentry, and
+disposal errors. Only notification admission and logical release are
+synchronous. A call's C buffers use the documented plain alloc/free exports;
+current `HEAPU8`/`DataView` objects are derived after allocations, never kept
+across memory growth.
 
-* `browser entry completed more than once` and `browser entry reported invalid
-  completion kind <kind>` (`TITAN_BROWSER_PROTOCOL`) for a second or malformed
-  completion, while an intact admitted run still finishes its cleanup;
-* `browser entry returned without completion`
-  (`TITAN_BROWSER_PROTOCOL`) when the promised entry has fulfilled
-  (`callFulfilled`) and no completion arrived — checking `callFulfilled`
-  ensures that an earlier queued safe point never masks a synchronous throw or
-  rejected `ccall`, such as an engine `RangeError: Maximum call stack size
-  exceeded`, which instead rejects with the engine error preserved as `cause`
-  (`spec/browser/runner.test.mjs` injects one; recursion through Lua's C API
-  stops at the [browser C-call limit](#the-browser-c-call-limit) first);
-* `cannot buffer browser <stream>` (`TITAN_BROWSER_PROTOCOL`) when an output
-  buffer cannot grow;
-* `TITAN_BROWSER_TRAP` when an original trap was recorded, or a
-  `WebAssembly.RuntimeError` arrives without abort evidence;
-  `TITAN_BROWSER_ABORT` when `onAbort` was observed; the message is the
-  original reason and the original error is the `cause`.
+Lifecycle is `created → initializing → ready ⇄ active → disposing → disposed`,
+with a poisoned terminal state. Initialization creates and initializes Lua
+without main and is memoized. Ordinary initializer errors retain their copied
+completion for one later failed/status1 run result and never print twice.
+Main alone is one-shot. Its defers run at return, but the state and callbacks
+remain available until explicit disposal.
 
-A trap is remembered ahead of a later abort that wraps it. An `onAbort` or a
-malformed completion that arrives after settlement throws the typed error, so
-a monitor such as the runner can observe late engine failures. A rejected
-`ccall` Promise is always consumed.
+`requireTrace` defaults to false. Its pre-Lua readiness check belongs to the
+same memoized initialization and automatic `run` path. A refusal writes
+`degraded browser trace: <reason>` and a newline to the stderr queue once and
+saves a failed/status1 record with those message bytes and no trace. The first
+`run` returns that saved result and consumes main's single attempt; the Module
+remains disposable without ever creating Lua. The map run dependency has
+retired before the factory resolves, so this check neither fetches again nor
+adds another asynchronous admission boundary.
 
-**Sinks.** At each safe point the loader delivers each stream's buffered
-bytes as a fresh owned `Uint8Array`, in per-stream order, including an
-unterminated tail. A sink that throws rejects with `browser <stream> sink
-failed` and the original error as `cause`; one that returns anything other
-than `undefined` rejects with `browser <stream> sink must return undefined`,
-after attaching a handler so that a returned Promise's rejection is observed.
-Both carry `code` `TITAN_BROWSER_SINK` and `stream`. The failed sink is never
-called again, new admission is refused, and an intact admitted continuation
-still resumes and finishes its Lua cleanup; the loader never re-enters broken
-WebAssembly for cleanup.
+### Logical operations and protected entries
 
-**Lifecycle.** new → initializing → ready → running (possibly suspended) →
-completed or failed → disposed. Independent instances may run concurrently in
-one realm, including two that are suspended at once; one may fail or be
-disposed while the other completes.
+The loader holds one logical operation from validation and marshaling through
+all contained C entries, physical callable retirement, and stream flush.
+`TitanBrowser.enter` owns each promising C entry, including all private JSPI
+and collector transfers. Its per-entry `entered` flag resets for the next
+contained entry; no lifetime completion counter blocks later entries.
+
+Every C entry receives the next nonzero instance-local uint64 BigInt identity.
+The admission import normalizes Wasm's signed i64 presentation back to unsigned
+before comparison. The final identity is reserved for close: exhausted
+application admission rejects before marshaling, while remaining callable roots
+retire with state close rather than consuming that last identity.
+The pending record has that identity, the expected operation kind, and one
+completion slot. The non-suspending completion import validates identity and
+kind and copies all result/error/trace data while C owns it. Duplicate,
+mismatched, or missing completion poisons the image. The export promise
+acknowledges physical context retirement only; its numeric value is never
+application status. Neither completion arrival nor an intermediate safe point
+reopens public admission or invokes sinks.
+
+`call` and `Callable.call` return the existing decoded result Array for every
+arity, without another copy: zero results are `[]`, one nil is `[null]`, and a
+single JSHandle is `[value]`. Returning a sole raw value from an async helper
+would adopt a Promise/thenable, lose its identity, and keep logical admission
+pending on unrelated host work. Keeping the carrier intact preserves opaque
+values and lets native retirement, sink flush, and disposal finish independently.
+
+Callable wrappers have module-private WeakMap brands and state/slot/generation
+records. Logical release invalidates immediately, while physical root removal
+uses a protected release entry at a complete safe point. A detached FIFO batch
+revalidates both its target and every branded argument before any Wasm
+allocation. A released target drops the notification; a released argument
+reports an error without Lua entry. State-close notification invalidates every
+callable, notification, request, and JS slot charged to that state, including
+close-phase slots created without Lua finalizer registration.
+
+`drain()` detaches one FIFO batch under one logical admission. Each callback
+has a unique protected entry and original error completion; one failure does
+not suppress later callbacks. Imports append to the next batch. `requestDrain`
+is coalesced only after the whole logical operation, including sinks, retires.
+No implicit scheduler or fairness policy is installed.
+
+### Host owners and detachable continuations
+
+Potentially throwing bridge imports catch at their own boundary and fill the
+shared header's status/message/exact-thrown-handle response. Titan raises only
+after normal import return. Trusted adoption, release, and state invalidation
+remain nonthrowing. Scalar, bytes, and void results reject promises;
+`call_handle` deliberately treats one as an opaque value and does not handle
+its rejection on the application's behalf.
+
+Requests declare detachable or guaranteed-terminal retained ownership.
+Listeners declare subscription/unregistration and enqueue synchronous events.
+Cancellation closes application delivery, but retained ownership persists
+until actual terminal settlement. Promise/listener continuations are
+module-scope functions capturing only a narrow mailbox cell; detachment clears
+the cell's sole link to the live owner. Late and duplicate settlements cannot
+enter Lua. Disposal permits retirement, never application callbacks into a
+released or closed state.
+
+The request's state-owned slot is reserved before invoking a start/listen/stdin
+source or appending completion-bearing output. An identity-allocation refusal
+therefore accepts neither host work nor output. Setup failure releases the
+unreturned unit; an already accepted retained operation still owns its terminal
+retirement even if cancellation reports an error. C-only output needs no request
+unit.
+
+Every request has both a success target and a mandatory failure target with
+exact `(BYTES, HANDLE) → ()` signature. Promise rejection queues that failure
+notification with copied message bytes and the exact raw thrown value, creating
+its state-owned handle only on delivery. `onNotificationError` is not a
+substitute for the rejected request's outcome. It receives
+`{kind: 'callback' | 'cleanup', operation, error}` for errors without another
+caller: callback failures, secondary cleanup failures, and callerless physical
+release failure. Public operation labels are `initialize`, `run`, `call`,
+`drain`, `dispose`, and `notify`; work-announcement failure uses `requestDrain`
+and background physical release uses `release_callable`. Failed physical
+release is not retried; state close remains the retirement fallback.
+
+### Output, disposal, and observation
+
+Each `OutputChannel` has a copied-byte FIFO, a coalesced C-byte tail, and at
+most one actual sink invocation. C hooks append synchronously and never invoke
+the sink. A logical operation flushes both streams only after all its C
+entries retire; later entries still run after a throw/rejection. An existing
+Titan failure remains primary while both deliverable stream flushes and
+deferred retirement are attempted. An otherwise successful operation returns
+its first cleanup failure; every secondary failure is reported once through
+the tagged observer. Completion writes settle their exact entry. A C-only
+failure record stays pending for the next completing write or disposal, but
+an unrelated or empty flush does not return it again. Its observed bit tracks
+delivery, not consumption, so later consumption cannot notify the same failure
+twice.
+
+Disposal closes admission before awaiting any work, interrupts an in-flight
+sink through a detachable gate, and makes that stream terminal so it can never
+overlap the pending sink. Accepted C work retires, retained host work settles,
+and close runs as the last legitimate owner-held promised entry. The backend's
+permanent block is installed only after close, or immediately on poison.
+Capture the first failure where the action, retirement, or sink fails, not
+after awaiting both streams. Disposal cannot replace an already captured
+failure while interrupting its flush. One shared interruption record is
+reported once as cleanup even if both streams are interrupted. Only an
+operation not yet failed rejects `DISPOSED`; disposal keeps its own output/error
+outcome, including `DISPOSED` for undeliverable interrupted or discarded bytes.
+
+Deliverable finalizer bytes are moved into JS-only drain records containing
+only sinks, copied bytes, failure status, and the notification observer.
+Their module-scope continuation reports secondary disposal failures without
+capturing the owner. `retireOwner` clears Module, backend,
+bindings, wrappers, and instance callbacks before its promise fulfills with
+those records. A separate module-scope continuation waits for their drains;
+an externally retained unresolved disposal promise cannot keep the image
+alive through an async method frame.
+
+Engine failure latches poison before `onEngineFailure({kind, cause})`.
+Observer throws are contained without replacing the original trap/abort.
+Later application methods reject the saved failure and disposal never enters
+the broken Module. `trace` exposes only a fresh frozen `{state, reason}`, not
+mutable trace internals. Before dropping Module, retirement saves that pure
+data snapshot; post-disposal reads retain the last map state and reason,
+including after poison.
 
 ## The runner
 
@@ -2817,8 +2918,9 @@ or Chrome resolver.
 **Node engine.** The supervisor spawns a separate qualifying Node worker
 (`titan-browser-node-worker.mjs`, run with `--expose-gc`) in its own process
 group, with stdout and stderr pipes and a private IPC channel. The worker
-imports the image and the installed loader, writes the program's bytes to its
-pipes, and reports completion and failures only over IPC, never on stdout.
+imports the image, whose embedded loader is the only loader it uses, writes
+the program's bytes to its pipes, and reports completion and failures only
+over IPC, never on stdout.
 The supervisor owns the wall-clock deadline and the grace period, so a busy
 WebAssembly loop cannot prevent a timeout; it never infers success from the
 worker's exit, and a worker that exits or disconnects before shutdown is a
@@ -2872,33 +2974,40 @@ control, which the page sends after the run settled and the instance was
 disposed, never at console output, and a later trap or abort overrides the
 completed result. Classification follows the evidence chain: a tagged original
 trap (`TITAN_BROWSER_TRAP` anywhere in the `cause` chain) is a trap even when
-an abort follows it; an observed `onAbort` otherwise makes the run an abort,
-including Emscripten's subsequent `RuntimeError`; and a bare `RuntimeError`
+an abort follows it; an observed abort (the loader's `onAbort` hook, reported
+through `onEngineFailure`) otherwise makes the run an abort, including
+Emscripten's subsequent `RuntimeError`; and a bare `RuntimeError`
 without abort evidence is a trap. Malformed, duplicate, or unknown controls,
 a premature engine exit, a crashed page target, a missing or invalid image,
 and an interrupted runner (`SIGINT`, `SIGTERM`) are harness failures. Timers
 longer than Node's 32-bit limit are armed in bounded slices against a
 monotonic deadline.
 
-**Factory observation, trace readiness, and terminal cleanup.** Each image's
-factory is wrapped once (`observeFactory`, one cached wrapper per imported
-factory, so repeated `image()` calls return the same identity). After the inner
-factory resolves and before entry, `observeFactory(factory, control,
-allowDegradedTrace)` inspects `module?.titanBrowserTrace`: when `state ===
-'degraded'` and `allowDegradedTrace` is false, it reports a `harness` failure
-control (`degraded browser trace: <reason>`) and throws, failing the run (exit
-75) even if the program or tests would otherwise pass, so missing or stale
-`.wasm.map` files fail in CI; fabricated transport test fixtures that do not
-link `titan-browser-trace.js` omit `titanBrowserTrace` and are unaffected.
-The wrapper also calls the loader's own `onAbort` first and sends an `abort`
-observation in `finally`, without exposing the Module. An observation is
-evidence, not shutdown: before completion the monitor records the reason,
-ignores the raw `RuntimeError` that follows it, and waits for the execution
-path's terminal failure, which the page sends only after `dispose()` has
-returned. Only then does it classify the run as an abort (70). If disposal
-never finishes, the deadline still yields 72. An observation after completion
-is a late abort (73), and a completion that arrives after an observation,
-including a fulfilled host test, cannot erase it.
+**Public image observation, trace readiness, and terminal cleanup.** Each
+image's public default creator is wrapped once (`observeImage`, one cached
+wrapper per imported creator, so repeated `image()` calls return the same
+identity). No wrapper exposes the private Wasm factory or Module. The wrapper
+passes `requireTrace: !allowDegradedTrace` to that public creator; the existing
+owner checks readiness after the map/factory barrier and before entering Lua.
+The runner observes an ordinary initialization failure and lets `run()` return
+its saved failed/status1 result. `--js-test` images receive the same option;
+there is no post-initialize facade or second admission state. A permitted
+degraded embedding continues with the Lua-only marker, while a strict
+pre-Lua failure has no invented Titan trace. Transport fixtures are not
+compiler-built images and supply their own test-only creator.
+
+The wrapper calls the supplied `onEngineFailure` observer and forwards abort
+and trap observations in `finally`, after the loader has latched poison.
+Handled completion-protocol errors remain local to their poisoned instance;
+their observer still runs and later application methods reject the saved
+failure. An uncaught operation rejection follows the normal harness-failure
+path (75); an unhandled Promise rejection still follows the unhandled policy
+(74). An abort or trap observation is evidence, not shutdown: before
+completion the monitor records the reason and waits for the execution path's
+terminal failure, which the page sends only after `dispose()` returns. A
+deadline still yields72 if disposal never finishes. Observations after
+completion are late engine failures (73), and a later completion, including a
+fulfilled host test, cannot erase an observed abort or trap.
 
 **Process cleanup.** Cleanup runs in `finally` on every path, including spawn,
 connect, and deadline failures. For Node, the runner asks the worker to shut
@@ -2925,8 +3034,7 @@ which is not a public bridge:
 ```javascript
 {
   engine: "node" | "chromium", args: Object.freeze([...argsAfterDashDash]),
-  create,                                        // the unmodified loader API
-  image: async relativeMjs => ({factory, locateFile}), // frozen, cached per path
+  image: async relativeMjs => ({create, locateFile}), // frozen, cached per path
   bytes: async relativeFile => Uint8Array,       // fresh owned bytes
   stdout: chunk => undefined, stderr: chunk => undefined, // raw runner sinks
   assert: (condition, message = "assertion failed") => undefined,
@@ -2938,8 +3046,10 @@ which is not a public bridge:
 
 Paths are slash-separated and relative to `--root`, never to the working
 directory or the test file; absolute and escaping paths are rejected.
-`image` returns the same wrapped factory for the same path and maps
-`locateFile` to the sibling Wasm, including names with literal `#` or `?`.
+`image` returns the same observed public creator for the same path, which
+supplies `requireTrace: !allowDegradedTrace` and the runner's engine-failure
+observer, and maps `locateFile` to the sibling Wasm and map, including names
+with literal `#` or `?`. The context has no separate loader entry point.
 `gc` fails rather than pretending to collect. A fulfilled `undefined` is
 host-test success (status 0), a thrown non-loader error is host-test failure
 (status 1), a loader error keeps its category, and any other return value is a
@@ -3211,7 +3321,7 @@ hosts`).
   before execution or provider publication.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
-  `TITAN_EXTRA_CPPFLAGS`, the thirteen-module provider whose non-compiler
+  `TITAN_EXTRA_CPPFLAGS`, the fourteen-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
   order and contents, and the standalone `-shared-mem` archive regression.
 * `spec/browser_stdlib_spec.lua` (emsdk-free) and
@@ -3239,17 +3349,30 @@ hosts`).
   (JSPI with and without `MCO_NO_DEBUG`, `MCO_USE_VMEM_ALLOCATOR`, and the tag
   comparator), the unwind-floor harness, and unstarted/suspended/stacked
   retirement before native allocation reuse, under both engines.
+* `spec/coder/browser_bridge_spec.lua`, `spec/browser/build-bridge.lua`,
+  `spec/fixtures/browser_bridge/`, and the browser-only owner
+  `spec/stdlib/titan/browser/` — the persistent bridge gate in both assertion
+  modes under Node and Chromium: the native `browser.tests` image with its
+  independent-state C helper and the failed-initializer image, driven by
+  `integration.mjs` through lifecycle, typed values, callbacks, notifications,
+  requests, stdio, state close, and WeakRef collection, plus the
+  unhandled-rejection (74) and poisoned-retirement (70) diagnostics
+  ([browser bridge runtime](browser-bridge.md#test-layers)).
+* `spec/coder/browser_deployment_spec.lua` with
+  `spec/fixtures/browser_bridge/deployment.mjs` — a real program loaded over
+  plain HTTP, with relocated assets through `locateFile`, and from a Vite
+  build, with no external Titan loader available.
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and
   dispose cycles, concurrent instances, lifecycle races, and the optimized
   guard image (`optimized-guard.mjs`).
 * `spec/browser/runner.test.mjs` and `spec/browser/runner-fixtures.mjs` — the
-  runner's resolver, probe, CLI, `--allow-degraded-trace` and default
-  degraded-map harness failure, exported `within`/`Monitor` helpers and symlink
-  invocation, status categories, grace, abort and cleanup boundaries,
-  process-group retirement, and path containment, over Node and both Chromium
-  transports.
+  runner's resolver, probe, CLI, `--allow-degraded-trace` and the default
+  required-trace initialization failure for direct and `--js-test` images,
+  exported `within`/`Monitor` helpers and symlink invocation, status
+  categories, grace, abort and cleanup boundaries, process-group retirement,
+  and path containment, over Node and both Chromium transports.
 * `spec/browser/trace-adapter.test.mjs` and
   `spec/fixtures/browser_trace_adapter/{stacks.json,stacks-jspi-current.json,degraded.mjs,lifecycle.c,filter.c}`
   — Node unit tests for the V8, SpiderMonkey, and JavaScriptCore stack parsers
@@ -3282,9 +3405,13 @@ hosts`).
   contract](#test-images).
 
 The Busted files need emcc 6.0.13 and the installed browser Lua; the image,
-protocol, SDK, stdlib closure, entry and stdlib gate, fixture, budget, and
-minicoro files also need Node 26+ and an installed browser SDK, and all of them
-except the stdlib closure file also need a headless Chromium.
+protocol, SDK, stdlib closure, entry and stdlib gate, bridge, fixture, budget,
+and minicoro files also need Node 26+ and an installed browser SDK, and all of
+them except the stdlib closure file also need a headless Chromium. The
+deployment file instead needs Node 26+, the browser SDK, and the pinned Vite
+and Playwright installations named by `TITAN_VITE_ROOT` and
+`TITAN_PLAYWRIGHT_ROOT`; `TITAN_REQUIRE_BROWSER_DEPLOYMENT=1` turns their
+absence into a failure.
 `spec/support/browser_toolchain.lua` discovers these through
 `require({node=true, chrome=true, sdk=true})` (or the subset a file needs)
 and the runner's `--probe`. Its
@@ -3301,7 +3428,7 @@ Two Linux CI jobs run these files with the real toolchain:
 the trace-map, trace-entry, and budget files beside the loader, runner,
 trace-adapter, and Node trace suites, and
 [`browser-stdlib`](continuous-integration.md#browser-stdlib-job) runs the
-provider, incremental, image, protocol, SDK, stdlib closure, entry and stdlib
-gate, fixture, and minicoro files after the browser core stdlib suite. The
-Playwright trace gate runs in
+provider, incremental, image, protocol, SDK, stdlib closure, entry, bridge and
+stdlib gate, fixture, and minicoro files after the browser core stdlib suite.
+The Playwright trace, bridge, and deployment gates run in
 [`browser-playwright`](continuous-integration.md#browser-playwright-job).

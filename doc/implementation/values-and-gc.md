@@ -415,13 +415,42 @@ setsvalue(L, s2v((restorestack(L, _base_off) + 0)), _local_t_1);
 ```
 
 The slot is refreshed at the declaration and at **every assignment** to the
-local, so it is never stale while the C variable holds a live value.
+local. Mutable C out-parameters additionally use the handoff rules below.
 Parameters (including method `self`) get a slot only when the body assigns to
 them or the checker marks them for spill across a catchable call. That is a
 semantic local/spill home, not argument transport; otherwise the parameter
 remains only its native C formal and its reachability comes from the input's
 existing provenance. Module variables need no shadow: their `_mod` user value is
 itself GC-visible.
+
+#### Mutable GC out-parameters
+
+A recovery-sensitive exact Lua `TValue` or `Udata *` local/parameter whose
+mutable C address is exposed has a canonical volatile C home **and** its
+existing traced Lua slot. The C home keeps the actual in-call writes; the
+slot supplies reachability. Neither replaces the other.
+
+`mutable_out_anchor` publishes a foreign call's current out-values immediately
+after a normal return and stack rebasing. Ordinary Titan calls publish their
+tracked GC out-values at the same handoff. If the callee exits nonlocally,
+`coder._spill_address_roots` publishes every active canonical GC home at the
+error landing, **before** Lua-frame close, `__close`, unwind helpers or any
+other recovery action that can collect. These are nonallocating `setslot`
+stores through the restored stack offset, without a heap barrier or new owner.
+The landing must not reload the prior slot into the C home: doing so would
+lose the fresh value or reinstate a cleared owner. A cleared home publishes
+nil, so the old object can become collectable during close.
+
+Defer-tail predeclarations initialize these C homes to nil/NULL and reserve
+their root slots before an earlier protected region can fail. Normal locals,
+named parameters and lambda parameters use the same home rule.
+
+Foreign code still roots fresh objects through the complete call/error
+handoff, just as it does before a normal out-value anchor. This mechanism
+does not infer raw-pointer aliases or make unrooted intermediate C objects
+safe. The native aggregate-recovery fixture leaves a fresh root above a Lua
+to-be-closed cell; close truncates that borrowed root before forcing a full GC,
+so the caller's committed home root is required to preserve the caught value.
 
 ### 3. Anchor fresh objects before the next allocation
 

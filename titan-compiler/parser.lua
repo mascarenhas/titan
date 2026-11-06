@@ -71,6 +71,7 @@ local standard_imports = {
     protobuf = "titan.protobuf",
     transfer = "titan.transfer",
     thread = "titan.thread",
+    browser = "titan.browser",
 }
 
 

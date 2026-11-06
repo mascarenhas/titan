@@ -17,7 +17,7 @@ local temporary = require "spec.support.temporary"
 local files = require "spec.fixtures.target_selection.support"
 
 local EXPECTED_RUNTIME_MEMBERS = {
-    "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o",
+    "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o", "titan-browser.o",
 }
 
 local EXPECTED_LPEGLABEL_MEMBERS = {
@@ -42,7 +42,7 @@ local EXPECTED_LPEGLABEL_SYMBOLS = {
 }
 
 local EXPECTED_PROVIDER_MODULES = {
-    "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
+    "titan.browser", "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
     "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
     "titan.test", "titan.transfer", "titan.url",
 }
@@ -161,6 +161,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.same({
             runtime = expected_bin .. "/libtitan.a",
             js_library = expected_bin .. "/titan-browser-library.js",
+            bridge_library = expected_bin .. "/titan-browser-bridge.js",
             trace_library = expected_bin .. "/titan-browser-trace.js",
             loader = expected_bin .. "/titan-browser.mjs",
             runner = expected_bin .. "/titan-browser-run",
@@ -190,7 +191,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             end,
         }
         local required_order = {
-            "runtime", "js_library", "trace_library", "loader", "runner",
+            "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
             "runner_module", "node_worker", "page",
         }
         for _, key in ipairs(required_order) do
@@ -243,8 +244,10 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             paths.join(browser_paths.include, "titan.h"),
             paths.join(browser_paths.include, "transfer.h"),
             paths.join(browser_paths.include, "titan/ffi.h"),
+            paths.join(browser_paths.include, "titan/browser.h"),
             assets.runtime,
             assets.js_library,
+            assets.bridge_library,
             assets.trace_library,
             assets.loader,
             assets.runner,
@@ -759,7 +762,7 @@ end
             assert(strategy:read_file(browser_paths.lua_record)))
 
         -- Common Titan headers were staged without copying native Lua headers into include/.
-        for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h" }) do
+        for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h", "titan/browser.h" }) do
             assert.equal("file", strategy:stat(paths.join(browser_paths.include, rel)).kind, rel)
         end
         assert.is_nil(strategy:stat(paths.join(browser_paths.include, "lua.h")))
@@ -819,7 +822,7 @@ end
         assert.is_nil(strategy:stat(browser_paths.titan_bin .. "/titan.dll"))
 
         -- Verify sdk-digests was written last and covers the exact full installed file set
-        -- (Lua archive/record/27 headers + 4 common Titan headers + 9 browser SDK assets).
+        -- (Lua archive/record/27 headers + 5 common Titan headers + browser SDK assets).
         local sha256 = require "titan-compiler.sha256"
         local support = require "titan"
         local digest_ctx = {
@@ -843,11 +846,11 @@ end
         for _, name in ipairs(staged_lua_headers) do
             expected_digest_files[#expected_digest_files + 1] = paths.join(browser_paths.lua_source, name)
         end
-        for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h" }) do
+        for _, rel in ipairs({ "minicoro.h", "titan.h", "transfer.h", "titan/ffi.h", "titan/browser.h" }) do
             expected_digest_files[#expected_digest_files + 1] = paths.join(browser_paths.include, rel)
         end
         for _, key in ipairs({
-            "runtime", "js_library", "trace_library", "loader", "runner",
+            "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
             "runner_module", "node_worker", "page", "lpeglabel", "provider",
         }) do
             expected_digest_files[#expected_digest_files + 1] = assets[key]

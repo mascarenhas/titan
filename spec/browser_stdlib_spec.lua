@@ -177,6 +177,26 @@ plan:
         assert.truthy(err:find("unrecorded public interface differences", 1, true))
     end)
 
+    it("compares every shared module and only exempts the browser-only bridge module", function()
+        local function entry(modname, member)
+            local modtype = types.Module(modname, {
+                types.ModuleMember(modname, member,
+                    types.Function({ types.Integer() }, { types.Integer() }, false, nil, nil), { "value" }),
+            }, {})
+            return { types = types.serialize(modtype) }
+        end
+        local native = { key_order = { "fixture" }, entries = { fixture = entry("fixture", "shared") } }
+        local rows, modules = checks.inventory(native, { key_order = { "fixture", "titan.browser" },
+            entries = { fixture = entry("fixture", "shared"), ["titan.browser"] = entry("titan.browser", "binding") } })
+        assert.equal(1, modules)
+        assert.equal(1, #rows)
+        assert.equal("fixture", rows[1].module)
+        local ok, err = checks.inventory(native, { key_order = { "fixture", "titan.other" },
+            entries = { fixture = entry("fixture", "shared"), ["titan.other"] = entry("titan.other", "binding") } })
+        assert.is_nil(ok)
+        assert.equal("missing native module titan.other", err)
+    end)
+
     it("includes public nominal fields, statics and methods from ordinary module members", function()
         local owner = "fixture.Box"
         local record = types.Record(owner, {

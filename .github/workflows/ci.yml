@@ -476,7 +476,7 @@ jobs:
           test -z "$(ls -A "$PREFIX/lib/titan-browser" 2>/dev/null || true)"
           make browser-sdk PREFIX="$PREFIX"
           for installed in libtitan.a titan.a titan-browser.mjs \
-              titan-browser-library.js titan-browser-trace.js \
+              titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
               titan-browser-node-worker.mjs titan-browser-page.mjs sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
@@ -705,9 +705,12 @@ jobs:
           for (const row of manifest.degradedCases) {
             const result = spawnSync(process.env.TITAN_TRACE_RUNNER,
               ['--engine', 'node', '--timeout', '60000', '--root', root,
-               resolve(root, row.image)], {stdio: 'inherit', timeout: 90000});
-            if (result.error || result.status !== 75)
-              throw new Error(`${row.name}: degraded trace was not a harness failure (${result.status})`);
+               resolve(root, row.image)], {encoding: 'utf8', timeout: 90000});
+            process.stdout.write(result.stdout || '');
+            process.stderr.write(result.stderr || '');
+            if (result.error || result.status !== 1 || result.stdout.length !== 0 ||
+                !result.stderr.includes('degraded browser trace:'))
+              throw new Error(`${row.name}: degraded trace was not an ordinary initialization failure before Lua/main (${result.status})`);
           }
           JS
           "$runner" --engine node --timeout 300000 --grace 2000 \
@@ -941,13 +944,13 @@ jobs:
           test -z "$(ls -A "$PREFIX/lib/titan-browser" 2>/dev/null || true)"
           make browser-sdk PREFIX="$PREFIX"
           for installed in libtitan.a titan.a titan-browser.mjs \
-              titan-browser-library.js titan-browser-trace.js \
+              titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
               titan-browser-node-worker.mjs titan-browser-page.mjs sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 
-      - name: Run partitioned browser core stdlib suite under Node and Chromium
+      - name: Run complete browser core stdlib suite under Node and Chromium
         run: |
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
@@ -970,6 +973,7 @@ jobs:
             spec/browser_sdk_spec.lua
             spec/coder/browser_stdlib_closure_spec.lua
             spec/coder/browser_entry_gate_spec.lua
+            spec/coder/browser_bridge_spec.lua
             spec/coder/browser_stdlib_gate_spec.lua
             spec/coder/browser_fixtures_spec.lua
             spec/minicoro_spec.lua
@@ -1019,9 +1023,9 @@ jobs:
 
   # The same native Titan fixture images run in all three managed engines.
   # Each matrix cell owns its prefix, browser installation and output tree;
-  # assertions 2 and 0 are both built by the portable trace-gate builder.
+  # assertions 2 and 0 are built by the portable trace and bridge gate builders.
   browser-playwright:
-    name: browser traces (${{ matrix.profile }}, ${{ matrix.engine }}, Playwright 1.64.1)
+    name: browser traces and bridge (${{ matrix.profile }}, ${{ matrix.engine }}, Playwright 1.64.1)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-4
@@ -1048,9 +1052,12 @@ jobs:
       TITAN_ROOT: ${{ github.workspace }}/.lua
       TITAN_PLAYWRIGHT_VERSION: "1.64.1"
       TITAN_PLAYWRIGHT_ROOT: ${{ github.workspace }}/out/playwright-tools
+      TITAN_VITE_VERSION: "8.3.6"
+      TITAN_VITE_ROOT: ${{ github.workspace }}/out/vite-tools
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
       TITAN_TRACE_ENGINE: ${{ matrix.engine }}
       TITAN_TRACE_OUTPUT: ${{ github.workspace }}/out/browser/trace-${{ matrix.profile }}-${{ matrix.engine }}
+      TITAN_BRIDGE_OUTPUT: ${{ github.workspace }}/out/browser/bridge-${{ matrix.profile }}-${{ matrix.engine }}
 
     steps:
       - uses: actions/checkout@v6
@@ -1143,6 +1150,7 @@ jobs:
           make lua-browser PREFIX="$PREFIX"
           make browser-sdk PREFIX="$PREFIX"
           test -f "$PREFIX/lib/titan-browser/0.6/titan-browser-trace.js"
+          test -f "$PREFIX/lib/titan-browser/0.6/titan-browser-bridge.js"
 
       - name: Restore Playwright-managed browsers
         uses: ubicloud/cache@v4
@@ -1198,9 +1206,12 @@ jobs:
               ['spec/browser/playwright-run.mjs', '--engine', process.env.TITAN_TRACE_ENGINE,
                '--timeout', '60000', '--sdk', resolve(process.env.PREFIX, 'lib/titan-browser/0.6'),
                '--root', root, '--image', resolve(root, row.image)],
-              {stdio: 'inherit', timeout: 90000});
-            if (result.error || result.status !== 75)
-              throw new Error(`${row.name}: degraded trace was not a harness failure (${result.status})`);
+              {encoding: 'utf8', timeout: 90000});
+            process.stdout.write(result.stdout || '');
+            process.stderr.write(result.stderr || '');
+            if (result.error || result.status !== 1 || result.stdout.length !== 0 ||
+                !result.stderr.includes('degraded browser trace:'))
+              throw new Error(`${row.name}: degraded trace was not an ordinary initialization failure before Lua/main (${result.status})`);
           }
           JS
           "$TITAN_NODE" spec/browser/playwright-run.mjs \
@@ -1209,6 +1220,75 @@ jobs:
             --root "$TITAN_TRACE_OUTPUT" \
             "$TITAN_TRACE_OUTPUT/trace.test.mjs" -- --degraded \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-degraded.log"
+
+      - name: Build the portable bridge gate for both assertion modes
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          lua -E spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-bridge-build.log"
+
+      - name: Run the persistent bridge and opaque-Promise diagnostics
+        run: |
+          set -euo pipefail
+          "$TITAN_NODE" --input-type=module <<'JS' \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-bridge.log"
+          import {spawnSync} from 'node:child_process';
+          import {resolve} from 'node:path';
+          const root = process.env.TITAN_BRIDGE_OUTPUT;
+          const sdk = resolve(process.env.PREFIX, 'lib/titan-browser/0.6');
+          const engines = [process.env.TITAN_TRACE_ENGINE];
+          // Validation Node is covered by browser-stdlib's real-toolchain gate.
+          if (process.env.TITAN_BUILD_PROFILE === 'production' && engines[0] === 'chromium')
+            engines.push('node');
+          for (const engine of engines) {
+            const common = ['--engine', engine, '--timeout', '300000', '--grace', '2000', '--root', root];
+            const runner = engine === 'node'
+              ? [resolve(sdk, 'titan-browser-run.mjs'), ...common, '--js-test']
+              : [resolve('spec/browser/playwright-run.mjs'), ...common, '--sdk', sdk];
+            for (const assertions of [2, 0]) {
+              const images = [`assertions-${assertions}/bridge.mjs`,
+                `assertions-${assertions}/initializer-failure.mjs`];
+              for (const [script, status, marker] of [
+                ['integration.mjs', 0, '"verdict":"PASS"'],
+                ['unhandled.mjs', 74, 'bridge unhandled opaque promise'],
+                ['unhandled-result.mjs', 74, 'bridge unhandled reverse result'],
+                ['poison-retirement.mjs', 70, 'poison-retirement-complete']]) {
+                console.log(`BRIDGE-RUN engine=${engine} assertions=${assertions} script=${script}`);
+                const args = status === 0 ? images : images.slice(0, 1);
+                const result = spawnSync(process.execPath,
+                  [...runner, resolve(root, script), '--', ...args],
+                  {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 320000});
+                process.stdout.write(result.stdout ?? '');
+                process.stderr.write(result.stderr ?? '');
+                const receipt = script === 'poison-retirement.mjs'
+                  ? result.stdout ?? '' : (result.stdout ?? '') + (result.stderr ?? '');
+                if (result.error || result.status !== status || !receipt.includes(marker))
+                  throw new Error(`${engine}/${assertions}/${script}: expected ${status} and ${marker}, got ${result.status}`,
+                    {cause: result.error});
+              }
+            }
+          }
+          JS
+
+      - name: Install the pinned Vite deployment dependency
+        if: matrix.engine == 'chromium'
+        run: |
+          set -euo pipefail
+          PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT" --no-save \
+            --package-lock=false --no-audit --no-fund "vite@$TITAN_VITE_VERSION"
+
+      - name: Run self-contained HTTP and Vite deployment gate
+        if: matrix.engine == 'chromium'
+        env:
+          TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
+          TITAN_REQUIRE_BROWSER_DEPLOYMENT: "1"
+          TITAN_PROBE_CACHE_DISABLE: "1"
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_deployment_spec.lua \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-deployment.log"
 
       # A validation install cannot stand in for a production one: the
       # descriptor and SDK identity would disagree. This cell already owns a
@@ -1248,9 +1328,12 @@ jobs:
           for (const row of manifest.degradedCases) {
             const result = spawnSync(process.env.TITAN_TRACE_RUNNER,
               ['--engine', 'node', '--timeout', '60000', '--root', root,
-               resolve(root, row.image)], {stdio: 'inherit', timeout: 90000});
-            if (result.error || result.status !== 75)
-              throw new Error(`${row.name}: degraded trace was not a harness failure (${result.status})`);
+               resolve(root, row.image)], {encoding: 'utf8', timeout: 90000});
+            process.stdout.write(result.stdout || '');
+            process.stderr.write(result.stderr || '');
+            if (result.error || result.status !== 1 || result.stdout.length !== 0 ||
+                !result.stderr.includes('degraded browser trace:'))
+              throw new Error(`${row.name}: degraded trace was not an ordinary initialization failure before Lua/main (${result.status})`);
           }
           JS
           "$runner" --engine node --timeout 300000 --grace 2000 \
@@ -1267,6 +1350,7 @@ jobs:
             ${{ runner.temp }}/browser-playwright-*.log
             ${{ runner.temp }}/browser-production-pins.log
             ${{ env.TITAN_TRACE_OUTPUT }}
+            ${{ env.TITAN_BRIDGE_OUTPUT }}
           if-no-files-found: error
           retention-days: 7
 

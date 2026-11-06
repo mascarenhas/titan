@@ -294,7 +294,7 @@ install-titan-sdk publish-titan-sdk:
 	  $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSES)
 	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/libtitan.a) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/libtitan.a)
 	cp -p titan-runtime/titan.h titan-runtime/minicoro.h titan-runtime/transfer.h $(call quote,$(TITAN_INSTALL_TREE)/include/)
-	cp -p titan-runtime/titan/ffi.h $(call quote,$(TITAN_INSTALL_TREE)/include/titan/ffi.h)
+	cp -p titan-runtime/titan/ffi.h titan-runtime/titan/browser.h $(call quote,$(TITAN_INSTALL_TREE)/include/titan/)
 	cp -p LICENSE $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSE)
 	cp -p THIRD_PARTY_NOTICES.md $(call quote,$(TITAN_INSTALL_TREE)/share/titan/THIRD_PARTY_NOTICES.md)
 	for filename in $(TITAN_LICENSE_FILES); do cp -p "LICENSES/$$filename" $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSES/); done

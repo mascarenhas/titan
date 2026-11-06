@@ -17,7 +17,7 @@ function privateControl(context, message) {
 
 async function abortImage(context) {
     const image = await context.image(context.args[1]);
-    const instance = context.create(image.factory, { locateFile: () => image.locateFile("missing-runner-329.wasm") });
+    const instance = image.create({ locateFile: () => image.locateFile("missing-runner-329.wasm") });
     try { await instance.initialize(); }
     finally { await instance.dispose(); }
 }
@@ -26,16 +26,6 @@ export async function run(context) {
     const mode = context.args[0] ?? "context";
     if (mode === "args") {
         context.stdout(new TextEncoder().encode(JSON.stringify(context.args.slice(1))));
-        return;
-    }
-    if (mode === "trace-policy") {
-        const image = await context.image("spec/fixtures/browser_trace_adapter/degraded.mjs");
-        try {
-            const module = await image.factory({});
-            context.assert(module.titanBrowserTrace.state === "degraded");
-        } catch {
-            // Swallowing the rejection must not erase the observer's failure.
-        }
         return;
     }
     if (mode === "trap") { wasmAction()(); return; }
@@ -82,7 +72,7 @@ export async function run(context) {
     }
     if (mode === "sink-stdout" || mode === "sink-stderr" || mode === "sink-thenable") {
         const image = await context.image(context.args[1]);
-        const instance = context.create(image.factory, {
+        const instance = image.create({
             locateFile: image.locateFile,
             stdout: mode === "sink-stdout" ? () => { throw new Error("runner stdout sink"); } :
                 mode === "sink-thenable" ? () => Promise.reject(new Error("runner Promise sink")) : context.stdout,
@@ -105,7 +95,7 @@ export async function run(context) {
         const first = await context.image(context.args[1]);
         const second = await context.image("./" + context.args[1]);
         context.assert(Object.isFrozen(first) && Object.isFrozen(second));
-        context.assert(first.factory === second.factory, "image factory identity was not cached");
+        context.assert(first.create === second.create, "image creator identity was not cached");
         return;
     }
     if (mode === "http-paths") {
@@ -114,7 +104,7 @@ export async function run(context) {
         for (const path of ["/root/%2e%2e%2fetc/passwd", "/root/%2Fetc/passwd", "/sdk/%2e%2e%2ftitan-browser-run.mjs"]) {
             context.assert((await fetch(origin + path)).status === 404, "HTTP server accepted traversal");
         }
-        const sdk = origin + "/sdk/titan-browser.mjs";
+        const sdk = origin + "/sdk/titan-browser-page.mjs";
         context.assert((await fetch(sdk, { method: "POST" })).status === 405, "SDK route was writable");
         const head = await fetch(sdk, { method: "HEAD" });
         context.assert(head.ok && head.headers.get("content-type").startsWith("text/javascript"));
@@ -124,7 +114,7 @@ export async function run(context) {
     context.assert(Object.isFrozen(context), "host-test context is mutable");
     context.assert(Object.isFrozen(context.args), "host-test args are mutable");
     context.equalBytes(new TextEncoder().encode(Object.keys(context).sort().join(",")),
-        new TextEncoder().encode("args,assert,bytes,create,engine,equalBytes,gc,image,stderr,stdout,tick"));
+        new TextEncoder().encode("args,assert,bytes,engine,equalBytes,gc,image,stderr,stdout,tick"));
     context.assert(context.engine === "node" || context.engine === "chromium");
     const first = await context.bytes("spec/browser/runner-fixtures.mjs");
     const original = first[0];

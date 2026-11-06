@@ -1,7 +1,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { classify, execute, knownTrap, observeFactory, reason, relativePath } from "./titan-browser-page.mjs";
+import { classify, execute, knownTrap, observeImage, reason, relativePath } from "./titan-browser-page.mjs";
 
 const control = message => process.send?.(message);
 const failure = (error, terminal = false) =>
@@ -39,10 +39,11 @@ async function run(config) {
             if (!images.has(path)) images.set(path, (async () => {
                 const file = await asset(path);
                 const module = await import(pathToFileURL(file).href);
-                if (typeof module.default !== "function") throw new Error("image must export a default factory");
-                if (!wrappers.has(module.default)) wrappers.set(module.default, observeFactory(module.default, control, config.allowDegradedTrace));
+                if (typeof module.default !== "function") throw new Error("image must export a default create function");
+                if (!wrappers.has(module.default)) wrappers.set(module.default,
+                    observeImage(module.default, control, config.allowDegradedTrace));
                 return Object.freeze({
-                    factory: wrappers.get(module.default),
+                    create: wrappers.get(module.default),
                     locateFile: name => resolve(dirname(file), name),
                 });
             })());

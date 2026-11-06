@@ -360,40 +360,38 @@ pointer has neither length nor count-aware indexing.
 After a caught error, `catch` blocks, deferred statements, and code after a
 handled `catch` see automatic C storage as follows.
 
-**Aggregates and fixed arrays** show the bytes as of Titan's last completed
-write to them or the last call that wrote them through a mutable address and
-returned normally. Both C functions and ordinary Titan functions count, when
-the object itself (or its decayed array) is passed directly as the argument. A
-call that writes the object and then raises does not count: its writes are
-discarded and the earlier bytes come back. FAM backing follows the same rules
-for its full dynamic extent. Mutation through a raw pointer or another alias
-that Titan does not track, or asynchronously from C, is outside these rules. A
-borrowed pointer view (`foreign *T` or `foreign T[]`) preserves only the
-pointer value; the bytes it points to are never saved or restored, so storage
-reached only through a pointer local shows its current memory. Keep state that
-C writes during a protected region, such as a native wait cell, in automatic
-storage accessed through a pointer local, as
-[external waits](async-io.md#external-waits) describe.
-
-**Scalars and pointers** whose mutable address is taken are never restored. If
-a non-GC scalar local or parameter, such as a C integer or pointer, is passed
-as a mutable out pointer to a call and recovery code reads it, it keeps a single
-storage location. A value that the callee stores through that address before
-raising, whether the callee is C or an ordinary Titan function, is what
-recovery sees, even when an earlier protected region also assigned the local.
-This is how a `defer` guard observes
+**Locals and parameters whose mutable C address is exposed** keep one storage
+location. What a C or ordinary Titan callee writes before raising is what
+recovery sees: scalar values, pointers, structs, unions, fixed and nested
+arrays, and the full automatic FAM extent. Direct array decay and inline
+array-field decay count too. A `defer` guard can therefore observe an acquired
+resource, or see that
 [`transfer.decode_message`](standard-library-transfer.md#raw-packet-encoding-decoding-copying-and-disposal)
-clearing its packet slot.
+cleared its packet slot, without restoring an obsolete owner.
 
-The scalar rule is a guarantee of Titan's supported GCC and Clang toolchains,
-including Clang on Windows (MSYS2), not of ISO C. The generated C declares such
-a local `volatile` and adds a compiler barrier at its declaration, so the
-optimizer keeps the callee's store even when it inlines the callee; `volatile`
-alone does not ensure that. The callee still writes through an unqualified
-pointer, which ISO C 6.7.3p6 leaves undefined. The
+A caught error is not a transaction that undoes native writes: recovery never
+restores the bytes such storage held before the raising call. Automatic C
+storage whose mutable address is never exposed shows the value of its last
+completed write.
+
+Exact Lua-internal `TValue` and `Udata *` out-parameters follow the retained-write
+rule as well. The compiler publishes their current values into existing GC
+root slots before recovery can run close methods or collect, and clearing a
+slot drops its old root. This does not remove the foreign writer's obligation
+to keep fresh GC objects rooted through the handoff.
+
+A borrowed pointer view (`foreign *T` or `foreign T[]`) preserves only the
+pointer value; the backing bytes are not saved or restored. Retained raw
+aliases that Titan does not track, asynchronous C writes, pointer lifetimes
+and callback ownership remain the foreign code's responsibility.
+
+This guarantee uses Titan's supported GCC and Clang toolchains, including
+Clang on Windows (MSYS2), rather than strict ISO C. Generated C makes the
+recovery home `volatile` and emits a declaration escape barrier; volatility
+alone does not preserve an inlined indirect store. The callee still uses an
+unqualified pointer, which ISO C 6.7.3p6 leaves undefined. The
 [implementation chapter](../implementation/error-handling.md#setjmp-sensitive-localparameter-spills)
-states the optimizer and link-time-optimization assumptions behind this
-guarantee.
+states the optimizer and link-time-optimization assumptions.
 
 ## A callback-options example
 

@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { classify, knownTrap, observeFactory, relativePath } from "../../titan-runtime/browser/titan-browser-page.mjs";
+import { classify, knownTrap, observeImage, relativePath } from "../../titan-runtime/browser/titan-browser-page.mjs";
 import {Monitor, within} from "../../titan-runtime/browser/titan-browser-run.mjs";
 import {create} from "../../titan-runtime/browser/titan-browser.mjs";
 
@@ -23,6 +23,17 @@ function testImage(t) {
     if (strict) assert.fail("TITAN_BROWSER_RUNNER_IMAGE must name the compiled runner_image fixture");
     t.skip("TITAN_BROWSER_RUNNER_IMAGE is unset");
     return null;
+}
+
+async function missingMapImage(t) {
+    const image = testImage(t);
+    if (!image) return null;
+    const directory = await mkdtemp(join(dirname(image), "trace-policy-"));
+    t.after(() => rm(directory, {recursive: true, force: true}));
+    const file = join(directory, basename(image));
+    await copyFile(image, file);
+    await copyFile(image.replace(/\.mjs$/, ".wasm"), file.replace(/\.mjs$/, ".wasm"));
+    return {file, directory};
 }
 
 function fixtureRoot(image) {
@@ -205,10 +216,26 @@ test("classification retains original trap identity and abort evidence", () => {
     assert.equal(knownTrap(wrapped), true);
     assert.equal(classify(Object.assign(new WebAssembly.RuntimeError("Aborted"), { code: "TITAN_BROWSER_ABORT" })), "abort");
     const events = [];
-    const factory = observeFactory(options => options.onAbort("late"), value => events.push(value));
+    const creator = observeImage(options => options.onEngineFailure({kind: "abort", cause: "late"}),
+        value => events.push(value));
     const sentinel = new Error("caller abort");
-    assert.throws(() => factory({ onAbort() { events.push("caller"); throw sentinel; } }), error => error === sentinel);
+    assert.throws(() => creator({onEngineFailure() { events.push("caller"); throw sentinel; }}), error => error === sentinel);
     assert.deepEqual(events, ["caller", { type: "abort", reason: "late" }]);
+});
+
+test("public image observation forwards aborts and traps but leaves handled protocol poison local", () => {
+    const events = ["abort", "trap", "protocol"].map(kind => ({kind, cause: new Error(kind)}));
+    const observed = [], controls = [];
+    for (const event of events) {
+        observeImage(options => options.onEngineFailure(event), value => controls.push(value))({
+            onEngineFailure: value => observed.push(value),
+        });
+    }
+    assert.deepEqual(observed, events);
+    assert.deepEqual(controls, [
+        {type: "abort", reason: "abort"},
+        {type: "failure", category: "trap", reason: "trap", knownTrap: true},
+    ]);
 });
 
 test("launcher rejects absent and wrong-major Node without stdout", { skip: !supported }, async () => {
@@ -332,6 +359,23 @@ for (const engine of ["node", "chromium"]) {
                 "Usage: <test-executable> [-h|--help] [-v|--verbose] [-f PATTERN|--filter=PATTERN]...\n");
             if (engine === "chromium") for (const result of [passed, failed, skipped, empty, invalid]) await cleanChromium(result);
         });
+        test(`uncaught real-image completion corruption remains a harness failure (${engine}/${cdp})`, { skip: !supported }, async t => {
+            const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
+            if (!named) {
+                if (strict) assert.fail("TITAN_BROWSER_LOADER_IMAGE must name the compiled fidelity fixture");
+                t.skip("TITAN_BROWSER_LOADER_IMAGE is unset");
+                return;
+            }
+            if (engine === "chromium" && !await chromium(t)) return;
+            for (const mode of ["duplicate", "invalid"]) await t.test(mode, async () => {
+                const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000",
+                    "--grace", "20", resolve(named), "--", mode]);
+                assert.equal(result.status, 75, result.stderr.toString());
+                assert.equal(result.signal, null);
+                assert.match(result.stderr.toString(), /titan-browser-run: harness failure: browser entry reported a duplicate or mismatched completion/);
+                if (engine === "chromium") await cleanChromium(result);
+            });
+        });
         test(`failure categories and bounded cleanup (${engine}/${cdp})`, { skip: !supported }, async t => {
             if (engine === "chromium" && !await chromium(t)) return;
             const image = process.env.TITAN_BROWSER_RUNNER_IMAGE && resolve(process.env.TITAN_BROWSER_RUNNER_IMAGE);
@@ -354,7 +398,7 @@ for (const engine of ["node", "chromium"]) {
                 ["host-fail", 1, /titan-browser-run: JS test failed: runner host assertion/],
                 ["sink-stdout", 76, /titan-browser-run: sink failure: browser stdout sink failed/],
                 ["sink-stderr", 76, /titan-browser-run: sink failure: browser stderr sink failed/],
-                ["sink-thenable", 76, /titan-browser-run: sink failure: browser stdout sink must return undefined/],
+                ["sink-thenable", 76, /titan-browser-run: sink failure: browser stdout sink failed/],
                 ["image-cache", 0, /^(?!.*titan-browser-run: (?:harness|abort|trap))/s],
             ];
             if (engine === "node") cases.push(["premature-exit", 75, /titan-browser-run: harness failure: Node worker (?:exited|IPC disconnected)/]);
@@ -382,7 +426,12 @@ for (const engine of ["node", "chromium"]) {
             assert.equal(short.status, 0, short.stderr.toString());
             if (engine === "chromium") await cleanChromium(short);
         });
-        for (const [phase, fixtureName] of [["suspended", "abort-dispose"], ["initializing", "initialize-abort"]]) {
+        for (const [phase, fixtureName, ...args] of [
+            ["suspended", "abort-dispose"], ["initializing", "initialize-abort"],
+            ["binding throw", "abort-binding", "throw"], ["binding return", "abort-binding", "return"],
+            ["binding bytes", "abort-binding", "bytes"], ["binding format", "abort-binding", "format"],
+            ["binding allocation", "abort-binding", "allocation"],
+        ]) {
             test(`fatal ${phase} abort completes disposal before shutdown (${engine}/${cdp})`, { skip: !supported }, async t => {
                 const named = process.env.TITAN_BROWSER_LOADER_IMAGE;
                 if (!named) {
@@ -396,7 +445,7 @@ for (const engine of ["node", "chromium"]) {
                 const before = performance.now();
                 const result = await run(["--engine", engine, "--cdp", cdp, "--timeout", "5000", "--grace", "200", "--root", directory,
                     "--js-test", join(root, `spec/fixtures/browser_loader/${fixtureName}.mjs`), "--",
-                    relative(directory, image).split(sep).join("/")]);
+                    relative(directory, image).split(sep).join("/"), ...args]);
                 assert.equal(result.status, 70, result.stderr.toString());
                 assert.deepEqual(result.stdout, Buffer.from("dispose-complete\n"), "abort status alone does not prove fatal disposal finished");
                 assert.ok(performance.now() - before < 5000, "fatal disposal waited for an unusable instance");
@@ -435,7 +484,7 @@ for (const engine of ["node", "chromium"]) {
                         context.assert(rejected, "symlink escaped --root");
                     }
                     const image = await context.image("factory #?.mjs");
-                    context.assert(await image.factory({locateFile: image.locateFile}) === 42,
+                    context.assert(await image.create({locateFile: image.locateFile}) === 42,
                         "real special-name sibling Wasm was not fetched and instantiated");
                 }\n`);
                 const isolated = await run(["--engine", engine, "--cdp", cdp, "--grace", "0", "--js-test", file]);
@@ -709,20 +758,162 @@ test("exact-profile PID EPERM ignores only retired processes", { skip: !supporte
     });
 });
 
-test("degraded trace metadata fails runner unless explicitly allowed", {skip: !supported}, async () => {
-    const base = ["--engine", "node", "--grace", "0", "--root", root, "--js-test", fixture,
-        "--", "trace-policy"];
-    const strictResult = await run(base);
-    assert.equal(strictResult.status, 75, strictResult.stderr.toString());
-    assert.match(strictResult.stderr.toString(), /degraded browser trace: intentional missing map/);
-    const allowed = await run(["--allow-degraded-trace", ...base]);
-    assert.equal(allowed.status, 0, allowed.stderr.toString());
+for (const [engine, cdp] of [["node", "pipe"], ["chromium", "pipe"], ["chromium", "port"]]) {
+    test(`required trace fails before main for direct and host-test images (${engine}/${cdp})`,
+        {skip: !supported}, async t => {
+        const image = await missingMapImage(t);
+        if (!image || (engine === "chromium" && !await chromium(t))) return;
+        const directory = fixtureRoot(image.file);
+        const imageArg = relative(directory, image.file).split(sep).join("/");
+        const base = ["--engine", engine, "--cdp", cdp, "--grace", "0", "--root", directory];
+        for (const entry of [
+            [image.file, "--", "--filter=^runner_image[.]test_bytes$"],
+            ["--js-test", join(root, "spec/fixtures/browser_trace_adapter/degraded.mjs"),
+                "--", imageArg, "--filter=^runner_image[.]test_bytes$"],
+        ]) {
+            const failed = await run([...base, ...entry]);
+            assert.equal(failed.status, 1, failed.stderr.toString());
+            assert.match(failed.stderr.toString(), /degraded browser trace:/);
+            assert.equal(failed.stdout.length, 0, "required-trace failure entered native main");
+            const allowed = await run(["--allow-degraded-trace", ...base, ...entry]);
+            assert.equal(allowed.status, 0, allowed.stderr.toString());
+            assert.match(allowed.stdout.toString(), /\[  PASSED  \] 1 test\./);
+            if (engine === "chromium") {
+                await cleanChromium(failed);
+                await cleanChromium(allowed);
+            }
+        }
+    });
+}
+
+test("required trace uses the existing lazy initialization and disposal lifecycle", {skip: !supported}, async t => {
+    const image = await missingMapImage(t);
+    if (!image) return;
+    const {default: createImage} = await import(pathToFileURL(image.file).href);
+    const decoder = new TextDecoder();
+    const make = (extra = {}) => {
+        const output = [], reports = [], counters = {located: 0};
+        const instance = createImage({
+            locateFile(name) { counters.located++; return join(image.directory, name); },
+            stdout(bytes) { output.push(bytes); },
+            stderr(bytes) { reports.push(bytes); },
+            ...extra,
+        });
+        assert.equal(counters.located, 0, "create eagerly instantiated its image");
+        assert.deepEqual(instance.trace, {state: "created", reason: null});
+        return {instance, output, reports, counters};
+    };
+    const caught = async (promise, code) => {
+        let error;
+        try { await promise; } catch (cause) { error = cause; }
+        assert.equal(error?.code, `TITAN_BROWSER_${code}`);
+        return error;
+    };
+    const bytes = chunks => Buffer.concat(chunks.map(chunk => Buffer.from(chunk)));
+    const args = ["--filter=^runner_image[.]test_bytes$"];
+    assert.throws(() => createImage({requireTrace: 1}), /requireTrace must be a boolean/);
+
+    const optional = make();
+    try {
+        const first = optional.instance.initialize();
+        assert.equal(first, optional.instance.initialize());
+        await first;
+        assert.ok(optional.counters.located > 0);
+        assert.equal(optional.instance.trace.state, "degraded");
+        const result = await optional.instance.run(args);
+        assert.equal(result.kind, "returned");
+        assert.equal(result.status, 0, bytes(optional.reports).toString());
+        assert.match(bytes(optional.output).toString(), /\[  PASSED  \] 1 test\./);
+        await optional.instance.dispose();
+        assert.equal(optional.instance.trace.state, "degraded");
+    } finally { await optional.instance.dispose(); }
+
+    const strictImage = make({requireTrace: true});
+    try {
+        await caught(strictImage.instance.call(undefined), "STATE");
+        await caught(strictImage.instance.drain(), "STATE");
+        const first = strictImage.instance.initialize();
+        assert.equal(first, strictImage.instance.initialize());
+        await caught(strictImage.instance.run(args), "REENTRY");
+        const error = await caught(first, "TITAN");
+        assert.equal(error.status, 1);
+        assert.equal(error.trace, undefined, "pre-Lua failure fabricated a Titan trace");
+        assert.match(decoder.decode(error.bytes), /^degraded browser trace:/);
+        assert.equal(first, strictImage.instance.initialize(), "failed initialize lost its saved promise");
+        assert.equal(strictImage.output.length, 0);
+        const report = bytes(strictImage.reports);
+        const result = await strictImage.instance.run(args);
+        assert.equal(result.kind, "failed");
+        assert.equal(result.status, 1);
+        assert.deepEqual(result.bytes, error.bytes);
+        assert.deepEqual(bytes(strictImage.reports), report, "run repeated the initialization report");
+        await caught(strictImage.instance.run(args), "STATE");
+        await caught(strictImage.instance.call(undefined), "STATE");
+        await caught(strictImage.instance.drain(), "STATE");
+        const disposal = strictImage.instance.dispose();
+        assert.equal(disposal, strictImage.instance.dispose());
+        await disposal;
+        assert.equal(strictImage.instance.trace.state, "degraded");
+        await caught(strictImage.instance.initialize(), "DISPOSED");
+    } finally { await strictImage.instance.dispose(); }
+
+    const automatic = make({requireTrace: true});
+    try {
+        const running = automatic.instance.run(args);
+        await caught(automatic.instance.run(args), "REENTRY");
+        const result = await running;
+        assert.equal(result.kind, "failed");
+        assert.equal(result.status, 1);
+        const first = automatic.instance.initialize();
+        assert.equal(first, automatic.instance.initialize());
+        const error = await caught(first, "TITAN");
+        assert.equal(error.trace, undefined);
+        assert.deepEqual(result.bytes, error.bytes);
+        await caught(automatic.instance.run(args), "STATE");
+        assert.equal(automatic.output.length, 0);
+    } finally { await automatic.instance.dispose(); }
+
+    let begin, release, calls = 0;
+    const started = new Promise(resolve => { begin = resolve; });
+    const pending = new Promise(resolve => { release = resolve; });
+    const cleanup = [];
+    const interrupted = make({requireTrace: true, stderr() { calls++; begin(); return pending; },
+        onNotificationError(event) { cleanup.push(event); }});
+    try {
+        const initializing = interrupted.instance.initialize();
+        const failure = caught(initializing, "TITAN");
+        await started;
+        const disposal = interrupted.instance.dispose();
+        const error = await failure;
+        assert.equal(error.trace, undefined);
+        assert.match(decoder.decode(error.bytes), /^degraded browser trace:/);
+        const interruption = await caught(disposal, "DISPOSED");
+        assert.equal(cleanup.length, 1);
+        assert.equal(cleanup[0].kind, "cleanup");
+        assert.equal(cleanup[0].operation, "initialize");
+        assert.equal(cleanup[0].error, interruption);
+        assert.equal(interrupted.instance.trace.state, "degraded");
+        assert.equal(interrupted.output.length, 0);
+        await caught(interrupted.instance.run(args), "DISPOSED");
+        release();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        assert.equal(calls, 1, "late trace-report sink settlement revived the disposed stream");
+        assert.equal(cleanup.length, 1, "late sink settlement repeated the cleanup interruption");
+    } finally {
+        release();
+        await interrupted.instance.dispose().catch(() => {});
+    }
 });
 
-test("factory observer admits ready and fabricated metadata-free factories", async () => {
-    for (const module of [{titanBrowserTrace: {state: "ready"}}, {}]) {
+test("image observer forwards trace policy without owning another lifecycle", () => {
+    for (const allow of [false, true]) {
+        const instance = {};
         const controls = [];
-        assert.equal(await observeFactory(async () => module, value => controls.push(value))({}), module);
+        let options;
+        const creator = observeImage(value => { options = value; return instance; },
+            value => controls.push(value), allow);
+        assert.equal(creator({requireTrace: allow}), instance);
+        assert.equal(options.requireTrace, !allow);
         assert.deepEqual(controls, []);
     }
 });
@@ -750,23 +941,26 @@ test("direct invocation through a symlink still runs the runner CLI", {skip: !su
     } finally { await rm(directory, {recursive: true, force: true}); }
 });
 
-// Transport unit fixture: zero arguments need no Wasm allocator. The queued
-// safe point deliberately precedes the loader's ccall outcome continuation.
+// Transport-only unit fixture, not linked-image acceptance evidence. Each
+// promised gateway uses the current operation-id/kind completion protocol.
 function entryOutcomeFactory(entry) {
     return options => {
-        options.titanBrowserAttach({safe: () => true, poison() {}});
+        const backend = {safe: () => true, poison() {}};
+        options.titanBrowserAttach(backend);
+        const complete = (id, kind, status = 0, bytes = new Uint8Array()) =>
+            options.titanBrowserComplete({id, kind, failed: false, status, bytes,
+                trace: new Uint8Array(), values: []});
         return {
             HEAPU8: new Uint8Array(0),
-            ccall() {
-                queueMicrotask(() => options.titanBrowserSafePoint());
-                return entry(options);
-            },
+            _titan_browser_initialize(id) { complete(id, 1); return Promise.resolve(0); },
+            _titan_browser_entry(id) { return entry(options, id); },
+            _titan_browser_close(id) { complete(id, 5); return Promise.resolve(0); },
         };
     };
 }
 
 for (const mode of ["synchronous throw", "promise rejection"]) {
-    test(`ccall ${mode} preserves RangeError before an earlier queued safe point`, {timeout: 1000}, async () => {
+    test(`promised export ${mode} preserves its original RangeError`, {timeout: 1000}, async () => {
         const cause = new RangeError("entry stack exhausted");
         const instance = create(entryOutcomeFactory(() => {
             if (mode === "synchronous throw") throw cause;
@@ -780,58 +974,73 @@ for (const mode of ["synchronous throw", "promise rejection"]) {
     });
 }
 
-test("fulfilled ccall without completion still reports the protocol failure", {timeout: 1000}, async () => {
+test("fulfilled export without completion still reports protocol failure", {timeout: 1000}, async () => {
     const instance = create(entryOutcomeFactory(() => Promise.resolve(0)));
     try {
         await assert.rejects(instance.run(), {
-            code: "TITAN_BROWSER_PROTOCOL",
-            message: "browser entry returned without completion",
+            code: "TITAN_BROWSER_PROTOCOL", message: "browser entry returned without completion",
         });
     } finally { await instance.dispose(); }
 });
 
-test("loader refuses missing JSPI before instantiation and shares its failure promise", async () => {
+test("loader refuses missing JSPI and memoizes failure for initialize and run", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(WebAssembly, "promising");
     let calls = 0;
     const instance = create(() => { calls++; });
-    let initializing;
     try {
         Object.defineProperty(WebAssembly, "promising", {...descriptor, value: undefined});
-        initializing = instance.initialize();
+        const initializing = instance.initialize();
         assert.equal(instance.initialize(), initializing);
+        const expected = {code: "TITAN_BROWSER_CAPABILITY",
+            message: "Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)"};
+        await assert.rejects(initializing, expected);
+        assert.equal(instance.initialize(), initializing);
+        await assert.rejects(instance.run(), expected);
+        assert.equal(calls, 0);
     } finally {
         if (descriptor) Object.defineProperty(WebAssembly, "promising", descriptor);
         else delete WebAssembly.promising;
+        await instance.dispose();
     }
-    try {
-        await assert.rejects(initializing, {
-            code: "TITAN_BROWSER_CAPABILITY",
-            message: "Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)",
-        });
-        assert.equal(calls, 0);
-    } finally { await instance.dispose(); }
 });
 
-test("completion waits for terminal promise retirement and ignores its numeric value", {timeout: 1000}, async () => {
+test("completion waits for promised retirement and ignores numeric fulfillment", {timeout: 1000}, async () => {
     let release;
     const retired = new Promise(resolve => { release = resolve; });
-    const instance = create(entryOutcomeFactory(options => {
-        options.titanBrowserComplete(0, 17, new Uint8Array([0, 255]), 1);
+    const instance = create(entryOutcomeFactory((options, id) => {
+        options.titanBrowserComplete({id, kind: 2, failed: false, status: 17,
+            bytes: new Uint8Array([0, 255]), trace: new Uint8Array(), values: []});
         return retired;
     }));
-    let settled = false, disposed = false;
+    let settled = false;
     const running = instance.run();
-    running.finally(() => { settled = true; });
+    running.then(() => { settled = true; }, () => { settled = true; });
     try {
         await new Promise(resolve => setImmediate(resolve));
-        assert.equal(settled, false, "copied completion released an unretired engine entry");
+        assert.equal(settled, false, "copied completion released an unretired entry");
+        release(-923);
+        assert.deepEqual(await running, {kind: "returned", status: 17, bytes: new Uint8Array([0, 255])});
+    } finally { release(-923); await instance.dispose(); }
+});
+
+test("dispose waits accepted retirement but interrupts the application result", {timeout: 1000}, async () => {
+    let release;
+    const retired = new Promise(resolve => { release = resolve; });
+    const instance = create(entryOutcomeFactory((options, id) => {
+        options.titanBrowserComplete({id, kind: 2, failed: false, status: 17,
+            bytes: new Uint8Array(), trace: new Uint8Array(), values: []});
+        return retired;
+    }));
+    const running = instance.run();
+    const interrupted = assert.rejects(running, {code: "TITAN_BROWSER_DISPOSED"});
+    let disposed = false;
+    try {
+        await new Promise(resolve => setImmediate(resolve));
         const disposing = instance.dispose().then(() => { disposed = true; });
         await new Promise(resolve => setImmediate(resolve));
-        assert.equal(disposed, false, "disposal dropped an admitted continuation");
+        assert.equal(disposed, false, "disposal dropped an accepted continuation");
         release(-923);
-        assert.deepEqual(await running, {
-            kind: "returned", status: 17, bytes: new Uint8Array([0, 255]),
-        });
+        await interrupted;
         await disposing;
     } finally { release(-923); await instance.dispose(); }
 });

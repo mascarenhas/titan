@@ -2,7 +2,9 @@
 #include <errno.h>
 #include <emscripten.h>
 EM_JS(void, configure_flush_devices, (int failures, int io_error), {
-    const records = Module['fixtureDrains'] = { order: [], stdout: [], stderr: [] };
+    const records = { order: [], stdout: [], stderr: [] };
+    const publish = Module['titanBrowserBridge'].options.bindings?.fixtureDrains;
+    if (publish) publish(records);
     for (const [index, name] of ['stdout', 'stderr'].entries()) {
         const device = FS.makedev(64, index);
         FS.registerDevice(device, {

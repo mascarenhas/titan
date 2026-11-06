@@ -82,8 +82,9 @@ use the chapters below for the normative language reference.
 | [Output directories](output-directory.md) | `-o/--output` directory creation, `--exe` executable paths, `-I`/`-D`/`-L`/`-l`/`--cflag`/`--ldflag`/`--c-source`/`--print-c-objects` switches, reserved generated-C names and upgrading older (including moved) output trees, `.titan/`, `.native/`, and `.titan-links/` contents, the `.titan-target` one-target marker, `.titan-build.lock` coordination, coverage, and platform output layouts. |
 | [Folder modules](folder-modules.md) | Splitting one logical module across a canonical main and immediate contributors: shared scope, deterministic order, lookup privacy, initialization, and artifacts. |
 | [Target source selection](target-source-selection.md) | `name.<label>.titan` variants for `linux`, `darwin`, `windows`, `browser`, and the umbrella `native`: reserved spellings, per-target selection with absence-only fallback, target-only files, precedence, folder composition and the initializer rule, source imports, `-T`/`--target` and `TITAN_TARGET`, logical artifact names, incremental reuse, test roots, and editor behavior. |
-| [Compiling for the browser target](browser-target.md) | Linux/macOS browser builds, Emscripten 6.0.13 and Node 26+, JSPI-capable engines, browser Lua/SDK installation, isolated output roots, production/validation profiles, three-file images and archive libraries, enforced Wasm body/image byte bounds with source-attributed diagnostics, promise-based loader entry and terminal completion, copied byte output, source-mapped traces, the thirteen-module standard provider, shared codec/JSON nesting policies, and the conservative browser C-call limit. |
+| [Compiling for the browser target](browser-target.md) | Linux/macOS browser builds, Emscripten 6.0.13 and Node 26+, JSPI-capable engines, browser Lua/SDK installation, isolated output roots, production/validation profiles, three-file images and archive libraries, enforced Wasm body/image byte bounds with source-attributed diagnostics, promise-based loader entry and terminal completion, copied byte output, source-mapped traces, the fourteen-module standard provider, shared codec/JSON nesting policies, and the conservative browser C-call limit. |
 | [Browser Wasm-EH longjmp contract](browser-target.md#wasm-eh-longjmp-contract) | Consistent legacy Wasm-EH in Lua/SDK/objects/links, ambient compiler-flag isolation, protected calls across JSPI transfers, stale-record rebuilds, and fatal engine traps. |
+| [JavaScript bindings](standard-library-browser.md) | Browser-only `titan.browser`: typed bindings, exact BigInt/float/byte rules, promise-returning exact result Arrays, original closure roots and shared captures, state-owned handles, ordinary errors, requests/listeners with explicit success/failure notifications, and close-time invalidation. |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, explicit non-raising transfer outcomes with owned traces, current coroutine identity, status, Lua interop, and unwinding of abandoned coroutines (`defer`, generic-`for` close functions, and Lua `<close>` run at collection and state close), cleanup that needs asynchronous I/O, and unwinding limits. |
@@ -245,8 +246,10 @@ remains rejected.
   applications, with unified Titan/Lua tracebacks backed by `.wasm.map` (full
   file/line attribution on Chromium, Firefox, and Node; function-level reduced
   fidelity on WebKit and Safari), but its standard library currently provides
-  only the thirteen modules that need no libuv, without `async`, `io`, `os`,
-  files, or networking ([browser target](browser-target.md#the-browser-standard-library)).
+  only the thirteen modules that need no libuv plus typed
+  [JavaScript bindings](standard-library-browser.md), without `async`, `io`,
+  `os`, files, or networking
+  ([browser target](browser-target.md#the-browser-standard-library)).
 
 The [README roadmap](../../README.md) lists where the language is headed;
 the [philosophy chapter](philosophy.md) explains the principles that order

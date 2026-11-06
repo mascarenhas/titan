@@ -6,7 +6,7 @@ local MODULE = "ffi_stack_objects"
 
 local function clean_module(name)
     for _, suffix in ipairs({
-        ".c", ".o", ".so", ".a", ".titan.h",
+        ".c", ".o", ".so", ".a", ".titan.h", ".ffi.h",
         "__entrypoint.c", "__entrypoint.o",
     }) do
         os.remove(name .. suffix)
@@ -243,9 +243,9 @@ describe("automatic C object code generation", function()
                 "ffi_anonymous_holder _local_holder_%d+ = %{0%};",
                 csrc)
             assert.match(
-                "unsigned char volatile _spill_local_holder_%d+"
-                    .. "%[sizeof%(_local_holder_%d+%)%];",
+                "volatile ffi_anonymous_holder _local_holder_%d+ = %{0%};",
                 csrc)
+            assert.not_match("_spill_local_holder_", csrc)
 
             -- Struct/union arguments take their local address. Arrays use
             -- their ordinary decay expression and must never become
@@ -483,7 +483,7 @@ describe("automatic C object code generation", function()
         end)
     end)
 
-    it("commits aggregate out-arguments after ordinary Titan calls return",
+    it("retains aggregate out-arguments when ordinary Titan callees return or raise",
     function()
         with_header(declarations, function(header)
             local source = [[
@@ -674,7 +674,7 @@ describe("automatic C object code generation", function()
                     { "tracked_write", m.tracked_write(), 43 },
                     { "explicit_address", m.explicit_address(), 43 },
                     { "call_only_write", m.call_only_write(), 43 },
-                    { "raising_callee", m.raising_callee(), 1 },
+                    { "raising_callee", m.raising_callee(), 63 },
                     { "expression_call", m.expression_call(), 41 },
                     { "array_out", m.array_out(), 12 },
                     { "method_call", m.method_call(), 101 },
@@ -696,6 +696,21 @@ describe("automatic C object code generation", function()
             assert.truthy(ok, err)
         end)
     end)
+
+    for _, optimization in ipairs({ "-O2", "-O3" }) do
+        it("retains every mutable C home across raising callees at " .. optimization,
+        function()
+            local fixture = assert(io.open(
+                "spec/fixtures/error_handling/aggregate_recovery.titan", "rb"))
+            local source = assert(fixture:read("*a"))
+            assert(fixture:close())
+            local status, out = h.with_extra_cflags({ optimization, "-Werror" }, function()
+                return h.compile_and_run_app(source, MODULE)
+            end)
+            assert.equal(0, status, out)
+            assert.matches("AGGREGATE%-RECOVERY OK", out)
+        end)
+    end
 
     it("builds a nested process-options, stdio-array, and tagged address shape",
     function()

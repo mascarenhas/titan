@@ -291,32 +291,40 @@ function M.members(modtype)
     return result
 end
 
+-- The reviewed browser-only bridge module has no native interface to compare.
+-- Every other delivered module must match its native interface exactly.
+local browser_only_modules = { ["titan.browser"] = true }
+
 -- No member omissions or semantic signature differences are recorded. Machine
 -- layouts live in separate provider metadata and are deliberately not compared.
+-- Returns the member rows and the number of compared shared modules.
 function M.inventory(native, browser)
-    local rows, differences = {}, {}
+    local rows, differences, modules = {}, {}, 0
     for _, modname in ipairs(browser.key_order) do
-        local browser_entry, native_entry = browser.entries[modname], native.entries[modname]
-        if not native_entry then return nil, "missing native module " .. modname end
-        local b = M.members(assert(driver.decode_module_interface(browser_entry.types, modname, "browser interface")))
-        local n = M.members(assert(driver.decode_module_interface(native_entry.types, modname, "native interface")))
-        local names, seen = {}, {}
-        for name in pairs(b) do names[#names + 1], seen[name] = name, true end
-        for name in pairs(n) do if not seen[name] then names[#names + 1] = name end end
-        table.sort(names, util.bytewise_less)
-        for _, name in ipairs(names) do
-            local bm, nm = b[name], n[name]
-            if not bm or not nm or bm.kind ~= nm.kind or bm.signature ~= nm.signature or bm.semantic ~= nm.semantic then
-                differences[#differences + 1] = modname .. "." .. name .. ": native=" ..
-                    (nm and nm.signature or "<absent>") .. "; browser=" .. (bm and bm.signature or "<absent>") ..
-                    (bm and nm and bm.semantic ~= nm.semantic and " (semantic declaration differs)" or "")
-            else
-                rows[#rows + 1] = { module = modname, name = name, kind = bm.kind, signature = bm.signature }
+        if not browser_only_modules[modname] then
+            local browser_entry, native_entry = browser.entries[modname], native.entries[modname]
+            if not native_entry then return nil, "missing native module " .. modname end
+            modules = modules + 1
+            local b = M.members(assert(driver.decode_module_interface(browser_entry.types, modname, "browser interface")))
+            local n = M.members(assert(driver.decode_module_interface(native_entry.types, modname, "native interface")))
+            local names, seen = {}, {}
+            for name in pairs(b) do names[#names + 1], seen[name] = name, true end
+            for name in pairs(n) do if not seen[name] then names[#names + 1] = name end end
+            table.sort(names, util.bytewise_less)
+            for _, name in ipairs(names) do
+                local bm, nm = b[name], n[name]
+                if not bm or not nm or bm.kind ~= nm.kind or bm.signature ~= nm.signature or bm.semantic ~= nm.semantic then
+                    differences[#differences + 1] = modname .. "." .. name .. ": native=" ..
+                        (nm and nm.signature or "<absent>") .. "; browser=" .. (bm and bm.signature or "<absent>") ..
+                        (bm and nm and bm.semantic ~= nm.semantic and " (semantic declaration differs)" or "")
+                else
+                    rows[#rows + 1] = { module = modname, name = name, kind = bm.kind, signature = bm.signature }
+                end
             end
         end
     end
     if #differences > 0 then return nil, "unrecorded public interface differences:\n" .. table.concat(differences, "\n") end
-    return rows
+    return rows, modules
 end
 
 function M.member_table(rows)

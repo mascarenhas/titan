@@ -1,7 +1,7 @@
 export async function run(context) {
-  const { factory, locateFile } = await context.image(context.args[0]);
+  const { create, locateFile } = await context.image(context.args[0])
   const stdout = [], stderr = [];
-  const instance = context.create(factory, {
+  const instance = create({
     locateFile,
     stdout: bytes => { stdout.push(...bytes); },
     stderr: bytes => { stderr.push(...bytes); },

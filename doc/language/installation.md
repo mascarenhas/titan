@@ -539,10 +539,13 @@ in [The browser Lua and SDK](#the-browser-lua-and-sdk), adds
 record `lib/browser/liblua-config.txt`. `make browser-sdk` adds
 `lib/titan-browser/0.6/`: the browser runtime `libtitan.a`, the browser PEG
 engine `libtitan-lpeglabel.a`, the browser standard library `titan.a` (the
-[thirteen modules](browser-target.md#the-browser-standard-library) available to
-browser programs, with the PEG engine linked in), the loader `titan-browser.mjs` and its
-Emscripten libraries `titan-browser-library.js` and `titan-browser-trace.js`,
-the runner `titan-browser-run` with its three `.mjs` modules, and `sdk-digests`. That
+[fourteen modules](browser-target.md#the-browser-standard-library) available to
+browser programs, with the PEG engine linked in), the loader input
+`titan-browser.mjs` and its Emscripten libraries `titan-browser-library.js`,
+`titan-browser-bridge.js`, and `titan-browser-trace.js`, the runner
+`titan-browser-run` with its three `.mjs` modules, and `sdk-digests`. The compiler
+embeds the loader into each generated image; applications deploy no separate
+loader file. That
 directory is never inside `lib/titan/0.6/`, and native builds never search
 it. See [the browser SDK](browser-target.md#installing-the-browser-sdk).
 

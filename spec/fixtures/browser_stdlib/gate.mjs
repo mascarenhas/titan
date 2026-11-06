@@ -22,12 +22,13 @@ export async function run(context) {
   const emit = record => context.stdout(text(JSON.stringify({engine: context.engine, ...record}) + "\n"));
   async function execute(image) {
     const stdout = [], stderr = [];
-    const instance = context.create(image.factory, {locateFile: image.locateFile,
+    const instance = image.create({locateFile: image.locateFile,
       stdout: chunk => { stdout.push(chunk.slice()); },
       stderr: chunk => { stderr.push(chunk.slice()); }});
     try {
       await instance.initialize();
       const result = await instance.run([]);
+      await instance.dispose();
       return {result, stdout: join(stdout), stderr: join(stderr)};
     } finally { await instance.dispose(); }
   }
@@ -65,8 +66,8 @@ export async function run(context) {
     await context.tick();
     await context.gc();
   }
-  context.assert(subset.factory === (await context.image(subsetPath)).factory,
-    "repeated subset instances did not share the cached image factory");
+  context.assert(subset.create === (await context.image(subsetPath)).create,
+    "repeated subset instances did not share the cached image creator");
   emit({subsetInitializeRunDisposeCycles: 3});
 
   const observed = await execute(await context.image(fidelityPath));
@@ -84,9 +85,10 @@ export async function run(context) {
     "test name was not reported byte-exact on the final failure summary line");
   context.assert(occurrences(observed.stdout, message) === 1,
     "test failure message was not reported byte-exact");
-  // The real coroutine owner intentionally reports one cleanup warning.
+  // Preserve the cleanup warning and binary marker, then Lua's warning controls
+  // and multipart boundaries from the later native warning-protocol case.
   const expectedStderr = join([text("Lua warning: error in coroutine cleanup (cleanup failure)\n"),
-    binary("stderr"), text("\n")]);
+    binary("stderr"), text("\nLua warning: multipart warning\nLua warning: standalone warning\n")]);
   context.assert(equal(observed.stderr, expectedStderr),
     "stderr hook did not preserve the warning and binary marker exactly: " +
       Array.from(observed.stderr).join(","));

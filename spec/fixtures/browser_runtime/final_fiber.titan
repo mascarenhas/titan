@@ -8,6 +8,6 @@ function main(args: {string}): integer
     return status
   end, "final")
   -- Completion must come from the Titan-owned import even when this final
-  -- application action switches fibers and ccall's return value is unrelated.
+  -- application action switches fibers and the promised export's value is unrelated.
   return owner:resume(nil)
 end

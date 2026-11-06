@@ -40,7 +40,7 @@ library implementations for the same call-graph pattern.
 
 ## Keep the browser subset dependency-closed
 
-Thirteen modules form the [browser standard
+Thirteen shared modules form the portable part of the [browser standard
 library](browser-target.md#the-browser-standard-library): `coroutine`, `gc`,
 `iteration`, `math`, `test`, `reflect`, `json`, `protobuf`, `transfer`, `peg`,
 `string`, `url`, and `path`. None of them may gain an import path to `uv`,
@@ -49,7 +49,7 @@ library](browser-target.md#the-browser-standard-library): `coroutine`, `gc`,
 payload and include path is LPegLabel: a libuv, OpenSSL, llhttp, or SQLite
 header, archive, or symbol fails the [dependency-closure
 check](browser-target.md#the-dependency-closure-check) in `make browser-sdk`
-and `make titan-stdlib-browser-test`. A new delivered module or member keeps
+and `make titan-stdlib-browser-test`. A new shared module or member keeps
 its native signature and behavior; the [member
 inventory](browser-target.md#interface-derived-member-inventory) fails on any
 difference between the native and browser interfaces. Read a target-dependent
@@ -58,6 +58,14 @@ constant from a target C define through `ffi`, as `coroutine`, `protobuf`,
 variant for a real behavioral difference. The native-only modules keep their
 canonical mains as `<name>.native.titan`, so a later browser composition adds
 a selected `.browser.titan` main or contributors without renaming them back.
+
+The browser provider's fourteenth module, `titan.browser`
+(`titan/browser.browser.titan`), is the one reviewed browser-only exception.
+It has no native placeholder or native interface, so the member inventory
+skips it. It imports only `gc` and `reflect`, keeps its C runtime in the
+browser runtime archive, and must not gain a native-only dependency either. A
+native module must not import it; see [browser bridge
+runtime](browser-bridge.md).
 
 ## Use existing typed storage and narrow foreign boundaries
 

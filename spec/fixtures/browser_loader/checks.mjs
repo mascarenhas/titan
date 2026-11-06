@@ -19,8 +19,11 @@ export async function rejection(context, promise, expected) {
   return caught;
 }
 
-export const closed = {
-  code: 'TITAN_BROWSER_STATE', message: 'browser instance has already run or is disposed',
+export const disposed = {
+  code: 'TITAN_BROWSER_DISPOSED', message: 'browser instance is disposed',
+};
+export const ran = {
+  code: 'TITAN_BROWSER_STATE', message: 'browser main has already run',
 };
 export const reentry = {
   code: 'TITAN_BROWSER_REENTRY', message: 'browser instance is active; reentry is not allowed',

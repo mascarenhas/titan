@@ -744,16 +744,16 @@ end
 -- mutable C parameter. Pointer-valued aliases intentionally do not qualify:
 -- after their creation the checker cannot know which object a pointer denotes.
 function mutable_c_call_argument_decl(exp, target)
-    if not target or c_pointer_is_const(target) then return nil end
+    local target_type = target and types.resolve_c_typedef(target)
+    if not target_type or target_type._tag ~= "Type.CPointer"
+       or c_pointer_is_const(target) then
+        return nil
+    end
 
-    local adjusted = exp
-    local unsafe_array_decay = false
     local direct_address_source = false
     while exp and exp._tag == "Ast.ExpCast" do
         local conversion = exp._c_conversion
-        if conversion and conversion.kind == "unsafe_object_pointer" then
-            unsafe_array_decay = true
-        elseif conversion and conversion.kind ==
+        if conversion and conversion.kind ==
                "address_then_unsafe_object_pointer" then
             direct_address_source = exp.exp
         elseif (exp._adjustment
@@ -762,38 +762,28 @@ function mutable_c_call_argument_decl(exp, target)
            or (exp._written_cast.tag == "just"
                 and maybe3.get_checked(exp._written_cast, "written cast").op == "coercion"
                 and maybe3.get_checked(exp._written_cast, "written cast").coercion.op == "mutable_c_address") then
-            -- An inner explicit cast may take the exact local address before
-            -- an outer unsafe pointer reinterpretation reaches the parameter.
             direct_address_source = exp.exp
         end
         exp = exp.exp
     end
     exp = direct_address_source or exp
+    local source = exp and types.resolve_c_typedef(exp._type)
+    if source and source._tag == "Type.CArray" then
+        -- Decay includes inline array fields and nested array elements. The
+        -- checked pointer argument already supplies the conversion authority.
+        local decl = inline_c_storage_decl(exp)
+        if decl and not decl.isconst and not decl._captured then
+            return decl, exp
+        end
+        return nil
+    end
     if not is_mutable_c_address_source(exp) then return nil end
+    if direct_address_source then return exp.var._decl, exp end
 
-    if direct_address_source then
-        return exp.var._decl, exp
-    end
-
-    local source = types.resolve_c_typedef(exp._type)
-    -- Pointer-local mutation needs the actual address plan found above. An
-    -- explicit pointer reinterpretation may have the same endpoint types but
-    -- addresses external storage, not the local variable containing its bits.
+    -- A pointer value is not its mutable address; explicit reinterpretation
+    -- alone must not turn an external pointee into a local out-parameter.
     if source and source._tag == "Type.CPointer" then return nil end
-
     if types.c_mutable_address_coerceable(exp._type, target) then
-        return exp.var._decl, exp
-    end
-
-    local planned_conversion = adjusted._adjustment
-        or adjusted._assignment_adjustment
-        or (adjusted._written_cast and adjusted._written_cast.tag == "just")
-        or adjusted._c_conversion
-    if source and source._tag == "Type.CArray"
-       and (unsafe_array_decay
-            or (planned_conversion
-                and adjusted._type
-                and types.equals(adjusted._type, target))) then
         return exp.var._decl, exp
     end
     return nil

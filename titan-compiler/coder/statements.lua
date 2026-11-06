@@ -2209,6 +2209,7 @@ end
 -- Implementation notes: doc/implementation/error-handling.md#unwinding-through-finally
 function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
     local landing = ""
+    local address_roots = coder._spill_address_roots(ctx)
     local close_frames = render([[
             L->ci = _oldci_$T;
             L->allowhook = _oldah_$T;
@@ -2239,6 +2240,7 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
                 if (TITAN_SETJMP(_lj_$T.b) == 0) {
                     _lj_$T.status = luaD_closeprotected(L, _oldtop_$T, _errst_$T);
                 } else {
+                    $ADDRESSROOTS
                     /* the unwind drops the caught error: clear its trace */
                     titan_unwind_clear_trace(L);
                 }
@@ -2260,6 +2262,7 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
                 _lj_$G.previous = L->errorJmp;
                 L->errorJmp = &_lj_$G;
                 if (TITAN_SETJMP(_lj_$G.b) != 0) {
+                    $ADDRESSROOTS
                     titan_unwind_guard_failed(L, &_lj_$G, _oldnC_$G,
                         _oldci_$G, _oldah_$G, _olderrfunc_$G,
                         _base_off + TITAN_RESERVED_NSLOTS
@@ -2272,6 +2275,7 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
             PA = unwind.pa,
             PAUNWIND = PA_UNWIND,
             SPILLRELOAD = spill_reload(ctx),
+            ADDRESSROOTS = address_roots,
         })
         close_frames = "/* the Lua frames above were closed under the re-armed boundary */"
     end
@@ -2281,6 +2285,7 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
         L->errorJmp = _lj_$T.previous;
         L->nCcalls = _oldnC_$T;
         if (_lj_$T.status != $INIT) {
+            $ADDRESSROOTS
             $LANDING
             /* raised; errorhandler already filled the trace slot. Mirror
              * luaD_pcall's recovery: restore ci/allowhook, close any to-be-
@@ -2330,6 +2335,7 @@ function boundary_recover_open(ctx, tag, d_err, d_tb, unwind)
         ERRSTACK = stackslotat(d_err),
         TBSTACK = stackslotat(d_tb),
         SPILLRELOAD = spill_reload(ctx),
+        ADDRESSROOTS = address_roots,
         TRACEKEY = recovery_string(ctx, "TITAN_BACKTRACE_KEY"),
         PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
         EMPTYTRACE = recovery_string(ctx, '""'),
@@ -2682,18 +2688,18 @@ function predeclare_defer_tail(ctx, block)
                             decl._defer_tail_spill_predeclared = true
                         else
                             decl._cvar = "_local_" .. localname(ctx, decl.name)
-                            if decl._c_zero_init then
-                                table.insert(out,
-                                    coder._local_cvardecl(ctx, decl)
-                                    .. " = {0};")
-                                decl._c_zero_predeclared = true
-                            else
-                                table.insert(out,
-                                    coder._local_cvardecl(ctx, decl) .. ";")
+                            if coder._decl_volatile_home(decl)
+                               and types.is_gc(decl._type) then
+                                -- Earlier recovery can visit this zeroed home
+                                -- before its initializer is reached.
+                                decl._slot = newslot(ctx)
                             end
-                            local spill = decl._c_zero_init
-                                and spill_decl_init(ctx, decl)
-                                or spill_decl_zero(ctx, decl)
+                            local init = coder._decl_volatile_home(decl)
+                                and types.is_gc(decl._type)
+                                and (" = " .. initval(decl._type)) or ""
+                            table.insert(out, coder._local_cvardecl(ctx, decl)
+                                .. init .. ";")
+                            local spill = spill_decl_zero(ctx, decl)
                             if spill ~= "" then
                                 decl._defer_tail_spill_predeclared = true
                                 table.insert(out, spill)
@@ -2838,7 +2844,7 @@ function coder._codeautomaticallocationdecl(ctx, decl)
             $CDECL = {0};
             $CSPILLDECL
         ]], {
-            CDECL = cvardecl(ctx, decl._type, decl._cvar),
+            CDECL = coder._local_cvardecl(ctx, decl),
             CSPILLDECL = spill_decl_init(ctx, decl),
         })
     elseif storage == "automatic_array_borrow" then
@@ -2890,13 +2896,14 @@ function coder._codeautomaticallocationdecl(ctx, decl)
             union {
                 $CT _align;
                 unsigned char bytes[$EXTENT];
-            } $UNION = {0};
+            } $QUAL$UNION = {0};
             $CT *$POINTER = ($CT *)$UNION.bytes;
             $CSPILLDECL
         ]], {
             CT = ctype_name,
             EXTENT = extent,
             UNION = union_name,
+            QUAL = coder._decl_volatile_home(decl) and "volatile " or "",
             POINTER = pointer,
             CSPILLDECL = spill_decl_init(ctx, decl),
         })
@@ -2942,14 +2949,19 @@ function coder._codeinitializeddecl(ctx, decl, cstats, cexp)
         if not decl._cvar then
             decl._cvar = "_local_" .. localname(ctx, decl.name)
         end
+        local init = coder._decl_volatile_home(decl) and types.is_gc(typ)
+            and (" = " .. initval(typ)) or ""
         local cdecl = decl._defer_tail_predeclared
-            and "" or coder._local_cvardecl(ctx, decl) .. ";"
+            and "" or coder._local_cvardecl(ctx, decl) .. init .. ";"
         local cset = ""
         local cspilldecl = decl._defer_tail_spill_predeclared
             and "" or spill_decl_zero(ctx, decl)
         local cspillset = spill_update(decl)
         if types.is_gc(typ) then
-            decl._slot = newslot(ctx)
+            if not (decl._defer_tail_predeclared
+                    and coder._decl_volatile_home(decl)) then
+                decl._slot = newslot(ctx)
+            end
             cset = render([[
                 /* update slot */
                 $SETSLOT
@@ -3079,31 +3091,6 @@ end
 function codestat_dispatch(ctx, node)
     local tag = node._tag
     if tag == "Ast.StatDecl" then
-        if node._c_zero_init then
-            local decl = assert(node.decls[1])
-            assert(#node.decls == 1 and #node.exps == 0
-                and decl._c_zero_init)
-            -- Automatic C aggregates are direct C objects, never adjusted
-            -- expression results or closure boxes. An unused object has no
-            -- observable initialization, so it may follow the ordinary unused
-            -- local elision rule.
-            decl._boxed = false
-            if not decl._used then return "" end
-            if not decl._cvar then
-                decl._cvar = "_local_" .. localname(ctx, decl.name)
-            end
-            if decl._c_zero_predeclared then
-                return ""
-            end
-            return render([[
-                $CDECL = {0};
-                $CSPILLDECL
-            ]], {
-                CDECL = cvardecl(ctx, decl._type, decl._cvar),
-                CSPILLDECL = spill_decl_init(ctx, decl),
-            })
-        end
-
         local has_automatic_allocation = false
         for _, decl in ipairs(node.decls) do
             if decl._c_allocation_plan

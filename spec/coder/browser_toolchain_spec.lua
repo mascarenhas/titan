@@ -308,7 +308,7 @@ local baseline_json = require "spec.support.browser_baseline_json"
 local validation_prefix = installed.active()
 local platform = require "titan-compiler.platform"
 
-local SDK_ASSETS = { "libtitan.a", "titan-browser-library.js", "titan-browser-trace.js",
+local SDK_ASSETS = { "libtitan.a", "titan-browser-library.js", "titan-browser-bridge.js", "titan-browser-trace.js",
     "titan-browser.mjs", "titan-browser-run", "titan-browser-run.mjs",
     "titan-browser-node-worker.mjs", "titan-browser-page.mjs" }
 local NODE_OK = { path = "/opt/node26/bin/node", version = "v26.13.0", ok = true }
@@ -709,7 +709,7 @@ assert(missing == nil and reason:find("browser SDK is incomplete", 1, true),
 local directory = os.getenv("SDK_DIRECTORY")
 local lfs = require "lfs"
 assert(lfs.mkdir(directory))
-for _, name in ipairs({ "libtitan.a", "titan-browser-library.js", "titan-browser-trace.js",
+for _, name in ipairs({ "libtitan.a", "titan-browser-library.js", "titan-browser-bridge.js", "titan-browser-trace.js",
         "titan-browser.mjs", "titan-browser-run", "titan-browser-run.mjs",
         "titan-browser-node-worker.mjs", "titan-browser-page.mjs" }) do
     local file = assert(io.open(directory .. "/" .. name, "wb"))

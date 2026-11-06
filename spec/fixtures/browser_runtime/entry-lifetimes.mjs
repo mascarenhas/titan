@@ -2,69 +2,69 @@ const encoder = new TextEncoder();
 export async function run(context) {
   context.assert(context.args.length === 1, 'pass the entry-lifetimes image');
   const image = await context.image(context.args[0]);
-  const hops = [], checks = [];
+  const hops = [], checks = [], failures = [];
   const observed = {entries: 0, parked: 0, resumed: 0, independentCloses: 0,
     allocationCleanup: 0, earlySinks: 0};
   const peers = [0, 1].map(id => {
-    const peer = {id, phase: 0, module: null, driver: null, deliveries: 0, lifetimes: null};
-    peer.instance = context.create(async options => {
-      const attach = options.titanBrowserAttach;
-      options.titanBrowserAttach = state => {
-        peer.driver = state;
-        const transfer = state.transfer;
-        state.transfer = (...args) => {
-          const result = transfer(...args);
-          hops.push({id, phase: peer.phase, terminal: !!args[4]});
-          checks.push(Promise.resolve().then(async () => {
-            context.assert(state.owner && !state.safe(), 'a coroutine/GC handoff released its entry owner');
-            context.assert(peer.deliveries === 0, 'collector/private handoff delivered a sink');
-            let rejected;
-            try { await peer.module._titan_browser_gate_guarded(); } catch (error) { rejected = error; }
-            context.assert(rejected?.code === 'TITAN_BROWSER_REENTRY', 'private hop admitted an external state entry');
-          }));
-          return result;
-        };
-        attach(state);
-      };
-      peer.module = await image.factory(options);
-      return peer.module;
-    }, {locateFile: image.locateFile, stdout: bytes => {
-      const safe = peer.driver.safe() && !peer.driver.owner && peer.phase === 3;
-      if (!safe) observed.earlySinks++;
-      context.assert(safe,
-        'allocation-finalizer output escaped before its logical entry retired');
-      context.equalBytes(bytes, encoder.encode('allocation-cleanup\n'));
-      peer.deliveries++;
-      observed.allocationCleanup++;
-    }});
+    const peer = {id, phase: 0, controls: undefined, callbacks: new Map(), deliveries: 0, lifetimes: undefined};
+    peer.instance = image.create({locateFile: image.locateFile,
+      bindings: {
+        __titanTest(controls) { peer.controls = controls; },
+        publish(name, callback) { peer.callbacks.set(new TextDecoder().decode(name), callback); },
+      },
+      stdout(bytes) {
+        const snapshot = peer.controls.snapshot();
+        const safe = snapshot.safe && !snapshot.owner && peer.phase === 3;
+        if (!safe) observed.earlySinks++;
+        context.assert(safe, 'allocation-finalizer output escaped before its logical entry retired');
+        context.equalBytes(bytes, encoder.encode('allocation-cleanup\n'));
+        peer.deliveries++;
+        observed.allocationCleanup++;
+      },
+    });
     return peer;
   });
   try {
     await Promise.all(peers.map(peer => peer.instance.initialize()));
+    for (const peer of peers) {
+      context.assert(peer.controls && peer.callbacks.size === 3, 'initializer did not publish real lifetime Callables');
+      peer.unwatch = peer.controls.watchTransfers(event => {
+        hops.push({id: peer.id, phase: peer.phase, terminal: event.terminal});
+        checks.push(Promise.resolve().then(async () => {
+          const snapshot = peer.controls.snapshot();
+          context.assert(snapshot.owner && !snapshot.safe, 'a coroutine/GC handoff released its entry owner');
+          context.assert(peer.deliveries === 0, 'collector/private handoff delivered a sink');
+          let rejected;
+          try { await peer.controls.rawGuarded(); } catch (error) { rejected = error; }
+          context.assert(rejected?.code === 'TITAN_BROWSER_REENTRY', 'private hop admitted an external state entry');
+        }).catch(error => { failures.push(error); }));
+      });
+    }
     for (const phase of [1, 2, 3]) {
       await Promise.all(peers.map(async peer => {
         peer.phase = phase;
-        const call = peer.module._titan_browser_gate_guarded();
-        context.assert(call instanceof Promise, 'state-entering export did not return a promise');
-        context.assert(await call === phase, 'independent state entry phase failed');
-        context.assert(peer.driver.safe() && !peer.driver.owner && peer.driver.current === 0,
+        const name = ['entry_prepare', 'entry_resume', 'entry_finish'][phase - 1];
+        const call = peer.instance.call(peer.callbacks.get(name));
+        context.assert(call instanceof Promise, 'production protected invoke did not return a promise');
+        const result = await call;
+        context.assert(Array.isArray(result) && result.length === 0, 'zero-result lifetime callback returned a nonempty carrier');
+        const snapshot = peer.controls.snapshot();
+        context.assert(snapshot.safe && !snapshot.owner && snapshot.current === 0,
           'a completed promised entry retained execution ownership');
-        context.assert(peer.module._titan_browser_gate_observe() === phase,
-          'state-neutral observer changed the entry lifetime');
+        context.assert(peer.controls.observe() === phase, 'state-neutral observer changed the entry lifetime');
         observed.entries++;
-        const contexts = [...peer.driver.contexts.values()].filter(item => item.id !== 0);
+        const contexts = peer.controls.lifetimes();
         if (phase === 1) {
-          context.assert(contexts.length === 5 && contexts.every(item => item.gate && item.lifetime),
+          context.assert(contexts.length === 5 && contexts.every(item => item.parked && item.lifetime),
             'first entry did not leave ordinary and stacked real continuations parked');
-          peer.lifetimes = contexts.map(item => [item, item.lifetime]);
+          peer.lifetimes = contexts;
           observed.parked += contexts.length;
         } else if (phase === 2) {
-          context.assert(peer.lifetimes.every(([item, lifetime]) =>
-            peer.driver.contexts.get(item.id) === item && item.lifetime === lifetime),
+          context.assert(peer.lifetimes.every(original => contexts.some(item =>
+            item.id === original.id && item.lifetime === original.lifetime)),
             'a later C entry replaced an existing engine continuation lifetime');
           const resumed = contexts.filter(item => item.finished).length;
-          context.assert(resumed === 4,
-            'second entry did not retire the ordinary and stacked continuations');
+          context.assert(resumed === 4, 'second entry did not retire the ordinary and stacked continuations');
           observed.resumed += resumed;
         } else {
           context.assert(contexts.length === 0 && peer.deliveries === 1,
@@ -73,6 +73,7 @@ export async function run(context) {
         }
       }));
       await Promise.all(checks);
+      if (failures.length) throw failures[0];
     }
     const switches = hops.slice(1).filter((hop, index) => hop.id !== hops[index].id).length;
     context.assert(switches >= 4, 'two instances did not interleave their private JSPI hops');
@@ -83,7 +84,11 @@ export async function run(context) {
       independentCloses: observed.independentCloses, allocationCleanup: observed.allocationCleanup,
       privateHops: hops.length, interleavedSwitches: switches, earlySinks: observed.earlySinks}) + '\n'));
   } finally {
+    for (const peer of peers) peer.unwatch?.();
     await Promise.all(peers.map(peer => peer.instance.dispose()));
-    for (const peer of peers) peer.module = peer.driver = peer.lifetimes = null;
+    for (const peer of peers) {
+      peer.callbacks.clear();
+      peer.controls = peer.lifetimes = undefined;
+    }
   }
 }

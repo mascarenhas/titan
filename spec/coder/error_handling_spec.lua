@@ -1903,4 +1903,63 @@ describe("unwind boundaries", function()
             assert.falsy(caught:find(fragment, 1, true), "catch-only try has " .. fragment)
         end
     end)
+
+    it("publishes GC address homes at all three recovery landings before collecting actions", function()
+        local csrc = compile_and_read_c([[
+            foreign import "spec/fixtures/error_handling/aggregate_recovery.h"
+
+            function gc_homes(): boolean
+                local current: foreign TValue = nil
+                local pointer: foreign *Udata
+                do
+                    defer ffi.recovery_gc_collect(L)
+                    ffi.recovery_gc_old_value(L, current)
+                    ffi.recovery_gc_old_pointer(L, pointer)
+                catch
+                    return ffi.recovery_gc_is_nil(current) ~= 0
+                        and pointer == nil
+                end
+                return false
+            end
+        ]])
+        local function compact(text)
+            return text:gsub("/%*.-%*/", " "):gsub("%s+", " ")
+                :gsub("^ ", ""):gsub(" $", "")
+        end
+        local body = compact(native_body(csrc, "gc_homes"))
+        local current = assert(body:match("(_local_current_%d+)"), body)
+        local pointer = assert(body:match("(_local_pointer_%d+)"), body)
+        -- Recover the existing traced destinations, not the landing text.
+        -- The oracle independently requires both real GC stores at each splice.
+        local current_slot = assert(body:match(
+            "TValue _titan_v = " .. current
+                .. "; setobj2t%(L, (.-), &_titan_v%);"), body)
+        local pointer_slot = assert(body:match(
+            "Udata %*_titan_u = %(Udata %*%)%(" .. pointer
+                .. "%); if %(_titan_u == NULL%) setnilvalue%((.-)%);"
+                .. " else setuvalue%(L,"), body)
+        local publication = "_base = restorestack(L, _base_off); "
+            .. "do { TValue _titan_v = " .. current .. "; setobj2t(L, "
+            .. current_slot .. ", &_titan_v); } while (0); "
+            .. "do { Udata *_titan_u = (Udata *)(" .. pointer
+            .. "); if (_titan_u == NULL) setnilvalue(" .. pointer_slot
+            .. "); else setuvalue(L, " .. pointer_slot
+            .. ", _titan_u); } while (0);"
+        local main = assert(body:match(
+            "if %(_lj_[%w_]+%.status != TITAN_STATUS_FINALLY%) {"
+                .. "(.-)if %(_lj_[%w_]+%.status != TITAN_STATUS_UNWIND%) {"), body)
+        local rearmed = assert(body:match(
+            "_lj_[%w_]+%.status = luaD_closeprotected%(L,"
+                .. " _oldtop_[%w_]+, _errst_[%w_]+%); } else {"
+                .. "(.-)titan_unwind_clear_trace%(L%);"), body)
+        local guard = assert(body:match(
+            "if %(TITAN_SETJMP%(_lj_[%w_]+%.b%) != 0%) {"
+                .. "(.-)titan_unwind_guard_failed%(L,"), body)
+        -- Exact segment equality detects deletion, duplication or movement
+        -- across the branch/action boundary. This is generated-C evidence;
+        -- the separate native fixture executes full GC in ordinary close.
+        assert.equal(publication, compact(main), "initial landing before either close policy")
+        assert.equal(publication, compact(rearmed), "re-armed landing before trace clearing")
+        assert.equal(publication, compact(guard), "finally guard before reporting/close")
+    end)
 end)

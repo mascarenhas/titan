@@ -1,4 +1,5 @@
 local coroutine = import "coroutine"
+local browser = import "browser"
 foreign import "stdio.h"
 foreign import "loader.h"
 
@@ -25,6 +26,18 @@ function main(args: {string}): integer
   if ffi.browser_loader_buffer_stdio() ~= 0 then raise "could not buffer fidelity stdio" end
   local mode = args[1]
   if mode == "abort_wait" then ffi.browser_loader_abort_wait() end
+  if mode == "abort_binding" then
+    local target = browser.binding("abort_binding")
+    defer target:close()
+    do
+      if args[2] == "bytes" then browser.call_bytes(target, {})
+      else browser.call_void(target, {}) end
+    catch
+      output("abort-translated-to-titan\n")
+    end
+    output("abort-binding-returned\n")
+    return 23
+  end
   local owner = coroutine.create(function(_input: value): value
     defer output("close\0\255")
     defer diagnostic("close\0\255")
@@ -59,7 +72,11 @@ function main(args: {string}): integer
   end, "last")
   local result: integer = finisher:resume(nil)
   if mode == "uncaught" then raise "failure\0\255\195(" end
-  -- The parked owner is closed by the real lua_close after main returns.
-  -- Its unterminated output still belongs to the entry's final libc drain.
+  -- The parked owner survives main and is closed by explicit instance disposal.
+  -- Its unterminated output belongs to that close entry's final libc drain.
   return result
+end
+
+do
+  ffi.browser_loader_publish()
 end

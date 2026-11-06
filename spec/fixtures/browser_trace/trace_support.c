@@ -7,6 +7,20 @@
 #include <string.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+EM_JS(void, trace_fixture_publish_controls, (void), {
+  const publish = Module['titanBrowserBridge'].options.bindings?.__traceTest;
+  if (!publish) return;
+  publish(Object.freeze({
+    metadata: () => {
+      const value = Module['titanBrowserTrace'];
+      return Object.freeze({state: value.state, reason: value.reason, mapBytes: value.mapBytes,
+        indexBytes: value.indexBytes, loadMilliseconds: value.loadMilliseconds});
+    },
+  }));
+});
+__attribute__((constructor)) static void trace_fixture_constructor(void) {
+  trace_fixture_publish_controls();
+}
 #endif
 
 static const char mixed_source[] =
@@ -134,7 +148,7 @@ void trace_fixture_sleep(void) {
 #ifdef __EMSCRIPTEN__
 /* Test-owned host bridge, called only after the failed catch has completed. */
 EM_JS(void, trace_fixture_host_recover, (void), {
-  Module['traceFixtureRestoreDescriptors']();
+  Module['titanBrowserBridge'].options.bindings.traceFixtureRestoreDescriptors();
 });
 #else
 void trace_fixture_host_recover(void) {}

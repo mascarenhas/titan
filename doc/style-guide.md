@@ -502,9 +502,10 @@ Use an alias such as `strings` when the short name is also a type keyword.
 The short-name set is `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`,
 `ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `lua`,
 `math`, `gc`, `iteration`, `reflect`, `sqlite3`, `json`, `protobuf`, `transfer`,
-and `thread`. The rule applies inside standard-library sources too: spelling one
-of those imports as `"titan.fs"`, `"titan.ssl"`, or another qualified name is a
-style violation, not extra precision.
+`thread`, and the browser-only `browser`. The rule applies inside
+standard-library sources too: spelling one of those imports as `"titan.fs"`,
+`"titan.ssl"`, or another qualified name is a style violation, not extra
+precision.
 Lua loads the same logical modules with qualified names:
 
 ```lua

@@ -288,8 +288,9 @@ TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O) $(TITAN_PATH_O) $(LTITANLIB_
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
 TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
 	titan-runtime/titan_path.c titan-runtime/ltitanlib.c
+BROWSER_RUNTIME_SOURCES := $(TITAN_RUNTIME_SOURCES) titan-runtime/browser/titan-browser.c
 BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
-	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path
+	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -297,7 +298,7 @@ LUA_BROWSER_RANLIB ?=
 LUA_BROWSER_MYCFLAGS ?= $(MYCFLAGS)
 LUA_BROWSER_MYLDFLAGS ?= $(MYLDFLAGS)
 TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h titan-runtime/transfer.h
-TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h
+TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h titan-runtime/titan/browser.h
 
 # Titan's public PEG module embeds one audited LPegLabel engine instead of
 # depending on the compiler-owned lpeglabel.so at run time. Keep this native
@@ -1299,7 +1300,7 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 	c_objects=$$($(BROWSER_SDK_ENV) "$$titanc_bin" --target browser \
 	  --output "$$build_dir" -c --incremental -j$(TITAN_JOBS) \
 	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) --print-c-objects \
-	  $(foreach source,$(TITAN_RUNTIME_SOURCES) $(LPEGLABEL_SOURCES),--c-source $(call make_shell_quote,$(abspath $(source))))); \
+	  $(foreach source,$(BROWSER_RUNTIME_SOURCES) $(LPEGLABEL_SOURCES),--c-source $(call make_shell_quote,$(abspath $(source))))); \
 	nl="$$(printf '\nX')"; nl="$${nl%X}"; \
 	set -f; IFS="$$nl"; set -- $$c_objects; set +f; unset IFS; \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua stage-runtime \

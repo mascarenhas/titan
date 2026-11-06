@@ -1093,10 +1093,29 @@ c_assignment_base_has_storage = function(exp)
     return true
 end
 
--- Return the originating const local when an lvalue descends only through
--- inline C aggregate storage. Pointer/owned dereferences deliberately stop the
--- walk: binding constness is shallow and does not freeze an independent
--- pointee.
+-- Follow inline C storage to its declaration, stopping at pointer/owned
+-- dereferences. Const checking and mutable array-decay analysis share this walk.
+function inline_c_storage_decl(exp)
+    if not exp then return nil end
+    if exp._tag == "Ast.ExpVar" then exp = exp.var end
+    if exp._tag == "Ast.VarName" then
+        local decl = exp._decl
+        if decl and decl._tag == "Ast.Decl"
+           and types.is_direct_c(decl._type) then
+            return decl
+        end
+    elseif exp._tag == "Ast.VarDot" and exp._decl
+           and exp._decl._tag == "Type.CField" then
+        if exp.exp and types.is_c_aggregate(exp.exp._type) then
+            return inline_c_storage_decl(exp.exp)
+        end
+    elseif exp._tag == "Ast.VarBracket" and exp.exp1
+           and types.is_c_array(exp.exp1._type) then
+        return inline_c_storage_decl(exp.exp1)
+    end
+    return nil
+end
+
 function const_inline_c_storage_decl(exp)
     if not exp then return nil end
     local value_type = exp._type and c_resolve(exp._type)
@@ -1104,32 +1123,9 @@ function const_inline_c_storage_decl(exp)
                        or value_type._tag == "Type.COwned") then
         return nil
     end
-    if exp._tag == "Ast.ExpVar" then exp = exp.var end
-
-    if exp._tag == "Ast.VarName" then
-        local decl = exp._decl
-        local typ = decl and decl._type and c_resolve(decl._type)
-        if decl and decl._tag == "Ast.Decl" and decl.isconst and typ
-           and (typ._tag == "Type.CStruct"
-                or typ._tag == "Type.CUnion"
-                or typ._tag == "Type.CArray") then
-            return decl
-        end
-        return nil
-    elseif exp._tag == "Ast.VarDot" and exp._decl
-           and exp._decl._tag == "Type.CField" then
-        local owner = exp.exp and exp.exp._type
-            and c_resolve(exp.exp._type)
-        if owner and (owner._tag == "Type.CStruct"
-                      or owner._tag == "Type.CUnion"
-                      or owner._tag == "Type.CArray") then
-            return const_inline_c_storage_decl(exp.exp)
-        end
-    elseif exp._tag == "Ast.VarBracket" and exp.exp1 then
-        local owner = exp.exp1._type and c_resolve(exp.exp1._type)
-        if owner and owner._tag == "Type.CArray" then
-            return const_inline_c_storage_decl(exp.exp1)
-        end
+    local decl = inline_c_storage_decl(exp)
+    if decl and decl.isconst and types.is_c_aggregate(decl._type) then
+        return decl
     end
     return nil
 end

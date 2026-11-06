@@ -2,8 +2,8 @@
  *
  * A `lua-main` image is a plain Emscripten factory exporting `_main`, so the
  * harness measures instantiation and one explicit interpreter invocation:
- * argv is marshalled into the current heap, `main` is called through the
- * exported `ccall`, and the interpreter's own rows are forwarded.
+ * argv is marshalled into the current heap, the promised `_main` is invoked
+ * directly, and the interpreter's own rows are forwarded.
  */
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -27,22 +27,30 @@ function join(list) {
 // every allocation because growing memory detaches the previous buffer.
 function marshal(module, args) {
   const pointers = module._malloc((args.length + 1) * 4);
+  const strings = [];
   for (let index = 0; index < args.length; index++) {
     const bytes = encoder.encode(args[index]);
     const pointer = module._malloc(bytes.length + 1);
+    strings.push(pointer);
     module.HEAPU8.set(bytes, pointer);
     module.HEAPU8[pointer + bytes.length] = 0;
     new DataView(module.HEAPU8.buffer).setUint32(pointers + index * 4, pointer, true);
   }
   new DataView(module.HEAPU8.buffer).setUint32(pointers + args.length * 4, 0, true);
-  return { count: args.length, pointers };
+  return { count: args.length, pointers, strings };
 }
 
 export async function run(context) {
   const path = context.args[0];
   context.assert(typeof path === 'string' && path.length > 0,
     'pass one lua-main image path');
-  const {factory, locateFile} = await context.image(path);
+  const {locateFile} = await context.image(path);
+  // This is the separate C interpreter reference, not a Titan application:
+  // import its private fixture factory explicitly, never add a public alias.
+  const filename = locateFile(path.split('/').at(-1));
+  const url = typeof process === 'object' && process.versions?.node ?
+    (await import('node:url')).pathToFileURL(filename).href : filename;
+  const {default: factory} = await import(url);
   const source = decoder.decode(await context.bytes('bench.lua'));
   const chunks = [];
   const errors = [];
@@ -55,8 +63,12 @@ export async function run(context) {
   const instantiated = now();
   // Keep a comment-first chunk off the interpreter's option scan.
   const argv = marshal(module, ['lua', '-e', '\n' + source]);
-  const status = await module.ccall('main', 'number', ['number', 'number'],
-    [argv.count, argv.pointers], {async: true});
+  let status;
+  try { status = await module._main(argv.count, argv.pointers); }
+  finally {
+    for (const pointer of argv.strings) module._free(pointer);
+    module._free(argv.pointers);
+  }
   const finished = now();
   context.stdout(encoder.encode(
     `lua.instantiate_ms=${instantiated - started}\n` +

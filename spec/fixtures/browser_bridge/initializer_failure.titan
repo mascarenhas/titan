@@ -1,0 +1,23 @@
+local browser = import "browser"
+local coroutine = import "coroutine"
+
+local parked: coroutine.Coroutine?
+
+function main(_: {string}): integer
+  local marker = browser.binding("initializer_main")
+  defer marker:close()
+  browser.call_void(marker, {})
+  return 0
+end
+
+do
+  parked = coroutine.create(function(_: value): value
+    defer do
+      local marker = browser.binding("initializer_close")
+      browser.call_void(marker, {})
+    end
+    return coroutine.yield(nil, "failed-initializer")
+  end, "failed-initializer")
+  parked:resume(nil)
+  raise "bridge initializer failed\0\255"
+end

@@ -137,7 +137,8 @@ local function prepare(info)
     assert(lfs.link(info.prefix .. "/include", prefix .. "/include", true))
     local source = browserlink.sdk_assets(fixtures.paths(info.prefix))
     local destination = browserlink.sdk_assets(fixtures.paths(prefix))
-    for _, key in ipairs({ "runtime", "js_library", "trace_library", "loader", "runner", "runner_module", "node_worker", "page" }) do
+    for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
+            "loader", "runner", "runner_module", "node_worker", "page" }) do
         files.copy(source[key], destination[key])
     end
     -- The source launcher is executable; binary copying alone does not retain it.

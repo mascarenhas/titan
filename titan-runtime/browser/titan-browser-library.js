@@ -10,7 +10,7 @@ addToLibrary({
     current: 0,
     contexts: null,
     retired: null,
-    completionCount: 0,
+    pending: null,
     terminalFailure: null,
     blocked: false,
     poisoned: false,
@@ -39,17 +39,18 @@ addToLibrary({
     // The owner outlives every internal transfer microtask, including a GC
     // finalizer's abandoned-stack unwind. This is also the internal entry hook
     // for future stateful gateways; call must invoke a promising Wasm export.
-    enter(call) {
+    enter(call, id, kind) {
       if (TitanBrowser.owner) {
         return Promise.reject(TitanBrowser.error('REENTRY',
           'browser instance is active; reentry is not allowed'));
       }
-      if (TitanBrowser.blocked || TitanBrowser.terminalFailure || TitanBrowser.completionCount) {
-        return Promise.reject(TitanBrowser.error('STATE',
-          'browser instance has already run or is disposed'));
+      if (TitanBrowser.blocked || TitanBrowser.poisoned) {
+        return Promise.reject(TitanBrowser.terminalFailure || TitanBrowser.error('DISPOSED',
+          'browser instance is disposed'));
       }
       TitanBrowser.owner = true;
       TitanBrowser.entered = false;
+      TitanBrowser.pending = {id, kind, completed: false};
       var result;
       try {
         result = call();
@@ -62,6 +63,7 @@ addToLibrary({
         throw cause;
       }).finally(() => {
         TitanBrowser.owner = false;
+        TitanBrowser.pending = null;
         TitanBrowser.schedule();
       });
     },
@@ -76,6 +78,7 @@ addToLibrary({
         context.gate?.reject(cause);
         context.gate = null;
       }
+      Module['titanBrowserBridge']?.poison(cause);
     },
 
     save(context) {
@@ -194,10 +197,19 @@ addToLibrary({
       // Emscripten's explicit JSPI_EXPORTS set uses WebAssembly.promising.
       // Wrap only general state-entering Module exports; C-only helpers stay
       // synchronous. Static wasmExports accesses survive export minification.
-      var entry = wasmExports['titan_browser_entry'];
-      if (entry) Module['_titan_browser_entry'] = (...args) => TitanBrowser.enter(() => entry(...args));
-      var guarded = wasmExports['titan_browser_gate_guarded'];
-      if (guarded) Module['_titan_browser_gate_guarded'] = (...args) => TitanBrowser.enter(() => guarded(...args));
+      for (var [name, kind] of [
+        ['titan_browser_initialize', 1], ['titan_browser_entry', 2],
+        ['titan_browser_invoke', 3], ['titan_browser_release_callable', 4],
+        ['titan_browser_close', 5], ['titan_browser_gate_guarded', 3],
+      ]) {
+        var entry = wasmExports[name];
+        if (entry) {
+          // Each closure captures its own entry/kind, not the loop's var home.
+          ((name, entry, kind) => {
+            Module['_' + name] = (...args) => TitanBrowser.enter(() => entry(...args), args[0], kind);
+          })(name, entry, kind);
+        }
+      }
       // Only the driver may start an engine coroutine. Its lexical raw export
       // stays private even though Emscripten publishes KEEPALIVE aliases.
       Module['_titan_mco_entry'] = () => Promise.reject(TitanBrowser.error('REENTRY',
@@ -223,21 +235,13 @@ addToLibrary({
   titan_mco_destroy__sig: 'vp',
   titan_mco_destroy: id => TitanBrowser.destroy(id),
 
-  titan_browser_complete__deps: ['$TitanBrowser'],
-  titan_browser_complete__sig: 'viiii',
-  titan_browser_complete: (kind, status, bytes, length) => {
-    // Copy synchronously while C owns the payload. JS promises are not Lua
-    // roots, and application sinks never run during an internal handoff.
-    Module['titanBrowserComplete'](kind, status,
-      HEAPU8.slice(bytes >>> 0, (bytes >>> 0) + (length >>> 0)),
-      ++TitanBrowser.completionCount);
-    TitanBrowser.schedule();
-  },
-
   titan_browser_entry_allowed__deps: ['$TitanBrowser'],
-  titan_browser_entry_allowed__sig: 'i',
-  titan_browser_entry_allowed: () => {
-    if (!TitanBrowser.owner || TitanBrowser.entered) return 0;
+  titan_browser_entry_allowed__sig: 'iji',
+  titan_browser_entry_allowed: (id, kind) => {
+    id = BigInt.asUintN(64, id);
+    var pending = TitanBrowser.pending;
+    if (!TitanBrowser.owner || TitanBrowser.entered || !pending ||
+        id === 0n || pending.id !== id || pending.kind !== kind) return 0;
     TitanBrowser.entered = true;
     return 1;
   },

@@ -458,6 +458,14 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
         return "", render("getudatamem($EXP)", { EXP = cexp })
     end
 
+    if target and stype._tag == "Type.CArray"
+       and ttype._tag == "Type.CPointer"
+       and coder._decl_volatile_home(coder._lvalue_root_decl(exp)) then
+        -- The volatility belongs to the canonical automatic array, not the
+        -- checked outgoing C pointer type.
+        return "", foreigncast(cexp, target)
+    end
+
     if types.is_direct_c(exp._type) then
         return "", cexp
     end
@@ -715,9 +723,8 @@ function codeforeigncall(ctx, node)
             end
         end
     end
-    -- A direct mutable-address argument may have changed the complete local
-    -- object representation. Commit only after the C call returns normally;
-    -- a C-side nonlocal exit must retain the last pre-call spill.
+    -- Non-address-exposed aggregates retain their ordinary byte-spill policy.
+    -- Mutable out-arguments use their actual home even on a nonlocal exit.
     coder._append_c_mutation_spills(node, poststats)
     local cstats = table.concat(castats, "\n")
     local ccall = render("$NAME($CAEXPS)", {
@@ -2408,16 +2415,15 @@ local function lower_call(ctx, node)
     return cstats, visnames[1]
 end
 
--- A normally returning ordinary Titan callee may have completed a write
--- through an aggregate's contextual mutable address. Commit each tracked byte
--- spill only after the call returns; calls passing no tracked aggregate
--- address emit nothing extra. Foreign calls commit `_c_mutated_decls` instead.
+-- Refresh existing traced roots after an ordinary Titan callee writes through
+-- a mutable C address. Stable homes need no byte snapshot or recovery reload.
 -- Implementation notes: doc/implementation/c-ffi-expressions.md#longjmp-safe-aggregate-spills
 function codecall(ctx, node)
     local cstats, cexp = lower_call(ctx, node)
     local commits = {}
-    for _, decl in ipairs(coder._titan_call_aggregate_out_decls(node)) do
-        local update = spill_update(decl)
+    for _, decl in ipairs(coder._titan_call_mutable_out_decls(node)) do
+        local update = types.is_gc(decl._type) and decl._slot
+            and setslot(decl._type, decl._slot, decl._cvar) or spill_update(decl)
         if update ~= "" then table.insert(commits, update) end
     end
     if #commits == 0 then return cstats, cexp end

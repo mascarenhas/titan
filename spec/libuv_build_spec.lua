@@ -1443,7 +1443,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
                 "prefix/include/transfer.h",
-                "prefix/include/titan/ffi.h",
+                "prefix/include/titan/ffi.h", "prefix/include/titan/browser.h",
                 "prefix/src/lua-5.5.1/lua.h", "prefix/src/lua-5.5.1/lobject.h",
                 "prefix/src/lua-5.5.1/lua.c",
                 "prefix/lib/titan/0.6/libtitan.a",
@@ -1542,7 +1542,8 @@ done
                 "LIBBT_LIB=" .. prefix .. "/lib/libbacktrace.a",
                 "TITAN_SDK_ROOT_HEADERS=" .. prefix .. "/include/minicoro.h " ..
                     prefix .. "/include/titan.h " .. prefix .. "/include/transfer.h",
-                "TITAN_SDK_NAMESPACED_HEADERS=" .. prefix .. "/include/titan/ffi.h",
+                "TITAN_SDK_NAMESPACED_HEADERS=" .. prefix .. "/include/titan/ffi.h " ..
+                    prefix .. "/include/titan/browser.h",
                 "LIBUV_SRC_DIR=native", "LLHTTP_HEADER=native/llhttp.h",
                 "SQLITE3_HEADER=native/sqlite3.h",
                 "--old-file=" .. support_module,
@@ -1555,6 +1556,7 @@ done
                 { "prefix/lib/libbacktrace.a", "lib/libbacktrace.a" },
                 { "prefix/lib/liblua.a", "lib/liblua.a" },
                 { "prefix/include/transfer.h", "include/transfer.h" },
+                { "prefix/include/titan/browser.h", "include/titan/browser.h" },
                 { "prefix/src/lua-5.5.1/lua.c", "src/lua-5.5.1/lua.c" },
                 { "native/include/uv.h", "include/uv.h" },
                 { "native/include/uv/version.h", "include/uv/version.h" },
@@ -6140,6 +6142,7 @@ printf '%s\n' "${schedule[@]}"
                     'make lua-browser PREFIX="$PREFIX"',
                     '"$PREFIX/bin/luarocks" make',
                     'make browser-sdk PREFIX="$PREFIX"',
+                    "titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js",
                     'test -z "${EMSDK:-}"', "! command -v emcc",
                     'TITAN_PROBE_CACHE_DISABLE: "1"', "if: failure()",
                 }) do
@@ -6228,6 +6231,7 @@ printf '%s\n' "${schedule[@]}"
                     "spec/browser_sdk_spec.lua",
                     "spec/coder/browser_stdlib_closure_spec.lua",
                     "spec/coder/browser_entry_gate_spec.lua",
+                    "spec/coder/browser_bridge_spec.lua",
                     "spec/coder/browser_stdlib_gate_spec.lua",
                     "spec/coder/browser_fixtures_spec.lua",
                     "spec/minicoro_spec.lua",
@@ -6336,19 +6340,69 @@ printf '%s\n' "${schedule[@]}"
                 "profile: [validation, production]",
                 "engine: [chromium, firefox, webkit]",
                 'TITAN_PLAYWRIGHT_VERSION: "1.64.1"',
+                'TITAN_VITE_VERSION: "8.3.6"',
+                "TITAN_VITE_ROOT:",
                 "PLAYWRIGHT_BROWSERS_PATH:",
                 "emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1",
                 "playwright-${{ env.TITAN_PLAYWRIGHT_VERSION }}-${{ matrix.engine }}-v1",
                 "spec/browser/build-trace.lua",
+                "spec/browser/build-bridge.lua",
+                "${{ env.TITAN_BRIDGE_OUTPUT }}",
                 "spec/browser/playwright-run.mjs",
                 "spec/browser/playwright-runner.test.mjs",
                 "--allow-degraded-trace",
                 "manifest.degradedCases",
-                "result.status !== 75",
+                "result.status !== 1",
+                "result.stdout.length !== 0",
+                "degraded browser trace:",
+                "ordinary initialization failure before Lua/main",
                 "browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}",
             }) do
                 assert.truthy(playwright_job:find(contract, 1, true), contract)
             end
+            local bridge_build = named_step(playwright_job,
+                "Build the portable bridge gate for both assertion modes")
+            assert.falsy(bridge_build:find("if:", 1, true), bridge_build)
+            assert.truthy(bridge_build:find(
+                'lua -E spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"', 1, true))
+            local bridge_gate = named_step(playwright_job,
+                "Run the persistent bridge and opaque-Promise diagnostics")
+            assert.falsy(bridge_gate:find("if:", 1, true), bridge_gate)
+            for _, contract in ipairs({
+                "for (const assertions of [2, 0])",
+                "['integration.mjs', 0,",
+                "['unhandled.mjs', 74,",
+                "['unhandled-result.mjs', 74,",
+                "['poison-retirement.mjs', 70, 'poison-retirement-complete']",
+                "!receipt.includes(marker)",
+                "process.env.TITAN_BUILD_PROFILE === 'production' && engines[0] === 'chromium'",
+                "engines.push('node')",
+                "result.status !== status",
+                "browser-playwright-bridge.log",
+            }) do
+                assert.truthy(bridge_gate:find(contract, 1, true), contract)
+            end
+            local vite_install = named_step(playwright_job,
+                "Install the pinned Vite deployment dependency")
+            assert.truthy(vite_install:find("if: matrix.engine == 'chromium'", 1, true))
+            assert.truthy(vite_install:find(
+                'PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT"', 1, true))
+            assert.truthy(vite_install:find('"vite@$TITAN_VITE_VERSION"', 1, true))
+            local deployment_gate = named_step(playwright_job,
+                "Run self-contained HTTP and Vite deployment gate")
+            for _, contract in ipairs({
+                "if: matrix.engine == 'chromium'",
+                'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"',
+                'TITAN_REQUIRE_BROWSER_DEPLOYMENT: "1"',
+                'TITAN_PROBE_CACHE_DISABLE: "1"',
+                'source "$TITAN_EMSDK_ROOT/emsdk_env.sh"',
+                '"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_deployment_spec.lua',
+                "browser-playwright-deployment.log",
+            }) do
+                assert.truthy(deployment_gate:find(contract, 1, true), contract)
+            end
+            assert.falsy(browser_job:find("TITAN_VITE_VERSION", 1, true))
+            assert.falsy(browser_stdlib_job:find("TITAN_VITE_VERSION", 1, true))
             assert.falsy(browser_job:find("TITAN_PLAYWRIGHT_VERSION", 1, true),
                 browser_job)
             assert.falsy(playwright_job:find("TITAN_CHROME_VERSION", 1, true),

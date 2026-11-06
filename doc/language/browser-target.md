@@ -55,13 +55,9 @@ mkdir -p site
 cp out/hello.mjs out/hello.wasm out/hello.wasm.map site/
 ```
 
-The page runs the program through the loader `titan-browser.mjs`, which ships
-in the browser SDK. The page needs a copy of the loader next to the program,
-so copy it from the SDK directory:
-
-```sh
-cp "$PREFIX/lib/titan-browser/0.6/titan-browser.mjs" site/
-```
+The generated ES module already contains Titan's loader. There is no runtime
+JavaScript file to copy from the SDK: the three generated files are the whole
+program image.
 
 Then write the page, `site/index.html`:
 
@@ -75,8 +71,7 @@ Then write the page, `site/index.html`:
 <body>
   <pre id="output"></pre>
   <script type="module">
-    import { create } from "./titan-browser.mjs";
-    import hello from "./hello.mjs";
+    import create from "./hello.mjs";
 
     const output = document.getElementById("output");
     const text = new TextDecoder();
@@ -84,7 +79,7 @@ Then write the page, `site/index.html`:
       output.textContent += text.decode(chunk, { stream: true });
     }
 
-    const instance = create(hello, { stdout: show, stderr: show });
+    const instance = create({ stdout: show, stderr: show });
     try {
       const result = await instance.run(["browser"]);
       output.textContent += `(${result.kind}, status ${result.status})\n`;
@@ -96,14 +91,14 @@ Then write the page, `site/index.html`:
 </html>
 ```
 
-The module script imports `create` from the loader and the program's factory,
-which is the default export of `hello.mjs`. `create(hello, {stdout, stderr})`
-makes an instance with two output sinks. Each sink receives the program's
-output as `Uint8Array` chunks; this page decodes them as UTF-8 and appends the
-text to the `<pre>` element. `run(["browser"])` runs `main` with
-`args[1] == "browser"` and resolves to the result, here a `returned` run with
-status 0. `dispose()` then releases the instance. The [loader
-API](#the-loader-api) describes every option and result.
+The module script imports the program's default `create(options)` function.
+Each output sink receives copied `Uint8Array` chunks; this page decodes them
+as UTF-8 and appends the text to the `<pre>` element. `run(["browser"])`
+initializes the image and runs `main` with `args[1] == "browser"`, resolving to
+a `returned` result with status 0. The state remains alive after `main`
+returns. **Always await `dispose()` in `finally`**: it closes Lua, runs state
+finalizers, drains their output, and releases the image. The
+[loader API](#the-loader-api) describes every option and result.
 
 Browsers do not load module scripts or WebAssembly into a page opened from a
 `file://` URL, so serve the folder over HTTP. Any static web server works if it
@@ -128,8 +123,8 @@ Titan counts 3
 (returned, status 0)
 ```
 
-To deploy the page, serve `hello.mjs`, `hello.wasm`, `hello.wasm.map`, and
-`titan-browser.mjs` together with it. The source map is what lets errors
+To deploy the page, serve `hello.mjs`, `hello.wasm`, and `hello.wasm.map`
+together with it. No external loader is required. The source map lets errors
 report Titan source files and lines (see [traces](#traces)).
 
 ## Prerequisites
@@ -263,9 +258,9 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | --- | --- |
 | `libtitan.a` | the browser runtime archive |
 | `libtitan-lpeglabel.a` | the PEG engine, built for the browser; `make browser-sdk` links it into `titan.a` |
-| `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen standard modules and the PEG engine they use |
-| `titan-browser.mjs` | the [loader](#the-loader-api), which pages copy next to their programs |
-| `titan-browser-library.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, admission, eager trace-map loading, and stack capture) |
+| `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen shared modules, browser-only `titan.browser`, and the PEG engine |
+| `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
+| `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
@@ -523,17 +518,15 @@ library's source, from the SDK directory or the browser Titan path described
 
 ## The loader API
 
-A web page or application runs a browser program through the loader
-`titan-browser.mjs` from the browser SDK, as in [the first web
-page](#a-first-web-page), and `titan-browser-run` uses the same loader. It
-works in a JSPI-capable browser and in Node 26+, where a script can import it
-from the SDK directory:
+Every generated program or test ES module exports one default
+`create(options = {})` function. Import that function directly; the raw
+Emscripten factory and Module are private. The same image works over HTTP, in
+a bundler such as Vite, and in Node 26+:
 
 ```javascript
-import factory from "./out/app.mjs";
-import { create } from "/home/me/.local/titan/lib/titan-browser/0.6/titan-browser.mjs";
+import create from "./out/app.mjs";
 
-const instance = create(factory, {
+const instance = create({
   stdout: chunk => { process.stdout.write(chunk); },
   stderr: chunk => { process.stderr.write(chunk); },
 });
@@ -545,69 +538,172 @@ try {
 }
 ```
 
-`create(factory, options)` takes the default export of a generated `.mjs` and
-returns an instance with three methods:
+The instance has the following methods:
 
-* `initialize()` instantiates the WebAssembly module and returns a Promise.
-  It runs no Titan code, and calling it again returns the same Promise. `run`
-  calls it when needed.
-* `run(args)` runs `main` once with `args`, an Array of strings, which are
-  encoded as UTF-8, and `Uint8Array` values, which are copied as they are. The
-  Promise resolves to `{kind, status, bytes}`: `kind` is `"returned"` or
-  `"failed"`, `status` is the signed 32-bit status, and `bytes` is a
-  `Uint8Array` with the error message of a failed run (empty for a returned
-  run). A nonzero status or a failed run is a result, not a rejection.
-* `dispose()` releases the instance and returns a Promise. It waits for a run
-  in progress to finish; it does not cancel it.
+* `initialize(): Promise<void>` instantiates Wasm, creates the persistent Lua
+  state, and runs the image's module initializers, but not `main`. Repeated
+  calls share one initialization promise. An ordinary initializer error
+  rejects with captured Titan error bytes and trace and prints its standard
+  report once. The partial state still needs disposal.
+  With `requireTrace: true`, a missing or invalid map fails initialization
+  before Lua is created or any initializer runs. This failure has message
+  bytes and status 1, but no Titan trace because no Titan code ran.
+* `run(args = [])` initializes when needed, then invokes `main` once. Strings
+  in `args` are UTF-8 encoded; `Uint8Array` arguments are copied byte for byte.
+  It resolves `{kind, status, bytes}`, with `"returned"` or `"failed"`, a
+  signed 32-bit status, and copied error bytes (empty for a returned run).
+  Ordinary initializer or main failure is a failed/status1 result, not a
+  fatal-engine rejection. A prior initializer failure is reused without a
+  second report.
+* `call(callable, ...args)` invokes a callable wrapper that Titan created with
+  [`browser.callable`](standard-library-browser.md#original-closures) and
+  passed to JavaScript. It requires successful initialization and remains
+  available after main returns. Both this method and `callable.call(...args)`
+  resolve one dense result Array: `[]` for zero results, `[value]` for one,
+  and the complete tuple for many. A nil result is `null`, including trailing
+  nils. Promise and thenable JSHandle values remain untouched elements of that
+  Array; the call does not await or handle their rejections. Destructure a
+  result explicitly, then separately await it if that is what the application
+  intends.
+  Byte arguments are snapshotted synchronously before either method returns
+  its promise; later mutations do not change that call.
+* `notify(callable, ...args)` synchronously snapshots and enqueues one
+  notification without entering Wasm. It copies byte arrays and keeps raw
+  JavaScript values by reference. It does not allocate Wasm buffers or handle
+  slots. Because it is synchronous, a wrong instance state, a foreign or
+  released wrapper, or arguments that do not match the callable's signature
+  throw immediately; after disposal begins, `notify` does nothing. Logically
+  released arguments are rejected again before delivery; released or closed
+  targets retire without delivery.
+* `drain()` requires successful initialization and delivers one detached FIFO
+  batch. A handler error is reported as a `"callback"` event through
+  `onNotificationError`, with its captured Titan data, and later
+  notifications still run. Notifications enqueued by handlers belong to the
+  next batch. There is no implicit loop or scheduling policy.
+* `dispose()` closes application admission immediately and returns one stable
+  promise. An accepted native entry physically retires before Lua closes.
+  Requests and queued work are retired according to their ownership contract.
+  Main's lexical defers have already run at return; state finalizers run here.
+  All state-owned handles become invalid. A disposed instance never revives.
 
-**Promise-based entry.** General JavaScript calls into a Titan state are
-promise-returning even when their Titan signature is synchronous. Resuming a
-coroutine, or allocating memory that runs an abandoned coroutine's finalizer,
-can suspend internally. The instance stays exclusively admitted across these
-internal promise microtasks; they do not admit callbacks or another entry.
-The run's result comes from Titan's completion record, not the fulfilled
-value of the underlying WebAssembly promise, and is released only after the
-native entry and terminal coroutine continuations have retired.
+`initialize`, `run`, `call`, `drain`, and `dispose` always return promises,
+including admission errors. Calling `call` or `drain` before initialization
+does not initialize implicitly. A callable wrapper also has `call(...args)`
+and idempotent, synchronous logical `release()`. Wrappers belong to one
+instance and one Lua state; another instance cannot use them.
 
-The options are `stdout` and `stderr`, the output sinks, and `locateFile`. A
-missing sink discards that stream. Emscripten and the trace loader use
-`locateFile` to find `<stem>.wasm` and `<stem>.wasm.map`; by default the
-`.wasm` and `.wasm.map` beside the `.mjs` are used. A page that serves them
-from elsewhere passes `locateFile(name, directory)`, which receives the file
-name (`<stem>.wasm` or `<stem>.wasm.map`) and the directory of the `.mjs`,
-and returns the URL to load, for example
-`locateFile: name => "/assets/wasm/" + name`.
+**Exclusive entry.** One logical operation owns the instance from argument
+validation through all protected C entries and output flush. Promise
+microtasks used by coroutine switching or GC cleanup do not release that
+admission. Immediate reverse calls during a binding or output sink reject
+with `TITAN_BROWSER_REENTRY`; they do not synchronously throw into the
+binding's `try/catch`. Observe the rejected promise, or use `notify`. A sink
+never runs from a Wasm import or an internal JSPI handoff. Independent
+instances can progress concurrently.
 
-**One run per instance.** An instance runs `main` at most once. Create a new
-instance for another run; independent instances can run at the same time in
-one JavaScript realm, and a disposed instance can be collected.
+Options are:
 
-**Sinks.** A sink is a synchronous function that receives its buffered stream
-as a fresh `Uint8Array`, which it may keep or modify. Internal coroutine/GC
-handoffs never deliver output or other notifications. The loader delivers
-the buffered bytes after the admitted native entry retires, including
-finalizer output. Each stream keeps its byte order; there is no ordering
-between streams. A sink must return `undefined`. If it throws or returns
-anything else, including a Promise, the loader stops calling it and rejects
-once with that failure; the rejection of a returned Promise is observed.
+| Option | Contract |
+| --- | --- |
+| `stdout`, `stderr` | Functions receiving copied `Uint8Array` chunks, which they may keep. A sink returns `undefined` or a promise; anything else is a sink failure. An absent sink discards its stream. |
+| `stdin(capacity)` | Serves explicit byte reads from the [C SDK](standard-library-browser.md#c-sdk). It returns a `Uint8Array`, a counted `{bytes, length}` source with `length` at most `capacity`, a promise of either, or an explicit detachable or retained request form. C `stdin` is unaffected and always at end of file; without this option an SDK read fails with a bridge error. |
+| `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
+| `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
+| `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. |
+| `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks and secondary or callerless cleanup failures. A host Promise rejection instead goes to its mandatory typed failure callable. |
+| `requestDrain()` | A coalesced announcement of queued work at a complete logical safe point; the application chooses when to call and await `drain()`. |
+| `onEngineFailure({kind, cause})` | Observes a terminal engine failure after the instance has been poisoned; `kind` is `"abort"`, `"trap"`, or `"protocol"`. Observer exceptions cannot replace that failure. |
 
-**Errors.** A rejected Promise carries an `Error` whose `name` is
-`TitanBrowserError`, with a `code`, a fixed message, and, where there is one,
-the original error as `cause`:
+The notification-error event's `kind` is `"callback"` or `"cleanup"`.
+`operation` identifies `initialize`, `run`, `call`, `drain`, `dispose`, or
+`notify`; a failed work announcement uses `requestDrain`, and callerless
+physical callable retirement uses `release_callable`. In-operation cleanup
+uses the containing public operation's name. Each failure is reported once,
+and a physical release failure is not retried: state close remains its
+retirement fallback. Without an observer, the loader logs each event with
+`console.error`. An observer that throws cannot replace a captured or
+terminal failure; the current operation, or else the next one that would
+otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 
-| `code` | Message | When |
-| --- | --- | --- |
-| `TITAN_BROWSER_REENTRY` | `browser instance is active; reentry is not allowed` | `run` while the instance's logical entry is still active, including internal coroutine/GC handoffs |
-| `TITAN_BROWSER_STATE` | `browser instance has already run or is disposed` | `run` after the instance has run, failed, or been disposed |
-| `TITAN_BROWSER_SINK` | `browser stdout sink failed`, `browser stderr sink failed`, `browser stdout sink must return undefined`, `browser stderr sink must return undefined` | a sink failed; `stream` names it |
-| `TITAN_BROWSER_CAPABILITY` | `Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)` | the engine lacks the required JSPI APIs |
-| `TITAN_BROWSER_ABORT` | the engine's abort reason | the WebAssembly module aborted |
-| `TITAN_BROWSER_TRAP` | the trap's message | the WebAssembly module trapped |
-| `TITAN_BROWSER_PROTOCOL` | for example `browser entry returned without completion` | the image broke the loader's protocol |
+**Output.** Each stream has one FIFO and at most one actual sink invocation in
+flight. The loader flushes only after all entries in the containing operation,
+including unterminated C-stdio tails. Later chunks continue after a sink
+throws or rejects. An otherwise successful operation rejects with its first
+cleanup failure; secondary failures are reported once through
+`onNotificationError`. If the operation already failed in Titan, its captured
+message and trace remain primary while deliverable output and deferred
+retirement are still attempted. There is no cross-stream ordering guarantee.
+A completion-carrying write receives its own outcome. A C-only append failure
+is returned by the operation that flushes it and stays pending for the next
+completion-carrying write, or disposal if no such write consumes it. Empty
+flushes and unrelated output-free operations do not fail again with that
+pending error, and observing it does not report the same failure twice.
 
-After an abort or a trap the instance is unusable, and `dispose()` releases it
-without running more WebAssembly code. Invalid arguments to `create` and
-`run` throw or reject with a `TypeError`.
+Disposal interrupts a pending sink by detaching its continuation and making
+that stream terminal; it never overlaps the old sink with a finalizer write.
+An operation whose failure was already captured keeps that failure if disposal
+interrupts its report flush; the interruption is reported once as cleanup,
+even when both streams are interrupted. Only an operation not yet failed
+rejects `TITAN_BROWSER_DISPOSED`. Disposal retains its own output/error outcome,
+including `TITAN_BROWSER_DISPOSED` for interrupted or discarded buffered bytes.
+Normal `await run(); await dispose()` delivers finalizer output. That output
+is delivered after the image's native state has been released, so even a
+never-settling sink and an externally retained disposal promise do not keep
+the disposed image alive. Caller closures that independently retain the
+instance are outside this rule.
+
+**Host work.** A tracked request explicitly chooses detachable work
+(`{kind: "detachable", promise, cancel?}`) or guaranteed-terminal retained
+ownership (`{kind: "retained", promise, cancel?}`). Never-settling work must be
+detachable. A listener uses
+`{kind: "listener", subscribe(emit) { return unregister; }}`. Its synchronous
+events only enqueue. Cancellation signals the host; it is not proof that
+retained work has physically retired. Late and duplicate settlements never
+enter Lua after cancellation, release, state close, or disposal. If the bridge
+cannot create a request's owner, it neither starts the host source, registers
+the listener, nor appends completion-carrying output.
+Start/listen and completion-carrying byte I/O take both a success callable and
+a mandatory failure callable. Failure receives `(message: string,
+thrown: JSHandle)`: the message is copied bytes and the handle preserves the
+exact rejected JavaScript value. Both outcomes enqueue and use protected
+delivery; a Promise rejection is not merely logged to an observer.
+
+**Observation and errors.** `instance.trace` is a fresh frozen `{state,
+reason}` snapshot, including before initialization. It preserves the last
+map state and reason after ordinary or poisoned disposal without retaining
+the image.
+
+A rejected promise, or an exception from a synchronous method, carries an
+`Error` whose `name` is `TitanBrowserError`, with a `code`, a message, and,
+where there is one, the original error as `cause`:
+
+| `code` | When |
+| --- | --- |
+| `TITAN_BROWSER_TITAN` | An ordinary Titan error from initialization or a call. `message` decodes the error text; `bytes` holds the exact copied message bytes, `trace` the original raw trace bytes (absent for a required-trace refusal), and `status` the completion status. A later valid call on the intact instance still works. |
+| `TITAN_BROWSER_REENTRY` | A general operation while another is active, including an immediate call from a binding or sink. |
+| `TITAN_BROWSER_STATE` | `call`, `drain`, or `notify` before successful initialization, a second `run`, or an exhausted operation identity. |
+| `TITAN_BROWSER_DISPOSED` | Work after disposal began, an operation that disposal interrupted before it failed, or buffered output that disposal could not deliver. |
+| `TITAN_BROWSER_HANDLE` | A released or foreign callable wrapper, or a handle of a closed Lua state. |
+| `TITAN_BROWSER_SINK` | An output sink threw, rejected, or returned something other than `undefined` or a promise; `stream` names the stream. |
+| `TITAN_BROWSER_HOST` | Host cleanup that the bridge could not complete, such as a throwing request `cancel` or listener `unregister` during disposal, or a throwing `onNotificationError` observer. |
+| `TITAN_BROWSER_CAPABILITY` | The engine lacks WebAssembly JSPI. |
+| `TITAN_BROWSER_ABORT`, `TITAN_BROWSER_TRAP`, `TITAN_BROWSER_PROTOCOL` | The engine aborted or trapped, or the image broke the completion protocol. The instance is poisoned: later application methods reject this saved failure, and disposal drops the image without entering Wasm again. |
+
+Invalid `create` options throw `TypeError` synchronously. Arguments that do
+not match a callable's signature (a wrong count, a Number for an integer, a
+non-`Uint8Array` byte value) reject `call` or throw from `notify` with
+`TypeError`, as do invalid `run` arguments.
+
+Byte argument snapshots for `call`, `callable.call`, `notify` and `run` read
+native `Uint8Array` storage, including subarrays, subclasses and Node Buffers.
+Custom iterators, byte-view accessors and constructor/species hooks cannot
+substitute bytes. A Proxy around a byte array has no native TypedArray slots
+and is rejected with `TypeError`.
+
+The test runner reports observed aborts and traps even if a test catches their
+operation rejection. A completion-protocol error that the test explicitly
+handles stays local to its poisoned instance; if the operation rejection
+escapes, the runner reports a harness failure.
 
 ## Testing with `titan-browser-run`
 
@@ -652,7 +748,7 @@ stdout and stderr exactly, and writes its own messages, all starting with
 | `--chrome PATH` | The Chrome or Chromium executable; overrides `TITAN_CHROME`. |
 | `--cdp pipe\|port` | How the tool controls Chromium: a private pipe (the default) or a loopback DevTools port. |
 | `--root DIR` | The directory served to the engine; defaults to `FILE`'s directory, and must contain `FILE`, its `.wasm`, and (unless `--allow-degraded-trace` is set) its `.wasm.map`. |
-| `--allow-degraded-trace` | Allow a run whose trace map is missing, malformed, or mismatched to proceed in degraded trace mode instead of failing as a harness error (used by tests of missing or invalid maps). |
+| `--allow-degraded-trace` | Permit missing, malformed, or mismatched trace maps by creating images with `requireTrace: false`; otherwise map failure is an ordinary initialization failure before Lua or main, not an infrastructure failure. |
 | `--js-test` | Run `FILE` as a JavaScript test module instead of a program (used by Titan's own tests). |
 | `--help`, `--version` | Print usage or the version to stderr and exit 0. |
 | `--probe` | Print one line of JSON describing the Node and Chrome that the tool would use, without running anything. |
@@ -677,7 +773,7 @@ honors only for the root user.
 | 72 | The `--timeout` limit expired, including a program that never stops computing. |
 | 73 | A trap or abort happened during the grace period after completion; it overrides the earlier result. |
 | 74 | An unhandled Promise rejection, before completion or during the grace period. |
-| 75 | The tool itself failed: Node or Chrome missing, an unreadable or invalid image, a degraded trace backend without `--allow-degraded-trace`, an engine that exited early, or a failed cleanup. |
+| 75 | The tool itself failed: Node or Chrome missing, an unreadable or invalid image, an engine that exited early, or a failed cleanup. |
 | 76 | A loader output sink failed. The runner's own sinks do not fail, so in practice this comes from the sinks of a `--js-test` module. |
 
 A program's own status can coincide with 70 to 76. The stderr message tells
@@ -705,12 +801,18 @@ A browser program completes in one of two ways:
   writes the standard report to stderr, as a native program does:
   `<progname>: <message>`, then `stack traceback:`, then one tab-indented line
   per frame. The status is 1. `<progname>` is the last component of the main
-  module's name, or of the first test root's name for a test image.
+  module's name, or of the first test root's name for a test image. A
+  required trace map that is missing or invalid also fails initialization
+  with status 1: stderr receives `degraded browser trace: <reason>`, without
+  a traceback because no Titan code ran.
 
-The program ends when `main` returns or fails; output written up to then,
-including finalizer output while Lua closes and an unterminated last line, is
-delivered in full. Output is binary: NUL, `0xFF`, and invalid UTF-8 pass
-through unchanged. Standard input is always at end of file.
+Main completes when it returns or fails, and its output (including an
+unterminated last line) is delivered then. The state and callable handles
+remain alive until explicit disposal. The runner awaits disposal and its
+finalizer output before reporting completion. Output is binary: NUL, `0xFF`,
+and invalid UTF-8 pass through unchanged. C standard input is always at end of
+file; the loader's `stdin` option serves only explicit SDK reads, and the
+command-line runner supplies none.
 
 ### Traces
 
@@ -830,18 +932,21 @@ limit, the trace ends with one final frame line:
 **Deploying `.wasm.map` and degraded mode.** A web server serving a browser
 image must serve `<stem>.wasm.map` next to `<stem>.wasm` (or map both through
 `locateFile`). If `<stem>.wasm.map` cannot be loaded, is malformed, or does not
-match the instantiated `.wasm` image, module initialization logs one console
-warning (`Titan browser trace: <reason>`) and the application still runs in
-degraded mode. Every trace generated by that instance contains the Lua frames
-plus one marker line:
+match the instantiated `.wasm` image, Wasm instantiation logs one console
+warning (`Titan browser trace: <reason>`). By default an embedding permits
+degraded mode; with `requireTrace: true`, initialization instead fails before
+Lua or any module initializer runs. In permitted degraded mode, every trace
+generated by that instance contains the Lua frames plus one marker line:
 
 ```text
 (native Titan frames unavailable: trace map not loaded)
 ```
 
-To catch deployment and staging mistakes in tests, `titan-browser-run` treats a
-degraded trace backend on a compiler-built image as a harness failure (exit 75)
-even if the program or tests pass, unless `--allow-degraded-trace` is supplied.
+To catch deployment and staging mistakes in tests, `titan-browser-run` sets
+`requireTrace: true` for both direct images and images created by `--js-test`
+modules, unless `--allow-degraded-trace` is supplied. A direct image's failed
+initialization becomes its saved failed/status1 run result, without entering
+main or inventing a Titan traceback.
 
 **Host `Error.prepareStackTrace` and capture failure.** The runtime never calls
 a host `Error.prepareStackTrace` callback or invokes property getters or
@@ -860,9 +965,9 @@ bare `raise`.
 
 ## The browser standard library
 
-The browser SDK's `titan.a` holds the thirteen standard modules that need no
-libuv and no other native-only library. They are compiled from the same
-sources as the native standard library:
+The browser SDK's `titan.a` holds fourteen standard modules that need no libuv
+or other native-only library: thirteen shared modules compiled from the same
+sources as the native standard library, plus the browser-only `titan.browser`:
 
 | Module | Contents |
 | --- | --- |
@@ -879,8 +984,9 @@ sources as the native standard library:
 | [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
 | [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
 | [`test`](standard-library-test.md) | the test API and the native test runner |
+| [`browser`](standard-library-browser.md) | typed JavaScript bindings, original-closure callables, handles, and tracked host requests |
 
-Each of these modules is complete. Every public declaration, including the raw
+Each of the thirteen shared modules is complete. Every public declaration, including the raw
 C functions `protobuf.write_resource_index`,
 `protobuf.write_resource_index_bytes`, `transfer.copy_message`,
 `transfer.discard_message`, and `transfer.transfer_load_module`, has the same
@@ -889,6 +995,11 @@ from the target facts [below](#what-the-browser-target-changes). No member
 raises an "unavailable" error or returns a stand-in value. `transfer` encodes
 and decodes packets within one instance; the modules that carry packets to
 another Lua state or thread are not available.
+
+`titan.browser` is the reviewed target-only exception. It has no native
+placeholder and imports only the portable core. Its byte/scalar ABI is not the
+native transfer packet format; schema copies and a browser async scheduler are
+separate features. See [JavaScript bindings](standard-library-browser.md).
 
 ### Modules that are not available
 
@@ -1167,7 +1278,7 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 ## Current limits
 
-* The browser standard library has [thirteen of the standard
+* The browser standard library has [fourteen of the standard
   modules](#the-browser-standard-library). `async`, timers, files, networking,
   `io`, `os`, `lua`, `thread`, and `sqlite3` are not available, so programs
   write output through C's `stdio.h`, as in [the first web
@@ -1184,7 +1295,8 @@ a walk over a deep record graph with `reflect`, has no library limit; under
   used the previous JavaScript-SJLJ lowering; JSPI/Wasm-EH error, GC, and
   unwind qualification covers Node 26.13.0 and Chromium 156, not a new
   four-engine, two-profile recursion-ceiling matrix.
-* A loader instance runs `main` once; sinks must be synchronous.
+* A loader instance runs `main` once; calls and explicit notification drains
+  remain available afterward. Output sinks may return promises.
 * Only Linux and macOS hosts are supported; `Makefile.win` offers neither
   `lua-browser` nor `browser-sdk`.
 * The language server analyzes the host target only.

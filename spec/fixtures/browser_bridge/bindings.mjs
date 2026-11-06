@@ -1,0 +1,162 @@
+export const encode = text => new TextEncoder().encode(text);
+export const decode = bytes => new TextDecoder().decode(bytes);
+export const binary = () => new Uint8Array([0, 255, 195, 40]);
+
+// Node Buffer has this slice-as-view behavior. Exercise it in every engine.
+export class AliasingBytes extends Uint8Array {
+  slice(start, end) { return this.subarray(start, end); }
+}
+
+export function gate() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return {promise, resolve, reject};
+}
+
+// The test-owned host callback itself has no instance/Module capture.
+export function formBinding(form) {
+  return () => form;
+}
+
+export function join(chunks) {
+  const bytes = new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0));
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  return bytes;
+}
+
+export function makeHost(context) {
+  const thrown = {throw_error: new Error('bridge failure'), throw_string: 'bridge failure string',
+    throw_value: Object.freeze({message: 'bridge failure value', marker: 332})};
+  const values = {false_value: false, zero_value: 0, null_value: null, undefined_value: undefined};
+  const host = {
+    callbacks: new Map(), controls: undefined, instance: undefined,
+    stdout: [], stderr: [], notificationErrors: [], notifications: [], checks: [],
+    successes: [], failures: [], closes: [], independentCloses: [], cleanup: 0,
+    r1Responses: [], r1Thrown: undefined,
+    r1CloseCount: 0n,
+    ioDone: 0, ioReads: [], ioFailures: [], capacities: [], input: [],
+    listeners: new Set(), retainedListeners: [], unregisters: 0, forbiddenRequests: 0,
+    sinks: {}, hooks: {}, thrown, values,
+  };
+  const bindings = host.bindings = {
+    __titanTest(controls) { host.controls = controls; },
+    echo_boolean(value) { context.assert(typeof value === 'boolean'); return value; },
+    echo_integer(value) { context.assert(typeof value === 'bigint'); return value; },
+    echo_float(value) { context.assert(typeof value === 'number'); return value; },
+    echo_bytes(value) { context.assert(value instanceof Uint8Array); return value.slice(); },
+    short_bytes() { return {bytes: new Uint8Array([0, 255, 195, 40, 88, 99]), length: 4}; },
+    large_bytes() {
+      const length = 20 * 1024 * 1024;
+      const pointer = host.controls.allocate(length);
+      context.assert(pointer !== 0, 'C-only source allocation failed');
+      const bytes = new Uint8Array(host.controls.weakTargets()[1].deref(), pointer, length);
+      bytes.fill(0);
+      bytes.set(binary()); bytes.set(binary(), length - 4);
+      // The response import copies synchronously; its own allocation must not
+      // detach this borrowed source before that copy. No borrowed data escapes.
+      queueMicrotask(() => host.controls.free(pointer));
+      return bytes;
+    },
+    invalid_bytes() { return {bytes: binary(), length: 5}; },
+    throw_error() { throw thrown.throw_error; },
+    throw_string() { throw thrown.throw_string; },
+    throw_value() { throw thrown.throw_value; },
+    check_thrown(name, value) { return value === thrown[decode(name)]; },
+    ...values,
+    check_value(name, value) { return Object.is(value, values[decode(name)]); },
+    promise_value() { return Promise.resolve('opaque promise'); },
+    is_promise(value) { return value instanceof Promise; },
+    handle_count() {
+      context.assert(host.controls, 'native browser.tests did not publish test-owned observations');
+      return BigInt(host.controls.snapshot().units);
+    },
+    publish(name, callable) {
+      context.assert(callable && typeof callable.call === 'function' && typeof callable.release === 'function',
+        'publish did not receive a production branded Callable');
+      context.assert(!Object.hasOwn(callable, 'slot') && !Object.hasOwn(callable, 'state') &&
+        !Object.hasOwn(callable, 'generation'), 'callable exposed private identity');
+      host.callbacks.set(decode(name), callable);
+    },
+    notification(value) { host.notifications.push(value); host.hooks.notification?.(value); },
+    allocation_cleanup() {
+      host.cleanup++;
+      const snapshot = host.controls.snapshot();
+      context.assert(snapshot.owner && !snapshot.safe, 'hidden allocation cleanup released its execution owner');
+      host.hooks.cleanup?.();
+    },
+    close_value: Object.freeze({close: 'owner'}),
+    close_observe(value) { host.closes.push(value); host.hooks.close?.(value); },
+    independent_close(index, asyncRejected, value) {
+      context.assert(asyncRejected === true, 'independent close admitted new async work');
+      const closing = host.controls.snapshot().states.filter(state => state.closing && !state.closed);
+      context.assert(closing.length > 0, 'independent finalizer did not observe its state closing');
+      host.independentCloses.push({index, value, closingTokens: closing.map(state => state.token)});
+    },
+    detachable_request() {
+      host.forbiddenRequests++;
+      throw new Error('a closing state invoked its forbidden host request');
+    },
+    request_success(number, bytes) { host.successes.push([number, bytes.slice()]); },
+    request_failure(message, value) { host.failures.push([message.slice(), value]); },
+    listener() {
+      return {kind: 'listener', subscribe(emit) {
+        host.listeners.add(emit);
+        host.retainedListeners.push(emit);
+        emit(31n, binary());
+        let removed = false;
+        return () => {
+          if (removed) return;
+          removed = true;
+          host.unregisters++;
+          host.listeners.delete(emit);
+        };
+      }};
+    },
+    io_done() { host.ioDone++; },
+    io_read(bytes) { host.ioReads.push(bytes.slice()); },
+    io_failure(message, value) { host.ioFailures.push([message.slice(), value]); },
+    r1_handle_first: Object.freeze({r1: 'first'}),
+    r1_handle_last: Object.freeze({r1: 'last'}),
+    r1_start_source() { return host.hooks.r1Start(); },
+    r1_listener_source() { return host.hooks.r1Listen(); },
+    r1_close_source() {
+      const pending = gate();
+      return {kind: 'detachable', promise: pending.promise, cancel() { host.r1CloseCount++; }};
+    },
+    r1_close_count() { return host.r1CloseCount; },
+    r1_release_result(position) { host.hooks.r1Release(position); },
+    r1_response_throw() { host.hooks.r1Throw?.(); throw host.r1Thrown; },
+    r1_response_observe(message, value, hasThrown) {
+      host.r1Responses.push({message: message.slice(), value, hasThrown,
+        units: host.controls.snapshot().units});
+    },
+  };
+  host.options = {
+    bindings,
+    stdout(bytes) { host.stdout.push(bytes.slice()); return host.sinks.stdout?.(bytes); },
+    stderr(bytes) { host.stderr.push(bytes.slice()); return host.sinks.stderr?.(bytes); },
+    stdin(capacity) {
+      host.capacities.push(capacity);
+      if (!host.input.length) throw new Error('test byte source is exhausted');
+      return host.input.shift();
+    },
+    onNotificationError(event) { host.notificationErrors.push(event); host.hooks.notificationError?.(event); },
+    requestDrain() { host.hooks.requestDrain?.(); },
+  };
+  host.call = (name, ...args) => {
+    const callable = host.callbacks.get(name);
+    context.assert(callable, `native tests did not publish ${name}`);
+    return host.instance.call(callable, ...args);
+  };
+  host.releaseObservations = () => {
+    host.controls = host.instance = host.r1Thrown = undefined;
+    host.hooks.r1Release = host.hooks.r1Throw = undefined;
+    host.hooks.r1Start = host.hooks.r1Listen = undefined;
+    host.r1Responses.length = 0;
+    // Awaited assertion promises hold returned Errors and their native stack closures.
+    host.checks.length = 0;
+    host.callbacks.clear();
+  };
+  return host;
+}

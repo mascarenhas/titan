@@ -215,7 +215,7 @@ local function titan_owned(relative)
         (library and library:match("^titan[.]so[.]dSYM/")) or
         relative == "include/titan.h" or relative == "include/minicoro.h" or
         relative == "include/transfer.h" or
-        relative == "include/titan/ffi.h" or
+        relative == "include/titan/ffi.h" or relative == "include/titan/browser.h" or
         relative:match("^share/titan/") or relative == "etc/titan/build-profile"
 end
 
@@ -348,6 +348,7 @@ local browser_sdk_owned = {
     "titan.a",
     "titan-browser.mjs",
     "titan-browser-library.js",
+    "titan-browser-bridge.js",
     "titan-browser-trace.js",
     "titan-browser-run",
     "titan-browser-run.mjs",
