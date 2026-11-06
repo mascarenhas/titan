@@ -468,7 +468,10 @@ terminal-callback ownership are in the
 [extension guide](libuv-extension-guide.md); the synchronous HTTP parser keeps
 its own parser-owner protocol. High-level fs/net/os/timer modules use ordinary
 Titan callbacks through the compiled UV interface and public async
-registration APIs, never this raw bridge.
+registration APIs, never this raw bridge. This trampoline is the model for
+rules 1 and 3 of the style guide's
+[native-binding rules](../style-guide.md#write-native-bindings-titan-first),
+which every new standard-library or runtime C callback into Titan follows.
 
 ## Native names and ABI
 

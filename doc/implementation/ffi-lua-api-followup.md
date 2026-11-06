@@ -9,7 +9,7 @@ chapter. That exception is an implementation technique, not public API.
 
 The inventory of trusted sites is the code: every `ffi.lua_*` and `ffi.luaL_*`
 call under `titan/`. Such calls appear in `titan/{async,coroutine,gc,iteration,reflect,test,transfer}.titan`,
-`titan/http/native.titan`, `titan/lua/{lua,worker}.titan`,
+`titan/browser.browser.titan`, `titan/http/native.titan`, `titan/lua/{lua,worker}.titan`,
 `titan/peg/native.titan`, `titan/protobuf/protobuf.titan`,
 `titan/string/{string,format}.titan`, `titan/thread/{spawn,thread}.titan`, and
 several `titan/uv/*.titan` files. Module-specific ledgers live with their
@@ -60,13 +60,24 @@ and `__call` objects (`titan-compiler/coder/calls.lua` `codevaluecall`; see
 
 ## Trusted standard-library discipline
 
-Every trusted site follows these rules:
+A raw operation is the last resort, not the default. Before adding one, or
+any authored runtime C, justify it against the style guide's six
+[rules for standard-library and runtime C](../style-guide.md#write-native-bindings-titan-first):
+layering, plain C off the Lua stack, protected work in Titan, pinning in module
+variables or owner fields, rooting by parameters and frame slots, and
+receiver-side checks of tagged values. [Standard-library
+maintenance](standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do)
+pairs each rule with a wrong and a right example. Every trusted site then
+follows these rules:
 
 - Current-state helpers use only the generated function's builtin `L`; they
-  never store, return, or substitute it. Restricted foreign callbacks receive
-  an exclusively owned state explicitly. An independent `titan.lua` state is
-  owned by `lua.Lua`, never substituted for `L`, and never given access to the
-  hosting state's objects or callbacks.
+  never keep it past the current call, return it, or substitute it. A per-call
+  owner may carry it to a synchronous native callback that runs before the call
+  returns, as the HTTP parser's `callback_state` does. Restricted foreign
+  callbacks recover their state explicitly: from such an owner, from their
+  owning loop, or as an exclusively owned state. An independent `titan.lua`
+  state is owned by `lua.Lua`, never substituted for `L`, and never given
+  access to the hosting state's objects or callbacks.
 - Snapshot `lua_gettop(L)` before the first push and restore that exact height
   with `lua_settop(L, saved)` on every exit. Put the restore in `defer` whenever
   anything between snapshot and restore can raise. Never balance an exceptional
@@ -78,7 +89,9 @@ Every trusted site follows these rules:
 - A pushed slot is a GC root only while it is below `L->top.p`. A C local
   holding a raw address is never a root. Copy any collectable result that must
   outlive restoration into a traced Titan `value` or another traced owner
-  (`ffi.lua_totvalue`) before restoring the top.
+  (`ffi.lua_totvalue`) before restoring the top. Push a Titan value only for an
+  operation that consumes stack slots, never merely to root a parameter or
+  local; their caller and frame slot already do (rule 5).
 - Never retain a pointer into a Lua string, userdata, or stack slot across an
   allocation, callback, protected call, metamethod, or anything else that can
   move the stack or run Lua. Keep the traced owner plus an offset and derive the
@@ -87,7 +100,9 @@ Every trusted site follows these rules:
   yield attempt is an ordinary Lua error at this boundary.
 - Handle ordinary Titan errors with native `do ... catch` and `defer`. Errors
   from typed Lua callables go through the generated generic-call boundary, not a
-  manual `pcall`. The only manual `lua_pcallk` sites are
+  manual `pcall`. A C callback that must run Titan reaches a Titan handler
+  through the callback trampoline (rules 1 and 3), and no manual protected call
+  wraps a C function that Lua never sees (rule 2). The only manual `lua_pcallk` sites are
   `titan/test.titan` `load_lua_helpers` (the fixed Lua helper factory),
   `titan/lua/worker.titan` `lua_state_open` and `lua_state_run` (independent
   state open and execution), and `titan/thread/spawn.titan`

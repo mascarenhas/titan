@@ -84,15 +84,6 @@ recasts add no ownership or type guarantee. Keep weak-table policy in
 `titan.gc`, dynamic loading in `titan.lua`, and raw Lua calls within the
 [audited stack-effect boundary](ffi-lua-api-followup.md).
 
-Ordinary C/libuv calls stay in Titan wrappers behind `foreign import`, with
-their error translation and rooting beside the operation. Source-defined
-`foreign function` declarations own expressible callbacks. Handwritten C
-shims are reserved for opaque layout or compile-time portability facts the
-FFI cannot express; document the exception immediately above each narrow,
-namespaced shim. Prefer the public libuv operation over platform-specific
-shortcuts when libuv provides it. See [foreign functions](foreign-functions.md)
-and [libuv extension rules](libuv-extension-guide.md).
-
 Foreign workers consume stable native callback data rather than the hosting
 state's Titan/Lua objects. In `titan/uv/uv.native.titan`, `uv_work_t.data` points to
 the embedded C `titan_uv_work_data` (`titan/uv/work-data.h`) that `queue_work`
@@ -103,6 +94,53 @@ distinct, and clear the old worker/argument state on terminal delivery
 [foreign-worker contract](libuv-runtime.md#foreign-workers) specifies the
 stable storage, callback ordering, and C-only entry boundary, including the
 exclusive independent-state execution used by `titan.lua`.
+
+## Keep C and the Lua C API to what Titan cannot do
+
+The style guide states six [rules for standard-library and runtime
+C](../style-guide.md#write-native-bindings-titan-first);
+a review justifies every new `lua_*`/`luaL_*` call and authored C line against
+them. This maintainer contract pairs each rule with its counterexample from the
+first browser bridge (`titan-runtime/browser/titan-browser.c` and
+`titan/browser.browser.titan`, PR #364), which #371 rewrites, and with existing
+code that follows it. [Foreign functions](foreign-functions.md) and the
+[libuv extension rules](libuv-extension-guide.md) describe the mechanisms. The
+[`titan-ffi` cartridge](../../.agents/skills/titan-ffi/SKILL.md) carries the
+same pairs for agents under "Guard-rails for standard-library and runtime C",
+with compiled examples.
+
+1. **Layering.** Wrong: `titan_browser_root_callable` validates the closure,
+   copies its signature into a new userdata and roots it, all in C. Right: the
+   libuv callbacks are Titan foreign functions that only recover their context
+   and call a Titan handler ([standard-library foreign
+   callbacks](foreign-functions.md#standard-library-foreign-callbacks)); their
+   one C helper, `titan_uv_push_owner` in `titan/uv/callback.h`, wraps the
+   `setuvalue` macro that the FFI cannot spell.
+2. **Plain C stays plain C.** Wrong: `root_callable_worker`, pushed with a
+   light-userdata context and run under `lua_pcall` only so that `luaL_ref` can
+   raise, be caught, `luaL_unref`'d and raised again. Right: a C helper that
+   returns a status for its caller to act on, as each `uv_*` call returns its
+   status to the Titan wrapper.
+3. **Protected work belongs in Titan.** Wrong: the initialize, main, invoke
+   and release entries each run a C worker under `protected_entry`'s
+   `lua_pcall`, and `complete_failure` adds three more (`original_trace`,
+   `error_description`, `restore_trace`) to rebuild the message and trace that
+   a Titan `catch` has as `error` and `traceback`. Right: `timer_callback` and
+   its handler `timer_deliver` in `titan/uv/uv.native.titan`.
+4. **Pinning.** Wrong: the bridge's callable roots and generations, `luaL_ref`
+   slots in tables hanging off a registry userdata's uservalues. Right:
+   `loop.handles`, which `timer_init` sets and `timer_closed` clears ([public
+   native owners](libuv-extension-guide.md#public-native-owners)).
+5. **Rooting.** Wrong: `invoke`, `request` and `callable` push their
+   parameters, and `invoke` and `request` push an `extra` buffer declared
+   inside an `if`. Right: an owner local declared before the `if` keeps the
+   buffer, and the parameters need nothing.
+6. **Don't duplicate checks the receiver makes.** Wrong: `callable` reflects a
+   closure's signature into kind descriptors that the loader re-checks
+   (`snapshotArguments`) before Titan's dynamic entry checks the call again.
+   Right: one tagged union marshalled by runtime type at the boundary, with a
+   callee that cases on it and raises for a variant it rejects (the
+   cartridge's `twice` example).
 
 ## Model actual call and result protocols
 

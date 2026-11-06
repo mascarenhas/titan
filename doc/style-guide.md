@@ -571,20 +571,14 @@ controls inside the low-level module that owns their lifetime. Convert to a
 public record, union, Interface, Array, Map, option, string, or number before
 returning from that boundary.
 
-Ordinary C operations belong in Titan code behind `foreign import`. This
-includes calls to reviewed public libuv APIs: keep the operation, error
-translation, rooting, and ownership in the Titan wrapper rather than adding a
-C forwarding function. Write callback ABI trampolines as restricted
-`foreign function` declarations when their types and bodies fit that source
-boundary. Reserve hand-written C shim code for opaque-layout normalization or
-compile-time portability facts that Titan cannot express. A forwarding
-function needs an exceptional boundary that the FFI cannot spell, such as a
-required function-like macro, and an immediately preceding code comment must
-name and justify that exception. Keep every such shim narrow and namespaced.
-When libuv supplies an operation, prefer that reviewed portable
-API over either a POSIX-specific shortcut or a lower-level ISO C platform
-service; use the latter only where libuv has no equivalent, such as calendar
-conversion and locale selection.
+Standard-library and runtime code that writes C or calls the Lua C API also
+follows the six rules in [Write native bindings
+Titan-first](#write-native-bindings-titan-first).
+
+When libuv supplies an operation, prefer that reviewed portable API over
+either a POSIX-specific shortcut or a lower-level ISO C platform service; use
+the latter only where libuv has no equivalent, such as calendar conversion and
+locale selection.
 
 Code that calls the raw Lua API must preserve stack balance on every path and
 must not let a borrowed Lua pointer outlive its stack/rooting contract. Keep
@@ -604,6 +598,53 @@ Do not expose a private bundled native dependency as part of an application
 ABI. In particular, the bundled libuv and LPegLabel payloads belong to the
 combined standard provider; extensions follow the documented provider/import
 contract rather than embedding a second native copy.
+
+## Write native bindings Titan-first
+
+Standard-library and runtime code that touches C (authored C, a source
+`foreign function` callback, or a `lua_*`/`luaL_*` call) follows six rules. A
+review counts the new Lua C API calls and authored C lines in a diff and
+justifies each one against a rule; [standard-library
+maintenance](implementation/standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do)
+pairs each rule with a wrong and a right example.
+
+1. **Layering.** Write the work in Titan. Ordinary C operations, including
+   reviewed public libuv calls, belong in Titan behind `foreign import`, with
+   their error translation, rooting, and ownership in the Titan wrapper rather
+   than in a C forwarding function. A C-ABI callback is a restricted
+   `foreign function`. Write C only where Titan cannot: an exact exported C
+   name (an Emscripten export), a protected call before any Titan module
+   exists (running the image initializer), or an opaque-layout or
+   compile-time fact the FFI cannot spell, such as a required function-like
+   macro. Such C is a narrow, namespaced shim that recovers its context and
+   hands over to Titan at once, with an immediately preceding comment that
+   names and justifies the exception.
+2. **Plain C stays plain C.** Data that only C uses lives in C locals,
+   formals, and return codes, never on the Lua stack. Never `lua_pcall` a C
+   function that Lua never sees just to get a protected region; return a
+   status from it instead.
+3. **Protected work belongs in Titan.** A boundary that must catch raises
+   calls a Titan function whose body uses `catch` and `defer`, where `error`
+   and `traceback` are available. The native callback trampolines are the
+   model: recover the state, owner, handler closure, and entry; push the owner
+   when the handler may remove its last other home; call the entry; restore
+   the stack top.
+4. **Pinning.** Per-state roots live in a module variable (a Map or Array) or
+   in an owner record's field, as `loop.handles` does in `titan.uv`, never in
+   `luaL_ref` slots, registry tables, or userdata uservalue tables.
+5. **Rooting.** A Titan parameter is rooted by its caller's provenance, and a
+   local by its frame slot, which is refreshed at its declaration and at every
+   assignment and is reused by sibling scopes once its block ends ([the
+   function frame](implementation/values-and-gc.md#1-the-function-frame-reserved-nil-initialized-stack-slots)
+   and [home roots](implementation/values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
+   Declare a value that must outlive an inner block in the outer block, and
+   copy an argument into a local before removing its last other home. Never
+   `lua_pushtvalue` a parameter or local just to keep it alive.
+6. **Don't duplicate checks the receiver makes.** Where the other side of a
+   boundary is dynamically typed, marshal by runtime type into one tagged
+   union at the boundary and let the receiver decide what it accepts. Do not
+   build parallel signature or descriptor machinery that re-checks the same
+   thing on both sides.
 
 ## Keep examples and documentation exact
 
