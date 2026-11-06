@@ -76,7 +76,7 @@ describe("browser measured delivered budget limits", function()
     end)
 
     for _, assertions in ipairs({ 2, 0 }) do
-        it("measures all five rows at the delivered limits on Node and Chromium with ASSERTIONS=" .. assertions, function()
+        it("measures all seven rows at the delivered limits on Node and Chromium with ASSERTIONS=" .. assertions, function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
             workspace = support.workspace()
             build(info, workspace, assertions, "budget")
@@ -152,7 +152,7 @@ describe("browser measured delivered budget limits", function()
                         assertions, engine, mode, (hrtime() - mode_started) / 1e6))
                     io.stdout:flush()
                 end
-                io.stdout:write(string.format("BUDGET VERDICT assertions=%d engine=%s rows=5 probes=%d positive=%d reported_negative=%d wall_s=%.3f PASS\n",
+                io.stdout:write(string.format("BUDGET VERDICT assertions=%d engine=%s rows=7 probes=%d positive=%d reported_negative=%d wall_s=%.3f PASS\n",
                     assertions, engine, probes, positive, negative, (hrtime() - started) / 1e9))
                 io.stdout:flush()
             end

@@ -114,7 +114,7 @@ export async function execute(config, host) {
         await instance.dispose();
         host.control({ type: "complete", kind: result.kind, status: result.status });
     } catch (error) {
-        // Fatal disposal may drop broken Wasm without waiting for its internal ccall.
+        // Fatal disposal may drop broken Wasm without waiting for its promised entry.
         try { await instance.dispose(); } catch { /* The original failure wins. */ }
         throw error;
     }

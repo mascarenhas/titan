@@ -149,7 +149,7 @@ export async function run(context) {
       const result = await instance.run(args);
       context.assert(result.kind === "returned" && result.status === status && result.bytes.length === 0,
         "final coroutine transfer lost Titan completion status");
-      emit({item: 6, finalAction: "coroutine_transfer", completionStatus: result.status, ccallResultAsserted: false});
+      emit({item: 6, finalAction: "coroutine_transfer", completionStatus: result.status, exportResultAsserted: false});
     } finally { await instance.dispose(); }
   }
   emit({verdict: "PASS", items: provenItems.size, nativeCases, waitForms: ["emscripten_sleep", "EM_ASYNC_JS/setTimeout"]});
