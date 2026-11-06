@@ -98,9 +98,10 @@ return {
 the compiled-module ABI.
 
 Record and union public method/function maps use quoted Lua string keys in
-their serialized type expressions. A contextual member name such as `end`
-therefore survives metadata loading just like any other name; member ordering
-remains bytewise deterministic.
+their serialized type expressions. Member positions admit reserved words through
+`AnyName` ([grammar](../language/grammar.md#identifiers-and-reserved-words)), so a
+member named `end` survives metadata loading just like any other name. Member
+ordering remains bytewise deterministic.
 
 Validation compiles the chunk as text with an empty `_ENV`, protected-calls it
 while counting results, and accepts exactly one plain table containing one
