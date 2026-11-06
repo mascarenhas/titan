@@ -90,6 +90,34 @@ int value;
          assert.equal(contents, util.normalize_line_directives(contents))
      end)
 
+     for _, ending in ipairs({ { "LF", "\n" }, { "CRLF", "\r\n" } }) do
+         it("does not let literal comment openers hide real directives with " .. ending[1], function()
+             local literal = [=[static const char quote = '"'; static const char glob[] = "src/*.c";]=]
+             local newline = ending[2]
+             local contents = table.concat({
+                 literal,
+                 '#line 7 "first.titan"',
+                 "",
+                 "int first;",
+                 "/* a later real comment */",
+                 '#line 11 "second.titan"',
+                 " \t",
+                 "int second;",
+                 "",
+             }, newline)
+             local expected = table.concat({
+                 literal,
+                 '#line 7 "first.titan"',
+                 "int first;",
+                 "/* a later real comment */",
+                 '#line 11 "second.titan"',
+                 "int second;",
+                 "",
+             }, newline)
+             assert.equal(expected, util.normalize_line_directives(contents))
+         end)
+     end
+
      it("renders string templates correctly", function()
          local substs = {
              VAR = "value",
