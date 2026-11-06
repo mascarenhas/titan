@@ -137,25 +137,27 @@ describe("C FFI code generation", function()
     end)
 
     it("keeps native adapters for literal pointer round trips", function()
-        h.run_coder([[
-            foreign import "string.h"
-            function matches(expected: string): boolean
-                return ffi.memcmp(
-                    (("raw" as foreign const *void) as foreign function(): void) as foreign const *void,
-                    expected, 3) == 0
-            end
-            local foreign function raw_bytes(expected: const *char): int
-                return ffi.memcmp(
-                    (("raw" as foreign const *void) as foreign function(): void) as foreign const *void,
-                    expected, 3 as foreign size_t)
-            end
-            function raw_matches(expected: string): boolean
-                return raw_bytes(expected) == 0
-            end
-        ]], [[
-            assert(test.matches("raw"))
-            assert(test.raw_matches("raw"))
-        ]])
+        h.with_extra_cflags({ "-Wpedantic", "-Werror" }, function()
+            h.run_coder([[
+                foreign import "string.h"
+                function matches(expected: string): boolean
+                    return ffi.memcmp(
+                        (("raw" as foreign const *void) as foreign function(): void) as foreign const *void,
+                        expected, 3) == 0
+                end
+                local foreign function raw_bytes(expected: const *char): int
+                    return ffi.memcmp(
+                        (("raw" as foreign const *void) as foreign function(): void) as foreign const *void,
+                        expected, 3 as foreign size_t)
+                end
+                function raw_matches(expected: string): boolean
+                    return raw_bytes(expected) == 0
+                end
+            ]], [[
+                assert(test.matches("raw"))
+                assert(test.raw_matches("raw"))
+            ]])
+        end)
     end)
 
     it("keeps effects around literal foreign arguments in written order", function()
