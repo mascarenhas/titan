@@ -1699,6 +1699,7 @@ local function rebound_record(context, record, roots, materialized_roots)
     end
     inputs(record.c_header_dependencies)
     local visited, companions, outputs = {}, {}, {}
+    local plans, planned, opts = {}, {}, options(context)
     local function write(filename, contents, marker)
         local stat, err = context.io:lstat(filename)
         if err then required(nil, err, filename) end
@@ -1711,14 +1712,14 @@ local function rebound_record(context, record, roots, materialized_roots)
             if existing == nil then return end
             contents = relocation.generated(context, existing, materialized_roots)
         end
-        if existing == contents then
+        local entry = planned[filename]
+        if not entry then
+            entry = { filename = filename, marker = marker }
+            plans[#plans + 1], planned[filename] = entry, entry
             companions[#companions + 1] = filename
-            return
         end
-        mkdir(context, paths.dirname(filename))
-        required(context.io:write_file(filename, contents))
-        incremental.invalidate_file(context, filename)
-        companions[#companions + 1] = filename
+        entry.contents = contents
+        entry.preserve = not opts.pretty_print and existing == contents
     end
     local function descriptor(item)
         if not item or visited[item] then return end
@@ -1748,11 +1749,13 @@ local function rebound_record(context, record, roots, materialized_roots)
             native.foreign_header, own:gsub("%.titan%.h$", ".ffi.h"),
             function(name) return assert(outputs[name], "missing source header output: " .. name) end),
             ffiheaders.FOREIGN_MARKER)
-        local opts = options(context)
-        if opts.pretty_print then
-            required(assert(opts.format_generated_file,
-                "missing generated-header formatter")(
-                own, context.probe_verbose, true, context.io))
+    end
+    if #plans > 0 then
+        required(assert(opts.write_foreign_header_plans,
+            "missing generated-header publisher")(
+            plans, context.probe_verbose, opts.pretty_print, context.io))
+        for _, entry in ipairs(plans) do
+            if not entry.preserve then incremental.invalidate_file(context, entry.filename) end
         end
     end
     if native.coverage then

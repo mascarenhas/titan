@@ -1074,7 +1074,10 @@ os.exit(result.ok and 0 or result.status or 1)
             local compiler = private_compiler()
             local dependency = NAMESPACE .. ".pretty"
             local function foreign_body(answer)
-                return "local foreign function answer(): int return " .. answer .. " end\n"
+                return [[
+                    foreign type RelocationCallbackWhoseNameMakesItsDeclarationLongEnoughForHeaderFormatting =
+                        function(int, int, int, int, int, int): int
+                    local foreign function answer(): int return ]] .. answer .. " end\n"
             end
             local dependency_stem = source(dependency, foreign_body(42))
             local stem = source(APP, 'local dep = import "' .. dependency .. [[.titan"
@@ -1095,6 +1098,24 @@ os.exit(result.ok and 0 or result.status or 1)
             decisions(text, saved, {})
             no_native_compile(text)
             certified_exit(42, moved_output)
+            local headers = {
+                moved_output .. "/" .. dependency:gsub("%.", "/") .. ".ffi.h",
+                moved_output .. "/" .. dependency:gsub("%.", "/") .. ".titan.h",
+                moved_output .. "/" .. APP .. ".ffi.h",
+            }
+            local previous, timestamp = {}, os.time() - 120
+            for _, filename in ipairs(headers) do
+                assert(lfs.touch(filename, timestamp, timestamp))
+                previous[filename] = { bytes = read(filename), inode = lfs.attributes(filename, "ino") }
+            end
+            text = build()
+            decisions(text, saved, {})
+            no_native_compile(text)
+            for filename, state in pairs(previous) do
+                assert.equal(state.bytes, read(filename), filename)
+                assert.equal(timestamp, lfs.attributes(filename, "modification"), filename)
+                if not platform.windows then assert.equal(state.inode, lfs.attributes(filename, "ino"), filename) end
+            end
             -- Formatting must not hide a real change to the exported helper body.
             source(dependency, foreign_body(43))
             decisions(build(), saved, { [dependency] = "source-content", [APP] = "import-interface" })

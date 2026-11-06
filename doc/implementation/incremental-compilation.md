@@ -775,9 +775,13 @@ plans likewise compare contents before preserving a file; a formatter's
 unchanged output is not republished. Header contents, origins and lookup
 candidates are freshly validated.
 Foreign-header replay applies the original optional `clang-format` policy at
-both the checking-header and relocated companion boundaries. Thus formatted
-foreign helpers reach semantic comparison with the same presentation as their
-published headers; their preprocessed bytes and header digests remain strict.
+both the checking-header and relocated companion boundaries. Relocation uses
+`driver.write_foreign_header_plans` with the context's I/O strategy, sharing
+fresh publication's staged format-and-compare pipeline for every recursive
+`.ffi.h` and `.titan.h` companion. All stages format before any replacement;
+identical formatted bytes keep the published file's identity and timestamps,
+and a formatter failure leaves the existing companions untouched. Preprocessed
+bytes and header digests remain strict.
 
 Only a move away from the creation roots requires checking every saved
 generated prefix against its hash and comparing the current preprocessed
