@@ -866,8 +866,10 @@ therefore unreachable from this path. Fixed and C-vararg arguments both flow
 through `codeforeignexp`. Syntactic string literals, including their checked
 pointer casts, use the existing C-literal byte escaping without a temporary;
 other Titan strings become `getstr(TString*)`. Literal addresses are unspecified
-and need not alias a same-content Titan string. Owned C objects decay to payload
-pointers when the target is a C pointer, and most `value` arguments consume their
+and need not alias a same-content Titan string. Function-pointer/`void *` casts
+keep their native portability adapter rather than being treated as ordinary
+byte-pointer literal conversions. Owned C objects decay to payload pointers when
+the target is a C pointer, and most `value` arguments consume their
 checker-attached plan when the target C type has a sound runtime representation.
 An implicit typed Titan projection carries
 a strict `GuardPlan`; an explicitly written or genuine-Lua boundary carries

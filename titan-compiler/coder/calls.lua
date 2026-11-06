@@ -236,13 +236,18 @@ function mutable_out_anchor(ctx, exp, target)
 end
 
 -- A literal has no evaluation effects. Preserve its byte spelling through
--- pointer casts, but never peel a conversion that constructs a Titan string.
+-- ordinary pointer casts, but retain native function-pointer conversions and
+-- conversions that construct a Titan string.
 function foreign_string_literal(node)
     if node._tag == "Ast.ExpString" then
         return c_string_literal(node.value)
     elseif node._tag == "Ast.ExpCast" then
         local target = types.resolve_c_typedef(node._type)
         local source = types.resolve_c_typedef(node.exp._type)
+        if types.is_c_function_pointer_void_cast(source, target)
+            or types.is_c_void_function_pointer_cast(source, target) then
+            return nil
+        end
         if target._tag == "Type.CPointer"
             or (target._tag == "Type.String" and source._tag == "Type.String") then
             local literal = foreign_string_literal(node.exp)
