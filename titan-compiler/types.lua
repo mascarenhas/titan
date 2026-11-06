@@ -5583,7 +5583,8 @@ function types.serialize(t, seen_ctypes)
         for _, name in ipairs(method_names) do
             local method = t.methods[name]
             if not method.islocal then
-                table.insert(methods, name .. " = " .. types.serialize(method))
+                table.insert(methods,
+                    "[" .. string.format("%q", name) .. "] = " .. types.serialize(method))
             end
         end
         local function_names = {}
@@ -5594,7 +5595,8 @@ function types.serialize(t, seen_ctypes)
         for _, name in ipairs(function_names) do
             local func = t.functions[name]
             if not func.islocal then
-                table.insert(functions, name .. " = " .. types.serialize(func))
+                table.insert(functions,
+                    "[" .. string.format("%q", name) .. "] = " .. types.serialize(func))
             end
         end
         local generic_tail = serialize_generic_tail(t.scope, t.typeparams)

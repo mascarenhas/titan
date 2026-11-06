@@ -92,14 +92,32 @@ describe("Titan types", function()
         local zpos = assert(serialized:find('["z"]', 1, true))
         local utf8pos = assert(serialized:find('["\195\169"]', 1, true))
         assert.is_true(apos < zpos and zpos < utf8pos)
-        assert.is_true(serialized:find("A = Method", 1, true) <
-            serialized:find("z = Method", 1, true))
-        assert.is_true(serialized:find("z = Method", 1, true) <
-            serialized:find("\195\169 = Method", 1, true))
-        assert.is_true(serialized:find("A = StaticMethod", 1, true) <
-            serialized:find("z = StaticMethod", 1, true))
-        assert.is_true(serialized:find("z = StaticMethod", 1, true) <
-            serialized:find("\195\169 = StaticMethod", 1, true))
+        assert.is_true(serialized:find('["A"] = Method', 1, true) <
+            serialized:find('["z"] = Method', 1, true))
+        assert.is_true(serialized:find('["z"] = Method', 1, true) <
+            serialized:find('["\195\169"] = Method', 1, true))
+        assert.is_true(serialized:find('["A"] = StaticMethod', 1, true) <
+            serialized:find('["z"] = StaticMethod', 1, true))
+        assert.is_true(serialized:find('["z"] = StaticMethod', 1, true) <
+            serialized:find('["\195\169"] = StaticMethod', 1, true))
+    end)
+
+    it("round-trips every Lua keyword as a public record method and function", function()
+        local functions, methods = {}, {}
+        for _, name in ipairs({
+            "and", "break", "do", "else", "elseif", "end", "false", "for",
+            "function", "goto", "if", "in", "local", "nil", "not", "or",
+            "repeat", "return", "then", "true", "until", "while",
+        }) do
+            methods[name] = types.Method("sample.Slot", name, {},
+                {types.Integer()}, nil, nil, {})
+            functions[name] = types.StaticMethod("sample.Slot", name, {},
+                {types.Integer()}, nil, nil, {})
+        end
+        local record = types.Record("sample.Slot", {}, functions, methods, 0)
+        local decoded = assert(load("return " .. types.serialize(record),
+            "keyword record metadata", "t", types))()
+        assert.is_true(types.equals(record, decoded))
     end)
 
     it("preserves declaration order for module members and record fields",

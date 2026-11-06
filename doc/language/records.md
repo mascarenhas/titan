@@ -53,6 +53,10 @@ named by importers. It also cannot appear anywhere in the public type surface:
 exported functions, methods, module variables, type aliases, or public record
 fields, because compiled module interfaces only serialize the public surface.
 
+Field, method, and record-function names are contextual, so a keyword such as
+`end` is a valid member name. Public keyword-named members are available to
+importing modules, including when only the compiled provider is present.
+
 A record's field types may mention the record being declared, so
 recursive records work:
 

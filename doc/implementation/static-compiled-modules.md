@@ -97,6 +97,11 @@ return {
 `%q` quoting. The banner versions the embedded container independently from
 the compiled-module ABI.
 
+Record and union public method/function maps use quoted Lua string keys in
+their serialized type expressions. A contextual member name such as `end`
+therefore survives metadata loading just like any other name; member ordering
+remains bytewise deterministic.
+
 Validation compiles the chunk as text with an empty `_ENV`, protected-calls it
 while counting results, and accepts exactly one plain table containing one
 valid dotted module key. Its value must be a plain table with string
