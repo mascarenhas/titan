@@ -334,6 +334,6 @@ function main(_args: {string}): integer
   end
   pointer_lambda(nil)
   later_gc_declaration()
-  ffi.printf("AGGREGATE-RECOVERY OK\n")
+  ffi.printf("%s", "AGGREGATE-RECOVERY OK\n")
   return 0
 end
