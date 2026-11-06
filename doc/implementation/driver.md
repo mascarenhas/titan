@@ -295,8 +295,10 @@ module resolution (`titan-compiler/parser.lua` `standard_imports` and
 mapping covers `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `path`, `net`,
 `ssl`, `url`, `http`, `websocket`, `os`, `peg`, `string`, `test`, `lua`,
 `math`, `gc`, `iteration`, `reflect`, `sqlite3`, `json`, `protobuf`,
-`transfer`, and `thread`; every other name is left unchanged. The driver,
-checker, code generator, and runtime thus see only the qualified module name.
+`transfer`, `thread`, and `browser`; every other name is left unchanged.
+`browser` resolves only on the browser target, where `titan.browser` exists.
+The driver, checker, code generator, and runtime thus see only the qualified
+module name.
 Each qualified name naturally produces its matching native symbols and Lua
 entry point (`titan_async_*` and `luaopen_titan_async`, for example), so no
 separate Lua alias is required and Lua's bare `coroutine` and `os` libraries
@@ -2195,24 +2197,29 @@ passes it, with `libnames` as objects and `static_archives`, to
 `driver.compile_browser_image`; the default executable is the logical output
 path with `.mjs` appended. The details are in the browser-target chapter:
 
-* **The browser entrypoint** replaces `main(argc, argv)` with one exported
-  `titan_browser_entry(argc, argv, lengths)`, which admits one run, creates
-  the state outside protection, runs a worker under one `lua_pcall` with
-  `errorhandler`, reports an uncaught error in the standalone format,
-  closes the state, drains `stdout` and `stderr`, and reports the result
-  through the `titan_browser_complete` import. It never calls `exit`, and its
-  return value is admission only. The program worker opens the libraries,
-  installs the searcher, preloads `titan` and the main module, builds the
-  byte-string argument Array, and calls `main` directly or through the
-  bootstrap hook, as `pmain` does
+* **The browser entrypoint** replaces `main(argc, argv)` with the generated
+  `titan_browser_initialize`, `titan_browser_entry`, and `titan_browser_close`
+  exports, which bind the program's workers to the shared protected bridge
+  runtime. Initialization creates the persistent state and requires the main
+  module without running `main`; the main entry runs `main` once on that state
+  under one `lua_pcall` with `errorhandler`, reports an uncaught error in the
+  standalone format, drains `stdout` and `stderr`, and reports the result
+  through the operation-identified `titan_browser_complete` import; close is
+  a separate owner-held state close. No entry calls `exit`, and their return
+  values are admission only. The initializer worker opens the libraries,
+  installs the searcher, and preloads and requires `titan` and the main
+  module; the main worker builds the byte-string argument Array and calls
+  `main` directly or through the bootstrap hook, as `pmain` does
   ([The browser entrypoint](browser-target.md#the-browser-entrypoint)).
   `driver.browser_c_image_contents(worker, options)` exposes the same
-  protected wrapper for C-only images.
+  protected wrappers for C-only images.
 * **Linking** uses `browserlink.profile`, compiles the entrypoint with the
   descriptor's prefix, links with `emcc` into a staging directory, checks the
-  final image's imports, and publishes `<stem>.wasm` and then `<stem>.mjs` as
-  one pair (running `after_publish` inside the rollback window and restoring
-  both predecessors on failure)
+  final image's imports and byte bounds, rewrites the staged source map,
+  embeds the loader into the staged `.mjs` with `browserlink.embed`, and
+  publishes `<stem>.wasm.map`, `<stem>.wasm`, and then `<stem>.mjs` as one set
+  (running `after_publish` inside the rollback window and restoring every
+  predecessor on failure)
   ([Program and test images](browser-target.md#program-and-test-images),
   [The link profile](browser-target.md#the-link-profile)).
 * **The protocol runner.** Before a browser program or test links, `titanc`

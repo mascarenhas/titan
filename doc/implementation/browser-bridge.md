@@ -1,11 +1,11 @@
 # Browser bridge runtime
 
-The core JavaScript bridge uses the qualified browser JSPI backend and the
-single persistent image lifecycle. It does not add another coroutine driver,
+The core JavaScript bridge uses the browser JSPI backend and the single
+persistent image lifecycle. It does not add another coroutine driver,
 scheduler, native message format, or synchronous reverse-call backend. The
 public Titan API is [JavaScript bindings](../language/standard-library-browser.md);
-[the browser target](browser-target.md) owns link profiles, embedded loader,
-runner, deployment, and fatal engine classifications.
+[the browser target](browser-target.md) owns link profiles, the embedded
+loader, the runner, deployment, and fatal engine classifications.
 
 ## Source ownership
 
@@ -16,15 +16,16 @@ runner, deployment, and fatal engine classifications.
 | Browser-only Titan API | `titan/browser.browser.titan` |
 | Generated image C exports | `titan-compiler/browserentry.lua` |
 | Generated module bootstrap/main | `driver.browser_entrypoint_contents` |
-| JSPI owner, bridge imports and loader | Browser JavaScript libraries and `titan-browser.mjs` |
+| JSPI owner, bridge imports and loader | `titan-runtime/browser/titan-browser-library.js`, `titan-browser-bridge.js`, and `titan-browser.mjs` |
 | Browser runtime/provider staging | `Makefile` and `scripts/browser_sdk.lua` |
 
-The runtime C object is added only to the browser archive. The native runtime
-archive retains its four objects and native standard provider has no
-`titan.browser`. The common installed header is not a native placeholder.
-The browser provider adds `titan.browser` to the portable module inventory;
-its imports remain `gc` and `reflect`. Rebuild pre-release SDKs/providers after
-this change; existing ABI, protocol, cache, and version numbers remain as-is.
+The runtime C object is added only to the browser runtime archive: the native
+runtime archive keeps its four objects, and the native standard provider has
+no `titan.browser`. The common installed header is not a native placeholder.
+The browser provider adds `titan.browser` beside the thirteen shared modules.
+It imports only `gc` and `reflect`, and the [member
+inventory](browser-target.md#interface-derived-member-inventory) skips it
+because it has no native interface to compare.
 
 ## Persistent C lifetime
 
@@ -298,8 +299,8 @@ not cancellation-based early ownership release.
 ## Test layers
 
 Public behavior belongs to the browser-target native Titan owner under
-`spec/stdlib/titan/browser/`, linked against the real C2 bridge and explicit
-test bindings. Its native cases cover exact scalars/bytes, original captures,
+`spec/stdlib/titan/browser/`, linked against the real JavaScript bridge and
+explicit test bindings. Its native cases cover exact scalars/bytes, original captures,
 GC, signatures, cross-entry/STACKED resumption, hidden allocation cleanup,
 requests, and SDK byte admissions. A test-owned C fixture constructs truly
 independent Lua states with the same earliest registry and exercises explicit,

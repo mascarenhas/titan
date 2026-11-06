@@ -369,10 +369,10 @@ resource, or see that
 [`transfer.decode_message`](standard-library-transfer.md#raw-packet-encoding-decoding-copying-and-disposal)
 cleared its packet slot, without restoring an obsolete owner.
 
-This changes the previous aggregate behavior, which restored pre-call bytes
-when the callee raised. A caught error is not a transaction that undoes native
-writes. Automatic storage without an exposed mutable address retains its
-existing completed-write recovery behavior.
+A caught error is not a transaction that undoes native writes: recovery never
+restores the bytes such storage held before the raising call. Automatic C
+storage whose mutable address is never exposed shows the value of its last
+completed write.
 
 Exact Lua-internal `TValue` and `Udata *` out-parameters follow the retained-write
 rule as well. The compiler publishes their current values into existing GC

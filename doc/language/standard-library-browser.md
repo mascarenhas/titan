@@ -99,7 +99,7 @@ For example, this complete module publishes two closures over one counter:
 ```titan
 local browser = import "browser"
 
-function main(_: {string}): integer
+function main(args: {string}): integer
   local count = 0
   local publish = browser.binding("publish")
   defer publish:close()
@@ -175,17 +175,40 @@ returns normally before Titan raises this ordinary error. The handle retains
 the exact thrown value, whether it is an Error object, string, null, undefined,
 or another value. `Error:close()` closes its thrown-value handle.
 
-If the bridge cannot produce a thrown-value unit, for example at its bounded
-handle-identity limit, it raises an ordinary protected memory/diagnostic error
-instead. It does not fabricate a `JSHandle`, adopt a zero identity, or poison
-an otherwise intact instance. A real returned unit remains rollback-owned
-until its finalized Titan owner has adopted it.
+Inside `catch`, test the implicit `error` with `is browser.Error` before
+projecting it:
 
-A JavaScript-to-Titan failure rejects that call with copied message bytes and
-the original captured Titan trace. A following valid call on an intact
-instance can succeed. Traps, aborts, backend transfer failures, and completion
-protocol corruption instead poison the instance; they are not catchable
-`browser.Error` values.
+```titan
+local browser = import "browser"
+
+function try_announce(message: string): boolean
+  local target = browser.binding("announce")
+  defer target:close()
+  do
+    browser.call_void(target, {browser.Argument.is_bytes(message)})
+  catch
+    if error is browser.Error then
+      local failure: browser.Error = error
+      failure:close()
+      return false
+    end
+    raise
+  end
+  return true
+end
+```
+
+If the bridge cannot create the thrown-value handle, for example at its
+handle-identity limit or when memory runs out, it raises an ordinary Titan
+error with the diagnostic message instead of a `browser.Error`. It never
+fabricates a handle, and the instance stays usable.
+
+A JavaScript-to-Titan failure rejects that call with a `TITAN_BROWSER_TITAN`
+error carrying the copied message bytes and the original captured Titan trace
+(see the [loader errors](browser-target.md#the-loader-api)). A following valid
+call on an intact instance can succeed. Traps, aborts, backend transfer
+failures, and completion protocol corruption instead poison the instance;
+they are not catchable `browser.Error` values.
 
 An immediate `instance.call()` or `drain()` attempted inside an active import
 returns a rejected `TITAN_BROWSER_REENTRY` promise. It does not throw
@@ -222,10 +245,12 @@ A start binding returns one of two explicit forms:
   settlement and genuinely needs retained native ownership. Disposal can wait
   for physical settlement. Never use this form for forever-pending work.
 
-For zero success arguments the promise resolves `undefined`; for one it
-resolves the value; for several it resolves a dense Array. Duplicate and late
-settlements retire without entering Lua. Cancellation signals the host but is
-not physical retirement and does not free an accepted borrowed owner early.
+For zero success arguments the host promise must resolve `undefined`; for one
+it resolves the value; for several it resolves a dense Array of exactly that
+many elements. Any other resolution value is delivered to the failure
+callable as a `TypeError`. Duplicate and late settlements retire without
+entering Lua. Cancellation signals the host but is not physical retirement
+and does not free an accepted borrowed owner early.
 
 A listener binding returns
 `{kind: 'listener', subscribe(emit): unregister}`. Its synchronous
@@ -242,16 +267,17 @@ admission, then permits only physical retirement, then closes the state.
 
 ## State close
 
-Each Lua state has an earliest-created C registry, installed before libraries
-or module initializers. It invalidates last at close, after coroutine unwinding
-and other finalizers. Detaching a state does not close it. Explicit close,
-reachability close, and a later close of a detached state invalidate its
-handles once; a reused native address never revives an old state token.
+Closing a Lua state invalidates its handles, callables, and queued
+notifications exactly once, after coroutine unwinding and the state's other
+finalizers have run. This holds for explicit close, reachability close, and a
+later close of a detached state; detaching a state does not close it. Handles
+from a closed state never become valid again, even if a new state reuses its
+memory.
 
 During close, synchronous binding calls, copied output admission, and
-idempotent release remain valid until that last invalidation. New requests,
-listeners, and reverse application calls are closed, including for an
-independently owned state when its containing instance is not disposing.
+idempotent release remain valid until that final invalidation. New requests,
+listeners, and reverse application calls are refused, including for a state
+created through the C SDK while its containing instance is not disposing.
 Warnings from Lua finalizers are stderr bytes, not an invented failed call.
 
 ## C SDK

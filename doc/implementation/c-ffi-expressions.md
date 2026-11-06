@@ -685,9 +685,8 @@ outgoing pointer types. No allocation, boxing, aggregate snapshot or cleanup
 forwarding shim is added.
 
 The live object is authoritative on both normal and nonlocal exits. A raising
-callee's completed writes are not rolled back. This replaces the former
-aggregate policy that committed bytes only after a normal call return and
-restored the previous snapshot on error.
+callee's completed writes are not rolled back: no byte snapshot is committed
+around such a call or restored on error.
 
 Exact `TValue` and `Udata *` are GC-bearing direct-C values rather than ordinary
 PODs. Their C homes are stable too, while their existing Lua slots remain the
@@ -695,8 +694,8 @@ traced owners. Normal calls publish updated roots; every error landing commits
 the current home **before** `luaD_closeprotected`, `titan_unwind_close` or an
 unwind guard can run a close/finalizer/collector. These commits cannot allocate.
 See [mutable GC out-parameters](values-and-gc.md#mutable-gc-out-parameters).
-Automatic aggregates and arrays still reject embedded GC-bearing storage;
-this change does not introduce a new untraced aggregate representation.
+Automatic aggregates and arrays still reject embedded GC-bearing storage; the
+GC homes add no untraced aggregate representation.
 
 Non-address-exposed automatic aggregates retain volatile byte spills.
 `coder._aggregate_spill_copy` commits their object representation after

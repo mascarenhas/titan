@@ -905,12 +905,11 @@ Rules for changing this code:
   cleared old-root collection during a full GC in `__close`. The owning coder
   specs compile the native fixtures at `-O2` and `-O3`.
 
-This is a semantics change from the earlier aggregate policy: a callee that
-wrote through a tracked mutable address and then raised previously caused the
-caller to restore its pre-call bytes. Recovery now retains the actual writes,
-so an acquired resource remains visible to its cleanup and a transferred
-resource cannot be restored for a second release. Locals without an exposed
-mutable C address retain their existing spill/reload behavior.
+Recovery retains the actual writes of a callee that wrote through a tracked
+mutable address and then raised; it never restores the caller's pre-call
+bytes. An acquired resource therefore remains visible to its cleanup, and a
+transferred resource cannot be restored for a second release. Locals without
+an exposed mutable C address keep the spill/reload behavior described above.
 
 The variadic descriptor structs follow the same rule. Their C-stack records
 contain counts and pointers to GC objects or typed C arrays, not pointers to Lua

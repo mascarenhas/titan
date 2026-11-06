@@ -555,24 +555,29 @@ The instance has the following methods:
   Ordinary initializer or main failure is a failed/status1 result, not a
   fatal-engine rejection. A prior initializer failure is reused without a
   second report.
-* `call(callable, ...args)` invokes a callable exported by `titan.browser`.
-  It requires successful initialization and remains available after main
-  returns. Both this method and `callable.call(...args)` resolve one dense result
-  Array: `[]` for zero results, `[value]` for one, and the complete tuple for
-  many. A nil result is `null`, including trailing nils. Promise and thenable
-  JSHandle values remain untouched elements of that Array; the call does not
-  await or handle their rejections. Destructure a result explicitly, then
-  separately await it if that is what the application intends.
+* `call(callable, ...args)` invokes a callable wrapper that Titan created with
+  [`browser.callable`](standard-library-browser.md#original-closures) and
+  passed to JavaScript. It requires successful initialization and remains
+  available after main returns. Both this method and `callable.call(...args)`
+  resolve one dense result Array: `[]` for zero results, `[value]` for one,
+  and the complete tuple for many. A nil result is `null`, including trailing
+  nils. Promise and thenable JSHandle values remain untouched elements of that
+  Array; the call does not await or handle their rejections. Destructure a
+  result explicitly, then separately await it if that is what the application
+  intends.
 * `notify(callable, ...args)` synchronously snapshots and enqueues one
   notification without entering Wasm. It copies byte arrays and keeps raw
   JavaScript values by reference. It does not allocate Wasm buffers or handle
-  slots. Logically released arguments are rejected again before delivery;
-  released or closed targets retire without delivery.
+  slots. Because it is synchronous, a wrong instance state, a foreign or
+  released wrapper, or arguments that do not match the callable's signature
+  throw immediately; after disposal begins, `notify` does nothing. Logically
+  released arguments are rejected again before delivery; released or closed
+  targets retire without delivery.
 * `drain()` requires successful initialization and delivers one detached FIFO
   batch. A handler error is reported as a `"callback"` event through
-  `onNotificationError`, with its captured Titan data, and later notifications still run. Notifications
-  enqueued by handlers belong to the next batch. There is no implicit loop or
-  scheduling policy.
+  `onNotificationError`, with its captured Titan data, and later
+  notifications still run. Notifications enqueued by handlers belong to the
+  next batch. There is no implicit loop or scheduling policy.
 * `dispose()` closes application admission immediately and returns one stable
   promise. An accepted native entry physically retires before Lua closes.
   Requests and queued work are retired according to their ownership contract.
@@ -598,21 +603,25 @@ Options are:
 
 | Option | Contract |
 | --- | --- |
-| `stdout`, `stderr` | Functions receiving copied `Uint8Array` chunks; absent sinks discard the stream. A sink may return a promise. |
-| `stdin` | A byte source receiving a requested capacity and returning copied bytes through a tracked read; absent input is a bridge error, not a prompt or hidden filesystem. |
-| `locateFile(name, directory)` | Resolves both Wasm and its extended map; defaults retain recognizable `new URL(..., import.meta.url)` assets for bundlers. |
-| `requireTrace` | Boolean, default `false`. Require a ready trace map after Wasm instantiation and before creating Lua or running initializers; failure follows the ordinary saved-initialization-failure contract. |
-| `bindings` | Explicit per-instance JavaScript values/functions available to `titan.browser`; no global-name lookup or eval. |
-| `onNotificationError({kind, operation, error})` | Observes errors Titan cannot return to a caller: failed notification callbacks and secondary or callerless cleanup failures. A host Promise rejection instead goes to its mandatory typed failure callable. |
-| `requestDrain()` | Coalesced announcement of queued work at a complete logical safe point; the application chooses when to call and await `drain()`. |
-| `onEngineFailure({kind, cause})` | Observes a terminal engine failure after the instance has been poisoned. Observer exceptions cannot replace that failure. |
+| `stdout`, `stderr` | Functions receiving copied `Uint8Array` chunks, which they may keep. A sink returns `undefined` or a promise; anything else is a sink failure. An absent sink discards its stream. |
+| `stdin(capacity)` | Serves explicit byte reads from the [C SDK](standard-library-browser.md#c-sdk). It returns a `Uint8Array`, a counted `{bytes, length}` source with `length` at most `capacity`, a promise of either, or an explicit detachable or retained request form. C `stdin` is unaffected and always at end of file; without this option an SDK read fails with a bridge error. |
+| `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
+| `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
+| `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. |
+| `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks and secondary or callerless cleanup failures. A host Promise rejection instead goes to its mandatory typed failure callable. |
+| `requestDrain()` | A coalesced announcement of queued work at a complete logical safe point; the application chooses when to call and await `drain()`. |
+| `onEngineFailure({kind, cause})` | Observes a terminal engine failure after the instance has been poisoned; `kind` is `"abort"`, `"trap"`, or `"protocol"`. Observer exceptions cannot replace that failure. |
 
 The notification-error event's `kind` is `"callback"` or `"cleanup"`.
 `operation` identifies `initialize`, `run`, `call`, `drain`, `dispose`, or
 `notify`; a failed work announcement uses `requestDrain`, and callerless
 physical callable retirement uses `release_callable`. In-operation cleanup
-uses the containing public operation's name. A physical release failure is
-reported once, without retry; state close remains its retirement fallback.
+uses the containing public operation's name. Each failure is reported once,
+and a physical release failure is not retried: state close remains its
+retirement fallback. Without an observer, the loader logs each event with
+`console.error`. An observer that throws cannot replace a captured or
+terminal failure; the current operation, or else the next one that would
+otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 
 **Output.** Each stream has one FIFO and at most one actual sink invocation in
 flight. The loader flushes only after all entries in the containing operation,
@@ -629,17 +638,17 @@ flushes and unrelated output-free operations do not fail again with that
 pending error, and observing it does not report the same failure twice.
 
 Disposal interrupts a pending sink by detaching its continuation and making
-that stream terminal; it cannot overlap the old sink with a finalizer write.
+that stream terminal; it never overlaps the old sink with a finalizer write.
 An operation whose failure was already captured keeps that failure if disposal
 interrupts its report flush; the interruption is reported once as cleanup,
 even when both streams are interrupted. Only an operation not yet failed
 rejects `TITAN_BROWSER_DISPOSED`. Disposal retains its own output/error outcome,
 including `TITAN_BROWSER_DISPOSED` for interrupted or discarded buffered bytes.
-Normal `await run(); await dispose()` does deliver finalizer output. After Lua and
-borrowed native owners retire, finalizer bytes move to a JavaScript-only
-drain. Even a never-settling sink and an externally retained disposal promise
-do not keep the disposed image alive through bridge-generated captures.
-Caller closures that independently retain the instance are outside this rule.
+Normal `await run(); await dispose()` delivers finalizer output. That output
+is delivered after the image's native state has been released, so even a
+never-settling sink and an externally retained disposal promise do not keep
+the disposed image alive. Caller closures that independently retain the
+instance are outside this rule.
 
 **Host work.** A tracked request explicitly chooses detachable work
 (`{kind: "detachable", promise, cancel?}`) or guaranteed-terminal retained
@@ -648,10 +657,9 @@ detachable. A listener uses
 `{kind: "listener", subscribe(emit) { return unregister; }}`. Its synchronous
 events only enqueue. Cancellation signals the host; it is not proof that
 retained work has physically retired. Late and duplicate settlements never
-enter Lua after cancellation, release, state close, or disposal.
-The bridge reserves the request owner before invoking its host source or
-accepting completion-carrying output. If that reservation fails, it does not
-start the source, register the listener, or append the output bytes.
+enter Lua after cancellation, release, state close, or disposal. If the bridge
+cannot create a request's owner, it neither starts the host source, registers
+the listener, nor appends completion-carrying output.
 Start/listen and completion-carrying byte I/O take both a success callable and
 a mandatory failure callable. Failure receives `(message: string,
 thrown: JSHandle)`: the message is copied bytes and the handle preserves the
@@ -661,15 +669,29 @@ delivery; a Promise rejection is not merely logged to an observer.
 **Observation and errors.** `instance.trace` is a fresh frozen `{state,
 reason}` snapshot, including before initialization. It preserves the last
 map state and reason after ordinary or poisoned disposal without retaining
-the Module or mutable trace internals. Ordinary Titan call errors retain copied
-message bytes and their original trace; a later valid call still works.
-`TITAN_BROWSER_STATE` rejects premature calls and a second main;
-`TITAN_BROWSER_DISPOSED` rejects work after disposal begins;
-`TITAN_BROWSER_HANDLE` rejects stale or foreign identities; and
-`TITAN_BROWSER_SINK` identifies the failed stream. `TITAN_BROWSER_CAPABILITY`
-means JSPI is unavailable. Abort, trap, or corrupted completion identity
-poisons the instance; all later application entries reject that saved failure.
-Disposal then drops references without entering broken Wasm.
+the image.
+
+A rejected promise, or an exception from a synchronous method, carries an
+`Error` whose `name` is `TitanBrowserError`, with a `code`, a message, and,
+where there is one, the original error as `cause`:
+
+| `code` | When |
+| --- | --- |
+| `TITAN_BROWSER_TITAN` | An ordinary Titan error from initialization or a call. `message` decodes the error text; `bytes` holds the exact copied message bytes, `trace` the original raw trace bytes (absent for a required-trace refusal), and `status` the completion status. A later valid call on the intact instance still works. |
+| `TITAN_BROWSER_REENTRY` | A general operation while another is active, including an immediate call from a binding or sink. |
+| `TITAN_BROWSER_STATE` | `call`, `drain`, or `notify` before successful initialization, a second `run`, or an exhausted operation identity. |
+| `TITAN_BROWSER_DISPOSED` | Work after disposal began, an operation that disposal interrupted before it failed, or buffered output that disposal could not deliver. |
+| `TITAN_BROWSER_HANDLE` | A released or foreign callable wrapper, or a handle of a closed Lua state. |
+| `TITAN_BROWSER_SINK` | An output sink threw, rejected, or returned something other than `undefined` or a promise; `stream` names the stream. |
+| `TITAN_BROWSER_HOST` | Host cleanup that the bridge could not complete, such as a throwing request `cancel` or listener `unregister` during disposal, or a throwing `onNotificationError` observer. |
+| `TITAN_BROWSER_CAPABILITY` | The engine lacks WebAssembly JSPI. |
+| `TITAN_BROWSER_ABORT`, `TITAN_BROWSER_TRAP`, `TITAN_BROWSER_PROTOCOL` | The engine aborted or trapped, or the image broke the completion protocol. The instance is poisoned: later application methods reject this saved failure, and disposal drops the image without entering Wasm again. |
+
+Invalid `create` options throw `TypeError` synchronously. Arguments that do
+not match a callable's signature (a wrong count, a Number for an integer, a
+non-`Uint8Array` byte value) reject `call` or throw from `notify` with
+`TypeError`, as do invalid `run` arguments.
+
 The test runner reports observed aborts and traps even if a test catches their
 operation rejection. A completion-protocol error that the test explicitly
 handles stays local to its poisoned instance; if the operation rejection
@@ -771,14 +793,18 @@ A browser program completes in one of two ways:
   writes the standard report to stderr, as a native program does:
   `<progname>: <message>`, then `stack traceback:`, then one tab-indented line
   per frame. The status is 1. `<progname>` is the last component of the main
-  module's name, or of the first test root's name for a test image.
+  module's name, or of the first test root's name for a test image. A
+  required trace map that is missing or invalid also fails initialization
+  with status 1: stderr receives `degraded browser trace: <reason>`, without
+  a traceback because no Titan code ran.
 
 Main completes when it returns or fails, and its output (including an
 unterminated last line) is delivered then. The state and callable handles
 remain alive until explicit disposal. The runner awaits disposal and its
 finalizer output before reporting completion. Output is binary: NUL, `0xFF`,
-and invalid UTF-8 pass through unchanged. Bridge stdin uses the explicitly
-supplied byte source; no source is installed by the command-line runner.
+and invalid UTF-8 pass through unchanged. C standard input is always at end of
+file; the loader's `stdin` option serves only explicit SDK reads, and the
+command-line runner supplies none.
 
 ### Traces
 

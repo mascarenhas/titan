@@ -352,7 +352,8 @@ After step 7, `browser-stdlib` runs:
    unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
    builds all fifteen browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
-   checks dependency closure and the native/browser member inventory, then
+   checks dependency closure and the native/browser member inventory of the
+   thirteen shared modules, then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
    `TITAN_CHROME`. Each engine must execute every owner with complete nonzero
    status/count/timing accounting
