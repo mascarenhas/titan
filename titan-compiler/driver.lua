@@ -4934,6 +4934,7 @@ function incremental_options(context)
         build_profile = driver.BUILD_PROFILE,
         emit_line_directives = driver.EMIT_LINE_DIRECTIVES,
         pretty_print = context.pretty_print == true,
+        format_generated_file = driver.format_generated_file,
         extra_ffi_include_dirs = context.extra_ffi_include_dirs or {},
         titan_root = driver.TITAN_ROOT or "",
         relocation_roots = context.relocation_roots,
@@ -5747,6 +5748,9 @@ function driver.defaultloader(static_deps, options)
             ffiheaders.remember_file(context, filename)
             local wrote, write_error = context.io:write_file(filename, contents)
             if not wrote then return false, write_error end
+            local formatted, format_error = driver.format_generated_file(
+                filename, context.probe_verbose, context.pretty_print, context.io)
+            if not formatted then return false, format_error end
             checking_foreign_header = filename
         end
 

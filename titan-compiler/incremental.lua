@@ -1748,6 +1748,12 @@ local function rebound_record(context, record, roots, materialized_roots)
             native.foreign_header, own:gsub("%.titan%.h$", ".ffi.h"),
             function(name) return assert(outputs[name], "missing source header output: " .. name) end),
             ffiheaders.FOREIGN_MARKER)
+        local opts = options(context)
+        if opts.pretty_print then
+            required(assert(opts.format_generated_file,
+                "missing generated-header formatter")(
+                own, context.probe_verbose, true, context.io))
+        end
     end
     if native.coverage then
         for index, filename in ipairs(native.coverage.files or {}) do

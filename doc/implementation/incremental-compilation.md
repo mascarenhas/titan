@@ -774,6 +774,10 @@ writing them, including on a return to the creation roots. Restored header
 plans likewise compare contents before preserving a file; a formatter's
 unchanged output is not republished. Header contents, origins and lookup
 candidates are freshly validated.
+Foreign-header replay applies the original optional `clang-format` policy at
+both the checking-header and relocated companion boundaries. Thus formatted
+foreign helpers reach semantic comparison with the same presentation as their
+published headers; their preprocessed bytes and header digests remain strict.
 
 Only a move away from the creation roots requires checking every saved
 generated prefix against its hash and comparing the current preprocessed
