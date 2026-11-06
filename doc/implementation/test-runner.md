@@ -393,6 +393,15 @@ is tested by separately compiled child programs that deliberately omit the
 option, rather than by exposing private registry state or adding a runner
 lifecycle protocol.
 
+The parent-stdio hint matrix compiles its immutable child image once in the
+parent and retains the workspace until parent `Context:cleanup`. Every named
+child still enters its own `support.runtime` session, starts a fresh child
+process, and sets up and restores its own descriptors. Each invocation creates
+a distinct result file and registers its removal before starting the child, so
+one failed invocation cannot leave a result for a later case. Parent cleanup
+uses the synchronous test-private filesystem remover; no live Runtime-owned
+resource crosses the sessions.
+
 ## Validation profile and isolated SDKs
 
 Profile selection, prefixes and command ownership are in [repository
@@ -541,8 +550,8 @@ names. Running edited compiler Lua through Busted without reinstalling uses the
 explicit [checkout profile](repository-workflow.md#run-checkout-compiler-lua-with-busted).
 
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
-process group and polls it at a coarse interval. Make's default
-`TITAN_TEST_TIMEOUT=600` covers the whole aggregate, including repeated fresh
+process group and checks completion every 100 milliseconds. Make's default
+`TITAN_TEST_TIMEOUT=600` covers the whole aggregate, including fresh
 child-fixture compilation under the selected profile. Explicit overrides,
 including the 15-second CI shutdown check, are independent of that default. At
 the deadline it sends `TERM`, then `KILL` after a short grace period, maps the

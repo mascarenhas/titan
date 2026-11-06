@@ -1095,6 +1095,12 @@ engine invocation retires before its native allocation can be freed or reused.
 Freed linear blocks are reusable, but grown WebAssembly memory never shrinks
 back to the host.
 
+Repository validation locates each measured stack and recursion boundary
+between a passing lowest sample and a declared failing ceiling, narrowing to
+adjacent samples at the declared step size. Those search ceilings only bound
+the measurement; they are not additional program limits or portable
+recursion-depth guarantees.
+
 ### Lua's C-call limit
 
 Lua counts nested calls through its C API and stops them with its ordinary

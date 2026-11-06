@@ -214,7 +214,8 @@ local function assert_stdio_fixture(workspace: string, mode: string,
                                     expected_stderr: string,
                                     pipe_hint: string?,
                                     stderr_fragment: boolean?)
-  local result_path = workspace .. "/" .. mode .. ".result"
+  local result_path = fs.tmpname()
+  defer fs.unlink(result_path)
   if ffi.titan_uv_test_stdio_setup(parent_mode) ~= 0 then
     raise ffi.titan_uv_test_stdio_failure() as string
   end
@@ -238,7 +239,6 @@ local function assert_stdio_fixture(workspace: string, mode: string,
     captured_stderr = ffi.titan_uv_test_stdio_output(2) as string
   end
   local report = fs.read_file(result_path)
-  defer fs.unlink(result_path)
   local probe_failure = ffi.titan_uv_test_stdio_failure() as string
   local stderr_matches = captured_stderr == expected_stderr
   if stderr_fragment then
@@ -357,21 +357,31 @@ end
 
 function test_parent_stdio_hints_preserve_known_descriptor_kinds(
     context: test.Context)
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function ()
+      command.remove_tree(workspace)
+    end)
+    compile_stdio_fixture(workspace)
+  end)
   context:run("pipe", function (_context: test.Context)
-    with_stdio_fixture(function (workspace: string)
+    runtime_test.run(function ()
       assert_stdio_fixture(workspace, "pipes", "parent-pipes-ok",
         ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
         "pipe-stdout", "pipe-stderr", "invalid")
     end)
   end)
   context:run("tty", function (_context: test.Context)
-    with_stdio_fixture(function (workspace: string)
+    runtime_test.run(function ()
       assert_stdio_fixture(workspace, "tty", "parent-tty-ok",
         ffi.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "", "1")
     end)
   end)
   context:run("regular_file", function (_context: test.Context)
-    with_stdio_fixture(function (workspace: string)
+    runtime_test.run(function ()
       assert_stdio_fixture(workspace, "file", "parent-file-ok",
         ffi.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "file-output", "", "1")
     end)
@@ -380,7 +390,7 @@ function test_parent_stdio_hints_preserve_known_descriptor_kinds(
     if ffi.titan_uv_test_stdio_mode_supported(ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL as integer) == 0 then
       test.skip("platform: connected TCP parent stdio is supported on Linux and macOS")
     end
-    with_stdio_fixture(function (workspace: string)
+    runtime_test.run(function ()
       assert_stdio_fixture(workspace, "tcp", "parent-tcp-ok",
         ffi.TITAN_UV_TEST_STDIO_TCP_CONNECTED_ALL, 7,
         "tcp-stdout", "tcp-stderr", "invalid")
@@ -403,7 +413,7 @@ function test_parent_stdio_hints_preserve_known_descriptor_kinds(
       if ffi.titan_uv_test_stdio_mode_supported(mode) == 0 then
         test.skip("platform: Windows standard handles do not represent Unix socket descriptors")
       end
-      with_stdio_fixture(function (workspace: string)
+      runtime_test.run(function ()
         assert_stdio_fixture(workspace, "socket", "parent-socket-rejected",
           mode, 0, "", "", "1")
       end)

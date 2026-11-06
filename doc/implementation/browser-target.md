@@ -2406,6 +2406,13 @@ collection. Native allocation failures can be ordinary errors; an engine
 trap or JS allocation failure poisons the instance instead of pretending
 that native cleanup or continuation reuse is safe.
 
+For each boundary row, the harness checks a positive lowest sample and
+qualifies its declared, unit-aligned ceiling with the same limit-failure
+classifier used for the final result. It then binary-searches to adjacent
+units and attributes the final failing sample. Every probe starts a fresh
+instance. The `lua-limit`, `create-failure`, and `exhaust` modes run once per
+assertion and engine cell, without a search.
+
 
 ## The browser C-call limit
 

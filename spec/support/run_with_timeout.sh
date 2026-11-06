@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Run one command in its own process group, polling at a coarse interval so a
-# hung native test cannot block the suite indefinitely.
+# Run one command in its own process group, checking completion every 100 ms
+# while bounding hung native tests and their descendants.
 
 set -u
 
@@ -52,7 +52,7 @@ while kill -0 "$child" 2>/dev/null; do
         wait "$child" 2>/dev/null || true
         exit 124
     fi
-    sleep 2
+    sleep 0.1
 done
 
 wait "$child" 2>/dev/null

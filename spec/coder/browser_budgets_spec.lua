@@ -101,17 +101,15 @@ describe("browser measured delivered budget limits", function()
                 end
                 local function measure(image, mode, unit, ceiling)
                     local m_started = hrtime()
-                    local low, high = unit, unit * 2
+                    local low, high = unit, ceiling
                     local failure_log, failure_status
                     local ok, log = probe(image, mode, low)
                     assert.is_true(ok, log)
-                    while true do
-                        local status
-                        ok, log, status = probe(image, mode, high)
-                        if not ok then failure_log, failure_status = log, status; break end
-                        low, high = high, high * 2
-                        assert.truthy(high <= ceiling, "budget probe never reached its real limit: " .. mode)
-                    end
+                    -- Each row declares a unit-aligned ceiling. Verify that
+                    -- failing bound instead of rediscovering it by doubling.
+                    ok, failure_log, failure_status = probe(image, mode, high)
+                    assert.is_false(ok, "budget probe never reached its real limit: " .. mode)
+                    limit_failure(failure_status, failure_log, mode)
                     while high - low > unit do
                         local middle = ((low + high) // (2 * unit)) * unit
                         local status
