@@ -42,7 +42,10 @@ export async function run(context) {
     try {
       if (inspect) {
         context.assert(controls, "native initializer omitted its test-owned observations");
-        const snapshot = () => controls.snapshot();
+        const snapshot = () => {
+          const state = controls.snapshot();
+          return {...state, operationId: state.operationId.toString()};
+        };
         const beforeGuard = snapshot();
         const admittedGuard = await controls.guarded();
         emit({guardStatus: String(admittedGuard), before: beforeGuard, after: snapshot()});

@@ -3,6 +3,7 @@ local test = import "test"
 local coroutine_tests = import "coroutine.tests.titan"
 
 foreign import "stdio.h"
+foreign import "lua.h"
 
 function test_binary_failure_after_coroutine_owner(context: test.Context)
   local marker = "stderr\0\255\195(\237\160\128:end\n"
@@ -11,4 +12,15 @@ function test_binary_failure_after_coroutine_owner(context: test.Context)
   context:run("name\0\255\195(\237\160\128:end", function(_child: test.Context)
     test.assert(false, "message\0\255\195(\237\160\128:end")
   end)
+end
+
+function test_warning_protocol(_context: test.Context)
+  ffi.lua_warning(L, "@off", 0)
+  ffi.lua_warning(L, "suppressed warning", 0)
+  ffi.lua_warning(L, "suppressed ", 1)
+  ffi.lua_warning(L, "continuation", 0)
+  ffi.lua_warning(L, "@on", 0)
+  ffi.lua_warning(L, "multipart ", 1)
+  ffi.lua_warning(L, "warning", 0)
+  ffi.lua_warning(L, "standalone warning", 0)
 end

@@ -99,9 +99,10 @@ second errorhandler. It retains the raw `TITAN_BACKTRACE_KEY` trace already
 captured by Titan. If `__tostring` raises, a conservative fixed diagnostic is
 used and fallback trace retrieval is protected too; no promise catch
 reconstructs a trace. Initialization/main report once to stderr; ordinary
-callback failures carry bytes/trace to their JavaScript promise. A warning
-callback is installed before user initialization so finalizer warnings enter
-the stderr byte queue.
+callback failures carry bytes/trace to their JavaScript promise. The owner
+state keeps `luaL_newstate`'s warning handler, including its prefix, warning
+controls and multipart messages; its stderr output enters the byte queue.
+Attaching an independent state preserves the warning handler its creator chose.
 
 Close is deliberately different. `titan_browser_close_state` marks the state
 closing and invokes `lua_close` directly while the JSPI execution owner is

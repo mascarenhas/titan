@@ -85,9 +85,10 @@ export async function run(context) {
     "test name was not reported byte-exact on the final failure summary line");
   context.assert(occurrences(observed.stdout, message) === 1,
     "test failure message was not reported byte-exact");
-  // The real coroutine owner intentionally reports one cleanup warning.
+  // Preserve the cleanup warning and binary marker, then Lua's warning controls
+  // and multipart boundaries from the later native warning-protocol case.
   const expectedStderr = join([text("Lua warning: error in coroutine cleanup (cleanup failure)\n"),
-    binary("stderr"), text("\n")]);
+    binary("stderr"), text("\nLua warning: multipart warning\nLua warning: standalone warning\n")]);
   context.assert(equal(observed.stderr, expectedStderr),
     "stderr hook did not preserve the warning and binary marker exactly: " +
       Array.from(observed.stderr).join(","));

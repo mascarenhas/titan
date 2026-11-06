@@ -26,12 +26,6 @@ static lua_State *owner;
 static int initialized, owner_ready, main_started;
 static const char *image_name;
 
-static void warning(void *context, const char *message, int continuation) {
-  (void)context;
-  fputs(message, stderr);
-  if (!continuation) fputc('\n', stderr);
-}
-
 static void mark_closing(bridge_state *state) {
   if (!state->closing) {
     state->closing = 1;
@@ -91,7 +85,6 @@ uint32_t titan_browser_attach(lua_State *L) {
   if (!state->token) luaL_error(L, "browser state identity exhausted");
   state->next = states;
   states = state;
-  lua_setwarnf(L, warning, NULL);
   lua_settop(L, top);
   return state->token;
 }
@@ -428,7 +421,6 @@ int titan_browser_initialize_image(uint64_t id, lua_CFunction initialize,
     flush_completion(&completion);
     return 0;
   }
-  lua_setwarnf(owner, warning, NULL);
   return protected_entry(id, TITAN_BROWSER_INITIALIZE, owner, initialize_worker, &context, 1, 0);
 }
 int titan_browser_main_image(uint64_t id, lua_CFunction main, void *arguments) {
