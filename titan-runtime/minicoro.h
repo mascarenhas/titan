@@ -38,12 +38,12 @@ Most platforms are supported through different methods:
 | Windows      | x86_64           | Windows fibers    |
 | Linux        | x86_64/i686      | ucontext          |
 | Mac OS X     | x86_64/ARM/ARM64 | ucontext          |
-| WebAssembly  | N/A              | Emscripten fibers |
+| WebAssembly  | N/A              | JSPI continuations |
 | Raspberry Pi | ARM              | ucontext          |
 | RISC-V       | rv64/rv32        | ucontext          |
 
 The assembly method is used by default if supported by the compiler and CPU,
-otherwise ucontext or fiber method is used as a fallback.
+otherwise ucontext, Windows fibers, or JSPI is used on the corresponding platform.
 
 The assembly method is very efficient, it just take a few cycles
 to create, resume, yield or destroy a coroutine.
@@ -1681,22 +1681,18 @@ static MCO_FORCE_INLINE void _mco_init_desc_sizes(mco_desc* desc, size_t stack_s
 
 #elif defined(__EMSCRIPTEN__)
 
-#include <emscripten/fiber.h>
+#include <emscripten.h>
+#include <stdint.h>
 
-#ifndef MCO_ASYNCFY_STACK_SIZE
-#define MCO_ASYNCFY_STACK_SIZE 16384
-#endif
+/* The JSPI driver owns engine continuations, while this allocation owns the
+ * disjoint linear C stack. Retirement is suspending: mco_uninit must not let
+ * its caller reuse the allocation until the engine invocation has returned. */
+void titan_mco_create(uintptr_t co, uintptr_t low, uintptr_t high);
+void titan_mco_transfer(uintptr_t from, int from_back, uintptr_t to, int to_back,
+                        int terminal);
+void titan_mco_destroy(uintptr_t co);
 
-typedef struct _mco_context {
-  emscripten_fiber_t fib;
-  emscripten_fiber_t* back_fib;
-} _mco_context;
-
-static emscripten_fiber_t* running_fib = NULL;
-static unsigned char main_asyncify_stack[MCO_ASYNCFY_STACK_SIZE];
-static emscripten_fiber_t main_fib;
-
-static void _mco_wrap_main(void* co) {
+EMSCRIPTEN_KEEPALIVE void titan_mco_entry(uintptr_t co) {
   _mco_main((mco_coro*)co);
 }
 
@@ -1718,73 +1714,37 @@ static void _mco_jumpout(mco_coro* co) {
 
 static void _mco_transfer(mco_coro* from, _mco_context_slot from_slot,
                           mco_coro* to, _mco_context_slot to_slot) {
-  _mco_context* from_context = (_mco_context*)from->context;
-  _mco_context* to_context = (_mco_context*)to->context;
-  emscripten_fiber_t* from_fib;
-  emscripten_fiber_t* to_fib;
-  if(from_slot == _MCO_CONTEXT_BACK) {
-    from_fib = running_fib;
-    if(!from_fib) {
-      from_fib = &main_fib;
-      emscripten_fiber_init_from_current_context(from_fib, main_asyncify_stack, MCO_ASYNCFY_STACK_SIZE);
-    }
-    from_context->back_fib = from_fib;
-  } else {
-    from_fib = &from_context->fib;
-  }
-  to_fib = to_slot == _MCO_CONTEXT_BACK ? to_context->back_fib : &to_context->fib;
-  MCO_ASSERT(to_fib != NULL);
-  if(to_slot == _MCO_CONTEXT_BACK) {
-    to_context->back_fib = NULL;
-  }
-  running_fib = to_fib;
-  emscripten_fiber_swap(from_fib, to_fib);
+  titan_mco_transfer((uintptr_t)from, from_slot == _MCO_CONTEXT_BACK,
+                    (uintptr_t)to, to_slot == _MCO_CONTEXT_BACK,
+                    from_slot == _MCO_CONTEXT_SELF && from->state == MCO_DEAD);
 }
 
 static mco_result _mco_create_context(mco_coro* co, mco_desc* desc) {
-  if(emscripten_has_asyncify() != 1) {
-    MCO_LOG("failed to create fiber because ASYNCIFY is not enabled");
-    return MCO_MAKE_CONTEXT_ERROR;
-  }
-  /* Determine the context address. */
   size_t co_addr = (size_t)co;
-  size_t context_addr = _mco_align_forward(co_addr + sizeof(mco_coro), 16);
-  size_t storage_addr = _mco_align_forward(context_addr + sizeof(_mco_context), 16);
+  size_t storage_addr = _mco_align_forward(co_addr + sizeof(mco_coro), 16);
   size_t stack_addr = _mco_align_forward(storage_addr + desc->storage_size, 16);
-  size_t asyncify_stack_addr = _mco_align_forward(stack_addr + desc->stack_size, 16);
-  /* Initialize context. */
-  _mco_context* context = (_mco_context*)context_addr;
-  memset(context, 0, sizeof(_mco_context));
-  /* Initialize storage. */
-  unsigned char* storage = (unsigned char*)storage_addr;
-  /* Initialize stack. */
-  void *stack_base = (void*)stack_addr;
-  size_t stack_size = asyncify_stack_addr - stack_addr;
-  void *asyncify_stack_base = (void*)asyncify_stack_addr;
-  size_t asyncify_stack_size = co_addr + desc->coro_size - asyncify_stack_addr;
-  /* Create the fiber. */
-  emscripten_fiber_init(&context->fib, _mco_wrap_main, co, stack_base, stack_size, asyncify_stack_base, asyncify_stack_size);
-  co->context = context;
-  co->stack_base = stack_base;
-  co->stack_size = stack_size;
-  co->storage = storage;
+  co->context = co;
+  co->stack_base = (void*)stack_addr;
+  co->stack_size = desc->stack_size;
+  co->storage = (unsigned char*)storage_addr;
   co->storage_size = desc->storage_size;
+  titan_mco_create((uintptr_t)co, stack_addr, stack_addr + desc->stack_size);
   return MCO_SUCCESS;
 }
 
 static void _mco_destroy_context(mco_coro* co) {
-  /* Nothing to do. */
-  _MCO_UNUSED(co);
+  if(co->context) {
+    titan_mco_destroy((uintptr_t)co);
+    co->context = NULL;
+  }
 }
 
 static MCO_FORCE_INLINE void _mco_init_desc_sizes(mco_desc* desc, size_t stack_size) {
   desc->coro_size = _mco_align_forward(sizeof(mco_coro), 16) +
-                    _mco_align_forward(sizeof(_mco_context), 16) +
                     _mco_align_forward(desc->storage_size, 16) +
                     _mco_align_forward(stack_size, 16) +
-                    _mco_align_forward(MCO_ASYNCFY_STACK_SIZE, 16) +
                     16;
-  desc->stack_size = stack_size; /* This is just a hint, it won't be the real one. */
+  desc->stack_size = stack_size;
 }
 
 #else

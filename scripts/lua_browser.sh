@@ -14,6 +14,8 @@
 #     exists in lua-5.5.1/src/browser/liblua.a, matches it as well).
 
 set -eu
+# Reuse probes run emcc directly before entering the fork's Make/install paths.
+unset EMCC_CFLAGS
 
 fail() {
 	printf 'lua-browser: %s\n' "$*" >&2
@@ -199,18 +201,32 @@ check_reuse() {
 	cflags_normalized=
 	defines=
 	longjmp=
+	legacy_exceptions=
+	eh_flags=
 	pic_flags=
 	previous=
 	for flag in $cfg_cflags; do
 		cflags_normalized=${cflags_normalized:+$cflags_normalized }$flag
 		case $flag in
 		-D*) defines=${defines:+$defines }$flag ;;
-		-sSUPPORT_LONGJMP=*) longjmp=${flag#-sSUPPORT_LONGJMP=} ;;
-		SUPPORT_LONGJMP=*)
-			if [ "$previous" = "-s" ]; then
-				longjmp=${flag#SUPPORT_LONGJMP=}
-			fi ;;
 		-fPIC | -fpic | -fPIE | -fpie) pic_flags="$pic_flags $flag" ;;
+		-fwasm-exceptions | -fno-wasm-exceptions | -mexception-handling | \
+		-mno-exception-handling | -mlegacy-exception-handling | \
+		-mno-legacy-exception-handling) eh_flags="$eh_flags $flag" ;;
+		esac
+		setting=
+		case $flag in
+		-s?*) setting=${flag#-s} ;;
+		*) if [ "$previous" = "-s" ]; then setting=$flag; fi ;;
+		esac
+		case $setting in
+		SUPPORT_LONGJMP | SUPPORT_LONGJMP=1 | NO_SUPPORT_LONGJMP=0) longjmp=emscripten ;;
+		SUPPORT_LONGJMP=*) longjmp=${setting#*=} ;;
+		NO_SUPPORT_LONGJMP | NO_SUPPORT_LONGJMP=*) longjmp=0 ;;
+		WASM_LEGACY_EXCEPTIONS | WASM_LEGACY_EXCEPTIONS=1 | \
+		NO_WASM_LEGACY_EXCEPTIONS=0) legacy_exceptions=1 ;;
+		WASM_LEGACY_EXCEPTIONS=*) legacy_exceptions=${setting#*=} ;;
+		NO_WASM_LEGACY_EXCEPTIONS | NO_WASM_LEGACY_EXCEPTIONS=*) legacy_exceptions=0 ;;
 		esac
 		previous=$flag
 	done
@@ -219,6 +235,8 @@ check_reuse() {
 	else
 		lua_defines=
 	fi
+	[ "$cfg_sjlj" = wasm ] && [ "$legacy_exceptions" = 1 ] || return 1
+	[ -z "$eh_flags" ] || return 1
 	[ "$longjmp" = "$cfg_sjlj" ] || return 1
 	[ -z "$pic_flags" ] || return 1
 
@@ -328,7 +346,7 @@ EOF
 	done <"$tmp/record_body"
 	[ "$rec_count" -eq 10 ] || return 1
 
-	expected_features="+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
+	expected_features="+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
 	[ "$rec_fork_revision" = "$revision" ] || return 1
 	[ "$rec_emscripten_version" = "$cfg_emscripten" ] || return 1
 	[ "$rec_target" = "$cfg_target" ] || return 1

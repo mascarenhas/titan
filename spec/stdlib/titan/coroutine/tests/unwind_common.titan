@@ -1,4 +1,5 @@
 local unwind_gc = import "gc"
+local unwind_string = import "string"
 
 -- Collecting an abandoned suspended coroutine, or closing its Lua state,
 -- unwinds it: defers run innermost first, catch blocks do not run, and nothing
@@ -120,6 +121,67 @@ function test_unwind_stacked_chain_from_innermost(context: test.Context)
     local text = unwind_log_text(log)
     test.assert(text == "c b a", "unwind log: " .. text)
   end)
+end
+
+function test_unwind_from_unrelated_allocation(context: test.Context)
+  local was_incremental = unwind_gc.incremental()
+  local was_paused = unwind_gc.paused()
+  local pause = unwind_gc.pause_percent(0)
+  local stepmul = unwind_gc.stepmul(1000)
+  defer do
+    unwind_gc.pause_percent(pause)
+    unwind_gc.stepmul(stepmul)
+    if not was_incremental then unwind_gc.generational() end
+    if was_paused then unwind_gc.pause() else unwind_gc.resume() end
+  end
+  unwind_gc.pause()
+  local log: {string} = {}
+  unwind_abandon_chain_stacked_first(log)
+  test.assert(#log == 0, "abandoned chain finalized while collection was paused")
+  -- This coroutine is unrelated to the abandoned chain. Its ordinary Array
+  -- allocations, not an explicit collect/step, enter the collector's cleanup.
+  local allocator = coroutine.create(function (_: value): value
+    local garbage: {value} = {}
+    unwind_gc.resume()
+    for index = 1, 32768 do
+      garbage[index] = {index, index + 1, index + 2}
+      if #log > 0 then break end
+    end
+    test.assert(unwind_log_text(log) == "c b a",
+                "allocation-triggered unwind: " .. unwind_log_text(log))
+    return "allocated"
+  end, "unrelated-allocation")
+  test.assert(allocator:resume(nil) == "allocated")
+  context:log("FIXTURE category=allocation_gc stacked=3 defers=3 unrelated=true")
+end
+
+function test_linear_stack_survives_growth_and_transfers(context: test.Context)
+  local child = coroutine.create(function (_: value): value
+    local canary = foreign int.new_array(64)
+    for index = 0, 63 do canary[index] = index * 17 + 3 end
+    coroutine.yield("parked", "growth-child")
+    -- Exceeds the browser image's initial linear memory while another stack
+    -- is parked. Native runs exercise the same public coroutine sequence.
+    local grown = unwind_string.rep("g", 20 * 1024 * 1024)
+    test.assert(#grown == 20 * 1024 * 1024)
+    for index = 0, 63 do
+      test.assert(canary[index] == index * 17 + 3, "child linear-stack canary changed")
+    end
+    return coroutine.yield("grown", "growth-child")
+  end, "growth-child")
+  local parent = coroutine.create(function (_: value): value
+    local canary = foreign int.new_array(64)
+    for index = 0, 63 do canary[index] = index * 19 + 5 end
+    test.assert(child:resume(nil) == "parked")
+    test.assert(child:resume(nil) == "grown")
+    for index = 0, 63 do
+      test.assert(canary[index] == index * 19 + 5, "parent linear-stack canary changed")
+    end
+    test.assert(child:resume("finished") == "finished")
+    return "finished"
+  end, "growth-parent")
+  test.assert(parent:resume(nil) == "finished")
+  context:log("FIXTURE category=stack_growth bytes=20971520 stacks=2 canaries=128")
 end
 
 -- Created after the handler A and before the stacked member B, so its

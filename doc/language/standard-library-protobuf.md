@@ -330,12 +330,9 @@ protobuf 2 GiB size bound.
 Nesting is limited on every encoding, decoding, and schema path, generated or
 reflective. Levels count nested messages and the fields of the innermost one:
 a chain of records whose innermost record has a field holds at most 127 records
-on a native target, and deeper input raises `protobuf: nesting exceeds 128
-levels`. On the [browser target](browser-target.md#nesting-limits) the chain
-holds at most 42 records and deeper input raises `protobuf: nesting exceeds 43
-levels`, a limit that keeps the codec's own recursion well within the
-JavaScript engine's stack (stack that the caller already uses is not counted).
-The error is an ordinary catchable error on both targets.
+on native and browser targets. Deeper input raises the ordinary catchable
+error `protobuf: nesting exceeds 128 levels`. This bounds the codec's own
+traversal, not stack already used by its caller.
 
 String entry points keep their input alive throughout decoding, including
 while a custom decoder runs after the caller has dropped its last reference to

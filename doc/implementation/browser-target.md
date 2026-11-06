@@ -6,7 +6,7 @@ providers as self-describing Wasm archives, and links programs and tests into
 an ES-module factory (`.mjs`), its WebAssembly binary (`.wasm`), and its
 extended source map (`.wasm.map`). A web page or application loads the image
 through a Titan-owned loader, and tests and command-line workflows run it
-under Node 24, headless Chromium (`titan-browser-run`), and Playwright
+under Node 26+, headless Chromium (`titan-browser-run`), and Playwright
 Chromium, Firefox, and WebKit. The user contract is in the [browser-target
 chapter](../language/browser-target.md) of
 the language manual.
@@ -125,8 +125,8 @@ with:
 * `-DLUA_USE_POSIX -DLUA_USE_BROWSER`, without `LUA_USE_DLOPEN` or readline,
   and `-DLUAI_MAXCCALLS=100` ([the browser C-call
   limit](#the-browser-c-call-limit));
-* `-sSUPPORT_LONGJMP=emscripten` in `SYSCFLAGS`, with `MYCFLAGS` passed
-  through and `CMCFLAGS` applied to every browser object;
+* `-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` in `SYSCFLAGS`,
+  with `MYCFLAGS` passed through and `CMCFLAGS` applied to every browser object;
 * browser `LUA_PATH_DEFAULT`/`LUA_CPATH_DEFAULT` rooted at the empty
   `LUA_ROOT`, without the executable-relative `!/../` root; and
 * its own object directory, `src/browser/obj`, separate from the native build.
@@ -135,16 +135,37 @@ with:
 needed and installs it. It writes only below `<root>/lib/browser`, never runs
 a host Lua interpreter, and refuses an effective configuration that would make
 the record false: a missing or wrong `emcc`, an effective `LUA_USE_DLOPEN`, a
-missing `LUA_USE_POSIX`/`LUA_USE_BROWSER`, a longjmp mode other than the
-recorded one, or position-independent flags. `fork_revision` comes from the
+missing `LUA_USE_POSIX`/`LUA_USE_BROWSER`, a longjmp mode other than `wasm`,
+a missing or disabled explicit legacy EH setting, native exception-lowering
+overrides, or position-independent flags. `fork_revision` comes from the
 fork tree's own `.git`; a tarball build must pass
 `FORK_REVISION=<40-hex commit>`. The fork's README documents the installer's
 own failure modes and the record's byte formats.
 
-Titan pins the fork commit through the gitlink and the `v5.5.1-1` release, not
-through the record's copy of the revision. `archive_sha256` is stable for one
+Titan pins the fork commit through the gitlink, not through the record's copy
+of the revision. `archive_sha256` is stable for one
 commit, flag set, and Emscripten build, because `emar` archives are
 deterministic.
+
+### Wasm-EH longjmp contract
+
+Emscripten 6.0.13 is pinned to `SUPPORT_LONGJMP=wasm` and
+`WASM_LEGACY_EXCEPTIONS=1` at both compile and link time. This is the pin's
+**legacy** Wasm exception instruction encoding, not the standardized encoding;
+the toolchain labels Wasm longjmp experimental. Lua, the runtime, generated
+Titan C, authored C helpers, and providers all use the same settings. A link
+flag alone cannot change old objects that contain JavaScript SJLJ calls.
+
+The existing record carries `sjlj=wasm`, the explicit encoding in `cflags`,
+and `+exception-handling` in `wasm_features`. No record, metadata, or cache
+schema version changes: these facts and the descriptor's compile flags already
+participate in identities, so prior JavaScript-SJLJ records and objects cannot
+qualify as this target. `make lua-browser` rebuilds a stale installation.
+JSPI is the sole browser coroutine backend; protected calls never cross a JavaScript SJLJ trampoline.
+Wasm EH catches language longjmp transfers, not engine traps, engine stack
+overflow, or arbitrary JavaScript exceptions. Native builds and
+`LUAI_MAXCCALLS=100` on the browser are unchanged.
+
 
 ### `make lua-browser`
 
@@ -284,16 +305,15 @@ installation tree, `TITAN_PATH_0_6` set to the checkout, an empty
 `TITAN_PATH`, an empty `CPPFLAGS`, and `TITAN_EXTRA_CPPFLAGS` replaced by
 exactly `LPEGLABEL_CPPFLAGS` (`-I<checkout>/vendor/lpeglabel`); the ambient
 values of both are discarded, never appended to (`BROWSER_SDK_ENV`). When
-`TITAN_NODE` is unset or empty, the recipe unsets
-`TITAN_NODE` and, when `EMSDK` is set, prepends the first executable
-`$EMSDK/node/*/bin` directory to `PATH` ahead of any existing `node`. The
+`TITAN_NODE` is unset or empty, the recipe unsets it and leaves ordinary
+`PATH` selection intact; emsdk's bundled Node does not override it. The
 build directory is `TITAN_BROWSER_BUILD_DIR` (default
 `$(TITAN_OUTPUT_DIR)/browser-sdk`), a browser `--output` root.
 
 1. `scripts/browser_sdk.lua prepare` stages a differing root (below), checks
-   Node 24 up front with `driver.browser_node_ready` against the checkout's
-   runner (`browser provider validation requires Node 24: <reason>; set
-   TITAN_NODE to a Node 24 executable`), removes a stale `sdk-digests` so that
+   Node 26+ up front with `driver.browser_node_ready` against the checkout's
+   runner (`browser provider validation requires Node 26 or newer: <reason>;
+   set TITAN_NODE to a Node 26 or newer executable`), removes a stale `sdk-digests` so that
    an interrupted run cannot leave a manifest describing old files, and creates
    `titan_bin`.
 2. `titanc --target browser --output <build> -c --incremental
@@ -360,10 +380,10 @@ no member is omitted, stubbed, or made to raise "unavailable", and none of
 them has a `.browser.titan` or `.native.titan` variant. Their foreign imports
 are libc, Lua, the Titan SDK headers, and LPegLabel only, and the
 target-dependent values they need come from target C defines rather than
-whole-file variants: `TITAN_COROUTINE_STACK_SIZE` for `coroutine`, the two
-[nesting-limit](#nesting-limits) defines for `protobuf`/`transfer` and `json`,
-and `_WIN32` (which `emcc` never defines) through `titan/path_platform.h`
-for `path`.
+whole-file variants: `TITAN_COROUTINE_STACK_SIZE` for `coroutine`, and
+`_WIN32` (which `emcc` never defines) through `titan/path_platform.h` for
+`path`. The [library nesting policies](#nesting-limits) are shared with
+native targets and need no browser-specific defines.
 
 The other thirteen standard modules are absent at compile time: their
 canonical mains are the `native` variants `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
@@ -546,7 +566,7 @@ delivered.
 | `math` | yes | none | `math.tests`, including automatic and argumentless seeding | calls `randomseed()` | none |
 | `test` | yes | none | `test.tests`, and every other owner through the runner | loads the Lua trace and pattern helpers when the Lua `string` library is open | none |
 | `reflect` | yes | none | `reflect.tests` | metatable, hydration, brand, and tag tables | none |
-| `json` | yes | none | `json.tests` | caches the writer depth limit, then builds the JSON pattern | none |
+| `json` | yes | none | `json.tests` | builds the JSON pattern | none |
 | `protobuf` | yes | none | `protobuf.tests`, including both raw index writers and the reservation failure | caches the nominal registry, sets up the ephemeron, validates the codec handoff | `write_resource_index`, `write_resource_index_bytes` |
 | `transfer` | yes | none | `transfer.tests` (same-instance behavior), including all three raw exports | installs protobuf's packet-context provider and nominal loader, the ephemerons, and `closure_fields` | `copy_message`, `discard_message`, `transfer_load_module` |
 | `peg` | yes | none | `peg.tests` | `_initialize_native()` | none |
@@ -635,12 +655,12 @@ for a three-image partition exceeded the budget (`reflect.tests` with
 `protobuf.tests` at 32,984,970 bytes, `protobuf.tests` with `coroutine.tests`
 at 34,633,460, and `transfer.tests` with `reflect.tests` at 32,556,174), and
 the four measure between about 23.1 MB and 28.8 MB on Linux and macOS. The
-engine-internal cause is not established; the size limit of V8 and
-Asyncify-expanded functions is separate follow-up work.
+engine-internal cause is not established. These measurements used the earlier
+Asyncify backend; they do not establish a V8 image-size ceiling for JSPI.
 
 `make titan-stdlib-browser-test` (a test goal, so it defaults to the
 `validation` profile) needs the installed native provider, the browser SDK,
-emsdk, Node 24, and a headless Chromium. It:
+emsdk, Node 26+, and a JSPI-capable headless Chromium. It:
 
 1. writes `roots.txt` (every browser root) and `<image>.roots.txt` (each
    image's owners) in `$(TITAN_OUTPUT_DIR)/browser-stdlib`, then builds each
@@ -703,12 +723,9 @@ holds `images/` and the roots files by then.
 from a cold and then a warm directory and checks this layout. The
 [`browser-stdlib` job](continuous-integration.md#browser-stdlib-job)
 runs the target unfiltered after the SDK is built and uploads everything but
-`objects/` when the job fails. Chrome for Testing 156 caps a sandboxed
-renderer's data segment at 8 GiB on a host with at most 16 GiB of physical
-memory, below the 13 to 14 GiB the `protobuf` image needs during startup, so
-on such a host that image crashes before its first case unless Chromium runs
-with `--enable-features=HigherRendererMemoryLimit`, which doubles the cap; the
-job passes it through a `TITAN_CHROME` wrapper.
+`objects/` when the job fails. It uses Chrome for Testing with the normal
+sandbox and no `HigherRendererMemoryLimit` wrapper. The older Asyncify
+protobuf-startup footprint is not a requirement of current JSPI images.
 
 ### Initialization and fidelity gate
 
@@ -724,7 +741,7 @@ purpose and assertions 2, and runs them through `gate.mjs` under
   disposed three times from one cached factory, with a tick and a collection
   between cycles; and
 * `fidelity_test.titan` imports the real `coroutine.tests` owner, so its
-  browser cases create fibers first, then writes a marker with NUL, `0xFF`,
+  browser cases create coroutines first, then writes a marker with NUL, `0xFF`,
   and invalid UTF-8 bytes to stderr and fails a child case whose name and
   message carry the same bytes. The gate requires status 1 through the
   Titan-owned completion channel, the exact name on the run, failure, and
@@ -734,68 +751,23 @@ The deliberately failing case lives outside every suite root.
 
 ### Nesting limits
 
-An engine stack overflow on the browser is not recoverable: Emscripten's
-`invoke_*` wrappers rethrow the engine `RangeError` past every Titan `catch`,
-the loader rejects with the error as `cause`, and the completion channel never
-fires. Every Titan method or closure call is an indirect call, which leaves
-WebAssembly through an `invoke_*` import, re-enters through `dynCall_*`, and
-passes Asyncify's wrapper, so one reflective protobuf level costs two
-WebAssembly and twelve JavaScript frames. A nesting-bounded library operation
-therefore gets a browser value from a target define, at most half of the
-lowest ceiling measured across engines and build profiles (the rule that set
-the [browser C-call limit](#the-browser-c-call-limit)), so over-deep input
-raises the module's ordinary catchable error with headroom to spare in the
-measured configurations. The counters cover only the library's own traversal,
-not stack the caller already uses. Native values are unchanged.
+Browser and native builds share the 128-level codec budget in `transfer.h`:
+the innermost field consumes one level, so a structural record chain accepts
+127 records. Generated and reflective protobuf paths, `protobuf.schema`,
+`TransferValue`, and packet encode/decode share that policy and ordinary
+error string. The browser descriptor no longer overrides it.
 
-| Bound | Define (browser value) | Native default | Lowest measured ceiling | Browser limit |
-| --- | --- | --- | --- | --- |
-| `protobuf` reflective and generated codecs, `protobuf.schema`, `transfer` | `TITAN_CODEC_DEPTH_LIMIT` (43), in `titan-runtime/transfer.h` | 128 | 85 levels: reflective encoder, `validation`, Node and Chromium | 42 accepted levels |
-| `json.encode` | `TITAN_JSON_WRITER_DEPTH_LIMIT` (103), in `titan-runtime/titan.h` | 0 (no target cap; writer uses `math.maxinteger`) | 206 levels: writer with a raised `max_depth`, `validation`, Chromium | `min(max_depth, 103)` |
+JSON encoding uses only the call's validated `max_depth` (default 32);
+there is no additional target cap or cached writer clamp. The owning native
+tests exercise arrays, Maps and records at configured depth 128, rejection
+at 129, and recovery; raising `max_depth` admits that next level. Parser
+depth and PEG matching-stack limits are unchanged.
 
-`TITAN_CODEC_DEPTH_LIMIT` is a raw budget: `require_depth` in
-`titan/protobuf/protobuf.titan` and `titan_codec_depth` in `transfer.h` raise
-when a depth exceeds it, and the fields of the innermost message are probed
-one level deeper, so 128 accepts 127 records and 43 accepts 42 (a union whose
-selected variant has no parts is accepted at the budget itself; see the
-[protobuf nesting limit](protobuf-library.md#nesting-limit)). Both messages
-print the macro value (`protobuf: nesting exceeds <limit> levels`).
-The JSON main initializer starts its cached writer limit at the const
-`math.maxinteger` and narrows it only for a positive target define. Zero is the
-SDK default and adds no native cap. `encode_value` in
-`titan/json/writer.titan` clamps the call's `max_depth` to that cached limit
-after option validation, so only a browser encode whose setting exceeds 103
-is affected, and the writer's ordinary `limit_exceeded` (`value exceeds
-max_depth`) fires; the default `max_depth` of 32 and every decode setting are
-unchanged. Both defines are profile-owned, so a `-D` or `-U` of either is
-rejected like the other target defines.
-
-The measurements (Emscripten 6.0.13, Node 24.19.0, Chrome for Testing
-156.0.8078.80, `--test` images) sweep one subtest per depth over a record chain
-and take the last completed level:
-
-| Operation | `validation` Node | `validation` Chromium | `production` (both) |
-| --- | ---: | ---: | ---: |
-| `protobuf` reflective encode | 85 | 85 | ≥ 127 (module limit) |
-| `protobuf` generated encode and decode, reflective decode, `transfer` | ≥ 127 | ≥ 127 | ≥ 127 |
-| `json` writer, `max_depth(1000000)` | 274 | 206 | 512 passed, 640 failed |
-| `json` parser, `max_depth(1000000)` | 98 | 98 | 98 (PEG matching stack, ordinary error) |
-| caller-written `reflect` walk | 4,128 | 3,072 | ≥ 5,120 |
-
-At the default 984 KB V8 stack, a reflective protobuf level costs about
-11.9 KB of engine stack and a JSON writer level about 3.7 KB. Both levels make
-two Titan calls, so the difference is most likely frame size: `Encoder:field`
-is one large dispatch over every field kind, and each protobuf level also
-enters a `defer` region (the captured traces prove frame counts, not frame
-bytes). Everything else keeps
-its native bounds: the JSON parser stops at 98 containers through the
-target-independent PEG matching stack (400 entries), regular expressions at
-512 nested groups and 200 captures, PEG grammars at their 400-entry matching
-stack and 200 nested captures (raising `peg.set_max_stack` to 4,000,000 ran
-50,000 nested rules without a trap, because LPegLabel's VM keeps its own
-stack), and `reflect` has no library traversal. A caller-written reflective
-walk and a `json.decode` run after raising `peg.set_max_stack` are not bounded
-by a library limit.
+The former browser-only codec43 and writer103 restrictions bounded
+instrumented protected-call stack costs. They are not JSPI budgets. Engine
+stack exhaustion remains fatal, and neither these library limits nor the
+linear C-stack sizes account for stack already consumed by an embedding
+caller. General unbounded recursion is not promised safe.
 
 ## The Lua configuration record
 
@@ -810,7 +782,7 @@ headers_sha256=<digest of the installed Lua headers>
 emscripten_version=6.0.13
 target=wasm32-unknown-emscripten
 wasm_features=<canonical sorted feature list>
-sjlj=emscripten
+sjlj=wasm
 lua_defines=<sorted unique -D list>
 numeric=integer=<C type>,float=<C type>
 cflags=<effective compile flags>
@@ -849,18 +821,20 @@ in this order; the first failure is reported:
    duplicate keys.
 4. Field syntax: missing, non-text, or empty fields, then the three
    hexadecimal fields.
-5. The fixed fields: `sjlj` must be `emscripten` (Titan's mode, because
-   `titan.h` mirrors `lua_longjmp`), `target` must be
+5. The fixed fields: `sjlj` must be `wasm` (matching Lua and `titan.h`),
+   `target` must be
    `wasm32-unknown-emscripten`, and `emscripten_version` must equal the pin,
    which step 2 already compared with the running `emcc`.
 6. `wasm_features` is a canonical list equal to the expected baseline
-   `+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue
-   +mutable-globals +nontrapping-fptoint +reference-types +sign-ext`.
+   `+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling
+   +multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext`.
 7. `lua_defines` is canonical, sorted, and unique, and equals the sorted
    unique `-D` tokens of `cflags`.
 8. The effective `-sSUPPORT_LONGJMP` mode of `cflags` (the last setting, in
    either the joined or the split `-s SUPPORT_LONGJMP=` spelling; a bare
-   setting or `=1` means `emscripten`) equals `sjlj`.
+   setting or `=1` means `emscripten`) equals `sjlj`. The effective explicit
+   `WASM_LEGACY_EXCEPTIONS` setting must be 1; joined, split, bare, and boolean
+   `NO_` aliases are checked in compiler order.
 9. `cflags` contains no unsupported flag.
 10. `archive_sha256` matches `liblua`.
 11. `headers_sha256` matches the headers in `lua_source`.
@@ -870,21 +844,21 @@ in this order; the first failure is reported:
     cross-checks the baseline features against the actual toolchain.
 
 The Lua archive itself is hash-verified, not feature-compared. Objects keep
-their exact canonical `target_features` string in `fingerprint.features`,
-including the standalone `-shared-mem` token that LLVM's
-`WebAssemblyLowerEmscriptenEHSjLj` pass records in each translation unit that
-calls `setjmp` or `longjmp`, such as Lua's `ldo.o`, a Titan module with a
-`catch`, or authored C that uses them. Fingerprint comparison ignores that one
-token, and only it: two feature lists match when they are equal, or when both
-are canonical and become equal after dropping the standalone `-shared-mem`
-token from each, provided neither carries any other `shared-mem` or `atomics`
+their exact canonical `target_features` string in `fingerprint.features`.
+Wasm-SJLJ objects share the `+exception-handling` baseline even when only some
+translation units use `setjmp`. The older JavaScript-SJLJ lowering additionally
+marked such units with standalone `-shared-mem`. The general object reader
+still ignores that token, and only it, for comparison: both feature lists must
+be canonical and become equal after dropping the standalone token, and neither
+may carry any other `shared-mem` or `atomics`
 entry (`+shared-mem`, `=shared-mem`, `+atomics`, `-atomics`, or `=atomics`).
 Every other feature, including a lookalike name such as
 `-shared-mem+atomics`, still matches exactly
 ([Static compiled modules](static-compiled-modules.md#relocatable-webassembly)).
-A Wasm-exceptions mode
-would need coordinated Lua, Titan, and generated-code settings; the `sjlj` and
-`wasm_features` checks and the unsupported `-fwasm-exceptions` flag reject it.
+The exact EH encoding is additionally pinned by the explicit legacy setting
+in `cflags`; the feature name alone does not distinguish the encodings.
+Native exception switches remain unsupported: Wasm SJLJ is selected by
+`SUPPORT_LONGJMP=wasm`, not by enabling C++ exceptions with `-fwasm-exceptions`.
 
 ### Record diagnostics
 
@@ -973,8 +947,7 @@ strings without NUL, CR, or LF; paths are normalized absolute paths):
   trace_control = boolean,       -- the harness level hook; optional on import
   include_dirs = { string, ... },
   target_defines = { "-DTITAN_TARGET_BROWSER=1",
-    "-DTITAN_COROUTINE_STACK_SIZE=262144", "-DTITAN_CODEC_DEPTH_LIMIT=43",
-    "-DTITAN_JSON_WRITER_DEPTH_LIMIT=103", "-DMCO_ASYNCFY_STACK_SIZE=65536" },
+    "-DTITAN_COROUTINE_STACK_SIZE=262144" },
   paths = <installed_paths(root, "browser")>,
   lua = { path = string, record = <the ten record fields>, record_sha256 = hex },
   profile_data = <csemantics.export_profile(profile)>, profile_identity = string,
@@ -1001,13 +974,10 @@ context-owned (`context.target_profile`), never stored in the frozen graph.
    `--std=c99`, then `-O1 -fno-inline -fno-optimize-sibling-calls`
    (`validation`) or `-O3` (`production`), then `-Wall`,
    `-Wno-unused-but-set-variable`, `-Wno-unused-function`,
-   `-gline-tables-only`, and `-sSUPPORT_LONGJMP=emscripten`;
+   `-gline-tables-only`, `-sSUPPORT_LONGJMP=wasm`, and `-sWASM_LEGACY_EXCEPTIONS=1`;
 2. the record's `lua_defines`, in record order;
 3. the ordered `target_defines`: `-DTITAN_TARGET_BROWSER=1`,
-   `-DTITAN_COROUTINE_STACK_SIZE=262144`, `-DTITAN_CODEC_DEPTH_LIMIT=43`,
-   `-DTITAN_JSON_WRITER_DEPTH_LIMIT=103` ([nesting
-   limits](#nesting-limits)), and `-DMCO_ASYNCFY_STACK_SIZE=65536`
-   (minicoro's own `ASYNCFY` spelling); and
+   `-DTITAN_COROUTINE_STACK_SIZE=262144`; and
 4. the normalized invocation compile extras: `driver.NATIVE_COMPILE_FLAGS`
    when `titanc` installed them (environment extras, then CLI `-I`, `-D`, and
    `--cflag` in written order), otherwise `TITAN_EXTRA_CPPFLAGS` followed by
@@ -1026,7 +996,7 @@ files and leaves the final `.wasm.map` without `.titan` source attributions;
 passes `-gsource-map -g2` to emit the source map and retain the Wasm `name`
 section. Lua's own `-O2` and debug policy in `liblua.a` stay independent
 because Lua C frames are filtered out of Titan traces. The host descriptor
-emits no new define. Validation requires all five target defines in this order
+emits no new define. Validation requires both target defines in this order
 (`inconsistent browser target defines`) and requires each in
 `compile_flags` (`browser target descriptor is missing required compile flag
 "<flag>"`), so build, import, and fixtures agree. The target defines reach
@@ -1034,12 +1004,9 @@ generated C, `--c-source` nodes, C probes, and FFI header preprocessing,
 because all of them use the same prefix, so the standard library and C headers
 read target constants through `foreign import`: `titan/coroutine.titan` reads
 `ffi.TITAN_COROUTINE_STACK_SIZE` ([Coroutines](coroutines.md#stacks-and-backends)),
-`titan/protobuf/protobuf.titan` and `titan-runtime/transfer.h` read
-`TITAN_CODEC_DEPTH_LIMIT`, `titan/json/json.titan` caches
-`ffi.TITAN_JSON_WRITER_DEPTH_LIMIT` from `titan.h`, and the Emscripten fiber backend in
-`minicoro.h` sizes its Asyncify buffers with `MCO_ASYNCFY_STACK_SIZE`. Each
-header keeps its native default under `#ifndef`, so native builds are
-unchanged. Because a measurement
+and the coroutine allocation uses that disjoint linear C stack independently
+of its engine-managed JSPI continuation. Codec nesting uses the common
+native policy and JSON has no target writer cap. Because a measurement
 optimization is part of the descriptor, probes, generated objects, authored C,
 and imported worker descriptors all compile and certify the same
 configuration, and an O1 and an O2 build need separate output trees.
@@ -1196,23 +1163,27 @@ recovery, selection snapshots, or finalization) ever sees one.
 
 ## Unsupported flags
 
-A browser invocation rejects these flags wherever they appear:
+A browser invocation rejects these explicitly spelled flags:
 
 `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-pie`, `-shared`, `-dynamiclib`,
 `-rdynamic`, `-pthread`, `-flto`, `-flto=*`, `-ffat-lto-objects`, `-march=*`,
-`-mcpu=*`, `-mtune=*`, `-m32`, `-m64`, `-fwasm-exceptions`, and any
-`-sSUPPORT_LONGJMP` setting other than `emscripten` (joined
-`-sSUPPORT_LONGJMP=<mode>` or split `-s SUPPORT_LONGJMP=<mode>`).
+`-mcpu=*`, `-mtune=*`, `-m32`, `-m64`, `-f[no-]wasm-exceptions`,
+`-m[no-]exception-handling`, `-m[no-]legacy-exception-handling`, and any
+`-sSUPPORT_LONGJMP` setting other than `wasm` or `-sWASM_LEGACY_EXCEPTIONS`
+setting other than 1 (joined, split, bare, and boolean `NO_` aliases included).
 
 The diagnostic is `browser target does not support <origin> flag "<flag>"`,
 where `<origin>` is `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`,
 `TITAN_EXTRA_LDFLAGS`, `--cflag` (the normalized compile extras, and
 per-request `extra_compile_flags`), `--ldflag` (the normalized link extras),
-or `compile_flags` for direct `browsertarget.build` inputs. A split longjmp
-setting quotes both words. Flags are never dropped silently. `-fno-lto` is
-harmless and accepted, as are the bare and `=1` longjmp spellings. Inside the
-record, the same check reports `invalid field "cflags": browser target does
-not support cflags flag "<flag>"`.
+or `compile_flags` for direct `browsertarget.build` inputs. A split setting
+quotes both words. Flags are never dropped silently. `-fno-lto` is harmless
+and accepted. Bare and `=1` longjmp settings select the wrong mode and are
+rejected; bare legacy EH and `NO_WASM_LEGACY_EXCEPTIONS=0` mean legacy EH is
+enabled. Inside the record, the same check reports
+`invalid field "cflags": browser target does not support cflags flag "<flag>"`.
+
+Browser tool spawns clear ambient `EMCC_CFLAGS`; deliberate EH overrides through opaque argument channels (`@file`, `-mllvm`, `-Xclang`, or `-Xlinker`) are unsupported and are not parsed by this check.
 
 Emscripten has no fat Wasm objects: `-flto` produces bare LLVM bitcode with no
 data segments to read. The descriptor never adds LTO and the Wasm reader
@@ -1250,7 +1221,8 @@ flags](#object-flags)).
 `trace_option` flags in the normalized compile and link extras and final link
 extras unless `options.purpose` is `baseline`, `minicoro`, or `budget`, as well
 as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
-`NO_` prefix, of `SUPPORT_LONGJMP`, `ASYNCIFY` and every `ASYNCIFY_*` setting,
+`NO_` prefix, of `SUPPORT_LONGJMP`, `WASM_LEGACY_EXCEPTIONS`, `ASYNCIFY`,
+every `ASYNCIFY_*` setting, `JSPI`, every `JSPI_*` setting,
 `BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
 `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
@@ -1554,7 +1526,7 @@ dispatches to `driver.stage_browser_provider`:
    unchanged-archive shortcut or renames the staged archive over the
    destination as the commit point.
 
-Before linking, `titanc` requires the SDK and a working Node 24
+Before linking, `titanc` requires the SDK and a working Node 26+
 (`driver.browser_node_ready`, below) for every library build, and records the
 `protocol` link profile and the runner's probe report in the link policy.
 Structural validation, the companion refusal, and publication are specified in
@@ -1577,8 +1549,8 @@ identity_inputs}`. Every image, including the protocol probe and test-owned
 C images, links through it; neither the Makefile nor a test duplicates the
 flag list.
 
-`options` is closed: `purpose`, `assertions`, `optimization`, `asyncify`,
-`budgets`, and `entry` (`unknown browser link profile option <key>`).
+`options` is closed: `purpose`, `assertions`, `optimization`, `budgets`, and
+`entry` (`unknown browser link profile option <key>`).
 
 * `purpose` is `program`, `test`, `protocol`, `gate`, `minicoro`, `budget`,
   or `baseline` (`invalid browser link profile purpose`). Programs use
@@ -1586,14 +1558,11 @@ flag list.
   `protocol`; the others serve the runtime-evidence and measurement harnesses.
 * `assertions` is required and is 0 or 2 (`browser assertions must be 0 or
   2`).
-* `asyncify` defaults to true; only `minicoro` and `baseline` may turn it off,
-  for named control measurements (`this browser link profile requires
-  Asyncify`).
 * `optimization` is `O1` or `O2`, only for `minicoro`, `budget`, and
   `baseline` (`invalid browser link optimization override`); it yields
   `compile_flags = {"-O1"}` or `{"-O2"}` and the matching link flag.
-* `budgets` overrides `stack_size`, `asyncify_stack_size` (positive multiples
-  of 16), `initial_memory`, and `maximum_memory` (positive multiples of 65536,
+* `budgets` overrides `stack_size` (a positive multiple of 16),
+  `initial_memory`, and `maximum_memory` (positive multiples of 65536,
   initial at most maximum, maximum at most 2147483648), only for `budget`
   (`browser budget overrides require the budget profile`, `invalid browser
   budget override <key>`, `invalid browser memory budgets`).
@@ -1609,27 +1578,27 @@ flag list.
 | Flags | Purpose |
 | --- | --- |
 | `<level>`, then `-fno-inline -fno-optimize-sibling-calls` except for a production `program`, then `-gsource-map -g2` | the level is the `optimization` override or else the descriptor's last `-O` flag (`-O1` for validation, `-O3` for production), so the link optimizes like its objects; a production program accepts the frames that inlining costs, while every other profile and purpose keeps the frame flags ([Link flags per purpose](#link-flags-per-purpose)); `-gsource-map -g2` writes the source map and keeps the Wasm `name` section in every profile |
-| `-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals`, plus `,--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` for a production `test` image | D18's post-Asyncify local cleanup, in every Titan-entry profile (`entry == "titan"`, omitted for `lua-main`); `emcc` runs `BINARYEN_EXTRA_PASSES` after `--asyncify` ([pass order](#binaryen-pass-order)). At link `-O1`, `emcc` runs no other Binaryen pass, and Asyncify inflated large coroutine functions (`coroutine_tests_ℳ_unwind_innermost_frame_titan`, from 1,072 to 126,402 locals) past V8's 50,000-local WebAssembly validation limit (`local count too large`); `simplify-locals,reorder-locals` kept that function at 1,396 locals (module maximum 3,431) without inlining or dropping physical frames or line mappings. The same passes set the validation profile's per-level engine-stack cost ([why they are load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)), and the two skips keep a production test image's frames ([test images](#test-images)) |
-| `-sASYNCIFY=1` | minicoro's Emscripten fiber backend refuses to create fibers without Asyncify, and Asyncify carries the outer suspension. Indirect calls keep the default conservative instrumentation: closures and the module ABI call through function pointers, so there are no `ASYNCIFY_IGNORE_INDIRECT`, `ASYNCIFY_ONLY`, or `ASYNCIFY_REMOVE` lists. `-sASYNCIFY=0` only for a control. |
-| `-sSUPPORT_LONGJMP=<sjlj>` | the record's verified longjmp mode, `emscripten`, matching `liblua.a` and `titan.h` |
-| `-sSTACK_SIZE=1048576`, `-sASYNCIFY_STACK_SIZE=65536` | the main C stack and the outer Asyncify data budget ([Budgets](#budgets)); the second only with Asyncify |
+| `-sBINARYEN_EXTRA_PASSES=--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` only for a production `test` image | retain distinct physical functions for test traces; JSPI needs no instrumentation-local cleanup passes |
+| `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"] -sJSPI_EXPORTS=["titan_browser_entry","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports. The `gate` purpose adds its guarded export and `emscripten_sleep`; the interpreter baseline promises `main`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
+| `-sSUPPORT_LONGJMP=<sjlj> -sWASM_LEGACY_EXCEPTIONS=1` | the record's verified longjmp mode, `wasm`, with Emscripten 6.0.13's legacy EH encoding, matching every object and `liblua.a` |
+| `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
 | `-sINITIAL_MEMORY=16777216 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
 | `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
 | `-sFORCE_FILESYSTEM=1` | keeps Emscripten's filesystem and TTY layer in every image (see below) |
 | `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
 | `-sEXPORTED_FUNCTIONS=["_titan_browser_entry","_titan_browser_trace_identity","_malloc","_free"]` | the entry, the 64-hex image identity export, and heap allocation for argument marshalling; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
-| `-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]` | the Asyncify-aware call path and the heap view used by the loader |
+| `-sEXPORTED_RUNTIME_METHODS=["ccall","HEAPU8"]` | the promised entry call and current heap view used by the loader |
 | `-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]` | the only module options the loader passes |
 | `--js-library <sdk>/titan-browser-library.js`, `--js-library <sdk>/titan-browser-trace.js` | the completion/admission and eager trace-map/stack-capture imports (omitted for `lua-main`) |
-| `-sASSERTIONS=<0\|2> -sSTACK_OVERFLOW_CHECK=2` | Emscripten detects reentry corruption only with assertions; the suites also pass with assertions off; stack checking stays on in both |
+| `-sASSERTIONS=<0\|2> -sSTACK_OVERFLOW_CHECK=2` | assertions are selectable; linear-stack bounds/cookies are restored on every JSPI context transition in either mode |
 
 `compile_flags` is empty without an override. `identity_inputs` is plain data,
 exactly `{target_identity, profile, purpose, entry, assertions, optimization,
-asyncify, budgets, link_flags, compile_flags}`, where `profile` is the
+backend, budgets, link_flags, compile_flags}`, where `backend` is `"jspi"`, `profile` is the
 descriptor's `build_profile`, `optimization` is the override or
 else the last `-O` flag of the descriptor's compile prefix and `budgets` holds
-all four effective sizes. Image certificates hash it together with the content
+all three effective sizes. Image certificates hash it together with the content
 of the referenced SDK assets, so a budget, profile, or JavaScript library
 change relinks, and incompatible variants use separate output trees.
 
@@ -1734,11 +1703,12 @@ object prefix:
 
 | Profile | Owned object flags |
 | --- | --- |
-| `validation` | `--std=c99 -O1 -fno-inline -fno-optimize-sibling-calls -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=emscripten` |
-| `production` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=emscripten` |
+| `validation` | `--std=c99 -O1 -fno-inline -fno-optimize-sibling-calls -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` |
+| `production` | `--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -gline-tables-only -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` |
 
-`validation` is #330's frozen profile, flag for flag. The production level is
-the one constant `PRODUCTION_LEVEL = "-O3"`, the native production level,
+`validation` retains #330's physical-frame settings with the coordinated
+Wasm-EH longjmp change. The production level is the one constant
+`PRODUCTION_LEVEL = "-O3"`, the native production level,
 chosen over `-O2` by [measurement](#measurements) (D34). Both profiles keep
 `-gline-tables-only` ([why not `-g2`](#compile-prefix-and-target-defines)),
 the warnings, and the longjmp mode; the record's `lua_defines` and the target
@@ -1761,10 +1731,10 @@ everywhere except a production program:
 
 | Profile | Purpose | Level and frame flags | `-sBINARYEN_EXTRA_PASSES=` |
 | --- | --- | --- | --- |
-| `validation` | every purpose | `-O1` (or the harness level) `-fno-inline -fno-optimize-sibling-calls` | `simplify-locals,reorder-locals` |
-| `production` | `program` | `-O3` | `simplify-locals,reorder-locals` |
-| `production` | `test` | `-O3 -fno-inline -fno-optimize-sibling-calls` | `simplify-locals,reorder-locals,--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` |
-| `production` | `protocol`, `gate`, `minicoro`, `budget`, `baseline` | `-O3` (or the harness level) `-fno-inline -fno-optimize-sibling-calls` | `simplify-locals,reorder-locals` |
+| `validation` | every purpose | `-O1` (or the harness level) `-fno-inline -fno-optimize-sibling-calls` | omitted |
+| `production` | `program` | `-O3` | omitted |
+| `production` | `test` | `-O3 -fno-inline -fno-optimize-sibling-calls` | `--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` |
+| `production` | `protocol`, `gate`, `minicoro`, `budget`, `baseline` | `-O3` (or the harness level) `-fno-inline -fno-optimize-sibling-calls` | omitted |
 
 `-gsource-map -g2` and the rest of [the link profile](#the-link-profile)
 follow in every row, and the pass list is omitted for the `lua-main` entry. A
@@ -1777,37 +1747,12 @@ names `test` for its test image and `program` for its uncaught image.
 
 ### Binaryen pass order
 
-In emsdk 6.0.13 the Binaryen optimizer runs only at link `-O2` and above
-(`should_run_binaryen_optimizer()` in `tools/link.py`), and
-`get_binaryen_passes()` lists the level's pipeline, then `--asyncify`, then
-`BINARYEN_EXTRA_PASSES`. The `wasm-opt` command that `EMCC_DEBUG=1` logs for a
-production program link at assertions 2 is (Asyncify import list and file
-arguments shortened):
+JSPI does not run a Wasm stack-rewriting pass. Production test images still
+skip Binaryen's inlining and duplicate-function elimination because physical
+trace identity is part of their contract. The old post-instrumentation
+`simplify-locals,reorder-locals` workaround is removed rather than carried
+into this backend.
 
-```text
-wasm-opt --strip-target-features --post-emscripten -O3 --low-memory-unused
-  --asyncify --pass-arg=asyncify-asserts --pass-arg=asyncify-propagate-addlist
-  --pass-arg=asyncify-imports@env.invoke_*,env.__asyncjs__*,...
-  --zero-filled-memory --pass-arg=directize-initial-contents-immutable
-  --simplify-locals --reorder-locals ...
-```
-
-A production test link ends `--simplify-locals --reorder-locals
---skip-pass=inlining-optimizing --skip-pass=duplicate-function-elimination`
-instead. The optimized link therefore optimizes before Asyncify, and
-`BINARYEN_EXTRA_PASSES` is the only thing that runs after it, as at `-O1`,
-where no level pipeline runs at all. Because `-gsource-map` keeps DWARF
-through the optimizer, `emcc` also warns `running limited binaryen
-optimizations because DWARF info requested (or indirectly required)`;
-inlining and duplicate-function elimination still run, as the test-image
-findings below show.
-
-`BINARYEN_PASS_DEBUG=1` cannot record these links: it validates the module
-after every pass, and the pinned binaryen 133 rejects the output of the
-`stack-check` pass that `wasm-emscripten-finalize --check-stack-overflow` runs
-for `-sSTACK_OVERFLOW_CHECK=2` (`Fatal: Last pass (stack-check) broke
-validation`), which aborts the link. The pass order above is `emcc`'s own
-`EMCC_DEBUG=1` log of the `wasm-opt` argv (D31).
 
 ### Test images
 
@@ -1825,11 +1770,11 @@ asserts, as native `--test` keeps its own (D25):
 * **No Binaryen inlining.** The `test` purpose adds
   `--skip-pass=inlining-optimizing` to `BINARYEN_EXTRA_PASSES`. `--skip-pass`
   is a `wasm-opt` option, not a pass: it disables the named pass wherever it
-  runs, including inside the `-O3` pipeline before `--asyncify`, so its place
-  after `--asyncify` in the argv does not matter. The pipeline's pass is named
-  `inlining-optimizing`; `--skip-pass=inlining` disables nothing. With the
-  skip, `inlining-optimizing` took 3.7e-07 s against 0.010 s without it, and
-  the output differed.
+  runs in the selected optimization pipeline; its position relative to other
+  pass arguments does not matter. The pipeline's pass is named
+  `inlining-optimizing`; `--skip-pass=inlining` disables nothing. An earlier
+  pass-timing control measured 3.7e-07 s with the skip against 0.010 s without
+  it, and the output differed.
 * **No duplicate-function folding (D31).** With only inlining skipped, four
   production test-image rows lost frames: `test_selected_contributor_locations`
   and `test_locations_before_after_yield` (`locations.browser.titan`), and
@@ -1856,32 +1801,14 @@ appear. Test-image and validation rows stay byte-exact. The gate takes the
 installation profile from `manifest.json` and fails without a valid one, so a
 missing profile cannot weaken a production program row.
 
-### Why the post-Asyncify cleanup is load-bearing
+### Historical instrumentation measurements
 
-D18 added `simplify-locals,reorder-locals` after `--asyncify` to keep
-Asyncify-inflated functions under V8's locals limit. The same passes set the
-validation profile's engine-stack cost per level (D30). With Lua's limit out
-of the way (a session-only `-DLUAI_MAXCCALLS=60000` install), the validation
-trace image measured for #343 reaches 318 mixed Lua/Titan levels on Node and
-320 on Chromium at assertions 2. The same image linked without the two passes
-reaches
-29 on both, its whole-image maximum rises from 2,012 to 38,683 locals
-(`trace_cases_ℳ_test_defer_failure_titan`), and its `.wasm` and `.wasm.map`
-grow from 5,148,243 and 1,234,920 to 6,638,213 and 2,754,427 bytes.
+The #330/#343 instrumentation-local and engine-stack measurements used
+JavaScript SJLJ and Asyncify, before the Wasm-EH and JSPI cutovers. Their
+transformation-dependent local counts and recursion ceilings do not describe
+current images or justify a current pass list. The surviving production-test
+skips preserve trace identity independently of the coroutine backend.
 
-That reproduces #330's D16 table (29 levels pass and 30 fail on V8) exactly:
-D16 was measured on images built before D18's passes landed, and its estimate
-of about 30 KB of engine stack per level is the pre-D18 cost (984 KB / 29 ≈
-34 KB), against 2.92 KB per level with the passes. On the same base with the
-passes in place, all four engines reached Lua's default limit first (195
-levels pass, 196 fail), so D16's ceilings are not inputs to the [C-call
-limit](#the-browser-c-call-limit).
-
-In production the passes are optional: without them the `-O3` mixed ceiling
-stays above 1,200 levels, and with them the `.wasm` is 14,486 bytes larger,
-the `.wasm.map` 33,050 bytes smaller, and the maximum 100 locals instead of
-102. Production keeps them (D34), so both profiles share one post-Asyncify
-pass list.
 
 ### The harness level hook
 
@@ -1906,8 +1833,9 @@ the measurement and budget specs. Production builds stay at
 
 ### Measurements
 
-Measured for #343 with Emscripten 6.0.13, Node 24.19.0, host Chrome
-156.0.8078.79, and Playwright 1.56.1's Firefox 142.0.1 and WebKit 26.0, one
+Measured for #343 before the Wasm-EH cutover, using JavaScript SJLJ with
+Emscripten 6.0.13, Node 24.19.0, host Chrome 156.0.8078.79, and
+Playwright 1.56.1's Firefox 142.0.1 and WebKit 26.0, one
 cold process per depth, on the retained trace fixture
 (`spec/fixtures/browser_trace`) and its session-only measurement copy. `-O2`
 is the same tree with `PRODUCTION_LEVEL` patched for the comparison; it does
@@ -1954,7 +1882,7 @@ least 8.5× on WebKit (more than 4,096/479; 3.8× at assertions 0,
 cell, `pcall` and `coroutine.resume` bind on every engine in both profiles,
 and V8 binds in both profiles: production `pcall` reaches 362 levels on Node,
 against 775 on Firefox and 2,121 on WebKit. Over the measured cells the
-minimum is therefore still 204 counts, under validation at assertions 2 on
+minimum was therefore 204 counts, under validation at assertions 2 on
 Node and Chromium. Validation `pcall` and `coroutine.resume` were measured at
 assertions 0 only on Node, where they reach 204 levels against 201 at
 assertions 2.
@@ -2063,7 +1991,7 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    with `browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)` so
    that `x_titan_image`, `x_titan_function_imports`,
    `x_titan_function_ranges`, and `x_titan_function_names` are bound to the
-   final post-Asyncify `.wasm`;
+   final linked `.wasm`;
 6. run `before_commit` (which invalidates the link record);
 7. validate that any existing destination in `{ <stem>.wasm.map, <stem>.wasm,
    <stem>.mjs }` is a regular file (`browser output '<path>' is not a regular
@@ -2117,7 +2045,7 @@ name, and a zero-length argument need not have a valid pointer. The return
 value is admission only, never the program's result: `-1` while another call
 is active or when `titan_browser_entry_allowed()` refuses ([Reentry
 guard](#the-reentry-guard)), `-2` after the one permitted run, and `0` after an
-admitted run. A refusal allocates nothing and switches no fiber.
+admitted run. A refusal allocates nothing and transfers no coroutine context.
 
 An admitted run:
 
@@ -2219,7 +2147,7 @@ system or JavaScript library (such as `-lidbfs.js`) that the static archive
 resolver cannot inventory still links: its flag text remains in `link_flags`
 within `browsertrace.identity` while the CLI marks the native link policy
 uncacheable and withholds the link record and reuse. No timestamps, random
-staging paths, inodes, process IDs, or pre-Asyncify Wasm digests enter the
+staging paths, inodes, process IDs, or intermediate Wasm digests enter the
 hash. `browsertrace.declaration(identity)` then appends:
 
 ```c
@@ -2231,11 +2159,11 @@ const char *titan_browser_trace_identity(void) {
 
 `_titan_browser_trace_identity` is exported in every Titan-entry profile and
 accessed in `titan-browser-trace.js` with a static property lookup
-`wasmExports['titan_browser_trace_identity']` so Emscripten export minification
-preserves it. Calling it returns the Wasm memory address of the 65-byte
-NUL-terminated ASCII string.
+`wasmExports['titan_browser_trace_identity']`; the pinned JSPI linker keeps
+export names stable. Calling it returns the Wasm memory address of the
+65-byte NUL-terminated ASCII string.
 
-After `emcc` finishes linking and running Asyncify/optimization,
+After `emcc` finishes linking and optimization,
 `browsertrace.rewrite(wasm, bytes, identity, origin)` calls
 `staticmetadata.browser_trace_image(wasm, origin)` (which reuses the bounded
 section and LEB128 reader primitives in `staticmetadata.lua`, accepting valid
@@ -2355,8 +2283,8 @@ Before finalizing the stack parser and WebKit renderer, a synthetic C/JS survey
 (324 raw stack captures across nine call topologies, named and `name`-stripped
 binaries, and default versus raised `Error.stackTraceLimit`) was recorded with
 Emscripten 6.0.13 and `-O1 -fno-inline -fno-optimize-sibling-calls -gsource-map
--g2` (today's validation link flags) plus the base Asyncify/longjmp link
-profile across six engines:
+-g2` (the validation frame flags), with the historical JavaScript-SJLJ
+Asyncify profile across six engines:
 
 | Engine | Version | Platform |
 | --- | --- | --- |
@@ -2367,7 +2295,10 @@ profile across six engines:
 | Host Chrome / V8 | 156.0.8078.79 (V8 15.6.75.27) | Linux x64 |
 | Safari / JSC | 27.0.1 (macOS 27.0.1, build 26A434) | macOS arm64 (Apple M1) |
 
-The survey established six implementation facts:
+The survey recorded the following behavior on those versions and binaries.
+Its historical depth and descriptor observations are not universal engine
+rules; the current [capture contract](error-handling.md) follows the JSPI
+runtime and its current-engine tests.
 
 1. **V8 (Node, Chromium, host Chrome)** formats frames as
    `    at <module>.<func> (<url>:wasm-function[<N>]:0x<PC>)` when the `name`
@@ -2378,11 +2309,13 @@ The survey established six implementation facts:
 2. **SpiderMonkey (Firefox)** formats frames as
    `<name>@<url>:wasm-function[<N>]:0x<PC>` (with an empty `<name>` when
    stripped) and no `Error` title line. After an outer or fiber
-   `emscripten_sleep`, Firefox appends saved asynchronous ancestry starting at
-   a frame line prefixed with `async*` (such as `async*handleSleep@...`), which
-   repeats earlier suspended Wasm activations (`fiber_entry`, `survey_run`). The
-   parser must stop at the first `async*` line rather than merely skipping
-   JS-shaped lines.
+   `emscripten_sleep`, the surveyed Firefox appended saved asynchronous
+   ancestry starting at a frame line prefixed with `async*` (such as
+   `async*handleSleep@...`), repeating earlier suspended Wasm activations
+   (`fiber_entry`, `survey_run`). Current JSPI captures also expose
+   `VoidFunction*`, `promise callback*`, and `setTimeout handler*` causes.
+   The parser stops before any saved-JavaScript-parent cause boundary, rather
+   than merely skipping JS-shaped lines and retaining their saved Wasm callers.
 3. **JavaScriptCore (Playwright WebKit and Safari)** formats named frames as
    `<func>@<image>.wasm:wasm-function[<N>]` and stripped or cold frames as
    `<N>@wasm-function[<N>]`, with no `Error` title line and no bytecode offset
@@ -2399,23 +2332,20 @@ The survey established six implementation facts:
    fiber, the physical stack ends at `fiber_entry`, `_mco_main`,
    `_mco_wrap_main`, and `dynCall_vi`; the resumer's native frames are absent
    and are supplied by `TITAN_TRACE_APPEND_KEY`.
-5. **Effective depth limits (`Object.defineProperty` versus assignment).** Default
-   `Error.stackTraceLimit` is 10 on V8 (leaving 9 Wasm frames), 100 on JSC, and
-   absent on Firefox. Raising `Error.stackTraceLimit` via
-   `Object.defineProperty` (which avoids invoking host setters) raises V8's
-   capture depth as requested (615 frames captured for a 600-edge recursion at
-   limit 1000). On JSC, `Object.defineProperty` updates the visible property
-   value without updating JSC's hidden capture limit, which stays at 100 total
-   frames (whereas direct `=` assignment updates the hidden state but cannot be
-   used or restored through descriptors without side effects), and deleting
-   `Error.stackTraceLimit` makes `new Error().stack` return `undefined` for the
-   rest of that JSC realm even after `Object.defineProperty` redefines it (so
-   captures in a JSC realm where `Error.stackTraceLimit` was deleted return
-   `CAPTURE_FAILED`). On Firefox,
-   neither `Object.defineProperty` nor `=` assignment raises synchronous capture
-   past 128 frames. Both the 100-frame WebKit limit (D10) and the 128-frame
-   Firefox synchronous ceiling (D11) are therefore documented engine truncation
-   boundaries that set `TRUNCATED`.
+5. **Observed depth limits (`Object.defineProperty` versus assignment).** In
+   the surveyed versions, default `Error.stackTraceLimit` was 10 on V8
+   (leaving 9 Wasm frames), 100 on JSC, and absent on Firefox. Raising the
+   property through `Object.defineProperty` raised V8's capture depth as
+   requested (615 frames for a 600-edge recursion at limit 1000). On the
+   surveyed JSC builds it changed the visible property but not the hidden
+   100-frame limit, while direct assignment updated that hidden state.
+   Deleting the property made `.stack` return `undefined` even after descriptor
+   restoration. These observations motivated the original JSC 100-frame
+   inference and isolated-realm test. Current WebKit 27.2 honors the temporary
+   descriptor and captures normally after the property was absent; neither
+   historical workaround remains. Firefox's surveyed 128-frame synchronous
+   ceiling is still observed in current JSPI captures and still marks
+   truncation.
 6. **JS wrapper headroom.** In the 48-recursion survey cases, up to 12 non-Wasm
    frames interleaved with 54 Wasm frames on V8. Requesting 640 frames (512
    Wasm capacity + 128 headroom) covers normal wrapper overhead, and the
@@ -2424,65 +2354,29 @@ The survey established six implementation facts:
 
 ## Budgets
 
-Every stack and memory budget is explicit and part of the image or SDK
-identity:
+Linear stack and heap sizes are explicit image/SDK identity inputs:
 
-| Budget | Setting | Emscripten 6.0.13 default | Notes |
-| --- | --- | --- | --- |
-| Main C stack | `-sSTACK_SIZE=1048576` | 64 KiB | The shadow stack for Lua C recursion and compiled Titan frames; native frames also use the engine's own stack. |
-| Coroutine C stack | `-DTITAN_COROUTINE_STACK_SIZE=262144` (target define) | `titan.h` default 2 MiB | minicoro's virtual-memory allocator commits each stack eagerly when a coroutine is created and reclaims it (`munmap`) for reuse when the coroutine is destroyed; the grown WebAssembly linear memory does not shrink. |
-| Outer Asyncify data | `-sASYNCIFY_STACK_SIZE=65536` | 4096 B | Allocated with `malloc` for each outer suspension. |
-| Fiber Asyncify data | `-DMCO_ASYNCFY_STACK_SIZE=65536` (target define) | 16384 B | Added to every coroutine's allocation and to one static main-context buffer. |
-| Linear memory | `-sINITIAL_MEMORY=16777216`, growth on, `-sMAXIMUM_MEMORY=2147483648` | growth off; 2 GiB maximum | The heap never shrinks after coroutines are destroyed, although freed blocks are reused. |
+| Resource | Setting | Ownership |
+| --- | --- | --- |
+| Main linear C stack | `-sSTACK_SIZE=1048576` | the root entry's address-taken locals and Lua/Titan protected-call data |
+| Coroutine linear C stack | `-DTITAN_COROUTINE_STACK_SIZE=262144` | one disjoint minicoro allocation; native default remains 2 MiB |
+| Linear memory | `-sINITIAL_MEMORY=16777216 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648` | freed blocks can be reused but the grown Wasm heap never shrinks |
+| Engine continuation stacks | JSPI engine-managed | not bounded by the linear C-stack sizes |
 
-`spec/coder/browser_budgets_spec.lua` measures each budget just below and just
-above its delivered limit with one-case Titan test images
-(`spec/fixtures/browser_runtime/budget_probe.titan`, with the C helpers
-`budget.c`, `budget_pad.c`, and `budget.h`) linked through the `budget`
-profile, in all four cells (Node 24.19.0 and Chrome for Testing
-156.0.8078.80, each with assertions 2 and 0). Every boundary is identical
-across the four cells:
+`STACK_OVERFLOW_CHECK=2` stays enabled. Each switch saves SP and the current
+stack base/end, restores the destination limits and SP before its Wasm
+continuation executes, and checks its stack cookie. New stacks receive
+their own cookies; memory views are never retained across memory growth.
 
-| Probe | Budget | Largest safe | First failing | Failure above the limit |
-| --- | --- | ---: | ---: | --- |
-| Titan recursion, 304 B frames | main C stack | 3424 frames | 3425 | abort (70): `Aborted(stack overflow (Attempt to set SP to ..., with stack limits [...]) ...)` |
-| Fixed 256 B and 16 B C frames | main C stack | 1041632 B | 1041648 B | abort (70), `stack overflow`; 6944 B are used by entry and runner frames |
-| Titan recursion in a coroutine | coroutine C stack | 855 frames | 856 | abort (70), `stack overflow` |
-| Fixed C frames in a coroutine, without yielding | coroutine C stack | 260704 B | 260720 B | abort (70), `stack overflow`; 1440 B are used by the coroutine entry |
-| 4 Titan + 5 Lua + n 32-register C frames across `emscripten_sleep(1)` | outer Asyncify data | 407 | 408 | trap (71), `unreachable`; the same depth plus 8 without waiting passes |
-| The same mix across a coroutine yield | fiber Asyncify data | 409 | 410 | trap (71), `unreachable`; the same depth plus 8 without yielding passes |
-| The same mix switching from the main context into a coroutine | minicoro's static `main_asyncify_stack` | 405 | 406 | trap (71), `unreachable` |
-| The outer mix with `ASYNCIFY_STACK_SIZE=32768` (a reduced supplement) | outer Asyncify data | 196 | 197 | trap (71), `unreachable` |
+`browser_budgets_spec.lua` measures checked root/coroutine C-stack limits,
+engine-stack limits with live Wasm-register canaries across JSPI waits and
+transfers, the catchable Lua C-call limit, forced native allocation failure,
+and the delivered 2-GiB heap boundary. The parked canary must remain usable
+before exhausted owners are released, and fresh coroutines must work after
+collection. Native allocation failures can be ordinary errors; an engine
+trap or JS allocation failure poisons the instance instead of pretending
+that native cleanup or continuation reuse is safe.
 
-The C stacks are checked: `-sSTACK_OVERFLOW_CHECK=2` bounds-checks every
-function prologue, so an overrun aborts before it writes outside the stack
-(the probes use fixed-size frames because a dynamic `alloca` bypasses that
-check). An Asyncify data overflow is a bare `unreachable` trap whose message
-blames `ASYNCIFY_STACK_SIZE` even when the cause is corruption, so a generic
-`unreachable` is not attribution by itself; the paired no-wait controls are.
-
-The recoverable limits are ordinary errors in every cell:
-
-* plain recursion through nested `pcall` in loaded Lua reaches Lua's own limit
-  (`LUAI_MAXCCALLS`, 100 on the browser) and raises the catchable `C stack
-  overflow` long before the 1 MiB C stack is exhausted, and so does recursion
-  that alternates between Lua and compiled Titan, whose WebAssembly and
-  JavaScript frames per level the [browser C-call
-  limit](#the-browser-c-call-limit) is sized against;
-* a forced `mco_create` failure raises exactly `could not create coroutine:
-  Out of memory`, and a fresh coroutine can then be created and resumed; and
-* creating coroutines while a canary coroutine is parked grows memory through
-  35 heap resizes from 16 MiB to the 2 GiB maximum, where the 5455th creation
-  fails in `mco_create` with that same catchable error after 5454 succeeded.
-  The parked canary still resumes while every owner is live; after the owners
-  are released and collected, memory stays at 2 GiB but a fresh coroutine is
-  created and resumed in the reclaimed space.
-
-Because `-sABORTING_MALLOC=0` makes allocation failure return NULL, running out
-of linear memory never aborts the instance. A coroutine's stack size changes
-only through the target define, which is part of the compile prefix and the
-descriptor identity; the native default stays 2 MiB. At 2 MiB, about 992
-coroutines would fit in 2 GiB; 256 KiB admits 5454.
 
 ## The browser C-call limit
 
@@ -2540,6 +2434,12 @@ another commit.
 
 ### Choosing 100
 
+The measurements in this subsection and [Engine stack per
+construct](#engine-stack-per-construct) used the previous JavaScript-SJLJ
+lowering. They record why 100 was chosen, not the current Wasm-EH engine
+ceilings; 100 is retained until the recursive Lua/C shapes are requalified
+across engines and build profiles.
+
 The value had to be greater than 10 (otherwise `LUAI_MAXCCALLS / 10 * 11` is 0
 and every overflow escalates to error-in-error-handling), at least 20 in
 practice so overflow handling and the two reserved finalizer slots stay
@@ -2553,18 +2453,17 @@ construct on Node, and `pcall`, `coroutine.resume`, and mixed recursion in both
 profiles), so levels and counts differ only by the starting count (2 in the
 mixed fixture, 3 in the construct probe).
 
-The lowest ceiling is 204 counts (201 levels): nested `pcall` and nested
-`coroutine.resume` on V8 (Node and Chromium), validation, assertions 2. Half of
-it is 102, and the maintainer chose 100 (D33). No construct can then reach
-more than 100 counts, against an engine ceiling of 204, a 2.04× margin; the
-fork's comment quotes 2.08×, 204 against the 98 counts at which the mixed
-fixture trips. At
+The lowest historical ceiling was 204 counts (201 levels): nested `pcall` and
+nested `coroutine.resume` on V8 (Node and Chromium), validation, assertions 2.
+Half of it is 102, and the maintainer chose 100 (D33). Against that measured
+ceiling, a limit of 100 gave a 2.04× margin, or 2.08× against the 98 counts at
+which the mixed fixture tripped. At
 Lua's default 200, the same `pcall` chain tripped at 195 levels (198 counts),
 a 1.03× margin, and mixed recursion passed 195 levels and tripped at 196 on
 all four engines in both assertion modes, as a catchable error.
 
-Validation ceilings with Lua's limit out of the way (deepest passing level;
-`-DLUAI_MAXCCALLS=60000`):
+Historical JavaScript-SJLJ validation ceilings with Lua's limit out of the way
+(deepest passing level; `-DLUAI_MAXCCALLS=60000`):
 
 | Engine | Assertions | Mixed Lua/Titan | Nested `pcall` | Nested `coroutine.resume` |
 | --- | ---: | ---: | ---: | ---: |
@@ -2624,8 +2523,8 @@ import and re-enter it through `dynCall_*` under Asyncify's wrapper; for
 of the protected call in `luaD_rawrunprotected`, which runs Lua's `setjmp`.
 The two levels differ in their WebAssembly frames, and the protected-call
 level's frames cost 4,904 − 2,913 ≈ 2 KB more per count. The trampoline's
-JavaScript half cannot be removed while
-Titan closures may suspend (`ASYNCIFY_IGNORE_INDIRECT` would be unsound).
+JavaScript half was a consequence of that historical SJLJ lowering. Wasm EH
+removes it without using the unsound `ASYNCIFY_IGNORE_INDIRECT` shortcut.
 
 Two validation levers were measured and not adopted: adding `--coalesce-locals`
 after `--asyncify` raised the Node mixed ceiling from 318 to 334, removing
@@ -2635,8 +2534,8 @@ after `--asyncify` raised the Node mixed ceiling from 318 to 334, removing
 validation. The only post-Asyncify measurement in production removed D18's
 pair: without it the `-O3` mixed ceiling stays at or above 1,200 levels, the
 `.wasm` is 14 KB smaller, the map 33 KB larger, and the maximum 102 locals
-instead of 100 (D34, [why the cleanup is
-load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)).
+instead of 100 (D34; see the [historical instrumentation
+measurements](#historical-instrumentation-measurements)).
 
 ### The regression
 
@@ -2647,117 +2546,100 @@ load-bearing](#why-the-post-asyncify-cleanup-is-load-bearing)).
   must keep at most 91 `mixed_recurse` frames with at most one truncation
   marker.
 * `test_mixed_recursion_overflow` and `test_pcall_recursion_overflow` recurse
-  toward a bound of 150, above the limit and below every engine ceiling,
+  toward a bound of 150, above Lua's limit and below the historical engine ceilings,
   through `@trace-shape.lua` and through `@trace-pcall.lua`, a Lua chain whose
-  only C boundary is `pcall`, so it costs one count per level (it passes 96
-  levels and trips at 97 on Node). Each must catch exactly `C stack overflow`
+  only C boundary is `pcall`, so it costs one count per level (it passed 96
+  levels and tripped at 97 on the historical Node fixture). Each must catch
+  exactly `C stack overflow`
   with a real capture and return normally. A missing limit reaches the base
   case's `expected C stack overflow` and fails the assertion instead of
-  crashing the engine, which a `-DLUAI_MAXCCALLS=60000` install confirms.
+  crashing the engine, which a `-DLUAI_MAXCCALLS=60000` install confirmed.
 
-All three pass on Node, Chromium, Firefox, and WebKit, at assertions 2 and 0,
-under both profiles. The loader still reports a real engine failure with its
-`cause` ([Settlement](#the-loader)); the C-call limit only keeps Lua's
+All three passed on Node, Chromium, Firefox, and WebKit, at assertions 2 and 0,
+under both profiles before the Wasm-EH cutover. The loader still reports a real
+engine failure with its `cause` ([Settlement](#the-loader)); the C-call limit only keeps Lua's
 recursion from reaching one.
 
-### Direction: JSPI
+### JSPI and protected calls
 
-WebAssembly JavaScript Promise Integration (stack switching at link) is the
-recorded long-term direction. It would remove Asyncify, and with it most of
-the per-level engine-stack cost. It depends on engine support (WebKit's is
-pending) and is a separate design; #343 does not adopt it.
+Wasm-EH longjmp keeps protected-call frames inside Wasm while a JSPI import
+suspends. It does not catch engine traps or change the conservative
+`LUAI_MAXCCALLS=100` browser policy.
 
 ## Completion and output channels
 
-`titan-browser-library.js` defines a private `$TitanBrowser` object inside
-each generated factory, so every instance has its own state; there is no
-process-global instance state. It is installed by the library's postset and
-announces itself to the loader through the internal Module callback
-`titanBrowserAttach`. Its other internal callbacks are
-`titanBrowserSafePoint`, `titanBrowserTrap`, and `titanBrowserComplete`.
+`titan-browser-library.js` owns one private `$TitanBrowser` per generated
+factory. An initialization callback attaches it through
+`Module.titanBrowserAttach`; `titanBrowserSafePoint`, `titanBrowserTrap`,
+and `titanBrowserComplete` are the other internal owner callbacks.
 
-**Completion.** `titan_browser_complete` (signature `viiii`) copies the
-payload with `HEAPU8.slice` while C still owns it, never retaining a heap view,
-passes `(kind, status, bytes, count)` to the loader with an incremented
-completion count, and schedules a safe point. It is the only result channel:
-the loader ignores the entry's return value and the fulfilled value of its
-`ccall` Promise, and Titan never consults `onExit`, `exitJS`,
-`EXIT_RUNTIME`, or `keepRuntimeAlive`, because Emscripten leaks one keepalive
-count per created fiber. `kind` is 0 (returned) or 1 (failed); `status` is a
-signed 32-bit integer.
+**Completion.** `titan_browser_complete` copies `(kind, status, bytes, count)`
+through `HEAPU8.slice` while C owns the source bytes. This record alone owns
+application status and payload. The promised export's fulfillment proves
+engine retirement, not Titan success: the loader waits for both and never
+substitutes a promise value, `onExit`, or Emscripten keepalive state.
 
-**Output.** The factory receives per-byte `stdout(byte)` and `stderr(byte)`
-hooks, which Emscripten's TTY layer calls for every byte (with `null` for a
-flush notification, which is ignored). The hooks only append to a
-stream-local `Uint8Array` that doubles from 1024 bytes; they never decode,
-forward to the console, or call user code while WebAssembly is live.
-`stdin` returns `null`, so reads see end of file and no browser prompt can
-appear.
+**Output.** Per-byte stdout/stderr hooks only buffer bytes, ignoring null
+flush notifications. Stdin returns null. No user sink or unrelated
+notification runs during an internal coroutine transfer, including a
+collector finalizer's cleanup. `safe()` means that the whole logical entry
+has released its owner; buffered streams are delivered only then.
 
-**Safe points.** Sinks run only when `TitanBrowser.safe()` holds: no compiled
-entry is live (`liveDepth` is 0), Asyncify's export call stack is empty, and
-no fiber trampoline is running. The library queues at most one microtask at a
-time that calls `titanBrowserSafePoint(suspensionPending)` when safe, after
-every compiled export returns and after every completion and rewind. A fiber
-switch alone is never a safe point, and nothing is delivered from Asyncify's
-`sleepCallbacks`, which run inside a rewind. Because an already resolved wake
-can run its rewind before the queued microtask, the `doRewind` wrapper first
-delivers the fully unwound batch when safe. The three real delivery points
-are therefore return from a WebAssembly entry, a fully unwound outer
-suspension, and completion after the entrypoint's libc drain.
+### JSPI coroutine contexts
 
-**Pinned seams.** The library wraps four Asyncify functions of Emscripten
-6.0.13 instead of patching emsdk: `instrumentWasmExports` (to collect the
-guarded export identities), `instrumentFunction` (an outer wrapper around each
-export that counts depth, records a `WebAssembly.RuntimeError` as the original
-trap through `titanBrowserTrap`, and schedules a safe point; it is stored in
-`Asyncify.funcWrappers` so that rewinds use it and it stays live through
-`maybeStopUnwind`'s whole fiber trampoline), `handleSleep` (sets
-`suspensionPending` before the compiled caller unwinds and clears it when a
-rewind finishes with no Asyncify data left; `Asyncify.State.Normal` alone is
-not enough, because `currData` survives `stop_unwind`), and `doRewind`.
+The Emscripten branch in `minicoro.h` retains minicoro's SELF/BACK routing,
+tag comparator, stacked-handler state transitions, transfer storage and
+native unwind protocol. A context owns one disjoint linear C stack and a
+JS record keyed by its allocation address. The record holds saved SP,
+base/end bounds, one lifetime promise, a parked gate and its BACK identity.
+Promises do not replace Lua's transfer-uservalue roots.
+
+`titan_mco_transfer` and `titan_mco_destroy` are explicit suspending imports.
+First activation invokes the promised `titan_mco_entry`; subsequent
+activation resolves the existing gate. Both sides suspend, preserving the
+C-visible rule that `mco_resume` returns only when its selected target yields
+or finishes. Tagged yield activates the selected handler's BACK directly;
+intermediate stacked contexts remain parked. Before every continuation runs,
+the driver restores its linear SP and Emscripten stack-limit globals and
+checks its cookie. Engine stacks are separate from those linear allocations.
+
+A terminal transfer records its destination without parking the dead stack
+or waking its resumer. `_mco_main` returns out of the engine invocation
+first; only its lifetime fulfillment activates that destination. Thus a
+resumer can immediately destroy a dead coroutine without freeing storage
+that an engine activation still touches. Never-started destruction just
+removes its record. Raw minicoro destruction of a live parked context rejects
+its gate with a private retirement exception and awaits its engine lifetime
+before returning to the C allocator. Only then is the C context pointer
+cleared. A failed initialization has no context to retire, and repeated
+uninitialization or destroy-after-uninit cannot retire one twice.
+Titan abandoned-stack cleanup does not use that shortcut: its existing
+floor/TRANSFER_UNWIND protocol runs defers, Lua close handlers and error
+retirement to terminal completion first.
 
 ### The reentry guard
 
-Re-entering an instance while an outer suspension is pending aborts with
-`RuntimeError: unreachable`, detected only by assertion-mode checks; a
-guarded export that unwinds or switches fibers must therefore refuse new
-external admission. The guarded exports are `titan_browser_entry` and, in
-gate images, `titan_browser_gate_guarded`; non-suspending exports such as
-`malloc`, `free`, and `titan_browser_gate_observe` stay callable.
+`TitanBrowser.enter(call)` is the direct internal logical-entry hook. It
+acquires admission before invoking a promised Wasm export and keeps it
+through all internal microtasks, collector cleanup and terminal handoffs.
+Concurrent entry rejects with `TITAN_BROWSER_REENTRY`, `browser instance is
+active; reentry is not allowed`. Blocked, failed or completed instances
+refuse new admission. `titan_browser_entry_allowed` consumes the one initial
+C admission; JSPI continuation wakes do not re-enter that C preamble.
 
-The library keeps two depths. `liveDepth` counts every live compiled entry,
-including the internal `invoke_*`/`dynCall_*` reentries of the longjmp
-lowering, and governs safe delivery. `admissionDepth`, the named Titan-facing
-admission depth, counts only live guarded exports. During a rewind,
-`continuing` holds the admission depth of the admitted continuation (one more
-when the rewound function is itself guarded). `titan_browser_entry_allowed`
-(signature `i`) returns 1 when the call is that admitted continuation at its
-exact depth, or when the instance is not blocked, has no terminal failure, has
-not completed, has no pending suspension, and the caller is the only live
-guarded export (`admissionDepth == 1`; without Asyncify, in control images,
-the depth condition is dropped). Keeping the internal longjmp reentries out of
-`admissionDepth` is what lets a ready raw guarded call through while a
-suspended one is refused. The C entry consults this import after its own
-active and used flags, and the loader checks the same state before it
-marshals anything.
+Initialization wraps the general Module exports `titan_browser_entry` and
+the gate's `titan_browser_gate_guarded` with this hook. Static
+`wasmExports[...]` accesses retain the explicit identity. Emscripten 6.0.13
+disables import/export minification for JSPI, including O2/shrink controls;
+the optimized guard fixture asserts that pinned naming contract. The driver's
+lexical engine-entry export remains private; its published Module alias
+always rejects outside use. C-only state-neutral exports such as malloc,
+free, trace identity and the gate observer remain synchronous.
 
-The guarded identities are read with static property accesses,
-`wasmExports['titan_browser_entry']` and
-`wasmExports['titan_browser_gate_guarded']`. Emscripten's export-name
-minification rewrites static accesses but not a dynamic `exports[name]`
-lookup, so the guard survives minified images. The pinned Emscripten runs that
-minification (`will_metadce`) only at `-O3` or a shrink level (`-Os`, `-Oz`),
-and only with assertions off. A production image linked with assertions off is
-therefore minified (its exports become short names such as `la` and `ma`), and
-the trace gate's production rows at assertions 0 run on such images.
-Validation's `-O1` images are not minified; a dedicated harness image linked
-with `--ldflag=-Os` proves the guard's minified case.
-
-A refused external call through the loader rejects with `TitanBrowserError`
-`TITAN_BROWSER_REENTRY`, `browser instance is suspended; reentry is not
-allowed`, and a refused raw guarded C call returns `-1`. Neither touches Lua,
-switches a fiber, completes the original run, or poisons it.
+`poison(cause)` permanently blocks admission and rejects known parked engine
+gates after a fatal error. It never calls C to free or reuse compromised
+allocations. An external import can remain unresolved after abort; disposal
+drops the unusable instance instead of claiming normal cleanup.
 
 ## The loader
 
@@ -2797,17 +2679,17 @@ instance keeps no other reference to them.
   rejection.
 
 **Settlement.** The run Promise settles in one place. A normal run settles
-only after completion, a safe point, no pending suspension, and the freeing
-of the argument storage; it resolves to `{kind: "returned" | "failed",
+only after the copied completion, fulfillment of the promised native entry,
+a safe point and freeing of argument storage; it resolves to `{kind: "returned" | "failed",
 status, bytes}`. A sink failure, protocol failure, trap, or abort rejects
 instead, and the first failure wins:
 
 * `browser entry completed more than once` and `browser entry reported invalid
   completion kind <kind>` (`TITAN_BROWSER_PROTOCOL`) for a second or malformed
   completion, while an intact admitted run still finishes its cleanup;
-* `browser entry returned without completion or suspension`
-  (`TITAN_BROWSER_PROTOCOL`) when `ccall` has fulfilled (`callFulfilled`),
-  nothing is pending, and no completion arrived — checking `callFulfilled`
+* `browser entry returned without completion`
+  (`TITAN_BROWSER_PROTOCOL`) when the promised entry has fulfilled
+  (`callFulfilled`) and no completion arrived — checking `callFulfilled`
   ensures that an earlier queued safe point never masks a synchronous throw or
   rejected `ccall`, such as an engine `RangeError: Maximum call stack size
   exceeded`, which instead rejects with the engine error preserved as `cause`
@@ -2846,13 +2728,13 @@ disposed while the other completes.
 `titan-browser-run` is a POSIX shell launcher. It resolves Node before loading
 any SDK JavaScript: `TITAN_NODE` names one executable (a bare name is looked
 up on `PATH`), otherwise `node` on `PATH`; it resolves the directory
-physically and requires `node --version` to report `v24.`. Failures exit 75
+physically and requires a major version of at least 26. Failures exit 75
 with empty stdout:
 
 ```text
-titan-browser-run: Node 24 is required (node not found (TITAN_NODE unset; not on PATH))
-titan-browser-run: Node 24 is required (node not executable at "<path>")
-titan-browser-run: Node 24 is required ("<path>" reports <found>; expected Node 24)
+titan-browser-run: Node 26 or newer is required (node not found (TITAN_NODE unset; not on PATH))
+titan-browser-run: Node 26 or newer is required (node not executable at "<path>")
+titan-browser-run: Node 26 or newer is required ("<path>" reports <found>; expected Node 26 or newer)
 ```
 
 where `<found>` is `unknown` without a parsable version. It then locates
@@ -2867,7 +2749,7 @@ CDP pipe, 30000 ms, and 1500 ms; the
 timeout is a positive and the grace a nonnegative safe integer. Misuse prints
 `titan-browser-run: <detail>` and the usage to stderr and exits 2; `--help`
 prints the usage and `--version` prints `titan-browser-run: Titan 0.6.0
-browser runner (Node 24)`, both to stderr with exit 0. `FILE` must be a
+browser runner (Node 26+)`, both to stderr with exit 0. `FILE` must be a
 regular `.mjs` file beneath the root, which defaults to its directory. Stdout
 carries only program bytes; every runner diagnostic goes to stderr. The module
 exports `within(root, path)` and `Monitor` and guards its top-level `main()`
@@ -2879,7 +2761,7 @@ with a `realpath(process.argv[1])` check so that importing it from tests or
 browser launch. It prints exactly one LF-terminated JSON object:
 
 ```text
-{"node":{"path":"<absolute>","version":"v24.x.y","ok":true,"reason":null},
+{"node":{"path":"<absolute>","version":"v26.x.y","ok":true,"reason":null},
  "chrome":{"path":"<absolute-or-null>","version":"<string-or-null>",
            "ok":<boolean>,"reason":"<string-or-null>"}}
 ```
@@ -2896,7 +2778,7 @@ never a fabricated capability record. The compiler's `driver.browser_node_ready`
 and the specs' toolchain helper both use this probe rather than a second Node
 or Chrome resolver.
 
-**Node engine.** The supervisor spawns a separate Node 24 worker
+**Node engine.** The supervisor spawns a separate qualifying Node worker
 (`titan-browser-node-worker.mjs`, run with `--expose-gc`) in its own process
 group, with stdout and stderr pipes and a private IPC channel. The worker
 imports the image and the installed loader, writes the program's bytes to its
@@ -3030,7 +2912,7 @@ harness failure.
 **Playwright supervisor (`spec/browser/playwright-run.mjs`).** To run the same
 portable `run(context)` host tests (or a standalone Titan image with `--image`)
 across Playwright-managed `chromium`, `firefox`, and `webkit`
-(`playwright@1.56.1`), `spec/browser/playwright-run.mjs` parses `--engine
+(`playwright@1.64.1`), `spec/browser/playwright-run.mjs` parses `--engine
 chromium|firefox|webkit [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
 [--allow-degraded-trace] [--image] FILE [-- ARG...]` (defaults: `timeout`
 300000 ms, `grace` 1500 ms, `sdk` `<repo>/titan-runtime/browser/`), loads
@@ -3052,10 +2934,10 @@ static_archives, link, verbose, extra_objects, options)` keeps its native
 contract for host contexts. With a browser `options.context` and at least one
 module, it:
 
-1. requires the SDK and a working Node 24: `driver.browser_node_ready` runs
-   `<runner> --probe` and maps the runner's Node diagnostic to `browser
-   provider validation requires Node 24: <reason>; set TITAN_NODE to a Node 24
-   executable`;
+1. requires the SDK and a working Node 26+: `driver.browser_node_ready` runs
+   `<runner> --probe` and maps its Node diagnostic to `browser provider
+   validation requires Node 26 or newer: <reason>; set TITAN_NODE to a Node
+   26 or newer executable`;
 2. renders the probe as a browser C image (`program_name`
    `titan-provider-probe`, state status 10) whose worker checks, for each
    module, that `<prefix>_init` and `luaopen_<prefix>` are non-null (20) and
@@ -3093,110 +2975,45 @@ consumer test cases from the archive under Node and Chromium.
 
 ## The entry gate decision
 
-The browser scheduler design depends on one premise: the main (scheduler)
-context can suspend through Asyncify, return to JavaScript, and later resume
-while real Titan coroutines stay parked on their own minicoro fibers. That
-premise is retained. The rules that follow from it bind the browser runtime
-and its later scheduler:
+JSPI supplies promise-based engine continuation switching, not a scheduler.
+One instance owner spans a logical entry, including GC and cleanup. An
+internal microtask transfer is not permission to admit an unrelated entry,
+drain notifications or call a user sink. The coroutine's linear-stack size
+still comes from the target descriptor, and application status still comes
+only from Titan completion.
 
-* only the scheduler's main context suspends;
-* results and exit status travel through Titan-owned completion, never through
-  `ccall {async: true}` values, `main`'s return value, or `exit()`/`onExit`;
-* the reentry guard covers every export that unwinds or switches fibers;
-* Asyncify budgets are explicit;
-* the coroutine stack size comes from a target define; and
-* output uses per-byte hooks.
+The authored entry-gate fixtures exercise parked mixed Lua/Titan/C frames,
+tagged transfers, collection, post-resumption catch/defer, independent
+instances and state close through production images. Direct general Module
+exports return promises and reject reentry without touching C state. The
+state-neutral observer stays callable. Timer/RAF responsiveness measures an
+admitted entry containing real external waits; it does not turn internal
+coroutine transfers into browser-turn scheduler checkpoints.
 
-Suspending inside a fiber works but parks its resumer and starves every other
-coroutine, so it is not a scheduling mechanism.
+Bridge handles/callback queues and scheduler policy remain separate work;
+they must use the existing logical owner rather than inventing admission
+based on absence of live Wasm frames.
 
-The decision rests on `spec/coder/browser_entry_gate_spec.lua` and its
-fixtures in `spec/fixtures/browser_runtime/` (`entry_gate.titan`,
-`final_fiber.titan`, `gate.c`, `gate.h`, `entry-gate.mjs`). Test-only C
-exports perform real outer suspensions on the main context, through
-`emscripten_sleep` and through an `EM_ASYNC_JS` `setTimeout` wait, and native
-Titan tests drive them through the production loader and runner. Each of the
-four cells (Node 24.19.0, then Google Chrome for Testing 156.0.8078.80 over the
-CDP pipe, each with `-sASSERTIONS=2` and `-sASSERTIONS=0`; Emscripten 6.0.13)
-runs 15 count-checked native cases: three early repeated instantiations of
-one factory, the nine-item selection, an isolated responsiveness case, a
-busy-wait control, and the fiber-internal-sleep negative, plus standalone
-final-fiber status runs. Every item passed in every cell with both wait
-forms:
+`entry_lifetimes.titan` and its test-owned C guard keep an independent Lua
+state across three distinct promised C-entry lifetimes: park ordinary and
+STACKED chains, resume them, then run allocation-triggered abandoned cleanup
+and close the state. The JS fixture interleaves two instances and checks
+entry ownership and sink fencing on every private hop. This exercises the
+backend lifetime boundary without adding a repeatable public bridge API.
 
-| Item | Observation in every cell |
-| --- | --- |
-| 1. Return to JS, later completion | The host regained control before completion with 4 mixed owners parked, holding 16 authored FFI frames, recursive Titan depth 4, loaded-Lua depth 6, and recursive authored C depth 4; 4 pending defers retired after resumption. |
-| 2. Interleaving | Per wait form, 64 coroutines × 20 outer waits: 1280 real suspensions and 1344 sequence and stack-canary checks. |
-| 3. GC while parked | 8 parked owners, one full collection and 80 generational steps across 4 waits; 168 checks intact. |
-| 4. Errors after resumption | A `catch` set before the suspension received an error raised after the rewind; success and failure paths each ran 2 ordered defers once. |
-| 5. Nested and tagged coroutines | 2 nested coroutines and a tagged nonlocal transfer kept their identity across 2 waits. |
-| 6. Promise entry | Completion statuses 0, 7, and 2 were exact, including when the last action was a fiber switch; `ccall` values were never read as results. |
-| 7. Responsiveness | See below. |
-| 8. Reentry refused | A ready raw guarded call ran a real `setjmp`/`longjmp` and returned 1; during a suspension a JavaScript timer saw the exact wrapper rejection and a raw `-1`, the observe export stayed callable, the original wait completed, and no `unreachable` occurred. |
-| 9. Close | `lua_close` retired 3 retained nested pairs: 6 exact deferred identities ran once, and no abandoned `catch` or continuation body ran. |
-
-Each nine-item selection made exactly 2578 outer waits per cell. The
-per-suspension cost of item 2's 1 ms waits, which includes the requested wait
-and scheduling, was about 1.1 ms under Node and about 4.2 ms under Chromium,
-whose timers clamp near 4 ms:
-
-| Assertions | Engine | `emscripten_sleep` (ms) | `EM_ASYNC_JS` (ms) |
-| ---: | --- | ---: | ---: |
-| 2 | Node | 1.172 | 1.100 |
-| 2 | Chromium | 4.217 | 4.238 |
-| 0 | Node | 1.134 | 1.112 |
-| 0 | Chromium | 4.184 | 4.172 |
-
-Item 7 runs a 10 ms `setInterval` during a 600 ms outer wait (300 ms per form).
-Its window starts at the first fully unwound pending safe point, not before
-startup work, and ends at completion; both the full host window and the wait
-window are recorded. The thresholds are a tick ratio of 0.75 to 1.25 of the
-elapsed time over 10 ms, a largest gap of at most 100 ms, and, in Chromium, at
-least 2 `requestAnimationFrame` callbacks; a separately timed 150 ms busy-wait
-control must see exactly 0 ticks over at least 140 ms:
-
-| Assertions | Engine | Host / wait window (ms) | Ticks | Ratio | Largest gap (ms) | RAF | Busy control |
-| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 2 | Node | 601.7 / 600.2 | 59 | 0.983 | 10.4 | — | 152.1 ms, 0 ticks |
-| 2 | Chromium | 603.6 / 601.6 | 60 | 0.997 | 10.1 | 37 | 155.8 ms, 0 ticks |
-| 0 | Node | 602.8 / 601.4 | 59 | 0.981 | 10.7 | — | 152.7 ms, 0 ticks |
-| 0 | Chromium | 605.0 / 602.5 | 60 | 0.996 | 10.8 | 37 | 153.0 ms, 0 ticks |
-
-In the fiber-internal negative, a 60 ms sleep inside a fiber left an
-already due ticker 50.3 to 51.4 ms late, with no peer step during the sleep.
-The responsiveness and per-suspension numbers are those of the current link
-profile, including `-sFORCE_FILESYSTEM=1`, under which every item observation
-above also holds. A change to the entry, the guard, or the fiber
-configuration requires running the gate again; a failure permits only an
-Asyncify configuration or ownership correction, and any other scheduler
-design needs a new decision with fresh evidence.
 
 ## Baseline
 
-The size and speed baseline is a measurement, not a gate. It feeds the later
-release-profile and packaging work. `scripts/browser_baseline.lua` builds the
-micro-benchmark program (`spec/fixtures/browser_baseline/`) through the
-`baseline` profile (`entry = "titan"`) and the fork's Lua interpreter (`entry
-= "lua-main"`, built from `lua-5.5.1/src/*.c` with the profile's flags and the
-installed record's `lua_defines`, which the cell's receipt records as
-`defines`) at `-O1` and `-O2`, each with and without Asyncify (the
-Asyncify-off controls create no coroutine of either kind and never suspend),
-in separate output trees, and runs each image three times per engine; every
-published value below is the median of the three raw repeats (`format =
-"titan-browser-baseline-2"`). One description of each cell's link options
-(`purpose = "baseline"`, assertions 2, and the cell's optimization, Asyncify
-setting, and entry) feeds the plan, the receipt, and the child build:
-`plan_for` installs it as `driver.browser_link_options` while it builds the
-descriptor and restores the previous value afterwards, so the plan's descriptor
-certifies the same `trace_control` and measurement level as the child
-`titanc`, which receives the same options through its preamble.
-Toolchain: Emscripten 6.0.13, Node 24.19.0, Google Chrome for Testing
-156.0.8078.80 headless shell, fork commit `4f740a4b`, all with
-`-sFORCE_FILESYSTEM=1`.
+`scripts/browser_baseline.lua` is a measurement harness, not a performance
+gate. It builds the Titan program and a plain fork-interpreter image through
+the shared `baseline` profile, at O1 and O2, with one JSPI backend and separate
+output trees. Coroutine and external-suspension rows always run; there is no
+backend-off control. A cell's one option record feeds planning, child build,
+identity and receipt. The format identifier stays unchanged.
 
-The micro-benchmarks were re-run for #343 against the build profiles; those
-results are in [Build profiles](#measurements). The tables below are #329's.
+The historical tables below belong to #329's pre-JSPI images and are not
+current JSPI size, memory, startup or latency guarantees.
+
 
 | Titan cell | `.wasm` bytes | `.mjs` bytes | Node instantiate / run (ms) | Chromium instantiate / run (ms) | Suspension, Node / Chromium (ms) |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -3375,13 +3192,13 @@ hosts`).
 * `spec/coder/browser_budgets_spec.lua` — every [budget](#budgets) just below
   and just above its limit.
 * `spec/minicoro_spec.lua` — the Emscripten lane of the tagged-behavior probe
-  (fiber backend with and without `MCO_NO_DEBUG`, `MCO_USE_VMEM_ALLOCATOR`,
-  and the tag comparator) and the unwind-floor harness under both engines, and
-  the no-Asyncify control, which must fail with `ASYNCIFY is not enabled`.
+  (JSPI with and without `MCO_NO_DEBUG`, `MCO_USE_VMEM_ALLOCATOR`, and the tag
+  comparator), the unwind-floor harness, and unstarted/suspended/stacked
+  retirement before native allocation reuse, under both engines.
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and
-  dispose cycles, concurrent instances, lifecycle races, and the minified
+  dispose cycles, concurrent instances, lifecycle races, and the optimized
   guard image (`optimized-guard.mjs`).
 * `spec/browser/runner.test.mjs` and `spec/browser/runner-fixtures.mjs` — the
   runner's resolver, probe, CLI, `--allow-degraded-trace` and default
@@ -3390,10 +3207,11 @@ hosts`).
   process-group retirement, and path containment, over Node and both Chromium
   transports.
 * `spec/browser/trace-adapter.test.mjs` and
-  `spec/fixtures/browser_trace_adapter/{stacks.json,degraded.mjs,lifecycle.c,filter.c}`
+  `spec/fixtures/browser_trace_adapter/{stacks.json,stacks-jspi-current.json,degraded.mjs,lifecycle.c,filter.c}`
   — Node unit tests for the V8, SpiderMonkey, and JavaScriptCore stack parsers
-  (66 recorded survey samples, V8 title-line frame-shape filtering, and
-  caller-owned capacity bounds), `Error.stackTraceLimit` and
+  (historical survey and current JSPI captures, saved-parent cutoff, V8
+  title-line frame-shape filtering, and caller-owned capacity bounds),
+  `Error.stackTraceLimit` and
   `Error.prepareStackTrace` descriptor preservation (absent, data, accessor,
   non-writable, and non-configurable descriptors without invoking getters or
   setters or constructing an `Error` on unsafe descriptors), lookup boundary,
@@ -3421,7 +3239,7 @@ hosts`).
 
 The Busted files need emcc 6.0.13 and the installed browser Lua; the image,
 protocol, SDK, stdlib closure, entry and stdlib gate, fixture, budget, and
-minicoro files also need Node 24 and an installed browser SDK, and all of them
+minicoro files also need Node 26+ and an installed browser SDK, and all of them
 except the stdlib closure file also need a headless Chromium.
 `spec/support/browser_toolchain.lua` discovers these through
 `require({node=true, chrome=true, sdk=true})` (or the subset a file needs)

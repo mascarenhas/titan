@@ -150,21 +150,19 @@ You need:
   source ./emsdk_env.sh
   ```
 
-* **Node 24.** `titanc` uses it for the check that it performs before it
-  publishes a browser library or links browser archives into a program (see
-  [library archives](#library-archives)), and `titan-browser-run` uses it to
-  run programs and tests from the command line. emsdk 6.0.13 ships a Node 24
-  under `$EMSDK/node/`. Titan uses the executable named by `TITAN_NODE` when
-  that variable is set, and otherwise the `node` on `PATH`; another major
-  version is rejected.
-* **Chrome or Chromium**, only for running programs and tests in a browser
-  engine with `titan-browser-run`. Any Chrome, Chromium, or Chrome for Testing
-  build that runs headless works, including the smaller Chrome for Testing
-  *headless shell*. Set `TITAN_CHROME` to its executable, or put it on `PATH`
-  as `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`,
-  or `chrome-headless-shell`. A web page itself needs no particular browser;
-  see [current limits](#current-limits) for the engines that run browser
-  images.
+* **Node 26 or newer with WebAssembly JSPI.** `titanc` uses it for the
+  executing check before publishing browser libraries or linking their
+  archives, and `titan-browser-run` uses it for command-line execution.
+  Set `TITAN_NODE` explicitly or put this Node on `PATH`. Emscripten 6.0.13's
+  bundled Node 24 is for its own tools, not for Titan browser images.
+* **A JSPI-capable browser.** The supported floor is Chrome/Chromium 137,
+  Firefox 153, and Safari 27. The loader checks for
+  `WebAssembly.promising` and `WebAssembly.Suspending`; there is no legacy
+  backend or experimental-flag requirement. `titan-browser-run` drives
+  headless Chrome/Chromium, including Chrome for Testing's *headless shell*.
+  Set `TITAN_CHROME` to its executable or put it on `PATH` as
+  `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`,
+  or `chrome-headless-shell`.
 * **The browser build of Titan's Lua fork** and **the browser SDK**, both
   installed into the same prefix as Titan; the next two sections install them.
 
@@ -200,10 +198,26 @@ headers. A matching commit alone is not enough; a changed setting or a
 damaged archive or header is rebuilt and reinstalled. `luarocks make` and
 `make browser-sdk` never run it.
 
+### Wasm-EH longjmp contract
+
+Browser Lua, Titan's runtime, generated C, and authored C helpers use
+`-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1` on every compile and
+link. This pins Emscripten 6.0.13's legacy Wasm exception encoding; that
+toolchain labels Wasm longjmp experimental. Rebuild the browser Lua and SDK
+when moving from a JavaScript-SJLJ installation: setting only a final link
+flag cannot convert old objects. The existing record and descriptor identities
+distinguish the settings without a record-format change.
+
+Wasm-EH protected calls preserve `catch`, `defer`, and coroutine cleanup
+across JSPI transfers. The browser C-call limit remains 100. Engine traps
+and engine stack overflow remain fatal, not catchable Titan errors. Native
+targets are unchanged.
+
+
 The fork's own `install-browser` target does the same work without the
 reuse check, and is the command that the compiler's diagnostics name. From
-a source archive of the fork's release, which has no Git metadata, also pass
-the release's 40-character commit as `FORK_REVISION=<commit>`. See [Installing
+a source archive of the matching fork commit, which has no Git metadata, also
+pass its 40-character commit as `FORK_REVISION=<commit>`. See [Installing
 Titan](installation.md#the-browser-lua-and-sdk) for the complete steps.
 
 The installation writes only below `PREFIX/lib/browser/`:
@@ -237,15 +251,13 @@ source /path/to/emsdk/emsdk_env.sh
 make browser-sdk PREFIX="$PREFIX"
 ```
 
-It uses the installed `titanc --target browser` and needs Node 24, because it
-publishes the browser standard library through the same check as any browser
-library. The target prefers `TITAN_NODE` when set and nonempty; otherwise,
-when `EMSDK` is set, it places emsdk's bundled Node directory ahead of `PATH`,
-and otherwise uses `node` on `PATH`, checking for Node 24 before compiling
-(`browser provider validation requires Node 24: <reason>; set TITAN_NODE to a
-Node 24 executable`). It installs into `lib/titan-browser/0.6/` under the
-Titan installation
-root:
+It uses the installed `titanc --target browser` and needs Node 26 or newer
+with JSPI because it publishes the standard library through the ordinary
+executing check. It uses nonempty `TITAN_NODE`, otherwise `node` on `PATH`;
+it does not substitute emsdk's bundled Node. A refusal says
+`browser provider validation requires Node 26 or newer: <reason>; set
+TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
+`lib/titan-browser/0.6/` under the Titan installation root:
 
 | File | Contents |
 | --- | --- |
@@ -362,13 +374,11 @@ link writes the source map and keeps the WebAssembly `name` section
 [traces](#traces). Every Titan frame that a trace shows is therefore
 attributed to its `.titan` file and line as that section describes, and a
 deployed program needs its `<stem>.wasm.map` next to `<stem>.wasm`, in either
-profile. Production images are smaller: on the trace-gate fixtures, measured
-with emsdk 6.0.13, about 39% smaller for the test image and about 37% smaller
-for the program image. No like-for-like speed comparison between the two
-profiles has been measured. The implementation manual's [measurement
-table](../implementation/browser-target.md#measurements) records the exact
-sizes, link times, engine ceilings, and micro-benchmarks, with their caveats,
-and [traces](#traces) shows what an optimized trace looks like.
+profile. The implementation manual's [historical measurement
+table](../implementation/browser-target.md#measurements) records pre-JSPI
+sizes, link times, engine ceilings, and micro-benchmarks. Those results do not
+predict the current backend's image sizes or relative profile speeds.
+[Traces](#traces) shows what an optimized trace looks like.
 
 **Test images keep their frames.** Under `production`, `titanc --test`
 compiles each test module (a module that declares discovered `test_`
@@ -445,7 +455,7 @@ contain any byte, including NUL.
 
 Building never runs the program. A link that selects browser archives, such
 as the standard library's `titan.a`, first checks them under Node as described
-for [library archives](#library-archives), so linking also needs Node 24.
+for [library archives](#library-archives), so linking also needs Node 26+.
 
 ### Tests
 
@@ -486,10 +496,10 @@ in two steps:
   records match the archive's metadata.
 
 A failed check publishes nothing and leaves an existing archive unchanged. The
-second step needs Node 24 and the browser SDK:
+second step needs Node 26 or newer with JSPI and the browser SDK:
 
 ```text
-browser provider validation requires Node 24: node not found (TITAN_NODE unset; not on PATH); set TITAN_NODE to a Node 24 executable
+browser provider validation requires Node 26 or newer: node not found (TITAN_NODE unset; not on PATH); set TITAN_NODE to a Node 26 or newer executable
 selected static provider failed executable-context protocol validation (browser runner exit 21)
 ```
 
@@ -516,7 +526,7 @@ library's source, from the SDK directory or the browser Titan path described
 A web page or application runs a browser program through the loader
 `titan-browser.mjs` from the browser SDK, as in [the first web
 page](#a-first-web-page), and `titan-browser-run` uses the same loader. It
-works in the browser and in Node 24, where a script can import it straight
+works in a JSPI-capable browser and in Node 26+, where a script can import it
 from the SDK directory:
 
 ```javascript
@@ -550,6 +560,15 @@ returns an instance with three methods:
 * `dispose()` releases the instance and returns a Promise. It waits for a run
   in progress to finish; it does not cancel it.
 
+**Promise-based entry.** General JavaScript calls into a Titan state are
+promise-returning even when their Titan signature is synchronous. Resuming a
+coroutine, or allocating memory that runs an abandoned coroutine's finalizer,
+can suspend internally. The instance stays exclusively admitted across these
+internal promise microtasks; they do not admit callbacks or another entry.
+The run's result comes from Titan's completion record, not the fulfilled
+value of the underlying WebAssembly promise, and is released only after the
+native entry and terminal coroutine continuations have retired.
+
 The options are `stdout` and `stderr`, the output sinks, and `locateFile`. A
 missing sink discards that stream. Emscripten and the trace loader use
 `locateFile` to find `<stem>.wasm` and `<stem>.wasm.map`; by default the
@@ -563,15 +582,14 @@ and returns the URL to load, for example
 instance for another run; independent instances can run at the same time in
 one JavaScript realm, and a disposed instance can be collected.
 
-**Sinks.** A sink is a synchronous function that receives each chunk of its
-stream as a fresh `Uint8Array`, which it may keep or modify. The loader calls
-sinks only when no WebAssembly code is running: when the run returns to
-JavaScript, while it waits on an asynchronous operation, and at completion.
-Chunks of one stream arrive in order; there is no ordering between the two
-streams. A sink must return `undefined`. If a sink throws or returns anything
-else, including a Promise, the loader stops calling it, lets the program
-finish its Lua cleanup when the instance is still intact, and rejects the run
-once with that failure; no unhandled rejection remains.
+**Sinks.** A sink is a synchronous function that receives its buffered stream
+as a fresh `Uint8Array`, which it may keep or modify. Internal coroutine/GC
+handoffs never deliver output or other notifications. The loader delivers
+the buffered bytes after the admitted native entry retires, including
+finalizer output. Each stream keeps its byte order; there is no ordering
+between streams. A sink must return `undefined`. If it throws or returns
+anything else, including a Promise, the loader stops calling it and rejects
+once with that failure; the rejection of a returned Promise is observed.
 
 **Errors.** A rejected Promise carries an `Error` whose `name` is
 `TitanBrowserError`, with a `code`, a fixed message, and, where there is one,
@@ -579,12 +597,13 @@ the original error as `cause`:
 
 | `code` | Message | When |
 | --- | --- | --- |
-| `TITAN_BROWSER_REENTRY` | `browser instance is suspended; reentry is not allowed` | `run` while the instance's run is still active, including while it waits |
+| `TITAN_BROWSER_REENTRY` | `browser instance is active; reentry is not allowed` | `run` while the instance's logical entry is still active, including internal coroutine/GC handoffs |
 | `TITAN_BROWSER_STATE` | `browser instance has already run or is disposed` | `run` after the instance has run, failed, or been disposed |
 | `TITAN_BROWSER_SINK` | `browser stdout sink failed`, `browser stderr sink failed`, `browser stdout sink must return undefined`, `browser stderr sink must return undefined` | a sink failed; `stream` names it |
+| `TITAN_BROWSER_CAPABILITY` | `Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)` | the engine lacks the required JSPI APIs |
 | `TITAN_BROWSER_ABORT` | the engine's abort reason | the WebAssembly module aborted |
 | `TITAN_BROWSER_TRAP` | the trap's message | the WebAssembly module trapped |
-| `TITAN_BROWSER_PROTOCOL` | for example `browser entry returned without completion or suspension` | the image broke the loader's protocol |
+| `TITAN_BROWSER_PROTOCOL` | for example `browser entry returned without completion` | the image broke the loader's protocol |
 
 After an abort or a trap the instance is unusable, and `dispose()` releases it
 without running more WebAssembly code. Invalid arguments to `create` and
@@ -593,7 +612,7 @@ without running more WebAssembly code. Invalid arguments to `create` and
 ## Testing with `titan-browser-run`
 
 `titan-browser-run` is the test runner for browser images. It runs a program
-or test image from the command line, under Node 24 or in headless Chrome or
+or test image from the command line, under Node 26 or newer or in headless Chrome or
 Chromium, through the same loader that a page uses, and turns the result into
 an exit status, so that test suites and continuous integration can check
 browser builds. Web pages do not use it.
@@ -626,7 +645,7 @@ stdout and stderr exactly, and writes its own messages, all starting with
 
 | Option | Meaning |
 | --- | --- |
-| `--engine node` | Run under Node 24 (the default). |
+| `--engine node` | Run under Node 26 or newer with JSPI (the default). |
 | `--engine chromium` | Run in a new headless Chrome or Chromium. |
 | `--timeout MS` | Wall-clock limit for the whole run, in milliseconds; default 30000. |
 | `--grace MS` | Time to keep watching after the program completes, to catch late traps and aborts; default 1500. |
@@ -670,8 +689,8 @@ the cases apart: an infrastructure failure always prints one, such as
 A missing or wrong Node is reported before anything starts, with exit 75:
 
 ```text
-titan-browser-run: Node 24 is required (node not found (TITAN_NODE unset; not on PATH))
-titan-browser-run: Node 24 is required ("/usr/bin/node" reports v26.1.0; expected Node 24)
+titan-browser-run: Node 26 or newer is required (node not found (TITAN_NODE unset; not on PATH))
+titan-browser-run: Node 26 or newer is required ("/usr/bin/node" reports v24.19.0; expected Node 26 or newer)
 titan-browser-run: headless Chromium not found; set TITAN_CHROME to a Chrome executable
 ```
 
@@ -792,16 +811,14 @@ JavaScriptCore's `Error.stack` reports WebAssembly frames by function index
 without a bytecode offset, browser traces provide reduced, function-level
 fidelity: Titan frames appear in the same merged order with Lua frames and with
 the same Titan display names, rendered in the no-line form
-`<basename>: in <display name>`, and captures are limited to 100 frames. Pages
-running in WebKit or Safari should not `delete Error.stackTraceLimit`: in
-JavaScriptCore, deleting that property makes `new Error().stack` return
-`undefined` for the rest of the realm even after the property is redefined, so
-subsequent traces fall back to Lua frames with the capture-failed marker below.
+`<basename>: in <display name>`.
 
-**Depth limits and truncation.** V8 (Chromium, Chrome, and Node) captures up to
-the runtime's 512-frame WebAssembly capacity; Firefox's SpiderMonkey caps
-synchronous captures at 128 frames; and WebKit and Safari cap captures at 100
-frames. Any host `Error.stackTraceLimit` is preserved across the capture. When
+**Depth limits and truncation.** Browser captures have a 512-record WebAssembly
+capacity. Firefox's SpiderMonkey also caps synchronous captures at 128 frames;
+current WebKit can exceed the 100-frame limit of older releases. Engine
+versions can supply shorter stacks, independently of JavaScriptCore's
+function-level fidelity. Any host `Error.stackTraceLimit` is preserved across
+the capture. When
 a trace is cut short by the 512-frame capacity, by a host
 `Error.stackTraceLimit` that cannot be raised, or by the engine's capture
 limit, the trace ends with one final frame line:
@@ -921,10 +938,11 @@ The browser modules follow the target's C facts and its fixed limits:
   clock functions when it initializes, as on a native target. Explicit seeds
   produce the same sequence as on a native target.
 * **Coroutines.** Each coroutine has a 256 KiB C stack instead of 2 MiB, so
-  deep recursion inside a coroutine fails sooner, and about 5,400 coroutines
-  fit in memory ([limits](#limits)).
-* **Nesting.** `protobuf`, `transfer`, and `json.encode` accept less nesting
-  than on a native target ([nesting limits](#nesting-limits)).
+  deep recursion inside a coroutine can exhaust its stack sooner. The number
+  of live coroutines also depends on the program's other memory use
+  ([limits](#limits)).
+* **Nesting.** `protobuf`, `transfer`, and `json.encode` use the same library
+  nesting policies as native targets ([nesting limits](#nesting-limits)).
 
 ## Dependencies and the browser Titan path
 
@@ -959,19 +977,22 @@ TITAN_PATH_0_6='out-browser' titanc --target browser -o out-app app.main_lib
 ## Compiler and linker flags
 
 The browser target compiles with Titan's own Emscripten settings, the Lua
-defines from the build record, and five target defines that C headers can
-test: `TITAN_TARGET_BROWSER=1`, `TITAN_COROUTINE_STACK_SIZE=262144`,
-`TITAN_CODEC_DEPTH_LIMIT=43`, `TITAN_JSON_WRITER_DEPTH_LIMIT=103` (the
-[nesting limits](#nesting-limits)), and `MCO_ASYNCFY_STACK_SIZE=65536`. `-I`,
-`-D`, and `--cflag` options and
+defines from the build record, and two target defines that C headers can
+test: `TITAN_TARGET_BROWSER=1` and `TITAN_COROUTINE_STACK_SIZE=262144`.
+The [library nesting policies](#nesting-limits) need no browser-specific
+defines. `-I`, `-D`, and `--cflag` options and
 `TITAN_EXTRA_CPPFLAGS`/`TITAN_EXTRA_CFLAGS` are added after them, as for
 native builds. Flags that only make sense for a native target are rejected
 rather than ignored:
 
 `-fPIC`, `-fpic`, `-fPIE`, `-fpie`, `-pie`, `-shared`, `-dynamiclib`,
 `-rdynamic`, `-pthread`, `-flto` and `-flto=...`, `-ffat-lto-objects`,
-`-march=...`, `-mcpu=...`, `-mtune=...`, `-m32`, `-m64`, `-fwasm-exceptions`,
-and an `-sSUPPORT_LONGJMP` setting other than `emscripten`.
+`-march=...`, `-mcpu=...`, `-mtune=...`, `-m32`, `-m64`,
+`-f[no-]wasm-exceptions`, `-m[no-]exception-handling`,
+`-m[no-]legacy-exception-handling`, an `-sSUPPORT_LONGJMP` setting other
+than `wasm`, or an explicit `-sWASM_LEGACY_EXCEPTIONS` setting other than 1.
+The check includes joined and split spellings, bare settings, and boolean
+`NO_` aliases; a bare longjmp setting or `=1` selects the wrong mode.
 
 The check covers `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`,
 `TITAN_EXTRA_LDFLAGS`, `--cflag`, and `--ldflag`, and names the source:
@@ -979,6 +1000,8 @@ The check covers `TITAN_EXTRA_CPPFLAGS`, `TITAN_EXTRA_CFLAGS`,
 ```text
 browser target does not support TITAN_EXTRA_CFLAGS flag "-flto"
 ```
+
+Browser tool spawns clear ambient `EMCC_CFLAGS`; deliberate EH overrides through opaque argument channels (`@file`, `-mllvm`, `-Xclang`, or `-Xlinker`) are unsupported and are not parsed by this check.
 
 `-fno-lto` is accepted. Environment settings meant for native builds, such as
 `TITAN_EXTRA_CFLAGS=-O0 -fno-lto -march=native`, must be cleared for browser
@@ -997,7 +1020,7 @@ their `-fno-` forms. Titan also owns `-gline-tables-only` (for object
 compilation), `-gsource-map`, `-g2`, and the WebAssembly optimizer's pass list
 `-sBINARYEN_EXTRA_PASSES` (for linking), and source `#line` directives
 (`--no-line-directives` and `TITAN_NO_LINE_DIRECTIVES=1`), together with
-Asyncify, the longjmp mode, the stack and memory sizes, the program lifecycle
+JSPI and its explicit import/export set, the longjmp mode and legacy EH encoding, the stack and memory sizes, the program lifecycle
 and exports, the filesystem layer, full-precision `long double` printing,
 assertions and stack checks, and the target defines. Other Emscripten `-s`
 settings, such as `-sWASM_BIGINT=1`, may
@@ -1012,7 +1035,7 @@ browser production profile owns compile option "-O2"
 browser production profile owns compile option "-fno-inline"
 browser production link profile owns option -O3
 browser production link profile owns option -sBINARYEN_EXTRA_PASSES=--coalesce-locals
-browser production link profile owns option -sASYNCIFY=0
+browser production link profile owns option -sJSPI=0
 browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)
 ```
 
@@ -1024,30 +1047,28 @@ A browser program runs with these fixed sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
-| Main C stack | 1 MiB | Recursion through Lua's C API, such as nested `pcall` or recursion that alternates between Lua and compiled Titan, stops first at [Lua's C-call limit](#luas-c-call-limit) with the ordinary catchable `C stack overflow` error. Deeper compiled recursion (about 3,400 frames of a small Titan function with a 256-byte C local) aborts the program with Emscripten's `stack overflow` message (runner exit 70); it never overwrites memory silently. |
-| Coroutine C stack | 256 KiB per coroutine (2 MiB natively) | The same inside a coroutine, at about a quarter of that depth. |
-| Saved call stack for a coroutine switch or a wait | 64 KiB, for the main context and for each coroutine | A switch or wait whose call stack does not fit traps with `unreachable` (runner exit 71). About 400 small C frames fit. |
-| Linear memory | 16 MiB initially, growing to at most 2 GiB | An allocation failure is Lua's ordinary out-of-memory error, and creating a coroutine fails with `could not create coroutine: Out of memory`. Both can be caught, and the instance stays usable. |
+| Main linear C stack | 1 MiB | Checked C-stack overflow aborts rather than silently overwriting memory. Lua's ordinary C-call limit can reject mixed recursion first. |
+| Coroutine linear C stack | 256 KiB per coroutine (2 MiB natively) | The same checks and bounds follow each continuation across suspension and memory growth. |
+| Engine continuation stack | Managed by the JSPI implementation | Engine stack exhaustion is fatal; the linear-stack budget does not bound engine memory. |
+| Linear memory | 16 MiB initially, growing to at most 2 GiB | A failed native allocation produces the ordinary Lua/Titan allocation error when the state still has enough memory to report it. Engine allocation failures are fatal. |
 
-Coroutine stacks are allocated in full when a coroutine is created, and memory
-that the program has grown never shrinks, although freed blocks are reused.
-About 5,400 live coroutines fit in 2 GiB.
+Linear coroutine stacks are allocated when a coroutine is created. A finished
+engine invocation retires before its native allocation can be freed or reused.
+Freed linear blocks are reusable, but grown WebAssembly memory never shrinks
+back to the host.
 
 ### Lua's C-call limit
 
 Lua counts nested calls through its C API and stops them with its ordinary
 `C stack overflow` error when the count reaches its limit, `LUAI_MAXCCALLS`.
 The browser build of Lua sets that limit to 100; native builds keep Lua's 200.
-A JavaScript engine's stack is much smaller than a native C stack, and each
-level of such recursion costs it several WebAssembly and JavaScript frames.
-With Lua's default of 200, nested `pcall` came within a few levels of running
-V8's stack out first, which ends the run with an uncatchable `RangeError:
-Maximum call stack size exceeded` instead of a Lua error. At 100, the engine
-has about twice the room it needs even in the tightest case measured, nested
-`pcall` and coroutine resumes on V8 under `validation`, and Titan's tests
-check that mixed recursion and nested `pcall` past the limit raise the
-catchable error on Node, Chromium, Firefox, and WebKit under both build
-profiles. The [implementation
+The original JavaScript-SJLJ implementation used several WebAssembly and
+JavaScript frames per level; with Lua's default of 200, nested `pcall` came
+close to running V8's stack out before the catchable Lua error. Wasm EH removes
+those longjmp trampolines, but the conservative limit remains 100 until all
+recursive Lua/C shapes are requalified across engines and build profiles.
+The existing tests check that mixed recursion and nested `pcall` past the
+limit raise the catchable error. The [implementation
 manual](../implementation/browser-target.md#the-browser-c-call-limit) records
 the measurements.
 
@@ -1080,26 +1101,16 @@ Two more effects appear only close to the limit:
 
 ### Nesting limits
 
-A recursive library operation spends engine stack on every level, and running
-the engine stack out ends the instance with an uncatchable `RangeError:
-Maximum call stack size exceeded` that no Titan `catch` receives. The standard
-library therefore stops over-deep input sooner on the browser target, with the
-module's ordinary catchable error. The limits bound the library's own
-traversal; stack that the caller already uses is not counted:
+The browser uses the native library nesting policies:
 
-| Operation | Native target | Browser target | Error |
-| --- | --- | --- | --- |
-| `protobuf` encoding, decoding, and `protobuf.schema`; `transfer` packets and `TransferValue` records and unions | 127 nested levels | 42 nested levels | `protobuf: nesting exceeds 128 levels`, or `... 43 levels` on the browser |
-| `json.encode` | `max_depth` (default 32) | `max_depth`, at most 103 | `json.Error` with code `limit_exceeded` and message `value exceeds max_depth` |
+| Operation | Every target | Error |
+| --- | --- | --- |
+| `protobuf` encoding, decoding, and `protobuf.schema`; `transfer` packets and structural records/unions | 127 nested levels with the shared 128-level codec budget | `protobuf: nesting exceeds 128 levels` |
+| `json.encode` | configured `max_depth` (default 32), with no additional browser cap | `json.Error` with code `limit_exceeded` and message `value exceeds max_depth` |
 
-Protobuf levels count nested messages and the fields of the innermost one, so
-a chain of records whose innermost record has a field holds at most 127
-records natively and 42 in the browser. `json.encode` accepts a `max_depth`
-above 103 on the browser target and applies 103; the default of 32 is the same
-on every target. Each browser limit is at most half of the lowest nesting that
-completed across Node, Chromium, and both [build profiles](#build-profiles):
-85 levels for the reflective protobuf encoder and 206 for the JSON writer,
-both under `validation`.
+These limits bound the library traversal, not stack already used by its caller.
+Raising a configurable limit cannot make arbitrary engine recursion safe;
+engine stack exhaustion is fatal rather than a Titan error.
 
 Everything else keeps its native limits: `json.decode` (its `max_depth`, and
 the PEG matching stack, which rejects deeper documents with an ordinary
@@ -1117,21 +1128,18 @@ a walk over a deep record graph with `reflect`, has no library limit; under
   `io`, `os`, `lua`, `thread`, and `sqlite3` are not available, so programs
   write output through C's `stdio.h`, as in [the first web
   page](#a-first-web-page).
-* `protobuf`, `transfer`, and `json.encode` accept less nesting than on a
-  native target ([nesting limits](#nesting-limits)).
-* Browser images run in Chromium and Chrome, Firefox, WebKit and Safari, and
-  Node 24; `titan-browser-run` (the test runner) drives only Node 24 and
-  headless Chrome or Chromium.
+* Browser images require JSPI-capable Chrome/Chromium, Firefox, Safari/WebKit,
+  or Node 26+. `titan-browser-run` drives Node and headless Chrome/Chromium.
 * On WebKit and Safari, traces have reduced, function-level fidelity
-  (`<basename>: in <display name>`, without line numbers, and a 100-frame
-  capture limit), and Firefox caps synchronous stack captures at 128 frames
-  (see [traces](#traces)).
+  (`<basename>: in <display name>`, without line numbers). Browser traces have
+  a 512-record WebAssembly capacity, and Firefox also caps synchronous stack
+  captures at 128 frames (see [traces](#traces)).
 * Lua's C-call limit is 100 instead of native Lua's 200, which also bounds
   nested `pcall`, metamethod, coroutine-resume, and parser depth (see [Lua's
-  C-call limit](#luas-c-call-limit)). Deep mixed Lua/Titan recursion raises
-  the catchable `C stack overflow` error before it can exhaust the engine's
-  JavaScript stack, as measured on Node, Chromium, Firefox, and WebKit under
-  both build profiles.
+  C-call limit](#luas-c-call-limit)). The four-engine headroom measurements
+  used the previous JavaScript-SJLJ lowering; JSPI/Wasm-EH error, GC, and
+  unwind qualification covers Node 26.13.0 and Chromium 156, not a new
+  four-engine, two-profile recursion-ceiling matrix.
 * A loader instance runs `main` once; sinks must be synchronous.
 * Only Linux and macOS hosts are supported; `Makefile.win` offers neither
   `lua-browser` nor `browser-sdk`.

@@ -7,7 +7,7 @@ import {fileURLToPath, pathToFileURL} from 'node:url';
 // Shared supervision intentionally retains the titan-browser-run diagnostic prefix.
 import {Monitor, within} from '../../titan-runtime/browser/titan-browser-run.mjs';
 
-const playwrightVersion = '1.56.1';
+const playwrightVersion = '1.64.1';
 const diagnostic = text => process.stderr.write(`titan-playwright-run: ${text}\n`);
 const usage = `usage: node spec/browser/playwright-run.mjs --engine chromium|firefox|webkit
        [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]

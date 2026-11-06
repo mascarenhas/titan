@@ -349,16 +349,15 @@ described above.
   the browser has no libbacktrace, so the smaller size bounds memory per
   coroutine instead. minicoro's own default
   and minimum stack sizes are not redefined.
-* The Binaryen `MCO_USE_ASYNCIFY` backend cannot express Titan's tagged
-  semantics and is removed from the vendored copy. Local Linux tests cover the
-  ASM and UCONTEXT backends. The Fiber backend serves Windows and Emscripten;
-  its Emscripten form switches with `emscripten_fiber_swap`, refuses to create
-  a fiber without `-sASYNCIFY` (`ASYNCIFY is not enabled`), and adds
-  `MCO_ASYNCFY_STACK_SIZE` bytes of Asyncify data (65536 on the browser
-  target) to every coroutine's allocation and to one static main-context
-  buffer. The browser image's [entry gate](browser-target.md#the-entry-gate-decision)
-  and the Emscripten lane of `spec/minicoro_spec.lua` exercise it under Node
-  and Chromium.
+* The native ASM, UCONTEXT and Windows Fiber backends are unchanged. The
+  Emscripten branch uses JSPI engine continuations and disjoint linear C
+  stacks, not an instrumented stack-copying backend. Each context saves SP
+  and stack-limit metadata, one parked gate, one engine-entry lifetime and a
+  BACK identity. A dead coroutine's promised engine invocation retires before
+  its resumer can free the allocation. Titan's abandoned-coroutine floor and
+  transfer-root protocol remain the owners of actual cleanup; dropping a
+  promise does not run defers. See [JSPI coroutine
+  contexts](browser-target.md#jspi-coroutine-contexts).
 
 ## Unwinding an abandoned coroutine
 

@@ -15,7 +15,7 @@ EM_ASYNC_JS(void, browser_loader_async_wait, (), {
     await new Promise(resolve => setTimeout(resolve, 15));
 });
 
-/* Abort after a real outer unwind without ever waking its Asyncify ccall.
+/* Abort while a real JSPI entry is parked and never resolve its import.
  * Fatal disposal must not wait for that permanently pending Promise. */
 EM_ASYNC_JS(void, browser_loader_abort_wait, (), {
     setTimeout(() => abort('loader abort while suspended'), 10);

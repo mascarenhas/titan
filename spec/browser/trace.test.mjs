@@ -24,13 +24,6 @@ function occurrences(text, needle) { return text.split(needle).length - 1; }
 function frameCount(trace, suffix) {
   return trace.split("\n").filter(line => line.endsWith(suffix)).length;
 }
-function terminalMarker(trace, marker, allowed) {
-  const found = trace.indexOf(marker);
-  if (found < 0) return true;
-  if (!allowed || (found !== 0 && trace[found - 1] !== "\n")) return false;
-  const end = found + marker.length;
-  return end === trace.length || (trace[end] === "\n" && end + 1 === trace.length);
-}
 
 export async function run(context) {
   const degraded = context.args.length === 1 && context.args[0] === "--degraded";
@@ -62,20 +55,17 @@ export async function run(context) {
   let nativeExecutions = 0;
   let recordCost = !degraded;
   for (const row of selected) {
-    nativeExecutions += webkit && row.name.endsWith(".host_limit_absent")
-      ? await executeIsolatedRow(context, row, degraded, recordCost, manifest.profile)
-      : await executeRow(context, row, degraded, recordCost, false, manifest.profile);
+    nativeExecutions += await executeRow(context, row, degraded, recordCost, manifest.profile);
     recordCost = false;
     await context.tick();
     await context.gc();
   }
   const emit = record => context.stdout(encoder.encode(JSON.stringify({engine: context.engine, ...record}) + "\n"));
   emit({verdict:"PASS", degraded, manifestCases:selected.length, nativeExecutions,
-    fidelity:webkit ? "function-level/no-line; 100-frame engine ceiling" : firefox ? "file/line; 128-frame engine ceiling" : "file/line; 512-record capacity"});
+    fidelity:webkit ? "function-level/no-line; 512-record capacity" : firefox ? "file/line; 128-frame engine ceiling" : "file/line; 512-record capacity"});
 }
 
-export async function executeRow(context, row, degraded, recordCost, isolated = false,
-    profile) {
+async function executeRow(context, row, degraded, recordCost, profile) {
   // The installation profile is required: a missing or unknown value must not
   // silently weaken a production program row into the exact contract.
   context.assert(profile === "production" || profile === "validation",
@@ -144,14 +134,6 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
     }
     if (label === "nested_held") {
       context.assert(occurrences(trace, captureFailed) === 1, "nested capture did not use one fallback marker");
-      return;
-    }
-    if (label === "host_absent") {
-      const count = trace.split("\n").filter(line => line.includes(": in ")).length;
-      context.assert(webkit && occurrences(trace, captureFailed) === 1 &&
-        terminalMarker(trace, captureFailed, true) && !trace.includes(unavailable) &&
-        !trace.includes(truncated) && !trace.includes(".titan:") && count > 0 && count <= 512,
-        "absent JSC limit did not retain a bounded Lua-only capture-failed trace");
       return;
     }
     if (label === "host_failed" || label === "lua_fallback_failed" || label.startsWith("degraded")) return;
@@ -238,12 +220,12 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
           context.assert(frameCount(trace, ": in trace_cases." + name) === 1,
             "ordinary deep trace omitted/duplicated " + name);
         }
-        context.assert(terminalMarker(trace, truncated, webkit), "ordinary deep trace has invalid engine truncation");
-      } else if (webkit || firefox) {
-        context.assert(count >= 40 && count < (webkit ? 100 : 128) && occurrences(trace, truncated) === 1,
+        context.assert(!trace.includes(truncated), "ordinary deep trace was spuriously truncated");
+      } else if (firefox) {
+        context.assert(count >= 40 && count < 128 && occurrences(trace, truncated) === 1,
           "engine-ceiling trace was not bounded/marked");
       } else if (depth === 460) {
-        context.assert(count === 461 && !trace.includes(truncated), "near512 real V8 capture was incomplete");
+        context.assert(count === 461 && !trace.includes(truncated), "near512 real capture was incomplete");
       } else context.assert(count >= 450 && count < 512 && occurrences(trace, truncated) === 1,
         "capacity trace was not bounded/marked");
       emit({depth, retainedTitanRecursions: count, truncated: trace.includes(truncated)});
@@ -293,8 +275,6 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
     console.error = (...values) => { notice(values); originalError.apply(console, values); };
     const factory = async options => {
       module = await image.factory(options);
-      module['traceFixtureWebKit'] = webkit;
-      module['traceFixtureAbsentLimit'] = webkit && hostMode === "host_limit_absent";
       return module;
     };
     const instance = context.create(factory, {
@@ -304,8 +284,6 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
     });
     try {
       await instance.initialize();
-      context.assert(!isolated || (module.HEAPU8 instanceof Uint8Array && instance.run instanceof Function),
-        "isolated image and loader did not execute in their own realm");
       const metadata = module.titanBrowserTrace;
       context.assert(metadata && metadata.state === (degraded ? "degraded" : "ready"), "missing/wrong eager trace readiness");
       context.assert(degraded ? typeof metadata.reason === "string" : metadata.reason === null, "invalid readiness reason");
@@ -372,7 +350,7 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
       context.assert(warnings + occurrences(stderr, "Titan browser trace: ") === (degraded ? 1 : 0), "error path repeated degraded warning");
       emit({case:row.name, recoveries, kind:result.kind, status:result.status, nativeCases:row.testCount,
         descriptorCalls:hostCalls, errorPathFetches:fetchCalls, errorPathAssetLookups:located-locatedBefore,
-        isolatedRealm:isolated, limitAbsent:hostMode === "host_limit_absent" ? own(Error, "stackTraceLimit") === undefined : null});
+        limitAbsent:hostMode === "host_limit_absent" ? own(Error, "stackTraceLimit") === undefined : null});
     } finally {
       restore(Error, "stackTraceLimit", originalLimit);
       restore(Error, "prepareStackTrace", originalPrepare);
@@ -384,76 +362,4 @@ export async function executeRow(context, row, degraded, recordCost, isolated = 
   }
   await execute(row);
   return nativeExecutions;
-}
-
-async function executeIsolatedRow(context, row, degraded, recordCost, profile) {
-  const originalConstructor = own(globalThis, "Error");
-  const originalLimit = own(Error, "stackTraceLimit");
-  const originalPrepare = own(Error, "prepareStackTrace");
-  context.assert(typeof new Error().stack === "string", "parent realm lost native stack capture before isolated row");
-  const frame = document.createElement("iframe");
-  frame.hidden = true;
-  const loaded = new Promise(resolve => frame.addEventListener("load", resolve, {once:true}));
-  frame.src = "about:blank";
-  document.body.append(frame);
-  try {
-    await loaded;
-    return await new Promise((resolve, reject) => {
-      const child = frame.contentWindow;
-      child.addEventListener("error", event => {
-        event.preventDefault();
-        reject(event.error ?? new Error(event.message));
-      });
-      child.addEventListener("unhandledrejection", event => {
-        event.preventDefault();
-        reject(event.reason);
-      });
-      child.traceFixtureRealm = {engine:context.engine, row, degraded, recordCost, profile, resolve, reject,
-        root:new URL("./", import.meta.url).href,
-        sdk:new URL("/sdk/titan-browser.mjs", import.meta.url).href,
-        page:new URL("/sdk/titan-browser-page.mjs", import.meta.url).href,
-        stdout:chunk => context.stdout(new Uint8Array(chunk)),
-        stderr:chunk => context.stderr(new Uint8Array(chunk))};
-      const script = frame.contentDocument.createElement("script");
-      script.type = "module";
-      script.addEventListener("error", () => reject(new Error("cannot import isolated trace gate")), {once:true});
-      script.textContent = `import {runInRealm} from ${JSON.stringify(import.meta.url)};` +
-        "const bridge = globalThis.traceFixtureRealm;" +
-        "runInRealm(bridge).then(bridge.resolve, bridge.reject);";
-      frame.contentDocument.body.append(script);
-    });
-  } finally {
-    frame.remove();
-    context.assert(equalDescriptor(own(globalThis, "Error"), originalConstructor) &&
-      equalDescriptor(own(Error, "stackTraceLimit"), originalLimit) &&
-      equalDescriptor(own(Error, "prepareStackTrace"), originalPrepare),
-      "isolated row changed parent Error descriptors");
-    context.assert(typeof new Error().stack === "string", "isolated row poisoned parent native capture");
-  }
-}
-
-export async function runInRealm(bridge) {
-  const {create} = await import(bridge.sdk);
-  const {observeFactory, relativePath} = await import(bridge.page);
-  const url = path => new URL(relativePath(path).split("/").map(encodeURIComponent).join("/"), bridge.root).href;
-  const context = Object.freeze({engine:bridge.engine, create, stdout:bridge.stdout, stderr:bridge.stderr,
-    assert(condition, message = "assertion failed") {
-      if (!condition) throw new Error(message);
-    },
-    async image(path) {
-      const imageUrl = url(path);
-      const {default:factory} = await import(imageUrl);
-      if (typeof factory !== "function") throw new Error("isolated image must export a factory");
-      return Object.freeze({
-        factory:observeFactory(factory, message => {
-          throw new Error(`isolated image ${message.type}: ${message.reason}`);
-        }, bridge.degraded),
-        locateFile:name => new URL(name.split("/").map(encodeURIComponent).join("/"), imageUrl).href});
-    },
-    async bytes(path) {
-      const response = await fetch(url(path));
-      if (!response.ok) throw new Error(`cannot read isolated asset ${path}: HTTP ${response.status}`);
-      return new Uint8Array(await response.arrayBuffer());
-    }});
-  return executeRow(context, bridge.row, bridge.degraded, bridge.recordCost, true, bridge.profile);
 }

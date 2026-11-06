@@ -9,17 +9,14 @@ local util = require "titan-compiler.util"
 local M = {}
 
 M.EMSCRIPTEN_VERSION = "6.0.13"
-local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +multivalue " ..
-    "+mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
+local FEATURES = "+bulk-memory +bulk-memory-opt +call-indirect-overlong +exception-handling " ..
+    "+multivalue +mutable-globals +nontrapping-fptoint +reference-types +sign-ext"
 local BANNER = "# Lua 5.5.1 browser build record v1\n"
 local RECORD_KEYS = { "fork_revision", "archive_sha256", "headers_sha256",
     "emscripten_version", "target", "wasm_features", "sjlj", "lua_defines", "numeric", "cflags" }
 local TARGET_DEFINES = {
     "-DTITAN_TARGET_BROWSER=1",
     "-DTITAN_COROUTINE_STACK_SIZE=262144",
-    "-DTITAN_CODEC_DEPTH_LIMIT=43",
-    "-DTITAN_JSON_WRITER_DEPTH_LIMIT=103",
-    "-DMCO_ASYNCFY_STACK_SIZE=65536",
 }
 -- One object profile per build profile (D26). `production` optimizes as native
 -- production does and accepts the frames inlining costs, keeping the object
@@ -50,8 +47,17 @@ function M.object_flags(build_profile)
     flags[#flags + 1] = "-Wno-unused-but-set-variable"
     flags[#flags + 1] = "-Wno-unused-function"
     flags[#flags + 1] = "-gline-tables-only"
-    flags[#flags + 1] = "-sSUPPORT_LONGJMP=emscripten"
+    flags[#flags + 1] = "-sSUPPORT_LONGJMP=wasm"
+    flags[#flags + 1] = "-sWASM_LEGACY_EXCEPTIONS=1"
     return flags
+end
+
+-- All browser compiler execution goes through this argv policy, including
+-- probes and coordinator jobs. Keep the frozen tools.cc as the raw executable.
+function M.compiler_argv(cc)
+    local argv = { "env", "EMCC_CFLAGS=" }
+    for _, argument in ipairs(cc) do argv[#argv + 1] = argument end
+    return argv
 end
 
 local function hex(value, length)
@@ -128,12 +134,21 @@ local function normalized_absolute(value)
         compiler_paths.to_slash(compiler_paths.normalize(value)) == compiler_paths.to_slash(value)
 end
 
-local function longjmp_mode(flags, index)
+-- Match emcc 6.0.13's joined/split settings, bare =1 and boolean NO_ aliases.
+local function setting_value(flags, index, name)
     local flag = flags[index]
-    if flag == "-sSUPPORT_LONGJMP" or
-        flag == "-s" and flags[index + 1] == "SUPPORT_LONGJMP" then return "emscripten" end
-    local mode = flag:match("^%-sSUPPORT_LONGJMP=(.*)$") or
-        flag == "-s" and (flags[index + 1] or ""):match("^SUPPORT_LONGJMP=(.*)$")
+    local setting = flag:match("^%-s(.+)$") or flag == "-s" and flags[index + 1]
+    if not setting then return nil end
+    local key, value = setting:match("^([%w_]+)=(.*)$")
+    if not key then key, value = setting, "1" end
+    if key == name then return value end
+    if key == "NO_" .. name then
+        return value == "0" and "1" or value == "1" and "0" or ""
+    end
+end
+
+local function longjmp_mode(flags, index)
+    local mode = setting_value(flags, index, "SUPPORT_LONGJMP")
     return mode == "1" and "emscripten" or mode
 end
 
@@ -226,11 +241,8 @@ local function validate(data, context)
     local tail, tail_error = check_owned_tail(data.compile_flags,
         #owned_flags + 1, data.trace_control == true, data.build_profile)
     if not tail then return nil, tail_error end
-    local seen, longjmp = {}, false
-    for index, flag in ipairs(data.compile_flags) do
-        seen[flag] = true
-        if longjmp_mode(data.compile_flags, index) == "emscripten" then longjmp = true end
-    end
+    local seen = {}
+    for _, flag in ipairs(data.compile_flags) do seen[flag] = true end
     local required = { "--std=c99", table.unpack(TARGET_DEFINES) }
     for _, flag in ipairs(defines) do required[#required + 1] = flag end
     for _, flag in ipairs(required) do
@@ -238,7 +250,6 @@ local function validate(data, context)
             return nil, "browser target descriptor is missing required compile flag " .. string.format("%q", flag)
         end
     end
-    if not longjmp then return nil, "browser target descriptor is missing required SUPPORT_LONGJMP setting" end
     if #data.include_dirs < 2 or data.include_dirs[1] ~= data.paths.lua_source or
         data.include_dirs[2] == data.paths.lua_source then
         return nil, "browser include roots must put verified Lua first and Titan runtime second"
@@ -295,7 +306,10 @@ end
 local UNSUPPORTED = { ["-fPIC"] = true, ["-fpic"] = true, ["-fPIE"] = true,
     ["-fpie"] = true, ["-pie"] = true, ["-shared"] = true, ["-dynamiclib"] = true,
     ["-rdynamic"] = true, ["-pthread"] = true, ["-ffat-lto-objects"] = true,
-    ["-m32"] = true, ["-m64"] = true, ["-fwasm-exceptions"] = true }
+    ["-m32"] = true, ["-m64"] = true, ["-fwasm-exceptions"] = true,
+    ["-fno-wasm-exceptions"] = true, ["-mexception-handling"] = true,
+    ["-mno-exception-handling"] = true, ["-mlegacy-exception-handling"] = true,
+    ["-mno-legacy-exception-handling"] = true }
 
 -- Optimization, inlining, sibling-call, frame-pointer and debug choices belong
 -- to the build profile; internal descriptors contain them and trailing user
@@ -308,7 +322,7 @@ function M.trace_option(flag)
 end
 
 -- A compile-side spelling the build profile owns: the optimization, debug and
--- frame choices, and the post-Asyncify pass list. Both `-sKEY[=VALUE]` and the
+-- frame choices, and the trace-preserving Binaryen pass list. Both `-sKEY[=VALUE]` and the
 -- two-token `-s KEY[=VALUE]` spellings count, with or without a value, and
 -- `-sNO_KEY...` is the same setting.
 function M.owned_compile_option(flags, index)
@@ -328,10 +342,11 @@ function M.validate_flags(flags, origin)
     end
     for index, flag in ipairs(flags or {}) do
         local longjmp = longjmp_mode(flags, index)
+        local legacy = setting_value(flags, index, "WASM_LEGACY_EXCEPTIONS")
         if UNSUPPORTED[flag] or flag == "-flto" or flag:match("^%-flto=") or
             flag:match("^%-march=") or flag:match("^%-mcpu=") or flag:match("^%-mtune=") or
-            longjmp and longjmp ~= "emscripten" then
-            local rejected = longjmp and flag == "-s" and flag .. " " .. flags[index + 1] or flag
+            longjmp and longjmp ~= "wasm" or legacy and legacy ~= "1" then
+            local rejected = (longjmp or legacy) and flag == "-s" and flag .. " " .. flags[index + 1] or flag
             return nil, "browser target does not support " .. origin .. " flag " .. string.format("%q", rejected)
         end
     end
@@ -393,7 +408,9 @@ local function tools(context)
             return nil, "browser target requires Emscripten 6.0.13: emcc not found (EMSDK unset; not on PATH)" .. INSTALL
         end
     end
-    local result = strategy:run({ cc, "--version" }, { stderr_to_stdout = true })
+    local command = M.compiler_argv({ cc })
+    command[#command + 1] = "--version"
+    local result = strategy:run(command, { stderr_to_stdout = true })
     local found = type(result) == "table" and type(result.output) == "string" and
         result.output:match("emcc[^\n]- (%d+%.%d+%.%d+)") or "unknown"
     if type(result) ~= "table" or not result.ok or found ~= M.EMSCRIPTEN_VERSION then
@@ -451,7 +468,7 @@ validate_record = function(record, paths)
             return nil, record_error(paths, "is malformed", "invalid field " .. string.format("%q", item[1]) .. ": invalid hexadecimal value")
         end
     end
-    for _, item in ipairs({ { "sjlj", "emscripten" }, { "target", "wasm32-unknown-emscripten" },
+    for _, item in ipairs({ { "sjlj", "wasm" }, { "target", "wasm32-unknown-emscripten" },
             { "emscripten_version", M.EMSCRIPTEN_VERSION } }) do
         if record[item[1]] ~= item[2] then return nil, mismatch(paths, record, item[1], item[2]) end
     end
@@ -469,7 +486,7 @@ validate_record = function(record, paths)
     end
     local flags, flags_error = record_list(record, paths, "cflags")
     if not flags then return nil, flags_error end
-    local flag_defines, seen, longjmp = {}, {}, nil
+    local flag_defines, seen, longjmp, legacy = {}, {}, nil, nil
     for index, flag in ipairs(flags) do
         if flag:sub(1, 2) == "-D" and not seen[flag] then
             flag_defines[#flag_defines + 1] = flag
@@ -477,6 +494,8 @@ validate_record = function(record, paths)
         end
         local mode = longjmp_mode(flags, index)
         if mode then longjmp = mode end
+        local encoding = setting_value(flags, index, "WASM_LEGACY_EXCEPTIONS")
+        if encoding then legacy = encoding end
     end
     table.sort(flag_defines, util.bytewise_less)
     if table.concat(flag_defines, " ") ~= record.lua_defines then
@@ -484,6 +503,11 @@ validate_record = function(record, paths)
     end
     if longjmp ~= record.sjlj then
         return nil, mismatch(paths, record, "sjlj", longjmp or "<missing in cflags>")
+    end
+    if legacy ~= "1" then
+        return nil, record_error(paths, "is malformed",
+            "invalid field \"cflags\": required -sWASM_LEGACY_EXCEPTIONS=1, found " ..
+                string.format("%q", legacy or "<missing>"))
     end
     local supported, unsupported = M.validate_flags(flags, "cflags")
     if not supported then return nil, record_error(paths, "is malformed", "invalid field \"cflags\": " .. unsupported) end
@@ -597,10 +621,11 @@ function M.build(context, inputs)
             if not resolved then return nil, resolve_error end
             includes[index] = resolved
         end
-        local provisional = { io = context.io, compiler_argv = tool.cc, compile_flags = flags,
+        local compiler = M.compiler_argv(tool.cc)
+        local provisional = { io = context.io, compiler_argv = compiler, compile_flags = flags,
             language_mode = "c99", language_flag = false, cppflags = {}, cflags = {}, include_dirs = includes }
         local profile_inputs, profile_error = cdriver.target_profile_inputs({ io = context.io,
-            cache_adapter = context.cache_adapter, compiler = tool.cc, language_flag = false,
+            cache_adapter = context.cache_adapter, compiler = compiler, language_flag = false,
             compiler_include_dirs = includes, compile_flags = flags, language_mode = "c99" })
         if not profile_inputs then return nil, profile_error end
         local profile

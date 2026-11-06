@@ -131,38 +131,30 @@ local function exercise(context: test.Context, mode: string, depth: integer)
   if main_stack ~= 262144 then raise "browser coroutine stack define drifted from 256 KiB" end
   context:log("BUDGET BEGIN mode=" .. mode .. " depth=" .. depth .. " coroutine_bytes=" .. main_stack)
   if mode == "main-titan" then test.assert(recurse(depth) == depth)
-  elseif mode == "fiber-titan" then
+  elseif mode == "coroutine-titan" then
     local owner = coroutine.create(function(_: value): value return recurse(depth) end, "depth")
     test.assert(owner:resume(nil) == depth)
   elseif mode == "main-shadow" then
     test.assert(ffi.budget_shadow_bytes(depth) == 91)
     log_shadow(context, "main", 1048576)
-  elseif mode == "fiber-shadow" then
+  elseif mode == "coroutine-shadow" then
     local owner = coroutine.create(function(_: value): value
       return ffi.budget_shadow_bytes(depth)
     end, "shadow")
     test.assert(owner:resume(nil) == 91)
-    log_shadow(context, "fiber", main_stack)
-  elseif mode == "outer-data" then
+    log_shadow(context, "coroutine", main_stack)
+  elseif mode == "outer-wait" then
     mixed_titan(3, function() ffi.budget_wait() end, depth)
-  elseif mode == "fiber-data" then
+  elseif mode == "coroutine-wait" then
     local owner = coroutine.create(function(_: value): value
       mixed_titan(3, function() coroutine.yield("parked", "data") end, depth)
       return "done"
     end, "data")
     test.assert(owner:resume(nil) == "parked")
     test.assert(owner:resume(nil) == "done")
-  elseif mode == "outer-no-wait" then
-    mixed_titan(3, function() end, depth)
-  elseif mode == "fiber-no-yield" then
-    local owner = coroutine.create(function(_: value): value
-      mixed_titan(3, function() end, depth)
-      return "done"
-    end, "control")
-    test.assert(owner:resume(nil) == "done")
-  elseif mode == "main-fiber-data" then
+  elseif mode == "nested-entry" then
     mixed_titan(3, function()
-      local owner = coroutine.create(function(_: value): value return 44 end, "main-buffer")
+      local owner = coroutine.create(function(_: value): value return 44 end, "nested-entry")
       test.assert(owner:resume(nil) == 44)
     end, depth)
   elseif mode == "lua-limit" then lua_limit(context)

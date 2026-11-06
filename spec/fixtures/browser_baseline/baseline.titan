@@ -104,12 +104,8 @@ function main(args: {string}): integer
   measure("bench.closures", function(): () bench_closures(extra) end)
   measure("bench.arrays", function(): () bench_arrays(extra) end)
   measure("bench.strings", function(): () bench_strings(extra) end)
-  -- An Asyncify-off cell cannot create a fiber or return to JavaScript, so the
-  -- harness omits the argument there.
-  if args[1] == "asyncify" then
-    measure("bench.coroutine_switch", function(): () bench_coroutine_switch(extra) end)
-    bench_suspensions()
-  end
+  measure("bench.coroutine_switch", function(): () bench_coroutine_switch(extra) end)
+  bench_suspensions()
   emit("bench.done", 1)
   return 0
 end

@@ -216,21 +216,21 @@ test("launcher rejects absent and wrong-major Node without stdout", { skip: !sup
     const result = await run(["--probe"], { TITAN_NODE: missing });
     assert.equal(result.status, 75);
     assert.equal(result.stdout.length, 0);
-    assert.equal(result.stderr.toString(), `titan-browser-run: Node 24 is required (node not executable at "${missing}")\n`);
+    assert.equal(result.stderr.toString(), `titan-browser-run: Node 26 or newer is required (node not executable at "${missing}")\n`);
     const noPath = await run(["--probe"], { TITAN_NODE: undefined, PATH: "" });
     assert.equal(noPath.status, 75);
     assert.equal(noPath.stdout.length, 0);
-    assert.equal(noPath.stderr.toString(), "titan-browser-run: Node 24 is required (node not found (TITAN_NODE unset; not on PATH))\n");
+    assert.equal(noPath.stderr.toString(), "titan-browser-run: Node 26 or newer is required (node not found (TITAN_NODE unset; not on PATH))\n");
     const explicit = await run(["--probe"], { PATH: "", TITAN_CHROME: "/missing/chrome-329" });
     assert.equal(explicit.status, 0, explicit.stderr.toString());
     const dir = await mkdtemp(join(tmpdir(), "titan-node-resolver-"));
     try {
         const node = join(dir, "node");
-        await writeFile(node, "#!/bin/sh\nprintf 'v22.23.4\\n'\n", { mode: 0o755 });
+        await writeFile(node, "#!/bin/sh\nprintf 'v24.19.0\\n'\n", { mode: 0o755 });
         const wrong = await run(["--probe"], { TITAN_NODE: node });
         assert.equal(wrong.status, 75);
         assert.equal(wrong.stdout.length, 0);
-        assert.equal(wrong.stderr.toString(), `titan-browser-run: Node 24 is required ("${node}" reports v22.23.4; expected Node 24)\n`);
+        assert.equal(wrong.stderr.toString(), `titan-browser-run: Node 26 or newer is required ("${node}" reports v24.19.0; expected Node 26 or newer)\n`);
     } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -754,11 +754,11 @@ test("direct invocation through a symlink still runs the runner CLI", {skip: !su
 // safe point deliberately precedes the loader's ccall outcome continuation.
 function entryOutcomeFactory(entry) {
     return options => {
-        options.titanBrowserAttach({safe: () => true, suspensionPending: false});
+        options.titanBrowserAttach({safe: () => true, poison() {}});
         return {
             HEAPU8: new Uint8Array(0),
             ccall() {
-                queueMicrotask(() => options.titanBrowserSafePoint(false));
+                queueMicrotask(() => options.titanBrowserSafePoint());
                 return entry(options);
             },
         };
@@ -785,19 +785,53 @@ test("fulfilled ccall without completion still reports the protocol failure", {t
     try {
         await assert.rejects(instance.run(), {
             code: "TITAN_BROWSER_PROTOCOL",
-            message: "browser entry returned without completion or suspension",
+            message: "browser entry returned without completion",
         });
     } finally { await instance.dispose(); }
 });
 
-test("completion and quiescence still settle a pending internal ccall promise", {timeout: 1000}, async () => {
-    const instance = create(entryOutcomeFactory(options => {
-        options.titanBrowserComplete(0, 17, new Uint8Array(0), 1);
-        return new Promise(() => {});
-    }));
+test("loader refuses missing JSPI before instantiation and shares its failure promise", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(WebAssembly, "promising");
+    let calls = 0;
+    const instance = create(() => { calls++; });
+    let initializing;
     try {
-        assert.deepEqual(await instance.run(), {
-            kind: "returned", status: 17, bytes: new Uint8Array(0),
+        Object.defineProperty(WebAssembly, "promising", {...descriptor, value: undefined});
+        initializing = instance.initialize();
+        assert.equal(instance.initialize(), initializing);
+    } finally {
+        if (descriptor) Object.defineProperty(WebAssembly, "promising", descriptor);
+        else delete WebAssembly.promising;
+    }
+    try {
+        await assert.rejects(initializing, {
+            code: "TITAN_BROWSER_CAPABILITY",
+            message: "Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)",
         });
+        assert.equal(calls, 0);
     } finally { await instance.dispose(); }
+});
+
+test("completion waits for terminal promise retirement and ignores its numeric value", {timeout: 1000}, async () => {
+    let release;
+    const retired = new Promise(resolve => { release = resolve; });
+    const instance = create(entryOutcomeFactory(options => {
+        options.titanBrowserComplete(0, 17, new Uint8Array([0, 255]), 1);
+        return retired;
+    }));
+    let settled = false, disposed = false;
+    const running = instance.run();
+    running.finally(() => { settled = true; });
+    try {
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(settled, false, "copied completion released an unretired engine entry");
+        const disposing = instance.dispose().then(() => { disposed = true; });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(disposed, false, "disposal dropped an admitted continuation");
+        release(-923);
+        assert.deepEqual(await running, {
+            kind: "returned", status: 17, bytes: new Uint8Array([0, 255]),
+        });
+        await disposing;
+    } finally { release(-923); await instance.dispose(); }
 });

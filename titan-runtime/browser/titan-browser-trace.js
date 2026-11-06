@@ -141,12 +141,10 @@ addToLibrary({
       var self = TitanBrowserTrace, records = [], frames = 0, engine = -1, truncated = false;
       var v8 = /^[ \t]*at[ \t]/m.test(stack);
       for (var text of stack.split('\n')) {
-        if (/^async\*/.test(text)) break; // SpiderMonkey's saved history is not active ancestry.
         if (!text.trim()) continue;
         var frame = v8 ? /^[ \t]*at[ \t]/.test(text)
           : text.includes('@');
         if (!frame) continue; // Count frame shapes, never V8's Error title.
-        ++frames;
         for (var kind = 0; kind < self.patterns.length; ++kind) {
           var match = self.patterns[kind].exec(text);
           if (!match) continue;
@@ -157,9 +155,15 @@ addToLibrary({
           else truncated = true;
           break;
         }
+        // SpiderMonkey prefixes saved JS parents with an arbitrary async cause
+        // and '*'. Match before '@', after recognizing Wasm: image names may
+        // themselves contain '*'. Saved parents are not active ancestry.
+        if (engine === 1 && kind === self.patterns.length && /^[^@]+\*[^@]*@/.test(text)) break;
+        ++frames;
       }
-      // D10/D11: these are observed synchronous ceilings under defineProperty.
-      var ceiling = engine === 2 ? 100 : engine === 1 ? 128 : Infinity;
+      // Firefox still caps synchronous capture at 128 frames. Current JSC does
+      // not have the historical 100-frame ceiling; use its effective limit.
+      var ceiling = engine === 1 ? 128 : Infinity;
       if (frames >= Math.min(limit, ceiling)) truncated = true;
       return {records, truncated};
     },

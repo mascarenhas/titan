@@ -76,7 +76,7 @@ local function fake_context(options)
     function strategy:run(argv)
         calls[#calls + 1] = { table.unpack(argv) }
         if argv[1] == "uname" then return { started = true, ok = true, output = options.uname or "Linux\n" } end
-        if argv[2] == "--version" then
+        if argv[#argv] == "--version" then
             return { started = true, ok = true, output = "emcc (Emscripten) " .. (options.version or "6.0.13") .. "\n" }
         end
         for index, flag in ipairs(argv) do
@@ -161,17 +161,17 @@ describe("browser target descriptor", function()
         assert.has_error(function() descriptor.label = "linux" end, "browser target descriptor is immutable")
         assert.has_error(function() descriptor.extra = true end, "browser target descriptor is immutable")
         assert.has_error(function() descriptor.tools.cc[1] = "cc" end, "browser target descriptor is immutable")
-        assert.has_error(function() descriptor.lua.record.sjlj = "wasm" end, "browser target descriptor is immutable")
+        assert.has_error(function() descriptor.lua.record.sjlj = "emscripten" end, "browser target descriptor is immutable")
         assert.has_error(function() table.insert(descriptor.compile_flags, "-flto") end,
             "browser target descriptor is immutable")
         assert.equal(2, #calls)
-        assert.equal("--version", calls[1][2])
+        assert.same({ "env", "EMCC_CFLAGS=", descriptor.tools.cc[1], "--version" }, calls[1])
         local flags = table.concat(calls[2], " ")
         contains(flags, "-c")
-        contains(flags, "-sSUPPORT_LONGJMP=emscripten")
+        contains(flags, "-sSUPPORT_LONGJMP=wasm")
+        contains(flags, "-sWASM_LEGACY_EXCEPTIONS=1")
         contains(flags, "-DTITAN_TARGET_BROWSER=1")
         contains(flags, "-DTITAN_COROUTINE_STACK_SIZE=262144")
-        contains(flags, "-DMCO_ASYNCFY_STACK_SIZE=65536")
         assert.same(fixtures.target_defines, browser.export(descriptor.target_defines))
         assert.is_nil(flags:find("-fPIC", 1, true))
         assert.is_nil(flags:find("-flto", 1, true))
@@ -196,7 +196,7 @@ describe("browser target descriptor", function()
             function(data) data.unknown = true end,
             function(data) data.tools.execute = function() end end,
             function(data) data.paths.root = data end,
-            function(data) data.lua.record.sjlj = "wasm"; fixtures.identify(data) end,
+            function(data) data.lua.record.sjlj = "emscripten"; fixtures.identify(data) end,
         }) do
             local data = fixtures.descriptor()
             change(data)
@@ -220,15 +220,19 @@ describe("browser target descriptor", function()
         { "missing C99 flag", function(data) remove_flag(data, "--std=c99") end },
         { "missing target define", function(data) remove_flag(data, "-DTITAN_TARGET_BROWSER=1") end },
         { "missing coroutine stack define", function(data) remove_flag(data, "-DTITAN_COROUTINE_STACK_SIZE=262144") end },
-        { "missing fiber Asyncify stack define", function(data) remove_flag(data, "-DMCO_ASYNCFY_STACK_SIZE=65536") end },
         { "inconsistent target defines", function(data) data.target_defines = { "-DTITAN_TARGET_BROWSER=1" } end },
         { "missing Lua define", function(data) remove_flag(data, "-DLUA_USE_BROWSER") end },
-        { "missing longjmp mode", function(data) remove_flag(data, "-sSUPPORT_LONGJMP=emscripten") end },
+        { "missing longjmp mode", function(data) remove_flag(data, "-sSUPPORT_LONGJMP=wasm") end },
+        { "missing legacy EH encoding", function(data) remove_flag(data, "-sWASM_LEGACY_EXCEPTIONS=1") end },
         { "LTO flag", function(data) data.compile_flags[#data.compile_flags + 1] = "-flto" end },
         { "PIC flag", function(data) data.compile_flags[#data.compile_flags + 1] = "-fPIC" end },
         { "split conflicting longjmp flag", function(data)
             data.compile_flags[#data.compile_flags + 1] = "-s"
-            data.compile_flags[#data.compile_flags + 1] = "SUPPORT_LONGJMP=wasm"
+            data.compile_flags[#data.compile_flags + 1] = "SUPPORT_LONGJMP=emscripten"
+        end },
+        { "split conflicting EH encoding", function(data)
+            data.compile_flags[#data.compile_flags + 1] = "-s"
+            data.compile_flags[#data.compile_flags + 1] = "WASM_LEGACY_EXCEPTIONS=0"
         end },
         { "sparse flags", function(data) data.compile_flags[2] = nil end },
         { "relative tool location", function(data) data.tools.location = "./emscripten" end },
@@ -391,7 +395,8 @@ describe("browser target descriptor", function()
 
     it("validates direct build compile extras before tool discovery", function()
         for _, flags in ipairs({
-            { "-fPIC" }, { "-flto" }, { "-s", "SUPPORT_LONGJMP=wasm" },
+            { "-fPIC" }, { "-flto" }, { "-s", "SUPPORT_LONGJMP=emscripten" },
+            { "-s", "WASM_LEGACY_EXCEPTIONS=0" },
             "not an array", { [1] = "-O0", [3] = "-g" }, { debug = "-O0" }, { true },
         }) do
             local context, inputs, calls = fake_context()
@@ -464,7 +469,7 @@ describe("browser target descriptor", function()
         assert.equal("production", descriptor.build_profile)
         assert.same({
             "--std=c99", "-O3", "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function",
-            "-gline-tables-only", "-sSUPPORT_LONGJMP=emscripten",
+            "-gline-tables-only", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1",
             "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(fixtures.target_defines),
         }, descriptor.compile_flags)
         assert.is_true(#calls > 0, "the production build never probed its toolchain")
@@ -473,7 +478,7 @@ describe("browser target descriptor", function()
         assert.same({
             "--std=c99", "-O1", "-fno-inline", "-fno-optimize-sibling-calls",
             "-Wall", "-Wno-unused-but-set-variable", "-Wno-unused-function",
-            "-gline-tables-only", "-sSUPPORT_LONGJMP=emscripten",
+            "-gline-tables-only", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1",
             "-DLUA_USE_BROWSER", "-DLUA_USE_POSIX", table.unpack(fixtures.target_defines),
         }, validation.compile_flags)
         assert.not_equal(descriptor.identity, validation.identity)
@@ -601,8 +606,8 @@ describe("browser target descriptor", function()
 
     for _, case in ipairs({
         { "unknown field", function(text) return text .. "unknown=yes\n" end, 'unknown field "unknown"' },
-        { "duplicate field", function(text) return text .. "sjlj=emscripten\n" end, 'duplicate field "sjlj"' },
-        { "missing field", function(text) return text:gsub("sjlj=emscripten\n", "") end, 'missing field "sjlj"' },
+        { "duplicate field", function(text) return text .. "sjlj=wasm\n" end, 'duplicate field "sjlj"' },
+        { "missing field", function(text) return text:gsub("sjlj=wasm\n", "") end, 'missing field "sjlj"' },
         { "banner", function(text) return text:gsub("record v1", "record v0") end, "invalid banner" },
         { "revision", function(text) return text:gsub("fork_revision=[^\n]*", "fork_revision=bad") end, 'invalid field "fork_revision"' },
         { "digest", function(text) return text:gsub("archive_sha256=[^\n]*", "archive_sha256=bad") end, 'invalid field "archive_sha256"' },
@@ -645,7 +650,7 @@ describe("browser target descriptor", function()
 
     for _, case in ipairs({
         { "emscripten_version", "6.0.12" }, { "target", "wasm64-unknown-emscripten" },
-        { "sjlj", "wasm" }, { "wasm_features", "+sign-ext" },
+        { "sjlj", "emscripten" }, { "wasm_features", "+sign-ext" },
         { "numeric", "integer=int,float=float" },
         { "archive_sha256", string.rep("0", 64) }, { "headers_sha256", string.rep("0", 64) },
         { "lua_defines", "-DLUA_USE_POSIX" },
@@ -704,13 +709,13 @@ describe("browser target descriptor", function()
         assert.is_nil(err:find("make install-browser", 1, true))
     end)
 
-    for _, case in ipairs({ { "sjlj", "wasm" }, { "target", "wasm64-unknown-emscripten" },
+    for _, case in ipairs({ { "sjlj", "emscripten" }, { "target", "wasm64-unknown-emscripten" },
             { "emscripten_version", "6.0.12" } }) do
         it("prioritizes fixed field " .. case[1] .. " over conflicting cflags", function()
             local record = fixtures.record()
             local context, inputs = fake_context({ record = {
                 [case[1]] = case[2],
-                cflags = record.cflags:gsub("SUPPORT_LONGJMP=emscripten", "SUPPORT_LONGJMP=wasm"),
+                cflags = record.cflags:gsub("SUPPORT_LONGJMP=wasm", "SUPPORT_LONGJMP=emscripten"),
             } })
             local descriptor, err = browser.build(context, inputs)
             assert.is_nil(descriptor)
@@ -720,7 +725,7 @@ describe("browser target descriptor", function()
             local data = fixtures.descriptor()
             data.lua.record = fixtures.record({
                 [case[1]] = case[2],
-                cflags = record.cflags:gsub("SUPPORT_LONGJMP=emscripten", "SUPPORT_LONGJMP=wasm"),
+                cflags = record.cflags:gsub("SUPPORT_LONGJMP=wasm", "SUPPORT_LONGJMP=emscripten"),
             })
             fixtures.identify(data)
             descriptor, err = browser.import(data)
@@ -749,11 +754,15 @@ describe("browser target descriptor", function()
     it("diagnoses host-only flags including ambient LTO without using native defaults", function()
         for _, flag in ipairs({ "-fPIC", "-fpic", "-fPIE", "-fpie", "-pie", "-shared", "-dynamiclib",
                 "-rdynamic", "-pthread", "-flto", "-flto=thin", "-ffat-lto-objects", "-march=native",
-                "-mcpu=native", "-mtune=native", "-m32", "-m64", "-fwasm-exceptions", "-sSUPPORT_LONGJMP=wasm" }) do
+                "-mcpu=native", "-mtune=native", "-m32", "-m64", "-fwasm-exceptions",
+                "-fno-wasm-exceptions", "-mexception-handling", "-mno-exception-handling",
+                "-mlegacy-exception-handling", "-mno-legacy-exception-handling",
+                "-sSUPPORT_LONGJMP=emscripten" }) do
             local ok, err = browser.validate_flags({ flag }, "TITAN_EXTRA_CFLAGS")
             assert.is_nil(ok); assert.equal('browser target does not support TITAN_EXTRA_CFLAGS flag "' .. flag .. '"', err)
         end
-        assert(browser.validate_flags({ "-fno-lto", "-sSUPPORT_LONGJMP=emscripten" }, "--cflag"))
+        assert(browser.validate_flags({ "-fno-lto", "-sSUPPORT_LONGJMP=wasm",
+            "-sWASM_LEGACY_EXCEPTIONS=1" }, "--cflag"))
         local subject = fresh_driver()
         subject.EXTRA_CFLAGS = { "-flto" }
         local context = { target = "browser", host_target = "linux" }
@@ -776,16 +785,55 @@ describe("browser target descriptor", function()
         }, "--cflag"))
     end)
 
-    it("names split conflicting longjmp settings and preserves equivalent forms", function()
+    it("rejects every conflicting SJLJ and EH setting through every flag origin", function()
         for _, origin in ipairs({ "TITAN_EXTRA_CPPFLAGS", "TITAN_EXTRA_CFLAGS", "TITAN_EXTRA_LDFLAGS",
-                "--cflag", "--ldflag", "cflags" }) do
-            local ok, err = browser.validate_flags({ "-s", "SUPPORT_LONGJMP=wasm" }, origin)
-            assert.is_nil(ok)
-            assert.equal("browser target does not support " .. origin ..
-                ' flag "-s SUPPORT_LONGJMP=wasm"', err)
+                "--cflag", "--ldflag", "compile_flags", "cflags" }) do
+            for _, setting in ipairs({ "SUPPORT_LONGJMP=emscripten", "SUPPORT_LONGJMP=0",
+                    "SUPPORT_LONGJMP=1", "SUPPORT_LONGJMP", "NO_SUPPORT_LONGJMP",
+                    "NO_SUPPORT_LONGJMP=0", "NO_SUPPORT_LONGJMP=1",
+                    "WASM_LEGACY_EXCEPTIONS=0", "NO_WASM_LEGACY_EXCEPTIONS",
+                    "NO_WASM_LEGACY_EXCEPTIONS=1" }) do
+                for _, flags in ipairs({ { "-s" .. setting }, { "-s", setting } }) do
+                    local ok, err = browser.validate_flags(flags, origin)
+                    assert.is_nil(ok)
+                    assert.equal("browser target does not support " .. origin ..
+                        " flag " .. string.format("%q", table.concat(flags, " ")), err)
+                end
+            end
         end
-        assert(browser.validate_flags({ "-sSUPPORT_LONGJMP", "-s", "SUPPORT_LONGJMP",
-            "-sSUPPORT_LONGJMP=1", "-s", "SUPPORT_LONGJMP=1" }, "--cflag"))
+        assert(browser.validate_flags({ "-sSUPPORT_LONGJMP=wasm", "-s", "SUPPORT_LONGJMP=wasm",
+            "-sWASM_LEGACY_EXCEPTIONS", "-s", "WASM_LEGACY_EXCEPTIONS=1",
+            "-sNO_WASM_LEGACY_EXCEPTIONS=0", "-s", "NO_WASM_LEGACY_EXCEPTIONS=0" }, "--cflag"))
+    end)
+
+    it("rejects missing or wrong effective record EH encoding in builds and transport", function()
+        local record = fixtures.record()
+        local without = record.cflags:gsub(" %-sWASM_LEGACY_EXCEPTIONS=1", "")
+        for _, cflags in ipairs({ without, record.cflags .. " -sWASM_LEGACY_EXCEPTIONS=0",
+                record.cflags .. " -s NO_WASM_LEGACY_EXCEPTIONS",
+                record.cflags .. " -s NO_WASM_LEGACY_EXCEPTIONS=1" }) do
+            local context, inputs = fake_context({ record = { cflags = cflags } })
+            local descriptor, err = browser.build(context, inputs)
+            assert.is_nil(descriptor)
+            contains(err, "required -sWASM_LEGACY_EXCEPTIONS=1")
+            contains(err, "make install-browser PREFIX=" .. inputs.paths.root)
+            local data = fixtures.descriptor()
+            data.lua.record.cflags = cflags
+            fixtures.identify(data)
+            descriptor, err = browser.import(data)
+            assert.is_nil(descriptor)
+            contains(err, "required -sWASM_LEGACY_EXCEPTIONS=1")
+        end
+    end)
+
+    it("accepts the explicit equivalent legacy EH record spellings", function()
+        local record = fixtures.record()
+        for _, setting in ipairs({ "-sWASM_LEGACY_EXCEPTIONS", "-s WASM_LEGACY_EXCEPTIONS=1",
+                "-sNO_WASM_LEGACY_EXCEPTIONS=0", "-s NO_WASM_LEGACY_EXCEPTIONS=0" }) do
+            local cflags = record.cflags:gsub("%-sWASM_LEGACY_EXCEPTIONS=1", setting)
+            local context, inputs = fake_context({ record = { cflags = cflags } })
+            assert(browser.build(context, inputs))
+        end
     end)
 
     it("preserves native installed paths and exposes only browser sibling SDK paths", function()
@@ -1103,7 +1151,7 @@ end
         end
     end
 
-    it("exposes 2 MiB TITAN_COROUTINE_STACK_SIZE by default in titan.h and 256 KiB / 64 KiB under browser target defines", function()
+    it("exposes a 2 MiB native coroutine stack and a 256 KiB browser linear stack", function()
         local strategy = compiler_io.new_sync()
         local root = assert(strategy:cwd())
         local prefix = require("spec.support.installed_prefix").active()
@@ -1129,14 +1177,10 @@ end
             profile, browser_types.TITAN_COROUTINE_STACK_SIZE.macro_expression))
         assert.equal(262144, tonumber(browser_stack.value))
 
-        local asyncfy_stack = assert(csemantics.evaluate_macro_expression(
-            profile, browser_types.MCO_ASYNCFY_STACK_SIZE.macro_expression))
-        assert.equal(65536, tonumber(asyncfy_stack.value))
         assert.is_nil(browser_types.MCO_DEFAULT_STACK_SIZE)
         assert.is_nil(browser_types.MCO_MIN_STACK_SIZE)
         local mco_source = assert(strategy:read_file(runtime_dir .. "/minicoro.h"))
         contains(mco_source, "#ifndef MCO_MIN_STACK_SIZE\n#define MCO_MIN_STACK_SIZE 32768")
-        contains(mco_source, "#ifndef MCO_ASYNCFY_STACK_SIZE\n#define MCO_ASYNCFY_STACK_SIZE 16384")
 
         local coro_source = assert(strategy:read_file(root .. "/titan/coroutine.titan"))
         contains(coro_source, 'foreign import "titan.h"')
@@ -1144,7 +1188,7 @@ end
         assert.is_nil(coro_source:find("local STACK_SIZE =", 1, true))
     end)
 
-    it("exposes native defaults and browser codec and JSON writer depth limits through FFI headers", function()
+    it("shares the native codec depth policy and has no target JSON writer cap", function()
         local strategy = compiler_io.new_sync()
         local root = assert(strategy:cwd())
         local prefix = require("spec.support.installed_prefix").active()
@@ -1152,21 +1196,19 @@ end
         local lua_dir = prefix .. "/src/lua-5.5.1"
         if not strategy:stat(lua_dir .. "/lua.h") then lua_dir = root .. "/lua-5.5.1/src" end
         local profile = fixtures.profile()
-        for _, case in ipairs({
-            { header = "transfer.h", macro = "TITAN_CODEC_DEPTH_LIMIT", native = 128, browser = 43 },
-            { header = "titan.h", macro = "TITAN_JSON_WRITER_DEPTH_LIMIT",
-                native = 0, browser = 103 },
-        }) do
-            for _, browser in ipairs({ false, true }) do
-                local types, err = cdriver.process_file(case.header, {
-                    compiler_include_dirs = { lua_dir, runtime_dir },
-                    cppflags = browser and { table.unpack(fixtures.target_defines) } or {},
-                })
-                assert.truthy(types, err)
-                local limit = assert(csemantics.evaluate_macro_expression(
-                    profile, types[case.macro].macro_expression))
-                assert.equal(browser and case.browser or case.native, tonumber(limit.value))
-            end
+        for _, browser in ipairs({ false, true }) do
+            local flags = browser and { table.unpack(fixtures.target_defines) } or {}
+            local types, err = cdriver.process_file("transfer.h", {
+                compiler_include_dirs = { lua_dir, runtime_dir }, cppflags = flags,
+            })
+            assert.truthy(types, err)
+            local limit = assert(csemantics.evaluate_macro_expression(
+                profile, types.TITAN_CODEC_DEPTH_LIMIT.macro_expression))
+            assert.equal(128, tonumber(limit.value))
+            local runtime = assert(cdriver.process_file("titan.h", {
+                compiler_include_dirs = { lua_dir, runtime_dir }, cppflags = flags,
+            }))
+            assert.is_nil(runtime.TITAN_JSON_WRITER_DEPTH_LIMIT)
         end
     end)
 end)

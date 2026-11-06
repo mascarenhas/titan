@@ -2349,7 +2349,7 @@ browser manifest. A browser invocation has already rejected `--coverage`
 compile and link extras (`browserlink.validate_extras`); before link
 certification, a browser link requires the SDK (`driver.require_browser_sdk`)
 and its link profile (`program` for programs and tests, `protocol` for
-libraries), and a library build also requires a working Node 24
+libraries), and a library build also requires a working Node 26 or newer with JSPI
 (`driver.browser_node_ready`). A browser program's output set is the `.mjs`
 and its sibling `.wasm` ([Program and test
 images](browser-target.md#program-and-test-images)).
@@ -3016,7 +3016,7 @@ listed in [The `titanc` command line](#the-titanc-command-line).
 | `TITAN_JOBS` | `titanc` | `4` | Local job cap when `--jobs` is absent. |
 | `TITAN_TARGET` | `titanc` | unset (empty means unset) | Source-selection target when `-T`/`--target` is absent; same vocabulary, with diagnostics naming `TITAN_TARGET=<value>`. Ignored by `--print-root`; never read by the driver library, build workers, or the language server. Make's native `titanc` recipes unset it. |
 | `EMSDK` | `browsertarget.lua` | unset (empty means unset) | Emscripten SDK root for the browser target: its `upstream/emscripten/{emcc,emar,emranlib}` are the only tools tried; otherwise `emcc` is found on `PATH`. |
-| `TITAN_NODE` | `titan-browser-run` (through the browser executing check and `make browser-sdk`) | unset | One Node 24 executable path (a bare name is looked up on `PATH`) for the browser runner; otherwise `node` on `PATH`. See [The runner](browser-target.md#the-runner). |
+| `TITAN_NODE` | `titan-browser-run` (through the browser executing check and `make browser-sdk`) | unset | One JSPI-capable Node 26-or-newer executable path (a bare name is looked up on `PATH`) for the browser runner; otherwise `node` on `PATH`. See [The runner](browser-target.md#the-runner). |
 | `TITAN_CHROME` | `titan-browser-run` | unset | Chrome or Chromium executable for `--engine chromium` and `--probe`, overridden by `--chrome`; otherwise the runner tries `google-chrome`, `google-chrome-stable`, `chromium`, `chromium-browser`, and `chrome-headless-shell` on `PATH`. |
 | `TITAN_BROWSER_ROOT_NO_SANDBOX` | `titan-browser-run` | unset | Exact value `1` adds `--no-sandbox` to Chromium, and only when the runner runs as root (root containers). |
 | `MAKEFLAGS` | `jobs.lua` `open_slots` (Unix), `titanc` (`progress.select`) | unset | A parent GNU Make's jobserver authorization and `-j1`; see [GNU Make jobserver participation](#gnu-make-jobserver-participation). An advertised jobserver (`--jobserver-auth`/`--jobserver-fds`) also selects the plain progress form. |

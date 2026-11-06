@@ -14,7 +14,7 @@ function now() {
 export async function run(context) {
   const path = context.args[0];
   context.assert(typeof path === 'string' && path.length > 0,
-    'pass one relative image path before an optional asyncify marker');
+    'pass one relative image path');
   const {factory, locateFile} = await context.image(path);
   const chunks = [];
   const errors = [];

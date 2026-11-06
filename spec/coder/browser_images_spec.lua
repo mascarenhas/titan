@@ -200,9 +200,11 @@ describe("browser image profile and SDK readiness", function()
         assert.same({}, profile.compile_flags)
         assert.same({
             "-O1", "-fno-inline", "-fno-optimize-sibling-calls", "-gsource-map", "-g2",
-            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals",
-            "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
-            "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
+            "-sJSPI=1",
+            '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"]',
+            '-sJSPI_EXPORTS=["titan_browser_entry","titan_mco_entry"]',
+            "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
+            "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
             "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
@@ -224,9 +226,11 @@ describe("browser image profile and SDK readiness", function()
         assert.same({}, profile.compile_flags)
         assert.same({
             "-O3", "-gsource-map", "-g2",
-            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals",
-            "-sASYNCIFY=1", "-sSUPPORT_LONGJMP=emscripten", "-sSTACK_SIZE=1048576",
-            "-sASYNCIFY_STACK_SIZE=65536", "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
+            "-sJSPI=1",
+            '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"]',
+            '-sJSPI_EXPORTS=["titan_browser_entry","titan_mco_entry"]',
+            "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
+            "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
             "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
@@ -247,8 +251,8 @@ describe("browser image profile and SDK readiness", function()
         local flags = table.concat(profile.link_flags, " ")
         assert.truthy(flags:find("-O3 -fno-inline -fno-optimize-sibling-calls -gsource-map -g2 ", 1, true), flags)
         assert.truthy(flags:find(
-            "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals," ..
-            "--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination", 1, true), flags)
+            "-sBINARYEN_EXTRA_PASSES=--skip-pass=inlining-optimizing," ..
+            "--skip-pass=duplicate-function-elimination", 1, true), flags)
         -- The validation profile never runs the level optimizer, so its test
         -- images keep #330's frozen link flags exactly.
         local frozen = assert(browserlink.profile(fixtures.descriptor(), { purpose = "test", assertions = 2 }))
@@ -268,7 +272,7 @@ describe("browser image profile and SDK readiness", function()
         local descriptor = fixtures.descriptor()
         local gate = assert(browserlink.profile(descriptor, { purpose = "gate", assertions = 0 }))
         assert.truthy(table.concat(gate.link_flags, " "):find('"_titan_browser_gate_guarded","_titan_browser_gate_observe"', 1, true))
-        for _, options in ipairs({ { purpose = "program", assertions = 2, asyncify = false },
+        for _, options in ipairs({
             { purpose = "protocol", assertions = 2, optimization = "O2" },
             { purpose = "program", assertions = 2, budgets = {} },
             { purpose = "gate", assertions = 1 }, { purpose = "program", assertions = 2, unknown = true },
@@ -281,30 +285,28 @@ describe("browser image profile and SDK readiness", function()
             optimization = "O1", budgets = { stack_size = 65536 } }))
         assert.same({ "-O1" }, budget.compile_flags)
         local baseline = assert(browserlink.profile(descriptor, { purpose = "baseline", assertions = 2,
-            entry = "lua-main", asyncify = false, optimization = "O2" }))
+            entry = "lua-main", optimization = "O2" }))
         local flags = table.concat(baseline.link_flags, " ")
         assert.is_nil(flags:find("--no-entry", 1, true))
         assert.is_nil(flags:find("--js-library", 1, true))
         assert.truthy(flags:find('-sEXPORTED_FUNCTIONS=["_main","_malloc","_free"]', 1, true))
     end)
 
-    it("retains ordered local cleanup in every Titan-entry profile and its identity", function()
-        local cleanup = "-sBINARYEN_EXTRA_PASSES=simplify-locals,reorder-locals"
+    it("owns one JSPI backend and records explicit import/export identity for every purpose", function()
         for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
             for _, assertions in ipairs({ 0, 2 }) do
                 local plan = assert(browserlink.profile(fixtures.descriptor(),
                     { purpose = purpose, assertions = assertions }))
-                local count = 0
-                for _, flag in ipairs(plan.link_flags) do
-                    if flag == cleanup then count = count + 1 end
-                end
-                assert.equal(1, count)
+                local flags = table.concat(plan.link_flags, " ")
+                assert.truthy(flags:find("-sJSPI=1", 1, true))
+                assert.truthy(flags:find("-sJSPI_IMPORTS=", 1, true))
+                assert.truthy(flags:find("-sJSPI_EXPORTS=", 1, true))
+                assert.is_nil(flags:find("ASYNCIFY", 1, true))
+                assert.is_nil(flags:find("simplify-locals", 1, true))
+                assert.equal("jspi", plan.identity_inputs.backend)
                 assert.same(plan.link_flags, plan.identity_inputs.link_flags)
             end
         end
-        local baseline = assert(browserlink.profile(fixtures.descriptor(),
-            { purpose = "baseline", assertions = 2, entry = "lua-main", asyncify = false }))
-        assert.is_nil(table.concat(baseline.link_flags, " "):find(cleanup, 1, true))
     end)
 
     it("preserves byte-oriented FS and TTY for every purpose including the interpreter baseline", function()
@@ -329,6 +331,25 @@ describe("browser image profile and SDK readiness", function()
                         if flag == "-sPRINTF_LONG_DOUBLE=1" then count = count + 1 end
                     end
                     assert.equal(1, count)
+                    assert.same(plan.link_flags, plan.identity_inputs.link_flags)
+                end
+            end
+        end
+    end)
+
+    it("pins legacy Wasm EH in every profile, purpose and entry", function()
+        for _, build_profile in ipairs({ "production", "validation" }) do
+            for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
+                for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
+                    local plan = assert(browserlink.profile(fixtures.descriptor(nil, { build_profile = build_profile }),
+                        { purpose = purpose, assertions = 2, entry = entry }))
+                    local sjlj, legacy = 0, 0
+                    for _, flag in ipairs(plan.link_flags) do
+                        if flag == "-sSUPPORT_LONGJMP=wasm" then sjlj = sjlj + 1 end
+                        if flag == "-sWASM_LEGACY_EXCEPTIONS=1" then legacy = legacy + 1 end
+                    end
+                    assert.equal(1, sjlj)
+                    assert.equal(1, legacy)
                     assert.same(plan.link_flags, plan.identity_inputs.link_flags)
                 end
             end
@@ -485,6 +506,8 @@ describe("browser image profile and SDK readiness", function()
     it("rejects trailing attempts to override profile-owned settings", function()
         for _, flags in ipairs({ { "-sASYNCIFY=0" }, { "-s", "ASYNCIFY_IGNORE_INDIRECT=1" },
             { "-DTITAN_COROUTINE_STACK_SIZE=1" }, { "-UTITAN_TARGET_BROWSER" }, { "-sNO_ASYNCIFY=1" },
+            { "-sJSPI=0" }, { "-s", "JSPI_EXPORTS=[]" }, { "-sNO_JSPI=1" },
+            { "-sJSPI_IMPORTS=[]" }, { "-DJSPI=0" }, { "-U", "JSPI_EXPORTS" },
             { "-sFORCE_FILESYSTEM=0" }, { "-sFILESYSTEM=0" }, { "-sMINIMAL_RUNTIME=1" },
             { "--js-library=x.js" }, { "--no-entry" } }) do
             assert.is_nil(browserlink.validate_extras(flags))
@@ -506,16 +529,16 @@ describe("browser image profile and SDK readiness", function()
                 { "-sPRINTF_LONG_DOUBLE=0" },
                 { "-s", "PRINTF_LONG_DOUBLE=0" },
                 { "-sNO_PRINTF_LONG_DOUBLE=1" },
+                { "-sWASM_LEGACY_EXCEPTIONS=0" },
+                { "-s", "WASM_LEGACY_EXCEPTIONS=0" },
+                { "-sNO_WASM_LEGACY_EXCEPTIONS=1" },
+                { "-s", "NO_WASM_LEGACY_EXCEPTIONS" },
                 { "-DPRINTF_LONG_DOUBLE=0" },
                 { "-U", "PRINTF_LONG_DOUBLE" },
                 { "-DTITAN_CODEC_DEPTH_LIMIT=1000" },
                 { "-D", "TITAN_CODEC_DEPTH_LIMIT=1000" },
                 { "-UTITAN_CODEC_DEPTH_LIMIT" },
                 { "-U", "TITAN_CODEC_DEPTH_LIMIT" },
-                { "-DTITAN_JSON_WRITER_DEPTH_LIMIT=1000" },
-                { "-D", "TITAN_JSON_WRITER_DEPTH_LIMIT=1000" },
-                { "-UTITAN_JSON_WRITER_DEPTH_LIMIT" },
-                { "-U", "TITAN_JSON_WRITER_DEPTH_LIMIT" },
             }) do
                 local ok, why = browserlink.validate_extras(flags, { purpose = purpose })
                 assert.is_nil(ok)
@@ -525,8 +548,7 @@ describe("browser image profile and SDK readiness", function()
         -- Compile extras are reported by the compile diagnostic, link extras by
         -- the link one (OG-L4): the same option, one owner, one message.
         for _, flag in ipairs({ "-O2", "-g2", "-fno-inline", "-DTITAN_TARGET_BROWSER=1",
-            "-DTITAN_CODEC_DEPTH_LIMIT=1000", "-UTITAN_CODEC_DEPTH_LIMIT",
-            "-DTITAN_JSON_WRITER_DEPTH_LIMIT=1000", "-UTITAN_JSON_WRITER_DEPTH_LIMIT" }) do
+            "-DTITAN_CODEC_DEPTH_LIMIT=1000", "-UTITAN_CODEC_DEPTH_LIMIT" }) do
             local ok, why = browserlink.validate_extras({ flag }, { purpose = "gate" }, "production", "compile")
             assert.is_nil(ok)
             assert.equal('browser production profile owns compile option "' .. flag .. '"', why)
@@ -758,7 +780,7 @@ describe("real browser test image", function()
         for _, case in ipairs({
             { "entry-close" }, { "entry-binary" }, { "entry-tostring" },
             { "entry-state-oom", { "-Wl,--wrap=luaL_newstate" } },
-            { "entry-copy-oom", { "-Wl,--wrap=malloc" } },
+            { "entry-copy-oom" },
             { "entry-bootstrap-oom", { "-Wl,--wrap=luaL_openselectedlibs", "-Wl,--wrap=lua_pcallk" } },
         }) do
             names[#names + 1] = case[1]
@@ -931,7 +953,7 @@ assert(driver.close_resolver_context(context))
         assert.match("^[0-9a-f]+$", image_identity(info, workspace .. "/out/repeated.mjs"))
     end)
 
-    it("publishes a matching extended map and callable identity for a minified measurement control", function()
+    it("publishes a matching extended map and callable identity for an optimized JSPI measurement control", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
@@ -979,9 +1001,13 @@ end
             "measurement control did not execute the real static-provider protocol link")
         local image = workspace .. "/out/image_control.mjs"
         local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/image_control.wasm")))
+        -- The pinned JSPI path explicitly disables import/export minification
+        -- (Emscripten tools/link.py); do not claim an unsupported minified cell.
+        local stable_identity = false
         for _, item in ipairs(inventory.exports) do
-            assert.not_equal("titan_browser_trace_identity", item.name, "control exports were not minified")
+            if item.name == "titan_browser_trace_identity" then stable_identity = true end
         end
+        assert.is_true(stable_identity, "JSPI identity export did not follow the pinned naming contract")
         assert.match("^[0-9a-f]+$", image_identity(info, image, "image_control.titan"))
     end)
 

@@ -19,23 +19,24 @@ export async function run(context) {
     });
     try {
       await instance.initialize();
-      // gate.c's guarded setjmp/longjmp reaches entry_allowed through the
-      // pinned toolchain's SJLJ invoke_i/dynCall_i compiled trampoline.
-      context.assert(module._titan_browser_gate_guarded() === 1,
+      // Wasm-EH protected calls remain inside the admitted promised entry.
+      context.assert(await module._titan_browser_gate_guarded() === 1,
         'fresh guarded SJLJ call was mistaken for external reentry');
       const running = instance.run(['--filter=^entry_gate%.test_08_']);
       await context.tick();
-      context.assert(bridge.suspensionPending, 'guard fixture did not park at its real outer wait');
+      context.assert(bridge.owner && !bridge.safe(), 'guard fixture did not retain its logical entry owner');
       const observed = module._titan_browser_gate_observe();
-      context.assert(module._titan_browser_gate_guarded() === -1,
-        'raw guarded SJLJ call entered a pending suspension');
+      let direct;
+      try { await module._titan_browser_gate_guarded(); } catch (error) { direct = error; }
+      context.assert(direct?.code === 'TITAN_BROWSER_REENTRY',
+        'direct guarded export entered an active logical entry');
       context.assert(module._titan_browser_gate_observe() === observed,
         'guard refusal changed the admitted run');
       let rejected;
       try { await instance.run(); } catch (error) { rejected = error; }
       context.assert(rejected?.name === 'TitanBrowserError' &&
         rejected.code === 'TITAN_BROWSER_REENTRY' &&
-        rejected.message === 'browser instance is suspended; reentry is not allowed',
+        rejected.message === 'browser instance is active; reentry is not allowed',
         'wrapper did not preserve the exact reentry diagnostic');
       const result = await running;
       context.assert(result.kind === 'returned' && result.status === 0,
@@ -61,7 +62,7 @@ export async function run(context) {
       context.equalBytes(actual, expected, 'guard image stdout was not byte-exact');
       context.assert(stderr.every(chunk => chunk.length === 0), 'guard image wrote unexpected stderr');
       context.stdout(actual);
-      context.stdout(new TextEncoder().encode(`loader guard regression: ${path}: ready=1 pending=-1 status=0\n`));
+      context.stdout(new TextEncoder().encode(`loader guard regression: ${path}: ready=1 pending=rejected status=0\n`));
     } finally {
       await instance.dispose();
       module = bridge = undefined;

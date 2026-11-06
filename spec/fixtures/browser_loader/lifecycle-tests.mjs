@@ -15,6 +15,55 @@ export async function lifecycle(context, paths) {
   for (const path of paths) {
     const image = await context.image(path);
     context.assert(image.factory === (await context.image(path)).factory, 'factory identity changed between instances');
+    let driver, native, published = false, retired = false, deliveries = 0;
+    let handoffs = 0, terminalHandoffs = 0;
+    const checks = [];
+    const internal = context.create(async options => {
+      const attach = options.titanBrowserAttach;
+      options.titanBrowserAttach = state => {
+        driver = state;
+        const transfer = state.transfer;
+        state.transfer = (...args) => {
+          const result = transfer(...args);
+          handoffs++;
+          if (args[4]) terminalHandoffs++;
+          checks.push(Promise.resolve().then(async () => {
+            context.assert(state.owner && !state.safe(),
+              'an internal JSPI microtask released logical-entry admission');
+            context.assert(deliveries === 0, 'an internal handoff drained an application sink');
+            await rejection(context, native._titan_browser_entry(0, 0, 0), reentry);
+          }));
+          return result;
+        };
+        attach(state);
+      };
+      const complete = options.titanBrowserComplete;
+      options.titanBrowserComplete = (...args) => {
+        context.assert(driver.owner && !retired && !published,
+          'completion was not copied inside the one admitted native entry');
+        context.assert(driver.contexts.size === 1,
+          'completion preceded coroutine engine-continuation retirement');
+        published = true;
+        complete(...args);
+      };
+      native = await image.factory(options);
+      const entry = native._titan_browser_entry;
+      native._titan_browser_entry = (...args) => {
+        const reentry = driver.owner;
+        const result = entry(...args);
+        return reentry ? result : result.finally(() => { retired = true; });
+      };
+      return native;
+    }, {locateFile: image.locateFile, stdout: () => { deliveries++; }, stderr: () => { deliveries++; }});
+    try {
+      const result = await internal.run(['fidelity']);
+      await Promise.all(checks);
+      context.assert(result.status === 23 && published && retired && driver.safe(),
+        'loader completion did not wait for the promised native entry to retire');
+      context.assert(handoffs >= 4 && terminalHandoffs >= 2 && deliveries === 2,
+        'internal handoff fixture did not exercise parked/terminal/close transitions');
+      await rejection(context, native._titan_mco_entry(0), {code: 'TITAN_BROWSER_REENTRY'});
+    } finally { await internal.dispose(); driver = native = undefined; runs++; }
     const references = [], keptHandles = [];
     async function cycle() {
       let module;
@@ -96,7 +145,7 @@ export async function lifecycle(context, paths) {
     const second = instances[1].run(['fidelity']);
     try {
       await context.tick();
-      context.assert(bridges.every(bridge => bridge.suspensionPending), 'independent waits did not overlap');
+      context.assert(bridges.every(bridge => bridge.owner && !bridge.safe()), 'independent logical entries did not overlap');
       await rejection(context, instances[1].run(), reentry);
       const disposingFirst = instances[0].dispose();
       await rejection(context, instances[0].run(), closed);

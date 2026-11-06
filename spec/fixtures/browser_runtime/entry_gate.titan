@@ -209,11 +209,11 @@ function test_05_nested_tagged_transfer(context: test.Context)
   context:log("GATE item=5 nested=2 tagged_nonlocal=1 identity_checks=4 waits=2")
 end
 
-function test_06_last_case_action_is_fiber_switch(context: test.Context)
+function test_06_last_case_action_is_coroutine_switch(context: test.Context)
   local owner = coroutine.create(function(_: value): value
-    return "fiber-last"
+    return "coroutine-last"
   end, "last")
-  context:log("GATE item=6 final_case_action=fiber_switch expected_status=0")
+  context:log("GATE item=6 final_case_action=coroutine_transfer expected_status=0")
   owner:resume(nil)
 end
 
@@ -268,7 +268,7 @@ function test_09_lua_close_retained_nested_coroutines(context: test.Context)
   context:log("GATE item=9 retained=6 nested_pairs=3 expected_close_mask=63 forbidden=0")
 end
 
-function test_negative_fiber_internal_sleep_starves_peers(context: test.Context)
+function test_negative_coroutine_internal_sleep_starves_peers(context: test.Context)
   for form = 0, 1 do
     local peer_steps = 0
     local due_at = ffi.gate_now() + 10
@@ -280,7 +280,7 @@ function test_negative_fiber_internal_sleep_starves_peers(context: test.Context)
     test.assert(peer:resume(nil) == "ticker-ready")
     local sleeper = coroutine.create(function(_: value): value
       ffi.gate_wait(form, 60)
-      test.assert(peer_steps == 0, "fiber-internal sleep unexpectedly scheduled peer")
+      test.assert(peer_steps == 0, "coroutine-internal sleep unexpectedly scheduled peer")
       return nil
     end, "sleep")
     local before = ffi.gate_now()
@@ -288,9 +288,9 @@ function test_negative_fiber_internal_sleep_starves_peers(context: test.Context)
     test.assert(peer_steps == 0 and peer:status() == "suspended")
     local lateness: float = peer:resume(nil)
     test.assert(peer_steps == 1 and lateness >= 40,
-                "fiber-internal negative control did not delay the due ticker")
+                "coroutine-internal negative control did not delay the due ticker")
     local elapsed: float = ffi.gate_now() - before
-    context:log("GATE negative=fiber_internal_sleep form=" .. form .. " elapsed_ms=" .. elapsed .. " ticker_lateness_ms=" .. lateness .. " peer_steps_during_sleep=0 peer_steps_after_resume=1")
+    context:log("GATE negative=coroutine_internal_sleep form=" .. form .. " elapsed_ms=" .. elapsed .. " ticker_lateness_ms=" .. lateness .. " peer_steps_during_sleep=0 peer_steps_after_resume=1")
   end
 end
 

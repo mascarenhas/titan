@@ -4,18 +4,9 @@ function test_host_capture_ready(_context: test.Context)
     defer cleanup = cleanup + 1
     direct_outer()
   end)
-  if ffi.trace_fixture_host_absent_limit() ~= 0 then
-    local frame_count = count(trace, ": in ")
-    test.assert(cleanup == 1 and count(trace, capture_failed) == 1 and not contains(trace, unavailable), trace)
-    test.assert(not contains(trace, ".titan:") and not contains(trace, truncated), trace)
-    test.assert(frame_count > 0 and frame_count <= 512, trace)
-    test.assert(ffi.trace_fixture_terminal_marker(trace, capture_failed, 1) ~= 0, trace)
-    emit("host_absent", trace)
-  else
-    test.assert(cleanup == 1 and not contains(trace, capture_failed) and not contains(trace, unavailable), trace)
-    frame(trace, "trace_cases.titan", 80, "trace_cases.original_leaf")
-    emit("host_ready", trace)
-  end
+  test.assert(cleanup == 1 and not contains(trace, capture_failed) and not contains(trace, unavailable), trace)
+  frame(trace, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  emit("host_ready", trace)
 end
 
 function test_host_capture_failed(_context: test.Context)

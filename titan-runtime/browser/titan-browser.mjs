@@ -1,4 +1,4 @@
-const reentryMessage = 'browser instance is suspended; reentry is not allowed';
+const reentryMessage = 'browser instance is active; reentry is not allowed';
 const stateMessage = 'browser instance has already run or is disposed';
 
 function failure(code, message, cause, stream) {
@@ -90,7 +90,10 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
   function fail(error, isFatal = false) {
     if (!terminal) terminal = error;
     fatal ||= isFatal;
-    if (bridge) bridge.terminalFailure = terminal;
+    if (bridge) {
+      if (isFatal) bridge.poison(error);
+      else bridge.terminalFailure = terminal;
+    }
     if (fatal && active && !settled) finish();
   }
 
@@ -115,7 +118,7 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
     // must instead reach completion and leave every compiled frame first.
     if (!fatal) {
       if (!called && !terminal) return;
-      if (called && (!completion || bridge?.suspensionPending || !bridge?.safe())) return;
+      if (called && (!callFulfilled || !completion || !bridge?.safe())) return;
     }
     try {
       freeArguments();
@@ -142,14 +145,14 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
     fail(failure(code, message, original), true);
   }
 
-  function safePoint(pending) {
+  function safePoint() {
     if (!bridge?.safe() || fatal) return;
     out.deliver();
     err.deliver();
-    // An export's queued safe point can beat ccall's rejection handler.
-    // Only fulfillment proves that an acknowledgement is missing.
-    if (callFulfilled && !completion && !pending) {
-      fail(failure('PROTOCOL', 'browser entry returned without completion or suspension'), true);
+    // A Titan completion record may arrive before the promising export has
+    // retired. Fulfillment is required too, but its value is not Titan status.
+    if (callFulfilled && !completion) {
+      fail(failure('PROTOCOL', 'browser entry returned without completion'), true);
     }
     finish();
   }
@@ -157,6 +160,12 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
   function initialize() {
     if (initialized) return initialized;
     if (closed) return Promise.reject(failure('STATE', stateMessage));
+    if (typeof WebAssembly.promising !== 'function' ||
+        typeof WebAssembly.Suspending !== 'function') {
+      initialized = Promise.reject(failure('CAPABILITY',
+        'Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)'));
+      return initialized;
+    }
     options = {
       stdin: () => null,
       stdout: byte => out?.byte(byte),
@@ -277,12 +286,11 @@ export function create(factory, {stdout, stderr, locateFile} = {}) {
       // cannot own byte argv across suspension or a large argument allocation.
       const call = module.ccall('titan_browser_entry', 'number',
         ['number', 'number', 'number'], argv, {async: true});
-      // The call's value is admission, never Titan's status. Some fiber-last
-      // paths do not settle this internal Promise: completion + actual stack
-      // quiescence own settlement and disposal, not Emscripten keepalive state.
+      // The promise acknowledges terminal continuation retirement. Titan's
+      // separate copied completion record remains the authoritative result.
       Promise.resolve(call).then(() => {
         callFulfilled = true;
-        safePoint(bridge?.suspensionPending);
+        safePoint();
       }, cause => {
         engineFailure(cause);
       });

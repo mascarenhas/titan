@@ -182,8 +182,8 @@ describe("browser executing provider protocol", function()
         prepare(info)
         local missing = workspace .. "/missing Node"
         local unavailable = { prefix = info.prefix, node = info.node, node_override = missing }
-        local expected = "browser provider validation requires Node 24: node not executable at " ..
-            string.format("%q", missing) .. "; set TITAN_NODE to a Node 24 executable"
+        local expected = "browser provider validation requires Node 26 or newer: node not executable at " ..
+            string.format("%q", missing) .. "; set TITAN_NODE to a Node 26 or newer executable"
         local result = cli(unavailable, nil, "--incremental", "pkg.left")
         assert.is_false(result.ok)
         assert.truthy(result.output:find(expected, 1, true), result.output)

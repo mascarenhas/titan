@@ -32,7 +32,7 @@ export async function fidelity(context, paths) {
       ['negative', -2147483648], ['wrapped', 1]]) {
       const actual = await execute(mode);
       context.assert(actual.result.kind === 'returned' && actual.result.status === status,
-        `wrong signed low32 completion after fibers: ${mode}`);
+        `wrong signed low32 completion after JSPI transfers: ${mode}`);
       context.equalBytes(actual.result.bytes, new Uint8Array(0));
       context.equalBytes(actual.stdout, closeBytes, 'lua_close stdout did not run exactly once');
       context.equalBytes(actual.stderr, closeBytes, 'lua_close stderr did not run exactly once');
@@ -68,7 +68,7 @@ export async function fidelity(context, paths) {
         const cause = new Error(`${stream} ${behavior}`);
         const healthy = stream === 'stdout' ? 'stderr' : 'stdout';
         const chunks = [];
-        let calls = 0, admission, suspended = false, bridge;
+        let calls = 0, admission, safe = false, bridge;
         const factory = options => {
           const attach = options.titanBrowserAttach;
           options.titanBrowserAttach = state => { bridge = state; attach(state); };
@@ -79,7 +79,7 @@ export async function fidelity(context, paths) {
           [healthy]: bytes => { chunks.push(bytes); },
           [stream]: () => {
             calls++;
-            suspended = bridge.suspensionPending;
+            safe = bridge.safe();
             admission = rejection(context, instance.run(), reentry);
             if (behavior === 'throw') throw cause;
             if (behavior === 'value') return 0;
@@ -92,7 +92,7 @@ export async function fidelity(context, paths) {
             ...(behavior === 'throw' ? {cause} : {}),
           });
           await admission;
-          context.assert(suspended && calls === 1, 'failed sink ran again or was not delivered at suspension');
+          context.assert(safe && calls === 1, 'failed sink ran again or ran before logical-entry retirement');
           context.equalBytes(join(chunks), expectedBytes(healthy), 'sink failure abandoned/duplicated Lua cleanup');
           await rejection(context, instance.run(), closed);
         } finally { await instance.dispose(); runs++; }
@@ -126,7 +126,7 @@ export async function fidelity(context, paths) {
       const result = await mutable.run(['fidelity']);
       context.assert(result.kind === 'returned' && result.status === 23);
       for (const stream of ['stdout', 'stderr']) {
-        context.assert(retained[stream].length >= 2, 'fixture did not cross multiple safe deliveries');
+        context.assert(retained[stream].length === 1, 'internal transfers exposed an early sink delivery');
         context.equalBytes(join(copies[stream]), expectedBytes(stream));
         context.assert(retained[stream].every(bytes => bytes.every(byte => byte === 90)), 'retained sink chunk changed later');
       }

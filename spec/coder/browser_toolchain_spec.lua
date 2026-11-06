@@ -8,6 +8,7 @@ local files = require "spec.fixtures.target_selection.support"
 local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local repository = assert(lfs.currentdir())
+local paths = require "titan-compiler.path"
 local workspace
 
 local function read(filename)
@@ -21,6 +22,7 @@ local function run(info, code, ...)
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_RUNTIME_PREBUILT=1", info.prefix .. "/bin/lua", "-E", "-e",
         string.format("package.path=%q..package.path;", repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. code }
+    if info.emcc_cflags then table.insert(argv, 2, "EMCC_CFLAGS=" .. info.emcc_cflags) end
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
     local result = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
     return result.started and result.ok, result.output or result.diagnostic or ""
@@ -51,7 +53,8 @@ end
 
 local function cli(info, ...)
     return run(info, "", repository .. "/titanc",
-        "--target", "browser", "-q", "--tree", workspace .. "/source", "--output", workspace .. "/out", ...)
+        "--target", "browser", "-q", "--tree", workspace .. "/source",
+        "--output", info.output or workspace .. "/out", ...)
 end
 
 local function wasm_object(filename)
@@ -100,6 +103,87 @@ assert(driver.close_resolver_context(context))
         assert.equal("object_fixture", object.metadata.module)
         local entry = assert(objectmetadata.read(bytes, "direct browser object"))
         assert.equal("object_fixture", entry.type.name)
+    end)
+
+    it("clears ambient EMCC_CFLAGS across browser compiler routes without changing native identity", function()
+        local info, why = toolchain.require({ node = true, sdk = true })
+        if not info then pending(why) return end
+        prepare()
+        files.write(workspace .. "/source/ambient.h", "int ambient_helper(void);\n")
+        files.write(workspace .. "/source/ambient.c", [[
+#include <setjmp.h>
+int ambient_helper(void) {
+    jmp_buf saved;
+    if (setjmp(saved) == 0) longjmp(saved, 7);
+    return 7;
+}
+]])
+        files.write(workspace .. "/source/ambient.titan", [[
+foreign import "ambient.h"
+function main(args: {string}): integer
+    local result: integer = ffi.ambient_helper()
+    if result ~= 7 then return 1 end
+    raise "ambient caught"
+catch
+    return 0
+end
+]])
+        for index, ambient in ipairs({ "-sWASM_LEGACY_EXCEPTIONS=0", "-sSUPPORT_LONGJMP=emscripten" }) do
+            local output = workspace .. "/ambient-out-" .. index
+            files.mkdir(output)
+            local image = output .. "/ambient.mjs"
+            local poisoned = { prefix = info.prefix, output = output, emcc_cflags = ambient }
+            local checked = string.format([[
+local driver = require "titan-compiler.driver"
+local incremental = require "titan-compiler.incremental"
+assert(os.getenv("EMCC_CFLAGS") == %q)
+local native = driver.new_resolver_context()
+local before = assert(driver.toolchain_descriptor(native))
+local native_identity = assert(incremental.toolchain_identity(native, before))
+assert(driver.close_resolver_context(native))
+local browser = driver.new_resolver_context({target="browser", output_root=%q})
+local descriptor = assert(driver.context_target_descriptor(browser))
+local toolchain = assert(driver.toolchain_descriptor(browser))
+assert(#descriptor.tools.cc == 1)
+assert(toolchain.compiler_argv[1] == "env" and toolchain.compiler_argv[2] == "EMCC_CFLAGS=")
+assert(toolchain.stage_tools[1] == descriptor.tools.cc[1])
+local identity, details = incremental.toolchain_identity(browser, toolchain)
+assert(identity, details)
+local compiler = assert(browser.io:realpath(descriptor.tools.cc[1]))
+local found = false
+for _, tool in ipairs(details.tools) do if tool.path == compiler then found = true end end
+assert(found, "emcc physical identity was lost behind env")
+assert(driver.close_resolver_context(browser))
+local restored = driver.new_resolver_context()
+local after = assert(driver.toolchain_descriptor(restored))
+assert(table.concat(before.compiler_argv, "\0") == table.concat(after.compiler_argv, "\0"))
+assert(incremental.toolchain_identity(restored, after) == native_identity)
+assert(after.stage_tools == nil)
+assert(os.getenv("EMCC_CFLAGS") == %q)
+local inherited = restored.io:run({"sh", "-c", 'printf "%%s" "$EMCC_CFLAGS"'})
+assert(inherited.ok and inherited.output == os.getenv("EMCC_CFLAGS"))
+assert(driver.close_resolver_context(restored))
+]], ambient, output, ambient)
+            local ok, log = run(poisoned, checked)
+            assert.is_true(ok, log)
+            ok, log = cli(poisoned, "--incremental", "--jobs", "2",
+                "--c-source", workspace .. "/source/ambient.c", "--exe", image, "ambient")
+            assert.is_true(ok, log)
+            local wat = output .. "/ambient.wat"
+            local disassembled = compiler_io.new_sync():run({
+                paths.join(paths.dirname(info.tools.clang[1]), "wasm-dis"),
+                output .. "/ambient.wasm", "-o", wat,
+            }, { stderr_to_stdout = true })
+            assert.is_true(disassembled.ok, disassembled.output)
+            local instructions = read(wat)
+            assert.truthy(instructions:match("%(try%s"), "legacy Wasm EH try was not emitted")
+            assert.is_nil(instructions:find("(try_table", 1, true), "ambient flags changed the EH encoding")
+            assert.is_nil(instructions:match('%(import [^\n]-"invoke_'), "ambient flags restored JS SJLJ")
+            local executed = compiler_io.new_sync():run({
+                info.sdk_root .. "/titan-browser-run", "--engine", "node", "--root", output, image,
+            }, { stderr_to_stdout = true })
+            assert.is_true(executed.ok, executed.output)
+        end
     end)
 
     it("compiles real standard stream macro values through emcc", function()
@@ -152,7 +236,7 @@ end
         local dependency = workspace .. "/headers.d"
         local command = { table.unpack(info.tools.cc) }
         for _, argument in ipairs(toolchain.with_lua_defines(info,
-                { "--std=c99", "-O0", "-sSUPPORT_LONGJMP=emscripten" },
+                { "--std=c99", "-O0", "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1" },
                 { "-DTITAN_TARGET_BROWSER=1",
                   "-I", info.prefix .. "/lib/browser/include", "-I", info.prefix .. "/include",
                   "-MD", "-MF", dependency, "-c", workspace .. "/out/object_fixture.c",
@@ -227,7 +311,7 @@ local platform = require "titan-compiler.platform"
 local SDK_ASSETS = { "libtitan.a", "titan-browser-library.js", "titan-browser-trace.js",
     "titan-browser.mjs", "titan-browser-run", "titan-browser-run.mjs",
     "titan-browser-node-worker.mjs", "titan-browser-page.mjs" }
-local NODE_OK = { path = "/opt/node24/bin/node", version = "v24.19.0", ok = true }
+local NODE_OK = { path = "/opt/node26/bin/node", version = "v26.13.0", ok = true }
 local CHROME_OK = { path = "/opt/chrome/chrome-headless-shell",
     version = "Google Chrome for Testing 156.0.8078.80", ok = true }
 
@@ -370,8 +454,8 @@ assert(type(base.tools.cc[1]) == "string" and type(base.record_path) == "string"
 local info = assert(toolchain.detect({ node = true, chrome = true }))
 assert(info.prefix == base.prefix and info.record_path == base.record_path,
     "extended detection changed the compile-only fields")
-assert(info.node.path == "/opt/node24/bin/node", tostring(info.node.path))
-assert(info.node.version == "v24.19.0", tostring(info.node.version))
+assert(info.node.path == "/opt/node26/bin/node", tostring(info.node.path))
+assert(info.node.version == "v26.13.0", tostring(info.node.version))
 assert(info.chrome.path == "/opt/chrome/chrome-headless-shell", tostring(info.chrome.path))
 assert(info.chrome.version == "Google Chrome for Testing 156.0.8078.80",
     tostring(info.chrome.version))
@@ -386,14 +470,14 @@ print("capabilities-ok")
         if posix_only() then return end
         local root = fixture_prefix()
         install_probe(root, { path = "/usr/bin/node", version = "v22.23.4",
-            ok = false, reason = "\"/usr/bin/node\" reports v22.23.4; expected Node 24" },
+            ok = false, reason = "\"/usr/bin/node\" reports v22.23.4; expected Node 26 or newer" },
             CHROME_OK)
         local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason, malformed = toolchain.detect({ node = true })
 assert(found == nil, "an unusable Node must not be a capability")
 assert(malformed == nil, "an explained refusal is an absence, not corruption")
-assert(reason:find("expected Node 24", 1, true), tostring(reason))
+assert(reason:find("expected Node 26 or newer", 1, true), tostring(reason))
 local pending_info, pending_reason = toolchain.require({ node = true })
 assert(pending_info == nil, "non-strict require must pend")
 assert(pending_reason:match("^browser toolchain unavailable: "), tostring(pending_reason))
@@ -424,12 +508,12 @@ assert(file:write('#!/bin/sh\ncat "$(dirname "$0")/probe.json"\n')); assert(file
 assert(os.execute("chmod 755 '" .. path .. "'"))
 local probe = assert(io.open(os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
             version.TITAN_LIBRARY_VERSION .. [[/probe.json", "wb"))
-assert(probe:write('{"node":{"path":"/opt/node24/bin/node","version":"v24.19.0",' ..
+assert(probe:write('{"node":{"path":"/opt/node26/bin/node","version":"v26.13.0",' ..
     '"ok":true,"reason":null},"chrome":{"path":null,"version":null,' ..
     '"ok":false,"reason":"chromium missing"}}\n'))
 assert(probe:close())
 local found = assert(toolchain.detect({ node = true }))
-assert(found.node.version == "v24.19.0", tostring(found.node.version))
+assert(found.node.version == "v26.13.0", tostring(found.node.version))
 print("retry-ok")
 ]])
         assert.is_true(retry_ok, retry_output)
@@ -440,14 +524,14 @@ print("retry-ok")
         if posix_only() then return end
         local root = fixture_prefix()
         install_probe(root, { path = "/usr/bin/node", version = nil, ok = false,
-            reason = "first line of the diagnostic\nsecond line: expected Node 24" },
+            reason = "first line of the diagnostic\nsecond line: expected Node 26 or newer" },
             CHROME_OK)
         local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason, malformed = toolchain.detect({ node = true })
 assert(found == nil, "a refusal is not a capability")
 assert(malformed == nil, "escaped text is not corruption")
-assert(reason == "first line of the diagnostic\nsecond line: expected Node 24",
+assert(reason == "first line of the diagnostic\nsecond line: expected Node 26 or newer",
     string.format("%q", tostring(reason)))
 print("escaped-reason-ok")
 ]])
@@ -462,13 +546,13 @@ print("escaped-reason-ok")
         local directory = sdk_directory(root)
         local cases = {
             { name = "success without a path",
-                node = '{"path":null,"version":"v24.19.0","ok":true,"reason":null}',
+                node = '{"path":null,"version":"v26.13.0","ok":true,"reason":null}',
                 requested = "node" },
             { name = "success with an empty version",
                 node = '{"path":"/opt/node","version":"","ok":true,"reason":null}',
                 requested = "node" },
             { name = "success with a reason",
-                node = '{"path":"/opt/node","version":"v24.19.0","ok":true,"reason":"why"}',
+                node = '{"path":"/opt/node","version":"v26.13.0","ok":true,"reason":"why"}',
                 requested = "node" },
             { name = "failure without a reason",
                 node = '{"path":null,"version":null,"ok":false,"reason":null}',
@@ -477,11 +561,11 @@ print("escaped-reason-ok")
                 node = '{"path":null,"version":null,"ok":false,"reason":""}',
                 requested = "node" },
             { name = "unrequested peer is corrupt",
-                node = '{"path":"/opt/node","version":"v24.19.0","ok":true,"reason":null}',
+                node = '{"path":"/opt/node","version":"v26.13.0","ok":true,"reason":null}',
                 chrome = '{"path":"/opt/chrome","version":null,"ok":true,"reason":null}',
                 requested = "node" },
             { name = "raw control byte in a string",
-                node = '{"path":"/opt/\1node","version":"v24.19.0","ok":true,"reason":null}',
+                node = '{"path":"/opt/\1node","version":"v26.13.0","ok":true,"reason":null}',
                 requested = "node" },
         }
         for _, case in ipairs(cases) do
@@ -521,7 +605,7 @@ local file = assert(io.open(os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
             version.TITAN_LIBRARY_VERSION .. [[/probe.json", "wb"))
 assert(file:write(os.getenv("PROBE_JSON"))); assert(file:close())
 local info = assert(toolchain.detect({ node = true }))
-assert(info.node.version == "v24.19.0", tostring(info.node.version))
+assert(info.node.version == "v26.13.0", tostring(info.node.version))
 print("repaired-ok")
 ]])
         assert.is_true(repaired_ok, repaired_output)
@@ -533,14 +617,14 @@ print("repaired-ok")
         local root = fixture_prefix()
         files.write(sdk_directory(root) .. "/titan-browser-run",
             "#!/bin/sh\n" ..
-            "echo 'titan-browser-run: Node 24 is required (node not found)' >&2\n" ..
+            "echo 'titan-browser-run: Node 26 or newer is required (node not found)' >&2\n" ..
             "exit 75\n")
         make_executable(sdk_directory(root) .. "/titan-browser-run")
         local ok, output = helper_child(fixture_environment(root), [[
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason = toolchain.require({ node = true })
 assert(found == nil, "a failed probe must not be a capability")
-assert(reason:find("Node 24 is required", 1, true), tostring(reason))
+assert(reason:find("Node 26 or newer is required", 1, true), tostring(reason))
 print("probe-failure-ok")
 ]])
         assert.is_true(ok, output)
@@ -658,7 +742,7 @@ local function probes()
     return count
 end
 local node = assert(toolchain.detect({ node = true }))
-assert(node.node.version == "v24.19.0", tostring(node.node.version))
+assert(node.node.version == "v26.13.0", tostring(node.node.version))
 assert(probes() == 1, "the first query probes once: " .. probes())
 local missing, reason = toolchain.detect({ chrome = true })
 assert(missing == nil and reason == "chromium missing", tostring(reason))
@@ -667,7 +751,7 @@ assert(probes() == 2, "an unavailable peer is probed again: " .. probes())
 local directory = os.getenv("PREFIX") .. "/lib/titan-browser/]] ..
             version.TITAN_LIBRARY_VERSION .. [["
 local probe = assert(io.open(directory .. "/probe.json", "wb"))
-assert(probe:write('{"node":{"path":"/opt/node24/bin/node","version":"v24.19.0",' ..
+assert(probe:write('{"node":{"path":"/opt/node26/bin/node","version":"v26.13.0",' ..
     '"ok":true,"reason":null},"chrome":{"path":"/opt/chrome/chrome-headless-shell",' ..
     '"version":"Google Chrome for Testing 156.0.8078.80","ok":true,"reason":null}}\n'))
 assert(probe:close())
@@ -724,7 +808,7 @@ print("invalid-ok")
 local toolchain = require "spec.support.browser_toolchain"
 local found, reason = toolchain.detect({ node = true })
 assert(found, tostring(reason))
-assert(found.node.version:match("^v24%."), tostring(found.node.version))
+assert(tonumber(found.node.version:match("^v(%d+)[.]")) >= 26, tostring(found.node.version))
 print("source-fallback-ok")
 ]])
         assert.is_true(ok, output)

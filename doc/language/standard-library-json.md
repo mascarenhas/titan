@@ -333,15 +333,10 @@ object. The node count includes the root, nulls, and ignored record members'
 values. Decode's byte limit applies to the complete input; encode's limit
 applies to emitted text. Exceeding a limit raises `limit_exceeded`.
 
-Native encoding has no target-imposed depth cap beyond the configured positive
-`max_depth`, whose largest possible value is the const
-[`math.maxinteger`](standard-library-math.md#typed-numeric-surface). On the
-[browser target](browser-target.md#nesting-limits), `encode` applies
-`min(max_depth, 103)`: a larger configured value is accepted, and a value
-nested deeper than 103 containers raises `limit_exceeded` (`value exceeds
-max_depth`). The cap keeps the writer's own traversal well within the
-JavaScript engine's stack; stack that the caller already uses is not counted.
-The default of 32 and every decode limit are the same on every target.
+Every target uses the configured positive `max_depth`, with no additional
+browser writer cap. Its largest possible setting is the const
+[`math.maxinteger`](standard-library-math.md#typed-numeric-surface). The
+default remains 32, and decoding keeps its own configured limits.
 
 The configured depth is a container budget, not a guarantee that every document
 within it fits the available execution resources. Parsing also consumes PEG

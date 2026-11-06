@@ -197,8 +197,7 @@ revision. Pins live in `TITAN_`-prefixed variables (`TITAN_EMSDK_VERSION`,
 `TITAN_EMSDK_ROOT`, `TITAN_CHROME_VERSION`, `TITAN_CHROME_SHA256`,
 `TITAN_CHROME_ROOT`), because `emsdk_env.sh` unsets every `EMSDK_*` variable it
 does not set itself, and each job sets `permissions.id-token: write` for its
-own Codecov upload. Both jobs begin with the same seven steps
-(`browser-stdlib` inserts [one more](#browser-stdlib-job) after step 3):
+own Codecov upload. Both jobs begin with the same seven steps:
 
 1. **Emscripten.** `ubicloud/cache@v4` restores `.emsdk` under the key
    `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
@@ -206,10 +205,12 @@ own Codecov upload. Both jobs begin with the same seven steps
    6.0.13` are idempotent, so a restored installation only re-verifies. The
    step sources `emsdk_env.sh` and requires `emcc --version` to report exactly
    6.0.13.
-2. **Node 24.** The job selects the Node bundled with the pinned emsdk,
-   requires its `--version` to start with `v24.`, and exports it as
-   `TITAN_NODE` and on `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
-   only action runtimes, so it does not select this Node.
+2. **Node 26.** `actions/setup-node@v6` installs Node 26.13.0 independently
+   of emsdk's bundled Node. The job checks that exact version and the unflagged
+   `WebAssembly.promising` and `WebAssembly.Suspending` APIs, then exports its
+   executable as `TITAN_NODE`. Browser commands use that path even after
+   `emsdk_env.sh` changes `PATH`. `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` affects
+   only action runtimes, not the runtime that executes Titan images.
 3. **Chrome for Testing.** `ubicloud/cache@v4` restores the headless shell
    under `ubuntu-24.04-<arch>-chrome-headless-shell-156.0.8078.80-<sha256>-v1`
    (the ZIP digest is part of the cache key so re-pinning cannot restore an
@@ -339,35 +340,9 @@ is emsdk-free); compiler shards never become browser SDK consumers.
 
 `browser-stdlib` (`browser SDK and core stdlib`) repeats steps 1–7 of the
 [`browser-toolchain` job](#browser-toolchain-job) on its own runner and
-prefix, with one step between the Chrome for Testing and user-namespace sandbox
-steps: `Raise the browser stdlib renderer data limit` writes
-`$RUNNER_TEMP/titan-stdlib-chrome`, a script that `exec`s the pinned headless
-shell with `--enable-features=HigherRendererMemoryLimit` ahead of its own
-arguments, and exports that script as `TITAN_CHROME`. Every later Chromium
-launch in the job (the sandbox check, the stdlib suite, and the gate files'
-runner launches) goes through the wrapper; `browser-toolchain` and
-`browser-playwright` launch Chromium with its default limit.
-
-The wrapper raises the renderer's data-segment limit. Chromium's Linux sandbox
-bounds a renderer with `RLIMIT_DATA` rather than `RLIMIT_AS`, because no
-address-space limit both fits V8's and WebAssembly's reservations and still
-blocks large-allocation exploits. In Chrome for Testing 156.0.8078.80,
-`GetProcessDataSizeLimit` in `sandbox/policy/linux/sandbox_linux.cc` picks the
-64-bit renderer limit from total physical memory: 8 GiB on a host with at most
-16 GiB, 16 GiB with at most 32 GiB, and 32 GiB above that, doubled when the
-`HigherRendererMemoryLimit` feature is enabled (`sandbox/policy/features.cc`
-declares it disabled by default). The sandbox only lowers an inherited limit,
-never raises it. On the job's 16GB runner the renderer therefore gets 8 GiB by
-default and 16 GiB through the wrapper. The `protobuf` suite image needs
-between 13 and 14 GiB of renderer data during startup, before its first case;
-its linear memory stays at its 16 MiB initial size, so the cost is the engine's
-startup work for that image. Measured with the sandbox on and the limit
-inherited from the launching process, the image's renderer crashes before the
-first case at 13 GiB even with a filter that selects no case, the image starts
-at 14 GiB, and all 199 of its cases pass at 16 GiB. At 8 GiB `protobuf` is the
-only image that fails, with `Chromium target crashed` (runner status 75) and no
-report; `core`, `reflection`, and `transfer` pass. The renderer keeps its
-seccomp and namespace sandbox, and the job passes no `--no-sandbox`.
+prefix. It uses the pinned Chrome for Testing executable with its default
+renderer-memory limits and enabled sandbox; no CI-only memory-limit wrapper
+or extra renderer-memory feature is applied.
 
 After step 7, `browser-stdlib` runs:
 
@@ -378,7 +353,7 @@ After step 7, `browser-stdlib` runs:
    validation-profile test images, checks each image against the 32,000,000-byte
    budget and the dependency closure, checks the native/browser member
    inventory, runs every image under Node and then Chromium (`TITAN_NODE` and
-   the wrapping `TITAN_CHROME` from the earlier steps), and requires a nonzero
+   the pinned `TITAN_CHROME` from the earlier steps), and requires a nonzero
    case count for every owner across the images
    ([browser test owners](browser-target.md#test-owners-and-the-browser-suite)).
    Each image's stdout report and stderr under each engine go to separate logs
@@ -414,7 +389,7 @@ After step 7, `browser-stdlib` runs:
 ## `browser-playwright` job
 
 `browser-playwright` (`browser traces (${{ matrix.profile }}, ${{
-matrix.engine }}, Playwright 1.56.1)`) runs the multi-engine browser trace gate
+matrix.engine }}, Playwright 1.64.1)`) runs the multi-engine browser trace gate
 on Linux across a six-cell `fail-fast: false` matrix (`profile: [validation,
 production]` × `engine: [chromium, firefox, webkit]`), each on a four-vCPU
 runner with a 60-minute timeout after `build-compiler`:
@@ -429,17 +404,18 @@ runner with a 60-minute timeout after `build-compiler`:
    `TITAN_BUILD_PROFILE=production`).
 2. **Native and browser SDK installation.** Each cell runs `"$PREFIX/bin/luarocks"
    make` with `EMSDK` unset and no `emcc` on `PATH`, restores the cached
-   `.emsdk` (`ubuntu-24.04-<arch>-emsdk-6.0.13-v1`), activates Emscripten 6.0.13
-   and its bundled Node 24 (`TITAN_NODE`), and runs `make lua-browser
-   PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`, asserting
-   `$PREFIX/lib/titan-browser/0.6/titan-browser-trace.js`.
+   `.emsdk` (`ubuntu-24.04-<arch>-emsdk-6.0.13-v1`), activates Emscripten 6.0.13,
+   and separately installs and qualifies Node 26.13.0 as `TITAN_NODE`. It runs
+   `make lua-browser PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`,
+   asserting `$PREFIX/lib/titan-browser/0.6/titan-browser-trace.js`.
 3. **Playwright engine provisioning and supervisor check.** `ubicloud/cache@v4`
    restores `PLAYWRIGHT_BROWSERS_PATH` (`.playwright-browsers`) under
-   `ubuntu-24.04-<arch>-playwright-1.56.1-<engine>-v1`; `npm install --prefix
+   `ubuntu-24.04-<arch>-playwright-1.64.1-<engine>-v1`; `npm install --prefix
    "$TITAN_PLAYWRIGHT_ROOT"` (`out/playwright-tools`) installs
-   `playwright@1.56.1`; `playwright/cli.js install --with-deps
-   "$TITAN_TRACE_ENGINE"` provisions the cell's browser and host libraries; and
-   `TITAN_PLAYWRIGHT_TEST_ENGINES="$TITAN_TRACE_ENGINE" node --test
+   `playwright@1.64.1`, whose engines are Chromium 156.0.8078.4, Firefox 157.0,
+   and WebKit 27.2. `playwright/cli.js install --with-deps
+   "$TITAN_TRACE_ENGINE"` provisions the cell's browser and host libraries;
+   `TITAN_PLAYWRIGHT_TEST_ENGINES="$TITAN_TRACE_ENGINE" "$TITAN_NODE" --test
    spec/browser/playwright-runner.test.mjs` verifies the supervisor against that
    managed engine (`$RUNNER_TEMP/browser-playwright-supervisor.log`).
 4. **Staged trace gate (`assertions-2` and `assertions-0`).** `lua -E
@@ -454,10 +430,11 @@ runner with a 60-minute timeout after `build-compiler`:
    "$TITAN_TRACE_OUTPUT/trace.test.mjs"`
    (`$RUNNER_TEMP/browser-playwright-trace.log`) runs the full file/line,
    contributor, wrapper-family, merge-order, descriptor-safety,
-   pin/rethrow/clear, coroutine-append, Firefox `async*` cutoff and 128-frame
-   ceiling, held-storage nested capture, and merge-OOM guard-recovery checks on
-   `chromium` and `firefox`, and the reduced-fidelity no-line / 100-frame
-   counterpart on `webkit`. The gate reads the installation profile from
+   pin/rethrow/clear, coroutine-append, SpiderMonkey saved-parent cutoff and
+   128-frame ceiling, held-storage nested capture, and merge-OOM guard-recovery
+   checks on `chromium` and `firefox`, and the reduced-fidelity no-line
+   counterpart with the same 512-record capacity on `webkit`. The gate reads
+   the installation profile from
    `manifest.json`: every row is exact except a `production` cell's uncaught
    program rows, which use the [ordered-subsequence
    contract](browser-target.md#test-images) for inlined frames.

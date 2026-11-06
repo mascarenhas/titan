@@ -1,27 +1,30 @@
-// Titan's private channels. This file is consumed by Emscripten --js-library.
+// Titan's private channels and JSPI continuation owner (--js-library).
 addToLibrary({
-#if ASYNCIFY
-  $TitanBrowser__deps: ['$Asyncify'],
-#endif
-  $TitanBrowser__postset: 'TitanBrowser.install();',
+  $TitanBrowser__deps: ['$addOnInit', '$stackSave', '$stackRestore',
+    'emscripten_stack_get_base', 'emscripten_stack_get_end',
+    'emscripten_stack_set_limits', '$setStackLimits'],
+  $TitanBrowser__postset: 'addOnInit(() => TitanBrowser.install());',
   $TitanBrowser: {
-    liveDepth: 0,
-    admissionDepth: 0,
-    continuing: -1,
-    guarded: null,
-    suspensionPending: false,
+    owner: false,
+    entered: false,
+    current: 0,
+    contexts: null,
+    retired: null,
     completionCount: 0,
     terminalFailure: null,
     blocked: false,
+    poisoned: false,
     queued: false,
 
     safe() {
-      return !TitanBrowser.liveDepth &&
-#if ASYNCIFY
-        !Asyncify.exportCallStack.length &&
-        !(typeof Fibers !== 'undefined' && Fibers.trampolineRunning) &&
-#endif
-        true;
+      return !TitanBrowser.owner;
+    },
+
+    error(code, message) {
+      var error = new Error(message);
+      error.name = 'TitanBrowserError';
+      error.code = 'TITAN_BROWSER_' + code;
+      return error;
     },
 
     schedule() {
@@ -29,97 +32,202 @@ addToLibrary({
       TitanBrowser.queued = true;
       queueMicrotask(() => {
         TitanBrowser.queued = false;
-        if (TitanBrowser.safe()) {
-          Module['titanBrowserSafePoint']?.(TitanBrowser.suspensionPending);
+        if (TitanBrowser.safe()) Module['titanBrowserSafePoint']?.();
+      });
+    },
+
+    // The owner outlives every internal transfer microtask, including a GC
+    // finalizer's abandoned-stack unwind. This is also the internal entry hook
+    // for future stateful gateways; call must invoke a promising Wasm export.
+    enter(call) {
+      if (TitanBrowser.owner) {
+        return Promise.reject(TitanBrowser.error('REENTRY',
+          'browser instance is active; reentry is not allowed'));
+      }
+      if (TitanBrowser.blocked || TitanBrowser.terminalFailure || TitanBrowser.completionCount) {
+        return Promise.reject(TitanBrowser.error('STATE',
+          'browser instance has already run or is disposed'));
+      }
+      TitanBrowser.owner = true;
+      TitanBrowser.entered = false;
+      var result;
+      try {
+        result = call();
+      } catch (cause) {
+        result = Promise.reject(cause);
+      }
+      return Promise.resolve(result).catch(cause => {
+        TitanBrowser.poison(cause);
+        if (cause instanceof WebAssembly.RuntimeError) Module['titanBrowserTrap']?.(cause);
+        throw cause;
+      }).finally(() => {
+        TitanBrowser.owner = false;
+        TitanBrowser.schedule();
+      });
+    },
+
+    poison(cause) {
+      TitanBrowser.terminalFailure ||= cause;
+      TitanBrowser.blocked = true;
+      TitanBrowser.poisoned = true;
+      // Fatal engine failure is not a Titan unwind. Reject engine gates so
+      // their invocations retire, but never call into C to recycle allocations.
+      for (var context of TitanBrowser.contexts.values()) {
+        context.gate?.reject(cause);
+        context.gate = null;
+      }
+    },
+
+    save(context) {
+      checkStackCookie();
+      context.sp = stackSave();
+      context.low = _emscripten_stack_get_end();
+      context.high = _emscripten_stack_get_base();
+    },
+
+    restore(context) {
+      _emscripten_stack_set_limits(context.high, context.low);
+      setStackLimits();
+      stackRestore(context.sp);
+      TitanBrowser.current = context.id;
+      if (context.started) checkStackCookie();
+      else writeStackCookie();
+    },
+
+    context(id) {
+      var context = TitanBrowser.contexts.get(id);
+      if (!context) throw new Error('unknown Titan coroutine context');
+      return context;
+    },
+
+    park(context) {
+      if (context.gate) throw new Error('Titan coroutine context is already parked');
+      var promise = new Promise((resolve, reject) => { context.gate = {resolve, reject}; });
+      // Both successful wakes and retirement exceptions restore the linear
+      // stack/bounds before the engine resumes the suspended Wasm activation.
+      return promise.then(value => {
+        TitanBrowser.restore(context);
+        return value;
+      }, cause => {
+        TitanBrowser.restore(context);
+        throw cause;
+      });
+    },
+
+    activate(context) {
+      // Defer first entry too: do not recursively nest JS import frames or
+      // execute a destination before the source import has actually suspended.
+      queueMicrotask(() => {
+        if (TitanBrowser.poisoned) return;
+        try {
+          if (context.started) {
+            var gate = context.gate;
+            if (!gate || context.retiring) throw new Error('Titan coroutine destination is not parked');
+            context.gate = null;
+            gate.resolve();
+            return;
+          }
+          TitanBrowser.restore(context);
+          context.started = true;
+          context.lifetime = Promise.resolve(_titan_mco_entry(context.id)).then(() => {
+            context.finished = true;
+            if (!context.terminal) throw new Error('Titan coroutine returned without terminal handoff');
+            TitanBrowser.activate(context.terminal);
+          }, cause => {
+            context.finished = true;
+            if (context.retiring && cause === TitanBrowser.retired) return;
+            throw cause;
+          }).catch(cause => { TitanBrowser.poison(cause); });
+        } catch (cause) {
+          TitanBrowser.poison(cause);
         }
       });
     },
 
+    transfer(from, fromBack, to, toBack, terminal) {
+      var source = TitanBrowser.context(TitanBrowser.current);
+      var fromContext = TitanBrowser.context(from);
+      var toContext = TitanBrowser.context(to);
+      if (fromBack) fromContext.back = source;
+      else if (source !== fromContext) throw new Error('Titan coroutine transfer source is not current');
+      var destination = toBack ? toContext.back : toContext;
+      if (!destination) throw new Error('Titan coroutine transfer has no BACK continuation');
+      if (toBack) toContext.back = null;
+      TitanBrowser.save(source);
+      if (terminal) {
+        // Do not wake the resumer yet. _mco_main must return all the way out of
+        // its promising export before that resumer may free the native stack.
+        source.terminal = destination;
+        return;
+      }
+      var parked = TitanBrowser.park(source);
+      TitanBrowser.activate(destination);
+      return parked;
+    },
+
+    destroy(id) {
+      var context = TitanBrowser.context(id);
+      if (!context.started || context.finished) {
+        TitanBrowser.contexts.delete(id);
+        return;
+      }
+      if (!context.gate || context.retiring) throw new Error('cannot retire a running Titan coroutine');
+      var caller = TitanBrowser.context(TitanBrowser.current);
+      TitanBrowser.save(caller);
+      context.retiring = true;
+      var gate = context.gate;
+      context.gate = null;
+      gate.reject(TitanBrowser.retired);
+      return context.lifetime.then(() => {
+        TitanBrowser.restore(caller);
+        if (TitanBrowser.poisoned) throw TitanBrowser.terminalFailure;
+        TitanBrowser.contexts.delete(id);
+      });
+    },
+
     install() {
-#if ASYNCIFY
-      TitanBrowser.guarded = new Set();
-      var instrumentExports = Asyncify.instrumentWasmExports;
-      Asyncify.instrumentWasmExports = (exports) => {
-        // Pinned applyImportAndExportNameChanges recognizes static accesses
-        // on wasmExports, and rewrites these keys when -O2/assertions-off
-        // minifies the native exports. Dynamic exports[name] is not rewritten.
-        for (var original of [wasmExports['titan_browser_entry'],
-                              wasmExports['titan_browser_gate_guarded']]) {
-          if (typeof original === 'function') TitanBrowser.guarded.add(original);
-        }
-        return instrumentExports(exports);
-      };
-      // Pin to Emscripten 6.0.13's export instrumentation. The outer wrapper
-      // stays live through maybeStopUnwind's entire fiber trampoline, not just
-      // one fiber switch. doRewind's map must use this same wrapper.
-      var instrument = Asyncify.instrumentFunction;
-      Asyncify.instrumentFunction = (original) => {
-        var inner = instrument(original);
-        var guarded = TitanBrowser.guarded.has(original);
-        var outer = (...args) => {
-          ++TitanBrowser.liveDepth;
-          if (guarded) ++TitanBrowser.admissionDepth;
-          try {
-            return inner(...args);
-          } catch (cause) {
-            if (cause instanceof WebAssembly.RuntimeError) {
-              Module['titanBrowserTrap']?.(cause);
-            }
-            throw cause;
-          } finally {
-            if (guarded) --TitanBrowser.admissionDepth;
-            --TitanBrowser.liveDepth;
-            TitanBrowser.schedule();
-          }
-        };
-        Asyncify.funcWrappers.set(original, outer);
-        return outer;
-      };
-      var sleep = Asyncify.handleSleep;
-      Asyncify.handleSleep = (startAsync) => {
-        var rewinding = Asyncify.state === Asyncify.State.Rewinding;
-        try {
-          return sleep(startAsync);
-        } finally {
-          // Set before returning to the unwinding compiled caller. Normal
-          // state alone is insufficient: stop_unwind leaves currData alive.
-          if (Asyncify.state === Asyncify.State.Unwinding) {
-            TitanBrowser.suspensionPending = true;
-          } else if (rewinding && !Asyncify.currData) {
-            TitanBrowser.suspensionPending = false;
-          }
-        }
-      };
-      var rewind = Asyncify.doRewind;
-      Asyncify.doRewind = (data) => {
-        // A resolved-Promise wake can beat our queued safe-point microtask.
-        // Deliver the fully unwound batch before its continuation enters C;
-        // nested fiber trampolines are explicitly not safe delivery points.
-        if (TitanBrowser.safe()) {
-          Module['titanBrowserSafePoint']?.(TitanBrowser.suspensionPending);
-        }
-        var previous = TitanBrowser.continuing;
-        // invoke_* / dynCall_* may re-enter compiled code internally. They
-        // affect safe delivery, but are not a new Titan-facing admission.
-        TitanBrowser.continuing = TitanBrowser.admissionDepth +
-          (TitanBrowser.guarded.has(Asyncify.getDataRewindFunc(data)) ? 1 : 0);
-        try {
-          return rewind(data);
-        } finally {
-          TitanBrowser.continuing = previous;
-          TitanBrowser.schedule();
-        }
-      };
-#endif
+      if (typeof WebAssembly.promising !== 'function' || typeof WebAssembly.Suspending !== 'function') {
+        throw TitanBrowser.error('CAPABILITY', 'Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)');
+      }
+      TitanBrowser.contexts = new Map([[0, {id: 0, started: true, gate: null, back: null}]]);
+      TitanBrowser.retired = new Error('Titan coroutine continuation retired');
+      // Emscripten's explicit JSPI_EXPORTS set uses WebAssembly.promising.
+      // Wrap only general state-entering Module exports; C-only helpers stay
+      // synchronous. Static wasmExports accesses survive export minification.
+      var entry = wasmExports['titan_browser_entry'];
+      if (entry) Module['_titan_browser_entry'] = (...args) => TitanBrowser.enter(() => entry(...args));
+      var guarded = wasmExports['titan_browser_gate_guarded'];
+      if (guarded) Module['_titan_browser_gate_guarded'] = (...args) => TitanBrowser.enter(() => guarded(...args));
+      // Only the driver may start an engine coroutine. Its lexical raw export
+      // stays private even though Emscripten publishes KEEPALIVE aliases.
+      Module['_titan_mco_entry'] = () => Promise.reject(TitanBrowser.error('REENTRY',
+        'Titan coroutine engine entry is private'));
       Module['titanBrowserAttach']?.(TitanBrowser);
     },
   },
 
+  titan_mco_create__deps: ['$TitanBrowser'],
+  titan_mco_create__sig: 'vppp',
+  titan_mco_create: (id, low, high) => {
+    if (TitanBrowser.contexts.has(id)) throw new Error('duplicate Titan coroutine context');
+    TitanBrowser.contexts.set(id, {id, low, high, sp: high, started: false,
+      finished: false, gate: null, back: null, terminal: null, lifetime: null, retiring: false});
+  },
+
+  titan_mco_transfer__deps: ['$TitanBrowser', 'titan_mco_entry'],
+  titan_mco_transfer__sig: 'vpipii',
+  titan_mco_transfer: (from, fromBack, to, toBack, terminal) =>
+    TitanBrowser.transfer(from, fromBack, to, toBack, terminal),
+
+  titan_mco_destroy__deps: ['$TitanBrowser'],
+  titan_mco_destroy__sig: 'vp',
+  titan_mco_destroy: id => TitanBrowser.destroy(id),
+
   titan_browser_complete__deps: ['$TitanBrowser'],
   titan_browser_complete__sig: 'viiii',
   titan_browser_complete: (kind, status, bytes, length) => {
-    // Copy synchronously while C still owns the payload. Never retain a heap
-    // view, and never invoke an application sink from a compiled stack.
+    // Copy synchronously while C owns the payload. JS promises are not Lua
+    // roots, and application sinks never run during an internal handoff.
     Module['titanBrowserComplete'](kind, status,
       HEAPU8.slice(bytes >>> 0, (bytes >>> 0) + (length >>> 0)),
       ++TitanBrowser.completionCount);
@@ -129,17 +237,8 @@ addToLibrary({
   titan_browser_entry_allowed__deps: ['$TitanBrowser'],
   titan_browser_entry_allowed__sig: 'i',
   titan_browser_entry_allowed: () => {
-    // Rewind/fiber continuations are already admitted. External calls must not
-    // enter an active compiled stack, a pending wait, or a retired instance.
-    return (TitanBrowser.continuing >= 0 &&
-            TitanBrowser.admissionDepth === TitanBrowser.continuing) ||
-      (!TitanBrowser.blocked && !TitanBrowser.terminalFailure &&
-       !TitanBrowser.completionCount && !TitanBrowser.suspensionPending &&
-#if ASYNCIFY
-       TitanBrowser.admissionDepth === 1
-#else
-       true
-#endif
-      ) ? 1 : 0;
+    if (!TitanBrowser.owner || TitanBrowser.entered) return 0;
+    TitanBrowser.entered = true;
+    return 1;
   },
 });

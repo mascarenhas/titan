@@ -40,8 +40,8 @@ end
 local purposes = { program = true, test = true, protocol = true, gate = true,
     minicoro = true, budget = true, baseline = true }
 local option_keys = { purpose = true, assertions = true, optimization = true,
-    asyncify = true, budgets = true, entry = true }
-local defaults = { stack_size = 1048576, asyncify_stack_size = 65536,
+    budgets = true, entry = true }
+local defaults = { stack_size = 1048576,
     initial_memory = 16777216, maximum_memory = 2147483648 }
 
 function M.profile(descriptor, options)
@@ -53,11 +53,6 @@ function M.profile(descriptor, options)
     if not purposes[purpose] then return nil, "invalid browser link profile purpose" end
     local assertions = options.assertions
     if assertions ~= 0 and assertions ~= 2 then return nil, "browser assertions must be 0 or 2" end
-    local asyncify = options.asyncify
-    if asyncify == nil then asyncify = true end
-    if type(asyncify) ~= "boolean" or not asyncify and purpose ~= "minicoro" and purpose ~= "baseline" then
-        return nil, "this browser link profile requires Asyncify"
-    end
     local optimization = options.optimization
     if optimization ~= nil and (optimization ~= "O1" and optimization ~= "O2" or
             purpose ~= "minicoro" and purpose ~= "budget" and purpose ~= "baseline") then
@@ -110,27 +105,28 @@ function M.profile(descriptor, options)
     end
     add("-gsource-map")
     add("-g2")
-    -- D18's post-Asyncify local cleanup stays in every Titan-entry profile.
-    -- A production test image also skips the two level-pipeline transforms
-    -- that rewrite function identity, both of which run before --asyncify:
-    -- `inlining-optimizing` and `duplicate-function-elimination`. The second
-    -- is measured: with only inlining skipped, Binaryen still folded
-    -- byte-identical bodies, so `locations.browser.titan`'s selected_leaf and
-    -- selected_outer became original_leaf and direct_middle (issue C's
-    -- identical-function-folding risk) and four fixtures lost their frames.
-    -- Object-level `-fno-inline` alone does not prevent that folding.
-    local passes = "simplify-locals,reorder-locals"
+    -- Preserve distinct function identities in production test traces.
+    -- Object-level -fno-inline alone does not prevent Binaryen folding.
+    local passes = ""
     if profile == "production" and purpose == "test" then
-        passes = passes .. ",--skip-pass=inlining-optimizing" ..
+        passes = "--skip-pass=inlining-optimizing" ..
             ",--skip-pass=duplicate-function-elimination"
     end
-    if entry == "titan" then
+    if entry == "titan" and passes ~= "" then
         add("-sBINARYEN_EXTRA_PASSES=" .. passes)
     end
-    add("-sASYNCIFY=" .. (asyncify and "1" or "0"))
+    add("-sJSPI=1")
+    local imports = '"titan_mco_transfer","titan_mco_destroy"'
+    local promised = entry == "titan" and '"titan_browser_entry","titan_mco_entry"' or '"main"'
+    if purpose == "gate" then
+        imports = imports .. ',"emscripten_sleep"'
+        promised = promised .. ',"titan_browser_gate_guarded"'
+    end
+    add("-sJSPI_IMPORTS=[" .. imports .. "]")
+    add("-sJSPI_EXPORTS=[" .. promised .. "]")
     add("-sSUPPORT_LONGJMP=" .. descriptor.lua.record.sjlj)
+    add("-sWASM_LEGACY_EXCEPTIONS=1")
     add("-sSTACK_SIZE=" .. budgets.stack_size)
-    if asyncify then add("-sASYNCIFY_STACK_SIZE=" .. budgets.asyncify_stack_size) end
     add("-sINITIAL_MEMORY=" .. budgets.initial_memory)
     add("-sALLOW_MEMORY_GROWTH=1")
     add("-sMAXIMUM_MEMORY=" .. budgets.maximum_memory)
@@ -163,13 +159,14 @@ function M.profile(descriptor, options)
     return { link_flags = flags, compile_flags = compile,
         identity_inputs = { target_identity = descriptor.identity, profile = profile,
             purpose = purpose, entry = entry, assertions = assertions,
-            optimization = effective_opt, asyncify = asyncify, budgets = budgets,
+            optimization = effective_opt, backend = "jspi", budgets = budgets,
             link_flags = flags, compile_flags = compile } }
 end
 
 -- Target-owned settings cannot be weakened by trailing user flags. Accept
 -- unrelated Emscripten settings, but reject every spelling of an owned one.
-local owned = { SUPPORT_LONGJMP = true, ASYNCIFY = true, STACK_SIZE = true,
+local owned = { SUPPORT_LONGJMP = true, WASM_LEGACY_EXCEPTIONS = true,
+    JSPI = true, STACK_SIZE = true,
     INITIAL_MEMORY = true, ALLOW_MEMORY_GROWTH = true, MAXIMUM_MEMORY = true,
     ABORTING_MALLOC = true, EXIT_RUNTIME = true, INVOKE_RUN = true,
     MODULARIZE = true, EXPORT_ES6 = true, ENVIRONMENT = true,
@@ -177,8 +174,8 @@ local owned = { SUPPORT_LONGJMP = true, ASYNCIFY = true, STACK_SIZE = true,
     EXPORTED_FUNCTIONS = true, EXPORTED_RUNTIME_METHODS = true,
     INCOMING_MODULE_JS_API = true, ASSERTIONS = true, STACK_OVERFLOW_CHECK = true,
     TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
-    TITAN_CODEC_DEPTH_LIMIT = true, TITAN_JSON_WRITER_DEPTH_LIMIT = true,
-    MCO_ASYNCFY_STACK_SIZE = true, BINARYEN_EXTRA_PASSES = true }
+    TITAN_CODEC_DEPTH_LIMIT = true,
+    BINARYEN_EXTRA_PASSES = true }
 -- `origin` is "compile" for a caller's compile extras and "link" otherwise, so
 -- one owned option is reported by the diagnostic that owns it: the compile
 -- message matches `browsertarget.build`'s, the link message names the link
@@ -201,7 +198,8 @@ function M.validate_extras(flags, options, build_profile, origin)
             (flag == "-s" or flag == "-D" or flag == "-U") and flags[index + 1]
         local key = setting and setting:match("^([%w_]+)")
         local positive = key and key:gsub("^NO_", "")
-        if key and (owned[positive] or positive:match("^ASYNCIFY_")) or
+        if key and (owned[positive] or positive == "ASYNCIFY" or
+                positive:match("^ASYNCIFY_") or positive:match("^JSPI_")) or
             flag == "--no-entry" or flag == "--js-library" or flag:match("^%-%-js%-library=") then
             if origin == "compile" then
                 return nil, compile_label .. " owns compile option " .. string.format("%q", flag)

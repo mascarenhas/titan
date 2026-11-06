@@ -248,7 +248,7 @@ end
 
 local function check_writer_depth_limit(context: test.Context, kind: string)
   local configured = 128
-  local limit = writer_depth_limit(configured)
+  local limit = configured
   context:run(kind .. "_accepts_" .. limit, function(_: test.Context)
     local subject, expected = writer_depth_chain(limit, kind)
     test.assert(json.encode(subject, json.EncodeOption.max_depth(configured)) == expected)
@@ -261,14 +261,7 @@ local function check_writer_depth_limit(context: test.Context, kind: string)
     end, "limit_exceeded")
     test.assert(failure.message == "value exceeds max_depth")
     test.assert(failure.position == nil and failure.line == nil and failure.column == nil)
-    if JSON_WRITER_DEPTH_LIMIT < math.maxinteger then
-      failure = core_error(function()
-        json.encode(subject, json.EncodeOption.max_depth(math.maxinteger))
-      end, "limit_exceeded")
-      test.assert(failure.message == "value exceeds max_depth")
-    else
-      test.assert(json.encode(subject, json.EncodeOption.max_depth(math.maxinteger)) == expected)
-    end
+    test.assert(json.encode(subject, json.EncodeOption.max_depth(math.maxinteger)) == expected)
     test.assert(json.encode(WriterDepthRecord(true)) == [[{"next":true}]],
                 "writer did not recover after the nesting error")
   end)

@@ -523,10 +523,14 @@ async function main() {
     try { options = parse(process.argv.slice(2)); }
     catch (error) { diagnostic(error.message); process.stderr.write(usage); return 2; }
     if (options.help) { process.stderr.write(usage); return 0; }
-    if (options.version) { diagnostic("Titan 0.6.0 browser runner (Node 24)"); return 0; }
+    if (options.version) { diagnostic("Titan 0.6.0 browser runner (Node 26+)"); return 0; }
     const chrome = options.probe || options.engine === "chromium" ? await chromeInfo(options.chrome) : null;
+    const nodeOK = Number(process.versions.node.split(".")[0]) >= 26 &&
+        typeof WebAssembly.promising === "function" && typeof WebAssembly.Suspending === "function";
+    const nodeReason = nodeOK ? null : "Node 26 or newer with WebAssembly JSPI is required";
+    if (!nodeOK) { diagnostic(nodeReason); return 75; }
     if (options.probe) {
-        process.stdout.write(JSON.stringify({ node: { path: process.execPath, version: process.version, ok: true, reason: null }, chrome }) + "\n");
+        process.stdout.write(JSON.stringify({ node: { path: process.execPath, version: process.version, ok: nodeOK, reason: nodeReason }, chrome }) + "\n");
         return 0;
     }
     if (chrome && !chrome.ok) { diagnostic("headless Chromium not found; set TITAN_CHROME to a Chrome executable"); return 75; }

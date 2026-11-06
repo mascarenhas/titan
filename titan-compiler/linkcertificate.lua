@@ -726,7 +726,8 @@ function certificate.browser_trace_libraries(context, compiler_argv, flags)
     end
     if #filtered == 0 then return {} end
     return compiler_libraries(context, {
-        compiler_argv = compiler_argv, argv = filtered, static = true,
+        compiler_argv = require("titan-compiler.browsertarget").compiler_argv(compiler_argv),
+        argv = filtered, static = true,
     })
 end
 

@@ -26,7 +26,7 @@ local function run(argv)
     return result.started and result.ok, result.output or result.diagnostic or ""
 end
 
-local function build(info, assertions, module, name, is_test)
+local function build(info, assertions, module, name, is_test, c_source)
     local output = workspace .. "/assertions-" .. assertions
     files.mkdir(output)
     local code = string.format("package.path=%q..package.path; " ..
@@ -38,7 +38,7 @@ local function build(info, assertions, module, name, is_test)
         info.prefix .. "/bin/lua", "-E", "-e", code, repository .. "/titanc",
         "--target", "browser", "-q", "--incremental", "--no-uv-bootstrap",
         "--tree", fixture, "--output", output, "--exe", output .. "/" .. name .. ".mjs",
-        "--c-source", fixture .. "/gate.c" }
+        "--c-source", fixture .. "/" .. (c_source or "gate.c") }
     if is_test then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = module
     local ok, log = run(argv)
@@ -92,6 +92,25 @@ describe("browser real runtime entry gate", function()
                     assertions, engine, guard_log))
                 io.stdout:flush()
                 assert.is_true(guard_ok, guard_log)
+            end
+        end)
+        it("preserves real Titan contexts across C entry lifetimes with ASSERTIONS=" .. assertions, function()
+            local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
+            workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+            files.write(workspace .. "/entry-lifetimes.mjs", read(fixture .. "/entry-lifetimes.mjs"))
+            build(info, assertions, "entry_lifetimes", "entry-lifetimes", false, "entry_lifetimes.c")
+            for _, engine in ipairs({ "node", "chromium" }) do
+                local ok, log = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                    "--timeout", "30000", "--grace", "1500", "--root", workspace,
+                    "--js-test", workspace .. "/entry-lifetimes.mjs", "--",
+                    "assertions-" .. assertions .. "/entry-lifetimes.mjs" })
+                io.stdout:write(string.format("\nENTRY LIFETIMES assertions=%d engine=%s\n%s\n",
+                    assertions, engine, log))
+                io.stdout:flush()
+                assert.is_true(ok, log)
+                assert.truthy(log:find('"entries":6', 1, true), log)
+                assert.truthy(log:find('"allocationCleanup":2', 1, true), log)
+                assert.truthy(log:find('"earlySinks":0', 1, true), log)
             end
         end)
     end

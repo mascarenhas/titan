@@ -420,6 +420,9 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         local clean_liblua_bytes = assert(strategy:read_file(liblua))
         local clean_record_bytes = assert(strategy:read_file(record))
         local clean_luah_bytes = assert(strategy:read_file(lua_h))
+        contains(clean_record_bytes, "sjlj=wasm\n")
+        contains(clean_record_bytes, "+exception-handling")
+        contains(clean_record_bytes, "-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1")
 
         -- 2. Warm matching configuration is reused without touching installed or object files,
         -- and explicit empty LUA_BROWSER_MYCFLAGS= overrides ambient MYCFLAGS.
@@ -446,14 +449,18 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.equal(clean_liblua_bytes, assert(strategy:read_file(liblua)))
         assert.equal(clean_record_bytes, assert(strategy:read_file(record)))
 
-        -- 4. Malformed records (missing final LF, extra comment, CR, NUL, invalid UTF-8) are rejected
-        -- by the reuse check and regenerated cleanly.
+        -- 4. Malformed records and records for the previous JS-SJLJ or implicit
+        -- EH encoding configuration are rejected and regenerated cleanly.
         for _, bad_record in ipairs({
             clean_record_bytes:sub(1, -2),
             clean_record_bytes .. "# trailing comment not allowed\n",
             (clean_record_bytes:gsub("\n", "\r\n", 1)),
             clean_record_bytes:sub(1, -2) .. "\0\n",
             clean_record_bytes:sub(1, -2) .. "\255\n",
+            (clean_record_bytes:gsub("sjlj=wasm", "sjlj=emscripten")),
+            (clean_record_bytes:gsub(" %-sWASM_LEGACY_EXCEPTIONS=1", "")),
+            (clean_record_bytes:gsub("WASM_LEGACY_EXCEPTIONS=1", "WASM_LEGACY_EXCEPTIONS=0")),
+            (clean_record_bytes:gsub(" %+exception%-handling", "")),
         }) do
             assert(strategy:write_file(record, bad_record))
             local repaired = run_lua_browser()
@@ -478,7 +485,112 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         contains(updated_record, "fork_revision=" .. fork_rev)
         contains(updated_record, "lua_defines=-DLUAI_MAXCCALLS=100 -DLUA_USER_DEFAULT=1 -DLUA_USE_BROWSER -DLUA_USE_POSIX")
         contains(updated_record, "cflags=-O2 -Wall -Wextra -DLUA_USE_POSIX -DLUA_USE_BROWSER " ..
-            "-DLUAI_MAXCCALLS=100 -sSUPPORT_LONGJMP=emscripten -DLUA_USER_DEFAULT=1")
+            "-DLUAI_MAXCCALLS=100 -sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1 -DLUA_USER_DEFAULT=1")
+
+        local updated_liblua = assert(strategy:read_file(liblua))
+        -- Inspect wrong effective settings using the real installer and an
+        -- existing archive: rejection must precede installation, not bless it
+        -- with a new record. This does not rebuild a Lua archive per bad flag.
+        local configuration = paths.join(root, "rejected-config")
+        for _, flag in ipairs({ "-sSUPPORT_LONGJMP=emscripten", "-s SUPPORT_LONGJMP=emscripten",
+                "-sSUPPORT_LONGJMP", "-sNO_SUPPORT_LONGJMP=1",
+                "-sWASM_LEGACY_EXCEPTIONS=0", "-s WASM_LEGACY_EXCEPTIONS=0",
+                "-sNO_WASM_LEGACY_EXCEPTIONS", "-s NO_WASM_LEGACY_EXCEPTIONS=1",
+                "-mno-exception-handling" }) do
+            local config = run_with_env(strategy, base_env, {
+                "make", "-s", "--no-print-directory", "-C", paths.join(temp_lua, "src"),
+                "browser-config", "BROWSER_CC=" .. info.tools.cc[1], "MYCFLAGS=" .. flag,
+            })
+            assert.is_true(config.ok, config.output)
+            local config_text, replacements = config.output:gsub("browser_src= %.\n",
+                "browser_src= " .. paths.join(temp_lua, "src") .. "\n")
+            assert.equal(1, replacements)
+            assert(strategy:write_file(configuration, config_text))
+            local rejected = run_with_env(strategy, base_env, {
+                "sh", "-c", 'exec sh "$1" "$2" < "$3"', "sh",
+                paths.join(temp_lua, "tools/install-browser.sh"),
+                paths.join(temp_prefix, "lib/browser"), configuration,
+            })
+            assert.is_false(rejected.ok, rejected.output)
+            contains(rejected.output, "install-browser: the browser build")
+            assert.equal(updated_record, strategy:read_file(record))
+            assert.equal(updated_liblua, strategy:read_file(liblua))
+        end
+    end)
+
+    it("clears ambient EMCC_CFLAGS in fork browser entrypoints and reuse without changing native goals", function()
+        local info, why = toolchain.require()
+        if not info then pending(why) return end
+        local root = new_workspace("-lua-browser-ambient")
+        local temp_lua = paths.join(root, "lua-5.5.1")
+        local temp_prefix = paths.join(root, "prefix")
+        for _, name in ipairs({ "Makefile", "src", "tools" }) do
+            copy_tree(strategy, paths.join(repository, "lua-5.5.1", name), paths.join(temp_lua, name))
+        end
+        local revision = assert(assert(strategy:read_file(info.record_path)):match("fork_revision=([0-9a-f]+)"))
+        local guarded_cc = paths.join(root, "guarded-emcc")
+        local native_cc = paths.join(root, "native-cc")
+        assert(strategy:write_file(guarded_cc, [[#!/bin/sh
+set -eu
+[ -z "${EMCC_CFLAGS:-}" ] || { echo "ambient EMCC_CFLAGS reached browser compiler" >&2; exit 91; }
+exec "$TITAN_TEST_REAL_EMCC" "$@"
+]]))
+        assert(strategy:write_file(native_cc, [[#!/bin/sh
+set -eu
+[ "${EMCC_CFLAGS-}" = "$TITAN_TEST_EXPECT_EMCC_CFLAGS" ] || { echo "native environment changed" >&2; exit 92; }
+exec cc "$@"
+]]))
+        assert(strategy:run({ "chmod", "0755", guarded_cc, native_cc }).ok)
+        for _, ambient in ipairs({ "-sWASM_LEGACY_EXCEPTIONS=0", "-sSUPPORT_LONGJMP=emscripten" }) do
+            local env = {
+                PATH = paths.dirname(info.tools.cc[1]) .. ":" .. (os.getenv("PATH") or ""),
+                EMCC_CFLAGS = ambient, TITAN_TEST_EXPECT_EMCC_CFLAGS = ambient,
+                TITAN_TEST_REAL_EMCC = info.tools.cc[1], FORK_REVISION = revision, CCACHE_DISABLE = "1",
+            }
+            local function run_make(directory, arguments)
+                local argv = { "make", "--no-print-directory", "-C", directory }
+                for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+                return run_with_env(strategy, env, argv)
+            end
+            local compiled = run_make(paths.join(temp_lua, "src"), {
+                "-B", "browser", "BROWSER_CC=" .. guarded_cc,
+            })
+            assert.is_true(compiled.ok, compiled.output)
+            local config = run_make(paths.join(temp_lua, "src"), {
+                "-s", "browser-config", "BROWSER_CC=" .. guarded_cc,
+            })
+            assert.is_true(config.ok, config.output)
+            local config_text, replacements = config.output:gsub("browser_src= %.\n",
+                "browser_src= " .. paths.join(temp_lua, "src") .. "\n")
+            assert.equal(1, replacements)
+            local config_path = paths.join(root, "browser-config")
+            assert(strategy:write_file(config_path, config_text))
+            local installed = run_with_env(strategy, env, {
+                "sh", "-c", 'exec sh "$1" "$2" < "$3"', "sh",
+                paths.join(temp_lua, "tools/install-browser.sh"),
+                paths.join(temp_prefix, "lib/browser"), config_path,
+            })
+            assert.is_true(installed.ok, installed.output)
+            local delegated = run_make(temp_lua, {
+                "install-browser", "PREFIX=" .. temp_prefix, "BROWSER_CC=" .. guarded_cc,
+            })
+            assert.is_true(delegated.ok, delegated.output)
+            local archive = paths.join(temp_prefix, "lib/browser/liblua.a")
+            local before = assert(strategy:stat(archive))
+            local reused = run_with_env(strategy, env, {
+                "make", "--no-print-directory", "lua-browser", "PREFIX=" .. temp_prefix,
+                "LUA_DIR=" .. temp_lua, "LUA_BROWSER_CC=" .. guarded_cc,
+                "LUA_BROWSER_AR=" .. info.tools.ar[1] .. " rcu",
+                "LUA_BROWSER_RANLIB=" .. info.tools.ranlib[1],
+            })
+            assert.is_true(reused.ok, reused.output)
+            assert.same(before, assert(strategy:stat(archive)))
+            local record = assert(strategy:read_file(paths.join(temp_prefix, "lib/browser/liblua-config.txt")))
+            contains(record, "sjlj=wasm\n")
+            contains(record, "-sSUPPORT_LONGJMP=wasm -sWASM_LEGACY_EXCEPTIONS=1")
+            local native = run_make(paths.join(temp_lua, "src"), { "-B", "lapi.o", "CC=" .. native_cc })
+            assert.is_true(native.ok, native.output)
+        end
     end)
 
     it("installs browser-sdk into an empty differing ROCKS_TREE, verifies archives/digests/stack size, and keeps compiler SDK emsdk-free", function()
@@ -583,17 +695,20 @@ end
                 no_sdk_root))
         assert.is_nil(link_empty_rocks_res.output:find("ROCKS_TREE=", 1, true), link_empty_rocks_res.output)
 
-        -- 1b. Non-24 Node is clearly diagnosed when TITAN_NODE points to it, while EMSDK's
-        -- bundled Node 24 is placed ahead of an earlier non-24 node on PATH when TITAN_NODE is unset.
-        local fake_node_dir = paths.join(root, "fake-node26")
+        -- An explicit old Node is diagnosed. An old EMSDK-bundled Node must
+        -- not override the qualifying Node selected through ordinary PATH.
+        local fake_node_dir = paths.join(root, "fake-node24")
+        local good_node_dir = paths.join(root, "node26")
         local fake_emsdk = paths.join(root, "fake-emsdk")
         local fake_emsdk_node_dir = paths.join(fake_emsdk, "node/24.19.0_64bit/bin")
         files.mkdir(fake_node_dir)
         files.mkdir(fake_emsdk_node_dir)
+        files.mkdir(good_node_dir)
         local bad_node = paths.join(fake_node_dir, "node")
-        assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v26.1.0'\n"))
+        assert(strategy:write_file(bad_node, "#!/bin/sh\necho 'v24.19.0'\n"))
         assert(strategy:run({ "chmod", "0755", bad_node }, { stderr_to_stdout = true }).ok)
-        assert(lfs.link(info.node.path, paths.join(fake_emsdk_node_dir, "node"), true))
+        assert(lfs.link(bad_node, paths.join(fake_emsdk_node_dir, "node"), true))
+        assert(lfs.link(info.node.path, paths.join(good_node_dir, "node"), true))
         assert(lfs.link(paths.dirname(em_dir), paths.join(fake_emsdk, "upstream"), true))
 
         local bad_node_res = run_with_env(strategy, {
@@ -609,13 +724,12 @@ end
         })
         assert.is_false(bad_node_res.ok)
         contains(bad_node_res.output,
-            string.format('browser provider validation requires Node 24: %q reports v26.1.0; expected Node 24; set TITAN_NODE to a Node 24 executable',
+            string.format('browser provider validation requires Node 26 or newer: %q reports v24.19.0; expected Node 26 or newer; set TITAN_NODE to a Node 26 or newer executable',
                 assert(strategy:realpath(bad_node))))
 
-        -- 2. Run make browser-sdk into a genuinely empty differing ROCKS_TREE, with fake Node 26
-        -- first on PATH and TITAN_NODE unset so EMSDK's bundled Node 24 must take precedence.
+        -- Run into an empty differing ROCKS_TREE with Node 26 on PATH.
         local sdk_res = run_with_env(strategy, {
-            PATH = fake_node_dir .. ":" .. em_dir .. ":" .. (os.getenv("PATH") or ""),
+            PATH = good_node_dir .. ":" .. fake_node_dir .. ":" .. em_dir .. ":" .. (os.getenv("PATH") or ""),
             EMSDK = fake_emsdk,
             TITAN_NODE = "",
             CCACHE_DISABLE = "1",
@@ -778,7 +892,7 @@ end
         contains(run_test.output, "[  PASSED  ] 1 test.")
 
         -- 3b. Publish a browser library from a catch-bearing Titan module plus a setjmp C helper
-        -- alongside non-setjmp counterparts, verifying raw per-object -shared-mem retention and archive compatibility.
+        -- alongside non-setjmp counterparts: Wasm SJLJ uses the same EH fingerprint without JS-SJLJ's -shared-mem marker.
         local sjlj_src = paths.join(root, "sjlj-src")
         local sjlj_out = paths.join(root, "sjlj-out")
         files.mkdir(paths.join(sjlj_src, "sjlj_pkg"))
@@ -858,9 +972,9 @@ end
         local plain_helper_obj = assert(staticmetadata.classify_object(
             assert(strategy:read_file(plain_c_obj)), "plain_helper.o", expected_fp))
 
-        assert.equal(fixtures.features .. " -shared-mem", catcher_obj.fingerprint.features)
+        assert.equal(fixtures.features, catcher_obj.fingerprint.features)
         assert.equal(fixtures.features, plain_mod_obj.fingerprint.features)
-        assert.equal(fixtures.features .. " -shared-mem", sjlj_helper_obj.fingerprint.features)
+        assert.equal(fixtures.features, sjlj_helper_obj.fingerprint.features)
         assert.equal(fixtures.features, plain_helper_obj.fingerprint.features)
 
         local sjlj_archive_path = paths.join(sjlj_out, "sjlj_pkg.a")

@@ -459,8 +459,8 @@ data behavior: encoding, decoding, copying, and discarding packets, the scoped
 resource table, and `transfer_load_module` through the image's static preload
 table. The packet consumers (`thread`, `async`, and `lua`) are not available
 there, so no packet leaves the instance. Nominal encoding and decoding use
-protobuf's [nesting limit](protobuf-library.md#nesting-limit), which the
-browser target lowers to 42 accepted levels.
+protobuf's shared [nesting limit](protobuf-library.md#nesting-limit): 127
+accepted record levels on both native and browser targets.
 
 The same-instance cases live in the `transfer.tests` folder owner
 (`spec/stdlib/titan/transfer/tests/`), which imports only the browser subset,
@@ -476,7 +476,7 @@ message from `ffi.TITAN_CODEC_DEPTH_LIMIT` and checks, through both
 `TransferValue` policies and raw packets on the generated and reflective
 paths, that the accepted chain round-trips, that encoding and decoding one
 level deeper raise the protobuf nesting error, and that a rejected packet is
-still consumed; the same case holds natively (127/128) and in the browser
-(42/43). The Task, thread, and independent-state transfer cases stay native,
+still consumed; the same 127/128 boundary holds on both targets. The Task,
+thread, and independent-state transfer cases stay native,
 in the `async.tests` contributors `transfer_payload_test.titan` and
 `transfer_scope_reuse_test.titan` and in `thread.tests`.
