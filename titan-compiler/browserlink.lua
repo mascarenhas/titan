@@ -1,5 +1,7 @@
 local path = require "titan-compiler.path"
 local M = {}
+-- WebAssembly JavaScript Interface implementation-defined byte limits.
+local MAX_IMAGE_BYTES, MAX_BODY_BYTES = 1073741824, 7654321
 
 function M.sdk_assets(paths)
     local root = paths.titan_bin
@@ -210,10 +212,35 @@ function M.validate_extras(flags, options, build_profile, origin)
     return true
 end
 
+function M.check_image_size(size)
+    if size > MAX_IMAGE_BYTES then
+        return nil, string.format("browser image is %d bytes, exceeds maximum of %d bytes",
+            size, MAX_IMAGE_BYTES)
+    end
+    return true
+end
+
 -- Inventory shares the bounded final-image walk with the map rewriter.
 function M.image_inventory(bytes)
-    local image, err = require("titan-compiler.staticmetadata").browser_trace_image(bytes)
+    local valid, err = M.check_image_size(#bytes)
+    if not valid then return nil, err end
+    local image
+    image, err = require("titan-compiler.staticmetadata").browser_trace_image(bytes)
     if not image then return nil, err end
+    for index, range in ipairs(image.function_ranges) do
+        local size = range[2] - range[1]
+        if size > MAX_BODY_BYTES then
+            local wasm_index = image.function_imports + index - 1
+            local name = image.function_names[wasm_index + 1]
+            local label = name and name ~= "" and
+                string.format("function %q (Wasm index %d)", name, wasm_index) or
+                ("function at Wasm index " .. wasm_index)
+            -- The existing range lets the driver enrich only this error with
+            -- mapped source, without reparsing the Wasm or copying its body.
+            return nil, string.format("browser image %s body is %d bytes, exceeds maximum of %d bytes",
+                label, size, MAX_BODY_BYTES), range
+        end
+    end
     for _, import in ipairs(image.imports) do
         local name = import.name
         if name:match("^_?dlopen") or name:match("^_?dlsym") or

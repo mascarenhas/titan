@@ -542,43 +542,168 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       local cell: owned int[] = foreign int.new_array(1)
       cell[0] = 31337
       local cfunc_val = tse_make_cfunction_value()
-      local v_nil = tse_decode_scalar_without_allocating(nil, "nil")
-      local v_false = tse_decode_scalar_without_allocating(false, "false")
-      local v_true = tse_decode_scalar_without_allocating(true, "true")
-      local v_min = tse_decode_scalar_without_allocating(tse_math.mininteger, "integer")
-      local v_nz = tse_decode_scalar_without_allocating(-0.0, "float")
-      local v_state = tse_decode_scalar_without_allocating(
-        tse_transfer.TransferValue.is_lua_state(th_ptr), "state")
-      local v_ptr = tse_decode_scalar_without_allocating(cell as foreign *void, "pointer")
-      local v_fn = tse_decode_scalar_without_allocating(cfunc_val, "bare C function")
 
-      -- Keep every scalar result rooted across the allocating failure, as in
-      -- the original combined recovery phase.
-      tse_check_string_decode_oom()
-      test.assert(v_nil == nil, "C-only nil decode failed")
-      test.assert(v_false == false, "C-only false decode confused false with nil")
-      test.assert(v_true == true, "C-only true decode failed")
-      test.assert((v_min as integer) == tse_math.mininteger,
+      local raw_nil = tse_transfer.encode_message(nil)
+      defer tse_transfer.discard_message(raw_nil)
+      local raw_false = tse_transfer.encode_message(false)
+      defer tse_transfer.discard_message(raw_false)
+      local raw_true = tse_transfer.encode_message(true)
+      defer tse_transfer.discard_message(raw_true)
+      local raw_min = tse_transfer.encode_message(tse_math.mininteger)
+      defer tse_transfer.discard_message(raw_min)
+      local raw_neg_zero = tse_transfer.encode_message(-0.0)
+      defer tse_transfer.discard_message(raw_neg_zero)
+      local raw_state = tse_transfer.encode_message(
+        tse_transfer.TransferValue.is_lua_state(th_ptr))
+      defer tse_transfer.discard_message(raw_state)
+      local raw_ptr = tse_transfer.encode_message(cell as foreign *void)
+      defer tse_transfer.discard_message(raw_ptr)
+      local raw_fn = tse_transfer.encode_message(cfunc_val)
+      defer tse_transfer.discard_message(raw_fn)
+      -- Long strings are copied afresh on decode rather than reused by interning.
+      local raw_str = tse_transfer.encode_message(
+        tse_string.rep("protected\0string\0allocation", 64))
+      defer tse_transfer.discard_message(raw_str)
+
+      local top = ffi.lua_gettop(L)
+      defer ffi.lua_settop(L, top)
+      -- Settle pending finalizers, then reserve decode's entry frame and result
+      -- slot before denial, so every failure below surfaces inside its
+      -- protected body after entry.
+      tse_gc.collect()
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
+
+      local denied: owned size_t[] = foreign size_t.new_array(1)
+      denied[0] = 0 as foreign size_t
+      local prev_ud: foreign *void = nil
+      local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+      ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
+      defer ffi.lua_setallocf(L, prev_alloc, prev_ud)
+
+      local v_nil = tse_transfer.decode_message(raw_nil)
+      local v_false = tse_transfer.decode_message(raw_false)
+      local v_true = tse_transfer.decode_message(raw_true)
+      local v_min = tse_transfer.decode_message(raw_min)
+      local v_nz = tse_transfer.decode_message(raw_neg_zero)
+      local v_state = tse_transfer.decode_message(raw_state)
+      local v_ptr = tse_transfer.decode_message(raw_ptr)
+      local v_fn = tse_transfer.decode_message(raw_fn)
+      local scalar_top = ffi.lua_gettop(L)
+      local denied_after_scalars = denied[0]
+
+      -- The long binary string requires an allocation even with a reused scope.
+      -- OOM must still consume raw_str before its error propagates.
+      local str_failed = false
+      local str_error: value = nil
+      do
+        tse_transfer.decode_message(raw_str)
+      catch
+        str_failed = true
+        str_error = error
+      end
+
+      ffi.lua_setallocf(L, prev_alloc, prev_ud)
+
+      test.assert(raw_nil == nil and v_nil == nil,
+                  "C-only nil decode failed or left slot occupied")
+      test.assert(raw_false == nil and v_false == false,
+                  "C-only false decode failed or confused false with nil")
+      test.assert(raw_true == nil and v_true == true,
+                  "C-only true decode failed")
+      test.assert(raw_min == nil and (v_min as integer) == tse_math.mininteger,
                   "C-only integer decode failed")
       case tse_reflect.inspect(v_nz)
       when is_float(f) then
-        test.assert(f == 0.0 and 1.0 / f < 0.0)
+        test.assert(raw_neg_zero == nil and f == 0.0 and 1.0 / f < 0.0)
       else raise "C-only float decode lost -0.0 tag or sign"
       end
       case tse_reflect.inspect(v_state)
       when is_raw_pointer(p) then
-        test.assert(p == (th_ptr as foreign *void))
+        test.assert(raw_state == nil and p == (th_ptr as foreign *void))
       else raise "C-only state decode failed"
       end
       case tse_reflect.inspect(v_ptr)
       when is_raw_pointer(p) then
-        test.assert(p == (cell as foreign *void))
+        test.assert(raw_ptr == nil and p == (cell as foreign *void))
       else raise "C-only pointer decode failed"
       end
       local fn_restored: function (...: value): (...: value) = v_fn
-      test.assert(fn_restored(1, 2, 3) as integer == 103,
+      test.assert(raw_fn == nil and fn_restored(1, 2, 3) as integer == 103,
                   "C-only bare C function decode failed")
-      tse_check_resource_decode_oom()
+      test.assert(scalar_top == top,
+                  "C-only scalar decodes changed the caller's Lua stack top")
+      test.assert(denied_after_scalars == (0 as foreign size_t),
+                  "C-only scalar decodes attempted a Lua heap allocation")
+
+      test.assert(str_failed and raw_str == nil and str_error ~= nil and
+                  denied[0] > (0 as foreign size_t),
+                  "protected string decode under OOM did not consume slot or raise")
+      -- Before any GC or follow-up packet operation, OOM unwind must have
+      -- retired the execution's decode scope rather than leaving stale authority.
+      tse_expect_error(function ()
+        tse_transfer.claim_resource("\0\0\0\0", tse_resource_release)
+      end, "transfer: resource claim requires a decode scope")
+      tse_expect_error(function ()
+        tse_transfer.attach_resource(
+          cell as foreign *void, tse_resource_retain, tse_resource_release)
+      end, "transfer: resource attachment requires an encode scope")
+
+      -- A resource-bearing packet decoded under sustained Lua heap denial must
+      -- also consume its slot, release unclaimed units, and retire scope
+      -- authority before any GC runs, then allow a normal decode afterward.
+      local res_c1: owned int[] = foreign int.new_array(1)
+      local res_c2: owned int[] = foreign int.new_array(1)
+      res_c1[0] = 1
+      res_c2[0] = 1
+      local raw_res = tse_transfer.encode_message(
+        TransferScalarEnvelopeScopeBypassProbe(
+          res_c1 as foreign *void, res_c2 as foreign *void))
+      defer tse_transfer.discard_message(raw_res)
+      test.assert(res_c1[0] == 2 and res_c2[0] == 2,
+                  "resource-bearing packet did not retain both attachments")
+
+      local denied_before_res = denied[0]
+      tse_gc.collect()
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
+      local res_failed = false
+      local res_error: value = nil
+      ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
+      do
+        tse_transfer.decode_message(raw_res)
+      catch
+        res_failed = true
+        res_error = error
+      end
+      ffi.lua_setallocf(L, prev_alloc, prev_ud)
+
+      test.assert(res_failed and raw_res == nil and res_error ~= nil and
+                  denied[0] > denied_before_res,
+                  "resource-bearing decode under OOM did not consume slot or raise")
+      -- The >40-byte qualified nominal name allocates in copy_native_bytes
+      -- before the probe decoder can claim either attached resource.
+      test.assert(res_c1[0] == 1 and res_c2[0] == 1,
+                  "resource-bearing decode under OOM did not release unclaimed units before GC")
+      tse_expect_error(function ()
+        tse_transfer.claim_resource("\0\0\0\0", tse_resource_release)
+      end, "transfer: resource claim requires a decode scope")
+      tse_expect_error(function ()
+        tse_transfer.attach_resource(
+          cell as foreign *void, tse_resource_retain, tse_resource_release)
+      end, "transfer: resource attachment requires an encode scope")
+      tse_gc.collect()
+      test.assert(res_c1[0] == 1 and res_c2[0] == 1,
+                  "resource-bearing decode under OOM released unclaimed units twice")
+
+      local restored_after_oom: TransferScalarEnvelopeScopeBypassProbe =
+        tse_roundtrip_raw(TransferScalarEnvelopeScopeBypassProbe(
+          res_c1 as foreign *void, res_c2 as foreign *void))
+      test.assert(restored_after_oom.ptr1 == (res_c1 as foreign *void) and
+                  restored_after_oom.ptr2 == (res_c2 as foreign *void) and
+                  res_c1[0] == 2 and res_c2[0] == 2,
+                  "normal resource-bearing decode after OOM recovery failed")
+      tse_resource_release(restored_after_oom.ptr1)
+      tse_resource_release(restored_after_oom.ptr2)
+      test.assert(res_c1[0] == 1 and res_c2[0] == 1)
     end)
 
   context:run("malformed-null-cfunction-packet-uses-protected-semantic-error",

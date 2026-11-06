@@ -7,6 +7,7 @@ local toolchain = require "spec.support.browser_toolchain"
 local types = require "titan-compiler.types"
 local browserlink = require "titan-compiler.browserlink"
 local driver = require "titan-compiler.driver"
+local browser_fixtures = require "spec.support.browser_fixtures"
 
 local repository = assert(lfs.currentdir())
 local modules = { "bundle.first", "bundle.second" }
@@ -112,6 +113,131 @@ describe("browser incremental compilation", function()
         fixture, provider_images = nil, nil
         if owned_fixture then owned_fixture:close(images) end
     end)
+
+    for _, kind in ipairs({ "program", "test" }) do
+        it("rejects oversize " .. kind .. " bodies before publication and certifies the guard on warm reuse", function()
+            local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+            fixture = new_fixture()
+            local source = fixture.source .. "/limit_main.titan"
+            local contents = [[
+local test = import "test"
+function main(_: {string}): integer return 0 end
+function test_case(_: test.Context) test.assert(true) end
+]]
+            fixtures.write(source, contents)
+            local arguments = { "--target", "browser", "--incremental", "-v", "limit_main" }
+            if kind == "test" then arguments[#arguments + 1] = "--test" end
+            local built = fixture:compile(arguments)
+            assert.is_true(built.ok, built.output)
+            local mjs = fixture.output .. "/limit_main.mjs"
+            local outputs = { mjs, mjs:gsub("%.mjs$", ".wasm"), (mjs:gsub("%.mjs$", ".wasm.map")) }
+            local predecessor = {}
+            for _, path in ipairs(outputs) do predecessor[path] = fixtures.read(path) end
+            local record = record_path(fixture.output)
+            local candidate, map = browser_fixtures.oversized_body(
+                kind == "program" and "oversized_guard_case" or nil,
+                kind == "program" and "actual.browser.titan" or nil)
+            local candidate_path, map_path = fixture.root .. "/candidate.wasm", fixture.root .. "/candidate.map"
+            fixtures.write(candidate_path, candidate); fixtures.write(map_path, map)
+            fixtures.write(source, (contents:gsub("return 0", "return 7")))
+            local hook, observed = fixture.root .. "/limit-hook.lua", fixture.root .. "/before-commit"
+            fixtures.write(hook, string.format([[
+local driver = require "titan-compiler.driver"
+local io_module = require "titan-compiler.io"
+local new_sync, image = io_module.new_sync, driver.compile_browser_image
+function driver.compile_browser_image(contents, entrypoint, executable, objects, archives, extra, verbose, options)
+    if executable == %q then
+        local before = options.before_commit
+        options.before_commit = function(...)
+            local file = assert(io.open(%q, "wb")); assert(file:write("entered")); assert(file:close())
+            if before then return before(...) end
+            return true
+        end
+    end
+    return image(contents, entrypoint, executable, objects, archives, extra, verbose, options)
+end
+function io_module.new_sync(...)
+    local strategy = new_sync(...)
+    local run = strategy.run
+    function strategy:run(argv, options)
+        local result = run(self, argv, options)
+        if result.ok then
+            for index, flag in ipairs(argv) do
+                if flag == "-o" and argv[index + 1]:match("[.]mjs$") then
+                    local wasm = argv[index + 1]:gsub("[.]mjs$", ".wasm")
+                    assert(self:write_file(wasm, assert(self:read_file(%q))))
+                    assert(self:write_file(wasm .. ".map", assert(self:read_file(%q))))
+                end
+            end
+        end
+        return result
+    end
+    return strategy
+end
+]], mjs, observed, candidate_path, map_path))
+            local function hooked(setup, collect)
+                local child_coverage = collect ~= false and fixture.collector:init_code() or ""
+                local argv = { info.prefix .. "/bin/lua", "-E", "-e",
+                    string.format("package.path=%q..package.path;", fixture.frontend .. "/?.lua;" ..
+                        fixture.frontend .. "/?/init.lua;") .. child_coverage .. ";" .. setup,
+                    fixture.frontend .. "/titanc", "--tree", fixture.source, "--output", fixture.output }
+                for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+                local result = fixture:run(argv)
+                if collect ~= false then fixture.collector:collect() end
+                return result
+            end
+            local rejected = hooked(string.format("dofile(%q)", hook))
+            assert.is_false(rejected.ok, rejected.output)
+            assert.matches("body is 7654322 bytes, exceeds maximum of 7654321 bytes", rejected.output, 1, true)
+            if kind == "program" then
+                assert.matches('function "oversized_guard_case" (Wasm index 0)', rejected.output, 1, true)
+                assert.matches('first mapped source "actual.browser.titan":42:7', rejected.output, 1, true)
+            else
+                assert.matches("function at Wasm index 0", rejected.output, 1, true)
+                assert.matches("source unavailable (no mapped source within function body)", rejected.output, 1, true)
+            end
+            assert.is_nil(lfs.attributes(observed))
+            assert.is_nil(lfs.attributes(record))
+            for _, path in ipairs(outputs) do assert.equal(predecessor[path], fixtures.read(path)) end
+            for name in lfs.dir(fixture.output) do
+                assert.is_nil(name:find(".stage.tmp.", 1, true), name)
+                assert.is_nil(name:find(".old.tmp.", 1, true), name)
+            end
+            local ran = fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", mjs })
+            assert.is_true(ran.ok, ran.output)
+            local recovered = fixture:compile(arguments)
+            assert.is_true(recovered.ok, recovered.output)
+            assert.matches("Titan link miss", recovered.output, 1, true)
+            local warm = hooked(string.format([[
+local file = assert(io.open(%q, "rb"))
+local published = assert(file:read("*a")); assert(file:close())
+local browserlink = require "titan-compiler.browserlink"
+local inventory = browserlink.image_inventory
+function browserlink.image_inventory(bytes)
+    if bytes == published then error("warm final-link hit reparsed image") end
+    return inventory(bytes)
+end
+]], outputs[2]))
+            assert.is_true(warm.ok, warm.output)
+            assert.matches("Titan link hit", warm.output, 1, true)
+            local previous_record = fixtures.read(record)
+            local policy = fixture.frontend .. "/titan-compiler/browserlink.lua"
+            local policy_bytes = fixtures.read(policy)
+            local restore_policy <close> = setmetatable({}, { __close = function()
+                fixtures.write(policy, policy_bytes)
+            end })
+            -- Only changed-identity children cannot map to tracked-source coverage.
+            -- Restore the copy even on assertion failure, before collector teardown.
+            fixtures.write(policy, policy_bytes .. "\n-- changed image-limit compiler identity\n")
+            local changed = hooked("", false)
+            assert.is_true(changed.ok, changed.output)
+            assert.matches("Titan link miss", changed.output, 1, true)
+            assert.not_equal(previous_record, fixtures.read(record))
+            warm = hooked("", false)
+            assert.is_true(warm.ok, warm.output)
+            assert.matches("Titan link hit", warm.output, 1, true)
+        end)
+    end
 
     it("links emcc system libraries with an identity but without certifying reuse", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end

@@ -58,14 +58,12 @@ describe("browser stdlib real-toolchain closure", function()
             "make", "--no-print-directory", "titan-stdlib-browser-test",
             "PREFIX=" .. info.prefix, "TITAN_BROWSER_TEST_BUILD_DIR=" .. output,
             "TITAN_STDLIB_BROWSER_TEST_ROOTS=test.tests",
-            "TITAN_STDLIB_BROWSER_TEST_IMAGES=cold",
-            "TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_cold=test.tests",
             "TITAN_FILTER=",
         }
         for _, state in ipairs({ "cold", "warm" }) do
             local log = run(argv)
             for _, engine in ipairs({ "node", "chromium" }) do
-                assert.truthy(log:find("Browser stdlib engine: " .. engine .. " image: cold", 1, true), log)
+                assert.truthy(log:find("Browser stdlib engine: " .. engine .. " image: stdlib", 1, true), log)
             end
             local summaries = 0
             for _ in log:gmatch(
@@ -76,14 +74,21 @@ describe("browser stdlib real-toolchain closure", function()
             assert.equal("browser\n", assert(strategy:read_file(output .. "/objects/.titan-target")))
             assert.is_nil(strategy:lstat(output .. "/.titan-target"))
             assert.equal("test.tests\n", assert(strategy:read_file(output .. "/roots.txt")))
-            assert.equal("test.tests\n", assert(strategy:read_file(output .. "/cold.roots.txt")))
+            assert.is_nil(strategy:lstat(output .. "/stdlib.roots.txt"))
             for _, artifact in ipairs({
-                "images/cold.mjs", "images/cold.wasm", "images/cold.wasm.map", "members.md",
-                "cold.node.log", "cold.node.stderr.log", "cold.chromium.log", "cold.chromium.stderr.log",
+                "images/stdlib.mjs", "images/stdlib.wasm", "images/stdlib.wasm.map", "members.md",
+                "stdlib.node.log", "stdlib.node.stderr.log", "stdlib.chromium.log", "stdlib.chromium.stderr.log",
             }) do
                 assert.equal("file", assert(strategy:stat(output .. "/" .. artifact)).kind, artifact)
             end
         end
+        argv[#argv] = "TITAN_FILTER=^test[.]tests[.]"
+        local filtered = run(argv)
+        assert.truthy(filtered:find("owners=1/1 images=1 (filtered)", 1, true), filtered)
+        argv[#argv] = "TITAN_FILTER=^__no_case__$"
+        local empty = strategy:run(argv, { stderr_to_stdout = true })
+        assert.is_false(empty.ok, empty.output)
+        assert.truthy(empty.output:find("selected no cases", 1, true), empty.output)
     end)
 
     it("rejects a certified injected libuv header, an archive payload and an internal image symbol", function()

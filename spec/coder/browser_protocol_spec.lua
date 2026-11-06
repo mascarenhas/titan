@@ -101,6 +101,32 @@ function driver.publish_provider_bundle(dso, archive, destination, options)
     end
     return publish(dso, archive, destination, options)
 end
+local oversized = os.getenv("TITAN_PROTOCOL_OVERSIZED")
+if oversized and oversized ~= "" then
+    local link = driver.run_link_command
+    function driver.run_link_command(argv, verbose, output)
+        local linked, term, code = link(argv, verbose, output)
+        if linked and output and output:match("[.]mjs$") then
+            local wasm = output:gsub("[.]mjs$", ".wasm")
+            assert(util.set_file_contents(wasm, assert(util.get_file_contents(oversized, "rb"))))
+            assert(util.set_file_contents(wasm .. ".map", assert(util.get_file_contents(oversized .. ".map", "rb"))))
+        end
+        return linked, term, code
+    end
+    local io_module = require "titan-compiler.io"
+    local new_sync = io_module.new_sync
+    function io_module.new_sync(...)
+        local strategy = new_sync(...)
+        local run = strategy.run
+        function strategy:run(argv, options)
+            if argv[1]:match("titan%-browser%-run$") and argv[2] == "--engine" then
+                error("oversize protocol image reached the runner")
+            end
+            return run(self, argv, options)
+        end
+        return strategy
+    end
+end
 ]]
 
 local function prepare(info)
@@ -130,6 +156,7 @@ local function cli(info, mode, ...)
         "TITAN_PROTOCOL_PUBLICATION_FAULT=" .. (info.publication_fault or ""),
         "TITAN_PROTOCOL_CORRUPTION=" .. (mode or ""), "TITAN_PROTOCOL_LOG=" .. workspace .. "/executions",
         "TITAN_PROTOCOL_IMAGES=" .. workspace .. "/probe-images",
+        "TITAN_PROTOCOL_OVERSIZED=" .. (info.oversized or ""),
         info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc", "-q", "--target", "browser",
         "--tree", workspace .. "/src", "--output", workspace .. "/out" }
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
@@ -236,6 +263,31 @@ describe("browser executing provider protocol", function()
         assert.is_false(result.ok, result.output)
         assert.truthy(result.output:find("browser runner exit 24", 1, true), result.output)
         assert.equal(predecessor, files.read(filename))
+        no_staged_images(workspace .. "/out")
+    end)
+
+    it("rejects a source-attributed oversize protocol body before execution or provider publication", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        prepare(info)
+        local first = cli(info, nil, "--incremental", "pkg.left")
+        assert.is_true(first.ok, first.output)
+        local archive = workspace .. "/out/pkg/left.a"
+        local predecessor = files.read(archive)
+        files.write(workspace .. "/src/pkg/left.titan", "function answer(): integer return 43 end\n")
+        local candidate, map = fixtures.oversized_body("native_guard_case", "native_input.c")
+        local filename = workspace .. "/candidate.wasm"
+        files.write(filename, candidate); files.write(filename .. ".map", map)
+        local rejected = cli({ prefix = info.prefix, node = info.node, oversized = filename },
+            nil, "--incremental", "pkg.left")
+        assert.is_false(rejected.ok, rejected.output)
+        assert.matches("selected static provider failed executable-context protocol linking", rejected.output, 1, true)
+        assert.matches('function "native_guard_case" (Wasm index 0)', rejected.output, 1, true)
+        assert.matches('first mapped source "native_input.c":42:7', rejected.output, 1, true)
+        assert.is_nil(rejected.output:find("oversize protocol image reached the runner", 1, true))
+        assert.equal(predecessor, files.read(archive))
+        no_staged_images(workspace .. "/out")
+        local recovered = cli(info, nil, "--incremental", "pkg.left")
+        assert.is_true(recovered.ok, recovered.output)
         no_staged_images(workspace .. "/out")
     end)
 

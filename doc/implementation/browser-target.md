@@ -625,86 +625,51 @@ string.core_test string.format_pack_test string.regex_test url.tests path.tests
 test.tests reflect.tests json.tests protobuf.tests transfer.tests
 ```
 
-The same manifest partitions those owners into test images, because one image
-holding all fifteen is too large for headless Chromium on mac-arm64:
-
-| Image (`TITAN_STDLIB_BROWSER_TEST_IMAGES`) | Owners (`TITAN_STDLIB_BROWSER_TEST_IMAGE_ROOTS_<image>`) |
-| --- | --- |
-| `core` | every browser root except the three images below |
-| `reflection` | `reflect.tests`, `json.tests` |
-| `protobuf` | `protobuf.tests` |
-| `transfer` | `transfer.tests` |
-
-`TITAN_STDLIB_BROWSER_TEST_IMAGE_MAX_BYTES` (32,000,000) caps each image's
-`.wasm`. Before the recipe runs, `TITAN_STDLIB_BROWSER_TEST_PLAN_CHECK` stops
-Make if the image list is empty or repeats an image, if an image has no owners,
-or if a browser root is repeated, assigned twice, assigned to no image, or
-assigned without being a browser root. The budget must be a positive decimal
-integer of at most eight digits. Moving an owner between images is a manifest
-edit only.
-
-The budget is about half the smallest image measured to fail. With Emscripten
-6.0.13 and the pinned Chrome for Testing 156.0.8078.80, the single
-63,787,003-byte fifteen-owner validation image trapped the mac-arm64 headless
-Chromium renderer (`EXC_BREAKPOINT`/`SIGTRAP`) before any test ran, even with
-a filter that matched no case and with `--js-flags=--liftoff-only`, while Node
-and Linux Chromium ran it. A 55,932,427-byte image of the other fourteen owners
-and a 28,241,082-byte `transfer.tests` image passed there. The four images
-are the fewest found among the partitions tried: every owner pairing sampled
-for a three-image partition exceeded the budget (`reflect.tests` with
-`protobuf.tests` at 32,984,970 bytes, `protobuf.tests` with `coroutine.tests`
-at 34,633,460, and `transfer.tests` with `reflect.tests` at 32,556,174), and
-the four measure between about 23.1 MB and 28.8 MB on Linux and macOS. The
-engine-internal cause is not established. These measurements used the earlier
-Asyncify backend; they do not establish a V8 image-size ceiling for JSPI.
+All fifteen owners are compiled into `images/stdlib.mjs`, with its `.wasm`
+and `.wasm.map` siblings. `TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK` rejects an
+empty or duplicate root inventory before build setup. The compiler's
+[general image bounds](#build-time-image-bounds) apply; the suite has no
+separate image-size budget or partition policy. The complete fifteen-owner
+image, including the unsplit transfer regression, runs under Node and
+sandboxed Chromium on Linux and macOS ([measurements](#build-time-image-bounds));
+the earlier four-image, 32,000,000-byte split was measured under Asyncify and
+is not a JSPI limit.
 
 `make titan-stdlib-browser-test` (a test goal, so it defaults to the
 `validation` profile) needs the installed native provider, the browser SDK,
 emsdk, Node 26+, and a JSPI-capable headless Chromium. It:
 
-1. writes `roots.txt` (every browser root) and `<image>.roots.txt` (each
-   image's owners) in `$(TITAN_OUTPUT_DIR)/browser-stdlib`, then builds each
-   image in manifest order as `images/<image>.mjs` there, with its `.wasm` and
-   `.wasm.map`. Each image is one installed `titanc -q --target browser --test
-   --incremental --tree spec/stdlib/titan` invocation over that image's roots,
-   with `--output` naming that directory's `objects/` subdirectory, so every
-   image shares one compiler output tree. The invocation adds `--c-source
-   spec/fixtures/browser_runtime/close.c` (the browser helper of
-   `coroutine.tests`) and runs under `BROWSER_SDK_ENV` with `TITAN_PATH_0_6`
-   set to the installed browser SDK directory. The target prints each image's
-   build time, then runs `check_browser_stdlib.lua size` (the image against
-   the budget; an oversized image fails with a request to repartition its
-   owners) and `check_browser_stdlib.lua closure` (the `objects/` tree, the
-   installed browser `titan.a`, and that image's `.wasm`);
+1. writes `roots.txt` in `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default
+   `out/browser-stdlib`), then builds `images/stdlib.mjs` with one installed
+   `titanc -q --target browser --test --incremental --tree spec/stdlib/titan`
+   invocation over every root. The compiler output is the directory's
+   `objects/` subdirectory, which titanc creates and marks. The invocation
+   adds `--c-source spec/fixtures/browser_runtime/close.c` (the browser helper
+   of `coroutine.tests`) and runs under `BROWSER_SDK_ENV` with `TITAN_PATH_0_6`
+   set to the installed browser SDK. The target prints the build duration,
+   then runs `check_browser_stdlib.lua closure` against the objects, installed
+   browser `titan.a` and final `.wasm`;
 2. runs `check_browser_stdlib.lua inventory` once against the installed native
    and browser providers and writes `members.md`;
-3. for `node` and then `chromium`, runs every image with
-   the SDK's `titan-browser-run --engine <engine> --timeout 300000 --grace
-   2000` through `scripts/run_browser_stdlib.sh`, forwarding a nonempty
-   `TITAN_FILTER` to each image as one `--filter=` argument. The wrapper saves
-   the runner's stdout in `<image>.<engine>.log` and its stderr in
-   `<image>.<engine>.stderr.log`, then replays both to the caller and returns
-   the runner's status. A failing image is reported and the remaining images
-   still run; and
-4. after each engine, audits only the stdout reports with
-   `check_browser_stdlib.lua output roots.txt <filter> <image> <log> <owners>...`,
-   which applies the native aggregate's union validator
-   (`spec/support/check_stdlib_test_output.lua`): each image's report is
-   checked against that image's owners, no case may appear in two images, and
-   an unfiltered run must report a nonzero case count for every browser root
-   across the union. A filtered run may leave an
-   image or owner with no selected case, but the union must select at least
-   one. It always prints one `Browser stdlib owner <root>: <n> cases` line per
-   root, appending `(N.NN ms total)` for owners whose interval was reported.
-   Each complete image report also produces
-   `Browser stdlib image <image>: <n> cases (N.NN ms total)` from that image's
-   independent run clock. These are not summed into a fictitious elapsed time
-   for the engine's whole image set. The
-   `Browser stdlib gate: selected=… passed=… skipped=… failed=… owners=…/…
-   images=…` summary is marked `(filtered)` when a filter applies. Counts and
-   available image/owner times remain visible even for a failed run; untimed
-   final failure-name references do not count as second outcomes. The target
-   fails if any image failed under either engine or if either audit failed.
+3. for `node` and then `chromium`, runs the image with the SDK's
+   `titan-browser-run --engine <engine> --timeout 300000 --grace 2000` through
+   `scripts/run_browser_stdlib.sh`, forwarding a nonempty `TITAN_FILTER` as
+   one `--filter=` argument. The wrapper saves stdout in `stdlib.<engine>.log`
+   and stderr in `stdlib.<engine>.stderr.log`, replays both, and preserves the
+   runner's status. Failure under one engine does not hide the other; and
+4. after each engine, audits only stdout with
+   `check_browser_stdlib.lua output roots.txt <filter> <stdout-log>`.
+   The shared native validator requires nonzero selection, no duplicate or
+   foreign cases, complete status/count/timing accounting, classified skips,
+   and, without a filter, execution of every root. A filter may omit owners
+   but must still select at least one case. The checker prints
+   `Browser stdlib image stdlib: <n> cases (N.NN ms total)` from the run clock
+   and `Browser stdlib owner <root>: <n> cases (N.NN ms total)` for each
+   reported owner interval. The gate summary retains selected/pass/skip/fail
+   counts, owner coverage and `images=1`, with `(filtered)` when applicable.
+   Counts and available timing remain visible on failure; untimed final
+   failure-name references are not second outcomes. The target fails if either
+   engine or its audit fails.
 
 The streams stay separate because a case may write to stderr while the runner
 is in the middle of a report line, and a merged log then splits that line; the
@@ -712,13 +677,14 @@ expected Lua warnings (`Lua warning: error in coroutine cleanup ...`) are such
 writes, and the validator rejects a split report. Warnings
 stay visible in the `.stderr.log` files and on the console; nothing is
 filtered out. `out/browser-stdlib/` therefore holds `objects/` (titanc's output
-tree), `images/` (each image's `.mjs`, `.wasm`, and `.wasm.map`), `roots.txt`,
-the `<image>.roots.txt` files, `members.md`, and the per-image, per-engine
-stdout and stderr logs. The target never writes into `objects/`: titanc creates
-it and its `.titan-target` marker on a cold run, because a browser output root
-without a marker must be empty when titanc first claims it ([output
-roots](#output-roots-and-the-target-marker)), and the suite directory already
-holds `images/` and the roots files by then.
+tree), `images/` (`stdlib.mjs`, `stdlib.wasm`, and `stdlib.wasm.map`),
+`roots.txt`, `members.md`, and the per-engine `stdlib.node.log`,
+`stdlib.node.stderr.log`, `stdlib.chromium.log`, and
+`stdlib.chromium.stderr.log`. The target never writes into `objects/`: titanc
+creates it and its `.titan-target` marker on a cold run, because a browser
+output root without a marker must be empty when titanc first claims it
+([output roots](#output-roots-and-the-target-marker)), and the suite
+directory already holds `images/` and `roots.txt` by then.
 `spec/coder/browser_stdlib_closure_spec.lua` runs the target with one owner
 from a cold and then a warm directory and checks this layout. The
 [`browser-stdlib` job](continuous-integration.md#browser-stdlib-job)
@@ -1984,11 +1950,12 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
 5. require the staged `.mjs`, `.wasm`, and `.wasm.map` to be regular files
    (`staged browser image '<path>' is not a regular file`), read the staged
    Wasm, run `browserlink.image_inventory` (which shares
-   `staticmetadata.browser_trace_image` to inspect the final image's import and
-   export sections and rejects any import named `dlopen`, `dlsym`, `dlerror`,
-   or `backtrace`, with or without a leading underscore: `browser image imports
-   forbidden symbol "<name>"`), and rewrite the staged `.wasm.map` in place
-   with `browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)` so
+   `staticmetadata.browser_trace_image` and enforces the
+   [byte bounds](#build-time-image-bounds), also rejecting imports named
+   `dlopen`, `dlsym`, `dlerror` or `backtrace`, with or without a leading
+   underscore: `browser image imports forbidden symbol "<name>"`), and rewrite
+   the staged `.wasm.map` in place with
+   `browsertrace.rewrite(image_bytes, map_bytes, identity, staged_map)` so
    that `x_titan_image`, `x_titan_function_imports`,
    `x_titan_function_ranges`, and `x_titan_function_names` are bound to the
    final linked `.wasm`;
@@ -2017,6 +1984,68 @@ never read `.titan.meta`,
 `.titan.meta` payloads as named data segments and drops `.titan.cprobe`
 ([Baseline](#baseline)). Every image imports Lua's `env.exit`, which neither
 the entrypoint nor completion uses.
+
+### Build-time image bounds
+
+`browserlink` enforces a maximum of **1,073,741,824 bytes per final `.wasm`**
+and **7,654,321 bytes per defined function body**; equality is accepted.
+These match the [WebAssembly JavaScript Interface
+limits](https://webassembly.github.io/spec/js-api/index.html#limits), also
+recorded in [JavaScriptCore's
+limits](https://github.com/WebKit/WebKit/blob/main/Source/JavaScriptCore/wasm/WasmLimits.h).
+They are static rejection bounds, not a guarantee of successful allocation or
+instantiation. Other engine limits and resource exhaustion still apply.
+
+`check_image_size` compares the scalar string length before parsing.
+`image_inventory` then uses `staticmetadata.browser_trace_image`'s existing
+half-open body ranges, including the local-declaration vector and excluding
+the preceding length LEB. It checks bodies in Wasm-index order and diagnoses
+the first overlarge body. The index is the function-import count plus the
+one-based defined index minus one; only function imports affect it. A sparse
+name section supplies the name when available, otherwise the diagnostic names
+the Wasm index. No body slices or instruction decoding are needed.
+
+On body rejection only, the driver reads the staged source map and calls
+`browsertrace.function_source` with that existing range. The same JSON,
+source-map validation and VLQ walk used by publication finds the first mapped
+instruction inside the body; it never borrows the previous function's
+location. Same-offset unmapped replacements and the exclusive end boundary
+are respected. Diagnostics include the literal `sources` entry, one-based line
+and column, and a separate literal `sourceRoot` when present. They do not
+infer a path from a symbol or invent a mapping for native or unnamed code.
+Absent, empty, invalid or wholly unmapped source metadata produces an explicit
+`source unavailable` reason while preserving the size diagnostic.
+
+All program, generated-test and provider-protocol images share this check
+before map rewriting, `before_commit`, protocol execution or three-file
+publication. Guard rejection leaves predecessor bytes untouched; the failed
+link certificate remains invalidated and the staged candidate is retired.
+The existing compiler inventory hashes both guard and source-map Lua owners,
+and its digest participates in the final-link recipe, so changing either owner
+invalidates older certificates without a version or schema bump.
+Unchanged final-link hits return before linking or parsing an image again.
+
+The original 168-line transfer recovery lambda is retained unsplit in the
+portable regression. Validation-profile qualification with Emscripten 6.0.13,
+Node 26.13.0 and sandboxed CfT 156.0.8078.80 produced these complete
+fifteen-owner images and separate fresh-process, zero-case startup samples:
+
+| Host | Wasm bytes | Original lambda body bytes | Node startup maxRSS KiB | Chromium sampled renderer RSS KiB | Chromium virtual-memory sample KiB |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Linux x64 | 30,463,536 | 667,879 | 224,596 | 297,000 | VmData 1,056,252 |
+| macOS arm64 | 30,275,426 | 667,706 | 243,664 | 290,912 | VSZ 2,002,559,040 |
+
+The lambda has 4,869 declared locals plus four parameters on both hosts.
+The complete image selected 759 cases per engine, passing 757 with two
+existing locale-capability skips; the recovered regression selected and
+passed seven. The zero-case runs measure initialization only, not functional
+success. Node maxRSS is a process high-water mark, while Chromium RSS and
+VmData/VSZ are renderer samples at a requested 10-ms interval; VmData and VSZ
+are different virtual-memory measures, not resident RAM. Linear memory grew
+from 16,777,216 to 20,185,088 bytes during combined-image initialization.
+Default tiering and sandboxing were unchanged, with no memory feature or
+forced optimizing-only compiler. These are individual measurements, not
+maximum startup-memory guarantees.
 
 ## The browser entrypoint
 
@@ -3145,12 +3174,20 @@ hosts`).
 * `spec/coder/browser_incremental_spec.lua` — browser object and three-file
   link certificates, shared-asset and `.wasm.map`-change invalidation,
   three-predecessor rollback across backup/publication/certificate boundaries,
-  and certified `-L`/`-l` archive reuse versus uncertified `emcc`-only system
-  libraries.
+  certified `-L`/`-l` archive reuse versus uncertified `emcc`-only system
+  libraries, and, for a program and a test image, an oversize body rejected
+  before `before_commit` and publication with predecessors intact and no
+  certificate, recovery, a warm final-link hit that does not inventory the
+  published image again, and a miss after the copied guard owner changes.
 * `spec/browser_trace_map_spec.lua` — final-image Wasm section/range/name
   extraction, standard v3 `.wasm.map` validation, `x_titan_*` extension
   rewriting, `browsertrace.identity` recipe, `browser_trace_libraries`
-  resolution, and malformed/truncated Wasm and map rejection.
+  resolution, malformed/truncated Wasm and map rejection, the
+  [byte bounds](#build-time-image-bounds) (image equality, bodies at and below
+  the bound with a padded length, imports-first indexing, quoted and unnamed
+  labels), and rejected-body source attribution (first mapping inside the body,
+  same-offset unmapped replacement, the half-open end, unavailable metadata,
+  whole-map validation).
 * `spec/coder/browser_trace_entries_spec.lua` — browser-only
   `registry[TITAN_ENTRIES_KEY]` registration across all `titanentry` wrapper
   families, split-unit deduplication, early `_init` ordering before
@@ -3162,8 +3199,9 @@ hosts`).
   browser generation changes.
 * `spec/coder/browser_protocol_spec.lua` — the executing check, corrupted
   providers (exits 21 to 26) without publication, re-execution before
-  identical-archive reuse, probe cleanup, and archive-only consumers on both
-  engines.
+  identical-archive reuse, probe cleanup, archive-only consumers on both
+  engines, and an oversize protocol body rejected with its mapped source
+  before execution or provider publication.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
   `TITAN_EXTRA_CPPFLAGS`, the thirteen-module provider whose non-compiler
@@ -3174,13 +3212,12 @@ hosts`).
   check](#the-dependency-closure-check) and its negative fixtures, the
   interface-derived [member inventory](#interface-derived-member-inventory)
   (raw foreign functions, nominal members, named-call metadata, unrecorded
-  differences), the image manifest (an exact owner partition and budget, and
-  rejection of incomplete, duplicate, empty, or unknown assignments and of
-  malformed budgets before any build), the byte budget at its exact boundary,
-  the CI failure artifact's image and per-engine log paths, the per-owner
-  audit of a failed run, the stdout-only audit of a run whose stderr arrives in
-  the middle of a report line, and the union audit, which fails when any image
-  fails.
+  differences), the fifteen-owner root inventory and its rejection of empty or
+  duplicate inventories before build setup, the cold and warm single-image
+  layout and filtered runs, the CI failure artifact's image and per-engine log
+  paths, the per-owner audit of a failed run, the stdout-only audit of a run
+  whose stderr arrives in the middle of a report line, and the strict
+  single-image audit of timing, owner, failure, skip, and filter accounting.
 * `spec/coder/browser_stdlib_gate_spec.lua` — the [initialization and
   fidelity gate](#initialization-and-fidelity-gate).
 * `spec/coder/browser_entry_gate_spec.lua` — the [entry gate](#the-entry-gate-decision).
