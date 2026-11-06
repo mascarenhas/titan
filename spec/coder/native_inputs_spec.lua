@@ -163,6 +163,28 @@ describe("certified app-owned C sources", function()
         assert.same({ "native-preprocess" }, phases)
     end)
 
+    it("classifies and fingerprints each preprocessed input with one read and hash", function()
+        local ctx = context()
+        local request = { sources = { source }, output_root = root,
+            compile_argv = assert(driver.authored_c_compile_prefix()),
+            toolchain = "authored-c-helper", incremental = true }
+        local function observations(expected)
+            local found = 0
+            for filename, count in pairs(incremental.counters(ctx).files) do
+                if filename:match("%.i$") then
+                    found = found + 1
+                    assert.equal(expected, count.reads, filename)
+                    assert.equal(expected, count.hashes, filename)
+                end
+            end
+            assert.equal(1, found)
+        end
+        assert.is_false(assert(native.compile(ctx, request))[1].hit)
+        observations(1)
+        assert.is_true(assert(native.compile(ctx, request))[1].hit)
+        observations(2)
+    end)
+
     it("retires invocation scratch after publication, hits and native failures", function()
         local function clean()
             for name in lfs.dir(root .. "/.native") do

@@ -664,6 +664,8 @@ describe("browser object and link certificate identity", function()
         files.write(ranlib, "archive index tool")
         local ctx = tool_context()
         ctx.target_descriptor = descriptor(root)
+        ctx.relocation_roots = { sdk = root }
+        local original_descriptor = browser_target.export(ctx.target_descriptor)
         local tools = assert(certificate.output_tools(ctx, { tools = {
             ar = { ar }, ranlib = { ranlib } } }))
         assert.is_table(tools.ar); assert.is_table(tools.ranlib); assert.is_nil(tools.linker)
@@ -674,7 +676,11 @@ describe("browser object and link certificate identity", function()
         local spec = { output_root = root, outputs = { root .. "/provider.a" },
             kind = "library", policy = { target = "native-profile" }, native_libraries = { backend = "archive" } }
         local browser = certificate.prepare(ctx, spec)
-        assert.equal(ctx.target_descriptor.identity, browser.recipe.policy.target)
+        local rooted = fixtures.descriptor("<titan:sdk>")
+        rooted.identity = nil
+        assert.equal(incremental.digest(ctx, "relocatable-browser-target", rooted),
+            browser.recipe.policy.target)
+        assert.same(original_descriptor, browser_target.export(ctx.target_descriptor))
         assert.equal("native-profile", spec.policy.target)
         assert.is_true(browser.cacheable)
         assert(certificate.commit(ctx, browser))

@@ -51,16 +51,38 @@ elseif action == "output" then
         }
     end
     local result, err = validate_union(groups, roots, second ~= "")
+    local image_summaries, owner_times = {}, {}
+    local summary = { count = 0, passed = 0, skipped = 0, failed = 0 }
+    local complete = true
+    local function duration_text(hundredths)
+        return string.format("%d.%02d", hundredths // 100, hundredths % 100)
+    end
+    for index, group in ipairs(groups) do
+        local image_summary = final_counts(group.contents)
+        image_summaries[index] = image_summary
+        if image_summary then
+            for _, key in ipairs({ "count", "passed", "skipped", "failed" }) do
+                summary[key] = summary[key] + image_summary[key]
+            end
+            for owner, elapsed in pairs(image_summary.owner_times) do
+                owner_times[owner] = elapsed
+            end
+        else
+            complete = false
+        end
+    end
     local cases = result and result.cases or {}
     if not result then
-        -- Failed reports still have named terminal results. Deduplicate the
-        -- repeated failure list before printing the per-owner diagnostic.
+        -- Count only timed terminal outcomes, never the untimed final failure
+        -- list or malformed/missing timing suffixes.
         for _, group in ipairs(groups) do
-            for raw_line in (group.contents .. "\n"):gmatch("([^\n]*)\n") do
-                local line = raw_line:gsub("\r$", "")
-                local name = line:match("^%[       OK %] (.+)$") or line:match("^%[  FAILED  %] (.+)$")
-                local skipped = line:match("^%[  SKIPPED %] (.+)$")
-                if skipped then name = skipped:match("^(.-) %(") end
+            for raw_line, ending in (group.contents .. "\n"):gmatch("([^\n]*)\n()") do
+                local line = ending <= #group.contents + 1 and raw_line:gsub("\r$", "") or raw_line
+                local outcome = line:match("^(.-) %(%d+%.%d%d ms%)$")
+                local name = outcome and (outcome:match("^%[       OK %] (.+)$") or
+                    outcome:match("^%[  FAILED  %] (.+)$"))
+                local skipped = outcome and outcome:match("^%[  SKIPPED %] (.+)$")
+                if skipped then name = skipped:match("^(.-) %((.*)%)$") end
                 if name then cases[name] = true end
             end
         end
@@ -71,17 +93,22 @@ elseif action == "output" then
             if name:sub(1, #root + 1) == root .. "." then counts[root] = counts[root] + 1; break end
         end
     end
+    for index, group in ipairs(groups) do
+        local image_summary = image_summaries[index]
+        if image_summary then
+            print(string.format("Browser stdlib image %s: %d cases (%s ms total)",
+                group.id, image_summary.count, duration_text(image_summary.elapsed)))
+        else
+            print(string.format("Browser stdlib image %s: incomplete; timing unavailable.", group.id))
+        end
+    end
     for _, root in ipairs(roots) do
-        print(string.format("Browser stdlib owner %s: %d cases", root, counts[root]))
+        local elapsed = owner_times[root]
+        print(string.format("Browser stdlib owner %s: %d cases%s", root, counts[root],
+            elapsed and " (" .. duration_text(elapsed) .. " ms total)" or ""))
         if counts[root] > 0 then owners = owners + 1 end
     end
-    local summary = { count = 0, passed = 0, skipped = 0, failed = 0 }
-    for _, group in ipairs(groups) do
-        local image_summary = final_counts(group.contents)
-        if not image_summary then summary = nil; break end
-        for key, value in pairs(image_summary) do summary[key] = summary[key] + value end
-    end
-    if summary then
+    if complete then
         print(string.format("Browser stdlib gate: selected=%d passed=%d skipped=%d failed=%d owners=%d/%d images=%d%s.",
             summary.count, summary.passed, summary.skipped, summary.failed, owners, #roots, #groups,
             second ~= "" and " (filtered)" or ""))

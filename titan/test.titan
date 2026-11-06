@@ -339,6 +339,11 @@ return
   return scanner_value as TraceScanner, matcher_value as PatternMatcher
 end
 
+local record OwnerTiming
+  name: string
+  elapsed: integer
+end
+
 local record State
   local filters: {string}
   local verbose: boolean
@@ -347,6 +352,8 @@ local record State
   local skipped: integer
   local failed: integer
   local failed_names: {string}
+  local owners: {OwnerTiming}
+  local owner_by_name: {string: OwnerTiming}
 end
 
 local function copy_interval(subject: string, first: integer,
@@ -395,6 +402,31 @@ local function count_text(count: integer): string
   return runner_error_text(count)
 end
 
+local function monotonic_now(): integer
+  local now: integer = ffi.titan_test_monotonic_ns()
+  if now < 0 then raise "cannot read monotonic test clock" end
+  return now
+end
+
+local function duration_text(nanoseconds: integer): string
+  local hundredths = (nanoseconds + 5000) // 10000
+  local fraction = hundredths % 100
+  local decimal = count_text(fraction)
+  if fraction < 10 then decimal = "0" .. decimal end
+  return count_text(hundredths // 100) .. "." .. decimal
+end
+
+local function State:add_owner_time(name: string, elapsed: integer)
+  local owner? = self.owner_by_name[name]
+  if owner then
+    owner.elapsed = owner.elapsed + elapsed
+  else
+    local timing = OwnerTiming(name, elapsed)
+    self.owners[#self.owners + 1] = timing
+    self.owner_by_name[name] = timing
+  end
+end
+
 local function selected(state: State, full_name: string): boolean
   if #state.filters == 0 then return true end
   for index = 1, #state.filters do
@@ -419,25 +451,27 @@ local function print_trace(trace: string)
 end
 
 local function report_skipped(state: State, full_name: string,
-                              reason: string)
-  state.run = state.run + 1
+                              reason: string, elapsed: integer)
   state.skipped = state.skipped + 1
   if #reason > 0 then
-    writeln("[  SKIPPED ] " .. full_name .. " (" .. reason .. ")")
+    writeln("[  SKIPPED ] " .. full_name .. " (" .. reason .. ") (" ..
+            duration_text(elapsed) .. " ms)")
   else
-    writeln("[  SKIPPED ] " .. full_name)
+    writeln("[  SKIPPED ] " .. full_name .. " (" ..
+            duration_text(elapsed) .. " ms)")
   end
 end
 
 local function report_failure(state: State, full_name: string,
                               owner_module: string, message: string,
-                              trace: string)
+                              trace: string, elapsed: integer)
   local file, function_name, line =
     runner_trace_location(trace, owner_module)
   writeln(file .. ":" .. count_text(line) .. ": in " .. function_name ..
           ": " .. message)
   if state.verbose then print_trace(trace) end
-  writeln("[  FAILED  ] " .. full_name)
+  writeln("[  FAILED  ] " .. full_name .. " (" ..
+          duration_text(elapsed) .. " ms)")
   state.failed = state.failed + 1
   state.failed_names[#state.failed_names + 1] = full_name
 end
@@ -448,14 +482,15 @@ local function skip_registered(state: State,
   for index = 1, #subtests do
     local child = subtests[index]
     if selected(state, child.name) then
-      report_skipped(state, child.name, reason)
+      state.run = state.run + 1
+      report_skipped(state, child.name, reason, 0)
     end
   end
 end
 
 local function execute(state: State, full_name: string,
-                       owner_module: string, body: TestFunction)
-  if not selected(state, full_name) then return end
+                       owner_module: string, body: TestFunction): integer?
+  if not selected(state, full_name) then return nil end
   state.run = state.run + 1
   writeln("[ RUN      ] " .. full_name)
 
@@ -463,6 +498,7 @@ local function execute(state: State, full_name: string,
   local status = 0
   local message = ""
   local failure_trace = ""
+  local started = monotonic_now()
   do
     body(context)
   catch
@@ -517,19 +553,18 @@ local function execute(state: State, full_name: string,
     end
   end
 
+  local elapsed = monotonic_now() - started
   if status == 0 then
     state.passed = state.passed + 1
-    writeln("[       OK ] " .. full_name)
+    writeln("[       OK ] " .. full_name .. " (" ..
+            duration_text(elapsed) .. " ms)")
   elseif status == 1 then
-    state.skipped = state.skipped + 1
-    if #message > 0 then
-      writeln("[  SKIPPED ] " .. full_name .. " (" .. message .. ")")
-    else
-      writeln("[  SKIPPED ] " .. full_name)
-    end
+    report_skipped(state, full_name, message, elapsed)
   else
-    report_failure(state, full_name, owner_module, message, failure_trace)
+    report_failure(state, full_name, owner_module, message, failure_trace,
+                   elapsed)
   end
+  return elapsed
 end
 
 local function usage()
@@ -584,23 +619,34 @@ end
 -- @return Zero on success, one on test failure, or two for invalid options.
 -- @usage standard-library-test.md
 function run(args: {string}, cases: {Case}): integer
-  local filters: {string} = {}
-  local failed_names: {string} = {}
-  local state = State.new(filters, false, 0, 0, 0, 0, failed_names)
+  local state = State.new {
+    filters = {}, verbose = false, run = 0, passed = 0, skipped = 0,
+    failed = 0, failed_names = {}, owners = {}, owner_by_name = {}
+  }
   local proceed, status = parse_options(args, state)
   if not proceed then return status end
 
   runner_begin(state.verbose, report_log)
   defer runner_end()
+  local started = monotonic_now()
   writeln("[==========] Running Titan tests.")
   for index = 1, #cases do
     local test_case = cases[index]
-    execute(state, test_case.full_name, test_case.owner_module,
-            test_case.body)
+    local elapsed? = execute(state, test_case.full_name, test_case.owner_module,
+                             test_case.body)
+    if elapsed then state:add_owner_time(test_case.owner_module, elapsed) end
+  end
+  local elapsed = monotonic_now() - started
+
+  for index = 1, #state.owners do
+    local owner = state.owners[index]
+    writeln("[----------] " .. owner.name .. " (" ..
+            duration_text(owner.elapsed) .. " ms total)")
   end
 
   writeln("[==========] " .. count_text(state.run) .. " " ..
-          test_word(state.run) .. " ran.")
+          test_word(state.run) .. " ran. (" .. duration_text(elapsed) ..
+          " ms total)")
   writeln("[  PASSED  ] " .. count_text(state.passed) .. " " ..
           test_word(state.passed) .. ".")
   if state.skipped > 0 then

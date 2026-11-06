@@ -2085,7 +2085,8 @@ struct titan_probe_target_s { int value; };
     function()
         local cache = temporary_directory()
         local strategy = compiler_io.new_sync()
-        local owner = { io = strategy }
+        local roots = { output = fixture_path("/project") }
+        local owner = { io = strategy, relocation_roots = roots }
         local dependency = assert(ffiheaders.prepare(owner, "lib.dep", {},
             fixture_path("/project/lib/dep.titan")))
         local header = assert(ffiheaders.prepare(owner, "app.consumer", {
@@ -2101,7 +2102,7 @@ struct titan_probe_target_s { int value; };
         local service
         service = assert(cprobe.new_service({
             include_dirs = {},
-            io = strategy, cache_directory = cache,
+            io = strategy, cache_directory = cache, relocation_roots = roots,
             runner = function(_, metadata)
                 calls = calls + 1
                 local staged = assert(service.generated_workspaces[header.digest]).header
@@ -2119,21 +2120,25 @@ struct titan_probe_target_s { int value; };
         local result = context:validate_baseline()
         assert.equal("rejected", result.status)
         assert.equal(1, calls)
-        local expected = "In file included from " .. header.identity .. ":2,\n"
-            .. dependency.identity .. ":5: error: generated declaration rejected"
+        local expected = "In file included from " .. fixture_path("/project/app/consumer.ffi.h") .. ":2,\n"
+            .. fixture_path("/project/lib/dep.ffi.h") .. ":5: error: generated declaration rejected"
         assert.equal(expected, result.diagnostic)
+        assert.is_nil(result.diagnostic:find("<titan:", 1, true))
         assert.is_nil(assert(strategy:read_file(result.cache_path)):find(private_root, 1, true))
         assert.is_true(service:close())
         assert.is_nil(lfs.attributes(private_root))
 
         local restored = assert(cprobe.new_service({
             include_dirs = {},
-            cache_directory = cache,
+            cache_directory = cache, relocation_roots = { output = fixture_path("/moved-project") },
             runner = function() error("persistent generated result must not compile") end,
         }))
         local replay = assert(restored:module_context({ includes = { include } })):validate_baseline()
         assert.is_true(replay.persistent_cached)
-        assert.equal(expected, replay.diagnostic)
+        local moved = "In file included from " .. fixture_path("/moved-project/app/consumer.ffi.h") .. ":2,\n"
+            .. fixture_path("/moved-project/lib/dep.ffi.h") .. ":5: error: generated declaration rejected"
+        assert.equal(moved, replay.diagnostic)
+        assert.is_nil(replay.diagnostic:find("<titan:", 1, true))
         assert.is_nil(restored.generated_workspaces)
         assert.is_true(restored:close())
         assert(os.remove(result.cache_path))

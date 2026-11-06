@@ -965,14 +965,16 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
    existing ancestor `realpath`s and folding slashes/case on Windows) and
    deduplicated in first-seen order. The authored spelling `source` is retained
    for compiler diagnostics and `__FILE__`. Committed artifacts are
-   `<output_root>/.native/<sha256("native-c-source-path", canonical)>.{o,record}`
+   `<output_root>/.native/<sha256("native-c-source-path", identity)>.{o,record}`,
+   where `identity` is the canonical path, or its root-relative form under a
+   [compiler-owned root](incremental-compilation.md#compiler-owned-root-relocation),
    and, after a successful compile, its `<stem>.d`; `<stem>.i` and any staged
    object are invocation scratch.
 2. **Unconditional preprocessing (`native-preprocess`).** On every invocation,
    `compile_node` runs:
 
    ```sh
-   <compile_argv...> -E -MD -MF <stem>.d -MT titan-native <source> -o <stem>.i
+   <compile_argv...> -E -P -MD -MF <stem>.d -MT titan-native <source> -o <stem>.i
    ```
 
    It invalidates any prior memo for `<stem>.i` and `<stem>.d`, parses
@@ -980,14 +982,18 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
 
    ```text
    input = incremental.digest(context, "native-c-input", {
-       source = source,
-       argv = request.compile_argv,
+       source = relocation.path(context, source),
+       argv = relocation.argv(context, request.compile_argv),
        toolchain = request.toolchain,
        authored = incremental.file_digest(context, source),
        preprocessed = incremental.file_digest(context, "<stem>.i"),
-       dependencies = certificate.files(context, files),
+       dependencies = relocation.files(context, certificate.files(context, files)),
    })
    ```
+
+   `-P` omits line markers, so header locations reach the digest through
+   `dependencies` (paths and realpaths root-relative under compiler-owned roots,
+   exact elsewhere) and through any expanded path macro such as `__FILE__`.
 
    Running `-E` on warm invocations ensures that conditional compilation,
    command-line macro changes, newly shadowing headers, and negative
@@ -1036,7 +1042,8 @@ Lua DLL import definitions so that helpers keep stock Lua conventions (see
 
 In `titanc`, `-c --c-source <file>` is permitted without Titan module names for
 standalone C helper preparation. Because the storage stem is derived from the
-canonical source path, a moved checkout leaves the old nodes in place and a
+canonical source path, which is root-relative only under a compiler-owned
+root, moving a user checkout leaves the old nodes in place and a
 consumer cannot select an object by enumerating `.native/`. With
 `--print-c-objects`, `titanc` maps each `--c-source` argument through
 `linkcertificate.canonical_path` to its certified node and, after releasing
@@ -1055,15 +1062,18 @@ or validation link.
 ### Output-set key and target directory
 
 `linkcertificate.prepare(context, spec)` (`linkcertificate.lua`)
-canonicalizes every entry in `spec.outputs`, rejects duplicates, sorts the
-canonical paths, and hashes them with tag `"final-output-set"` to form the
-64-hex directory key `key`. Canonicalization resolves each output's existing
-ancestors through `realpath` but keeps the output's own leaf, so relative,
-absolute, and symlinked-parent spellings of one destination share a key while
-a symlink substituted for the output itself still fails the output snapshot.
-Windows keys are further normalized to forward slashes and lowercase. The
-record directory lives under the canonical output root. The owned output set
-is:
+canonicalizes every entry in `spec.outputs`, rejects duplicates, maps each
+canonical path under a [compiler-owned
+root](incremental-compilation.md#compiler-owned-root-relocation) to its
+root-relative identity, sorts the results, and hashes them with tag
+`"final-output-set"` to form the 64-hex directory key `key`, so moving an
+explicit output tree keeps the key. Canonicalization resolves each output's
+existing ancestors through `realpath` but keeps the output's own leaf, so
+relative, absolute, and symlinked-parent spellings of one destination share a
+key while a symlink substituted for the output itself still fails the output
+snapshot. Windows keys are further normalized to forward slashes and
+lowercase. The record directory lives under the canonical output root. The
+owned output set is:
 
 * **Unix standalone or `--test` executable:** `{ path = program_path,
   executable = true }`, plus `{ path = program_path .. ".dSYM", kind =
@@ -1113,8 +1123,9 @@ are never part of `spec.outputs`. Each target owns
   `target`, and `environment` (`{ runtime_flags, MACOSX_DEPLOYMENT_TARGET,
   SDKROOT }`); `titanc` supplies the native profile identity as
   `policy.target`, and for a browser context `prepare`, the sole writer of the
-  browser value, replaces it with the descriptor identity in its own copy of
-  the policy;
+  browser value, replaces it with the `"relocatable-browser-target"` digest of
+  the exported descriptor, whose owned SDK paths are root-relative, in its own
+  copy of the policy;
 * `FILE_FIELDS` (`linkcertificate.lua`): `objects` (every linked
   module's primary `.o` and `.part<k>.o` files in bytewise module and part
   order), `c_objects` (`--c-source` objects), `payloads` (`-X` arguments in CLI
@@ -1199,6 +1210,11 @@ are never part of `spec.outputs`. Each target owns
     mechanism: <flag>` or `cannot resolve native file: <path>`) instead of
     certifying an incomplete input set.
 
+The hashed copy of `input` replaces path operands in `argv`, the output paths,
+and the paths in `FILE_FIELDS` and `native_policy.files` with their
+root-relative identities under compiler-owned roots; the ticket keeps the
+concrete recipe for linking and commit.
+
 `output_tools` comes from `linkcertificate.output_tools(context, request)`,
 whose request carries the exact compiler argv, ordered link flags, compiler
 toolchain identity, compile prefix, the ordered linked inputs, and the
@@ -1259,13 +1275,21 @@ relink.
    final link hits.
 2. **Read-only check (`linkcertificate.check`, `linkcertificate.lua`).**
    Verifies `ticket.cacheable`, decodes `<ticket.record>`, checks
-   `record_valid` (`schema`, `digest`, `canonicalization`), checks
-   `record.input == ticket.input` and `#record.outputs == #ticket.outputs`,
-   takes a fresh `output_snapshot` of every path in `ticket.outputs` (verifying
-   non-symlink `file`/`directory` kind, `mode`, non-Windows executable bit
-   `mode & 0x49 ~= 0`, recursive `.dSYM` directory entries, and SHA-256 content
-   digests), and rechecks the digests of `record.native` (a file whose precise
-   observation is unchanged reuses its recorded digest). When all digests match, `check`
+   `record_valid` (`schema`, `digest`, `canonicalization`, and an optional
+   closed `roots` map), checks `record.input == ticket.input` and
+   `#record.outputs == #ticket.outputs`, and rebinds the recorded `native` and
+   output paths from `record.roots` to the current compiler-owned roots.
+   Rebound native inputs use the same absolute spelling as `certificate.files`;
+   rebound outputs use the same `output_path` canonicalization as fresh
+   snapshots, including recursive directory members. On Windows, output paths
+   therefore retain the producer's forward-slash, lowercase convention rather
+   than acquiring the current root's case. Canonicalization resolves ancestors,
+   not the output leaf. A fresh `output_snapshot` of every path in
+   `ticket.outputs` still verifies non-symlink `file`/`directory` kind, `mode`,
+   the non-Windows executable bit `mode & 0x49 ~= 0`, recursive `.dSYM` entries,
+   and SHA-256 content digests. The check also rechecks `record.native` digests
+   (a file whose precise observation is unchanged reuses its recorded digest).
+   When all digests match, `check`
    returns `true`, `titanc` prints `Titan link hit <target>` under `-v`, and
    the invocation finishes.
 3. **Pre-mutation invalidation (`linkcertificate.invalidate`,
@@ -1291,7 +1315,8 @@ relink.
    is hashed once; a preserved, unchanged one is reused), digests the linker
    dependency report (`native_dependencies`) under the same rule, failing with
    `native library changed during build` if the compiler-fallback library set
-   changed, and writes `<ticket.record>` last.
+   changed, and writes `<ticket.record>` last with the current compiler-owned
+   `roots`.
 
 ## Automatic test-root discovery
 

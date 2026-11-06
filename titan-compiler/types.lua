@@ -3121,7 +3121,7 @@ end
 -- module member) records the umbrella header that spelled it; that include
 -- record, its generated header, dependency headers, inputs, and observations
 -- are closed plain data (`declarationschemas` `include`, `header`, `input`,
--- `observation`) with no type table, so nothing generic is reachable through
+-- `observation`, `relocation`) with no type table, so nothing generic is reachable through
 -- it. Skipping it keeps every answer exact while avoiding a walk of the whole
 -- header dependency graph from each C type.
 local generic_walk_skips = { _tag = true, _c_origin_header = true }

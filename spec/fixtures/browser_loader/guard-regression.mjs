@@ -41,12 +41,19 @@ export async function run(context) {
       context.assert(result.kind === 'returned' && result.status === 0,
         'guard refusal poisoned the original wait/completion');
       context.equalBytes(result.bytes, new Uint8Array(0));
+      const transcript = stdout.map(chunk =>
+        Array.from(chunk, byte => String.fromCharCode(byte)).join('')).join('');
+      const timing = /^\[==========\] Running Titan tests\.\n\[ RUN      \] entry_gate\.test_08_guard_window\n\[----------\] entry_gate\.test_08_guard_window: GATE item=8 outer_waits=2 host_checks=wrapper_reentry,raw_guard,observe\n\[       OK \] entry_gate\.test_08_guard_window \(([0-9]+\.[0-9]{2}) ms\)\n\[----------\] entry_gate \(([0-9]+\.[0-9]{2}) ms total\)\n\[==========\] 1 test ran\. \(([0-9]+\.[0-9]{2}) ms total\)\n\[  PASSED  \] 1 test\.\n$/.exec(transcript);
+      context.assert(timing && timing[0] === transcript, 'guard image omitted or malformed wall timings');
+      context.assert(timing[1] === timing[2] && Number(timing[3]) >= Number(timing[2]),
+        'guard image case/owner/run timings are inconsistent');
       const expected = new TextEncoder().encode(
         '[==========] Running Titan tests.\n' +
         '[ RUN      ] entry_gate.test_08_guard_window\n' +
         '[----------] entry_gate.test_08_guard_window: GATE item=8 outer_waits=2 host_checks=wrapper_reentry,raw_guard,observe\n' +
-        '[       OK ] entry_gate.test_08_guard_window\n' +
-        '[==========] 1 test ran.\n' +
+        `[       OK ] entry_gate.test_08_guard_window (${timing[1]} ms)\n` +
+        `[----------] entry_gate (${timing[2]} ms total)\n` +
+        `[==========] 1 test ran. (${timing[3]} ms total)\n` +
         '[  PASSED  ] 1 test.\n');
       const actual = new Uint8Array(stdout.reduce((count, chunk) => count + chunk.length, 0));
       let offset = 0;

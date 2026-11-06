@@ -1966,7 +1966,7 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh coroutine-unwind \
             make titan-stdlib-test-run TITAN_FILTER='test_unwind_'
           for teardown_log in lua-close-teardown coroutine-unwind; do
-            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+            if ! grep -Eq $'^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)\r?$' \
                 "$TITAN_SANITIZER_LOG_DIR/$teardown_log.log"; then
               echo "Teardown sanitizer filter ran no tests: $teardown_log" >&2
               exit 1
@@ -2038,7 +2038,7 @@ jobs:
               TITAN_FILTER='test_upgrade_opening_cancellation_aborts_before_output_drain$'
           for ownership_log in ssl-duplex ssl-backpressure ssl-drain-failure \
               http-upgrade-handoff http-upgrade-abort; do
-            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+            if ! grep -Eq $'^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)\r?$' \
                 "$TITAN_SANITIZER_LOG_DIR/$ownership_log.log"; then
               echo "TLS/HTTP ownership sanitizer filter ran no tests: $ownership_log" >&2
               exit 1
@@ -2068,7 +2068,7 @@ jobs:
           for ownership_log in websocket-message-gc websocket-partial-utf8 \
               websocket-read-cancel websocket-active-close \
               websocket-receive-progress websocket-backpressure; do
-            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+            if ! grep -Eq $'^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)\r?$' \
                 "$TITAN_SANITIZER_LOG_DIR/$ownership_log.log"; then
               echo "WebSocket ownership sanitizer filter ran no tests: $ownership_log" >&2
               exit 1
@@ -2097,7 +2097,7 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh json-native-storage \
             make titan-stdlib-test-run TITAN_FILTER='^json%.tests%.test_mapping_.*native_numbers'
           for nesting_log in json-nesting json-nesting-mixed json-nesting-peg-limit; do
-            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+            if ! grep -Eq $'^\\[==========\\] [1-9][0-9]* tests? ran\\. \\([0-9]+\\.[0-9]{2} ms total\\)\r?$' \
                 "$TITAN_SANITIZER_LOG_DIR/$nesting_log.log"; then
               echo "JSON nesting sanitizer filter ran no tests: $nesting_log" >&2
               exit 1

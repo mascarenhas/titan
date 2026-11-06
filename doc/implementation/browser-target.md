@@ -675,10 +675,16 @@ emsdk, Node 24, and a headless Chromium. It:
    across the union. A filtered run may leave an
    image or owner with no selected case, but the union must select at least
    one. It always prints one `Browser stdlib owner <root>: <n> cases` line per
-   root and a `Browser stdlib gate: selected=… passed=… skipped=… failed=…
-   owners=…/… images=…` summary (marked `(filtered)` when a filter applies),
-   even for a failed run. The target fails if any image failed under either
-   engine or if either audit failed.
+   root, appending `(N.NN ms total)` for owners whose interval was reported.
+   Each complete image report also produces
+   `Browser stdlib image <image>: <n> cases (N.NN ms total)` from that image's
+   independent run clock. These are not summed into a fictitious elapsed time
+   for the engine's whole image set. The
+   `Browser stdlib gate: selected=… passed=… skipped=… failed=… owners=…/…
+   images=…` summary is marked `(filtered)` when a filter applies. Counts and
+   available image/owner times remain visible even for a failed run; untimed
+   final failure-name references do not count as second outcomes. The target
+   fails if any image failed under either engine or if either audit failed.
 
 The streams stay separate because a case may write to stderr while the runner
 is in the middle of a report line, and a merged log then splits that line; the
@@ -1117,8 +1123,10 @@ descriptor` or `invalid browser target identity`.
 * `driver.toolchain_descriptor(context)` returns, for browser, a fresh service
   adapter with the descriptor's `emcc` argv, compile flags, and include roots,
   `language_mode = "c99"`, empty `cppflags`/`cflags`, the context profile and
-  its identity, and `target_identity = descriptor.identity`. The host result
-  is unchanged and has no `target_identity`.
+  its identity, `target_identity = descriptor.identity`, and
+  `certification_target_identity`, the `"relocatable-browser-target"` digest
+  of the exported descriptor with its compiler-owned SDK paths made
+  root-relative. The host result has neither identity field.
 * `driver.generated_compile_prefix(context?)` and
   `driver.authored_c_compile_prefix(context?)` take an optional context;
   every browser-capable caller passes it. `nil` keeps the native API.
@@ -1416,25 +1424,27 @@ output root and each held lock domain again and reserves every
 
 ## Object and link identity
 
-* **Objects.** `incremental.toolchain_identity` adds the descriptor identity
-  as `target_identity` to the hashed toolchain details, not only to its memo
-  key, so a browser object certificate depends on the complete descriptor.
+* **Objects.** `incremental.toolchain_identity` adds the browser descriptor's
+  `certification_target_identity` as `target_identity` to the hashed
+  toolchain details, not only to its memo key, so a browser object
+  certificate depends on the complete descriptor; only its compiler-owned SDK
+  paths are [root-relative](incremental-compilation.md#compiler-owned-root-relocation).
   The native details table keeps its original shape and no target field, so
   native certificates are byte-identical. The compile prefix in the
   `options` component differs as well. A foreign-format object found at an
   expected path parses and misses.
-* **Links.** The final-link key remains a digest of the output paths only, so
+* **Links.** The final-link key is a digest of the output paths only, so
   a program's key covers `<stem>.mjs`, `<stem>.wasm`, and `<stem>.wasm.map`.
   `titanc` always supplies its ordinary native profile identity as
   `policy.target`; `linkcertificate.prepare` is the sole writer of the browser
   value: for a browser context it copies the recipe policy and sets `target`
-  to the descriptor identity without mutating the caller's table, which covers
-  non-CLI callers too. A record written by another target or another browser
-  configuration is therefore a miss. The browser policy also records
-  `browser_profile`, the link profile's `identity_inputs`, and for library
-  mode `browser_probe`, the runner's `--probe` report of the Node (and Chrome)
-  that the executing check uses. The `runtime` file field lists the eight
-  required SDK assets (`libtitan.a`, `titan-browser-library.js`,
+  to the same relocatable descriptor digest without mutating the caller's
+  table, which covers non-CLI callers too. A record written by another target
+  or another browser configuration is therefore a miss. The browser policy
+  also records `browser_profile`, the link profile's `identity_inputs`, and
+  for library mode `browser_probe`, the runner's `--probe` report of the Node
+  (and Chrome) that the executing check uses. The `runtime` file field lists
+  the eight required SDK assets (`libtitan.a`, `titan-browser-library.js`,
   `titan-browser-trace.js`, the loader, and the four runner files) plus the
   browser `liblua.a` and its record, all certified by content, so changing any
   of them relinks while object certificates still hit.

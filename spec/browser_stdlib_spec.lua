@@ -276,8 +276,9 @@ plan:
         assert(strategy:write_file(log, [[
 [==========] Running Titan tests.
 [ RUN      ] fixture.tests.test_fail
-[  FAILED  ] fixture.tests.test_fail
-[==========] 1 test ran.
+[  FAILED  ] fixture.tests.test_fail (1.25 ms)
+[----------] fixture.tests (1.25 ms total)
+[==========] 1 test ran. (1.50 ms total)
 [  PASSED  ] 0 tests.
 [  FAILED  ] 1 test.
 [  FAILED  ] fixture.tests.test_fail
@@ -289,6 +290,10 @@ plan:
         assert.is_false(result.ok)
         assert.truthy(result.output:find("Browser stdlib owner fixture.tests: 1 cases", 1, true), result.output)
         assert.truthy(result.output:find("selected=1 passed=0 skipped=0 failed=1 owners=1/1", 1, true), result.output)
+        assert.truthy(result.output:find(
+            "Browser stdlib owner fixture.tests: 1 cases (1.25 ms total)", 1, true), result.output)
+        assert.truthy(result.output:find(
+            "Browser stdlib image fixture: 1 cases (1.50 ms total)", 1, true), result.output)
     end)
 
     it("audits a case emitting stderr in the middle of a report line from stdout alone", function()
@@ -305,8 +310,9 @@ plan:
         local report = [[
 [==========] Running Titan tests.
 [ RUN      ] fixture.tests.test_stderr
-[       OK ] fixture.tests.test_stderr
-[==========] 1 test ran.
+[       OK ] fixture.tests.test_stderr (1.25 ms)
+[----------] fixture.tests (1.25 ms total)
+[==========] 1 test ran. (1.50 ms total)
 [  PASSED  ] 1 test.
 ]]
         local warning = "Lua warning: error in coroutine cleanup (expected fixture warning)\n"
@@ -315,7 +321,7 @@ io.stdout:setvbuf("no")
 io.stdout:write("[==========] Running Titan tests.\n[ RUN      ] fixture.tests.")
 io.stderr:write(%q)
 io.stderr:flush()
-io.stdout:write("test_stderr\n[       OK ] fixture.tests.test_stderr\n[==========] 1 test ran.\n[  PASSED  ] 1 test.\n")
+io.stdout:write("test_stderr\n[       OK ] fixture.tests.test_stderr (1.25 ms)\n[----------] fixture.tests (1.25 ms total)\n[==========] 1 test ran. (1.50 ms total)\n[  PASSED  ] 1 test.\n")
 if arg[1] == "fail" then os.exit(7) end
 ]], warning)))
         local lua = installed_prefix.active() .. "/bin/lua"
@@ -348,8 +354,9 @@ if arg[1] == "fail" then os.exit(7) end
         end
         local function report(owner, failed)
             return "[==========] Running Titan tests.\n[ RUN      ] " .. owner .. ".test_case\n" ..
-                (failed and "[  FAILED  ] " or "[       OK ] ") .. owner .. ".test_case\n" ..
-                "[==========] 1 test ran.\n[  PASSED  ] " .. (failed and "0 tests.\n" or "1 test.\n") ..
+                (failed and "[  FAILED  ] " or "[       OK ] ") .. owner .. ".test_case (1.25 ms)\n" ..
+                "[----------] " .. owner .. " (1.25 ms total)\n" ..
+                "[==========] 1 test ran. (1.50 ms total)\n[  PASSED  ] " .. (failed and "0 tests.\n" or "1 test.\n") ..
                 (failed and "[  FAILED  ] 1 test.\n[  FAILED  ] " .. owner .. ".test_case\n" or "")
         end
         local roots = file("-browser-roots.txt", "first.tests\nsecond.tests\n")
@@ -364,6 +371,61 @@ if arg[1] == "fail" then os.exit(7) end
         assert.is_true(passed.ok, passed.output)
         assert.truthy(passed.output:find("selected=2 passed=2 skipped=0 failed=0 owners=2/2 images=2", 1, true),
             passed.output)
+        assert.truthy(passed.output:find(
+            "Browser stdlib image first: 1 cases (1.50 ms total)", 1, true), passed.output)
+        assert.truthy(passed.output:find(
+            "Browser stdlib image second: 1 cases (1.50 ms total)", 1, true), passed.output)
+        assert.truthy(passed.output:find(
+            "Browser stdlib owner first.tests: 1 cases (1.25 ms total)", 1, true), passed.output)
+        assert.truthy(passed.output:find(
+            "Browser stdlib owner second.tests: 1 cases (1.25 ms total)", 1, true), passed.output)
+
+        assert(strategy:write_file(first, (report("first.tests", false):gsub("\n", "\r\n"))))
+        assert(strategy:write_file(second, (report("second.tests", false):gsub("\n", "\r\n"))))
+        local crlf = strategy:run(argv, {stderr_to_stdout = true})
+        assert.is_true(crlf.ok, crlf.output)
+        assert.truthy(crlf.output:find(
+            "selected=2 passed=2 skipped=0 failed=0 owners=2/2 images=2", 1, true), crlf.output)
+        assert(strategy:write_file(first, report("first.tests", false)))
+        for _, malformed in ipairs({
+            (report("second.tests", false):gsub("\n", "\r\r\n")),
+            (report("second.tests", false):gsub("1%.25 ms%)", "1.2\r5 ms)")),
+            (report("second.tests", false):gsub("\n$", "\r")),
+        }) do
+            assert(strategy:write_file(second, malformed))
+            local rejected = strategy:run(argv, {stderr_to_stdout = true})
+            assert.is_false(rejected.ok, rejected.output)
+        end
+
+        for _, suffix in ipairs({
+            "", " (-1.25 ms)", " (1.2 ms)", " (1.250 ms)", " (nan ms)",
+            " (inf ms)", " (1e2 ms)", " (1,25 ms)", " (1.25 ms total)",
+        }) do
+            local malformed = report("second.tests", false):gsub(
+                "(%[       OK %] second.tests.test_case) %(1%.25 ms%)",
+                function(prefix) return prefix .. suffix end)
+            assert(strategy:write_file(second, malformed))
+            local rejected = strategy:run(argv, {stderr_to_stdout = true})
+            assert.is_false(rejected.ok, rejected.output)
+            assert.truthy(rejected.output:find("malformed native case timing", 1, true), rejected.output)
+        end
+        for _, replacement in ipairs({
+            {"%[----------%] second.tests %(1%.25 ms total%)\n", "", "missing native owner timing"},
+            {"%[----------%] second.tests %(1%.25 ms total%)", "[----------] second.tests (1.26 ms total)", "owner timing differs"},
+            {"ran%. %(1%.50 ms total%)", "ran.", "malformed native run timing"},
+            {"ran%. %(1%.50 ms total%)", "ran. (0.00 ms total)", "run timing is shorter"},
+        }) do
+            assert(strategy:write_file(second,
+                (report("second.tests", false):gsub(replacement[1], replacement[2]))))
+            local rejected = strategy:run(argv, {stderr_to_stdout = true})
+            assert.is_false(rejected.ok, rejected.output)
+            assert.truthy(rejected.output:find(replacement[3], 1, true), rejected.output)
+        end
+        assert(strategy:write_file(second, report("second.tests", false) ..
+            "[       OK ] second.tests.test_case (1.25 ms)\n"))
+        local duplicate = strategy:run(argv, {stderr_to_stdout = true})
+        assert.is_false(duplicate.ok, duplicate.output)
+        assert.truthy(duplicate.output:find("duplicate native result", 1, true), duplicate.output)
 
         assert(strategy:write_file(second, report("first.tests", false)))
         local foreign_case = strategy:run(argv, {stderr_to_stdout = true})
@@ -371,14 +433,14 @@ if arg[1] == "fail" then os.exit(7) end
         assert.truthy(foreign_case.output:find(
             "group second: result outside native root inventory", 1, true), foreign_case.output)
 
-        assert(strategy:write_file(second, report("second.tests", true)))
+        assert(strategy:write_file(second, (report("second.tests", true):gsub("\n", "\r\n"))))
         local failed = strategy:run(argv, {stderr_to_stdout = true})
         assert.is_false(failed.ok, failed.output)
         assert.truthy(failed.output:find("selected=2 passed=1 skipped=0 failed=1 owners=2/2 images=2", 1, true),
             failed.output)
         assert.truthy(failed.output:find("group second: native test failure", 1, true), failed.output)
 
-        local empty = "[==========] Running Titan tests.\n[==========] 0 tests ran.\n[  PASSED  ] 0 tests.\n"
+        local empty = "[==========] Running Titan tests.\n[==========] 0 tests ran. (0.00 ms total)\n[  PASSED  ] 0 tests.\n"
         assert(strategy:write_file(second, empty))
         argv[6] = "^first[.]"
         local filtered = strategy:run(argv, {stderr_to_stdout = true})

@@ -1180,7 +1180,7 @@ describe("Windows compiler path integration", function()
         end
 
         local sources = {
-            { modname = "app", output = "C:/project/build/app.titan", c_parts = 1 },
+            { modname = "app", output = "C:/project/build/app.titan", c_parts = 2 },
         }
         local ok, err = driver.validate_program_output_paths(
             sources, "C:/project/build/bin/app.exe",
@@ -4063,10 +4063,10 @@ describe("generated C formatting", function()
         local root = temporary.name(" formatter transaction")
         assert(lfs.mkdir(root))
         local header = root .. "/module.titan.h"
-        local old = driver.FOREIGN_HEADER_MARKER .. "\n/* old */\n"
+        local old = ffiheaders.FOREIGN_MARKER .. "\n/* old */\n"
         local plan = {
             filename = header,
-            contents = driver.FOREIGN_HEADER_MARKER .. "\nint value;\n",
+            contents = ffiheaders.FOREIGN_MARKER .. "\nint value;\n",
             ast = {},
         }
         write_file(header, old)
@@ -4100,14 +4100,14 @@ describe("generated C formatting", function()
         assert(os.remove(root))
         assert(lfs.mkdir(root))
         local header, ffi_header = root .. "/module.titan.h", root .. "/module.ffi.h"
-        local old_header = driver.FOREIGN_HEADER_MARKER .. "\n/* old declarations */\n"
-        local old_ffi = driver.FFI_HEADER_MARKER .. "\n/* old environment */\n"
+        local old_header = ffiheaders.FOREIGN_MARKER .. "\n/* old declarations */\n"
+        local old_ffi = ffiheaders.MARKER .. "\n/* old environment */\n"
         write_file(header, old_header)
         write_file(ffi_header, old_ffi)
         local plan = { filename = header, ast = {},
-            contents = driver.FOREIGN_HEADER_MARKER .. "\n/* new declarations */\n",
-            ffi_header = { filename = ffi_header, marker = driver.FFI_HEADER_MARKER,
-                contents = driver.FFI_HEADER_MARKER .. "\n/* new environment */\n" } }
+            contents = ffiheaders.FOREIGN_MARKER .. "\n/* new declarations */\n",
+            ffi_header = { filename = ffi_header, marker = ffiheaders.MARKER,
+                contents = ffiheaders.MARKER .. "\n/* new environment */\n" } }
         local calls = {}
         driver.format_generated_file = function(path)
             calls[#calls + 1] = path
@@ -4128,8 +4128,8 @@ describe("generated C formatting", function()
         local root = temporary.name(" formatter space")
         assert(lfs.mkdir(root))
         local header = root .. "/module.titan.h"
-        local old = driver.FOREIGN_HEADER_MARKER .. "\n/* old */\n"
-        local new = driver.FOREIGN_HEADER_MARKER .. "\nint value;\n"
+        local old = ffiheaders.FOREIGN_MARKER .. "\n/* old */\n"
+        local new = ffiheaders.FOREIGN_MARKER .. "\nint value;\n"
         write_file(header, old)
         local plan = {
             filename = header,
@@ -4198,6 +4198,58 @@ describe("source foreign-header planning", function()
             coder.generate_ffi_header("case", {}))
     end)
 
+    for _, ending in ipairs({ { "LF", "\n" }, { "CRLF", "\r\n" } }) do
+        it("replays " .. ending[1] .. " foreign recipes with fresh-header directive spacing", function()
+            local newline = ending[2]
+            local prefix = ffiheaders.FOREIGN_MARKER .. newline .. "#ifndef SAVED_HEADER" .. newline
+            local literal = 'const char *path = "C:\\\\root\\\\unchanged";'
+            local body = table.concat({
+                "static inline int saved(void) {",
+                '#line 7 "source.titan"',
+                "",
+                " \t",
+                "int item = 1;",
+                "",
+                literal,
+                "return item;",
+                "}",
+                "",
+            }, newline)
+            local recipe = { prefix = prefix, body = body, source_headers = { "dep" },
+                policy = { line_directives = true, coverage = false } }
+            local digest = ffiheaders.foreign_recipe_digest(recipe)
+            local includes = '#include "saved.ffi.h"\n#include "dep.titan.h"\n'
+            local replayed = ffiheaders.foreign_contents(recipe, "saved.ffi.h", function(name)
+                assert.equal("dep", name)
+                return "dep.titan.h"
+            end)
+            local expected_body = table.concat({
+                "static inline int saved(void) {",
+                '#line 7 "source.titan"',
+                "int item = 1;",
+                "",
+                literal,
+                "return item;",
+                "}",
+                "",
+            }, newline)
+            assert.equal(prefix .. "\n" .. includes .. expected_body, replayed)
+            assert.equal(body, recipe.body)
+            assert.equal(digest, ffiheaders.foreign_recipe_digest(recipe))
+
+            -- Model the fresh writer's text-mode read on either host without
+            -- changing the replayed header's independently asserted LF/CRLF bytes.
+            local fresh = (prefix .. "\n" .. includes .. body):gsub("\r\n", "\n")
+            local strategy = {
+                read_file = function() return fresh end,
+                write_file = function(_, _, contents) fresh = contents; return true end,
+                run = function() error("unexpected formatter execution") end,
+            }
+            assert.is_true(driver.format_generated_file("saved.titan.h", false, false, strategy))
+            assert.equal(fresh, (replayed:gsub("\r\n", "\n")))
+        end)
+    end
+
     it("plans dependency headers, writes owned outputs, and removes stale ones",
     function()
         local root = temporary.name()
@@ -4237,7 +4289,7 @@ describe("source foreign-header planning", function()
         coder.generate_foreign_header = function(name, ast)
             generated[name] = (generated[name] or 0) + 1
             local dependency = ast[1] and ast[1]._foreign_header
-            return driver.FOREIGN_HEADER_MARKER .. "\n/* " .. name .. " "
+            return ffiheaders.FOREIGN_MARKER .. "\n/* " .. name .. " "
                 .. tostring(dependency) .. " */\n"
         end
         local ok, plans_or_err = pcall(
@@ -4284,7 +4336,7 @@ describe("source foreign-header planning", function()
         local ast = { { _tag = "Ast.TopLevelForeignFunc", name = "f" } }
         local original = coder.generate_foreign_header
         coder.generate_foreign_header = function()
-            return driver.FOREIGN_HEADER_MARKER .. "\n"
+            return ffiheaders.FOREIGN_MARKER .. "\n"
         end
         local plans, err = driver.plan_foreign_headers({ "left", "right" }, {
             left = { ast = ast, filename = shared, native_output = shared },
@@ -4297,7 +4349,7 @@ describe("source foreign-header planning", function()
         local reserved = root .. "/reserved.titan"
         write_file(root .. "/reserved.titan.h", "/* user-owned */\n")
         coder.generate_foreign_header = function()
-            return driver.FOREIGN_HEADER_MARKER .. "\n"
+            return ffiheaders.FOREIGN_MARKER .. "\n"
         end
         local plan = driver.plan_foreign_header("reserved", ast, reserved)
         coder.generate_foreign_header = original
@@ -4314,6 +4366,50 @@ describe("source foreign-header planning", function()
         assert.matches("plain.ffi.h", err, 1, true)
         remove_tree(root)
     end)
+
+    for _, header in ipairs({
+        { suffix = ".ffi.h", marker = ffiheaders.MARKER },
+        { suffix = ".titan.h", marker = ffiheaders.FOREIGN_MARKER },
+        { suffix = ".priv.h", marker = coder.PRIVATE_HEADER_MARKER },
+    }) do
+        it("requires the exact intended ownership marker for fresh " .. header.suffix, function()
+            local root = temporary.name()
+            assert(os.remove(root))
+            assert(lfs.mkdir(root))
+            local filename = root .. "/reserved" .. header.suffix
+            local plan = { filename = filename, marker = header.marker,
+                contents = header.marker .. "\n/* replacement */\n" }
+            for _, contents in ipairs({
+                "/* user-owned */\n",
+                " " .. header.marker .. "\n",
+                "/* user prefix */\n" .. header.marker .. "\n",
+                header.marker:sub(1, -2),
+                (header.marker == ffiheaders.MARKER and
+                    ffiheaders.FOREIGN_MARKER or ffiheaders.MARKER) .. "\n",
+            }) do
+                write_file(filename, contents)
+                local ok, err = driver.write_foreign_header_plan(plan)
+                assert.is_nil(ok)
+                assert.matches("refusing to overwrite user-owned", err, 1, true)
+                assert.matches(filename, err, 1, true)
+                assert.equal(contents, assert(util.get_file_contents(filename)))
+            end
+            assert(os.remove(filename))
+            assert(lfs.mkdir(filename))
+            local original_symlinkattributes = lfs.symlinkattributes
+            lfs.symlinkattributes = function(path, field)
+                assert.equal("mode", field)
+                return original_symlinkattributes(path, field)
+            end
+            local called, ok, err = pcall(driver.validate_foreign_header_plan, plan)
+            lfs.symlinkattributes = original_symlinkattributes
+            assert.is_true(called, ok)
+            assert.is_nil(ok)
+            assert.matches("refusing to overwrite user-owned", err, 1, true)
+            assert.equal("directory", lfs.symlinkattributes(filename, "mode"))
+            remove_tree(root)
+        end)
+    end
 
     it("uses finalized header paths for an already compiled source dependency", function()
         local root = temporary.name()
@@ -5506,6 +5602,7 @@ describe("compiler module loader", function()
                 foreign_header = driver.plan_foreign_header(entry.type.name,
                     entry.ast, entry.native_output or entry.filename, false).recipe
             end
+            local generated = "int ordinary_object;\n"
             local native = {
                 has_main = false,
                 imports = imports,
@@ -5520,6 +5617,12 @@ describe("compiler module loader", function()
                     { index = 0, c_suffix = ".c", object_suffix = ".o" },
                 },
             }
+            native.generated_inputs = { {
+                spelling = stem .. ".c", bytes = #generated,
+                sha256 = incremental.digest(context, "generated-c", generated),
+                semantic = assert(incremental.preprocessed_identities(context,
+                    { { filename = stem .. ".c", contents = generated } }))[1],
+            } }
             entry.interface_digests = assert(incremental.producer_digests(
                 context, entry, layouts, native.foreign_header))
             native.certificate = assert(incremental.make_certificate(
@@ -5553,17 +5656,20 @@ describe("compiler module loader", function()
                     },
                     binary_usage = entry.ast and entry.ast._binary_usage or {},
                     generated_parts = {
-                        { index = 0, code = "int ordinary_object;\n" },
+                        { index = 0, code = generated },
                     },
                 }))
             if mutator then mutator(native) end
+            if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
+            local code = generated .. (payload == false and ""
+                or assert(objectmetadata.render(payload, "source_metadata")))
+            write_file(stem .. ".c", code)
+            if type(native.certificate) == "table" and type(native.certificate.object_identity) == "string" then
+                incremental.record_materialization(context, stem, native.certificate)
+            end
             if owns_context then
                 assert.is_true(driver.close_resolver_context(context))
             end
-            if payload == nil then payload = assert(objectmetadata.encode(entry, native)) end
-            local code = payload == false and "int ordinary_object;\n"
-                or assert(objectmetadata.render(payload, "source_metadata"))
-            write_file(stem .. ".c", code)
             local argv = assert(driver.generated_compile_prefix())
             for _, argument in ipairs({ "-c", stem .. ".c", "-o", object }) do
                 argv[#argv + 1] = argument

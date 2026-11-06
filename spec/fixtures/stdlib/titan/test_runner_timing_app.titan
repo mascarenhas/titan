@@ -1,0 +1,50 @@
+local test = import "test"
+local timer = import "timer"
+
+function main(args: {string}): integer
+  if args[1] == "--empty" then return test.run({}, {}) end
+  local cases: {test.Case} = {
+    test.Case.new("timing.alpha.parent", "timing.alpha",
+      function (context: test.Context)
+        timer.sleep(15)
+        context:cleanup(function () timer.sleep(35) end)
+        context:run("child", function (child: test.Context)
+          timer.sleep(25)
+          child:cleanup(function () timer.sleep(15) end)
+          child:run("grandchild", function (_: test.Context)
+            timer.sleep(15)
+          end)
+        end)
+      end),
+    test.Case.new("timing.beta.skipped", "timing.beta",
+      function (context: test.Context)
+        context:cleanup(function () timer.sleep(15) end)
+        context:run("never", function (_: test.Context)
+          raise "skipped parent invoked its child"
+        end)
+        timer.sleep(15)
+        test.skip("timed skip")
+      end),
+    test.Case.new("timing.alpha.failed", "timing.alpha",
+      function (context: test.Context)
+        context:cleanup(function () timer.sleep(15) end)
+        context:run("never", function (_: test.Context)
+          raise "failed parent invoked its child"
+        end)
+        timer.sleep(15)
+        raise "timed failure"
+      end),
+    test.Case.new("timing.beta.cleanup_failure", "timing.beta",
+      function (context: test.Context)
+        context:cleanup(function ()
+          timer.sleep(15)
+          raise "timed cleanup failure"
+        end)
+      end),
+    test.Case.new("timing.alpha.later", "timing.alpha",
+      function (_: test.Context) timer.sleep(15) end),
+    test.Case.new("timing.gamma.reasonless", "timing.gamma",
+      function (_: test.Context) test.skip() end),
+  }
+  return test.run(args, cases)
+end

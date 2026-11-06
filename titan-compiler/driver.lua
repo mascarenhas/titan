@@ -1355,6 +1355,11 @@ function driver._new_resolver_context(options, target_descriptor)
             error(target_error, 0)
         end
     end
+    context.relocation_roots = require("titan-compiler.relocation").roots(context.io, {
+        sdk = configured_installation_root,
+        compiler = driver.SOURCE_CHECKOUT_ROOT,
+        output = context.output_root,
+    })
     context._target_initializing = nil
     return context
 end
@@ -1916,6 +1921,8 @@ function driver.toolchain_descriptor(context)
             include_dirs = { table.unpack(descriptor.include_dirs) },
             profile = context.target_profile, profile_identity = descriptor.profile_identity,
             target_identity = descriptor.identity,
+            certification_target_identity = incremental.digest(context, "relocatable-browser-target",
+                require("titan-compiler.relocation").browser(context, driver._browser_target.export(descriptor))),
         }
     end
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
@@ -2128,6 +2135,7 @@ function driver.get_probe_service(context)
     service, err = cprobe.new_service({
         io = context.io,
         cache_adapter = context.cache_adapter,
+        relocation_roots = context.relocation_roots,
         header_observations = context.header_observations,
         file_digest = context_file_digest(context),
         process_trace = context.c_header_process_trace,
@@ -2258,6 +2266,11 @@ function driver.close_resolver_context(context)
             first_error = first_error or err
         end
     end
+    -- Semantic preprocessing shares this resolver's cleanup boundary, just
+    -- like deferred C-probe signals: deliver only after both owners retire.
+    local signal = context.generated_c_cancelled_signal
+    context.generated_c_cancelled_signal = nil
+    jobs.propagate(signal)
     if first_error then return nil, first_error end
     return true
 end
@@ -2349,7 +2362,7 @@ end
 -- clients. Unlike `types.serialize`, this is not executable metadata: it also
 -- covers declarations visible only through an explicit `.titan` import and
 -- their exact C-header inputs.
-function driver.serialize_source_interface(entry)
+function driver.serialize_source_interface(entry, context)
     if type(entry) ~= "table" or entry.kind ~= "source"
        or (type(entry.ast) ~= "table" and entry._analysis_manifest ~= true)
        or type(entry.type) ~= "table"
@@ -2381,7 +2394,7 @@ function driver.serialize_source_interface(entry)
         type = entry.type,
         c_header_dependencies = headers,
     }
-    return sourceinterface.serialize(normalized)
+    return sourceinterface.serialize(normalized, context)
 end
 
 -- File-only verification also serves publication's fresh digest/header memo;
@@ -4886,8 +4899,7 @@ local function expected_codegen_options(policy, modname, native)
     }
 end
 
--- The absolute output stem a module's certificate records. A moved output
--- tree therefore misses instead of reusing objects whose paths changed.
+-- The physical output stem is used for I/O; certificates label its owned root.
 local function certified_stem(modname, source)
     return normalized_absolute_filename(driver.module_output_stem(
         source.native_output or source.main, modname))
@@ -4926,6 +4938,7 @@ function incremental_options(context)
         pretty_print = context.pretty_print == true,
         extra_ffi_include_dirs = context.extra_ffi_include_dirs or {},
         titan_root = driver.TITAN_ROOT or "",
+        relocation_roots = context.relocation_roots,
         preamble_path = preamble_probe_path(context),
         stem = certified_stem,
         codegen_options = function(modname, record)
@@ -5027,6 +5040,9 @@ local function resolver_plan(context, linked_names)
         local mod = certificate_dependency(context, name, linked_names)
         if not mod then return nil, "unavailable" end
         return incremental.interface_digest(context, mod, view)
+    end
+    function plan.path(filename)
+        return require("titan-compiler.relocation").path(context, filename)
     end
     return plan
 end
@@ -6136,7 +6152,7 @@ function driver.defaultloader(static_deps, options)
             source_certificate = source_certificate,
         }
         local source_manifest, manifest_error =
-            driver.serialize_source_interface(entry)
+            driver.serialize_source_interface(entry, context)
         if not source_manifest then
             -- Keep the checked source available to semantic clients even when
             -- its interface cannot be retained. Report this alongside checker
@@ -6862,6 +6878,9 @@ function driver.resolution_plan(context)
         driver.assert_target_context(context)
         local module = modules[name]
         return module and module.kind == "dynamic" and module.provider_file or nil
+    end
+    function plan.path(filename)
+        return require("titan-compiler.relocation").path(context, filename)
     end
     function plan.digest(name, view)
         driver.assert_target_context(context)
@@ -8437,9 +8456,6 @@ end
 
 local ensure_output_parent
 
-driver.FOREIGN_HEADER_MARKER =
-    "/* Generated by Titan: source foreign function interface. */"
-driver.FFI_HEADER_MARKER = ffiheaders.MARKER
 driver.PRIVATE_HEADER_MARKER = coder.PRIVATE_HEADER_MARKER
 
 driver.module_output_stem = source_selection.output_stem
@@ -8580,7 +8596,7 @@ function driver.plan_foreign_header(
         ast = ast,
         filename = headername,
         absolute = absolute_header,
-        marker = driver.FOREIGN_HEADER_MARKER,
+        marker = ffiheaders.FOREIGN_MARKER,
         has_foreign = has_foreign,
         contents = contents,
         recipe = recipe,
@@ -8593,7 +8609,7 @@ function driver.plan_foreign_header(
         ffi_header = {
             filename = ffi_headername,
             absolute = absolute_ffi_header,
-            marker = driver.FFI_HEADER_MARKER,
+            marker = ffiheaders.MARKER,
             contents = not defer_render
                 and coder.generate_ffi_header(modname, ast) or nil,
         },
@@ -8605,15 +8621,14 @@ local function generated_header_entries(plan)
 end
 
 local function validate_generated_header_entry(entry)
-    local marker = entry.marker or driver.FOREIGN_HEADER_MARKER
-    local attr = lfs.symlinkattributes(entry.filename)
-    local existing = attr and attr.mode == "file"
+    local marker = entry.marker or ffiheaders.FOREIGN_MARKER
+    -- LFS table queries can fail on Windows directory destinations.
+    local mode = lfs.symlinkattributes(entry.filename, "mode")
+    local existing = mode == "file"
         and util.get_file_contents(entry.filename) or nil
-    local owned = existing and existing:sub(1, #marker) == marker
-    if entry.contents and attr and (attr.mode ~= "file" or not owned) then
-        return nil, "refusing to overwrite user-owned generated-header path '"
-            .. entry.filename .. "'"
-    end
+    local owned, err = ffiheaders.check_destination(
+        entry.filename, marker, mode, existing)
+    if entry.contents and err then return nil, err end
     entry.managed = entry.contents ~= nil or owned and true or false
     return true
 end
@@ -8684,7 +8699,7 @@ function driver.plan_foreign_headers(names, imported, policy_for)
                     modname = name, mod = mod,
                     filename = headername,
                     absolute = normalized_absolute_filename(headername),
-                    marker = driver.FOREIGN_HEADER_MARKER,
+                    marker = ffiheaders.FOREIGN_MARKER,
                     -- Restored bytes are compiler-owned and carry the policy
                     -- their record was built under; the record identity owns
                     -- invalidation, so the plan states the current expectation.
@@ -8693,7 +8708,7 @@ function driver.plan_foreign_headers(names, imported, policy_for)
                     ffi_header = {
                         filename = ffi_headername,
                         absolute = normalized_absolute_filename(ffi_headername),
-                        marker = driver.FFI_HEADER_MARKER,
+                        marker = ffiheaders.MARKER,
                     },
                 }
             else
@@ -8770,7 +8785,8 @@ function driver.plan_foreign_headers(names, imported, policy_for)
             end
             for _, entry in ipairs(generated_header_entries(plan)) do
                 entry.preserve = entry.contents ~= nil and
-                    lfs.attributes(entry.filename, "mode") == "file"
+                    lfs.attributes(entry.filename, "mode") == "file" and
+                    util.get_file_contents(entry.filename) == entry.contents
             end
         else
             plan.ffi_header.contents = coder.generate_ffi_header(
@@ -8818,6 +8834,12 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
             ok, err = driver.format_generated_file(
                 temporary, verbose, pretty_print)
             if not ok then return abandon(err) end
+            if lfs.attributes(entry.filename, "mode") == "file" and
+                util.get_file_contents(entry.filename) == util.get_file_contents(temporary) then
+                local removed, remove_error = os.remove(temporary)
+                if not removed then return abandon(remove_error) end
+                staged[entry], entry.preserve = nil, true
+            end
         end
     end
     for _, entry in ipairs(entries) do
@@ -9059,20 +9081,20 @@ local function prepare_compile(
     end
     -- Preflight an existing private header before any invalidation or file
     -- write.
-    local priv_attr = lfs.symlinkattributes(priv_header_path)
+    local priv_mode = lfs.symlinkattributes(priv_header_path, "mode")
     local priv_owned = false
-    if priv_attr and priv_attr.mode == "file" then
+    if priv_mode == "file" then
         local existing = util.get_file_contents(priv_header_path)
         priv_owned = existing and existing:sub(1, #driver.PRIVATE_HEADER_MARKER)
             == driver.PRIVATE_HEADER_MARKER or false
     end
-    if generated.private_header and priv_attr then
-        local existing = priv_attr.mode == "file"
+    if generated.private_header and priv_mode then
+        local existing = priv_mode == "file"
             and util.get_file_contents(priv_header_path) or nil
         local owned = existing and
             existing:sub(1, #driver.PRIVATE_HEADER_MARKER)
                 == driver.PRIVATE_HEADER_MARKER
-        if priv_attr.mode ~= "file" or not owned then
+        if priv_mode ~= "file" or not owned then
             return nil, "refusing to overwrite user-owned generated-header path '"
                 .. priv_header_path .. "'"
         end
@@ -9222,11 +9244,6 @@ local function prepare_compile(
         for _, part in ipairs(generated_parts) do
             local part_c = driver.part_c_filename(stem, part.index)
             local part_code = driver.GENERATED_C_MARKER .. "\n" .. part.code
-            if not (options and options.coverage) and part.index == 0 then
-                local metadata, metadata_error = metadata_code()
-                if not metadata then return nil, metadata_error end
-                part_code = part_code .. metadata
-            end
             os.remove(part_c)
             local ok, err = util.set_file_contents(part_c, part_code)
             if not ok then return nil, err end
@@ -9251,15 +9268,38 @@ local function prepare_compile(
             end
             native.coverage = coverage.partial(coverage_parts,
                 entry.source_files, options.coverage_backend)
-            local metadata, metadata_error = metadata_code()
-            if not metadata then return nil, metadata_error end
-            converted_codes[1].code = converted_codes[1].code .. metadata
             for _, item in ipairs(converted_codes) do
                 local written, write_error =
                     util.set_file_contents(item.filename, item.code)
                 if not written then return nil, write_error end
             end
         end
+        if certify then
+            native.generated_inputs = {}
+            local preprocessing = {}
+            for index, part in ipairs(generated_parts) do
+                local filename = driver.part_c_filename(stem, part.index)
+                local contents, err = util.get_file_contents(filename, "rb")
+                if not contents then return nil, err end
+                native.generated_inputs[index] = {
+                    spelling = filename,
+                    bytes = #contents, sha256 = incremental.digest(context, "generated-c", contents),
+                }
+                preprocessing[index] = { filename = filename, contents = contents }
+            end
+            local semantics, preprocessing_error =
+                incremental.preprocessed_identities(context, preprocessing)
+            if not semantics then return nil, preprocessing_error end
+            for index, identity in ipairs(semantics) do native.generated_inputs[index].semantic = identity end
+        end
+        local metadata, metadata_error = metadata_code()
+        if not metadata then return nil, metadata_error end
+        local primary = driver.part_c_filename(stem, 0)
+        local contents, read_error = util.get_file_contents(primary, "rb")
+        if not contents then return nil, read_error end
+        local written, write_error = util.set_file_contents(primary, contents .. metadata, "wb")
+        if not written then return nil, write_error end
+        if native.certificate then incremental.record_materialization(context, stem, native.certificate) end
         if source_entry then
             source_entry.coverage = native.coverage
             source_entry.private_symbols = private_symbols
@@ -12736,8 +12776,8 @@ function driver.validate_program_output_paths(
             ok, err = add_output(priv_path,
                 "generated private header for " .. owner, "file")
             if not ok then return nil, err end
-            local priv_attr = lfs.symlinkattributes(priv_path)
-            if priv_attr and priv_attr.mode == "file" then
+            local priv_mode = lfs.symlinkattributes(priv_path, "mode")
+            if priv_mode == "file" then
                 local existing = util.get_file_contents(priv_path)
                 if not existing or existing:sub(1, #driver.PRIVATE_HEADER_MARKER)
                    ~= driver.PRIVATE_HEADER_MARKER then
@@ -12940,8 +12980,8 @@ function driver.preflight_build_outputs(context, plan, options)
             end
             for _, header in ipairs({
                 { suffix = ".priv.h", marker = driver.PRIVATE_HEADER_MARKER },
-                { suffix = ".titan.h", marker = driver.FOREIGN_HEADER_MARKER },
-                { suffix = ".ffi.h", marker = driver.FFI_HEADER_MARKER },
+                { suffix = ".titan.h", marker = ffiheaders.FOREIGN_MARKER },
+                { suffix = ".ffi.h", marker = ffiheaders.MARKER },
             }) do
                 local filename = stem .. header.suffix
                 output(filename, owner)
@@ -13350,7 +13390,7 @@ function driver.publish_provider_bundle(
         if driver.IS_DARWIN then
             unchanged = same_file_tree(staged_dsym, public_dsym)
         else
-            unchanged = not lfs.symlinkattributes(public_dsym)
+            unchanged = not lfs.symlinkattributes(public_dsym, "mode")
         end
     end
     if unchanged then

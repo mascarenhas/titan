@@ -312,11 +312,17 @@ logical filenames.
    module's imported raw foreign binding slots; and
 5. every local direct-call helper body in declaration order.
 
-Before any generated companion is consumed or published, the driver applies
-required `#line` normalization. With `titanc --pretty-print` it additionally
-runs the configured `clang-format` with Titan's explicit style and include
-sorting disabled. Default builds do not invoke the formatter; either mode
-preserves the intentional include sequence above.
+Fresh source-foreign headers and restored recipes share
+`ffiheaders.foreign_contents`. It removes the blank physical lines after
+generated `#line` directives that fresh header publication already removes,
+preserving LF/CRLF spelling and all other recipe bytes. A replayed companion
+therefore has the same directive spacing before native preprocessing, rather
+than relying on a file-formatting step that direct restoration bypasses.
+The driver retains its final required normalization before publication. With
+`titanc --pretty-print` it additionally runs the configured `clang-format`
+with Titan's explicit style and include sorting disabled. Default builds do
+not invoke the formatter; either mode preserves the intentional include
+sequence above.
 
 Putting every prototype before every helper body supports calls among the
 module's foreign declarations. Include lines are normalized and deduplicated.
@@ -386,14 +392,26 @@ walking the same decorated foreign-function bodies again. Every plan is
 ownership-validated before any plan is written and is also included in the
 CLI's general output-path preflight.
 
-A required path may be replaced only when its first bytes are
-the applicable generated-header marker (`driver.FFI_HEADER_MARKER` or
-`driver.FOREIGN_HEADER_MARKER`); a user file, symlink, directory, or other
-unowned object is refused. For a source module with no remaining foreign
-declaration, a banner-owned old companion is removed and an unowned same path is
-left alone. Each final companion is written to a sibling stage, normalized and
-optionally formatted, then renamed over its owned destination only after the
-selected steps succeed. All final
+A required path may be replaced only when byte zero begins the exact marker for
+its header kind: `ffiheaders.MARKER` for `.ffi.h` or
+`ffiheaders.FOREIGN_MARKER` for `.titan.h`. The shared
+`ffiheaders.check_destination` check refuses a user file, a wrong-kind or
+displaced marker, a symlink, a directory, or another unowned object. Fresh
+header-kind checks use LuaFileSystem's scalar `mode` query; its table form can
+fail while resolving Windows directory destinations. Incremental relocation
+applies the same ownership check before comparing, adopting, or writing
+descriptor headers, recursive source-dependency helpers, and the module's own
+persisted foreign-header recipe. It also checks split-unit `.priv.h` contents
+against the existing `coder.PRIVATE_HEADER_MARKER` before rebinding or adopting
+them; their existing regular-file requirement remains in force.
+
+Missing `.ffi.h` descriptors and a module's own persisted `.titan.h` recipe can
+be materialized again. A refused destination remains untouched through the
+relocation miss and subsequent fresh-build preflight. For a source module with
+no remaining foreign declaration, a marker-owned old companion is removed and
+an unowned same path is left alone. Fresh publication writes each final companion
+to a sibling stage, normalizes and optionally formats it, then renames it over
+its owned destination only after the selected steps succeed. All final
 companions are published before any source object is compiled, and
 `driver.compile` retains a single-module fallback for direct programmatic
 callers.

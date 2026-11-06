@@ -4,8 +4,11 @@ local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local filesystem = require "spec.support.filesystem"
 local objectmetadata = require "titan-compiler.objectmetadata"
+local incremental = require "titan-compiler.incremental"
+local coverage = require "titan-compiler.coverage"
 
 local NAMESPACE = "incremental_cli_fixture"
 local APP = "incremental_cli_app"
@@ -249,16 +252,17 @@ local function no_native_compile(output)
     end
 end
 
-local function certified_exit(expected)
+local function certified_exit(expected, output)
+    output = output or workspace .. "/build"
     local executable = platform.windows and
-        assert(driver.windows_program_paths(APP, nil, nil, workspace .. "/build")).executable
-        or workspace .. "/build/" .. APP
+        assert(driver.windows_program_paths(APP, nil, nil, output)).executable
+        or output .. "/" .. APP
     local argv = { "env",
         "PATH=" .. (sdk_root or prefix) .. "/bin" .. (platform.windows and ";" or ":") ..
             (os.getenv("PATH") or ""),
         "TITAN_PATH_0_6=" ..
-            (platform.windows and (workspace .. "/build/lib/titan/0.6;") or "") ..
-            workspace .. "/build;" ..
+            (platform.windows and (output .. "/lib/titan/0.6;") or "") ..
+            output .. ";" ..
             (sdk_root or prefix) .. "/lib/titan/0.6;;", executable }
     local ok, output, why, status = run(argv)
     assert.equal("exit", why, output)
@@ -270,10 +274,16 @@ end
 describe("incremental and separate compilation (CLI)", function()
     before_each(function()
         compiler_root, sdk_root, compiler_environment = nil, nil, {}
-        workspace = assert(compiler_io.new_sync():tmpname())
+        local strategy = compiler_io.new_sync()
+        workspace = assert(strategy:tmpname())
         assert(os.remove(workspace))
         if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
         mkdir(workspace)
+        -- Owned-root relocation needs physical roots, not a temporary-directory
+        -- alias such as Darwin's /tmp. Keep intentional symlinks in each case.
+        workspace = assert(strategy:realpath(workspace))
+        -- Physical Windows paths still need the fixture's compiler-facing spelling.
+        if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
     end)
 
     after_each(function()
@@ -988,6 +998,628 @@ os.exit(result.ok and 0 or result.status or 1)
     end)
 
     describe("certified input decisions", function()
+        it("reuses every object, native node, link and probe after owned-root relocation", function()
+            local sdk = private_sdk()
+            write(sdk .. "/include/relocation_probe.h", [[
+                static inline int relocation_answer(void) { return 42; }
+            ]])
+            local stem = source(APP, [[
+                foreign import "relocation_probe.h"
+                local math = import "math"
+                function main(args: {string}): integer
+                    local first: foreign *int = nil
+                    local second = first as foreign *double
+                    return math.abs(ffi.relocation_answer() as integer)
+                end
+            ]])
+            compiler_environment.TITAN_PROBE_CACHE_DISABLE = "0"
+            compiler_environment.TITAN_PREFIX = sdk
+            compiler_environment.TITAN_PATH_0_6 = sdk .. "/lib/titan/0.6"
+            write(workspace .. "/helper.c", "int relocation_native_helper(void) { return 17; }\n")
+            certified("--c-source", workspace .. "/helper.c", APP)
+            local saved = remember_objects({ [APP] = stem })
+            local old_output, moved_output = workspace .. "/build", workspace .. "/moved output"
+            local moved_sdk = workspace .. "/moved sdk"
+            assert(os.rename(sdk, moved_sdk))
+            assert(os.rename(old_output, moved_output))
+            assert.is_false(exists(sdk)); assert.is_false(exists(old_output))
+            sdk_root = moved_sdk
+            compiler_environment.TITAN_PREFIX = moved_sdk
+            compiler_environment.TITAN_PATH_0_6 = moved_sdk .. "/lib/titan/0.6"
+            saved[APP].path = moved_output .. "/" .. APP .. ".o"
+            local output = compiled("-o", moved_output, "--incremental", "--source-first",
+                "-v", "--c-source", workspace .. "/helper.c", APP)
+            local executable = platform.windows and
+                assert(driver.windows_program_paths(APP, nil, nil, moved_output)).executable
+                or moved_output .. "/" .. APP
+            local _, runtime_output, why, status = run({ "env",
+                "TITAN_PATH_0_6=" ..
+                    (platform.windows and moved_output .. "/lib/titan/0.6;" or "") ..
+                    moved_output .. ";" .. moved_sdk .. "/lib/titan/0.6",
+                "PATH=" .. moved_sdk .. "/bin" .. (platform.windows and ";" or ":") ..
+                    (os.getenv("PATH") or ""), executable })
+            assert.equal("exit", why, runtime_output)
+            assert.equal(42, status, runtime_output)
+            decisions(output, saved, {})
+            no_native_compile(output)
+            assert.matches("Titan link hit", output, 1, true)
+            assert.is_nil(output:find("configuration options", 1, true), output)
+            local receipt = saved[APP].path:gsub("%.o$", ".relocation")
+            assert.is_true(exists(receipt))
+            local original_receipt = read(receipt)
+            output = compiled("-o", moved_output, "--incremental", "--source-first",
+                "-v", "--c-source", workspace .. "/helper.c", APP)
+            decisions(output, saved, {})
+            no_native_compile(output)
+            assert.equal(original_receipt, read(receipt))
+            local generated = moved_output .. "/" .. APP .. ".c"
+            write(generated, "/* changed generated prefix */\n" .. read(generated))
+            output = compiled("-o", moved_output, "--incremental", "--source-first",
+                "-v", "--c-source", workspace .. "/helper.c", APP)
+            decisions(output, saved, { [APP] = "parts" })
+            -- Force only the authored module through checking to observe actual
+            -- persistent baseline/candidate hits in its moved SDK namespace.
+            output = compiled("-o", moved_output, "-c", "-v", APP)
+            assert.matches("[cprobe] baseline cache hit", output, 1, true)
+            assert.matches("[cprobe] candidate cache hit", output, 1, true)
+            assert.is_nil(output:find("[cprobe] baseline cache miss", 1, true), output)
+            assert.is_nil(output:find("[cprobe] candidate cache miss", 1, true), output)
+        end)
+
+        it("repairs source-import companions after an A-to-B-to-A root round trip", function()
+            local sdk = private_sdk()
+            local compiler = private_compiler()
+            local generator = compiler .. "/titan-compiler/coder/generate.lua"
+            local configured, replacements = read(generator):gsub(
+                "(coder%.DEFAULT_SPLIT_THRESHOLD%s*=)[^\n]+", "%1 0")
+            assert.equal(1, replacements)
+            write(generator, configured)
+            local dependency = NAMESPACE .. ".return_dep"
+            local dependency_stem = source(dependency, [[
+                local foreign function bump(item: int): int return item + 1 end
+                function anchor(value: integer): integer return value end
+            ]])
+            local function consumer(value)
+                return 'local dep = import "' .. dependency .. [[.titan"
+                    function main(args: {string}): integer
+                        return dep.bump(]] .. value .. [[) as integer
+                    end
+                ]]
+            end
+            local stem = source(APP, consumer(40))
+            local output = workspace .. "/build"
+            local function build(destination)
+                return compiled("-o", destination, "--incremental", "--source-first",
+                    "--c-parts", "2", "-v", APP)
+            end
+            build(output)
+            local saved = remember_objects({ [dependency] = dependency_stem, [APP] = stem })
+            local moved_output = workspace .. "/moved output"
+            local moved_sdk = workspace .. "/moved sdk"
+            assert(os.rename(sdk, moved_sdk))
+            assert(os.rename(output, moved_output))
+            assert.is_false(exists(sdk)); assert.is_false(exists(output))
+            sdk_root = moved_sdk
+            for _, item in pairs(saved) do item.path = moved_output .. item.path:sub(#output + 1) end
+            local text = build(moved_output)
+            decisions(text, saved, {})
+            assert(os.rename(moved_sdk, sdk))
+            assert(os.rename(moved_output, output))
+            assert.is_false(exists(moved_sdk)); assert.is_false(exists(moved_output))
+            sdk_root = sdk
+            for _, item in pairs(saved) do item.path = output .. item.path:sub(#moved_output + 1) end
+            source(APP, consumer(41))
+            text = build(output)
+            decisions(text, saved, { [APP] = "source-content" })
+            local header = output .. "/" .. dependency:gsub("%.", "/") .. ".titan.h"
+            assert.matches(header:gsub("%.titan%.h$", ".ffi.h"), read(header), 1, true)
+            assert.is_nil(read(header):find(moved_output, 1, true))
+            certified_exit(42)
+            local headers = { header, (header:gsub("%.titan%.h$", ".ffi.h")) }
+            saved = remember_objects({ [dependency] = dependency_stem, [APP] = stem })
+            local private = header:gsub("%.titan%.h$", ".priv.h")
+            assert.is_true(exists(private))
+            headers[#headers + 1] = private
+            for _, filename in ipairs(headers) do
+                assert.is_nil(read(filename):find(moved_output, 1, true))
+                assert.is_nil(read(filename):find(moved_sdk, 1, true))
+            end
+            local timestamp = os.time() - 120
+            for _, filename in ipairs(headers) do assert(lfs.touch(filename, timestamp, timestamp)) end
+            decisions(build(output), saved, {})
+            for _, filename in ipairs(headers) do assert.equal(timestamp, lfs.attributes(filename, "modification")) end
+        end)
+
+        describe("relocated companion destination ownership", function()
+            local function fixture()
+                local compiler = private_compiler()
+                local generator = compiler .. "/titan-compiler/coder/generate.lua"
+                local configured, replacements = read(generator):gsub(
+                    "(coder%.DEFAULT_SPLIT_THRESHOLD%s*=)[^\n]+", "%1 0")
+                assert.equal(1, replacements)
+                write(generator, configured)
+                local nested, middle = NAMESPACE .. ".owned_nested", NAMESPACE .. ".owned_middle"
+                local stems = {
+                    [nested] = source(nested, [[
+                        local foreign function bump(item: int): int return item + 1 end
+                        function anchor(value: integer): integer return value end
+                    ]]),
+                    [middle] = source(middle, 'local dep = import "' .. nested .. [[.titan"
+                        function answer(): integer return dep.bump(40) as integer end
+                    ]]),
+                    [APP] = source(APP, 'local dep = import "' .. middle .. [[.titan"
+                        local foreign function bump(item: int): int return item + 1 end
+                        function main(args: {string}): integer
+                            return bump(dep.answer() as foreign int) as integer
+                        end
+                    ]]),
+                }
+                local output = workspace .. "/build"
+                compiled("-o", output, "--incremental", "--source-first", "--c-parts", "2", "-v", APP)
+                local saved = remember_objects(stems)
+                return output, saved, nested
+            end
+
+            for _, target in ipairs({
+                { owner = "root", suffix = ".ffi.h" },
+                { owner = "root", suffix = ".titan.h" },
+                { owner = "recursive dependency", suffix = ".ffi.h" },
+                { owner = "recursive dependency", suffix = ".titan.h" },
+                { owner = "root", suffix = ".priv.h" },
+            }) do
+                it("preserves a user-replaced " .. target.owner .. " " .. target.suffix ..
+                    " through relocation and fresh-path refusal", function()
+                    local output, saved, nested = fixture()
+                    local name = target.owner == "root" and APP or nested
+                    local relative = "/" .. name:gsub("%.", "/") .. target.suffix
+                    assert.is_true(exists(output .. relative))
+                    local receipt_relative = "/" .. APP .. ".relocation"
+                    local decode = require("titan-compiler.graphcodec").decode
+                    assert.is_true(assert(decode(read(output .. receipt_relative))).complete)
+                    local replacement = '/* user replacement */\r\n#include "' ..
+                        output .. '/user-owned.h"\r\n\0preserve every byte\n'
+                    write(output .. relative, replacement)
+                    local moved = workspace .. "/moved output"
+                    local destination = paths.from_slash(moved .. relative)
+                    assert(os.rename(output, moved))
+                    for _, item in pairs(saved) do item.path = moved .. item.path:sub(#output + 1) end
+                    local ok, text = compile("-o", moved, "--incremental", "--source-first",
+                        "--c-parts", "2", "-v", APP)
+                    assert.is_false(ok, text)
+                    assert.matches("refusing to overwrite user-owned generated-header path", text, 1, true)
+                    assert.matches(destination, text, 1, true)
+                    -- An incomplete receipt proves local relocation ran before
+                    -- output preflight refused; aborts do not print decisions.
+                    assert.is_false(assert(decode(read(moved .. receipt_relative))).complete)
+                    assert.equal(replacement, read(moved .. relative))
+                    no_native_compile(text)
+                    -- The relocation miss falls back to ordinary ownership
+                    -- preflight; a later forced fresh build must refuse too.
+                    ok, text = compile("-o", moved, "--source-first", "--c-parts", "2", "-v", APP)
+                    assert.is_false(ok, text)
+                    assert.matches("refusing to overwrite user-owned generated-header path", text, 1, true)
+                    assert.matches(destination, text, 1, true)
+                    assert.equal(replacement, read(moved .. relative))
+                    no_native_compile(text)
+                    for _, item in pairs(saved) do
+                        assert.equal(item.bytes, read(item.path))
+                        assert.equal(item.timestamp, lfs.attributes(item.path, "modification"))
+                    end
+                end)
+            end
+
+            for _, missing in ipairs({ false, true }) do
+                it("repairs and reuses " .. (missing and "missing" or "marked") ..
+                    " companions after moving the output root", function()
+                    local output, saved, nested = fixture()
+                    if missing then
+                        for _, suffix in ipairs({ ".ffi.h", ".titan.h" }) do
+                            assert(os.remove(output .. "/" .. APP .. suffix))
+                        end
+                        assert(os.remove(output .. "/" .. nested:gsub("%.", "/") .. ".ffi.h"))
+                    end
+                    local moved = workspace .. "/moved output"
+                    assert(os.rename(output, moved))
+                    for _, item in pairs(saved) do item.path = moved .. item.path:sub(#output + 1) end
+                    local text = compiled("-o", moved, "--incremental", "--source-first",
+                        "--c-parts", "2", "-v", APP)
+                    decisions(text, saved, {})
+                    no_native_compile(text)
+                    for _, name in ipairs({ APP, nested }) do
+                        for _, suffix in ipairs({ ".ffi.h", ".titan.h", ".priv.h" }) do
+                            local filename = moved .. "/" .. name:gsub("%.", "/") .. suffix
+                            assert.is_true(exists(filename), filename)
+                            assert.is_nil(read(filename):find(output .. "/", 1, true), filename)
+                        end
+                    end
+                    local executable = platform.windows and
+                        assert(driver.windows_program_paths(APP, nil, nil, moved)).executable
+                        or moved .. "/" .. APP
+                    local _, runtime_output, why, status = run({ "env",
+                        "TITAN_PATH_0_6=" ..
+                            (platform.windows and moved .. "/lib/titan/0.6;" or "") ..
+                            moved .. ";" .. prefix .. "/lib/titan/0.6",
+                        "PATH=" .. prefix .. "/bin" .. (platform.windows and ";" or ":") ..
+                            (os.getenv("PATH") or ""), executable })
+                    assert.equal("exit", why, runtime_output)
+                    assert.equal(42, status, runtime_output)
+                    text = compiled("-o", moved, "--incremental", "--source-first",
+                        "--c-parts", "2", "-v", APP)
+                    decisions(text, saved, {})
+                    no_native_compile(text)
+                end)
+            end
+        end)
+
+        for _, covered in ipairs({ false, true }) do
+            it("certifies raw generated-C prefixes for split modules" ..
+                (covered and " after coverage conversion" or ""), function()
+                local compiler = private_compiler()
+                local generator = compiler .. "/titan-compiler/coder/generate.lua"
+                local configured, replacements = read(generator):gsub(
+                    "(coder%.DEFAULT_SPLIT_THRESHOLD%s*=)[^\n]+", "%1 0")
+                assert.equal(1, replacements)
+                write(generator, configured)
+                local functions = {}
+                for index = 1, 6 do
+                    functions[index] = ("function value%d(): integer return %d end\n"):format(index, index)
+                end
+                functions[#functions + 1] = main(42)
+                local stem = source(APP, table.concat(functions))
+                local arguments = { "-c", "--c-parts", "2" }
+                if covered then
+                    local cc = os.getenv("TITAN_COVERAGE_TEST_CC") or driver.CC
+                    local version_argv = assert(driver.split_shell_words(cc))
+                    version_argv[#version_argv + 1] = "--version"
+                    local available, banner = run(version_argv)
+                    assert.is_true(available, banner)
+                    local clang = banner:lower():find("clang", 1, true) ~= nil
+                    local backend = os.getenv("TITAN_COVERAGE_TEST_BACKEND") or
+                        (clang and "llvm-gcov" or "gcc-gcov")
+                    local gcov = os.getenv("TITAN_COVERAGE_TEST_GCOV") or
+                        (clang and "llvm-cov gcov" or "gcov")
+                    local prepared, reason = coverage.prepare({
+                        CC = cc, EMIT_LINE_DIRECTIVES = true,
+                        split_shell_words = driver.split_shell_words,
+                    }, { coverage_backend = backend, coverage_gcov = gcov }, compiler_io.new_sync())
+                    if not prepared then
+                        if os.getenv("TITAN_COVERAGE_TEST_REQUIRED") == "1" or
+                            os.getenv("TITAN_COVERAGE_TEST_CC") or
+                            os.getenv("TITAN_COVERAGE_TEST_GCOV") or
+                            os.getenv("TITAN_COVERAGE_TEST_BACKEND") then
+                            assert.is_nil(reason, reason)
+                        end
+                        pending("native coverage tools unavailable: " .. reason)
+                        return
+                    end
+                    compiler_environment.CC = cc
+                    for _, value in ipairs({ "--coverage", "--coverage-backend", backend,
+                        "--coverage-gcov", gcov }) do
+                        arguments[#arguments + 1] = value
+                    end
+                end
+                arguments[#arguments + 1] = APP
+                certified(table.unpack(arguments))
+                local object = object_path(stem)
+                if covered then object = coverage.output_path(object) end
+                local native = assert(objectmetadata.read(read(object), object)).object_metadata
+                local inputs = native.certificate.generated
+                assert.is_true(#native.parts > 1)
+                assert.equal(#native.parts, #inputs)
+                assert.equal(covered, native.coverage and native.coverage.enabled == true or false)
+                local hashing = {}
+                for index, part in ipairs(native.parts) do
+                    local filename = inputs[index].spelling
+                    local contents = read(filename)
+                    local input = inputs[index]
+                    local prefix = contents:sub(1, input.bytes)
+                    assert.equal(input.bytes, #prefix)
+                    assert.equal(input.sha256, incremental.digest(hashing, "generated-c", prefix), filename)
+                    if part.index == 0 then
+                        assert.is_true(#contents > input.bytes)
+                    else
+                        assert.equal(input.bytes, #contents)
+                    end
+                end
+            end)
+        end
+
+        for _, observable in ipairs({ false, true }) do
+            it("reuses Windows mixed-case outputs after an SDK-only move " ..
+                (observable and "with observable output-header __FILE__" or "without a path macro"), function()
+                if not platform.windows then pending("Windows concrete path spelling"); return end
+                local sdk = private_sdk()
+                local output = workspace .. "/MixedCaseOutput"
+                local contents = main(42)
+                if observable then
+                    local header = output .. "/Include/MixedCaseHeader.h"
+                    write(header, [[
+                        #include <string.h>
+                        static inline int relocation_path_length(void) { return (int)strlen(__FILE__); }
+                    ]])
+                    contents = "foreign import " .. string.format("%q", header) .. [[
+                        function main(args: {string}): integer
+                            return ffi.relocation_path_length() as integer
+                        end
+                    ]]
+                end
+                source(APP, contents)
+                local function build()
+                    return compiled("-c", "-o", output, "--incremental", "--source-first", "-v", APP)
+                end
+                build()
+                local object, timestamp = output .. "/" .. APP .. ".o", os.time() - 120
+                assert(lfs.touch(object, timestamp, timestamp))
+                local saved = { [APP] = { path = object, bytes = read(object), timestamp = timestamp } }
+                local moved = workspace .. "/MovedSDKCase"
+                assert(os.rename(sdk, moved))
+                assert.is_false(exists(sdk))
+                sdk_root = moved
+                local text = build()
+                decisions(text, saved, {})
+                no_native_compile(text)
+                assert.is_true(exists(output .. "/" .. APP .. ".ffi.h"))
+                local directories = 0
+                for name in lfs.dir(workspace) do
+                    if name:lower() == "mixedcaseoutput" then
+                        assert.equal("MixedCaseOutput", name)
+                        directories = directories + 1
+                    end
+                end
+                assert.equal(1, directories)
+            end)
+        end
+
+        it("keeps moved source-adjacent builds conservative without an explicit output tree", function()
+            source(APP, main(43))
+            local previous = assert(lfs.currentdir())
+            local ok, failure = xpcall(function()
+                assert(lfs.chdir(workspace))
+                local function build()
+                    local argv = compiler_arguments()
+                    for index, argument in ipairs(argv) do
+                        if argument == "--tree" then argv[index + 1] = "."; break end
+                    end
+                    for _, argument in ipairs({ "-c", "--incremental", "--source-first", "-v", APP }) do
+                        argv[#argv + 1] = argument
+                    end
+                    local built, text = run(argv)
+                    assert.is_true(built, text)
+                    return text
+                end
+                build()
+                local old, moved = workspace, workspace .. "-moved-adjacent"
+                -- Windows cannot rename the directory holding this process's cwd.
+                assert(lfs.chdir(previous))
+                assert(os.rename(old, moved))
+                workspace = moved
+                assert(lfs.chdir(workspace))
+                assert.is_false(exists(old))
+                local text = build()
+                assert.matches("Titan object miss " .. APP .. ": output-moved", text, 1, true)
+                assert.is_nil(text:find("Titan object hit " .. APP, 1, true))
+            end, debug.traceback)
+            assert(lfs.chdir(previous))
+            assert.is_true(ok, failure)
+        end)
+
+        it("invalidates an observable foreign-header __FILE__ during SDK relocation", function()
+            local sdk = private_sdk()
+            write(sdk .. "/include/relocation_file.h", [[
+                #include <string.h>
+                static inline int relocation_answer(void) { return (int)strlen(__FILE__); }
+            ]])
+            local stem = source(APP, [[
+                foreign import "relocation_file.h"
+                function main(args: {string}): integer
+                    return ffi.relocation_answer() as integer
+                end
+            ]])
+            certified(APP)
+            local saved = remember_objects({ [APP] = stem })
+            local moved = workspace .. "/much longer moved SDK"
+            assert(os.rename(sdk, moved))
+            assert.is_false(exists(sdk))
+            sdk_root = moved
+            decisions(certified(APP), saved, { [APP] = "c-input relocated generated-C semantics" })
+            certified_exit(#(moved .. "/include/relocation_file.h"))
+        end)
+
+        it("invalidates an observable __BASE_FILE__ during output-root relocation", function()
+            write(workspace .. "/relocation_base.h", [[
+                #include <string.h>
+                static inline int relocation_base(void) { return (int)strlen(__BASE_FILE__); }
+            ]])
+            local stem = source(APP, [[
+                foreign import "relocation_base.h"
+                function main(args: {string}): integer
+                    return ffi.relocation_base() as integer
+                end
+            ]])
+            certified(APP)
+            local saved = remember_objects({ [APP] = stem })
+            local moved = workspace .. "/longer moved output"
+            assert(os.rename(workspace .. "/build", moved))
+            saved[APP].path = moved .. "/" .. APP .. ".o"
+            local text = compiled("-o", moved, "--incremental", "--source-first", "-v", APP)
+            decisions(text, saved, { [APP] = "c-input relocated generated-C semantics" })
+        end)
+
+        for _, moved_root in ipairs({ "SDK", "output" }) do
+            it("rebuilds native presumed paths after an " .. moved_root .. "-only move", function()
+                local sdk = moved_root == "SDK" and private_sdk() or prefix
+                local output = workspace .. "/build"
+                local header_directory = moved_root == "SDK" and sdk .. "/include" or output
+                write(header_directory .. "/relocation_builtin.h", [[
+                    #include <stdio.h>
+                    #define RELOCATION_LOCATION(name) __builtin_ ## name ()
+                    static inline int relocation_path(void) {
+                        puts(RELOCATION_LOCATION(FILE));
+                        return 0;
+                    }
+                ]])
+                local control = source(OTHER, "function value(): integer return 0 end\n")
+                local stem = source(APP, [[
+                    foreign import "relocation_builtin.h"
+                    local control = import "incremental_cli_other"
+                    function main(args: {string}): integer
+                        return (ffi.relocation_path() as integer) + control.value()
+                    end
+                ]])
+                local function build()
+                    return compiled("-o", output, "--incremental", "--source-first",
+                        "-I", header_directory, "-v", APP)
+                end
+                build()
+                local saved = remember_objects({ [APP] = stem, [OTHER] = control })
+                local expected = (header_directory .. "/relocation_builtin.h\n"):gsub("\\", "/")
+                assert.equal(expected, (certified_exit(0):gsub("\\", "/")))
+                if moved_root == "SDK" then
+                    local moved = workspace .. "/much longer moved SDK"
+                    assert(os.rename(sdk, moved))
+                    assert.is_false(exists(sdk))
+                    sdk_root, header_directory = moved, moved .. "/include"
+                    -- Output and generated filename remain fixed; only the
+                    -- builtin's included SDK-header origin has changed.
+                    assert.equal(workspace .. "/build", output)
+                else
+                    local moved = workspace .. "/much longer moved output"
+                    assert(os.rename(output, moved))
+                    assert.is_false(exists(output))
+                    for _, previous in pairs(saved) do
+                        previous.path = moved .. previous.path:sub(#output + 1)
+                    end
+                    output, header_directory = moved, moved
+                end
+                local text = build()
+                decisions(text, saved, { [APP] = "c-input relocated generated-C semantics" })
+                expected = (header_directory .. "/relocation_builtin.h\n"):gsub("\\", "/")
+                assert.equal(expected, (certified_exit(0, output):gsub("\\", "/")))
+                saved[APP].bytes, saved[APP].timestamp = read(saved[APP].path), os.time() - 120
+                assert(lfs.touch(saved[APP].path, saved[APP].timestamp, saved[APP].timestamp))
+                text = build()
+                decisions(text, saved, {})
+                no_native_compile(text)
+            end)
+        end
+
+        it("conservatively relocates signature-bearing external assertions but keeps ordinary controls", function()
+            local sdk = private_sdk()
+            write(workspace .. "/stable_assert.h", [[
+                #include <assert.h>
+                #include <stdio.h>
+                static inline int assertion_answer(int value) {
+                    assert(value >= 0);
+                    puts(__PRETTY_FUNCTION__);
+                    return value;
+                }
+            ]])
+            local control = source(OTHER, "function value(): integer return 0 end\n")
+            local stem = source(APP, [[
+                foreign import "stable_assert.h"
+                local control = import "incremental_cli_other"
+                function main(args: {string}): integer
+                    return (ffi.assertion_answer(42) as integer) + control.value()
+                end
+            ]])
+            certified(APP)
+            local original = certified_exit(42)
+            assert.matches("assertion_answer", original, 1, true)
+            local stems = { [APP] = stem, [OTHER] = control }
+            local saved = remember_objects(stems)
+            local text = certified(APP)
+            decisions(text, saved, {})
+            no_native_compile(text)
+            local moved = workspace .. "/moved signature SDK"
+            assert(os.rename(sdk, moved))
+            assert.is_false(exists(sdk))
+            sdk_root = moved
+            text = certified(APP)
+            -- A signature is location-semantic on every compiler even if this
+            -- particular (non-anonymous) signature's runtime value is unchanged.
+            decisions(text, saved, { [APP] = "c-input relocated generated-C semantics" })
+            assert.equal(original, certified_exit(42))
+            saved = remember_objects(stems)
+            text = certified(APP)
+            decisions(text, saved, {})
+            no_native_compile(text)
+        end)
+
+        it("rebuilds a presumed-path C source after an SDK-only move while ordinary native nodes hit", function()
+            local sdk = private_sdk()
+            write(sdk .. "/include/native_location.h", [[
+                #define NATIVE_LOCATION(name) __builtin_ ## name ()
+                static inline const char *native_sdk_path(void) { return NATIVE_LOCATION(FILE); }
+            ]])
+            write(sdk .. "/include/native_control.h",
+                "static inline int native_sdk_control(void) { return 0; }\n")
+            write(workspace .. "/native_location_api.h", [[
+                int native_location_path(void);
+                int native_location_control(void);
+            ]])
+            local helper, control = workspace .. "/native_path.c", workspace .. "/native_control.c"
+            write(helper, [[
+                #include <stdio.h>
+                #include <native_location.h>
+                int native_location_path(void) { puts(native_sdk_path()); return 0; }
+            ]])
+            write(control, [[
+                #include <native_control.h>
+                int native_location_control(void) { return native_sdk_control(); }
+            ]])
+            local stem = source(APP, [[
+                foreign import "native_location_api.h"
+                function main(args: {string}): integer
+                    return (ffi.native_location_path() as integer) +
+                        (ffi.native_location_control() as integer)
+                end
+            ]])
+            local function build()
+                return certified("--c-source", helper, "--c-source", control, APP)
+            end
+            build()
+            local expected = (sdk .. "/include/native_location.h\n"):gsub("\\", "/")
+            assert.equal(expected, (certified_exit(0):gsub("\\", "/")))
+            local saved = remember_objects({ [APP] = stem })
+            local text = build()
+            decisions(text, saved, {})
+            no_native_compile(text)
+            assert.matches("Titan native hit " .. helper, text, 1, true)
+            assert.matches("Titan native hit " .. control, text, 1, true)
+            local moved = workspace .. "/much longer native SDK"
+            assert(os.rename(sdk, moved))
+            assert.is_false(exists(sdk))
+            sdk_root = moved
+            text = build()
+            -- The generated Titan part has declarations only; its object and
+            -- the location-free C node still hit at the fixed output root.
+            decisions(text, saved, {})
+            assert.matches("Titan native miss " .. helper, text, 1, true)
+            assert.matches("Titan native hit " .. control, text, 1, true)
+            expected = (moved .. "/include/native_location.h\n"):gsub("\\", "/")
+            assert.equal(expected, (certified_exit(0):gsub("\\", "/")))
+            text = build()
+            decisions(text, saved, {})
+            no_native_compile(text)
+            assert.matches("Titan native hit " .. helper, text, 1, true)
+            assert.matches("Titan native hit " .. control, text, 1, true)
+        end)
+
+        it("keeps absolute user source spelling significant during relocation", function()
+            source(APP, main(43))
+            certified("-c", APP)
+            local output = workspace .. "/build"
+            local old = workspace
+            local moved = workspace .. "-moved-source"
+            assert(os.rename(workspace, moved))
+            workspace = moved
+            local text = certified("-c", APP)
+            assert.matches("source%-set", text)
+            assert.is_nil(text:find("Titan object hit " .. APP, 1, true))
+            assert.is_false(exists(old))
+            assert.is_false(exists(output))
+        end)
+
         for _, publication in ipairs({ "copy", "hardlink", "symlink" }) do
             it("reuses objects after identical " .. publication .. " SDK publication", function()
                 if publication == "symlink" then

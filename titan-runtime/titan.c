@@ -1,7 +1,19 @@
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
+/* Keep Darwin's dlfcn extensions (including RTLD_DEFAULT) visible alongside
+** the POSIX clock declarations, as in the other runtime translation units. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#if !defined(_WIN32)
+#include <time.h>
+#endif
 #if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 #include <dlfcn.h>
 #endif
@@ -19,6 +31,31 @@
 #if defined(_WIN32)
 #include "titan_winloader.h"
 #endif
+
+/* Private runner wall clock. Keep platform declarations out of generated C
+** and keep titan.test usable without libuv on native and browser targets. */
+lua_Integer titan_test_monotonic_ns(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER counter, frequency;
+    lua_Integer seconds, nanoseconds;
+    if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0 ||
+        !QueryPerformanceCounter(&counter) || counter.QuadPart < 0)
+        return -1;
+    seconds = counter.QuadPart / frequency.QuadPart;
+    /* Scale only the subsecond remainder, never the complete QPC counter. */
+    nanoseconds = (lua_Integer)((long double)(counter.QuadPart %
+        frequency.QuadPart) * 1000000000.0L / (long double)frequency.QuadPart);
+    if (seconds > (LUA_MAXINTEGER - nanoseconds) / 1000000000)
+        return -1;
+    return seconds * 1000000000 + nanoseconds;
+#else
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 ||
+        now.tv_sec > (LUA_MAXINTEGER - now.tv_nsec) / 1000000000)
+        return -1;
+    return (lua_Integer)now.tv_sec * 1000000000 + now.tv_nsec;
+#endif
+}
 
 /*
 ** These assertions make the assumptions inherited from Lua's MAXASIZE

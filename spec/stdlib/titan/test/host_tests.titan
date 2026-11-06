@@ -3,6 +3,8 @@ local command = import "support.command.titan"
 local runtime_test = import "support.runtime.titan"
 local common = import "support.common.titan"
 local fs = import "fs"
+local string = import "string"
+local math = import "math"
 
 local function assert_outside_runner_probe(source: string, label: string)
   local output, why, code = command.lua(source)
@@ -72,6 +74,156 @@ function test_public_runner_rejects_nested_runs_and_resets_state(
   end)
 end
 
+local function reported_hundredths(output: string, prefix: string,
+                                   total: boolean): integer
+  local expression = [[^ \(([0-9]+)[.]([0-9][0-9]) ms\)$]]
+  if total then
+    expression = [[^ \(([0-9]+)[.]([0-9][0-9]) ms total\)$]]
+  end
+  local found = false
+  local duration = 0
+  for row in string.gmatch(output, "([^\n]*)\n") do
+    local line: string = row:group(1)
+    -- Scan only LF-terminated rows of the complete runner report, dropping one
+    -- CR immediately before that LF. Embedded or doubled CR stays in the row
+    -- and fails the strict pattern; an unterminated final fragment is skipped.
+    if string.sub(line, -1) == "\r" then line = string.sub(line, 1, -2) end
+    if string.sub(line, 1, #prefix) == prefix then
+      local match? = string.match(string.sub(line, #prefix + 1), expression)
+      if match then
+        test.assert(not found, "duplicate timed line: " .. prefix)
+        found = true
+        local whole: integer = math.tonumber(match:group(1))
+        local fraction: integer = math.tonumber(match:group(2))
+        duration = whole * 100 + fraction
+      end
+    end
+  end
+  test.assert(found, "missing two-decimal timing: " .. prefix .. "\n" .. output)
+  return duration
+end
+
+function test_public_runner_reports_wall_times_and_owner_totals(
+    context: test.Context)
+  local output = ""
+  local filtered = ""
+  local zero = ""
+  local empty = ""
+  local boundary_prefix = "[       OK ] timing.fixture.case"
+  test.assert(reported_hundredths(boundary_prefix .. " (1.25 ms)\n",
+    boundary_prefix, false) == 125)
+  test.assert(reported_hundredths(boundary_prefix .. " (1.25 ms)\r\n",
+    boundary_prefix, false) == 125)
+  for malformed in string.split(" (1.25 ms)\r\r\n| (1.2\r5 ms)\n| (1.25 ms)\r", "[|]") do
+    common.assert_raises_contains(function ()
+      reported_hundredths(boundary_prefix .. malformed, boundary_prefix, false)
+    end, "missing two-decimal timing")
+  end
+  runtime_test.run(function ()
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    defer command.remove_tree(workspace)
+    fs.write_file(workspace .. "/test_runner_timing_app.titan",
+      fs.read_file("spec/fixtures/stdlib/titan/test_runner_timing_app.titan"))
+    local compiled, why, code = command.compile(workspace,
+                                               "test_runner_timing_app")
+    test.assert(why == "exit" and code == 0,
+                "timing child compilation failed: " .. compiled)
+    local program = command.program(workspace, "test_runner_timing_app")
+    output, why, code = command.capture({program})
+    test.assert(why == "exit" and code == 1,
+                "timed failures changed the runner status: " .. output)
+    filtered, why, code = command.capture({
+      program, "--filter=^timing[.]alpha[.]parent$"
+    })
+    test.assert(why == "exit" and code == 0,
+                "timed filtered run failed: " .. filtered)
+    zero, why, code = command.capture({program, "--filter=^absent$"})
+    test.assert(why == "exit" and code == 0,
+                "zero-selection status changed: " .. zero)
+    empty, why, code = command.capture({program, "--empty"})
+    test.assert(why == "exit" and code == 0,
+                "empty runner status changed: " .. empty)
+  end)
+
+  context:run("inclusive_body_descendants_and_cleanup", function (_: test.Context)
+    local parent = reported_hundredths(output,
+      "[       OK ] timing.alpha.parent", false)
+    local child = reported_hundredths(output,
+      "[       OK ] timing.alpha.parent.child", false)
+    local grandchild = reported_hundredths(output,
+      "[       OK ] timing.alpha.parent.child.grandchild", false)
+    test.assert(grandchild >= 1000, "case clock excluded a wall-clock wait")
+    test.assert(child >= grandchild + 3500,
+                "child timing excluded its body or cleanup")
+    test.assert(parent >= child + 4500,
+                "parent timing excluded its body, descendants, or cleanup")
+  end)
+  context:run("failure_skip_and_uninvoked_children", function (_: test.Context)
+    test.assert(reported_hundredths(output,
+      "[  FAILED  ] timing.alpha.failed", false) >= 2000,
+      "failure timing excluded body or cleanup")
+    test.assert(reported_hundredths(output,
+      "[  SKIPPED ] timing.beta.skipped (timed skip)", false) >= 2000,
+      "skip timing excluded body or cleanup")
+    test.assert(reported_hundredths(output,
+      "[  FAILED  ] timing.beta.cleanup_failure", false) >= 1000,
+      "cleanup failure omitted its wall time")
+    test.assert(reported_hundredths(output,
+      "[  SKIPPED ] timing.alpha.failed.never (parent failed)", false) == 0,
+      "uninvoked failure child did not report zero time")
+    test.assert(reported_hundredths(output,
+      "[  SKIPPED ] timing.beta.skipped.never (parent skipped: timed skip)",
+      false) == 0, "uninvoked skipped child did not report zero time")
+    reported_hundredths(output, "[  SKIPPED ] timing.gamma.reasonless", false)
+    test.assert(common.contains(output, "[==========] 10 tests ran.") and
+                common.contains(output, "[  PASSED  ] 4 tests.") and
+                common.contains(output, "[  SKIPPED ] 4 tests.") and
+                common.contains(output, "[  FAILED  ] 2 tests."),
+                "timing changed outcome accounting")
+  end)
+  context:run("interleaved_owner_and_independent_run_totals",
+    function (_: test.Context)
+      local alpha = reported_hundredths(output,
+        "[----------] timing.alpha", true)
+      local beta = reported_hundredths(output,
+        "[----------] timing.beta", true)
+      local gamma = reported_hundredths(output,
+        "[----------] timing.gamma", true)
+      local alpha_cases = reported_hundredths(output,
+        "[       OK ] timing.alpha.parent", false) +
+        reported_hundredths(output, "[  FAILED  ] timing.alpha.failed", false) +
+        reported_hundredths(output, "[       OK ] timing.alpha.later", false)
+      local beta_cases = reported_hundredths(output,
+        "[  SKIPPED ] timing.beta.skipped (timed skip)", false) +
+        reported_hundredths(output, "[  FAILED  ] timing.beta.cleanup_failure",
+                            false)
+      test.assert(math.abs(alpha - alpha_cases) <= 2 and
+                  math.abs(beta - beta_cases) <= 1,
+                  "owner total lost interleaved roots or counted children twice")
+      local run = reported_hundredths(output, "[==========] 10 tests ran.", true)
+      test.assert(run + 3 >= alpha + beta + gamma,
+                  "run total did not span top-level intervals")
+    end)
+  context:run("selection_and_empty_runs", function (_: test.Context)
+    local parent = reported_hundredths(filtered,
+      "[       OK ] timing.alpha.parent", false)
+    test.assert(parent >= 4000, "filtered parent excluded body or cleanup")
+    test.assert(reported_hundredths(filtered,
+      "[----------] timing.alpha", true) == parent,
+      "filtered owner included unselected cases")
+    test.assert(not common.contains(filtered, "[ RUN      ] timing.alpha.parent.child") and
+                not common.contains(filtered, "[----------] timing.beta"),
+                "timing changed independent child/owner selection")
+    reported_hundredths(filtered, "[==========] 1 test ran.", true)
+    reported_hundredths(zero, "[==========] 0 tests ran.", true)
+    reported_hundredths(empty, "[==========] 0 tests ran.", true)
+    test.assert(not common.contains(zero, "[----------]") and
+                not common.contains(empty, "[----------]"),
+                "empty run reported unexecuted owners")
+  end)
+end
 
 function test_outside_runner_raises_readable_errors(_context: test.Context)
   assert_outside_runner_probe([==[

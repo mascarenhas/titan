@@ -7,6 +7,7 @@ local certificate = require "titan-compiler.linkcertificate"
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local version = require "titan-compiler.version"
+local relocation = require "titan-compiler.relocation"
 local native = {}
 
 local function append(out, items)
@@ -165,18 +166,29 @@ local function compile_node(context, request, source, stem)
         local cacheable = not request.uncacheable and cacheable_policy(request.compile_argv)
         local argv = {}
         append(argv, request.compile_argv)
-        append(argv, { "-E", "-MD", "-MF", dependencies, "-MT", "titan-native", source, "-o", preprocessed })
+        append(argv, { "-E", "-P", "-MD", "-MF", dependencies, "-MT", "titan-native", source, "-o", preprocessed })
         -- Always execute preprocessing: its output covers negative __has_include
         -- decisions that cannot be represented by a positive dependency list.
         run(context, request, argv, "native-preprocess")
         incremental.invalidate_file(context, preprocessed)
         incremental.invalidate_file(context, dependencies)
         local files = need(depfile.parse(incremental.file_contents(context, dependencies)))
+        -- Materialize before requesting its digest so classification and the
+        -- strict preprocessed hash share one read/hash, not a streamed reread.
+        local location_sensitive = cacheable and incremental.has_presumed_location(
+            incremental.file_contents(context, preprocessed))
         local recipe = { source = source, argv = request.compile_argv, toolchain = request.toolchain,
             authored = incremental.file_digest(context, source),
             preprocessed = incremental.file_digest(context, preprocessed),
             dependencies = certificate.files(context, files) }
-        local input = cacheable and incremental.digest(context, "native-c-input", recipe) or nil
+        local semantic = { source = relocation.path(context, source),
+            argv = relocation.argv(context, request.compile_argv), toolchain = request.toolchain,
+            authored = recipe.authored, preprocessed = recipe.preprocessed,
+            dependencies = relocation.files(context, recipe.dependencies) }
+        if location_sensitive then
+            semantic.locations = { source = source, roots = context.relocation_roots or {} }
+        end
+        local input = cacheable and incremental.digest(context, "native-c-input", semantic) or nil
         local record = cacheable and certificate.read_record(context, sidecar) or nil
         if cacheable and request.incremental and native_record(record) and record.input == input and regular(context, object) then
             local identity = incremental.file_digest(context, object)
@@ -294,7 +306,8 @@ function native.compile(context, request)
             local canonical = certificate.canonical_path(context, source)
             if not seen[canonical] then
                 seen[canonical] = true
-                local stem = paths.join(directory, incremental.digest(context, "native-c-source-path", canonical))
+                local stem = paths.join(directory, incremental.digest(context, "native-c-source-path",
+                    relocation.path(context, canonical)))
                 -- Keep the authored spelling stable for __FILE__ and diagnostics.
                 result[#result + 1] = compile_node(context, request, source, stem)
             end

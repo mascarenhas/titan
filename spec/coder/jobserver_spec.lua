@@ -8,6 +8,7 @@ local checker = require "titan-compiler.checker"
 local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
 local installed_prefix = require "spec.support.installed_prefix"
+local incremental = require "titan-compiler.incremental"
 local jobs = require "titan-compiler.jobs"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
@@ -927,6 +928,7 @@ describe("generated-C batches under a parent Make", function()
                 ' TITAN_PARALLEL_TEST_DELAY="${DELAY:-0.5}"' ..
                 ' TITAN_PARALLEL_TEST_EXPECTED="${EXPECTED:-1}"' ..
                 ' TITAN_PARALLEL_TEST_FAIL="${FAIL:-}"' ..
+                ' TITAN_PARALLEL_TEST_PHASE="${PHASE:-compile}"' ..
                 " TITAN_ROOT=" .. quote(PREFIX) ..
                 " TITAN_RUNTIME_PREBUILT=1 " .. quote(LUA) .. " -e " ..
                 quote("package.path = " .. string.format("%q",
@@ -1195,11 +1197,18 @@ describe("generated-C batches under a parent Make", function()
 #!/bin/sh
 state=${TITAN_PARALLEL_TEST_STATE:?}
 leaf=
+compile=no
+preprocess=no
+previous=
 for argument in "$@"; do
-    case "$argument" in */batch/*.c) leaf=${argument##*/}; leaf=${leaf%.c} ;; esac
+    if [ "$previous" = -c ]; then
+        case "$argument" in */batch/*.c) leaf=${argument##*/}; leaf=${leaf%.c} ;; esac
+    fi
+    case "$argument" in -c) compile=yes ;; -E) preprocess=yes ;; esac
+    previous=$argument
 done
-# Compiler identification and other probes use the real compiler.
-test -n "$leaf" || exec cc "$@"
+# Compiler identification, preprocessing and other probes use the real compiler.
+test "$compile" = yes && test "$preprocess" = no && test -n "$leaf" || exec cc "$@"
 cleanup() {
     kill "$sleeper" 2>/dev/null
     sleep 1
@@ -1354,6 +1363,122 @@ describe("in-process batches under a parent pool", function()
         holder = nil
         remove_tree(workspace)
     end)
+
+    for _, cap in ipairs({ 1, 2, 4 }) do
+        for _, failure in ipairs({ "", "three" }) do
+            it("bound semantic preprocessing and conserve tokens at cap " .. cap ..
+                (failure == "" and " on success" or " on native failure"), function()
+                local context = { io = compiler_io.new_sync(), jobs = cap,
+                    incremental_options = { compile_prefix = {
+                        "env", "TITAN_PARALLEL_TEST_PHASE=preprocess",
+                        "TITAN_PARALLEL_TEST_STATE=" .. state,
+                        "TITAN_PARALLEL_TEST_DELAY=0.1",
+                        "TITAN_PARALLEL_TEST_EXPECTED=" .. math.min(cap, 3),
+                        "TITAN_PARALLEL_TEST_FAIL=" .. failure, WRAPPER,
+                    } } }
+                local inputs, temporaries = {}, {}
+                for _, leaf in ipairs({ "one", "two", "three", "four" }) do
+                    inputs[#inputs + 1] = { filename = source_root .. "/batch/" .. leaf .. ".c",
+                        contents = "int " .. leaf .. ";\n" }
+                end
+                local tmpname = context.io.tmpname
+                function context.io:tmpname()
+                    local path, err = tmpname(self)
+                    if path then temporaries[#temporaries + 1] = path end
+                    return path, err
+                end
+                local identities, err = incremental.preprocessed_identities(context, inputs)
+                if failure == "" then
+                    assert.truthy(identities, err)
+                    assert.equal(4, #identities)
+                else
+                    assert.is_nil(identities)
+                    assert.matches("parallel compiler sentinel: three", err, 1, true)
+                end
+                assert(driver.close_resolver_context(context))
+                assert.equal(math.min(cap, 3), tonumber(read_file(state .. "/maximum")))
+                assert.equal(4, count_lines(state .. "/commands"))
+                assert.equal("0\n", read_file(state .. "/active"))
+                for _, path in ipairs(temporaries) do assert.falsy(exists(path), path) end
+                local probe = assert(require("titan")._jobserver_open("fifo", workspace .. "/pool"))
+                for _ = 1, 2 do assert.is_true(probe:acquire()) end
+                assert.is_false(probe:acquire())
+                assert(probe:close())
+                assert.same(sorted_bytes("\1\2"), sorted_bytes(holder:read(2)))
+            end)
+        end
+    end
+
+    for _, signal in ipairs({ { name = "TERM", number = 15, status = 143 },
+            { name = "INT", number = 2, status = 1 } }) do
+        it("retire semantic preprocessing scratch and tokens before re-raising SIG" .. signal.name, function()
+            local script = workspace .. "/semantic-cancel.lua"
+            write_file(script, [==[
+local root, lua_cpath, state, source_root, signal = table.unpack(arg)
+package.path = root .. "/?.lua;" .. root .. "/?/init.lua;" .. package.path
+package.cpath = lua_cpath
+local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
+local incremental = require "titan-compiler.incremental"
+local support = require "titan"
+local strategy, temporaries = compiler_io.new_sync(), {}
+local tmpname = strategy.tmpname
+function strategy:tmpname()
+    local path, err = tmpname(self)
+    if path then temporaries[#temporaries + 1] = path end
+    return path, err
+end
+local popen, launches = io.popen, 0
+io.popen = function(command, mode)
+    local pipe = popen(command, mode)
+    launches = launches + 1
+    if launches == 2 then assert(support._signal_raise(tonumber(signal))) end
+    return pipe
+end
+local context = { io = strategy, jobs = 4,
+    incremental_options = { compile_prefix = {
+        "env", "TITAN_PARALLEL_TEST_PHASE=preprocess",
+        "TITAN_PARALLEL_TEST_STATE=" .. state,
+        "TITAN_PARALLEL_TEST_DELAY=0.2",
+        "TITAN_PARALLEL_TEST_EXPECTED=2",
+        root .. "/spec/fixtures/parallel_compilation/counting_cc.sh",
+    } } }
+local inputs = {}
+for _, leaf in ipairs({ "one", "two", "three", "four" }) do
+    inputs[#inputs + 1] = { filename = source_root .. "/batch/" .. leaf .. ".c",
+        contents = "int " .. leaf .. ";\n" }
+end
+local called, err = pcall(incremental.preprocessed_identities, context, inputs)
+io.popen = popen
+assert(not called and err == tonumber(signal), tostring(err))
+assert(launches == 2, launches)
+assert(context.generated_c_cancelled_signal == tonumber(signal))
+for _, path in ipairs(temporaries) do assert(not strategy:lstat(path), path) end
+assert(support._signal_pending() == nil)
+io.stdout:write("semantic scratch retired; launches=2\n")
+io.stdout:flush()
+driver.close_resolver_context(context)
+error("native preprocessing signal was not redelivered")
+]==])
+            local ok, output, _, status = shell(CLEAN_MAKE_ENV .. " MAKEFLAGS=" ..
+                quote("-j3 --jobserver-auth=fifo:" .. workspace .. "/pool") .. " " ..
+                quote(TIMEOUT) .. " 20 " .. quote(LUA) .. " " .. quote(script) .. " " ..
+                quote(ROOT) .. " " .. quote(package.cpath) .. " " .. quote(state) .. " " ..
+                quote(source_root) .. " " .. signal.number)
+            assert.falsy(ok, output)
+            assert.equal(signal.status, status, output)
+            assert.matches("semantic scratch retired; launches=2", output, 1, true)
+            if signal.name == "INT" then assert.matches("interrupted!", output, 1, true) end
+            assert.equal(2, count_lines(state .. "/commands"), output)
+            assert.equal("2\n", read_file(state .. "/maximum"), output)
+            assert.equal("0\n", read_file(state .. "/active"), output)
+            local probe = assert(require("titan")._jobserver_open("fifo", workspace .. "/pool"))
+            for _ = 1, 2 do assert.is_true(probe:acquire()) end
+            assert.is_false(probe:acquire())
+            assert(probe:close())
+            assert.same(sorted_bytes("\1\2"), sorted_bytes(holder:read(2)))
+        end)
+    end
 
     it("return the token of a failed launch and keep the batch going", function()
         local launches = 0

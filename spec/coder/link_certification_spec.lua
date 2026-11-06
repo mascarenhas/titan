@@ -203,6 +203,67 @@ describe("final link certificates", function()
         assert.equal(target .. ".dSYM/debug", record.outputs[2].entries[1].path)
     end)
 
+    it("preserves output and native-input snapshots across mixed-case owned-root moves", function()
+        local owned, moved = root .. "/OwnedOutput", root .. "/MovedOutput"
+        assert(lfs.mkdir(owned))
+        for _, leaf in ipairs({ "main.o", "side.o", "helper.o", "payload.a",
+            "provider.so", "runtime.a", "native.a", "program" }) do
+            write(owned .. "/" .. leaf, assert(context().io:read_file(root .. "/" .. leaf)))
+        end
+        assert(lfs.mkdir(owned .. "/Companion"))
+        assert(lfs.mkdir(owned .. "/Companion/Nested"))
+        write(owned .. "/Companion/Nested/DebugData", "debug bytes")
+        write(owned .. "/link.d", gnu_report(owned .. "/program", { owned .. "/native.a" }))
+        local function request(directory)
+            local value = clone(spec)
+            value.output_root = directory
+            value.outputs = { { path = directory .. "/program" },
+                { path = directory .. "/Companion", kind = "directory" } }
+            for _, field in ipairs({ "objects", "c_objects", "payloads", "providers", "archives", "runtime" }) do
+                for index, filename in ipairs(value[field]) do
+                    value[field][index] = directory .. "/" .. paths.basename(filename)
+                end
+            end
+            value.native_libraries.dependency_file = directory .. "/link.d"
+            return value
+        end
+        local function current(directory)
+            local ctx = context()
+            ctx.relocation_roots = { output = directory }
+            return ctx, certificate.prepare(ctx, request(directory))
+        end
+        local ctx, cold = current(owned)
+        assert(certificate.commit(ctx, cold))
+        local warm
+        ctx, warm = current(owned)
+        assert.is_true(certificate.check(ctx, warm))
+        assert(os.rename(owned, moved))
+        local ticket
+        ctx, ticket = current(moved)
+        assert.equal(cold.key, ticket.key)
+        assert.equal(cold.input, ticket.input)
+        local before = assert(ctx.io:read_file(ticket.record))
+        assert.is_true(certificate.check(ctx, ticket))
+        assert.equal(before, assert(ctx.io:read_file(ticket.record)))
+        local record = assert(certificate.read_record(ctx, ticket.record))
+        local member = record.outputs[2].entries[1].entries[1]
+        assert.equal(certificate.canonical_path(ctx, owned .. "/Companion/Nested/DebugData"),
+            member.path)
+        write(moved .. "/Companion/Nested/DebugData", "other bytes")
+        ctx, ticket = current(moved)
+        local accepted, reason = certificate.check(ctx, ticket)
+        assert.is_false(accepted)
+        assert.equal("link outputs changed", reason)
+        write(moved .. "/Companion/Nested/DebugData", "debug bytes")
+        ctx, ticket = current(moved)
+        assert.is_true(certificate.check(ctx, ticket))
+        write(moved .. "/native.a", "changed native bytes")
+        ctx, ticket = current(moved)
+        accepted, reason = certificate.check(ctx, ticket)
+        assert.is_false(accepted)
+        assert.equal("native libraries changed", reason)
+    end)
+
     it("does not reuse a certified target through a substituted output leaf symlink", function()
         if platform.windows then pending("POSIX symlink fixture"); return end
         local original = commit()
@@ -305,8 +366,9 @@ describe("final link certificates", function()
             local record = assert(certificate.read_record(context(), ticket.record))
             local names = {}
             for _, member in ipairs(record.outputs[1].entries) do names[#names + 1] = member.path end
-            assert.same({ native_spelling(directory .. "/A"), native_spelling(directory .. "/z"),
-                native_spelling(directory .. "/é") }, names)
+            assert.same({ certificate.canonical_path(context(), directory .. "/A"),
+                certificate.canonical_path(context(), directory .. "/z"),
+                certificate.canonical_path(context(), directory .. "/é") }, names)
             for _, locale in ipairs({ "en_US.UTF-8", "pt_BR.UTF-8", "C.UTF-8" }) do
                 if os.setlocale(locale, "collate") then
                     local ctx, next_ticket = prepare()
@@ -420,6 +482,22 @@ describe("final link certificates", function()
         assert.is_false(hit())
     end)
 
+    it("misses malformed relocation root maps without aborting and accepts absent roots", function()
+        local ticket = commit()
+        local ctx = context()
+        local record = assert(certificate.read_record(ctx, ticket.record))
+        for _, roots in ipairs({ "sdk", { sdk = 1 }, { sdk = "" }, { unknown = "/sdk" } }) do
+            record.roots = roots
+            assert(certificate.write_record(ctx, ticket.record, record))
+            local reused, reason = hit()
+            assert.is_false(reused)
+            assert.equal("link record schema", reason)
+        end
+        record.roots = nil
+        assert(certificate.write_record(ctx, ticket.record, record))
+        assert.is_true(hit())
+    end)
+
     it("treats a record whose output snapshot has an unknown kind as a miss", function()
         local ticket = commit()
         assert.is_true(hit())
@@ -460,6 +538,30 @@ describe("final link certificates", function()
         assert.is_false(ok)
         assert.equal(signal, err)
     end)
+
+    for _, cancelled in ipairs({ false, true }) do
+        it("preserves " .. (cancelled and "cancellation" or "miss diagnostics") ..
+            " during rebound output canonicalization", function()
+            commit()
+            local ctx, ticket = prepare()
+            local lstat, signal = ctx.io.lstat, {}
+            function ctx.io:lstat(filename)
+                if filename == root then
+                    if cancelled then error(signal, 0) end
+                    return nil, "output parent inspection denied"
+                end
+                return lstat(self, filename)
+            end
+            local called, accepted, reason = pcall(certificate.check, ctx, ticket)
+            assert.equal(not cancelled, called)
+            if cancelled then
+                assert.equal(signal, accepted)
+            else
+                assert.is_false(accepted)
+                assert.equal("output parent inspection denied", reason)
+            end
+        end)
+    end
 end)
 
 describe("final link certification through the CLI", function()

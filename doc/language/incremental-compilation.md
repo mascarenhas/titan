@@ -53,12 +53,56 @@ root. A folder module's objects belong to the entire module, never to one
 contributor: one object, or one object per part when the module is
 [split](build-profiles.md#split-modules).
 
-Reuse follows the source spelling but not the output spelling. The selected
-`--tree` path appears in generated `#line` directives, debug information, and
-tracebacks, so naming the same source root differently (for example relative
-instead of absolute) rebuilds the affected modules. Different spellings of
-the same `--output` or `--exe` destination, such as relative and absolute
-paths, reuse the existing objects and link record.
+Reuse follows user source spelling, but compiler-owned roots can move. The
+selected `--tree` path appears in generated `#line` directives, debug
+information, and tracebacks: changing an absolute user source path, or
+switching between relative and absolute spelling, rebuilds the affected
+modules. With an explicit `-o`/`--output` tree, moving a checkout whose source
+paths remain relative, together with its output tree and an identical SDK
+prefix, does not by itself recompile certified objects. Source-adjacent builds
+without `-o` miss conservatively when moved; the user source tree is not
+treated as a compiler-owned root. Equivalent spellings of one
+`--output` or `--exe` destination reuse the existing objects and link record,
+including Windows output-path separator and case variants.
+
+The compiler identifies its SDK prefix, its own source checkout when running
+from source, and the selected output root by relative paths within those
+roots. This applies to native path operands in the compile command, ordered
+SDK include roots, generated companions, and selected SDK providers; it is
+not a rule that removes arbitrary absolute paths. External includes, tools,
+providers, explicit source spellings, option values such as `-D` strings and
+runtime search paths, and changed symlink bindings remain significant.
+A root reached through a symlink is not admitted to this relocation guarantee.
+
+On the first use after an owned root moves, `titanc` preprocesses the saved
+generated C against the current headers and roots before reusing its object.
+It reads those saved bytes exactly, including their line endings, and excludes
+the certificate data that `titanc` appends to the primary C file, so the check
+behaves the same on Windows. Expanded location macros (`__FILE__`,
+`__BASE_FILE__`, `__FILE_NAME__`, and `__LINE__`) remain exact compared values;
+a changed value rebuilds the module. Native presumed-location builtins such
+as `__builtin_FILE()` are resolved later than preprocessing. Parts containing
+these readers conservatively rebuild when an owned root moves, including an
+SDK-only move with a fixed output directory. This also covers filename, line,
+and column readers whose values preprocessing alone cannot certify.
+Signature readers can also contain anonymous C type locations and are guarded;
+unadorned function-name-only readers do not impose this restriction.
+Authored `--c-source` nodes use the same native-location classification, while
+continuing to preprocess on every invocation.
+
+A disposable `<stem>.relocation` receipt avoids repeating this extra work on
+later unchanged invocations. The receipt also tracks the roots used to
+materialize generated companions; moving back to an earlier root repairs
+those files without rewriting unchanged ones. A missing or interrupted
+materialization record causes a safe rebuild. Reused objects retain their
+originally embedded diagnostic and debug paths; moving a tree does not
+rewrite object bytes or promise relocated debug locations.
+
+Generated FFI environments use the same root-relative identity, so a copied
+SDK probe cache keeps its hits. Native and browser probes use separate
+persistent cache directories. Within each directory, probe outcomes are keyed
+by the generated C source bytes, and toolchain or external header changes
+follow the [manual cache-refresh policy](c-ffi-expressions.md#compiled-probe-cache).
 
 Use `--source-first` when source dependencies should take precedence over
 installed `.so`, `.a`, or `.dll` providers. This option still allows compiled
@@ -203,20 +247,21 @@ Authored or generated C files passed with repeatable `--c-source FILE` are
 compiled with the invocation's effective native compile flags and toolchain
 identity (excluding Titan-only test-owner and coverage flags) into
 `<output>/.native/<hash>.o` alongside a `<hash>.record` certificate, where
-`<hash>` is derived from the C file's canonical path. On each invocation,
-`titanc` preprocesses each C file and hashes the authored source,
-preprocessed output, transitive header contents, compile command, and
-toolchain identity. When `--incremental` is active and both the input digest
-and current `.o` bytes match the record, `titanc` reuses the object without
-compiling. Resulting objects are linked in `--c-source` command-line order
-before `-X` payloads.
+`<hash>` is derived from the C file's canonical path, relative to a recognized
+compiler-owned root when applicable. On each invocation, `titanc` preprocesses
+each C file and hashes the authored source, preprocessed output, transitive
+header contents, compile command, and toolchain identity. When `--incremental`
+is active and both the input digest and current `.o` bytes match the record,
+`titanc` reuses the object without compiling. Resulting objects are linked in
+`--c-source` command-line order before `-X` payloads.
 
 A build script that needs the compiled object itself, for example to copy a
 helper to a fixed path, should ask for it with `--print-c-objects` rather
 than listing `.native/`. Standard output then contains exactly one absolute
-path per `--c-source` argument, in argument order. Moving a checkout leaves
-the nodes keyed by its old paths in place, so `.native/` can hold more than
-one object for the same C file:
+path per `--c-source` argument, in argument order. Unchanged compiler-owned
+paths keep their node identity after a move; paths outside those roots remain
+distinct inputs, so `.native/` can still contain more than one object for a
+C file selected through different external paths:
 
 ```sh
 object=$(titanc -c --incremental -o out/helper --print-c-objects \
@@ -295,11 +340,13 @@ titanc: waiting for build lock '<lock-path>'
 | `configuration compiler\|preamble\|toolchain\|options` | Loaded compiler/parser/frontend Lua inventory, generated-C preamble header closure, native toolchain identity, or effective compile options changed. |
 | `source-set added\|removed <path>` | Flat-versus-folder layout, folder contributor membership, or the selected target variant of a source changed. |
 | `source-content <path>` | SHA-256 content of the main `.titan` source or a contributor changed, or could not be read. |
-| `output-moved` | Output stem differs from the stem recorded in the certificate. |
+| `output-moved` | Output stem differs within the compiler-owned output root, or an unowned output path changed. |
 | `codegen-options c_parts\|split_threshold\|test_flags\|coverage` | Per-module code-generation policy changed. |
 | `parts [<detail>]` | A recorded generated `.c` part, `.priv.h` header, or sidecar `.part<k>.o` is missing, not a regular file, carries unexpected metadata, or mismatches the primary target fingerprint. |
 | `coverage-artifacts <path>` | A required `.c` source or `.gcno` note file for a coverage-instrumented module is missing or not a regular file. |
 | `c-input <path>: content\|provenance\|missing\|unreadable\|candidate\|changed-during-read` | A transitive C header or include-search candidate changed content, declaring realpath origin, existence/kind, or readability, or changed while being read. |
+| `c-input relocated generated-C semantics` | Moving an owned root changed the preprocessed program, including an observable C path-macro expansion. |
+| `relocation [<detail>]` | Generated-companion materialization evidence is missing/incomplete, or rebinding, reading, writing, or preprocessing relocated artifacts failed. |
 | `import-interface <module> (public\|source)` | A direct dependency's semantic public interface, nominal layout, copied `.titan.h` helper body, or (for `.titan` imports) source-private manifest changed. |
 | `owner-interface <module>` | A contextually reached nominal owner's public interface or layout changed. |
 | `import-binding <module>: <before> -> <after>` | A direct dependency's native binding (`direct`, `handle`, or `global`) or selected provider path changed. |

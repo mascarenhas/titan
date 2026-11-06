@@ -4,6 +4,7 @@ local cdeclarator = require "titan-compiler.cdeclarator"
 local platform = require "titan-compiler.platform"
 local documentation = require "titan-compiler.documentation"
 local version = require "titan-compiler.version"
+local relocation = require "titan-compiler.relocation"
 
 local sourceinterface = {}
 
@@ -226,11 +227,12 @@ end
 local Encoder = {}
 Encoder.__index = Encoder
 
-function Encoder.new(header_inputs)
+function Encoder.new(header_inputs, context)
     return setmetatable({
         active_ids = {},
         next_id = 0,
         header_inputs = header_inputs or {},
+        context = context or {},
     }, Encoder)
 end
 
@@ -388,8 +390,9 @@ function Encoder:field(value, spec, owner_tag)
             fail(label .. " has no stable rendered spelling")
         end
         local header = self:generated_header(field, label)
-        if header then return tuple("g", atom(field.rendered), atom(header.digest)) end
-        return atom(field.rendered)
+        local rendered = relocation.includes(self.context, "#include " .. field.rendered):sub(10)
+        if header then return tuple("g", atom(rendered), atom(header.digest)) end
+        return atom(rendered)
     end
 end
 
@@ -424,7 +427,7 @@ function Encoder:descriptor(value, label)
     return tuple("d", atom(id), atom(tag), table.concat(fields))
 end
 
-local function encode_headers(headers)
+local function encode_headers(headers, context)
     if type(headers) ~= "table" then
         fail("C header dependencies must be an ordered array")
     end
@@ -450,13 +453,18 @@ local function encode_headers(headers)
             fail("C header dependencies repeat " .. kind .. " input " .. path)
         end
         seen[key] = identity
-        out[#out + 1] = tuple("h", atom(kind), atom(path), atom(identity))
+        local prefix = version.C_HEADER_ORIGIN_PROTOCOL .. ";real="
+        local semantic = identity
+        if kind == "origin" and identity:sub(1, #prefix) == prefix then
+            semantic = prefix .. relocation.path(context, identity:sub(#prefix + 1))
+        end
+        out[#out + 1] = tuple("h", atom(kind), atom(relocation.path(context, path)), atom(semantic))
     end
     return tuple("l", table.concat(out)), seen
 end
 
-local function encode_source_delta(modtype, header_inputs)
-    local encoder = Encoder.new(header_inputs)
+local function encode_source_delta(modtype, header_inputs, context)
+    local encoder = Encoder.new(header_inputs, context)
     local public_nominals = {}
     for _, member in ipairs(modtype.members or {}) do
         local typ = member._tag == "Type.ModuleMember" and member.type
@@ -476,7 +484,8 @@ local function encode_source_delta(modtype, header_inputs)
             "source module type documentation"))
 end
 
-function sourceinterface.serialize(entry)
+function sourceinterface.serialize(entry, context)
+    context = context or {}
     if type(entry) ~= "table" or entry.kind ~= "source" then
         return nil, "source interface entry must be a source module"
     elseif type(entry.type) ~= "table"
@@ -486,9 +495,9 @@ function sourceinterface.serialize(entry)
     local ok, result = pcall(function()
         local public = types.serialize(entry.type)
         local headers, header_inputs =
-            encode_headers(entry.c_header_dependencies or {})
+            encode_headers(entry.c_header_dependencies or {}, context)
         return tuple("S", atom(FORMAT), atom(public),
-            encode_source_delta(entry.type, header_inputs), headers)
+            encode_source_delta(entry.type, header_inputs, context), headers)
     end)
     if not ok then return nil, tostring(result) end
     return result

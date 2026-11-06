@@ -265,10 +265,16 @@ and needed source dependencies' `.titan.h` declarations before emitting all
 foreign prototypes and then all local direct-call helpers. Generated C includes
 its `.ffi.h` before its `.titan.h` when present.
 
-Both paths are compiler-owned. Titan refuses to overwrite an unowned path,
-replaces a prior generated header only after staging succeeds, and removes a
-stale owned `.titan.h` when the module no longer defines foreign functions.
-Do not use either reserved path for an author-written header.
+Both paths are compiler-owned. An existing destination must be a regular file
+whose first bytes are the exact generated marker for that header kind. Titan
+refuses user-written files, wrong-kind markers, symlinks, and directories, both
+during fresh compilation and when an incremental build repairs or reuses
+companions after a root move. This includes source-import dependencies; the
+same ownership rule protects split-unit `.priv.h` companions. Missing `.ffi.h`
+and required `.titan.h` files can be regenerated. Fresh compilation publishes
+replacements only after staging succeeds, and removes a stale owned `.titan.h`
+when the module no longer defines foreign functions. Do not use these reserved
+paths for author-written headers.
 
 These headers are source-build artifacts, not binary interfaces. They are not
 placed in `.titan.meta`, provider archives, installed SDKs, or

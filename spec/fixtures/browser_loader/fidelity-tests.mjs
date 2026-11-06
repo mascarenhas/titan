@@ -146,15 +146,37 @@ export async function names(context, paths) {
       const result = await instance.run();
       const parent = encode('loader_names.test_names');
       const child = join([parent, encode('.name'), new Uint8Array([0, 255, 195, 40])]);
+      const sections = [
+        join([encode('[==========] Running Titan tests.\n[ RUN      ] '), parent,
+          encode('\n[ RUN      ] '), child,
+          encode('\n[----------] '), child, encode(': message'), new Uint8Array([0, 255, 195, 40]),
+          encode('\n[       OK ] '), child]),
+        join([encode('\n[       OK ] '), parent]),
+        encode('\n[----------] loader_names'),
+        encode('\n[==========] 2 tests ran.'),
+        encode('\n[  PASSED  ] 2 tests.\n'),
+      ];
+      const bytesText = bytes => Array.from(bytes, byte => String.fromCharCode(byte)).join('');
+      const literal = bytes => bytesText(bytes).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      let expression = '^';
+      for (let index = 0; index < sections.length; index++) {
+        expression += literal(sections[index]);
+        if (index < 4) expression += ' \\(([0-9]+\\.[0-9]{2}) ms' + (index >= 2 ? ' total' : '') + '\\)';
+      }
+      const actual = join(stdout);
+      const raw = bytesText(actual);
+      const timing = new RegExp(expression + '$').exec(raw);
+      context.assert(timing && timing[0] === raw, 'test output omitted or malformed wall timings');
+      context.assert(Number(timing[2]) >= Number(timing[1]) && timing[2] === timing[3] &&
+        Number(timing[4]) >= Number(timing[3]), 'inclusive case/owner/run timings are inconsistent');
       const expected = join([
-        encode('[==========] Running Titan tests.\n[ RUN      ] '), parent,
-        encode('\n[ RUN      ] '), child,
-        encode('\n[----------] '), child, encode(': message'), new Uint8Array([0, 255, 195, 40]),
-        encode('\n[       OK ] '), child, encode('\n[       OK ] '), parent,
-        encode('\n[==========] 2 tests ran.\n[  PASSED  ] 2 tests.\n'),
+        sections[0], encode(` (${timing[1]} ms)`),
+        sections[1], encode(` (${timing[2]} ms)`),
+        sections[2], encode(` (${timing[3]} ms total)`),
+        sections[3], encode(` (${timing[4]} ms total)`), sections[4],
       ]);
       context.assert(result.kind === 'returned' && result.status === 0, 'binary names fixture failed');
-      context.equalBytes(join(stdout), expected, 'test names/messages were truncated or decoded');
+      context.equalBytes(actual, expected, 'test names/messages were truncated or decoded');
       context.equalBytes(join(stderr), new Uint8Array(0));
     } finally { await instance.dispose(); }
     context.stdout(encode(`loader names: ${path}: 2 native cases passed\n`));

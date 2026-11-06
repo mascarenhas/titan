@@ -441,7 +441,7 @@ does not reject unknown extra keys:
 | `configuration` | `{ digest, compiler, preamble, toolchain, options }` | Invocation-wide configuration digests (all strings). |
 | `layout` | `"flat"` \| `"folder"` | Source module layout from the tagged source resolver. |
 | `sources` | `{ { path, sha256 }, ... }` | Dense ordered own-source list (the selected main first, then the selected contributors in bytewise order of logical filenames). |
-| `stem` | `string` | Normalized absolute output stem (`<stem>.o` without `.o`). |
+| `stem` | `string` | Output stem with a compiler-owned root label when applicable (`<stem>.o` without `.o`). |
 | `codegen` | `{ c_parts, split_threshold, test_flags, coverage? }` | Per-module code-generation policy (`coverage` is `nil` or `{ enabled, backend }`). |
 | `imports` | `{ { name, source_required, view, interface }, ... }` | Direct imports in declaration/constituent order (`view` is `"source"` or `"public"`). |
 | `owners` | `{ { name, interface }, ... }` | Bytewise-sorted contextually exposed nominal owners not in `imports` or `{modname}`. |
@@ -449,6 +449,8 @@ does not reject unknown extra keys:
 | `providers` | `{ [name] = <string> }` | Selected dynamic provider relative filename (`type.file`) per handle-bound direct import. |
 | `interface` | `{ public = <hex>, source = <hex> }` | Producer self digests computed from this module's coder outputs. |
 | `object_identity` | `<hex>` | Recipe digest over configuration, module name, stem, codegen options, generated C parts before record injection, and `.priv.h`. |
+| `roots` | `{ sdk?, compiler?, output? }` | Concrete original compiler-owned roots, used only to rebind named filesystem fields. |
+| `generated` | `{ { spelling, bytes, sha256, semantic }, ... }` | Per-part generated-C filename at creation, metadata-free prefix length, and content/expanded-program digests. |
 
 ## Configuration, toolchain, and preamble certificates
 
@@ -660,6 +662,143 @@ reports the exact component:
    application and `--test` builds in the same output tree to share unchanged
    production objects.
 
+## Compiler-owned root relocation
+
+`titan-compiler/relocation.lua` separates a path's current I/O spelling from its
+certified identity. Resolver contexts identify the selected SDK prefix, the
+compiler's source checkout when applicable, and the output root. A path under
+one of these roots receives a root label and relative suffix; the most
+specific root wins. A symlinked root is not admitted as a relocatable binding.
+Neither a user source root nor an arbitrary external include/provider/tool
+directory becomes relocatable just because it appears in a command.
+The reuse-on-move guarantee requires an explicit `-o`/`--output` tree.
+Source-adjacent builds without it have no owned output root and miss
+conservatively when moved; the user source directory is not added to the root
+map.
+
+Configuration hashing applies this mapping to known path operands in the
+ordered compile argv, FFI include roots, the SDK root, and preamble dependency
+paths and realpaths. Preprocessed preamble bytes are hashed unchanged.
+Opaque flags and their separated operands, `-D` values, prefix-map options,
+runtime search paths, and external paths keep their exact bytes. Bare absolute
+argv elements are not inferred to be file operands; native source and link
+input/output files have separate typed inventories. Browser certification
+derives a root-relative view of the frozen descriptor's SDK paths without
+changing its operational identity or external Emscripten tool selection, and
+native and browser probes keep separate cache directories. Browser final-link
+profiles carry their operational target identity and SDK-dependent flag lists,
+so a moved browser SDK may miss its link certificate; browser final-link reuse
+after a move is outside the native guarantee described here.
+
+Generated FFI descriptor identities and their include operands use the same
+mapping, rather than embedding an output-root address into every probe
+source's environment-digest comment. The C parser's nominal declaring-header
+identity is rooted only for these owned paths; the separately recorded origin
+still checks the current realpath. Source-private header manifests and native
+provider bindings likewise retain the relative selected input and its
+content/interface evidence.
+On Windows the rebound origin's realpath retains native path serialization,
+matching the I/O strategy that records and revalidates it. Concrete path case
+and semantic C strings are not folded or rewritten.
+
+Compilation records each generated part's final C prefix, after formatting and
+any coverage line conversion, before source-record injection. A binary read
+supplies its byte count and digest; appending the primary source record uses
+binary read/write to preserve that prefix. Formatting and coverage conversion
+are text operations that precede this boundary.
+`incremental.preprocessed_identities` preprocesses the metadata-free prefix
+once, using the effective compile prefix, its actual quoted-include directory,
+and macro-prefix mappings from the private temporary path and basename to
+the actual generated filename and basename. The scratch source is made
+absolute after registering cleanup, keeping those mapping keys distinct even
+when an I/O strategy returns a relative name. GCC and Clang strip the basename
+for `__FILE_NAME__` before applying the mappings. The resulting digest keeps all
+expanded C bytes, including `__FILE__`, `__BASE_FILE__`, `__FILE_NAME__`, and
+`__LINE__`; it does not substitute roots inside expanded strings.
+
+The preprocessor leaves native presumed-location builtins unresolved. A
+streaming lexical match detects `__builtin_FILE`, `__builtin_FILE_NAME`,
+`__builtin_LINE`, `__builtin_COLUMN`, `__builtin_source_location`,
+`__builtin_FUNCSIG`, `__PRETTY_FUNCTION__`, `__FUNCSIG__` and `L__FUNCSIG__`
+after macro expansion, including token-pasted names, without allocating a
+token graph. Quoted and GNU C raw strings, character constants, comments and
+longer identifiers do not count as location reads. For affected parts, the
+digest also includes the original generated prefix, filename and concrete SDK,
+compiler and output roots. This conservatively rejects a moved location context even
+when `-E -P` removes the relevant line information or leaves identical tokens;
+an SDK-header origin remains significant when the output root stays fixed.
+The basename, line and column values may be unchanged by a particular move,
+but are not inferred from the stripped token stream. The source-location
+aggregate is a C++ facility, not enabled by Titan's C compilation; its spelling
+is conservatively recognized as well. Clang can print an anonymous C parameter
+type's presumed file, line and column inside a signature.
+Signature forms are treated as path-semantic on every toolchain, including
+GCC C's name-only `__PRETTY_FUNCTION__` expansion; unadorned
+`__builtin_FUNCTION`, `__func__`, `__FUNCTION__`, `L__FUNCTION__` and
+`__FUNCDNAME__` do not add this location context.
+See the [GCC builtin semantics](https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html),
+[Clang source-location semantics](https://clang.llvm.org/docs/LanguageExtensions.html#source-location-builtins),
+and Clang's
+[signature construction](https://github.com/llvm/llvm-project/blob/main/clang/lib/AST/Expr.cpp)
+and [anonymous-type location printing](https://github.com/llvm/llvm-project/blob/main/clang/lib/AST/Decl.cpp).
+
+Parts of one module run through `io.run_batch` under the resolver's local cap
+and shared Make job-slot ledger when the strategy supports batching; custom
+synchronous runners keep their own execution boundary unless they also supply
+a batch override. The batch reaps every launched compiler and returns its exact
+borrowed token bytes before preprocessing removes its source/output scratch.
+
+An ordinary preprocessing or scratch-cleanup failure returns `nil, diagnostic`;
+fresh materialization returns that failure through the normal compilation
+result, before appending a source record or starting object compilation. A
+relocation check turns the same diagnostic into a miss, never a successful
+semantic certificate. Raised non-string values retain their identity after all
+scratch-removal attempts, with the original exceptional outcome taking
+precedence over cleanup noise. A caught native batch signal is retained on the
+resolver context and raised as a non-string value, so certification cannot
+demote cancellation to a miss. `driver.close_resolver_context` redelivers it
+under the restored signal action after closing the header and probe owners.
+
+Certificates retain the roots at object creation. A separate materialization
+receipt records the roots used for the generated companions and is bound to
+the object recipe. Fresh compilation records that state after materializing
+its generated files. Before moving existing companions, certification marks
+the receipt incomplete; an interrupted or malformed materialization cannot
+certify a later hit.
+
+When either root set differs, local certification rebinds explicit header and
+descriptor fields from their recorded roots, and companion files from their
+last materialization roots. It compares current generated contents before
+writing them, including on a return to the creation roots. Restored header
+plans likewise compare contents before preserving a file; a formatter's
+unchanged output is not republished. Header contents, origins and lookup
+candidates are freshly validated.
+
+Only a move away from the creation roots requires checking every saved
+generated prefix against its hash and comparing the current preprocessed
+program with the original semantic digest. A mismatch is
+`c-input relocated generated-C semantics`; missing semantics are
+`record-schema`, not a migration. Ordinary same-root hits do not repeat this
+preprocessing.
+
+The disposable `<stem>.relocation` data-only receipt binds successful semantic
+comparison to the exact object/generated companion bytes and concrete current
+roots, so subsequent unchanged builds do not preprocess again. It also keeps
+materialization state distinct from immutable certificate roots. It cannot
+replace the ordinary source, configuration, header or dependency checks.
+Reused native objects keep their original debug and diagnostic path strings.
+Authored C nodes keep their preprocessing check over root-relative source, argv
+and dependency identities, using the same `incremental.has_presumed_location`
+classifier. A cacheable node materializes the expanded bytes before requesting
+their file digest, so classification and strict byte fingerprinting share one
+read and hash. Only a location-bearing node adds its concrete source spelling
+and owned roots to its input identity; location-free nodes retain their
+existing hashes and move reuse. No extra native pass or record field is added
+([`--c-source` nodes](build-coordinator.md#--c-source-compilation-and-records)).
+Final-link records rebind only named owned input and output paths before their
+ordinary validation, so a changed external path or a missing output still
+misses.
+
 ## Own-source content and folder membership
 
 `incremental.source_certificate(context, source, contents_by_path)`
@@ -781,10 +920,11 @@ source = digest("source-interface", {
 * `rendered_foreign_helper_or_empty` is `ffiheaders.foreign_contents(recipe,
   "module.ffi.h", ...)` when the module exports or defines source
   `foreign function` helpers in `.titan.h`, and `""` otherwise.
-* `entry.source_manifest` is `sourceinterface.serialize(entry)`
-  (`titan-source-interface-v2`), which adds private top-level declarations,
-  inherited C-header input identities, and documentation maps for explicit
-  `.titan` source importers.
+* `entry.source_manifest` is computed once by
+  `sourceinterface.serialize(entry, context)` (`titan-source-interface-v2`)
+  during checking and reused by certification. It adds private top-level
+  declarations, inherited C-header input identities, and documentation maps
+  for explicit `.titan` source importers.
 
 Because `interface.public` and `interface.source` are stored in the producer's
 own `.titan.source` record and read back verbatim on a hit, a freshly compiled
@@ -876,8 +1016,8 @@ evaluates local evidence in a fixed order before any dependency check:
    `configuration <component>` on the first mismatch.
 5. **Own-source verdict and output location.** If step 3 failed or missed,
    returns `source-set added|removed <path>` or `source-content <path>`. Then
-   checks `cert.stem == stem`, returning `output-moved` if the output tree
-   moved.
+   compares the root-relative certified stem, returning `output-moved` only
+   when that identity differs (not merely when its owned root moved).
 6. **Code-generation options.** Compares `cert.codegen[key]` against
    `opts.codegen_options(modname, record)[key]` in order `c_parts`,
    `split_threshold`, `test_flags`, `coverage`, returning
@@ -1021,8 +1161,9 @@ name `titan/http.ffi.h` differs from the folder module's native companion
 `titan/http/http.ffi.h`; materialization resolves those owned references to
 their current paths while preserving helper bodies.
 
-Existing complete companions are left untouched on a hit. If a generated
-`.ffi.h` or `.titan.h` file was removed from the output tree,
+Existing complete companions are left untouched on a same-root hit. A
+relocation rebinds their compiler-owned directives before its semantic check.
+If a generated `.ffi.h` or `.titan.h` file was removed from the output tree,
 `driver.prepare_foreign_headers` (`titanc`) restores it from the
 accepted record under the output-tree lock even when every module object and
 the final link hit. Because rendered `.titan.h` helper contents enter the

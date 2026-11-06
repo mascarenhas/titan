@@ -558,9 +558,10 @@ The Linux native coverage lane (through `make titan-native-coverage-build`)
 and the macOS lane run the same reinstall gate without the snapshot.
 
 A gate whose filter could silently select nothing, for example after a case
-rename, also greps each log for the runner's `[==========] N test(s) ran.`
-summary with N at least one; the `ci.yml` steps show which gates do. The
-teardown gate is one of them. It runs every `test_lua_close_` case
+rename, also greps each log for the runner's timed
+`[==========] N test(s) ran. (N.NN ms total)` summary with N at least one,
+accepting one CR before its line end; the `ci.yml` steps show which gates do.
+The teardown gate is one of them. It runs every `test_lua_close_` case
 ([Lua-state close of an unretired
 Runtime](libuv-runtime.md#lua-state-close-of-an-unretired-runtime), parked
 external waits, and thread endpoints) and every `test_unwind_` case

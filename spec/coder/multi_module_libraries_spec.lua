@@ -2354,7 +2354,7 @@ function collision(): integer return ffi.TITAN_SOURCE_COLLISION end
         assert.truthy(ok, output)
         local environment = read_file(source_root .. "/macro/consumer.ffi.h")
         local dependency = assert(environment:find(
-            '/macro/provider.ffi.h"', 1, true))
+            '#include "provider.ffi.h"', 1, true))
         local direct = assert(environment:find(
             '/macro/consumer.h"', dependency, true))
         assert.is_true(dependency < direct)

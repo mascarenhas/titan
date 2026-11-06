@@ -3935,7 +3935,8 @@ describe("contains_generic batch memo", function()
         -- If one of these records ever gains a type-valued field, the
         -- `_c_origin_header` skip in types.contains_generic must be revisited.
         local schemas = require "titan-compiler.declarationschemas"
-        local records = { include = true, header = true, input = true, observation = true }
+        local records = { include = true, header = true, input = true,
+            observation = true, relocation = true }
         local lists = { headers = "header", inputs = "input" }
         local plain = { string = true, integer = true, boolean = true, names = true }
         for name in pairs(records) do
