@@ -58,6 +58,38 @@ describe("Titan utils", function()
          assert.is_false(util.bytewise_less("same", "same"))
      end)
 
+     for _, newline in ipairs({ "\n", "\r\n" }) do
+         it("normalizes generated directives while preserving line-ending bytes " .. #newline, function()
+             local directive = ' \t#line 7 "source.titan"' .. newline
+             local statement = "int value;" .. newline .. newline
+             local contents = directive .. newline .. " \t" .. newline .. statement
+                 .. '#line 8 TITAN_GENERATED_C_FILE' .. newline .. newline .. statement
+             local expected = directive .. statement
+                 .. '#line 8 TITAN_GENERATED_C_FILE' .. newline .. statement
+             assert.equal(expected, util.normalize_line_directives(contents))
+             assert.equal(expected, util.normalize_line_directives(expected))
+         end)
+     end
+
+     it("preserves directive-like literal and comment text byte for byte", function()
+         local contents = [=[
+const char *text = "#line 7 \"not a directive\"";
+
+const char *continued = "\
+#line 9 not_a_directive\
+";
+
+/*
+#line 11 "comment"
+
+*/
+// #line 12 "comment"
+
+int value;
+]=]
+         assert.equal(contents, util.normalize_line_directives(contents))
+     end)
+
      it("renders string templates correctly", function()
          local substs = {
              VAR = "value",

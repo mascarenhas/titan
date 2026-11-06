@@ -1,3 +1,5 @@
+local lpeg = require "lpeglabel"
+
 local util = {}
 
 function util.tostring(v)
@@ -44,6 +46,31 @@ function util.set_file_contents(filename, contents, mode)
     f:write(contents)
     f:close()
     return true
+end
+
+-- Generated directives must apply to the next statement, not template padding.
+-- Skip C literals and comments so directive-like text remains byte-identical.
+local generated_line_cleanup
+do
+    local P, S = lpeg.P, lpeg.S
+    local newline = P("\r")^-1 * P("\n")
+    local horizontal = S(" \t")
+    local escaped = P("\\") * (P("\r\n") + P(1))
+    local function quoted(quote)
+        return P(quote) * (escaped + (P(1) - S(quote .. "\r\n")))^0 * P(quote)
+    end
+    local comment = P("/*") * (P(1) - P("*/"))^0 * P("*/")
+        + P("//") * (escaped + (P(1) - S("\r\n")))^0
+    local directive = lpeg.B("\n") * horizontal^0 * P("#line") * horizontal^1
+        * (P(1) - S("\r\n"))^0 * newline
+        * ((horizontal^0 * newline)^1 / "")
+    generated_line_cleanup = lpeg.Cs(
+        (quoted('"') + quoted("'") + comment + directive + P(1))^0)
+end
+
+function util.normalize_line_directives(source)
+    if not source:find("#line", 1, true) then return source end
+    return lpeg.match(generated_line_cleanup, "\n" .. source):sub(2)
 end
 
 -- Barebones string-based template function for generating C/Lua code. Replaces

@@ -1651,11 +1651,7 @@ function driver.format_generated_file(
     -- its own physical-line progression, including blank lines after #line.
     local normalized = contents
     if not coverage_mode then
-        local removed
-        repeat
-            normalized, removed = normalized:gsub(
-                "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
-        until removed == 0
+        normalized = util.normalize_line_directives(contents)
     end
     if normalized ~= contents then
         local write_ok, write_err
