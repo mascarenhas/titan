@@ -1443,7 +1443,7 @@ printf 'target=[%s]\n' "${TITAN_TARGET-<unset>}" >> environment
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
                 "prefix/include/transfer.h",
-                "prefix/include/titan/ffi.h",
+                "prefix/include/titan/ffi.h", "prefix/include/titan/browser.h",
                 "prefix/src/lua-5.5.1/lua.h", "prefix/src/lua-5.5.1/lobject.h",
                 "prefix/src/lua-5.5.1/lua.c",
                 "prefix/lib/titan/0.6/libtitan.a",
@@ -1542,7 +1542,8 @@ done
                 "LIBBT_LIB=" .. prefix .. "/lib/libbacktrace.a",
                 "TITAN_SDK_ROOT_HEADERS=" .. prefix .. "/include/minicoro.h " ..
                     prefix .. "/include/titan.h " .. prefix .. "/include/transfer.h",
-                "TITAN_SDK_NAMESPACED_HEADERS=" .. prefix .. "/include/titan/ffi.h",
+                "TITAN_SDK_NAMESPACED_HEADERS=" .. prefix .. "/include/titan/ffi.h " ..
+                    prefix .. "/include/titan/browser.h",
                 "LIBUV_SRC_DIR=native", "LLHTTP_HEADER=native/llhttp.h",
                 "SQLITE3_HEADER=native/sqlite3.h",
                 "--old-file=" .. support_module,
@@ -1555,6 +1556,7 @@ done
                 { "prefix/lib/libbacktrace.a", "lib/libbacktrace.a" },
                 { "prefix/lib/liblua.a", "lib/liblua.a" },
                 { "prefix/include/transfer.h", "include/transfer.h" },
+                { "prefix/include/titan/browser.h", "include/titan/browser.h" },
                 { "prefix/src/lua-5.5.1/lua.c", "src/lua-5.5.1/lua.c" },
                 { "native/include/uv.h", "include/uv.h" },
                 { "native/include/uv/version.h", "include/uv/version.h" },

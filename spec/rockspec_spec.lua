@@ -2253,7 +2253,7 @@ inspect-lua-sdk:
         copy_tree("LICENSE", workspace .. "/LICENSE")
         for _, source in ipairs({
             "titan.c", "titan.h", "minicoro.c", "minicoro.h", "transfer.h",
-            "titan_path.c", "ltitanlib.c", "titan/ffi.h",
+            "titan_path.c", "ltitanlib.c", "titan/ffi.h", "titan/browser.h",
         }) do
             copy_tree("titan-runtime/" .. source,
                 workspace .. "/titan-runtime/" .. source)
@@ -2293,7 +2293,8 @@ inspect-lua-sdk:
             "titan-runtime/libtitan.a", "titan-runtime/bootstrap/titan.so",
             "lpeglabel-build/libtitan-lpeglabel.a",
             "sdk/lib/titan/0.6/libtitan.a",
-            "sdk/include/titan/ffi.h", "sdk/include/uv.h", "sdk/include/uv/version.h",
+            "sdk/include/titan/ffi.h", "sdk/include/titan/browser.h",
+            "sdk/include/uv.h", "sdk/include/uv/version.h",
         }) do
             assert_file(workspace .. "/" .. artifact)
         end
@@ -2498,7 +2499,8 @@ describe("relocatable Lua build configuration", function()
         end
         for _, path in ipairs({ "titanc", "titan-compiler/driver.lua", "LICENSE",
                 "THIRD_PARTY_NOTICES.md", "LICENSES/fixture-license",
-                "titan-runtime/titan.h", "titan-runtime/minicoro.h", "titan-runtime/transfer.h", "titan-runtime/titan/ffi.h" }) do fixture(source, path) end
+                "titan-runtime/titan.h", "titan-runtime/minicoro.h", "titan-runtime/transfer.h",
+                "titan-runtime/titan/ffi.h", "titan-runtime/titan/browser.h" }) do fixture(source, path) end
         fixture(build, "out/titan.dll")
         fixture(build, "runtime/libtitan.a")
         fixture(build, "runtime/titan.dll", "support module\n")
@@ -2510,6 +2512,7 @@ describe("relocatable Lua build configuration", function()
             ["include/minicoro.h"] = source .. "/titan-runtime/minicoro.h",
             ["include/transfer.h"] = source .. "/titan-runtime/transfer.h",
             ["include/titan/ffi.h"] = source .. "/titan-runtime/titan/ffi.h",
+            ["include/titan/browser.h"] = source .. "/titan-runtime/titan/browser.h",
             ["share/titan/LICENSE"] = source .. "/LICENSE",
             ["share/titan/THIRD_PARTY_NOTICES.md"] = source .. "/THIRD_PARTY_NOTICES.md",
             ["share/titan/LICENSES/fixture-license"] = source .. "/LICENSES/fixture-license",
