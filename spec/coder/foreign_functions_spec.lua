@@ -61,6 +61,71 @@ end
 describe("source-defined foreign functions", function()
     after_each(cleanup)
 
+    it("executes fitting foreign literals in every typed C context", function()
+        with_header([[
+            #include <stdlib.h>
+            typedef struct ffi_context { long long big; } ffi_context;
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+                local foreign function takes_wide(input: long long): long long
+                    return input
+                end
+                local foreign function returns_wide(): long long return 10 end
+                local foreign function contexts(item: *ffi_context,
+                                                 elements: *long long): long long
+                    local wide: foreign long long = 5
+                    if wide ~= 5 then return -2 end
+                    wide = 7
+                    item.big = 6
+                    elements[0] = 8
+                    local argument = takes_wide(9)
+                    local named = takes_wide { input = 9 }
+                    if named ~= 9 then return -3 end
+                    local memory = ffi.malloc(16)
+                    if memory == nil then return -1 end
+                    ffi.free(memory)
+                    return wide + item.big + elements[0] + argument + returns_wide()
+                end
+                function run(): integer
+                    local item = foreign ffi_context.new()
+                    local elements = foreign long long.new_array(1)
+                    return contexts(item, elements)
+                end
+            ]], [[
+                assert(test.run() == 40)
+            ]])
+        end)
+    end)
+
+    it("emits contextual signed minima and C-rounded floating values", function()
+        h.run_coder([[
+            local foreign function boundaries(): int
+                local small: foreign signed char = -128
+                local minimum: foreign long long = -9223372036854775808
+                local maximum: foreign unsigned long long = 18446744073709551615
+                local hexadecimal: foreign long long = -0xFFFFFFFF
+                local fraction: foreign float = -0.1
+                local wide: foreign long double = 0.1
+                local base: foreign double = 0.1
+                if small ~= -128 then return 1 end
+                if minimum ~= -9223372036854775807 - 1 then
+                    return 2
+                end
+                if maximum ~= ~(0 as foreign unsigned long long) then return 3 end
+                if hexadecimal ~= -4294967295 then
+                    return 4
+                end
+                if fraction ~= (-base as foreign float) then return 5 end
+                if wide ~= base then return 6 end
+                return 0
+            end
+            function run(): integer return boundaries() end
+        ]], [[
+            assert(test.run() == 0)
+        ]])
+    end)
+
     it("resolves public foreign entries from a compiled shared provider", function()
         local ok, err = h.build_so_chain({
             { name = "foreign_export_provider", src = [[

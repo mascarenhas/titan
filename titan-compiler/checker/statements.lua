@@ -1229,10 +1229,6 @@ checkstat_visitor = util.make_visitor({
                             var._decl._assigned = true
                         end
                     end
-                    local old = exp
-                    exp = coerce_and_check(
-                        exp, var._type, "assignment", errors, var.loc)
-                    replace_adjusted_value(adjusted, old, exp)
                 end
             end
         end

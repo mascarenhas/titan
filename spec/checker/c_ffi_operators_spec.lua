@@ -1,8 +1,10 @@
 local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
+local driver = require "titan-compiler.driver"
 
 local probe_session
+local target_profile
 
 local function run_checker(code)
     return h.run_checker(code, probe_session)
@@ -79,11 +81,198 @@ end
 describe("C FFI operator type checking", function()
     setup(function()
         probe_session = h.new_checker_probe_session()
+        local resolver = driver.new_resolver_context()
+        local profile, err = driver.get_target_profile(resolver)
+        assert(driver.close_resolver_context(resolver))
+        target_profile = assert(profile, err)
     end)
 
     teardown(function()
         h.close_checker_probe_session(probe_session)
         probe_session = nil
+    end)
+
+    local literal_cases = {
+        { "widens decimal integers", "c_int + 3000000000", function(profile)
+            return tonumber(profile.integers.long.maximum) >= 3000000000
+                and "long" or "long long"
+        end },
+        { "classifies hexadecimal integers", "c_unsigned & 0xFFFFFFFF",
+            function() return "unsigned int" end },
+        { "promotes negated integer literals", "c_unsigned + (-1)",
+            function() return "unsigned int" end },
+        { "keeps integer literals integral beside C floats", "c_float * 2",
+            function() return "float" end },
+        { "classifies floating literals as double", "c_float * 0.5",
+            function() return "double" end },
+        { "classifies left-hand literals", "2 * c_float",
+            function() return "float" end },
+        { "classifies complemented literals", "c_unsigned & (~0xFFFFFFFF)",
+            function() return "unsigned int" end },
+        { "keeps leading-zero Titan numerals decimal", "c_int + 04000000000",
+            function(profile)
+                return tonumber(profile.integers.long.maximum) >= 4000000000
+                    and "long" or "long long"
+            end },
+        { "preserves hexadecimal magnitudes above lua_Integer",
+            "c_unsigned & 0xFFFFFFFFFFFFFFFF", function(profile)
+                return profile.integers["unsigned long"].precision >= 64
+                    and "unsigned long" or "unsigned long long"
+            end },
+    }
+    for _, case in ipairs(literal_cases) do
+        it(case[1], function()
+            local ok, err, ast = run_checker([[
+                local function literal(
+                    c_int: foreign int,
+                    c_unsigned: foreign unsigned int,
+                    c_float: foreign float
+                )
+                    local result = ]] .. case[2] .. [[
+                end
+            ]])
+            assert.truthy(ok, err)
+            local result = ast[1].block.stats[1].exps[1]
+            assert.equal(case[3](target_profile), result._type.spelling)
+        end)
+    end
+
+    it("uses C literals across arithmetic, bitwise and shift operators", function()
+        for _, op in ipairs({ "+", "-", "*", "/", "%", "&", "|", "~",
+                               "<<", ">>" }) do
+            local ok, err, ast = run_checker([[
+                local function literal(number: foreign int)
+                    local right = number ]] .. op .. [[ ((1))
+                    local left = ((1)) ]] .. op .. [[ number
+                end
+            ]])
+            assert.truthy(ok, err)
+            for _, stat in ipairs(ast[1].block.stats) do
+                assert.equal(target_profile.int, stat.exps[1]._type.spelling)
+            end
+        end
+    end)
+
+    it("leaves non-literal Titan operands, comparisons and offsets unchanged",
+    function()
+        local ok, err, ast = run_checker([[
+            local function unchanged(number: foreign unsigned int,
+                                     floating: foreign float,
+                                     offset: integer, scale: float,
+                                     pointer: foreign *int)
+                local integer_mix = number + offset
+                local float_mix = floating * scale
+                local forced_titan = number + (1 as integer)
+                local comparison = number < -1
+                local equality = number == 1
+                local pointer_offset = pointer + 1
+            end
+        ]])
+        assert.truthy(ok, err)
+        local stats = ast[1].block.stats
+        for _, index in ipairs({ 1, 3, 4, 5 }) do
+            assert.equal(target_profile.lua_integer,
+                stats[index].exps[1]._c_operator.rhs_target.spelling)
+        end
+        assert.equal(target_profile.lua_number,
+            stats[2].exps[1]._c_operator.rhs_target.spelling)
+        assert.equal("Type.Boolean", stats[4].exps[1]._type._tag)
+        assert.equal("Type.Boolean", stats[5].exps[1]._type._tag)
+        assert.equal("Type.CPointer", stats[6].exps[1]._type._tag)
+        assert.equal(target_profile.lua_integer,
+            stats[6].exps[1]._c_operator.rhs_target.spelling)
+    end)
+
+    it("requires explicit casts for newly narrower C results", function()
+        for _, body in ipairs({
+            "local wide: foreign long long = number + 1",
+            "local narrow: foreign float = floating * 0.5",
+        }) do
+            local ok, err = run_checker([[
+                local function rejected(number: foreign int,
+                                        floating: foreign float)
+                    ]] .. body .. [[
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("types in declaration of local variable", err, 1, true)
+            local _, count = err:gsub("do not match", "")
+            assert.equal(1, count)
+        end
+    end)
+
+    it("rejects floating bitwise operands even under unary complement", function()
+        for _, expression in ipairs({ "number & ~0.5", "~0.5 & number" }) do
+            local ok, err = run_checker([[
+                local function rejected(number: foreign int)
+                    local result = ]] .. expression .. [[
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("requires a C integer operand", err, 1, true)
+        end
+    end)
+
+    it("reports each rejected assignment once at the delivered value", function()
+        with_header([[
+            typedef struct ffi_store {
+                int fills;
+                long long big;
+            } ffi_store;
+        ]], function(header)
+            for _, assignment in ipairs({
+                "response.fills = response.big + 1",
+                "elements[0] = response.big + 1",
+                "local_value = response.big + 1",
+                "response.fills, elements[0] = response.big + 1, response.big + 2",
+            }) do
+                for _, signature in ipairs({
+                    "local function mismatch(response: foreign *ffi_store, "
+                        .. "elements: foreign *int)",
+                    "local foreign function mismatch(response: *ffi_store, "
+                        .. "elements: *int)",
+                }) do
+                    local ok, err, ast = run_checker([[
+                        foreign import "]] .. header .. [["
+                        ]] .. signature .. [[
+                            local local_value: foreign int = 0
+                            ]] .. assignment .. [[
+                        end
+                    ]])
+                    assert.falsy(ok)
+                    local _, count = err:gsub("types in assignment do not match", "")
+                    assert.equal(assignment:find(",", 1, true) and 2 or 1, count)
+                    assert.match("expected foreign int but found foreign long long",
+                        err, 1, true)
+                    for _, exp in ipairs(ast[2].block.stats[2].exps) do
+                        local loc = exp.loc
+                        assert.match(":" .. loc.line .. ":" .. loc.col
+                            .. ": type error: types in assignment", err, 1, true)
+                    end
+                end
+            end
+        end)
+    end)
+
+    it("classifies literals beside C typedefs, enums and bools", function()
+        with_header([[
+            typedef int ffi_count;
+            enum ffi_choice { FFI_CHOICE_ZERO, FFI_CHOICE_ONE };
+        ]], function(header)
+            local ok, err, ast = run_checker([[
+                foreign import "]] .. header .. [["
+                local function categories(count: foreign ffi_count,
+                                          flag: foreign bool)
+                    local typedef_result = count + 1
+                    local enum_result = ffi.FFI_CHOICE_ONE + 1
+                    local bool_result = flag + 1
+                end
+            ]])
+            assert.truthy(ok, err)
+            for _, stat in ipairs(ast[2].block.stats) do
+                assert.equal(target_profile.int, stat.exps[1]._type.spelling)
+            end
+        end)
     end)
 
     it("keeps an unsigned macro at unsigned rank without pre-narrowing",

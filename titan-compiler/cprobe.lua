@@ -620,7 +620,7 @@ local operator_spellings = {
 }
 
 local function render_operator_operand(name, variable, source_type,
-                                       target_type, is_null)
+                                       target_type, is_null, literal)
     if not target_type then
         error("C operator operand '" .. name .. "' has no target type", 3)
     end
@@ -634,6 +634,15 @@ local function render_operator_operand(name, variable, source_type,
         }
     elseif not source_type then
         error("C operator operand '" .. name .. "' has no source type", 3)
+    end
+    if literal then
+        return nil, "((" .. target_name .. ")(" .. literal .. "))", {
+            source_type = cdeclarator.render_type_name(source_type),
+            source_declaration = "",
+            target_type = target_name,
+            null = false,
+            literal = literal,
+        }
     end
 
     local declaration =
@@ -661,12 +670,12 @@ local function prepare_operator_probe(module_context, trait)
     local rhs_name = probe_identifier("r")
     local lhs_decl, lhs_exp, lhs = render_operator_operand(
         "lhs", lhs_name,
-        trait.lhs_source, trait.lhs_target, trait.lhs_null)
+        trait.lhs_source, trait.lhs_target, trait.lhs_null, trait.lhs_literal)
     local rhs_decl, rhs_exp, rhs
     if trait.kind == "binary" then
         rhs_decl, rhs_exp, rhs = render_operator_operand(
             "rhs", rhs_name,
-            trait.rhs_source, trait.rhs_target, trait.rhs_null)
+            trait.rhs_source, trait.rhs_target, trait.rhs_null, trait.rhs_literal)
     end
 
     local expression

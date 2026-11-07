@@ -291,6 +291,9 @@ end
 
 function codevalue(ctx, node, target)
     local tag = node._tag
+    if node._c_literal then
+        return "", foreigncast(node._c_literal, node._type)
+    end
     if tag == "Ast.ExpNil" then
         return "", "0"
     elseif tag == "Ast.ExpBool" then

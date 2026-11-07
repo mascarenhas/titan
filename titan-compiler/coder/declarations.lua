@@ -863,6 +863,9 @@ end
 
 function coder._foreign_raw_exp(ctx, node)
     local tag = node._tag
+    if node._c_literal then
+        return "", foreigncast(node._c_literal, node._type)
+    end
     if tag == "Ast.ExpNil" then
         return "", "NULL"
     elseif tag == "Ast.ExpBool" then
