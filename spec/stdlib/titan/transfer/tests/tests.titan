@@ -19,7 +19,7 @@ function test_raw_loader_uses_explicit_length_and_canonical_identity(_context: t
   ffi.lua_rawget(L, ffi.LUA_REGISTRYINDEX)
   test.assert(ffi.lua_rawequal(L, -1, -2) ~= 0,
               "raw module loader returned a noncanonical module")
-  ffi.lua_settop(L, (top + 1) as foreign int)
+  ffi.lua_settop(L, top + 1)
   transfer.transfer_load_module(L, name, #name)
   test.assert(ffi.lua_gettop(L) == top + 2 and ffi.lua_rawequal(L, -1, -2) ~= 0,
               "repeated raw module load did not preserve module identity")

@@ -97,8 +97,12 @@ called with `{ foreign = true }` and increments
 
 * does not synthesize the built-in `L` and `M` locals;
 * does not annotate Lua argument/result boundary plans;
-* gives literals raw target C types (`_Bool`, target `int`, `double`,
-  `const char *`, and contextual `NULL`);
+* gives literals raw target C types (`_Bool`, unsuffixed C99 integer
+  classification, `double`, `const char *`, and contextual `NULL`), sharing the
+  [C-operator literal classifier](c-ffi-expressions.md#c-operator-traits);
+* contextually types fitting numeric literals at annotated declarations,
+  assignments, C arguments, and C returns, without passing the expected result
+  type into operator operands;
 * requires conditions to be C scalars;
 * requires numeric-for controls, limits, and steps to share a C integer or
   floating type; and

@@ -1630,6 +1630,17 @@ end
         assert_expression_ast("'asd'", { _tag = "Ast.ExpString", value = "asd" })
     end)
 
+    it("preserves numeric token spellings independently of Lua values", function()
+        for _, spelling in ipairs({
+            "3000000000", "04000000000", "0xFFFFFFFF", "0xFFFFFFFFFFFFFFFF",
+            "9223372036854775808", "0.5", "0x1.8", "0x1.8p2",
+        }) do
+            local exp = assert_expression_ast("((" .. spelling .. "))",
+                { value = tonumber(spelling), _numeral = spelling })
+            assert.is_true(exp._parenthesized)
+        end
+    end)
+
     it("can parse variables", function()
         assert_expression_ast("y", { _tag = "Ast.ExpVar", var = { _tag = "Ast.VarName", name = "y" }})
     end)

@@ -309,6 +309,241 @@ describe("foreign functions (checker)", function()
         end)
     end)
 
+    it("classifies uncontextualized foreign numerals with target C99 types",
+    function()
+        local resolver = driver.new_resolver_context()
+        local profile, profile_error = driver.get_target_profile(resolver)
+        assert(driver.close_resolver_context(resolver))
+        assert(profile, profile_error)
+        local ok, err, ast = h.run_checker([[
+            foreign function literals(input: int)
+                local sum = input + 3000000000
+                local decimal = 3000000000
+                local hexadecimal = 0xFFFFFFFF
+                local greatest = 0xFFFFFFFFFFFFFFFF
+                local fraction = 0.5
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        local wide = tonumber(profile.integers.long.maximum) >= 3000000000
+            and "long" or "long long"
+        local expected = {
+            wide, wide, "unsigned int",
+            profile.integers["unsigned long"].precision >= 64
+                and "unsigned long" or "unsigned long long",
+            "double",
+        }
+        for index, stat in ipairs(ast[1].block.stats) do
+            assert.equal(expected[index],
+                types.resolve_c_typedef(stat.decls[1]._type).spelling)
+        end
+    end)
+
+    it("preserves foreign literal declarations, returns, arguments and for bounds",
+    function()
+        local ok, err, ast = h.run_checker([[
+            local foreign function identity(input: int): int return input end
+            local foreign function fraction(input: double): double return input end
+            foreign function contextual(): int
+                local integral: foreign int = 1
+                local floating: foreign double = 0.5
+                local result = identity(2)
+                local other = fraction(0.25)
+                for count: foreign unsigned long long = 0, 2, 1 do
+                    integral = integral + 1
+                end
+                return 3
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        local stats = ast[3].block.stats
+        assert.equal("int", stats[1].exps[1]._type.spelling)
+        assert.equal("double", stats[2].exps[1]._type.spelling)
+        assert.equal("int", stats[3].exps[1].args.args[1]._type.spelling)
+        assert.equal("double", stats[4].exps[1].args.args[1]._type.spelling)
+        for _, bound in ipairs({ stats[5].start, stats[5].finish, stats[5].inc }) do
+            assert.equal("unsigned long long", bound._type.spelling)
+        end
+        assert.equal("int", stats[6].exps[1]._type.spelling)
+    end)
+
+    it("contextually types fitting foreign literals at every C sink", function()
+        with_header([[
+            #include <stdlib.h>
+            typedef struct ffi_context { long long big; } ffi_context;
+        ]], function(header)
+            local ok, err, ast = check_with_header(header, [[
+                local foreign function takes_wide(input: long long): long long
+                    return input
+                end
+                local foreign function returns_wide(): long long return 10 end
+                foreign function sinks(item: *ffi_context, elements: *long long)
+                    local wide: foreign long long = 5
+                    wide = 7
+                    item.big = 6
+                    elements[0] = 8
+                    local positional = takes_wide(9)
+                    local named = takes_wide { input = 9 }
+                    local memory = ffi.malloc(16)
+                    ffi.free(memory)
+                end
+            ]])
+            assert.truthy(ok, err)
+            local stats = ast[4].block.stats
+            for _, index in ipairs({ 1, 2, 3, 4 }) do
+                assert.equal("long long",
+                    types.resolve_c_typedef(stats[index].exps[1]._type).spelling)
+            end
+            for _, index in ipairs({ 5, 6 }) do
+                assert.equal("long long",
+                    stats[index].exps[1].args.args[1]._type.spelling)
+            end
+            assert.equal("long long", ast[3].block.stats[1].exps[1]._type.spelling)
+            local argument = stats[7].exps[1].args.args[1]
+            assert.is_true(types.equals(argument._type,
+                stats[7].exps[1].exp._type.params[1]))
+        end)
+    end)
+
+    it("fits exact signed minima and unsigned magnitudes contextually", function()
+        local ok, err, ast = h.run_checker([[
+            foreign function boundaries()
+                local small: foreign signed char = -128
+                local minimum: foreign long long = -9223372036854775808
+                local maximum: foreign unsigned long long = 18446744073709551615
+                local hexadecimal: foreign long long = -0xFFFFFFFF
+                local fractional: foreign float = -0.1
+                local widened: foreign long double = 0.1
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        local expected = { "signed char", "long long", "unsigned long long",
+            "long long", "float", "long double" }
+        for index, stat in ipairs(ast[1].block.stats) do
+            assert.equal(expected[index], stat.exps[1]._type.spelling)
+        end
+    end)
+
+    it("keeps non-fitting and cross-kind literals at their C99 types", function()
+        for _, declaration in ipairs({
+            "local number: foreign unsigned char = 300",
+            "local number: foreign unsigned char = -1",
+            "local number: foreign signed char = -129",
+            "local number: foreign float = 1e100",
+            "local number: foreign long double = 1e400",
+            "local number: foreign unsigned int = 1.0",
+            "local number: foreign float = 1",
+            "local number: foreign long long = input + 1",
+        }) do
+            local ok, err = h.run_checker([[
+                foreign function rejected(input: int)
+                    ]] .. declaration .. [[
+                end
+            ]], probe_session)
+            assert.falsy(ok, declaration)
+            assert.match("types in declaration of local variable number do not match",
+                err, 1, true)
+            local _, count = err:gsub("do not match", "")
+            assert.equal(1, count)
+        end
+    end)
+
+    it("rejects numeric literals at every enum sink without rejecting enumerators",
+    function()
+        with_header([[
+            typedef enum ffi_color { FFI_RED, FFI_GREEN, FFI_BLUE } ffi_color;
+            typedef ffi_color ffi_color_alias;
+            typedef struct ffi_color_box { ffi_color color; } ffi_color_box;
+        ]], function(header)
+            for _, body in ipairs({
+                "local color: foreign ffi_color = 7",
+                "local color: foreign ffi_color_alias = 1",
+                "box.color = 1",
+                "elements[0] = 1",
+                "takes_color(1)",
+                "return 1",
+            }) do
+                local ok, err = check_with_header(header, [[
+                    local foreign function takes_color(_: ffi_color) end
+                    local foreign function rejected(box: *ffi_color_box,
+                                                     elements: *ffi_color): ffi_color
+                        ]] .. body .. [[
+                        ]] .. (body == "return 1" and "" or "return ffi.FFI_RED") .. [[
+                    end
+                ]])
+                assert.falsy(ok, body)
+                assert.match("do not match", err, 1, true)
+                local _, count = err:gsub("do not match", "")
+                assert.equal(1, count)
+            end
+            local ok, err = check_with_header(header, [[
+                local foreign function takes_color(_: ffi_color) end
+                local foreign function accepted(box: *ffi_color_box,
+                                                 elements: *ffi_color): ffi_color
+                    local color: foreign ffi_color = ffi.FFI_RED
+                    local alias: foreign ffi_color_alias = ffi.FFI_BLUE
+                    box.color = color
+                    elements[0] = alias
+                    takes_color(color)
+                    return alias
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("adapts bool literals only within the bool range", function()
+        local ok, err, ast = h.run_checker([[
+            foreign function flags()
+                local zero: foreign bool = 0
+                local one: foreign bool = 1
+                local half: foreign float = -0.5
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        for index = 1, 2 do
+            assert.equal("_Bool", ast[1].block.stats[index].exps[1]._type.spelling)
+        end
+        ok, err = h.run_checker([[
+            foreign function rejected()
+                local flag: foreign bool = 2
+            end
+        ]], probe_session)
+        assert.falsy(ok)
+        assert.match("do not match", err, 1, true)
+    end)
+
+    it("rejects an unrepresentable foreign for-bound integer spelling", function()
+        local ok, err = h.run_checker([[
+            foreign function rejected()
+                for index: foreign int = 0, 99999999999999999999 do break end
+            end
+        ]], probe_session)
+        assert.falsy(ok)
+        assert.match("does not fit any C99 candidate type (int, long, long long)",
+            err, 1, true)
+    end)
+
+    it("keeps explicit foreign for controls ahead of default literal classification",
+    function()
+        local ok, err, ast = h.run_checker([[
+            foreign function controls()
+                for index: foreign unsigned long long =
+                    18446744073709551615, 18446744073709551615 do
+                    break
+                end
+                for index: foreign double = 0, 2 do break end
+                for index: foreign unsigned char = 300, 300 do break end
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        for _, stat in ipairs(ast[1].block.stats) do
+            for _, bound in ipairs({ stat.start, stat.finish, stat.inc }) do
+                assert.is_true(types.equals(stat.decl._type, bound._type))
+            end
+        end
+    end)
+
     it("keeps size and alignment in the C size_t domain inside foreign bodies",
     function()
         with_header("#include <stddef.h>\n" .. declarations, function(header)

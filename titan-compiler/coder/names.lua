@@ -90,19 +90,6 @@ function c_integer_literal(n)
     return string.format("%i", n)
 end
 
-function c_float_literal(n)
-    if n ~= n then return "NAN" end            -- nan (unreachable from a literal, defensive)
-    if n == math.huge then return "HUGE_VAL" end   -- +inf, e.g. the literal 1e400
-    if n == -math.huge then return "(-HUGE_VAL)" end
-    local s = string.format("%.17g", n)        -- round-trips every finite double
-    -- %.17g prints an integral value as a bare integer token ("1", "0", "-2"),
-    -- which is a C *integer* constant: spliced into a raw operator it would make
-    -- e.g. `1.0 / 2.0` integer division (== 0) and `0.0 / 0.0` an integer divide
-    -- by zero. Force a floating constant when the token has no '.' or exponent.
-    if not s:find("[.eE]") then s = s .. ".0" end
-    return s
-end
-
 -- Emit a standalone C `#line` directive pointing at `node`'s .titan source
 -- location, so DWARF and libbacktrace symbolization attribute the *following*
 -- generated C to the original .titan file and line rather than the generated

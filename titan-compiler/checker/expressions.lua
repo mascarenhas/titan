@@ -52,25 +52,18 @@ checkexp = util.make_visitor({
         end
     end,
 
-    ["Ast.ExpInteger"] = function(node, st)
+    ["Ast.ExpInteger"] = function(node, st, errors, context)
         if checker._foreign_function_depth > 0 then
-            local spelling = st.c_profile and st.c_profile.int or "int"
-            node._type = st.c_profile and st.c_profile.integers
-                and st.c_profile.integers[spelling]
-                and st.c_profile.integers[spelling].type
-                or types.CInteger("int", true, 3, 32)
+            classify_c_numeric_literal(node, st, errors, context)
             node._foreign_literal = true
         else
             node._type = types.Integer()
         end
     end,
 
-    ["Ast.ExpFloat"] = function(node, st)
+    ["Ast.ExpFloat"] = function(node, st, errors, context)
         if checker._foreign_function_depth > 0 then
-            node._type = st.c_profile and st.c_profile.floats
-                and st.c_profile.floats.double
-                and st.c_profile.floats.double.type
-                or types.CFloat("double")
+            classify_c_numeric_literal(node, st, errors, context)
             node._foreign_literal = true
         else
             node._type = types.Float()
@@ -333,8 +326,11 @@ checkexp = util.make_visitor({
         end
     end,
 
-    ["Ast.ExpUnop"] = function(node, st, errors, _)
+    ["Ast.ExpUnop"] = function(node, st, errors, context)
         local op = node.op
+        if op == "-" and try_contextual_c_numeric_literal(node, st, errors, context) then
+            return
+        end
         checkexp(node.exp, st, errors)
         if check_c_unary_operator(node, st, errors) then
             return

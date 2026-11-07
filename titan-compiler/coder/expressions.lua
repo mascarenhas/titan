@@ -291,6 +291,9 @@ end
 
 function codevalue(ctx, node, target)
     local tag = node._tag
+    if node._c_literal then
+        return "", foreigncast(node._c_literal, node._type)
+    end
     if tag == "Ast.ExpNil" then
         return "", "0"
     elseif tag == "Ast.ExpBool" then
@@ -298,7 +301,7 @@ function codevalue(ctx, node, target)
     elseif tag == "Ast.ExpInteger" then
         return "", c_integer_literal(node.value)
     elseif tag == "Ast.ExpFloat" then
-        return "", c_float_literal(node.value)
+        return "", util.c_float_literal(node.value)
     elseif tag == "Ast.ExpString" then
         return makestring(ctx, c_string_literal(node.value), target,
             tostring(#node.value))
@@ -2921,9 +2924,13 @@ function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpCast"
            and node.exp._tag == "Ast.ExpVar"
            and node.exp.var._tag == "Ast.VarBracket"
+           and (node.exp.var.exp1._type._tag == "Type.Array"
+                or node.exp.var.exp1._type._tag == "Type.Map")
            and node.exp._type._tag ~= "Type.Option"
            and node.exp._type._tag ~= "Type.Value" then
-        -- Fold casts of array/map indexing into the code for the operation
+        -- Fold only Titan container reads, whose loader consumes the target
+        -- type. Raw C reads must keep their source type and use the ordinary
+        -- checked boxing/conversion path below.
         local t = node.exp.var._type
         node.exp.var._type = node._type
         local cstats, cexp = codeexp(ctx, node.exp.var)

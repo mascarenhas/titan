@@ -479,11 +479,38 @@ The subtraction itself has the target's exact `ptrdiff_t` type; the subsequent
 conversion to `lua_Integer` is checked and raises if the result is not
 representable rather than narrowing silently.
 
-A Titan `integer` mixed with a C operand participates as the configured
-`lua_Integer`; a Titan `float` participates as the configured `lua_Number`.
-The compiler reads those types and all C integer widths, ranks, signedness, and
-ranges from the active target toolchain. It does not assume the Lua process
-running the compiler has the same data model.
+For `+`, `-`, `*`, `/`, `%`, `&`, `|`, binary `~`, `<<`, and `>>`, a numeric
+literal next to a C arithmetic operand has its unsuffixed C99 type:
+
+* A decimal integer numeral uses the first of `int`, `long`, and `long long`
+  whose range contains its value.
+* A hexadecimal integer numeral uses the first of `int`, `unsigned int`,
+  `long`, `unsigned long`, `long long`, and `unsigned long long` whose range
+  contains its value.
+* A floating numeral has type `double`.
+
+An integer numeral that fits none of its C99 candidates is rejected. The
+classification uses the integer spelling even when the same numeral would be
+a Titan `float` outside C mode, as with decimal `9223372036854775808` on a
+target whose `long long` has 64 bits.
+
+Parentheses and unary `-` or `~` do not hide a literal operand. Unary operators
+apply after the numeral is classified: `-1` negates C `int` `1`, and
+`~0xFFFFFFFF` complements the hexadecimal constant in its classified type.
+Titan's leading-zero decimal numerals remain decimal, not C octal constants.
+The rule includes C typedefs, enum values, and `_Bool` operands. Thus an `int`
+field can be updated with `response.fills = response.fills + 1`, a `size_t`
+field with `response.length = response.length + 1`, and `c_float * 2` has type
+`float`. In contrast, `c_float * 0.5` has type `double`; storing it into a C
+`float` requires an explicit cast.
+
+A non-literal Titan `integer` mixed with a C operand participates as the
+configured `lua_Integer`; a non-literal Titan `float` participates as the
+configured `lua_Number`. Comparisons and pointer offsets use that rule even
+for literal operands. In particular, `c_unsigned < -1` compares in
+`lua_Integer` rather than converting `-1` to `unsigned int`.
+The compiler reads numeric widths, ranks, signedness, and ranges from the active
+target toolchain, not from the Lua process running the compiler.
 
 This distinction matters. In `small_unsigned + titan_integer`, the small C
 operand is promoted and then combined with `lua_Integer`; the Titan operand is
@@ -522,6 +549,24 @@ shifts, and implementation-defined right shift consequently have their C
 meaning. Some of those cases are undefined behavior. Titan does not add safety
 checks or define a portable result; use an explicit Titan conversion before
 the operation when Titan semantics are required.
+
+Literal arithmetic can therefore happen in a narrower type than Titan
+`integer`: `c_int + 1` at `INT_MAX` and `c_int * 1000000` outside C `int`'s
+range have signed-overflow undefined behavior. Similarly, `1 << c_n` uses C
+`int` for its left operand and must obey that type's shift rules. A later wider
+destination does not widen the computation, and storing a C `int` result into
+an explicitly wider C integer type requires a cast.
+
+Choose Titan arithmetic before the operation when wrapping arithmetic and a
+range-checked store are wanted:
+
+```text
+response.fills = (response.fills as integer) + 1
+```
+
+To compute in a wider C type instead, cast an operand before the operator, for
+example `(1 as foreign unsigned long long) << c_n`. C's overflow and shift
+rules still apply to that wider type.
 
 ## C constants and macro-projected fields
 

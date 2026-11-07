@@ -1764,8 +1764,13 @@ function csemantics.classify_integer_literal(profile, literal)
         end
     end
 
+    local candidates = {}
+    for index, candidate in ipairs(literal.candidate_classes) do
+        candidates[index] = candidate_spelling(candidate)
+    end
     return nil, "C integer literal '" .. tostring(literal.token) ..
-        "' is not representable by any preserved candidate type"
+        "' does not fit any C99 candidate type (" ..
+        table.concat(candidates, ", ") .. ")"
 end
 
 -- Short compatibility name for consumers that already call the cdefines

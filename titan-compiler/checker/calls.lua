@@ -224,6 +224,160 @@ function reject_invisible_c_operator_object(node, st, errors)
     return false
 end
 
+local function c_numeric_literal_parts(node)
+    local leaf, negative = node, false
+    while leaf._tag == "Ast.ExpUnop" and leaf.op == "-" do
+        negative = not negative
+        leaf = leaf.exp
+    end
+    if leaf._tag ~= "Ast.ExpInteger" and leaf._tag ~= "Ast.ExpFloat" then
+        return nil
+    end
+    local token = leaf._numeral or tostring(leaf.value)
+    if token:match("^%d+$") then
+        token = token:gsub("^0+", "")
+        if token == "" then token = "0" end
+    end
+    local literal = cdefines.integer_literal_metadata(token)
+    if not literal then token = util.c_float_literal(leaf.value) end
+    return token, literal, leaf, negative
+end
+
+local function typed_c_literal(typ, token)
+    return "((" .. cdeclarator.render_type_name(typ) .. ")(" .. token .. "))"
+end
+
+function try_contextual_c_numeric_literal(node, st, errors, context)
+    if not context or checker._foreign_function_depth == 0 then return false end
+    local token, literal, leaf, negative = c_numeric_literal_parts(node)
+    if not token then return false end
+    local resolved = types.resolve_c_typedef(context)
+    if not resolved or resolved._c_enum_identity
+       or (literal and resolved._tag ~= "Type.CInteger")
+       or (not literal and resolved._tag ~= "Type.CFloat") then
+        return false
+    end
+    local profile = ensure_c_profile(st)
+    if not profile then return false end
+    local target = csemantics.numeric_trait(profile, context)
+    if not target then return false end
+    local magnitude
+    if literal then
+        -- The widest unsigned candidate also covers the positive magnitude of
+        -- a signed minimum, even when the default decimal candidates do not.
+        magnitude = csemantics.classify_integer_literal(profile, {
+            token = literal.token, digits = literal.digits, radix = literal.radix,
+            candidate_classes = { { spelling = "unsigned long long" } },
+        })
+        if not magnitude then return false end
+        local value = negative and magnitude.value ~= "0"
+            and "-" .. magnitude.value or magnitude.value
+        if not csemantics.integer_range_contains(target, {
+            kind = "integer", minimum = value, maximum = value,
+        }) then
+            return false
+        end
+        token = magnitude.value .. "ULL"
+        if negative and magnitude.value ~= "0" then
+            -- Avoid an out-of-range positive signed constant at LLONG_MIN.
+            token = "(-((long long)(" .. token .. " - 1ULL)) - 1LL)"
+        end
+    else
+        local value = leaf.value
+        if value ~= value or value == math.huge or value == -math.huge then
+            return false
+        end
+        local maximum = (1 - target.radix ^ -target.mantissa_digits)
+            * target.radix ^ (target.maximum_exponent - 1) * target.radix
+        if math.abs(value) > maximum then return false end
+        if negative then token = "-(" .. token .. ")" end
+    end
+    if leaf ~= node then
+        -- The contextual literal is the complete signed source expression.
+        -- Keep its children typed, but do not retain a C unary trait on the
+        -- root: promotion is not the selected contextual-literal operation.
+        if literal and not csemantics.classify_integer_literal(profile, literal) then
+            leaf._type = magnitude.type
+            leaf._c_literal = typed_c_literal(magnitude.type, magnitude.value .. "ULL")
+        else
+            classify_c_numeric_literal(leaf, st, errors)
+        end
+        local function annotate_unary(exp)
+            if exp == leaf then return end
+            annotate_unary(exp.exp)
+            if exp ~= node then check_c_unary_operator(exp, st, errors) end
+        end
+        annotate_unary(node)
+        node._c_operator = nil
+    end
+    node._type = context
+    node._c_literal = typed_c_literal(context, token)
+    node._foreign_literal = true
+    return true
+end
+
+-- This is shared by foreign-body numerals and literal operands selected by
+-- C arithmetic. Keep lexical integer digits separate from Lua's numeric value.
+function classify_c_numeric_literal(node, st, errors, context)
+    if try_contextual_c_numeric_literal(node, st, errors, context) then return end
+    local profile, profile_error = ensure_c_profile(st)
+    if not profile then
+        node._type = invalid(errors, node.loc,
+            "cannot classify C numeric literal: %s", tostring(profile_error))
+        return
+    end
+    local token, literal = c_numeric_literal_parts(node)
+    if literal then
+        local result, err = csemantics.classify_integer_literal(profile, literal)
+        if not result then
+            node._type = invalid(errors, node.loc, "%s", err)
+            return
+        end
+        node._type = result.type
+        token = result.value .. (result.type.signed and "LL" or "ULL")
+    else
+        node._type = profile.floats.double.type
+    end
+    node._c_literal = typed_c_literal(node._type, token)
+end
+
+local literal_c_operators = {
+    ["+"] = true, ["-"] = true, ["*"] = true, ["/"] = true, ["%"] = true,
+    ["&"] = true, ["|"] = true, ["~"] = true, ["<<"] = true, [">>"] = true,
+}
+
+local function is_c_arithmetic_type(typ)
+    local resolved = types.resolve_c_typedef(typ)
+    return resolved and (resolved._tag == "Type.CInteger"
+        or resolved._tag == "Type.CFloat")
+end
+
+local function is_numeric_literal_operand(node)
+    if node._tag == "Ast.ExpInteger" or node._tag == "Ast.ExpFloat" then
+        return true
+    elseif node._tag == "Ast.ExpUnop"
+       and (node.op == "-" or node.op == "~") then
+        return is_numeric_literal_operand(node.exp)
+    elseif node._tag == "Ast.ExpCast" and node._implicit_coercion then
+        -- Ordinary Titan `~` may have inserted a float-to-integer adjustment
+        -- before its enclosing operator selected C literal semantics.
+        return is_numeric_literal_operand(node.exp)
+    end
+    return false
+end
+
+local function classify_c_literal_operand(node, st, errors)
+    if node._tag == "Ast.ExpCast" and node._implicit_coercion then
+        return classify_c_literal_operand(node.exp, st, errors)
+    elseif node._tag == "Ast.ExpUnop" then
+        node.exp = classify_c_literal_operand(node.exp, st, errors)
+        check_c_unary_operator(node, st, errors)
+    else
+        classify_c_numeric_literal(node, st, errors)
+    end
+    return node
+end
+
 function finish_c_operator(node, st, errors, decide, operands)
     if reject_direct_c_bitfield(node, operands, errors) then
         return true
@@ -259,6 +413,8 @@ function finish_c_operator(node, st, errors, decide, operands)
         node._type = types.Invalid()
         return true
     end
+    trait.lhs_literal = operands[1]._c_literal
+    trait.rhs_literal = operands[2] and operands[2]._c_literal
 
     local module_probe, probe_error = checker._probe_for_c_types(st, {
         trait.lhs_source, trait.lhs_target,
@@ -303,6 +459,19 @@ function check_c_binary_operator(node, st, errors)
     if not csemantics.is_binary_operator_candidate(
             node.op, node.lhs._type, node.rhs._type) then
         return false
+    end
+    if literal_c_operators[node.op] then
+        -- Foreign-body operands already have their C99 types. Only
+        -- replace ordinary Titan literals, not casts, variables or pointers.
+        if is_c_arithmetic_type(node.lhs._type)
+           and not is_c_arithmetic_type(node.rhs._type)
+           and is_numeric_literal_operand(node.rhs) then
+            node.rhs = classify_c_literal_operand(node.rhs, st, errors)
+        elseif is_c_arithmetic_type(node.rhs._type)
+           and not is_c_arithmetic_type(node.lhs._type)
+           and is_numeric_literal_operand(node.lhs) then
+            node.lhs = classify_c_literal_operand(node.lhs, st, errors)
+        end
     end
     return finish_c_operator(node, st, errors, function(profile)
         return csemantics.decide_binary_operator(

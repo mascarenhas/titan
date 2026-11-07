@@ -57,8 +57,11 @@ selects them, not a global lexer priority.
 `lexer.NUMBER` matches a deliberately broad candidate and validates it inside a
 match-time capture with Lua's `tonumber`; a malformed candidate raises
 `MalformedNumber`. The match-time capture returns only a position, so a wide
-constructor does not retain one dynamic capture per numeral; an ordinary `/
-tonumber` capture produces the value afterwards.
+constructor does not retain one dynamic capture per numeral. The ordinary
+capture produces the Lua value afterwards; the parser wraps `NUMBER` in a
+string capture to retain the validated spelling as `_numeral`. Its
+`ExpInteger`/`ExpFloat` choice follows Lua's numeric tag, while C literal
+classification uses the preserved radix and exact digits instead of that value.
 
 Quoted strings decode Lua-style escapes. The decimal-escape pattern only
 admits 0–255 (`MalformedEscape_decimal`), `\x` requires exactly two hex digits

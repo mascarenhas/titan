@@ -22,6 +22,9 @@ end
 local defs = {}
 local with_name_loc, with_end_loc
 for name, pattern in pairs(lexer) do defs[name] = pattern end
+-- Keep the validated token spelling alongside its ordinary Lua numeric value.
+-- C99 literal typing needs the radix and digits before Lua rounds or wraps them.
+defs.NUMBER = lpeg.C(lexer.NUMBER)
 for name, constructor in pairs(ast) do defs[name] = constructor end
 local identifier_rest = lpeg.P"_" + lpeg.R("AZ", "az", "09")
 for token, word in pairs({
@@ -230,14 +233,17 @@ function defs.nil_exp(pos --[[, s ]])
     return ast.ExpNil(pos)
 end
 
-function defs.number_exp(pos, n)
+function defs.number_exp(pos, spelling, n)
+    local node
     if math.type(n) == "integer" then
-        return ast.ExpInteger(pos, n)
+        node = ast.ExpInteger(pos, n)
     elseif math.type(n) == "float" then
-        return ast.ExpFloat(pos, n)
+        node = ast.ExpFloat(pos, n)
     else
         error("impossible")
     end
+    node._numeral = spelling
+    return node
 end
 
 function defs.name_exp(pos, name)

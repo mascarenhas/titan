@@ -151,6 +151,130 @@ describe("C FFI operator code generation", function()
         if not h.verbose then clean_module() end
     end)
 
+    it("increments C int and size_t fields and C array elements with literals",
+    function()
+        with_header([[
+            #include <stddef.h>
+            typedef struct ffi_response {
+                int fills;
+                size_t length;
+            } ffi_response;
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+                local function bump(response: foreign *ffi_response)
+                    response.fills = response.fills + 1
+                    response.length = response.length + 1
+                end
+                function increment(): (integer, integer, integer)
+                    local response = foreign ffi_response.new()
+                    response.fills = 7
+                    response.length = 9
+                    bump(response)
+                    local elements = foreign int.new_array(1)
+                    elements[0] = 11
+                    elements[0] = elements[0] + 1
+                    return response.fills, response.length, elements[0]
+                end
+            ]], [[
+                local fills, length, element = test.increment()
+                assert(fills == 8)
+                assert(length == 10)
+                assert(element == 12)
+            ]])
+        end)
+    end)
+
+    it("executes classified integer and floating literals with C semantics",
+    function()
+        h.run_coder([[
+            function unsigned_minus_one(number: foreign unsigned int): integer
+                return number + -1
+            end
+            function literal_shift(number: foreign int): integer
+                return 1 << number
+            end
+            function floating_integer(number: foreign float): float
+                return number * 2
+            end
+            function floating_fraction(number: foreign float): float
+                return number * 0.5
+            end
+            function comparison(number: foreign unsigned int): boolean
+                return number < -1
+            end
+            function nonliteral(number: foreign unsigned int,
+                                delta: integer): integer
+                return number + delta
+            end
+        ]], [[
+            assert(test.unsigned_minus_one(0) > 0)
+            assert(test.unsigned_minus_one(1) == 0)
+            assert(test.literal_shift(3) == 8)
+            assert(test.floating_integer(1.25) == 2.5)
+            assert(test.floating_fraction(1.25) == 0.625)
+            assert(not test.comparison(0))
+            assert(test.nonliteral(0, -1) == -1)
+        ]])
+    end)
+
+    it("emits foreign-body magnitudes and contextual literals without Lua rounding",
+    function()
+        h.run_coder([[
+            local foreign function large(input: int): long long
+                local sum = input + 3000000000
+                return sum as foreign long long
+            end
+            local foreign function hexadecimal(): int
+                local maximum = 0xFFFFFFFFFFFFFFFF
+                if maximum > 0 then return 1 end
+                return 0
+            end
+            local foreign function contextual(): unsigned long long
+                local sum: foreign unsigned long long =
+                    0 as foreign unsigned long long
+                for count: foreign unsigned long long = 0, 2, 1 do
+                    sum = sum + count
+                end
+                return sum
+            end
+            function run(): (integer, integer, integer)
+                return large(7), hexadecimal(), contextual()
+            end
+        ]], [[
+            local large, hexadecimal, contextual = test.run()
+            assert(large == 3000000007)
+            assert(hexadecimal == 1)
+            assert(contextual == 3)
+        ]])
+    end)
+
+    it("emits lexer floating values without overflow warnings", function()
+        h.with_extra_cflags({ "-Werror" }, function()
+            h.run_coder([[
+                local foreign function foreign_infinity(): double
+                    local untyped = 1e400
+                    local typed: foreign double = 1e400
+                    return untyped + typed
+                end
+                local foreign function finite(): float
+                    local fraction: foreign float = -0x.8
+                    local zero: foreign float = 1e-400
+                    return fraction + zero
+                end
+                function operator_infinity(input: foreign double): float
+                    return input + 1e400
+                end
+                function foreign_value(): float return foreign_infinity() end
+                function finite_value(): float return finite() end
+            ]], [[
+                assert(test.operator_infinity(0.0) == math.huge)
+                assert(test.foreign_value() == math.huge)
+                assert(test.finite_value() == -0.5)
+            ]])
+        end)
+    end)
+
     it("covers C arithmetic, bitwise, comparison, and pointer lowering once",
     function()
         with_header([[
