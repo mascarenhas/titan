@@ -30,6 +30,24 @@ EM_JS(void, gate_test_publish, (), {
     free: pointer => Module['_free'](pointer),
     abort: () => abort('bridge fixture owned abort'),
     armResponseOwnerFailure: () => Module['_titan_bridge_test_arm_response_owner_failure'](),
+    failAllocationAfter(successes) {
+      var allocate = Module['_malloc'];
+      var failed = false, slotsAtFailure;
+      Module['_malloc'] = size => {
+        if (successes-- === 0) {
+          failed = true;
+          slotsAtFailure = owner.slots.size;
+          Module['_malloc'] = allocate;
+          return 0;
+        }
+        return allocate(size);
+      };
+      return Object.freeze({
+        restore() { Module['_malloc'] = allocate; },
+        get failed() { return failed; },
+        get slotsAtFailure() { return slotsAtFailure; },
+      });
+    },
     failNextEntryStack(kind, freeSlots, maxFailures) {
       var entry = owner.entry;
       owner.entry = function(entryKind, ...args) {

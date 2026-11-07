@@ -754,7 +754,7 @@ class BrowserOwner {
     }
   }
 
-  newSlot(state, value, kind = 'value') {
+  newSlot(state, value, kind = 'value', temporary = false) {
     if (this.states.get(state) === 'closed' || !this.states.has(state)) {
       throw failure('HANDLE', 'browser handle belongs to a closed state');
     }
@@ -772,7 +772,7 @@ class BrowserOwner {
       slot = this.nextSlot++;
       generation = 1;
     }
-    this.slots.set(slot, {value, state, generation, kind, units: 1});
+    this.slots.set(slot, {value, state, generation, kind, units: 1, temporary});
     return {slot, generation};
   }
 
@@ -888,7 +888,7 @@ class BrowserOwner {
     });
   }
 
-  writeValue(address, state, item, allocations, handles) {
+  writeValue(address, state, item, allocations, handles, temporary = false) {
     const type = item.kind;
     let bytes, length = 0, handle;
     if (type === kind.string || type === kind.bytes) {
@@ -898,7 +898,7 @@ class BrowserOwner {
       bytes = this.allocate(length, allocations);
       if (length) this.module.HEAPU8.set(item.bytes, bytes);
     } else if (type === kind.handle) {
-      handle = this.newSlot(state, item.value);
+      handle = this.newSlot(state, item.value, 'value', temporary);
       handles.push(handle);
     } else if (type === kind.callable) {
       handle = this.validateCallable(item.wrapper, state);
@@ -924,9 +924,8 @@ class BrowserOwner {
     const pointer = this.allocate(args.length * valueSize, allocations);
     if (args.length) this.module.HEAPU8.fill(0, pointer, pointer + args.length * valueSize);
     for (let index = 0; index < args.length; ++index) {
-      this.writeValue(pointer + index * valueSize, state, args[index], allocations, temporary);
+      this.writeValue(pointer + index * valueSize, state, args[index], allocations, temporary, true);
     }
-    for (const handle of temporary) this.slots.get(handle.slot).temporary = true;
     return pointer;
   }
 

@@ -191,14 +191,56 @@ async function argumentMaterialization(context, image) {
     }
     context.assert(coercions === 0 && hooks.length === 0, 'runtime-type marshalling invoked host coercion');
     const hostValues = await hostValueMaterialization(context, host);
+    const reverseArguments = await reverseArgumentFailures(context, host);
     context.assert(engineFailures.length === 0 && host.notificationErrors.length === 0 &&
       (await host.call('valid_after_failure')) === 42n,
       'host-value materialization poisoned a later valid call or reported an unreturnable error');
-    return {proxyBytes: 2, nativeByteViews: sources.length, strictScalars: 3, runGetters: reads.length, ...hostValues};
+    return {proxyBytes: 2, nativeByteViews: sources.length, strictScalars: 3,
+      runGetters: reads.length, reverseArguments, ...hostValues};
   } finally {
     await host.instance?.dispose().catch(() => {});
     host.releaseObservations();
   }
+}
+
+async function reverseArgumentFailures(context, host) {
+  const target = host.callbacks.get('handle_echo');
+  let cases = 0;
+  for (const method of ['instance', 'wrapper']) {
+    const call = (...args) => method === 'instance' ?
+      host.instance.call(target, ...args) : target.call(...args);
+    await host.call('force_gc');
+    await host.instance.drain();
+    const beforeAllocation = host.controls.snapshot();
+    const fault = host.controls.failAllocationAfter(1);
+    try {
+      const result = await admissionOutcome(context, call({first: method}, binary()));
+      context.assert(result.status === 'rejected' && result.error instanceof RangeError &&
+        fault.failed && fault.slotsAtFailure === beforeAllocation.slots + 1,
+        `${method} allocation failure did not follow the first handle argument`);
+    } finally { fault.restore(); }
+    const afterAllocation = host.controls.snapshot();
+    context.assert(afterAllocation.slots === beforeAllocation.slots &&
+      afterAllocation.units === beforeAllocation.units,
+      `${method} allocation failure leaked a reverse-call argument slot`);
+    context.assert((await host.call('valid_after_failure')) === 42n);
+    cases++;
+
+    const wrapper = await host.call('make_callable');
+    await host.call('force_gc');
+    await host.instance.drain();
+    const beforeRelease = host.controls.snapshot();
+    const rejectedCall = call({first: method}, wrapper);
+    wrapper.release();
+    await rejected(context, rejectedCall, 'HANDLE');
+    const afterRelease = host.controls.snapshot();
+    context.assert(afterRelease.slots === beforeRelease.slots &&
+      afterRelease.units === beforeRelease.units,
+      `${method} released-wrapper failure leaked an earlier handle argument`);
+    context.assert((await host.call('valid_after_failure')) === 42n);
+    cases++;
+  }
+  return cases;
 }
 
 async function hostValueMaterialization(context, host) {

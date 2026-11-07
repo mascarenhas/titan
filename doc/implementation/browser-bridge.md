@@ -252,8 +252,9 @@ released there too; wrappers clear fields when their completed Titan owner
 adopts a unit. Thus allocation while building a Titan owner/error cannot leak
 an unowned host slot.
 
-For reverse-call `BrowserHandle` arguments, the marshaler initially owns
-temporary slots (`entry.temporary = true`). `new_handle` rejects an absent
+For reverse-call `BrowserHandle` arguments, each slot is created temporary
+(`entry.temporary = true`), before any later argument can fail to marshal.
+`new_handle` rejects an absent
 identity, registers its inert finalizer, and checks the actual host unit again
 after that potentially allocating setup before trusted
 `titan_browser_host_adopt(state, slot, generation)`, which clears
