@@ -301,7 +301,7 @@ function codevalue(ctx, node, target)
     elseif tag == "Ast.ExpInteger" then
         return "", c_integer_literal(node.value)
     elseif tag == "Ast.ExpFloat" then
-        return "", c_float_literal(node.value)
+        return "", util.c_float_literal(node.value)
     elseif tag == "Ast.ExpString" then
         return makestring(ctx, c_string_literal(node.value), target,
             tostring(#node.value))

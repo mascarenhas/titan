@@ -249,6 +249,32 @@ describe("C FFI operator code generation", function()
         ]])
     end)
 
+    it("emits lexer floating values without overflow warnings", function()
+        h.with_extra_cflags({ "-Werror" }, function()
+            h.run_coder([[
+                local foreign function foreign_infinity(): double
+                    local untyped = 1e400
+                    local typed: foreign double = 1e400
+                    return untyped + typed
+                end
+                local foreign function finite(): float
+                    local fraction: foreign float = -0x.8
+                    local zero: foreign float = 1e-400
+                    return fraction + zero
+                end
+                function operator_infinity(input: foreign double): float
+                    return input + 1e400
+                end
+                function foreign_value(): float return foreign_infinity() end
+                function finite_value(): float return finite() end
+            ]], [[
+                assert(test.operator_infinity(0.0) == math.huge)
+                assert(test.foreign_value() == math.huge)
+                assert(test.finite_value() == -0.5)
+            ]])
+        end)
+    end)
+
     it("covers C arithmetic, bitwise, comparison, and pointer lowering once",
     function()
         with_header([[

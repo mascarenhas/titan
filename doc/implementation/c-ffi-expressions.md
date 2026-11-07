@@ -734,20 +734,22 @@ The parser preserves the validated numeric token in `ExpInteger._numeral` or
 This retains hexadecimal radix and exact magnitudes even when Lua wraps a
 hexadecimal integer or rounds a decimal numeral to floating point.
 `classify_c_numeric_literal` normalizes leading-zero decimal spellings, obtains
-the existing `cdefines.integer_literal_metadata`, and reuses
+`cdefines.integer_literal_metadata`, and reuses
 `csemantics.classify_integer_literal` with the target profile. Floating numerals
 select target `double`. The same helper classifies foreign-body numerals;
-foreign numeric-`for` literal bounds keep their declared C control type.
+foreign numeric-`for` literal bounds use their declared C control type.
 An explicit foreign control annotation is resolved before bare literal bounds
 are checked, so a fitting magnitude such as `ULLONG_MAX` is not first rejected
 by the default signed decimal candidates. Operators and unary expressions do
-not inherit that control context; the existing final bound retargeting remains.
+not inherit that control context. After checking, bare literal bounds are
+retagged with the declared control type.
 
 Foreign numeric visitors also receive the ordinary sink's expected type.
 `try_contextual_c_numeric_literal` accepts an integer only when its exact
-decimal singleton range fits a C integer target, using the same classifier
-with the widest unsigned candidate to obtain its magnitude. This includes a
-signed minimum written under unary `-`. A floating literal uses its finite
+decimal singleton range fits a non-enum C integer target, using the same
+classifier with the widest unsigned candidate to obtain its magnitude.
+This includes a signed minimum written under unary `-` and `_Bool` values
+0 and 1. A floating literal, including under unary `-`, uses its finite
 `double` value and the target profile's radix, precision, and maximum exponent
 for the fit decision. It is emitted as the unsuffixed double constant converted
 to the target, not reparsed with an `L` suffix. A failed fit leaves the C99 type
@@ -763,10 +765,10 @@ for the target's signed minimum.
 Each classified numeral carries `_c_literal`, a C expression explicitly cast
 to its classified primitive or contextual type. Integer magnitudes are emitted
 as exact decimal digits with a signed or unsigned `long long` suffix.
-Hexadecimal floating fractions without an exponent acquire `p0` for C99.
-Both ordinary and raw foreign-body literal lowering consume this expression,
-casting to the current contextual type when needed rather than reconstructing
-the numeral from its Lua value.
+Floating literals use `util.c_float_literal` to render the lexer's double
+value with an exact round trip, including `HUGE_VAL` for infinity, rather than
+re-emitting an out-of-range source token. Both ordinary and raw foreign-body
+literal lowering consume this expression and cast it to the contextual type.
 
 The checker then evaluates category rules, array decay, promotions, symmetric
 pointer common types, and the result type through `csemantics`. It asks `cprobe`

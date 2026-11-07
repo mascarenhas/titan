@@ -873,7 +873,7 @@ function coder._foreign_raw_exp(ctx, node)
     elseif tag == "Ast.ExpInteger" then
         return "", c_integer_literal(node.value)
     elseif tag == "Ast.ExpFloat" then
-        return "", c_float_literal(node.value)
+        return "", util.c_float_literal(node.value)
     elseif tag == "Ast.ExpString" then
         return "", c_string_literal(node.value)
     elseif tag == "Ast.ExpVar" then

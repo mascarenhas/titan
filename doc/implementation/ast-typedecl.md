@@ -371,6 +371,9 @@ remain booleans.
 | `_coder_spread` | `ExpSpread` | coder | coder | prepared subject/range/count/result-run state shared by every generated projection and open sink |
 | `_adjusted_spread` | `ExpAdjust` | checker | flow analysis, coder | the evaluated-once carrier for the scalar projection of a parenthesized spread |
 | `_parenthesized` | node returned by `defs.adjust_exp` | parser | checker | the expression was parenthesized; rejects it as an lvalue |
+| `_numeral` | parsed `ExpInteger` and `ExpFloat` | parser | checker | validated source spelling; preserves radix and exact integer digits for [C99 literal typing](c-ffi-expressions.md#c-operator-traits), independently of the Lua numeric value |
+| `_c_literal` | C-typed numeric literals, including contextual signed `ExpUnop` | checker | coder, C operator probe | exact typed C literal expression selected by [C99 or contextual typing](c-ffi-expressions.md#c-operator-traits); floating values are rendered from the lexer's double value |
+| `_c_operator` | C-mode `ExpUnop` and `ExpBinop` | checker | coder | validated operator, operand conversions, result type, literal expressions, and probe key ([C operator traits](c-ffi-expressions.md#c-operator-traits)) |
 | `_parsed_candidates` | `StatAssign` | parser, cleared by checker | checker | `vars` still contains prefix expressions awaiting lvalue validation |
 | `_current_module_member` | normalized `VarName` | checker | checker | an `M.member` selection resolved against the module root rather than lexical shadows |
 | `_ffi_scope` | C type descriptors | C declaration conversion | runtime identity rendering, source declaration persistence | declaration origin retained through typedef and pointer/array/function wrappers; anonymous aggregates keep distinct sites |

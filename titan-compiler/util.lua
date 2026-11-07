@@ -94,6 +94,16 @@ function util.render(code, substs, ignore_missing)
     end))
 end
 
+function util.c_float_literal(n)
+    if n ~= n then return "NAN" end
+    if n == math.huge then return "HUGE_VAL" end
+    if n == -math.huge then return "(-HUGE_VAL)" end
+    local s = string.format("%.17g", n) -- round-trips every finite double
+    -- Integral values still need floating syntax in raw C operators.
+    if not s:find("[.eE]") then s = s .. ".0" end
+    return s
+end
+
 -- Implementation notes: doc/implementation/ast-typedecl.md#_tag-dispatch-and-utilmake_visitor
 function util.make_visitor(functions)
     return function(node, ...)

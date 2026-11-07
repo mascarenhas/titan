@@ -489,6 +489,11 @@ literal next to a C arithmetic operand has its unsuffixed C99 type:
   contains its value.
 * A floating numeral has type `double`.
 
+An integer numeral that fits none of its C99 candidates is rejected. The
+classification uses the integer spelling even when the same numeral would be
+a Titan `float` outside C mode, as with decimal `9223372036854775808` on a
+target whose `long long` has 64 bits.
+
 Parentheses and unary `-` or `~` do not hide a literal operand. Unary operators
 apply after the numeral is classified: `-1` negates C `int` `1`, and
 `~0xFFFFFFFF` complements the hexadecimal constant in its classified type.
@@ -499,11 +504,11 @@ field with `response.length = response.length + 1`, and `c_float * 2` has type
 `float`. In contrast, `c_float * 0.5` has type `double`; storing it into a C
 `float` requires an explicit cast.
 
-A non-literal Titan `integer` mixed with a C operand still participates as the
+A non-literal Titan `integer` mixed with a C operand participates as the
 configured `lua_Integer`; a non-literal Titan `float` participates as the
-configured `lua_Number`. Comparisons and pointer offsets keep that rule even
-for literal operands. In particular, `c_unsigned < -1` keeps its existing
-`lua_Integer` comparison rather than converting `-1` to `unsigned int`.
+configured `lua_Number`. Comparisons and pointer offsets use that rule even
+for literal operands. In particular, `c_unsigned < -1` compares in
+`lua_Integer` rather than converting `-1` to `unsigned int`.
 The compiler reads numeric widths, ranks, signedness, and ranges from the active
 target toolchain, not from the Lua process running the compiler.
 

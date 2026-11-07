@@ -248,7 +248,7 @@ local function raw_lua_function(
     table_index: foreign int, name: string): boolean
   ffi.lua_pushstring(L, name)
   local kind = ffi.lua_rawget(L, table_index)
-  ffi.lua_settop(L, (ffi.lua_gettop(L) - 1) as foreign int)
+  ffi.lua_settop(L, ffi.lua_gettop(L) - 1)
   return kind == ffi.LUA_TFUNCTION
 end
 

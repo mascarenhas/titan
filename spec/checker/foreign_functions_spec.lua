@@ -448,6 +448,82 @@ describe("foreign functions (checker)", function()
         end
     end)
 
+    it("rejects numeric literals at every enum sink without rejecting enumerators",
+    function()
+        with_header([[
+            typedef enum ffi_color { FFI_RED, FFI_GREEN, FFI_BLUE } ffi_color;
+            typedef ffi_color ffi_color_alias;
+            typedef struct ffi_color_box { ffi_color color; } ffi_color_box;
+        ]], function(header)
+            for _, body in ipairs({
+                "local color: foreign ffi_color = 7",
+                "local color: foreign ffi_color_alias = 1",
+                "box.color = 1",
+                "elements[0] = 1",
+                "takes_color(1)",
+                "return 1",
+            }) do
+                local ok, err = check_with_header(header, [[
+                    local foreign function takes_color(_: ffi_color) end
+                    local foreign function rejected(box: *ffi_color_box,
+                                                     elements: *ffi_color): ffi_color
+                        ]] .. body .. [[
+                        ]] .. (body == "return 1" and "" or "return ffi.FFI_RED") .. [[
+                    end
+                ]])
+                assert.falsy(ok, body)
+                assert.match("do not match", err, 1, true)
+                local _, count = err:gsub("do not match", "")
+                assert.equal(1, count)
+            end
+            local ok, err = check_with_header(header, [[
+                local foreign function takes_color(_: ffi_color) end
+                local foreign function accepted(box: *ffi_color_box,
+                                                 elements: *ffi_color): ffi_color
+                    local color: foreign ffi_color = ffi.FFI_RED
+                    local alias: foreign ffi_color_alias = ffi.FFI_BLUE
+                    box.color = color
+                    elements[0] = alias
+                    takes_color(color)
+                    return alias
+                end
+            ]])
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("adapts bool literals only within the bool range", function()
+        local ok, err, ast = h.run_checker([[
+            foreign function flags()
+                local zero: foreign bool = 0
+                local one: foreign bool = 1
+                local half: foreign float = -0.5
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        for index = 1, 2 do
+            assert.equal("_Bool", ast[1].block.stats[index].exps[1]._type.spelling)
+        end
+        ok, err = h.run_checker([[
+            foreign function rejected()
+                local flag: foreign bool = 2
+            end
+        ]], probe_session)
+        assert.falsy(ok)
+        assert.match("do not match", err, 1, true)
+    end)
+
+    it("rejects an unrepresentable foreign for-bound integer spelling", function()
+        local ok, err = h.run_checker([[
+            foreign function rejected()
+                for index: foreign int = 0, 99999999999999999999 do break end
+            end
+        ]], probe_session)
+        assert.falsy(ok)
+        assert.match("does not fit any C99 candidate type (int, long, long long)",
+            err, 1, true)
+    end)
+
     it("keeps explicit foreign for controls ahead of default literal classification",
     function()
         local ok, err, ast = h.run_checker([[

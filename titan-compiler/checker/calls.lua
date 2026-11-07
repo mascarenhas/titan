@@ -239,10 +239,7 @@ local function c_numeric_literal_parts(node)
         if token == "" then token = "0" end
     end
     local literal = cdefines.integer_literal_metadata(token)
-    if not literal and token:match("^0[xX]") and not token:find("[pP]") then
-        -- Lua accepts a hexadecimal fraction without an exponent; C99 does not.
-        token = token .. "p0"
-    end
+    if not literal then token = util.c_float_literal(leaf.value) end
     return token, literal, leaf, negative
 end
 
@@ -255,7 +252,8 @@ function try_contextual_c_numeric_literal(node, st, errors, context)
     local token, literal, leaf, negative = c_numeric_literal_parts(node)
     if not token then return false end
     local resolved = types.resolve_c_typedef(context)
-    if not resolved or (literal and resolved._tag ~= "Type.CInteger")
+    if not resolved or resolved._c_enum_identity
+       or (literal and resolved._tag ~= "Type.CInteger")
        or (not literal and resolved._tag ~= "Type.CFloat") then
         return false
     end
@@ -463,7 +461,7 @@ function check_c_binary_operator(node, st, errors)
         return false
     end
     if literal_c_operators[node.op] then
-        -- Foreign-body operands already have their C/contextual types. Only
+        -- Foreign-body operands already have their C99 types. Only
         -- replace ordinary Titan literals, not casts, variables or pointers.
         if is_c_arithmetic_type(node.lhs._type)
            and not is_c_arithmetic_type(node.rhs._type)

@@ -213,6 +213,24 @@ describe("C FFI operator type checking", function()
         end
     end)
 
+    it("reports the C99 candidate list when an integer spelling cannot fit",
+    function()
+        for _, case in ipairs({
+            { "number + 9223372036854775808", "int, long, long long" },
+            { "number + 0x1FFFFFFFFFFFFFFFF",
+                "int, unsigned int, long, unsigned long, long long, unsigned long long" },
+        }) do
+            local ok, err = run_checker([[
+                local function rejected(number: foreign double)
+                    local result = ]] .. case[1] .. [[
+                end
+            ]])
+            assert.falsy(ok)
+            assert.match("does not fit any C99 candidate type (" .. case[2] .. ")",
+                err, 1, true)
+        end
+    end)
+
     it("reports each rejected assignment once at the delivered value", function()
         with_header([[
             typedef struct ffi_store {

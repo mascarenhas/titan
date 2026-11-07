@@ -60,7 +60,7 @@ match-time capture with Lua's `tonumber`; a malformed candidate raises
 constructor does not retain one dynamic capture per numeral. The ordinary
 capture produces the Lua value afterwards; the parser wraps `NUMBER` in a
 string capture to retain the validated spelling as `_numeral`. Its
-`ExpInteger`/`ExpFloat` choice still follows Lua's numeric tag, while C literal
+`ExpInteger`/`ExpFloat` choice follows Lua's numeric tag, while C literal
 classification uses the preserved radix and exact digits instead of that value.
 
 Quoted strings decode Lua-style escapes. The decimal-escape pattern only

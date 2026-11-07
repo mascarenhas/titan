@@ -898,7 +898,7 @@ local function restore_closure_from_buffer(
     if was_policy[index] then ffi.lua_pushtvalue(L, policy)
     else ffi.lua_pushtvalue(L, policy:to_value()) end
   end
-  transfer_restore(L, entry, module_index, (module_index + 1) as foreign int)
+  transfer_restore(L, entry, module_index, module_index + 1)
   return ffi.lua_totvalue(L, -1) as value
 end
 
