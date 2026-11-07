@@ -162,12 +162,15 @@ describe("C FFI operator code generation", function()
         ]], function(header)
             h.run_coder([[
                 foreign import "]] .. header .. [["
+                local function bump(response: foreign *ffi_response)
+                    response.fills = response.fills + 1
+                    response.length = response.length + 1
+                end
                 function increment(): (integer, integer, integer)
                     local response = foreign ffi_response.new()
                     response.fills = 7
                     response.length = 9
-                    response.fills = response.fills + 1
-                    response.length = response.length + 1
+                    bump(response)
                     local elements = foreign int.new_array(1)
                     elements[0] = 11
                     elements[0] = elements[0] + 1

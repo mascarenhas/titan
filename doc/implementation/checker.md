@@ -479,7 +479,7 @@ runs keep their shared plan on the list consumer instead.
 
 For an assignment, the expression-list demand owns each delivered value's
 coercion and mismatch diagnostic, at that value's source location. `StatAssign`
-then validates target mutability/storage and records assigned declarations;
+retains target mutability/storage checks and assigned-declaration bookkeeping;
 it does not repeat the RHS match. This applies equally to locals, C fields,
 C elements, and values projected from a multiple-result call.
 
