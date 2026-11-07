@@ -401,6 +401,11 @@ function test_export_callbacks(_: test.Context)
     ffi.titan_bridge_test_arm_alloc_failure(L, expect_integer(...[1]))
     return Value.is_nil()
   end)
+  publish("arm_invoke_oom_count", function(...: browser.BrowserValue): browser.BrowserValue
+    ffi.titan_bridge_test_arm_alloc_failure_count(
+        L, expect_integer(...[1]), expect_integer(...[2]))
+    return Value.is_nil()
+  end)
   publish("finish_invoke_oom", function(...: browser.BrowserValue): browser.BrowserValue
     return Value.is_integer(ffi.titan_bridge_test_finish_alloc_failure(L))
   end)
@@ -682,6 +687,43 @@ function test_export_requests_and_listeners(_: test.Context)
     gc.collect()
     gc.collect()
     return Value.is_integer(pin_markers_collected)
+  end)
+  publish("make_pinned_wrapper", function(...: browser.BrowserValue): browser.BrowserValue
+    local weight = expect_integer(...[1])
+    pin_markers_collected = 0
+    local captured = PinMarker { weight = weight }
+    gc.finalizable<|value|>(captured, pin_marker_finalize)
+    local fn = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(captured.weight)
+    end
+    return Value.is_callable(fn)
+  end)
+  local nested_finalizer_ran = false
+  local arm_nested_finalizer = function()
+    local finalizer_obj: {string: integer} = {}
+    gc.finalizable<|value|>(finalizer_obj, function(_: value)
+      local nested = browser.binding("echo_integer")
+      defer nested:close()
+      if expect_integer(nested:call(Value.is_integer(7))) == 7 then
+        nested_finalizer_ran = true
+      end
+    end)
+  end
+  publish("nested_finalizer_rollback", function(...: browser.BrowserValue): browser.BrowserValue
+    local arm_oom = expect_integer(...[1])
+    pin_markers_collected = 0
+    nested_finalizer_ran = false
+    arm_nested_finalizer()
+    local captured = PinMarker { weight = arm_oom ~= 0 and 77 or 88 }
+    gc.finalizable<|value|>(captured, pin_marker_finalize)
+    local first = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(captured.weight)
+    end
+    ffi.titan_bridge_test_arm_identity_gc_and_fail(L, 1, arm_oom)
+    return Value.is_callable(first)
+  end)
+  publish("nested_finalizer_ran", function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_boolean(nested_finalizer_ran)
   end)
 end
 

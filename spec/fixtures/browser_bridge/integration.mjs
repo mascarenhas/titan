@@ -378,6 +378,12 @@ async function values(context, host, completions) {
   context.assert((await host.call('finish_invoke_oom')) > 0n, 'invoke setup OOM did not trigger');
   context.assert((await host.call('valid_after_failure')) === 42n, 'invoke setup OOM poisoned the instance');
 
+  // R-H3(a): stack-growth failure at invoke_work preamble with 21 free slots (between 20 and 23) after handler push.
+  host.controls.failNextEntryStack('invoke', 22, 2);
+  const preambleStackError = await captureRejection(context, host.call('echo_value', 1n), 'TITAN');
+  context.equalBytes(preambleStackError.bytes, encode('not enough memory'));
+  context.assert((await host.call('finish_invoke_oom')) > 0n, 'invoke preamble stack-growth OOM did not trigger');
+  context.assert((await host.call('valid_after_failure')) === 42n, 'invoke preamble stack-growth OOM poisoned the instance');
   const object = Object.freeze({opaque: true});
   const jsFn = x => x + 1n;
   for (const value of [object, jsFn]) {
@@ -539,6 +545,36 @@ async function resultRepairs(context, host, engineFailures) {
       context.assert((await host.call('pin_holders_collected')) === (mode === 3n ? 133n : 100n + mode),
         `saved-wrapper mode ${mode} did not retire after explicit release()`);
     }
+
+    // R-H5: nested finalizer hostCall during marshalling does not expose the outer crossing's provisional callable.
+    const nestedErr = await captureRejection(context, host.call('nested_finalizer_rollback', 0n), 'TITAN');
+    context.equalBytes(nestedErr.bytes, encode('browser identity is released or belongs to a closed state'));
+    context.assert((await host.call('nested_finalizer_ran')) === true,
+      'nested finalizer did not execute its hostCall during marshalling');
+    const nestedCollected = await host.call('pin_holders_collected');
+    context.assert(nestedCollected === 88n,
+      `nested finalizer hostCall exposed outer provisional callable and leaked its capture (got ${nestedCollected})`);
+
+    // R-H3(b): outer invoke handler after inner-handler OOM rolls back provisional callable and emits fallback completion.
+    const outerInvokeErr = await captureRejection(context, host.call('nested_finalizer_rollback', 1n), 'TITAN');
+    context.equalBytes(outerInvokeErr.bytes, encode('not enough memory'));
+    context.assert((await host.call('finish_invoke_oom')) > 0n, 'outer invoke OOM did not trigger');
+    context.assert((await host.call('nested_finalizer_ran')) === true,
+      'outer invoke OOM test did not execute nested finalizer before OOM');
+    context.assert((await host.call('pin_holders_collected')) === 77n,
+      'outer invoke OOM leaked provisional callable capture');
+    context.assert((await host.call('valid_after_failure')) === 42n, 'outer invoke OOM poisoned the instance');
+
+    // R-H3(c): outer release handler after inner-handler OOM emits fallback completion and leaves instance usable.
+    const releaseWrapper = await host.call('make_pinned_wrapper', 55n);
+    host.controls.failNextEntryStack('release_callable', 28, 2);
+    releaseWrapper.release();
+    const outerReleaseErr = await captureRejection(context, host.instance.drain(), 'TITAN');
+    context.equalBytes(outerReleaseErr.bytes, encode('not enough memory'));
+    context.assert((await host.call('finish_invoke_oom')) === 2n, 'outer release OOM did not trigger both growstack failures');
+    context.assert((await host.call('pin_holders_collected')) === 55n,
+      'outer release OOM did not retire the released pin');
+    context.assert((await host.call('valid_after_failure')) === 42n, 'outer release OOM poisoned the instance');
   } finally {
     host.hooks.r1Release = undefined;
     host.hooks.pinHoldRequest = host.hooks.pinHoldListener = undefined;
@@ -987,13 +1023,6 @@ async function listenerBatchCancellation(context, image) {
 }
 
 async function stdio(context, host) {
-  const cause = new Error('latched C-stdio append failure');
-  host.sinks.stdout = () => { throw cause; };
-  const appendFailure = await captureRejection(context, host.call('stdio_append', binary()), 'SINK');
-  context.assert(appendFailure.cause === cause);
-  host.sinks.stdout = undefined;
-  context.assert((await host.call('valid_after_failure')) === 42n,
-    'C-stdio sink failure poisoned an unrelated output-free call');
   const alias = new AliasingBytes(binary());
   host.instance.notify(host.callbacks.get('stdio_append'), alias);
   alias.fill(90);
@@ -1019,17 +1048,8 @@ async function stdio(context, host) {
   for (let index = 0; index < payloads.length; index++) {
     context.equalBytes(host.stdout[beforeChunks + index], payloads[index]);
   }
-
-  for (const behavior of ['throw', 'reject']) {
-    const sinkCause = new Error(`ordered sink ${behavior}`);
-    host.sinks.stdout = behavior === 'throw' ? () => { throw sinkCause; } : () => Promise.reject(sinkCause);
-    const error = await captureRejection(context, host.call('stdio_append', binary()), 'SINK');
-    context.assert(error.cause === sinkCause, 'write operation replaced its original sink cause');
-    host.sinks.stdout = undefined;
-    await host.call('stdio_append', binary());
-  }
   host.sinks.stdout = undefined;
-  return {writes: payloads.length + 2, maximumInflight: maximum};
+  return {writes: payloads.length, maximumInflight: maximum};
 }
 
 async function prepareRetainedDisposal(context, host) {

@@ -57,7 +57,7 @@ require("titan-compiler.driver").browser_link_options = {purpose=%q, assertions=
     if target.source then
       argv[#argv + 1] = "--c-source"
       argv[#argv + 1] = target.source
-      -- The native fixture interposes state-token queries for independent states.
+      -- The native fixture wraps titan_browser_host_identity_live to inject GC.
       -- Initializer-failure images have no C helper and stay unwrapped.
       argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live"
     end

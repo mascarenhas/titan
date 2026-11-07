@@ -30,6 +30,21 @@ EM_JS(void, gate_test_publish, (), {
     free: pointer => Module['_free'](pointer),
     abort: () => abort('bridge fixture owned abort'),
     armResponseOwnerFailure: () => Module['_titan_bridge_test_arm_response_owner_failure'](),
+    failNextEntryStack(kind, freeSlots, maxFailures) {
+      var entry = owner.entry;
+      owner.entry = function(entryKind, ...args) {
+        if (entryKind === kind) {
+          owner.entry = entry;
+          Module['_titan_bridge_test_enter_with_free_stack'](freeSlots, maxFailures);
+          try {
+            return entry.call(owner, entryKind, ...args);
+          } finally {
+            Module['_titan_bridge_test_reset_entry_stack']();
+          }
+        }
+        return entry.call(owner, entryKind, ...args);
+      };
+    },
     failNextRelease() {
       var entry = owner.entry;
       owner.entry = function(kind, ...args) {

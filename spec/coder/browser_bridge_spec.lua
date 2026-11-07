@@ -51,7 +51,7 @@ describe("persistent core JavaScript bridge", function()
     end)
 
     for _, assertions in ipairs({ 2, 0 }) do
-        it("executes real native owners, queue/retirement and byte I/O with ASSERTIONS=" .. assertions, function()
+        it("executes real native owners, queue/retirement and BrowserValue marshalling with ASSERTIONS=" .. assertions, function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
             if not info then pending(why) return end
             fixture = files.new()

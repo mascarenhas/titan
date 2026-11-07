@@ -14,9 +14,11 @@ extern void titan_browser_\u2133_close_state_titan(void *L);
 typedef struct independent_owner { lua_State *child; } independent_owner;
 
 /* Wrap titan_browser_host_identity_live in the dedicated bridge test image to
- * inject deterministic GC between result encoding and liveness validation. */
+ * inject deterministic GC, liveness failure, or outer-handler OOM between
+ * result encoding and liveness validation. */
 static lua_State *identity_gc_state;
 static int identity_gc_after, identity_gc_running;
+static int identity_force_fail, identity_arm_oom;
 static titan_browser_state_record *admission_failure_record;
 static uint32_t admission_failure_saved_token;
 static int admission_failure_observed;
@@ -46,17 +48,32 @@ int titan_bridge_test_finish_admission_failure(lua_State *L) {
   admission_failure_observed = 0;
   return observed;
 }
+static void titan_bridge_test_arm_inner_catch_oom(lua_State *L);
 extern int __real_titan_browser_host_identity_live(uint32_t state,
     uint32_t slot, uint32_t generation, uint32_t kind);
 int __wrap_titan_browser_host_identity_live(uint32_t state,
     uint32_t slot, uint32_t generation, uint32_t kind) {
   if (identity_gc_state && --identity_gc_after == 0) {
     lua_State *L = identity_gc_state;
+    int fail = identity_force_fail;
+    int oom = identity_arm_oom;
     identity_gc_state = NULL;
+    identity_force_fail = 0;
+    identity_arm_oom = 0;
     lua_gc(L, LUA_GCCOLLECT);
     if (identity_gc_running) lua_gc(L, LUA_GCRESTART);
+    if (oom) {
+      titan_bridge_test_arm_inner_catch_oom(L);
+    }
+    if (fail) return 0;
   }
   return __real_titan_browser_host_identity_live(state, slot, generation, kind);
+}
+
+void titan_bridge_test_arm_identity_gc_and_fail(lua_State *L, int after, int arm_oom) {
+  titan_bridge_test_arm_identity_gc(L, after);
+  identity_force_fail = 1;
+  identity_arm_oom = arm_oom;
 }
 
 static struct {
@@ -113,10 +130,16 @@ static struct {
   lua_State *L;
   lua_Alloc allocate;
   void *ud;
-  int installed, after, failures;
+  StkId saved_stack_last;
+  StkId saved_ci_top;
+  int installed, after, max_failures, failures;
 } alloc_failure;
 static void restore_alloc_failure(void) {
   if (alloc_failure.installed) {
+    if (alloc_failure.saved_stack_last != NULL) {
+      alloc_failure.L->stack_last.p = alloc_failure.saved_stack_last;
+      alloc_failure.saved_stack_last = NULL;
+    }
     lua_setallocf(alloc_failure.L, alloc_failure.allocate, alloc_failure.ud);
     alloc_failure.installed = 0;
   }
@@ -127,26 +150,68 @@ static void *alloc_failure_allocate(void *ud, void *pointer, size_t old_size, si
     if (alloc_failure.after > 0) {
       alloc_failure.after--;
     } else {
-      if (++alloc_failure.failures >= 2) restore_alloc_failure();
+      if (alloc_failure.saved_stack_last != NULL) {
+        alloc_failure.L->stack_last.p = alloc_failure.saved_stack_last;
+        alloc_failure.saved_stack_last = NULL;
+      }
+      if (++alloc_failure.failures >= alloc_failure.max_failures) restore_alloc_failure();
       return NULL;
     }
   }
   return alloc_failure.allocate(alloc_failure.ud, pointer, old_size, size);
 }
-void titan_bridge_test_arm_alloc_failure(lua_State *L, int after) {
+void titan_bridge_test_arm_alloc_failure_count(lua_State *L, int after, int max_failures) {
   assert(!alloc_failure.installed);
   memset(&alloc_failure, 0, sizeof(alloc_failure));
   alloc_failure.L = mainthread(G(L));
   alloc_failure.allocate = lua_getallocf(alloc_failure.L, &alloc_failure.ud);
   alloc_failure.after = after;
+  alloc_failure.max_failures = max_failures > 0 ? max_failures : 2;
   alloc_failure.installed = 1;
   lua_setallocf(alloc_failure.L, alloc_failure_allocate, NULL);
 }
-int titan_bridge_test_finish_alloc_failure(lua_State *L) {
-  int failures = alloc_failure.failures;
-  assert(!alloc_failure.installed || alloc_failure.L == mainthread(G(L)));
+void titan_bridge_test_arm_alloc_failure(lua_State *L, int after) {
+  titan_bridge_test_arm_alloc_failure_count(L, after, 2);
+}
+static void titan_bridge_test_arm_inner_catch_oom(lua_State *L) {
+  lua_State *main_L = mainthread(G(L));
+  titan_bridge_test_arm_alloc_failure_count(main_L, 0, 2);
+  alloc_failure.saved_stack_last = main_L->stack_last.p;
+  main_L->stack_last.p = main_L->top.p + 2;
+}
+__attribute__((used, visibility("default")))
+void titan_bridge_test_enter_with_free_stack(int free_slots, int max_failures) {
+  lua_State *L = alloc_failure.L;
+  assert(L != NULL);
+  int size = stacksize(L);
+  int target_top = size - free_slots;
+  assert(target_top >= 0);
+  StkId saved_ci_top = L->ci->top.p;
+  if (L->ci->top.p < L->stack.p + target_top + 1)
+    L->ci->top.p = L->stack.p + target_top + 1;
+  lua_settop(L, target_top);
+  titan_bridge_test_arm_alloc_failure_count(L, 0, max_failures);
+  alloc_failure.saved_ci_top = saved_ci_top;
+}
+__attribute__((used, visibility("default")))
+void titan_bridge_test_reset_entry_stack(void) {
+  lua_State *L = alloc_failure.L;
   restore_alloc_failure();
-  memset(&alloc_failure, 0, sizeof(alloc_failure));
+  if (L != NULL) {
+    lua_settop(L, 0);
+    if (alloc_failure.saved_ci_top != NULL) {
+      L->ci->top.p = alloc_failure.saved_ci_top;
+      alloc_failure.saved_ci_top = NULL;
+    }
+  }
+}
+int titan_bridge_test_finish_alloc_failure(lua_State *L) {
+  lua_State *main_L = mainthread(G(L));
+  int failures = alloc_failure.failures;
+  assert(!alloc_failure.installed || alloc_failure.L == main_L);
+  restore_alloc_failure();
+  alloc_failure.L = main_L;
+  alloc_failure.failures = 0;
   return failures;
 }
 
