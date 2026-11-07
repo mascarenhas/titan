@@ -351,8 +351,8 @@ memory.
 
 During close, synchronous binding calls, copied output admission, and
 idempotent release remain valid until that final invalidation. New requests,
-listeners, and reverse application calls are refused, including for a state
-created through the C SDK while its containing instance is not disposing.
+listeners, and reverse application calls are refused, including for an
+independent state closing while its containing instance is not disposing.
 Warnings from Lua finalizers are stderr bytes, not an invented failed call.
 
 ## C SDK

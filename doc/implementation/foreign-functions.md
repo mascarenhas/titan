@@ -467,8 +467,9 @@ foreign functions compiled into the owning module objects:
   `titan_browser_release_callable`) to those public foreign functions, so the
   browser runtime needs no hand-written C file.
 
-The runtime SDK archive therefore contains only `titan.o` and `minicoro.o`; no
-adapter object carries callback code. The Lua-internal macro bridges these
+The runtime SDK archive therefore contains only the four portable runtime
+objects (`titan.o`, `minicoro.o`, `titan_path.o`, and `ltitanlib.o`); no adapter
+object carries callback code. The Lua-internal macro and field bridges these
 callbacks use (`lmacro_*`, `lua_totvalue`, `lua_pushtvalue`) are typed inline
 functions in `titan/ffi.h`; see
 [header support files](ffi-internals.md#header-support-files).

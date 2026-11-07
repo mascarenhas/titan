@@ -394,9 +394,9 @@ native targets and need no browser-specific defines.
 
 The provider adds a fourteenth root, the browser-only `titan.browser` in
 `titan/browser.browser.titan`, with no native placeholder. It imports only
-`gc`; its [C shims and state-token list](browser-bridge.md) live in the
-browser runtime archive, not in a native-only dependency or a second coroutine
-driver.
+`gc`; its [foreign entry points and state lifecycle](browser-bridge.md) live in
+`titan/browser.browser.titan` and the generated launcher, not in a native-only
+dependency or a second coroutine driver.
 
 The other thirteen standard modules are absent at compile time: their
 canonical mains are the `native` variants `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
@@ -2096,8 +2096,9 @@ state-allocation status. The installed
 [`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout) defines the five
 promised export signatures, the shared struct layouts, and the JS imports.
 
-Initialization creates the owner Lua state and its earliest bridge registry,
-then enters the image initializer under the shared protected gateway. Main
+Initialization creates the owner Lua state and attaches its state record (when
+`titan.browser` is linked), then enters the image initializer under the shared
+protected gateway. Main
 runs once on that initialized state and leaves it live. Each contained C entry
 receives a nonzero unsigned 64-bit operation id, echoes it with its expected
 operation kind in exactly one completion, and returns only an admission code.

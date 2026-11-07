@@ -629,8 +629,9 @@ pairs each rule with a wrong and a right example.
      registry only to anchor an object before any module variable exists,
      explicitly justified.
    - *Struct access and marshalling*: in Titan through `foreign import`; the
-     only C in headers is one-line inline macro bridges (`lmacro_*` in
-     `titan/ffi.h`) for macros the FFI cannot spell.
+     only C in headers is one-expression inline bridges (`lmacro_*` in
+     `titan/ffi.h`) for macros, internal fields of incomplete structs, and
+     `const` casts that the FFI cannot spell directly.
    - *Test-only C*: stays in test fixtures.
 
    ```text

@@ -62,9 +62,9 @@ a selected `.browser.titan` main or contributors without renaming them back.
 The browser provider's fourteenth module, `titan.browser`
 (`titan/browser.browser.titan`), is the one reviewed browser-only exception.
 It has no native placeholder or native interface, so the member inventory
-skips it. It imports only `gc`, keeps its C runtime shims in the
-browser runtime archive, and must not gain a native-only dependency either. A
-native module must not import it; see [browser bridge
+skips it. It imports only `gc`, defines its native entry points as foreign
+functions in `titan/browser.browser.titan`, and must not gain a native-only
+dependency either. A native module must not import it; see [browser bridge
 runtime](browser-bridge.md).
 
 ## Use existing typed storage and narrow foreign boundaries
