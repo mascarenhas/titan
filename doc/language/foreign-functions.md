@@ -199,10 +199,42 @@ Literals in a foreign body are C values:
 | Source literal | Foreign-body C type/meaning |
 | --- | --- |
 | `true`, `false` | target `_Bool`, emitted as 1 or 0 |
-| integer numeral | target C `int` by default, or a compatible contextual C type |
-| float numeral | C `double` by default, or a compatible contextual C float |
+| integer numeral | fitting contextual C integer type, otherwise its unsuffixed C99 type |
+| float numeral | fitting contextual C float type, otherwise C `double` |
 | string literal | `const char *` with static storage |
 | `nil` | contextual `NULL` for a pointer or function pointer |
+
+Decimal integer numerals choose the first fitting `int`, `long`, or `long long`.
+Hexadecimal numerals choose the first fitting `int`, `unsigned int`, `long`,
+`unsigned long`, `long long`, or `unsigned long long`. Leading-zero decimal
+numerals remain decimal. Thus `3000000000` can be `long` or `long long`, and
+`0xFFFFFFFF` can be `unsigned int`; neither is unconditionally `int`.
+Without a fitting context, unary `-` and `~` apply to the already classified
+numeral, as in [C operator mode](c-ffi-expressions.md#promotions-and-mixed-titan-operands).
+
+A numeric literal takes the C type expected by:
+
+* a local declaration with an explicit C annotation;
+* an assignment to a C local, field, or element;
+* an argument to a C-typed parameter; or
+* a return from a function with a C return type.
+
+An integer literal, including under unary `-`, fits when its value lies within
+the C integer target's range. A floating literal fits a C floating target only
+when its `double` value is finite and within that target's range. Conversion
+then rounds as C does: `0.1` stored into `long double` first has its `double`
+value, then widens; `1e400` is infinite as a `double` and does not fit.
+Integer literals adapt only to integer targets, and floating literals only to
+floating targets. A non-fitting literal keeps its C99 type and the existing
+conversion rules apply, so `local byte: foreign unsigned char = 300` is rejected.
+
+For example, `local wide: foreign long long = 5`, a `long long` field assignment
+`item.big = 6`, a call `takes_wide(9)` with a `long long` parameter, `return 10`
+from a `long long` function, and `ffi.malloc(16)` all use their expected C type.
+This does not propagate an expected type into C operator operands:
+`local wide: foreign long long = c_int + 1` still computes a C `int` result and
+requires a cast. Numeric-`for` literal bounds retain their declared-control-type
+rule.
 
 An untyped `local p = nil` has no pointee type and is rejected; write an
 annotation such as `local p: foreign *Item = nil`.

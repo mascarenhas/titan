@@ -722,10 +722,53 @@ Boundaries of the guarantee:
 ## C operator traits
 
 The checker dispatches C operator mode before every Titan-special numeric or
-comparison path. It first evaluates category rules, array decay, mixed
-`lua_Integer`/`lua_Number` participation, promotions, symmetric pointer common
-types, and result type through `csemantics`. It then asks `cprobe` to compile
-the exact lowered expression.
+comparison path. For arithmetic, bitwise and shift operators,
+`check_c_binary_operator` (`checker/calls.lua`) first classifies a numeric literal
+opposite a C arithmetic operand. Comparisons, pointer offsets, explicit casts,
+and non-literal Titan operands retain `lua_Integer`/`lua_Number` participation.
+Parenthesized numerals remain the same AST node; unary `-` and `~` are
+reclassified from the numeral outward through the ordinary C unary traits.
+
+The parser preserves the validated numeric token in `ExpInteger._numeral` or
+`ExpFloat._numeral`, independently of the Lua value and its integer/float tag.
+This retains hexadecimal radix and exact magnitudes even when Lua wraps a
+hexadecimal integer or rounds a decimal numeral to floating point.
+`classify_c_numeric_literal` normalizes leading-zero decimal spellings, obtains
+the existing `cdefines.integer_literal_metadata`, and reuses
+`csemantics.classify_integer_literal` with the target profile. Floating numerals
+select target `double`. The same helper classifies foreign-body numerals;
+foreign numeric-`for` literal bounds keep their declared C control type.
+
+Foreign numeric visitors also receive the ordinary sink's expected type.
+`try_contextual_c_numeric_literal` accepts an integer only when its exact
+decimal singleton range fits a C integer target, using the same classifier
+with the widest unsigned candidate to obtain its magnitude. This includes a
+signed minimum written under unary `-`. A floating literal uses its finite
+`double` value and the target profile's radix, precision, and maximum exponent
+for the fit decision. It is emitted as the unsuffixed double constant converted
+to the target, not reparsed with an `L` suffix. A failed fit leaves the C99 type
+and normal mismatch handling in place. Binary operators do not pass their
+expected result type to either operand.
+
+A contextual signed literal owns its complete expression and does not retain
+a promoted unary trait at its root. Its source children remain typed.
+Negative integer emission subtracts one from the unsigned magnitude before
+forming the signed result, avoiding an out-of-range positive signed constant
+for the target's signed minimum.
+
+Each classified numeral carries `_c_literal`, a C expression explicitly cast
+to its classified primitive or contextual type. Integer magnitudes are emitted
+as exact decimal digits with a signed or unsigned `long long` suffix.
+Hexadecimal floating fractions without an exponent acquire `p0` for C99.
+Both ordinary and raw foreign-body literal lowering consume this expression,
+casting to the current contextual type when needed rather than reconstructing
+the numeral from its Lua value.
+
+The checker then evaluates category rules, array decay, promotions, symmetric
+pointer common types, and the result type through `csemantics`. It asks `cprobe`
+to compile the lowered expression, including the classified literal spelling
+in `lhs_literal` or `rhs_literal` rather than replacing that operand with an
+unrelated external variable. Unary literal traits are validated the same way.
 
 An accepted AST node carries the complete lowering contract:
 
@@ -735,6 +778,8 @@ node._c_operator = {
     lhs_target = ...,
     rhs_target = ...,
     lhs_decay = false,
+    lhs_literal = ...,
+    rhs_literal = ...,
     rhs_decay = false,
     result = ...,
     probe_key = ...,
