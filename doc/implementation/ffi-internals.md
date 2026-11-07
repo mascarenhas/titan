@@ -863,10 +863,15 @@ be the authoritative `Type.CFunction` and emits a direct C call of the
 designator from `coder._foreign_reference_name`. It has no `Type.Function`
 fallback; closure tags, brands, strict relays, and adjustment wrappers are
 therefore unreachable from this path. Fixed and C-vararg arguments both flow
-through `codeforeignexp`, so Titan strings become `getstr(TString*)`, owned C
-objects decay to payload pointers when the target is a C pointer, and most
-`value` arguments consume their checker-attached plan when the target C type
-has a sound runtime representation. An implicit typed Titan projection carries
+through `codeforeignexp`. Syntactic string literals, including their checked
+pointer casts, use the existing C-literal byte escaping without a temporary;
+other Titan strings become `getstr(TString*)`. Literal addresses are unspecified
+and need not alias a same-content Titan string. Function-pointer/`void *` casts
+keep their native portability adapter rather than being treated as ordinary
+byte-pointer literal conversions. Owned C objects decay to payload pointers when
+the target is a C pointer, and most `value` arguments consume their
+checker-attached plan when the target C type has a sound runtime representation.
+An implicit typed Titan projection carries
 a strict `GuardPlan`; an explicitly written or genuine-Lua boundary carries
 the broader dynamic plan before this foreign sink. A raw C-pointer target has
 no implicit guard and must have arisen from an explicit unsafe written cast. A
@@ -878,8 +883,11 @@ This path has no flexible-result descriptor. C returns its single ordinary
 result (or `void`) according to `CFunction.ret`; any finite projections used to
 form its fixed arguments have already been made explicit by the checker.
 
-A checked named direct call freezes its arguments into target-typed C
-temporaries in lexical order and emits them in formal order; see
+A checked named direct call freezes its nonliteral arguments into target-typed
+C temporaries in lexical order and emits them in formal order. String literals
+remain inline because evaluating them has no effects; surrounding argument
+effects retain their written order. The same rule applies to adjusted fixed
+argument lists and raw foreign bodies; see
 [code generation and evaluation order](named-arguments.md#code-generation-and-evaluation-order).
 The positional path's post-call `mutable_out_anchor` refreshes for GC-bearing
 `TValue` out parameters still apply.

@@ -3266,7 +3266,7 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
             assert(type(mt[registry.TITAN_MT_MEMBERMAP].y) == 'userdata')
             assert(mt[registry.TITAN_MT_MOD] == test)
             assert(test.Point.new == mt[registry.TITAN_MT_STATICS].new)
-            assert(mt[registry.TITAN_MT_TYPE] == "Record('test.Point',{Field('test.Point', 'x', Float(), 0, false),Field('test.Point', 'y', Float(), 1, false)},{new = StaticMethod('test.Point', 'new',{Float(),Float()},{Nominal('test.Point')},nil,nil,{\"x\",\"y\"})},{},2)")
+            assert(mt[registry.TITAN_MT_TYPE] == "Record('test.Point',{Field('test.Point', 'x', Float(), 0, false),Field('test.Point', 'y', Float(), 1, false)},{[\"new\"] = StaticMethod('test.Point', 'new',{Float(),Float()},{Nominal('test.Point')},nil,nil,{\"x\",\"y\"})},{},2)")
           ]])
         end)
     end)

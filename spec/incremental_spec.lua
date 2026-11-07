@@ -1946,7 +1946,8 @@ describe("incremental local certification", function()
             [fixture_path("/src/main.titan")] = "source" })
         ctx.incremental_configuration = configuration()
         ctx.incremental_options = { stem = function() return fixture_path("/out/main") end,
-            codegen_options = function() return certificate().codegen end }
+            codegen_options = function() return certificate().codegen end,
+            write_foreign_header_plans = require("titan-compiler.driver").write_foreign_header_plans }
         local saved = record()
         objectmetadata.read = function() return saved end
         staticmetadata.scan_bytes = function() return { kind = "object", fingerprint = {} } end
@@ -2047,6 +2048,48 @@ describe("incremental local certification", function()
         { name = "nested.titan.h", marker = ffiheaders.FOREIGN_MARKER },
         { name = "main.priv.h", marker = require("titan-compiler.coder").PRIVATE_HEADER_MARKER },
     }
+    for _, raised in ipairs({ false, true }) do
+        it("preserves every companion when staged replay formatting " ..
+            (raised and "raises cancellation" or "fails"), function()
+            local ctx, _, source, files = companion_fixture()
+            ctx.incremental_options.pretty_print = true
+            local original = {}
+            for _, companion in ipairs(companions) do
+                local filename = fixture_path("/out/" .. companion.name)
+                original[filename] = files[filename]
+            end
+            local driver = require "titan-compiler.driver"
+            local formatter, calls, token = driver.format_generated_file, {}, {}
+            finally(function() driver.format_generated_file = formatter end)
+            driver.format_generated_file = function(filename, _, pretty_print, strategy)
+                assert.is_true(pretty_print)
+                assert.equal(ctx.io, strategy)
+                assert.truthy(filename:find(".format.", 1, true))
+                assert.truthy(filename:match("%.h$"))
+                calls[#calls + 1] = filename
+                if #calls == 2 then
+                    if raised then error(token, 0) end
+                    return nil, "injected replay formatter failure"
+                end
+                return true
+            end
+            local called, result = pcall(incremental.certify_local, ctx, "main", source)
+            if raised then
+                assert.is_false(called)
+                assert.equal(token, result)
+            else
+                assert.is_true(called)
+                assert.equal("miss", result.status)
+                assert.matches("injected replay formatter failure", result.detail, 1, true)
+            end
+            assert.equal(2, #calls)
+            for filename, contents in pairs(original) do assert.equal(contents, files[filename], filename) end
+            for filename in pairs(files) do
+                assert.is_nil(filename:find(".format.", 1, true), filename)
+            end
+        end)
+    end
+
     for _, companion in ipairs(companions) do
         for _, replacement in ipairs({ "user bytes", "wrong marker", "shifted marker" }) do
             it("refuses " .. replacement .. " before relocating or adopting " .. companion.name, function()

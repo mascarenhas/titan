@@ -756,8 +756,9 @@ semantic certificate. Raised non-string values retain their identity after all
 scratch-removal attempts, with the original exceptional outcome taking
 precedence over cleanup noise. A caught native batch signal is retained on the
 resolver context and raised as a non-string value, so certification cannot
-demote cancellation to a miss. `driver.close_resolver_context` redelivers it
-under the restored signal action after closing the header and probe owners.
+demote cancellation to a miss. A later successful batch does not clear that
+pending signal. `driver.close_resolver_context` redelivers it under the restored
+signal action after closing the header and probe owners.
 
 Certificates retain the roots at object creation. A separate materialization
 receipt records the roots used for the generated companions and is bound to
@@ -773,6 +774,14 @@ writing them, including on a return to the creation roots. Restored header
 plans likewise compare contents before preserving a file; a formatter's
 unchanged output is not republished. Header contents, origins and lookup
 candidates are freshly validated.
+Foreign-header replay applies the original optional `clang-format` policy at
+both the checking-header and relocated companion boundaries. Relocation uses
+`driver.write_foreign_header_plans` with the context's I/O strategy, sharing
+fresh publication's staged format-and-compare pipeline for every recursive
+`.ffi.h` and `.titan.h` companion. All stages format before any replacement;
+identical formatted bytes keep the published file's identity and timestamps,
+and a formatter failure leaves the existing companions untouched. Preprocessed
+bytes and header digests remain strict.
 
 Only a move away from the creation roots requires checking every saved
 generated prefix against its hash and comparing the current preprocessed

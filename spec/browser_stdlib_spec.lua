@@ -159,6 +159,25 @@ plan:
         end
     end)
 
+    it("audits internal image names independently of optimizer retention", function()
+        local function section(id, bytes)
+            assert.is_true(#bytes < 128)
+            return string.char(id, #bytes) .. bytes
+        end
+        local function image(name)
+            local function_names = "\1\0" .. string.char(#name) .. name
+            return "\0asm\1\0\0\0" ..
+                section(1, "\1\96\0\0") ..
+                section(3, "\1\0") ..
+                section(10, "\1\2\0\11") ..
+                section(0, "\4name" .. section(1, function_names))
+        end
+        assert(checks.check_image(image("portable_entry"), "control.wasm"))
+        local ok, err = checks.check_image(image("uv_closure_intruder"), "intruder.wasm")
+        assert.is_nil(ok)
+        assert.equal("intruder.wasm: forbidden browser stdlib symbol uv_closure_intruder", err)
+    end)
+
     it("derives raw foreign entries and fails on any unrecorded member change", function()
         local function provider(raw_name)
             local modtype = types.Module("fixture", {

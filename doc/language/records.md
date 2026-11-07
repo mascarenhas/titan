@@ -53,6 +53,11 @@ named by importers. It also cannot appear anywhere in the public type surface:
 exported functions, methods, module variables, type aliases, or public record
 fields, because compiled module interfaces only serialize the public surface.
 
+Field, method, and record-function positions use `AnyName`, which admits reserved
+words such as `end`; see [the grammar](grammar.md#identifiers-and-reserved-words).
+Public keyword-named members are available to importing modules, including when
+only the compiled provider is present.
+
 A record's field types may mention the record being declared, so
 recursive records work:
 

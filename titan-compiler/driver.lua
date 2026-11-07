@@ -1651,11 +1651,7 @@ function driver.format_generated_file(
     -- its own physical-line progression, including blank lines after #line.
     local normalized = contents
     if not coverage_mode then
-        local removed
-        repeat
-            normalized, removed = normalized:gsub(
-                "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
-        until removed == 0
+        normalized = util.normalize_line_directives(contents)
     end
     if normalized ~= contents then
         local write_ok, write_err
@@ -4938,6 +4934,7 @@ function incremental_options(context)
         build_profile = driver.BUILD_PROFILE,
         emit_line_directives = driver.EMIT_LINE_DIRECTIVES,
         pretty_print = context.pretty_print == true,
+        write_foreign_header_plans = driver.write_foreign_header_plans,
         extra_ffi_include_dirs = context.extra_ffi_include_dirs or {},
         titan_root = driver.TITAN_ROOT or "",
         relocation_roots = context.relocation_roots,
@@ -5751,6 +5748,9 @@ function driver.defaultloader(static_deps, options)
             ffiheaders.remember_file(context, filename)
             local wrote, write_error = context.io:write_file(filename, contents)
             if not wrote then return false, write_error end
+            local formatted, format_error = driver.format_generated_file(
+                filename, context.probe_verbose, context.pretty_print, context.io)
+            if not formatted then return false, format_error end
             checking_foreign_header = filename
         end
 
@@ -8622,12 +8622,26 @@ local function generated_header_entries(plan)
     return plan.ffi_header and { plan.ffi_header, plan } or { plan }
 end
 
-local function validate_generated_header_entry(entry)
+function perf.generated_header_state(filename, strategy)
+    if strategy then
+        local attributes, err = strategy:lstat(filename)
+        if err then return nil, nil, err end
+        local mode = attributes and attributes.kind
+        if mode == "file" then
+            local contents, read_error = strategy:read_file(filename)
+            if not contents then return nil, nil, read_error end
+            return mode, contents
+        end
+        return mode
+    end
+    local mode = lfs.symlinkattributes(filename, "mode")
+    return mode, mode == "file" and util.get_file_contents(filename) or nil
+end
+
+local function validate_generated_header_entry(entry, strategy)
     local marker = entry.marker or ffiheaders.FOREIGN_MARKER
-    -- LFS table queries can fail on Windows directory destinations.
-    local mode = lfs.symlinkattributes(entry.filename, "mode")
-    local existing = mode == "file"
-        and util.get_file_contents(entry.filename) or nil
+    local mode, existing, state_error = perf.generated_header_state(entry.filename, strategy)
+    if state_error then return nil, state_error end
     local owned, err = ffiheaders.check_destination(
         entry.filename, marker, mode, existing)
     if entry.contents and err then return nil, err end
@@ -8635,13 +8649,13 @@ local function validate_generated_header_entry(entry)
     return true
 end
 
-function driver.validate_foreign_header_plan(plan)
+function driver.validate_foreign_header_plan(plan, strategy)
     for _, entry in ipairs(generated_header_entries(plan)) do
-        local ok, err = validate_generated_header_entry(entry)
+        local ok, err = validate_generated_header_entry(entry, strategy)
         if not ok then return nil, err end
         if entry.contents and not entry.preserve and not entry.temporary then
             local temporary, reserve_err = driver.sibling_temporary_path(
-                entry.filename .. ".format")
+                entry.filename .. ".format", strategy)
             if not temporary then return nil, reserve_err end
             -- Preserve C language inference across the random suffix.
             entry.temporary = temporary .. ".h"
@@ -8650,8 +8664,8 @@ function driver.validate_foreign_header_plan(plan)
     return true
 end
 
-function driver.write_foreign_header_plan(plan, verbose, pretty_print)
-    return driver.write_foreign_header_plans({ plan }, verbose, pretty_print)
+function driver.write_foreign_header_plan(plan, verbose, pretty_print, strategy)
+    return driver.write_foreign_header_plans({ plan }, verbose, pretty_print, strategy)
 end
 
 -- Implementation notes: doc/implementation/foreign-functions.md#final-planning-ownership-and-stale-cleanup
@@ -8808,53 +8822,77 @@ function driver.plan_foreign_headers(names, imported, policy_for)
     return plans
 end
 
-function driver.write_foreign_header_plans(plans, verbose, pretty_print)
+function driver.write_foreign_header_plans(plans, verbose, pretty_print, strategy)
     local entries = {}
     for _, plan in ipairs(plans or {}) do
-        local ok, err = driver.validate_foreign_header_plan(plan)
+        local ok, err = driver.validate_foreign_header_plan(plan, strategy)
         if not ok then return nil, err end
         for _, entry in ipairs(generated_header_entries(plan)) do
             entries[#entries + 1] = entry
         end
     end
+    local read_file = strategy and function(filename) return strategy:read_file(filename) end
+        or util.get_file_contents
+    local write_file = strategy and function(filename, contents) return strategy:write_file(filename, contents) end
+        or util.set_file_contents
+    local remove_file = strategy and function(filename) return strategy:unlink(filename) end
+        or os.remove
+    local rename_file = strategy and function(from, to) return strategy:rename(from, to) end
+        or rename_output
     local staged = {}
-    local function abandon(message)
-        for _, temporary in pairs(staged) do os.remove(temporary) end
-        return nil, message
-    end
-    -- Format every new header before publishing either header of any module.
-    -- A formatter failure must leave the existing environment and signatures
-    -- together, including when several source modules are being compiled.
-    for _, entry in ipairs(entries) do
-        if entry.contents and not entry.preserve then
-            local ok, err = ensure_output_parent(entry.filename)
-            if not ok then return abandon(err) end
-            local temporary = assert(entry.temporary)
-            staged[entry] = temporary
-            ok, err = util.set_file_contents(temporary, entry.contents)
-            if not ok then return abandon(err) end
-            ok, err = driver.format_generated_file(
-                temporary, verbose, pretty_print)
-            if not ok then return abandon(err) end
-            if lfs.attributes(entry.filename, "mode") == "file" and
-                util.get_file_contents(entry.filename) == util.get_file_contents(temporary) then
-                local removed, remove_error = os.remove(temporary)
-                if not removed then return abandon(remove_error) end
-                staged[entry], entry.preserve = nil, true
+    local function abandon(message, raised)
+        local cancellation
+        for _, temporary in pairs(staged) do
+            local called, removed, err = pcall(remove_file, temporary)
+            if not called then err = removed end
+            if err ~= nil and type(err) ~= "string" and not cancellation then
+                cancellation = { error = err }
             end
         end
+        if raised then error(message, 0) end
+        if cancellation then error(cancellation.error, 0) end
+        return nil, message
     end
-    for _, entry in ipairs(entries) do
-        local ok, err
-        if staged[entry] then
-            ok, err = rename_output(staged[entry], entry.filename)
-            if not ok then return abandon(err) end
-            staged[entry] = nil
-        elseif entry.managed and not entry.preserve then
-            ok, err = os.remove(entry.filename)
-            if not ok then return abandon(err) end
+    local called, written, write_error = pcall(function()
+        -- Format every new header before publishing either header of any module.
+        -- A formatter failure must leave the existing environment and signatures
+        -- together, including when several source modules are being compiled.
+        for _, entry in ipairs(entries) do
+            if entry.contents and not entry.preserve then
+                local ok, err = ensure_output_parent(entry.filename, strategy)
+                if not ok then return nil, err end
+                local temporary = assert(entry.temporary)
+                staged[entry] = temporary
+                ok, err = write_file(temporary, entry.contents)
+                if not ok then return nil, err end
+                ok, err = driver.format_generated_file(temporary, verbose, pretty_print, strategy)
+                if not ok then return nil, err end
+                local mode, existing, state_error = perf.generated_header_state(entry.filename, strategy)
+                if state_error then return nil, state_error end
+                local formatted, read_error = read_file(temporary)
+                if not formatted then return nil, read_error end
+                if mode == "file" and existing == formatted then
+                    local removed, remove_error = remove_file(temporary)
+                    if not removed then return nil, remove_error end
+                    staged[entry], entry.preserve = nil, true
+                end
+            end
         end
-    end
+        for _, entry in ipairs(entries) do
+            local ok, err
+            if staged[entry] then
+                ok, err = rename_file(staged[entry], entry.filename)
+                if not ok then return nil, err end
+                staged[entry] = nil
+            elseif entry.managed and not entry.preserve then
+                ok, err = remove_file(entry.filename)
+                if not ok then return nil, err end
+            end
+        end
+        return true
+    end)
+    if not called then return abandon(written, true) end
+    if not written then return abandon(write_error) end
     return true
 end
 
@@ -10455,9 +10493,9 @@ local function write_entrypoint(modname, entrypoint_c, program_name,
     return entrypoint_c
 end
 
-local function ensure_directory(path)
-    if platform.windows then
-        local strategy = compiler_io.new_sync()
+local function ensure_directory(path, strategy)
+    if strategy or platform.windows then
+        strategy = strategy or compiler_io.new_sync()
         local attributes, attribute_error = strategy:stat(path)
         if attribute_error then return nil, attribute_error end
         if attributes then
@@ -10467,7 +10505,7 @@ local function ensure_directory(path)
         end
         local parent = platform.parent(path)
         if parent and parent ~= path then
-            local ok, err = ensure_directory(parent)
+            local ok, err = ensure_directory(parent, strategy)
             if not ok then return nil, err end
         end
         local made, make_error = strategy:mkdir(path)
@@ -10492,11 +10530,11 @@ local function ensure_directory(path)
     return nil, err
 end
 
-ensure_output_parent = function(filename)
-    if platform.windows then
+ensure_output_parent = function(filename, strategy)
+    if strategy or platform.windows then
         local parent = platform.parent(filename)
         if not parent then return true end
-        return ensure_directory(parent)
+        return ensure_directory(parent, strategy)
     end
     local parent = filename:match("^(.*)/[^/]+$")
     if not parent or parent == "" then return true end

@@ -731,6 +731,10 @@ end
 
 -- Implementation notes: doc/implementation/foreign-functions.md#exact-raw-c-lowering-and-sequencing
 function coder._foreign_freeze(ctx, node, target, prefix)
+    local literal = foreign_string_literal(node)
+    if literal then
+        return "", target and foreigncast(literal, target) or literal
+    end
     local stats, exp = coder._foreign_raw_exp(ctx, node)
     local typ = target or node._type
     local resolved = types.resolve_c_typedef(typ)

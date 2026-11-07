@@ -515,16 +515,18 @@ relaxation is part of the policy.
 
 `spec/browser_stdlib_spec.lua` (emsdk-free) covers the path and symbol
 matrices, including every archive stem with `.a`, `_a.a`, `_1.48.a`,
-`-static.a`, and `.1.a` suffixes, and requires the `browser-sdk` environment
-and recipe to name no native-only dependency variable.
+`-static.a`, and `.1.a` suffixes. It tests image-name rejection with a hand-built
+Wasm module and a passing control, independently of optimizer retention, and
+requires the `browser-sdk` environment and recipe to name no native-only
+dependency variable.
 `spec/coder/browser_stdlib_closure_spec.lua` holds the real-toolchain negative
 fixtures:
 
 * a compiled provider that `foreign import`s an injected `uv.h`, an injected
   `libuv.a`, a neutrally named archive that defines `uv_closure_intruder`, an
-  image that keeps that function internally, and an image linked with
-  `-X libuv_a.a` whose selected object has no forbidden symbol but whose link
-  certificate names the archive;
+  authored-C output tree whose object defines that symbol (checked by
+  `check_output`), and an image linked with `-X libuv_a.a` whose selected object
+  has no forbidden symbol but whose link certificate names the archive;
 * an authored C file whose only forbidden header contributes a macro, rejected
   on a cache miss, on a hit, and as an uncacheable node; deleting its `.d` or
   the `.native/inputs` inventory fails closed, and a clean rebuild with an
@@ -2938,10 +2940,14 @@ unique `--user-data-dir`, and with real-time timers. The default transport is
 `--remote-debugging-pipe` with NUL-delimited CDP JSON written to the child's
 fd 3 and read from fd 4; `--cdp port` uses `--remote-debugging-address=127.0.0.1
 --remote-debugging-port=0`, reads the endpoint from the profile's
-`DevToolsActivePort`, and connects with Node's built-in `WebSocket`. Both use
-the same CDP commands; there is no npm dependency and no hidden fallback. The
-page reports through a `Runtime.addBinding` binding as base64-encoded JSON, so
-program bytes cross byte for byte and console text is never parsed. GC
+`DevToolsActivePort`, and connects with Node's built-in `WebSocket`. Chromium
+creates that file before writing it, so empty or partial content is retried for
+up to about one second; content that stays malformed is reported verbatim as a
+JSON string. A missing file remains subject to the overall runner timeout.
+Both transports use the same CDP commands; there is no npm dependency and no
+hidden fallback. The page reports through a `Runtime.addBinding` binding as
+base64-encoded JSON, so program bytes cross byte for byte and console text is
+never parsed. GC
 requests from host tests use `HeapProfiler.collectGarbage`. The runner logs
 `Chromium <version>; executable "<path>"; CDP <pipe|port>; pid <pid>; profile
 "<path>"` and, after cleanup, `cleanup: profile "<path>" removed`. On an early

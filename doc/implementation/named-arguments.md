@@ -186,14 +186,16 @@ methods, `codecall` freezes the receiver once before invoking
 `named_ordered_call_args`, matching the language order of receiver first, then
 written arguments.
 
-`codeforeigncall` has a parallel path. For each explicit named argument in
-lexical order, it runs `codeforeignexp`, assigns the converted result to a C
-temporary of the formal's target type, and records that temporary by formal
-index. It freezes omissions afterward, emits the C argument list in formal
-order, and keeps the positional path's post-call `mutable_out_anchor`
-refreshes for GC-bearing mutable `TValue` out parameters. C's unspecified
-argument-evaluation order therefore cannot reorder Titan effects. Restricted
-foreign bodies use the same scheme through `_foreign_raw_call`
+`codeforeigncall` has a parallel path. It converts explicit named arguments in
+lexical order, freezes each nonliteral result in a C temporary of the formal's
+target type, and records the values by formal index. String literals stay
+inline through ordinary byte-pointer casts because their evaluation has no
+effects; native function-pointer conversion adapters are retained. It freezes
+omissions afterward, emits the C argument list in formal order, and keeps the
+positional path's post-call `mutable_out_anchor` refreshes for GC-bearing mutable
+`TValue` out parameters. C's unspecified argument-evaluation order therefore
+cannot reorder Titan effects. Restricted foreign bodies use the same
+nonliteral-freezing scheme through `_foreign_raw_call`
 (`coder/declarations.lua`).
 
 Neither path emits a name table, changes the native signature, or enters

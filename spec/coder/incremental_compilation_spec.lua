@@ -1066,6 +1066,62 @@ os.exit(result.ok and 0 or result.status or 1)
             assert.is_nil(output:find("[cprobe] candidate cache miss", 1, true), output)
         end)
 
+        it("replays formatted foreign headers after moving the compiler checkout and output", function()
+            local formatter = assert(driver.split_shell_words(driver.CLANG_FORMAT))
+            formatter[#formatter + 1] = "--version"
+            local available = run(formatter)
+            if not available then pending("clang-format is unavailable"); return end
+            local compiler = private_compiler()
+            local dependency = NAMESPACE .. ".pretty"
+            local function foreign_body(answer)
+                return [[
+                    foreign type RelocationCallbackWhoseNameMakesItsDeclarationLongEnoughForHeaderFormatting =
+                        function(int, int, int, int, int, int): int
+                    local foreign function answer(): int return ]] .. answer .. " end\n"
+            end
+            local dependency_stem = source(dependency, foreign_body(42))
+            local stem = source(APP, 'local dep = import "' .. dependency .. [[.titan"
+                function main(args: {string}): integer return dep.answer() end
+            ]])
+            certified("--pretty-print", APP)
+            local saved = remember_objects({ [dependency] = dependency_stem, [APP] = stem })
+            local output, moved_output = workspace .. "/build", workspace .. "/pretty output"
+            compiler_root = workspace .. "/moved compiler"
+            assert(os.rename(compiler, compiler_root))
+            assert(os.rename(output, moved_output))
+            for _, item in pairs(saved) do item.path = moved_output .. item.path:sub(#output + 1) end
+            local function build()
+                return compiled("-o", moved_output, "--incremental", "--source-first",
+                    "--pretty-print", "-v", APP)
+            end
+            local text = build()
+            decisions(text, saved, {})
+            no_native_compile(text)
+            certified_exit(42, moved_output)
+            local headers = {
+                moved_output .. "/" .. dependency:gsub("%.", "/") .. ".ffi.h",
+                moved_output .. "/" .. dependency:gsub("%.", "/") .. ".titan.h",
+                moved_output .. "/" .. APP .. ".ffi.h",
+            }
+            local previous, timestamp = {}, os.time() - 120
+            for _, filename in ipairs(headers) do
+                assert(lfs.touch(filename, timestamp, timestamp))
+                previous[filename] = { bytes = read(filename), inode = lfs.attributes(filename, "ino") }
+            end
+            text = build()
+            decisions(text, saved, {})
+            no_native_compile(text)
+            for filename, state in pairs(previous) do
+                assert.equal(state.bytes, read(filename), filename)
+                assert.equal(timestamp, lfs.attributes(filename, "modification"), filename)
+                if not platform.windows then assert.equal(state.inode, lfs.attributes(filename, "ino"), filename) end
+            end
+            -- Formatting must not hide a real change to the exported helper body.
+            source(dependency, foreign_body(43))
+            decisions(build(), saved, { [dependency] = "source-content", [APP] = "import-interface" })
+            certified_exit(43, moved_output)
+        end)
+
         it("repairs source-import companions after an A-to-B-to-A root round trip", function()
             local sdk = private_sdk()
             local compiler = private_compiler()
@@ -1276,7 +1332,7 @@ os.exit(result.ok and 0 or result.status or 1)
                     local clang = banner:lower():find("clang", 1, true) ~= nil
                     local backend = os.getenv("TITAN_COVERAGE_TEST_BACKEND") or
                         (clang and "llvm-gcov" or "gcc-gcov")
-                    local gcov = os.getenv("TITAN_COVERAGE_TEST_GCOV") or
+                    local gcov = os.getenv("TITAN_COVERAGE_TEST_GCOV") or os.getenv("GCOV") or
                         (clang and "llvm-cov gcov" or "gcov")
                     local prepared, reason = coverage.prepare({
                         CC = cc, EMIT_LINE_DIRECTIVES = true,

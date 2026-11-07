@@ -2564,12 +2564,15 @@ disables include sorting rather than discovering an ambient project
 generated headers: source dependencies precede direct foreign directives in
 `.ffi.h`, and the module C environment precedes Titan-generated declarations.
 
-Every generated-file boundary performs the non-presentational normalization
-needed for source maps: it removes all blank physical lines immediately after a
-`#line` directive. The coder performs the same cleanup on its assembled module
-source before returning it. Thus default and pretty-printed builds both make the
-directive's named Titan line apply to the immediately following generated
-statement.
+Every generated-file boundary uses `util.normalize_line_directives` for the
+non-presentational source-map cleanup: it removes blank physical lines
+immediately after a generated `#line` directive, preserving LF or CRLF spelling
+and leaving C literals and comments untouched. The coder's assembled C and
+private headers, the driver's formatting boundary, and foreign-header recipe
+replay all use this helper. Default and pretty-printed builds therefore apply
+the directive's named Titan line to the immediately following generated
+statement. Preprocessed C is not normalized; coverage keeps its separate
+region-marker conversion and authored physical-line progression.
 
 The lifecycle is raw write, optional format, normalization, then native compile.
 Generated headers use sibling stages and are renamed into place only after every

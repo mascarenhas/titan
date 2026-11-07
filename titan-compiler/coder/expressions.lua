@@ -3356,6 +3356,8 @@ function codeexp(ctx, node, iscondition, target)
 end
 
 function codeforeignexp(ctx, node, target)
+    local literal = foreign_string_literal(node)
+    if literal then return "", literal end
     local tag = node._tag
     if tag == "Ast.ExpCast" and (node._written_cast and node._written_cast.tag == "just")
        and maybe3.get_checked(node._written_cast, "written cast").op == "current_module" then
@@ -3381,8 +3383,6 @@ function codeforeignexp(ctx, node, target)
         -- happen from its actual type (not a premature lua_Integer/
         -- lua_Number cast).
         return codeforeignvar(ctx, node.var)
-    elseif tag == "Ast.ExpString" then
-        return "", c_string_literal(node.value)
     elseif tag == "Ast.ExpCast" and node.target._tag == "Type.String" then
         local cstats, cexp = codeforeignexp(ctx, node.exp)
         return cstats, foreigncast(cexp, node._type)

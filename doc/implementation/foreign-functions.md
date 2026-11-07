@@ -234,13 +234,17 @@ the `static inline` direct-call helper described in
 C does not specify the evaluation order of operands or call arguments, whereas
 Titan does. `_foreign_freeze` is the sequencing primitive: it emits an exact
 C declarator, evaluates the source once, applies the checker-selected target
-cast when needed, and assigns the result to a fresh temporary. The raw lowering
-uses it systematically:
+cast when needed, and assigns the result to a fresh temporary. A string literal
+needs no temporary because its evaluation has no effects. The raw lowering uses
+this primitive systematically:
 
-* unary and binary operands are frozen left to right before the C operator;
-* a call's callee is evaluated once, positional arguments are frozen in source
-  order, and named arguments are frozen in written order before their temporary
-  names are assembled in formal order;
+* nonliteral unary and binary operands are frozen left to right before the C operator;
+* a call's callee is evaluated once; nonliteral positional arguments are frozen
+  in source order, and nonliteral named arguments in written order before the
+  values are assembled in formal order. String literals stay inline through
+  ordinary byte-pointer casts, using the ordinary C-literal byte escaping
+  without introducing evaluation effects. Function-pointer/`void *` conversions
+  retain their native portability adapter;
 * a non-void C result is assigned to its own result temporary;
 * declaration targets are declared first, initializers are frozen left to
   right, and only then are the declared locals assigned;
@@ -313,16 +317,17 @@ logical filenames.
 5. every local direct-call helper body in declaration order.
 
 Fresh source-foreign headers and restored recipes share
-`ffiheaders.foreign_contents`. It removes the blank physical lines after
-generated `#line` directives that fresh header publication already removes,
-preserving LF/CRLF spelling and all other recipe bytes. A replayed companion
-therefore has the same directive spacing before native preprocessing, rather
-than relying on a file-formatting step that direct restoration bypasses.
-The driver retains its final required normalization before publication. With
-`titanc --pretty-print` it additionally runs the configured `clang-format`
-with Titan's explicit style and include sorting disabled. Default builds do
-not invoke the formatter; either mode preserves the intentional include
-sequence above.
+`ffiheaders.foreign_contents` and the canonical generated-line cleanup. It
+removes blank physical lines after generated `#line` directives while preserving
+LF/CRLF spelling and all other recipe bytes.
+
+Fresh publication, checking-header restoration, and relocated companion replay
+all apply the original formatting policy before native preprocessing. With
+`titanc --pretty-print`, both `.ffi.h` and `.titan.h` companions are formatted
+with Titan's explicit style and include sorting disabled. Published companions
+are staged and compared before replacement, so unchanged formatted bytes keep
+the existing file. Default builds do not invoke the formatter; either mode
+preserves the intentional include sequence above.
 
 Putting every prototype before every helper body supports calls among the
 module's foreign declarations. Include lines are normalized and deduplicated.

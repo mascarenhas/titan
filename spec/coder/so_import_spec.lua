@@ -66,6 +66,34 @@ describe(".so-only cross-module imports", function()
         generated_modules = {}
     end)
 
+    for _, member in ipairs({
+        { kind = "method", declaration = "function Slot:end(): integer return self.n end",
+            call = "slot:end()" },
+        { kind = "function", declaration = "function Slot.end(slot: Slot): integer return slot.n end",
+            call = "provider.Slot.end(slot)" },
+    }) do
+        it("recovers a keyword-named public record " .. member.kind .. " in a separately compiled consumer", function()
+            local provider = "keyword_record_" .. member.kind .. "_provider"
+            local consumer = "keyword_record_" .. member.kind .. "_consumer"
+            local ok, err = build_so_chain({
+                { name = provider, src = [[
+                    record Slot
+                        n: integer
+                    end
+                ]] .. member.declaration },
+                { name = consumer, src = 'local provider = import "' .. provider .. [["
+                    function run(): integer
+                        local slot = provider.Slot(42)
+                        return ]] .. member.call .. [[
+                    end
+                ]] },
+            })
+            assert.truthy(ok, err)
+            local ran, output = call(consumer, "assert(" .. consumer .. ".run() == 42)")
+            assert.truthy(ran, output)
+        end)
+    end
+
     it("calls a function in a .so-only module", function ()
         local ok, err = build_so_chain({
             { name = "sfoo", src = [[

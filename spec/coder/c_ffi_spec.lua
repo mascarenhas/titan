@@ -94,6 +94,122 @@ describe("C FFI code generation", function()
         os.execute("rm -rf test.so.dSYM")
     end)
 
+    it("preserves literal format strings under hardened native warnings", function()
+        h.with_extra_cflags({ "-O2", "-Wformat", "-Wformat-security", "-Werror" }, function()
+            local output = h.compile_and_run([[
+                foreign import "stdio.h"
+                function direct(): integer
+                    return ffi.printf("ok\n")
+                end
+                local foreign function raw(): int
+                    return ffi.printf("ok\n")
+                end
+                function through_raw(): integer
+                    return raw()
+                end
+            ]], [[
+                assert(test.direct() == 3)
+                assert(test.through_raw() == 3)
+                io.write("LITERAL OK\n")
+            ]])
+            assert.equal("ok\nok\nLITERAL OK\n", output)
+        end)
+    end)
+
+    it("preserves literal bytes including NULs, non-ASCII and long foreign arguments", function()
+        local bytes = ("\0\255λ??/\\\"\n$VAR"):rep(1024)
+        local source = string.format([[
+            foreign import "string.h"
+            function matches(expected: string): boolean
+                return ffi.memcmp(%q, expected, %d) == 0
+            end
+            local foreign function raw_bytes(expected: const *char): int
+                return ffi.memcmp(%q, expected, %d as foreign size_t)
+            end
+            function raw_matches(expected: string): boolean
+                return raw_bytes(expected) == 0
+            end
+        ]], bytes, #bytes, bytes, #bytes)
+        h.run_coder(source, string.format([[
+            assert(test.matches(%q))
+            assert(test.raw_matches(%q))
+        ]], bytes, bytes))
+    end)
+
+    it("keeps native adapters for literal pointer round trips", function()
+        h.with_extra_cflags({ "-Wpedantic", "-Werror" }, function()
+            h.run_coder([[
+                foreign import "string.h"
+                function matches(expected: string): boolean
+                    return ffi.memcmp(
+                        (("raw" as foreign const *void) as foreign function(): void) as foreign const *void,
+                        expected, 3) == 0
+                end
+                local foreign function raw_bytes(expected: const *char): int
+                    return ffi.memcmp(
+                        (("raw" as foreign const *void) as foreign function(): void) as foreign const *void,
+                        expected, 3 as foreign size_t)
+                end
+                function raw_matches(expected: string): boolean
+                    return raw_bytes(expected) == 0
+                end
+            ]], [[
+                assert(test.matches("raw"))
+                assert(test.raw_matches("raw"))
+            ]])
+        end)
+    end)
+
+    it("keeps effects around literal foreign arguments in written order", function()
+        -- The C sink observes argument placement independently of Titan calls.
+        with_header([[
+            #include <string.h>
+            static int ffi_literal_order(int first, const char *middle, int last) {
+                return strcmp(middle, "middle") == 0 ? first * 10 + last : -1;
+            }
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+                local trace = 0
+                local function mark(value: integer): integer
+                    trace = trace * 10 + value
+                    return value
+                end
+                function positional(): integer
+                    trace = 0
+                    local result = ffi.ffi_literal_order(mark(1), "middle", mark(2))
+                    return trace * 100 + result
+                end
+                function named(): integer
+                    trace = 0
+                    local result = ffi.ffi_literal_order {
+                        last = mark(1), middle = "middle", first = mark(2),
+                    }
+                    return trace * 100 + result
+                end
+                local function tail(): {integer}
+                    return {mark(2)}
+                end
+                function adjusted(): integer
+                    trace = 0
+                    local result = ffi.ffi_literal_order(mark(1), "middle", ...tail())
+                    return trace * 100 + result
+                end
+                function indirect(): integer
+                    trace = 0
+                    local target: foreign function(int, const *char, int): int = ffi.ffi_literal_order
+                    local result = target(mark(1), "middle", ...tail())
+                    return trace * 100 + result
+                end
+            ]], [[
+                assert(test.positional() == 1212)
+                assert(test.named() == 1221)
+                assert(test.adjusted() == 1212)
+                assert(test.indirect() == 1212)
+            ]])
+        end)
+    end)
+
     it("passes the built-in Lua state and module pointers to C functions", function()
         with_header([[
             typedef struct lua_State lua_State;

@@ -570,6 +570,69 @@ for (const cdp of ["pipe", "port"]) {
     });
 }
 
+test("port discovery retries partial files and bounds malformed content", { skip: !supported }, async t => {
+    for (const initial of ["empty", "port", "garbage", "missing"]) await t.test(initial, async () => {
+        const directory = await mkdtemp(join(tmpdir(), "titan-chrome-port-"));
+        try {
+            const chrome = join(directory, "chrome");
+            const connected = join(directory, "connected");
+            const retired = join(directory, "retired");
+            await writeFile(chrome, `#!${process.execPath}
+                const {writeFileSync} = require("node:fs");
+                const {join} = require("node:path");
+                const net = require("node:net");
+                if (process.argv.includes("--version")) {
+                    console.log("Chromium 156.0.8078.80");
+                } else {
+                    const profile = process.argv.find(arg => arg.startsWith("--user-data-dir=")).slice(16);
+                    const path = join(profile, "DevToolsActivePort");
+                    let publishedAt;
+                    process.on("SIGTERM", () => {
+                        if (publishedAt !== undefined) writeFileSync(${JSON.stringify(retired)},
+                            String(performance.now() - publishedAt));
+                        process.exit(0);
+                    });
+                    const server = net.createServer(socket => {
+                        writeFileSync(${JSON.stringify(connected)}, "connected");
+                        socket.destroy();
+                    });
+                    server.listen(0, "127.0.0.1", () => {
+                        const port = server.address().port;
+                        const initial = ${JSON.stringify(initial)};
+                        if (initial !== "missing") {
+                            publishedAt = performance.now();
+                            writeFileSync(path,
+                                initial === "garbage" ? "nonsense\\n" : initial === "port" ? port + "\\n" : "");
+                        }
+                        if (initial === "empty" || initial === "port") setTimeout(() => {
+                            writeFileSync(path, port + "\\n/devtools/browser/ready\\n");
+                        }, 60);
+                    });
+                }
+            `, {mode: 0o755});
+            const result = await run(["--engine", "chromium", "--chrome", chrome, "--cdp", "port",
+                "--timeout", initial === "missing" ? "500" : "4000", "--grace", "0",
+                "--root", root, "--js-test", fixture]);
+            const stderr = result.stderr.toString();
+            assert.equal(result.status, initial === "missing" ? 72 : 75, stderr);
+            if (initial === "empty" || initial === "port") {
+                assert.equal(await readFile(connected, "utf8"), "connected");
+                assert.match(stderr, /CDP WebSocket/);
+                assert.doesNotMatch(stderr, /invalid DevToolsActivePort/);
+            } else if (initial === "garbage") {
+                assert.ok(stderr.includes('invalid DevToolsActivePort: "nonsense\\n"'), stderr);
+                assert.ok(Number(await readFile(retired, "utf8")) >= 1000,
+                    "malformed file was not retried before Chromium cleanup began");
+                assert.doesNotMatch(stderr, /timed out after/);
+            } else {
+                assert.match(stderr, /timed out after 500 ms/);
+                assert.doesNotMatch(stderr, /invalid DevToolsActivePort/);
+            }
+            await cleanChromium(result);
+        } finally { await rm(directory, {recursive: true, force: true}); }
+    });
+});
+
 test("Node retires TERM-resistant descendants independently of its worker leader", { skip: !supported }, async t => {
     for (const mode of ["leader-exit", "deadline", "SIGINT", "SIGTERM"]) await t.test(mode, async () => {
         const directory = await mkdtemp(join(tmpdir(), "titan-node-group-"));
