@@ -30,33 +30,27 @@ local function with_header(contents, body)
     return table.unpack(results, 2, results.n)
 end
 
-local function assert_program_output(source, expected)
-    local ok, err, ast = h.run_checker(source)
-    assert.truthy(ok, err)
-    ok, err = h.compile_app("test", ast)
-    assert.truthy(ok, err)
-    local ran, why, status, output = h.call_app("./test")
-    assert.truthy(ran, why)
-    assert.equal(0, status, output)
-    assert.equal(expected, output)
-end
-
 describe("scalar variadic parameters (code generator)", function()
     after_each(clean)
 
-    it("prints an automatic C array element through a value vararg", function()
-        assert_program_output([[
-            local io = import "io"
-            function main(args: {string}): integer
+    it("boxes an automatic C array element through a value vararg", function()
+        run_coder([[
+            local function check(...: value): boolean
+                if #... ~= 1 then return false end
+                local count: integer = ...[1]
+                return count == 2
+            end
+            function run(): boolean
                 local counts = foreign int.new_array(1)
                 counts[0] = 2
-                io.print("count", counts[0])
-                return 0
+                return check(counts[0])
             end
-        ]], "count\t2")
+        ]], [[
+            assert(test.run())
+        ]])
     end)
 
-    it("prints C fields, arithmetic results and floating elements through value varargs",
+    it("boxes C fields, arithmetic results and floating elements through value varargs",
     function()
         with_header([[
             typedef struct ffi_vararg_item {
@@ -64,10 +58,19 @@ describe("scalar variadic parameters (code generator)", function()
                 double amount;
             } ffi_vararg_item;
         ]], function(header)
-            assert_program_output([[
-                local io = import "io"
+            run_coder([[
                 foreign import "]] .. header .. [["
-                function main(args: {string}): integer
+                local function check(...: value): boolean
+                    if #... ~= 5 then return false end
+                    local count: integer = ...[1]
+                    local field: integer = ...[2]
+                    local total: integer = ...[3]
+                    local fraction: float = ...[4]
+                    local amount: float = ...[5]
+                    return count == 2 and field == 3 and total == 3
+                        and fraction == 2.5 and amount == 1.5
+                end
+                function run(): boolean
                     local counts = foreign int.new_array(1)
                     counts[0] = 2
                     local item = foreign ffi_vararg_item.new()
@@ -75,11 +78,12 @@ describe("scalar variadic parameters (code generator)", function()
                     item.amount = 1.5
                     local fractions = foreign double.new_array(1)
                     fractions[0] = 2.5
-                    io.print("values", counts[0], item.count, counts[0] + 1,
-                             fractions[0], item.amount)
-                    return 0
+                    return check(counts[0], item.count, counts[0] + 1,
+                                 fractions[0], item.amount)
                 end
-            ]], "values\t2\t3\t3\t2.5\t1.5")
+            ]], [[
+                assert(test.run())
+            ]])
         end)
     end)
 
