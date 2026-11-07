@@ -738,6 +738,10 @@ the existing `cdefines.integer_literal_metadata`, and reuses
 `csemantics.classify_integer_literal` with the target profile. Floating numerals
 select target `double`. The same helper classifies foreign-body numerals;
 foreign numeric-`for` literal bounds keep their declared C control type.
+An explicit foreign control annotation is resolved before bare literal bounds
+are checked, so a fitting magnitude such as `ULLONG_MAX` is not first rejected
+by the default signed decimal candidates. Operators and unary expressions do
+not inherit that control context; the existing final bound retargeting remains.
 
 Foreign numeric visitors also receive the ordinary sink's expected type.
 `try_contextual_c_numeric_literal` accepts an integer only when its exact

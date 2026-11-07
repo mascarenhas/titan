@@ -126,6 +126,31 @@ describe("source-defined foreign functions", function()
         ]])
     end)
 
+    it("executes explicit foreign for controls without changing their literal rule",
+    function()
+        h.run_coder([[
+            local foreign function controls(): int
+                for index: foreign unsigned long long =
+                    18446744073709551615, 18446744073709551615 do
+                    if index ~= ~(0 as foreign unsigned long long) then return 1 end
+                    break
+                end
+                for index: foreign double = 0, 2 do
+                    if index ~= 0.0 then return 2 end
+                    break
+                end
+                for index: foreign unsigned char = 300, 300 do
+                    if index ~= 44 then return 3 end
+                    break
+                end
+                return 0
+            end
+            function run(): integer return controls() end
+        ]], [[
+            assert(test.run() == 0)
+        ]])
+    end)
+
     it("resolves public foreign entries from a compiled shared provider", function()
         local ok, err = h.build_so_chain({
             { name = "foreign_export_provider", src = [[

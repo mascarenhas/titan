@@ -50,20 +50,28 @@ end
 --   errors: list of compile-time errors
 --   returns whether the statement cannot fall through (always false here)
 function checkfor(node, st, errors)
-    checkexp(node.start, st, errors)
-    node.start = tryforce(node.start)
-    checkexp(node.finish, st, errors)
-    node.finish = tryforce(node.finish)
-    if node.inc then
-        checkexp(node.inc, st, errors)
-        node.inc = tryforce(node.inc)
+    -- An explicit foreign control type already owns bare literal bounds.
+    -- Supply it before default C99 classification can reject a magnitude such
+    -- as ULLONG_MAX, but do not contextualize operators or unary expressions.
+    local control_context
+    if checker._foreign_function_depth > 0 and node.decl.type then
+        checkdecl(node.decl, st, errors)
+        control_context = node.decl._type
     end
+    local function check_bound(exp)
+        local literal = exp._tag == "Ast.ExpInteger" or exp._tag == "Ast.ExpFloat"
+        checkexp(exp, st, errors, literal and control_context or nil)
+        return tryforce(exp)
+    end
+    node.start = check_bound(node.start)
+    node.finish = check_bound(node.finish)
+    if node.inc then node.inc = check_bound(node.inc) end
 
     -- Add loop variable to symbol table only after checking expressions
     if not node.decl.type then
         node.decl._type = node.start._type
     end
-    checkdecl(node.decl, st, errors)
+    if not control_context then checkdecl(node.decl, st, errors) end
     declare(node.decl, st, errors)
     -- The numeric-for control variable is read-only (as in Lua 5.4+):
     -- assigning to it is a clean compile-time error, not a silent miscompile.

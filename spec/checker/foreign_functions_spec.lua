@@ -448,6 +448,26 @@ describe("foreign functions (checker)", function()
         end
     end)
 
+    it("keeps explicit foreign for controls ahead of default literal classification",
+    function()
+        local ok, err, ast = h.run_checker([[
+            foreign function controls()
+                for index: foreign unsigned long long =
+                    18446744073709551615, 18446744073709551615 do
+                    break
+                end
+                for index: foreign double = 0, 2 do break end
+                for index: foreign unsigned char = 300, 300 do break end
+            end
+        ]], probe_session)
+        assert.truthy(ok, err)
+        for _, stat in ipairs(ast[1].block.stats) do
+            for _, bound in ipairs({ stat.start, stat.finish, stat.inc }) do
+                assert.is_true(types.equals(stat.decl._type, bound._type))
+            end
+        end
+    end)
+
     it("keeps size and alignment in the C size_t domain inside foreign bodies",
     function()
         with_header("#include <stddef.h>\n" .. declarations, function(header)
