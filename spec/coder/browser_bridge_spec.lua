@@ -21,7 +21,8 @@ local function build(info, assertions, tree, module, name, is_test, c_source)
         "-q", "--target", "browser", "--incremental", "--no-uv-bootstrap",
         "--tree", tree, "--output", output, "--exe", image }
     if c_source then
-        local headers = output .. "/foreign-headers"
+        -- Keep this separate from the image root until its target marker exists.
+        local headers = fixture.output .. "/foreign-headers-" .. assertions
         local interface = fixture:run({info.prefix .. "/bin/lua", "-E", "-e", init,
             fixture.frontend .. "/titanc", "-q", "--target", "browser", "--incremental",
             "--tree", repository, "--output", headers, "-c", "titan.browser"},
