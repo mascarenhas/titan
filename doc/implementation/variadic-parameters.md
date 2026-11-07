@@ -393,6 +393,15 @@ list, `codecall` inserts the `_varargs`/`_start` pair through
 adjusted to the callee's element type, go into a C-stack array with an exact
 `TitanVarg*` descriptor, and `_start` is 0. No allocation is involved.
 
+For a `value` element, the checker-inserted cast owns boxing before the
+descriptor is built. C integer and floating sources go through
+`setboxed`/`_code_checked_numeric_setslot`, preserving their raw C type until
+the Lua carrier-range check. Cast folding into an indexed read is restricted
+to Titan Array/Map loaders; a raw C array or pointer read cannot consume a
+`value` target and must use the normal conversion path. The same cast lowering
+serves fixed parameters, static variadic arguments, and scalar prefixes of an
+open run; the run itself consumes its stored per-element adjustment.
+
 A call whose argument list ends in `...` never reaches that emitter. The
 checker gives it an open-input plan (`open_source`, see [shared finite/open
 expression-list demand](#shared-finiteopen-expression-list-demand)), and the

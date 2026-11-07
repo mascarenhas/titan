@@ -8,6 +8,7 @@
 --
 -- The checker-only counterparts live in spec/checker/variadic_spec.lua.
 local h = require 'spec.support.helpers'
+local temporary = require "spec.support.temporary"
 
 local run_coder = h.run_coder
 
@@ -18,8 +19,142 @@ local function clean()
     if not h.verbose then os.execute("rm -f *.c") end
 end
 
+local function with_header(contents, body)
+    local header = temporary.name(".h")
+    local file = assert(io.open(header, "w"))
+    assert(file:write(contents))
+    assert(file:close())
+    local results = table.pack(xpcall(function() return body(header) end, debug.traceback))
+    os.remove(header)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
+local function assert_program_output(source, expected)
+    local ok, err, ast = h.run_checker(source)
+    assert.truthy(ok, err)
+    ok, err = h.compile_app("test", ast)
+    assert.truthy(ok, err)
+    local ran, why, status, output = h.call_app("./test")
+    assert.truthy(ran, why)
+    assert.equal(0, status, output)
+    assert.equal(expected, output)
+end
+
 describe("scalar variadic parameters (code generator)", function()
     after_each(clean)
+
+    it("prints an automatic C array element through a value vararg", function()
+        assert_program_output([[
+            local io = import "io"
+            function main(args: {string}): integer
+                local counts = foreign int.new_array(1)
+                counts[0] = 2
+                io.print("count", counts[0])
+                return 0
+            end
+        ]], "count\t2")
+    end)
+
+    it("prints C fields, arithmetic results and floating elements through value varargs",
+    function()
+        with_header([[
+            typedef struct ffi_vararg_item {
+                int count;
+                double amount;
+            } ffi_vararg_item;
+        ]], function(header)
+            assert_program_output([[
+                local io = import "io"
+                foreign import "]] .. header .. [["
+                function main(args: {string}): integer
+                    local counts = foreign int.new_array(1)
+                    counts[0] = 2
+                    local item = foreign ffi_vararg_item.new()
+                    item.count = 3
+                    item.amount = 1.5
+                    local fractions = foreign double.new_array(1)
+                    fractions[0] = 2.5
+                    io.print("values", counts[0], item.count, counts[0] + 1,
+                             fractions[0], item.amount)
+                    return 0
+                end
+            ]], "values\t2\t3\t3\t2.5\t1.5")
+        end)
+    end)
+
+    it("boxes C reads in direct, first-class and open-prefix value calls", function()
+        run_coder([[
+            function collect(...: value): (value, value, value)
+                return ...[1], ...[2], ...[3]
+            end
+            local function forward(counts: foreign *int, ...: integer):
+                (value, value, value)
+                return collect(counts[0], ...)
+            end
+            function direct(): (value, value, value)
+                local counts = foreign int.new_array(1)
+                counts[0] = 2
+                return collect(counts[0], counts[0] + 1, counts[0] + 2)
+            end
+            function invoke(callback: function (...: value): (value, value, value)):
+                (value, value, value)
+                local counts = foreign int.new_array(1)
+                counts[0] = 2
+                return callback(counts[0], counts[0] + 1, counts[0] + 2)
+            end
+            function forwarded(): (value, value, value)
+                local counts = foreign int.new_array(1)
+                counts[0] = 2
+                return forward(counts, 3, 4)
+            end
+            function spread(): (value, value, value)
+                local counts = foreign int.new_array(1)
+                counts[0] = 2
+                local values: {value} = {counts[0], counts[0] + 1, counts[0] + 2}
+                return collect(...values)
+            end
+        ]], [[
+            local function check(a, b, c)
+                assert(a == 2 and b == 3 and c == 4)
+                assert(math.type(a) == "integer")
+                assert(math.type(b) == "integer")
+                assert(math.type(c) == "integer")
+            end
+            check(test.direct())
+            check(test.invoke(test.collect))
+            check(test.invoke(function(...) return ... end))
+            check(test.forwarded())
+            check(test.spread())
+        ]])
+    end)
+
+    it("checks C carrier ranges before calling a value-vararg callee", function()
+        run_coder([[
+            calls = 0
+            local function consume(...: value)
+                calls = calls + 1
+            end
+            local function first(...: value): value return ...[1] end
+            function rejected()
+                local numbers = foreign unsigned long long.new_array(1)
+                numbers[0] = ~(0 as foreign unsigned long long)
+                consume(numbers[0])
+            end
+            function wrapped(): value
+                local numbers = foreign unsigned long long.new_array(1)
+                numbers[0] = ~(0 as foreign unsigned long long)
+                return first(numbers[0] + 1)
+            end
+        ]], [[
+            local ok, err = pcall(test.rejected)
+            assert(not ok)
+            assert(err:match("C scalar is outside its Titan carrier range"))
+            assert(test.calls == 0)
+            assert(test.wrapped() == 0)
+            assert(math.type(test.wrapped()) == "integer")
+        ]])
+    end)
 
     it("integer vararg: #... and ...[i] called from Lua", function()
         run_coder([[

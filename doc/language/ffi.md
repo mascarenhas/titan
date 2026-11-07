@@ -488,6 +488,12 @@ description with a different signed range:
   boxed slot checks that the exact value fits the corresponding Lua carrier
   before storing it.
 
+This includes each C scalar passed to a Titan `...: value` parameter, such as
+a C array element, a C struct field, or a C-mode arithmetic result. Scalar
+prefixes before a forwarded or spread run use the same checked boxing. A C
+variadic function is a different boundary and follows its C argument types
+and promotions.
+
 Written C-integer-to-C-integer casts retain ordinary C conversion semantics.
 The integer promotions and usual arithmetic conversions selected inside a C
 expression likewise retain C's integer semantics; an integer-to-floating

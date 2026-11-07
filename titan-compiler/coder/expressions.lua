@@ -2924,9 +2924,13 @@ function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpCast"
            and node.exp._tag == "Ast.ExpVar"
            and node.exp.var._tag == "Ast.VarBracket"
+           and (node.exp.var.exp1._type._tag == "Type.Array"
+                or node.exp.var.exp1._type._tag == "Type.Map")
            and node.exp._type._tag ~= "Type.Option"
            and node.exp._type._tag ~= "Type.Value" then
-        -- Fold casts of array/map indexing into the code for the operation
+        -- Fold only Titan container reads, whose loader consumes the target
+        -- type. Raw C reads must keep their source type and use the ordinary
+        -- checked boxing/conversion path below.
         local t = node.exp.var._type
         node.exp.var._type = node._type
         local cstats, cexp = codeexp(ctx, node.exp.var)
