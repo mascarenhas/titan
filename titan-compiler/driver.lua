@@ -10123,32 +10123,7 @@ static void fatal(const char* message) {
     exit(EXIT_FAILURE);
 }
 
-/* Same message conversion policy as lua.c's msghandler: strings/numbers through
- * lua_tostring, then __tostring if present and string-valued, otherwise a typed
- * placeholder. */
-static const char *errmsg_tostring(lua_State *L, int idx) {
-    const char *msg;
-    idx = lua_absindex(L, idx);
-    msg = lua_tostring(L, idx);
-    if (msg == NULL) {
-        if (luaL_callmeta(L, idx, "__tostring") && lua_type(L, -1) == LUA_TSTRING) {
-            msg = lua_tostring(L, -1);
-        } else {
-            msg = lua_pushfstring(L, "(error object is a %s value)",
-                                  luaL_typename(L, idx));
-        }
-    }
-    return msg;
-}
-
-static const char *strip_bootstrap_prefix(const char *message) {
-    static const char prefix[] = "[string \"local arg = ...;...\"]:3: ";
-    const size_t prefix_len = sizeof(prefix) - 1;
-    while (strncmp(message, prefix, prefix_len) == 0) {
-        message += prefix_len;
-    }
-    return message;
-}
+$ERROR_HELPERS
 
 static int line_ends_with(const char *line, size_t len, const char *suffix) {
     const size_t suffix_len = strlen(suffix);
@@ -10178,7 +10153,7 @@ static void write_tabbed_trace(const char *trace) {
 }
 
 static void report_titan_error(const char *message, const char *trace) {
-    fprintf(stderr, "%s: %s\n", "$PROGNAME", strip_bootstrap_prefix(message));
+    fprintf(stderr, "%s: %s\n", "$PROGNAME", strip_bootstrap_prefix(message, NULL));
     fputs("stack traceback:", stderr);
     write_tabbed_trace(trace);
     exit(EXIT_FAILURE);
@@ -10304,10 +10279,10 @@ int main(int argc, char** argv) {
         const char *report;
         if (lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY) == LUA_TSTRING) {
             const char *trace = lua_tostring(L, -1);
-            report_titan_error(errmsg_tostring(L, -2), trace);
+            report_titan_error(errmsg_tostring(L, -2, NULL), trace);
         }
         lua_pop(L, 1);                     /* nil/non-string trace slot */
-        report = errmsg_tostring(L, -1);
+        report = errmsg_tostring(L, -1, NULL);
         fatal(report);
     }
     ret = lua_tointeger(L, -1);
@@ -10327,6 +10302,7 @@ function driver.entrypoint_contents(modname, program_name, options)
         MODNAME = modname,
         SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
         COVERAGE_DECLARATIONS = "", COVERAGE_PREPARE = "", COVERAGE_FINISH = "",
+        ERROR_HELPERS = require("titan-compiler.browserentry").error_helpers,
     }
     if platform.windows then
         values.PROGNAME = c_string_contents(values.PROGNAME)
