@@ -183,7 +183,7 @@ class OutputChannel {
         (failures ||= []).push(current);
         captureFailure(token, error, current);
       }
-      if (current && current !== token.primaryFault) this.firstFailure ||= current;
+      if (current) this.firstFailure ||= current;
     }
     return failures;
   }
@@ -231,7 +231,8 @@ async function drainOutput(drain) {
     try {
       if (drain.sink) await sinkResult(drain.sink(entry.bytes), drain.stream);
     } catch (cause) {
-      const error = failure('SINK', `browser ${drain.stream} sink failed`, cause, drain.stream);
+      const error = cause?.code === 'TITAN_BROWSER_SINK' ? cause :
+        failure('SINK', `browser ${drain.stream} sink failed`, cause, drain.stream);
       const current = {error};
       first ||= current;
       (failures ||= []).push(current);
@@ -313,7 +314,6 @@ class BrowserOwner {
     this.releases = [];
     this.releaseScheduled = false;
     this.callables = new Map();
-    this.provisionalCallables = [];
     this.slots = new Map();
     this.freeSlots = [];
     this.nextSlot = 1;
@@ -731,7 +731,6 @@ class BrowserOwner {
         this.callables.delete(record.key);
       }
     }
-    this.provisionalCallables = this.provisionalCallables.filter(record => record.state !== state);
     this.queue = this.queue.filter(entry => entry.target.state !== state);
     this.releases = this.releases.filter(entry => entry.state !== state);
     for (const request of this.requests) {
@@ -834,13 +833,7 @@ class BrowserOwner {
     wrapperRecords.set(wrapper, record);
     record.wrapper = wrapper;
     this.callables.set(key, record);
-    this.provisionalCallables.push(record);
     return 1;
-  }
-
-  exposeProvisionalCallables() {
-    for (const record of this.provisionalCallables) record.exposed = true;
-    this.provisionalCallables.length = 0;
   }
 
   invalidateCallable(state, slot, generation) {
@@ -851,15 +844,14 @@ class BrowserOwner {
     record.released = true;
     record.owner = undefined;
     this.callables.delete(key);
-    this.provisionalCallables = this.provisionalCallables.filter(item => item !== record);
     return 1;
   }
 
-  callableAt(state, slot, generation) {
+  callableRecordAt(state, slot, generation) {
     const record = this.callables.get(`${state}:${slot}:${generation}`);
     if (!record) throw failure('HANDLE', 'browser callable is released');
     this.validateCallable(record.wrapper, state);
-    return record.wrapper;
+    return record;
   }
 
   snapshotFailureArguments(message, cause) {
@@ -934,7 +926,7 @@ class BrowserOwner {
 
   valuesAt(pointer, count, state) {
     const view = this.heapView(pointer, count * valueSize);
-    const values = [];
+    const values = [], callables = [];
     for (let index = 0; index < count; ++index) {
       const address = index * valueSize, type = view.getUint32(address, true);
       switch (type) {
@@ -960,13 +952,19 @@ class BrowserOwner {
           const ownerState = view.getUint32(address + 4, true);
           if (state !== undefined && ownerState !== state) throw failure('HANDLE', 'browser argument belongs to another state');
           const slot = view.getUint32(address + 24, true), generation = view.getUint32(address + 28, true);
-          values.push(type === kind.handle ? this.getSlot(ownerState, slot, generation).value :
-            this.callableAt(ownerState, slot, generation));
+          if (type === kind.handle) {
+            values.push(this.getSlot(ownerState, slot, generation).value);
+          } else {
+            const record = this.callableRecordAt(ownerState, slot, generation);
+            callables.push(record);
+            values.push(record.wrapper);
+          }
           break;
         }
         default: throw failure('PROTOCOL', 'browser value has an invalid kind');
       }
     }
+    for (const record of callables) record.exposed = true;
     return values;
   }
 
@@ -982,7 +980,6 @@ class BrowserOwner {
     pending.completed = true;
     const status = view.getUint32(12, true);
     const values = status === 0 ? this.valuesAt(view.getUint32(24, true), view.getUint32(20, true)) : [];
-    if (status === 0) this.exposeProvisionalCallables();
     const record = {id, kind: operation, failed: status !== 0,
       status: view.getInt32(16, true),
       bytes: this.bytesAt(view.getUint32(28, true), view.getUint32(32, true)),
@@ -1034,7 +1031,6 @@ class BrowserOwner {
     const target = this.getSlot(state, slot, generation).value;
     if (typeof target !== 'function') throw new TypeError('browser binding is not callable');
     const args = this.valuesAt(pointer, count, state);
-    this.exposeProvisionalCallables();
     return {value: target(...args), state};
   }
 
@@ -1181,7 +1177,6 @@ class BrowserOwner {
     let args;
     try { args = this.valuesAt(pointer, count, state); }
     catch (cause) { this.abortRequest(request); throw cause; }
-    this.exposeProvisionalCallables();
     this.startRequest(request, target, args, listener);
     return {kind: kind.request, value: request};
   }

@@ -96,6 +96,7 @@ typedef struct titan_browser_state_record {
   int configured;
   TValue invoke_handler;
   TValue release_handler;
+  titan_browser_completion *fallback;
 } titan_browser_state_record;
 
 #if defined(__EMSCRIPTEN__)

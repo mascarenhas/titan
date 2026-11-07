@@ -1,3 +1,5 @@
+require "titan-compiler.coder.names"
+local coder = require("titan-compiler.coder.core").coder
 local util = require "titan-compiler.util"
 local M = {}
 
@@ -58,15 +60,15 @@ struct titan_browser_arguments {
     const size_t *lengths;
 };
 
-extern void *titan_browser_\u2133_attach_titan(
+extern void *$ATTACH_FN(
     void *L) __attribute__((weak));
-extern void titan_browser_\u2133_close_state_titan(
+extern void $CLOSE_STATE_FN(
     void *L) __attribute__((weak));
-extern int titan_browser_\u2133_invoke_titan(
+extern int $INVOKE_FN(
     unsigned long long operation_id, unsigned int state, unsigned int slot,
     unsigned int generation, unsigned int argc,
     const void *args) __attribute__((weak));
-extern int titan_browser_\u2133_release_callable_titan(
+extern int $RELEASE_FN(
     unsigned long long operation_id, unsigned int state, unsigned int slot,
     unsigned int generation, unsigned int wrapper) __attribute__((weak));
 
@@ -170,9 +172,7 @@ static int titan_browser_protected_entry(uint64_t id, uint32_t operation,
     titan_browser_completion completion = {0};
     completion.operation_id = id;
     completion.operation = operation;
-    if (!lua_checkstack(L, 8))
-        return titan_browser_invalid_entry(id, operation,
-            "not enough memory for browser entry stack");
+    /* Owner state enters at top == 0 with LUA_MINSTACK slots pre-allocated. */
     lua_pushcfunction(L, errorhandler);
     lua_pushcfunction(L, worker);
     lua_pushlightuserdata(L, context);
@@ -195,8 +195,8 @@ $INITIALIZER
 $WORKER
 
 static int titan_browser_initialize_entry(lua_State *L) {
-    if (titan_browser_\u2133_attach_titan) {
-        titan_browser_owner_record = (titan_browser_state_record *)titan_browser_\u2133_attach_titan(L);
+    if ($ATTACH_FN) {
+        titan_browser_owner_record = (titan_browser_state_record *)$ATTACH_FN(L);
         titan_browser_owner_token = titan_browser_owner_record->token;
         titan_browser_owner_record->is_owner = -1;
     } else {
@@ -250,8 +250,8 @@ int titan_browser_entry(uint64_t operation_id, int argc,
 
 int titan_browser_invoke(uint64_t operation_id, uint32_t state, uint32_t slot,
         uint32_t generation, uint32_t argc, const titan_browser_value *args) {
-    return titan_browser_\u2133_invoke_titan
-        ? titan_browser_\u2133_invoke_titan(operation_id, state, slot, generation, argc, args)
+    return $INVOKE_FN
+        ? $INVOKE_FN(operation_id, state, slot, generation, argc, args)
         : (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_INVOKE) ? -1
             : titan_browser_invalid_entry(operation_id, TITAN_BROWSER_INVOKE,
                   "browser state is closed, closing or uninitialized"));
@@ -259,8 +259,8 @@ int titan_browser_invoke(uint64_t operation_id, uint32_t state, uint32_t slot,
 
 int titan_browser_release_callable(uint64_t operation_id, uint32_t state,
         uint32_t slot, uint32_t generation, uint32_t wrapper) {
-    return titan_browser_\u2133_release_callable_titan
-        ? titan_browser_\u2133_release_callable_titan(operation_id, state, slot, generation, wrapper)
+    return $RELEASE_FN
+        ? $RELEASE_FN(operation_id, state, slot, generation, wrapper)
         : (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_RELEASE) ? -1
             : titan_browser_invalid_entry(operation_id, TITAN_BROWSER_RELEASE,
                   "browser state is closed"));
@@ -278,8 +278,8 @@ int titan_browser_close(uint64_t operation_id) {
         titan_browser_owner = NULL;
         titan_browser_owner_record = NULL;
         titan_browser_owner_token = 0;
-        if (titan_browser_\u2133_close_state_titan) {
-            titan_browser_\u2133_close_state_titan(L);
+        if ($CLOSE_STATE_FN) {
+            $CLOSE_STATE_FN(L);
         } else {
             if (token) titan_browser_host_state_closing(token);
             lua_close(L);
@@ -295,6 +295,10 @@ function M.contents(worker, options)
     options = options or {}
     return util.render(template, {
         ERROR_HELPERS = M.error_helpers,
+        ATTACH_FN = coder._foreign_func_name("titan.browser", "attach"),
+        CLOSE_STATE_FN = coder._foreign_func_name("titan.browser", "close_state"),
+        INVOKE_FN = coder._foreign_func_name("titan.browser", "invoke"),
+        RELEASE_FN = coder._foreign_func_name("titan.browser", "release_callable"),
         DECLARATIONS = options.declarations or "",
         INITIALIZER = options.initializer or
             "static int titan_browser_initialize_worker(lua_State *L) { (void)L; return 0; }",

@@ -277,25 +277,11 @@ static inline void lmacro_sethvalue(lua_State *L, TValue *o, Table *t) {
 
 TITAN_RUNTIME_FUNC void titan_unwind_clear_trace(lua_State *L);
 
-static inline lua_State *lmacro_mainthread(lua_State *L) {
-  return mainthread(G(L));
-}
-
-static inline int lmacro_gc_closing(lua_State *L) {
-  return (G(L)->gcstp & GCSTPCLS) != 0;
-}
-
-static inline ptrdiff_t lmacro_push_errorhandler(lua_State *L) {
-  ptrdiff_t old = L->errfunc;
-  lua_pushcfunction(L, errorhandler);
-  L->errfunc = savestack(L, L->top.p - 1);
-  return old;
-}
-
-static inline void lmacro_restore_errfunc(lua_State *L, ptrdiff_t old) {
-  L->errfunc = old;
-}
-
+static inline lua_State *lmacro_mainthread(lua_State *L) { return mainthread(G(L)); }
+static inline ptrdiff_t lmacro_get_errfunc(lua_State *L) { return L->errfunc; }
+static inline void lmacro_set_errfunc(lua_State *L, ptrdiff_t old) { L->errfunc = old; }
+static inline ptrdiff_t lmacro_savestack_top(lua_State *L) { return savestack(L, L->top.p - 1); }
 static inline void *lmacro_unconst(const void *p) { return (void *)p; }
+static inline void *lmacro_cfunc_key(lua_CFunction f) { return titan_cast_func(void *, f); }
 
 #endif

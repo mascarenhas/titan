@@ -73,12 +73,16 @@ end
 
 local pins_by_slot: {Pin} = {}
 local pins_by_fn: {value: Pin} = {}
+-- Pre-sized at module init and pre-grown in allocate_pin so pin retirement
+-- and invoke_entry rollback never reallocate the Array or table.
 local free_slots: {integer} = { 0, 0, 0, 0, 0, 0, 0, 0 }
 local slot_generations: {integer} = {}
 local next_slot: integer = 1
 local invoke_provisional_item = ProvisionalPin { pin = nil, wrapper = true }
 local invoke_provisioned: {ProvisionalPin} = { ProvisionalPin { pin = nil, wrapper = true } }
-
+local fallback_completion: owned *titan_browser_completion =
+    foreign titan_browser_completion.new()
+local fallback_message = "not enough memory"
 local state_record: foreign *titan_browser_state_record = nil
 local invoke_handler: (function (foreign uint64_t, foreign uint32_t, foreign uint32_t,
     foreign uint32_t, foreign uint32_t, foreign const *titan_browser_value): ())?
@@ -99,9 +103,6 @@ end
 
 local foreign function state_gc(L: *lua_State): int
   local state = ffi.lua_touserdata(L, 1) as foreign *titan_browser_state_record
-  if state == nil then
-    return 0
-  end
   if state.token == 0 then
     return 0
   end
@@ -113,11 +114,12 @@ local foreign function state_gc(L: *lua_State): int
 end
 
 -- Rule 1 & 4 pre-module lifecycle exception: anchors the earliest-registered
--- finalizer userdata in the Lua registry so it finalizes last on lua_close.
+-- finalizer userdata in the Lua registry under the private lightuserdata key
+-- of state_gc so it finalizes last on lua_close.
 foreign function attach(raw_L: *void): *void
   local L = raw_L as foreign *lua_State
-  if ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, "__titan_browser_state") ==
-     ffi.LUA_TUSERDATA then
+  local key = ffi.lmacro_cfunc_key(state_gc)
+  if ffi.lua_rawgetp(L, ffi.LUA_REGISTRYINDEX, key) == ffi.LUA_TUSERDATA then
     local existing = ffi.lua_touserdata(L, -1)
     ffi.lua_settop(L, -2)
     return existing
@@ -132,11 +134,12 @@ foreign function attach(raw_L: *void): *void
   state.closing = 0
   state.is_owner = 0
   state.configured = 0
+  state.fallback = nil
   ffi.lua_createtable(L, 0, 1)
   ffi.lua_pushcclosure(L, state_gc, 0)
   ffi.lua_setfield(L, -2, "__gc")
   ffi.lua_setmetatable(L, -2)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "__titan_browser_state")
+  ffi.lua_rawsetp(L, ffi.LUA_REGISTRYINDEX, key)
   local token = ffi.titan_browser_host_state_open(state)
   if token == 0 then
     ffi.luaL_error(L, "browser state identity exhausted")
@@ -147,8 +150,8 @@ end
 
 foreign function close_state(raw_L: *void)
   local L = raw_L as foreign *lua_State
-  if ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, "__titan_browser_state") ==
-     ffi.LUA_TUSERDATA then
+  local key = ffi.lmacro_cfunc_key(state_gc)
+  if ffi.lua_rawgetp(L, ffi.LUA_REGISTRYINDEX, key) == ffi.LUA_TUSERDATA then
     local state =
         ffi.lua_touserdata(L, -1) as foreign *titan_browser_state_record
     mark_closing(state)
@@ -162,7 +165,7 @@ local function state_closing(): boolean
   if current == nil or current.token == 0 then
     return true
   end
-  if current.closing == 0 and ffi.lmacro_gc_closing(L) ~= 0 then
+  if current.closing == 0 and ffi.titan_state_closing(L) ~= 0 then
     mark_closing(current)
   end
   return current.closing ~= 0
@@ -173,7 +176,7 @@ local function current_state(): foreign uint32_t
   if current == nil or current.token == 0 then
     raise "browser state is not attached"
   end
-  if current.closing == 0 and ffi.lmacro_gc_closing(L) ~= 0 then
+  if current.closing == 0 and ffi.titan_state_closing(L) ~= 0 then
     mark_closing(current)
   end
   return current.token
@@ -328,6 +331,12 @@ local function allocate_pin(callback: Callable): Pin
   do
     pins_by_slot[slot] = pin
     slot_generations[slot] = generation
+    if free_index == 0 then
+      -- Pre-grow free_slots capacity for this new slot inside the protected
+      -- allocation step so later retirement never reallocates.
+      free_slots[slot] = 0
+      free_slots[slot] = nil
+    end
   catch
     pins_by_fn[callback] = nil
     pins_by_slot[slot] = nil
@@ -346,10 +355,7 @@ local function Pin:retire_if_unused()
     if pins_by_slot[self.slot] == self then
       pins_by_slot[self.slot] = nil
       pins_by_fn[self.callback] = nil
-      do
-        free_slots[#free_slots + 1] = self.slot
-      catch
-      end
+      free_slots[#free_slots + 1] = self.slot
     end
   end
 end
@@ -581,23 +587,7 @@ local function complete_titan_failure(operation_id: foreign uint64_t,
   flush_completion(completion)
 end
 
-local function complete_fallback_failure(operation_id: foreign uint64_t,
-                                         operation: foreign uint32_t,
-                                         trace: string)
-  local message = "not enough memory"
-  local completion = foreign titan_browser_completion.new()
-  completion.operation_id = operation_id
-  completion.operation = operation
-  completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
-  completion.application_status = 1
-  completion.message = message as foreign const *unsigned char
-  completion.message_length = #message
-  completion.trace = trace as foreign const *unsigned char
-  completion.trace_length = #trace
-  flush_completion(completion)
-end
-
-local function invoke_entry(
+local function invoke_work(
     operation_id: foreign uint64_t,
     state: foreign uint32_t,
     slot: foreign uint32_t,
@@ -641,35 +631,94 @@ local function invoke_entry(
     completion.results = encoded
     flush_completion(completion)
     if completion.status ~= ffi.TITAN_BROWSER_OK then
-      rollback_provisioned(state, invoke_provisioned)
-    else
-      for index = #invoke_provisioned, 1, -1 do
-        invoke_provisioned[index].pin = nil
-        invoke_provisioned[index] = nil
+      local prov_pin? = invoke_provisional_item.pin
+      if prov_pin ~= nil then
+        invoke_provisional_item.pin = nil
+        invoke_provisioned[1] = nil
+        if ffi.titan_browser_host_callable_closed(
+               state, prov_pin.slot, prov_pin.generation) ~= 0 then
+          prov_pin.wrapper_live = false
+        end
+        if not prov_pin.wrapper_live and prov_pin.holds <= 0 then
+          if pins_by_slot[prov_pin.slot] == prov_pin then
+            pins_by_slot[prov_pin.slot] = nil
+            pins_by_fn[prov_pin.callback] = nil
+            free_slots[#free_slots + 1] = prov_pin.slot
+          end
+        end
       end
+    else
+      invoke_provisional_item.pin = nil
+      invoke_provisioned[1] = nil
     end
   catch
     local trace = traceback
-    rollback_provisioned(state, invoke_provisioned)
+    local prov_pin? = invoke_provisional_item.pin
+    if prov_pin ~= nil then
+      invoke_provisional_item.pin = nil
+      invoke_provisioned[1] = nil
+      if ffi.titan_browser_host_callable_closed(
+             state, prov_pin.slot, prov_pin.generation) ~= 0 then
+        prov_pin.wrapper_live = false
+      end
+      if not prov_pin.wrapper_live and prov_pin.holds <= 0 then
+        if pins_by_slot[prov_pin.slot] == prov_pin then
+          pins_by_slot[prov_pin.slot] = nil
+          pins_by_fn[prov_pin.callback] = nil
+          free_slots[#free_slots + 1] = prov_pin.slot
+        end
+      end
+    end
     complete_titan_failure(
         operation_id, ffi.TITAN_BROWSER_INVOKE as foreign uint32_t,
         error, trace)
   end
-catch
-  local trace = traceback
-  rollback_provisioned(state, invoke_provisioned)
-  complete_fallback_failure(
-      operation_id, ffi.TITAN_BROWSER_INVOKE as foreign uint32_t, trace)
 end
 
-local function release_entry(
+local function invoke_entry(
+    operation_id: foreign uint64_t,
+    state: foreign uint32_t,
+    slot: foreign uint32_t,
+    generation: foreign uint32_t,
+    argc: foreign uint32_t,
+    args: foreign const *titan_browser_value)
+  invoke_work(operation_id, state, slot, generation, argc, args)
+catch
+  -- No allocating Titan helper entry may run outside this catch boundary.
+  local trace = traceback
+  local message = fallback_message
+  local completion: foreign *titan_browser_completion = fallback_completion
+  completion.operation_id = operation_id
+  completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
+  completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
+  completion.application_status = 1
+  completion.result_count = 0
+  completion.results = nil
+  completion.message = message as foreign const *unsigned char
+  completion.message_length = #message
+  completion.trace = trace as foreign const *unsigned char
+  completion.trace_length = #trace
+  ffi.fflush(ffi.stdout)
+  ffi.fflush(ffi.stderr)
+  ffi.titan_browser_complete(completion)
+end
+
+local function release_work(
     operation_id: foreign uint64_t,
     state: foreign uint32_t,
     slot: foreign uint32_t,
     generation: foreign uint32_t,
     wrapper: foreign uint32_t)
   do
-    if not state_closing() then
+    local current = state_record
+    local closing = current == nil or current.token == 0
+    if not closing then
+      if current.closing == 0 and ffi.titan_state_closing(L) ~= 0 then
+        mark_closing(current)
+      end
+      closing = current.closing ~= 0
+    end
+    if not closing then
       local pin? = pins_by_slot[slot]
       if pin ~= nil and pin.generation == generation then
         if wrapper ~= 0 then
@@ -677,7 +726,13 @@ local function release_entry(
         elseif pin.holds > 0 then
           pin.holds = pin.holds - 1
         end
-        pin:retire_if_unused()
+        if not pin.wrapper_live and pin.holds <= 0 then
+          if pins_by_slot[pin.slot] == pin then
+            pins_by_slot[pin.slot] = nil
+            pins_by_fn[pin.callback] = nil
+            free_slots[#free_slots + 1] = pin.slot
+          end
+        end
       end
     end
     local completion = foreign titan_browser_completion.new()
@@ -690,10 +745,33 @@ local function release_entry(
         operation_id, ffi.TITAN_BROWSER_RELEASE as foreign uint32_t,
         error, trace)
   end
+end
+
+local function release_entry(
+    operation_id: foreign uint64_t,
+    state: foreign uint32_t,
+    slot: foreign uint32_t,
+    generation: foreign uint32_t,
+    wrapper: foreign uint32_t)
+  release_work(operation_id, state, slot, generation, wrapper)
 catch
+  -- No allocating Titan helper entry may run outside this catch boundary.
   local trace = traceback
-  complete_fallback_failure(
-      operation_id, ffi.TITAN_BROWSER_RELEASE as foreign uint32_t, trace)
+  local message = fallback_message
+  local completion: foreign *titan_browser_completion = fallback_completion
+  completion.operation_id = operation_id
+  completion.operation = ffi.TITAN_BROWSER_RELEASE as foreign uint32_t
+  completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
+  completion.application_status = 1
+  completion.result_count = 0
+  completion.results = nil
+  completion.message = message as foreign const *unsigned char
+  completion.message_length = #message
+  completion.trace = trace as foreign const *unsigned char
+  completion.trace_length = #trace
+  ffi.fflush(ffi.stdout)
+  ffi.fflush(ffi.stderr)
+  ffi.titan_browser_complete(completion)
 end
 
 foreign function invoke(
@@ -723,7 +801,7 @@ foreign function invoke(
   end
   local state_L = state.L
   if state.closing == 0 then
-    if ffi.lmacro_gc_closing(state_L) ~= 0 then
+    if ffi.titan_state_closing(state_L) ~= 0 then
       mark_closing(state)
     end
   end
@@ -740,16 +818,32 @@ foreign function invoke(
         "browser state is closed, closing or uninitialized")
   end
   if ffi.lua_checkstack(state_L, ffi.LUA_MINSTACK) == 0 then
-    return ffi.titan_browser_invalid_entry(id, op,
-        "not enough memory for browser entry stack")
+    local message = "not enough memory"
+    local completion = state.fallback
+    completion.operation_id = id
+    completion.operation = op
+    completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
+    completion.application_status = 1
+    completion.result_count = 0
+    completion.results = nil
+    completion.message = message as foreign const *unsigned char
+    completion.message_length = 17
+    completion.trace = nil
+    completion.trace_length = 0
+    ffi.fflush(ffi.stdout)
+    ffi.fflush(ffi.stderr)
+    ffi.titan_browser_complete(completion)
+    return 0
   end
   local handler = ffi.lmacro_clCvalue(state.invoke_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign InvokeEntry
   local top = ffi.lua_gettop(state_L)
-  local old_errfunc = ffi.lmacro_push_errorhandler(state_L)
+  local old_errfunc = ffi.lmacro_get_errfunc(state_L)
+  ffi.lua_pushcclosure(state_L, ffi.errorhandler, 0)
+  ffi.lmacro_set_errfunc(state_L, ffi.lmacro_savestack_top(state_L))
   entry(state_L, module, handler, id, token, slot, generation, argc, args)
-  ffi.lmacro_restore_errfunc(state_L, old_errfunc)
+  ffi.lmacro_set_errfunc(state_L, old_errfunc)
   ffi.lua_settop(state_L, top)
   return 0
 end
@@ -781,16 +875,32 @@ foreign function release_callable(
   end
   local state_L = state.L
   if ffi.lua_checkstack(state_L, ffi.LUA_MINSTACK) == 0 then
-    return ffi.titan_browser_invalid_entry(id, op,
-        "not enough memory for browser entry stack")
+    local message = "not enough memory"
+    local completion = state.fallback
+    completion.operation_id = id
+    completion.operation = op
+    completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
+    completion.application_status = 1
+    completion.result_count = 0
+    completion.results = nil
+    completion.message = message as foreign const *unsigned char
+    completion.message_length = 17
+    completion.trace = nil
+    completion.trace_length = 0
+    ffi.fflush(ffi.stdout)
+    ffi.fflush(ffi.stderr)
+    ffi.titan_browser_complete(completion)
+    return 0
   end
   local handler = ffi.lmacro_clCvalue(state.release_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign ReleaseEntry
   local top = ffi.lua_gettop(state_L)
-  local old_errfunc = ffi.lmacro_push_errorhandler(state_L)
+  local old_errfunc = ffi.lmacro_get_errfunc(state_L)
+  ffi.lua_pushcclosure(state_L, ffi.errorhandler, 0)
+  ffi.lmacro_set_errfunc(state_L, ffi.lmacro_savestack_top(state_L))
   entry(state_L, module, handler, id, token, slot, generation, wrapper)
-  ffi.lmacro_restore_errfunc(state_L, old_errfunc)
+  ffi.lmacro_set_errfunc(state_L, old_errfunc)
   ffi.lua_settop(state_L, top)
   return 0
 end
@@ -937,5 +1047,6 @@ do
   release_handler = rel
   current.invoke_handler = inv
   current.release_handler = rel
+  current.fallback = fallback_completion
   current.configured = 1
 end
