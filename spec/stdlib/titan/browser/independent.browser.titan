@@ -58,13 +58,29 @@ local function failed_publication()
     end
   end
 
-  -- 3. Host start refuses (binding throws), rolling back completion, failure, and arg pins.
-  local caught_start = false
+  -- 3. Host start fails before exposure (target is not a function), rolling back
+  -- completion, failure, and unexposed callable arguments.
+  local caught_start_pre = false
   do
-    bad_request:start(
+    non_callable:start(
         make_captured_callable(4),
         make_captured_callable(8),
         Value.is_callable(make_captured_callable(16)))
+  catch
+    caught_start_pre = true
+    if error is browser.BrowserError then
+      local err: browser.BrowserError = error
+      err:close()
+    end
+  end
+
+  -- 4. Host start refuses inside target (binding throws), rolling back the
+  -- request's completion and failure holds.
+  local caught_start = false
+  do
+    bad_request:start(
+        make_captured_callable(32),
+        make_captured_callable(64))
   catch
     caught_start = true
     if error is browser.BrowserError then
@@ -72,9 +88,89 @@ local function failed_publication()
       err:close()
     end
   end
+  -- 5. Invalid UTF-8 string argument to start and listen rolls back request holds.
+  local caught_start_utf8 = false
+  do
+    bad_request:start(
+        make_captured_callable(128),
+        make_captured_callable(256),
+        Value.is_string("\255"))
+  catch
+    caught_start_utf8 = true
+  end
+  local caught_listen_utf8 = false
+  do
+    bad_request:listen(
+        make_captured_callable(512),
+        make_captured_callable(1024),
+        Value.is_string("\255"))
+  catch
+    caught_listen_utf8 = true
+  end
 
-  test.assert(caught_marshal and caught_call and caught_start,
+  test.assert(caught_marshal and caught_call and caught_start_pre and
+      caught_start and caught_start_utf8 and caught_listen_utf8,
       "provisional pin rollback cases did not raise as expected")
+end
+
+local function try_alloc_wrapper_step(target: browser.BrowserHandle, step: integer): boolean
+  local cb = make_captured_callable(1)
+  local raised = false
+  ffi.titan_bridge_test_arm_alloc_failure(L, step)
+  do
+    target:call(Value.is_callable(cb), Value.is_string("\255"))
+  catch
+    raised = true
+  end
+  local failures = ffi.titan_bridge_test_finish_alloc_failure(L)
+  test.assert(raised, "wrapper pin step did not raise")
+  return failures > 0
+end
+
+local function try_alloc_request_step(bad_request: browser.BrowserHandle, step: integer): boolean
+  local c1 = make_captured_callable(1)
+  local c2 = make_captured_callable(2)
+  local raised = false
+  ffi.titan_bridge_test_arm_alloc_failure(L, step)
+  do
+    bad_request:start(c1, c2)
+  catch
+    raised = true
+    if error is browser.BrowserError then
+      local err: browser.BrowserError = error
+      err:close()
+    end
+  end
+  local failures = ffi.titan_bridge_test_finish_alloc_failure(L)
+  test.assert(raised, "request pin step did not raise")
+  return failures > 0
+end
+
+local function allocation_failure_publication()
+  local target = browser.binding("publish")
+  defer target:close()
+  local bad_request = browser.binding("throw_error")
+  defer bad_request:close()
+  local wrapper_oom = 0
+  for step = 0, 5 do
+    publication_collected = 0
+    if try_alloc_wrapper_step(target, step) then wrapper_oom = wrapper_oom + 1 end
+    gc.collect()
+    gc.collect()
+    test.assert(publication_collected == 1,
+        "wrapper pin allocation failure leaked capture at step " .. step)
+  end
+  local request_oom = 0
+  for step = 0, 8 do
+    publication_collected = 0
+    if try_alloc_request_step(bad_request, step) then request_oom = request_oom + 1 end
+    gc.collect()
+    gc.collect()
+    test.assert(publication_collected == 3,
+        "request pin allocation failure leaked capture at step " .. step)
+  end
+  test.assert(wrapper_oom > 0 and request_oom > 0,
+      "allocation failure steps did not trigger OOM")
 end
 
 function publication(_: integer)
@@ -82,8 +178,9 @@ function publication(_: integer)
   failed_publication()
   gc.collect()
   gc.collect()
-  test.assert(publication_collected == 31,
+  test.assert(publication_collected == 2047,
       "unpublished provisional pins retained their discarded captures")
+  allocation_failure_publication()
   local target = browser.binding("publish")
   defer target:close()
   target:call(Value.is_string("r1_publication_recovery"),
@@ -152,4 +249,9 @@ function check()
   when is_integer(actual) then test.assert(actual == index)
   else raise "echo_integer did not return an integer"
   end
+  local req_target = browser.binding("r1_close_source")
+  defer req_target:close()
+  local req = req_target:start(success, failure)
+  req:cancel()
+  req:close()
 end

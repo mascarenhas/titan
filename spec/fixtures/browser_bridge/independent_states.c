@@ -9,12 +9,17 @@
 
 extern int luaopen_titan(lua_State *L);
 extern int luaopen_browser_independent(lua_State *L);
+extern void *titan_browser_\u2133_attach_titan(void *L);
+extern void titan_browser_\u2133_close_state_titan(void *L);
 typedef struct independent_owner { lua_State *child; } independent_owner;
 
-/* Wrap titan_browser_state in the dedicated bridge test image to inject
- * deterministic GC during result encoding and close-time state failures. */
-static lua_State *identity_gc_state, *admission_failure_state;
-static int identity_gc_after, identity_gc_running, admission_failure_observed;
+/* Wrap titan_browser_host_identity_live in the dedicated bridge test image to
+ * inject deterministic GC between result encoding and liveness validation. */
+static lua_State *identity_gc_state;
+static int identity_gc_after, identity_gc_running;
+static titan_browser_state_record *admission_failure_record;
+static uint32_t admission_failure_saved_token;
+static int admission_failure_observed;
 
 void titan_bridge_test_arm_identity_gc(lua_State *L, int after) {
   assert(identity_gc_state == NULL && after > 0);
@@ -25,28 +30,33 @@ void titan_bridge_test_arm_identity_gc(lua_State *L, int after) {
 }
 
 void titan_bridge_test_arm_admission_failure(lua_State *L) {
-  assert(admission_failure_state == NULL);
-  admission_failure_state = L;
-  admission_failure_observed = 0;
+  assert(admission_failure_record == NULL);
+  admission_failure_record = (titan_browser_state_record *)titan_browser_\u2133_attach_titan(L);
+  admission_failure_saved_token = admission_failure_record->token;
+  admission_failure_record->token = 0;
+  admission_failure_observed = 1;
 }
 int titan_bridge_test_finish_admission_failure(lua_State *L) {
-  assert(admission_failure_state == NULL || admission_failure_state == L);
-  admission_failure_state = NULL;
-  return admission_failure_observed;
-}
-extern uint32_t __real_titan_browser_state(lua_State *L);
-uint32_t __wrap_titan_browser_state(lua_State *L) {
-  if (L == admission_failure_state) {
-    admission_failure_state = NULL;
-    admission_failure_observed = 1;
-    luaL_error(L, "browser state admission failure");
+  int observed = admission_failure_observed;
+  (void)L;
+  if (admission_failure_record) {
+    admission_failure_record->token = admission_failure_saved_token;
+    admission_failure_record = NULL;
   }
-  if (L == identity_gc_state && --identity_gc_after == 0) {
+  admission_failure_observed = 0;
+  return observed;
+}
+extern int __real_titan_browser_host_identity_live(uint32_t state,
+    uint32_t slot, uint32_t generation, uint32_t kind);
+int __wrap_titan_browser_host_identity_live(uint32_t state,
+    uint32_t slot, uint32_t generation, uint32_t kind) {
+  if (identity_gc_state && --identity_gc_after == 0) {
+    lua_State *L = identity_gc_state;
     identity_gc_state = NULL;
     lua_gc(L, LUA_GCCOLLECT);
     if (identity_gc_running) lua_gc(L, LUA_GCRESTART);
   }
-  return __real_titan_browser_state(L);
+  return __real_titan_browser_host_identity_live(state, slot, generation, kind);
 }
 
 static struct {
@@ -99,19 +109,99 @@ int titan_bridge_test_finish_response_failure(lua_State *L) {
   return failures;
 }
 
+static struct {
+  lua_State *L;
+  lua_Alloc allocate;
+  void *ud;
+  int installed, after, failures;
+} alloc_failure;
+static void restore_alloc_failure(void) {
+  if (alloc_failure.installed) {
+    lua_setallocf(alloc_failure.L, alloc_failure.allocate, alloc_failure.ud);
+    alloc_failure.installed = 0;
+  }
+}
+static void *alloc_failure_allocate(void *ud, void *pointer, size_t old_size, size_t size) {
+  (void)ud;
+  if (alloc_failure.installed && size && (!pointer || size > old_size)) {
+    if (alloc_failure.after > 0) {
+      alloc_failure.after--;
+    } else {
+      if (++alloc_failure.failures >= 2) restore_alloc_failure();
+      return NULL;
+    }
+  }
+  return alloc_failure.allocate(alloc_failure.ud, pointer, old_size, size);
+}
+void titan_bridge_test_arm_alloc_failure(lua_State *L, int after) {
+  assert(!alloc_failure.installed);
+  memset(&alloc_failure, 0, sizeof(alloc_failure));
+  alloc_failure.L = mainthread(G(L));
+  alloc_failure.allocate = lua_getallocf(alloc_failure.L, &alloc_failure.ud);
+  alloc_failure.after = after;
+  alloc_failure.installed = 1;
+  lua_setallocf(alloc_failure.L, alloc_failure_allocate, NULL);
+}
+int titan_bridge_test_finish_alloc_failure(lua_State *L) {
+  int failures = alloc_failure.failures;
+  assert(!alloc_failure.installed || alloc_failure.L == mainthread(G(L)));
+  restore_alloc_failure();
+  memset(&alloc_failure, 0, sizeof(alloc_failure));
+  return failures;
+}
+
+static int error_tostring_ok(lua_State *L) {
+  lua_pushliteral(L, "custom error tostring");
+  return 1;
+}
+static int error_tostring_throw(lua_State *L) {
+  return luaL_error(L, "converter boom");
+}
+static int inner_caught_worker(lua_State *L) {
+  return luaL_error(L, "inner caught converter error");
+}
+static int error_tostring_catch_then_ok(lua_State *L) {
+  lua_pushcfunction(L, errorhandler);
+  lua_pushcfunction(L, inner_caught_worker);
+  if (lua_pcall(L, 0, 0, -2) != LUA_OK) lua_pop(L, 2);
+  lua_pushliteral(L, "converted after inner catch");
+  return 1;
+}
+static int error_tostring_oom(lua_State *L) {
+  titan_bridge_test_arm_alloc_failure(L, 0);
+  lua_pushfstring(L, "uninterned error formatting allocation %p %d", (void *)L, 12345);
+  return 1;
+}
+TValue titan_bridge_test_make_error_object(lua_State *L, int mode) {
+  TValue result;
+  int top = lua_gettop(L);
+  luaL_checkstack(L, 4, "error object fixture");
+  lua_newtable(L);
+  lua_newtable(L);
+  if (mode == 1) lua_pushcfunction(L, error_tostring_ok);
+  else if (mode == 2) lua_pushcfunction(L, error_tostring_throw);
+  else if (mode == 3) lua_pushcfunction(L, error_tostring_catch_then_ok);
+  else lua_pushcfunction(L, error_tostring_oom);
+  lua_setfield(L, -2, "__tostring");
+  lua_setmetatable(L, -2);
+  result = lua_totvalue(L, -1);
+  lua_settop(L, top);
+  return result;
+}
+
 
 static int owner_gc(lua_State *L) {
   independent_owner *owner = (independent_owner *)lua_touserdata(L, 1);
   if (owner->child) {
     lua_State *child = owner->child;
     owner->child = NULL;
-    titan_browser_close_state(child);
+    titan_browser_\u2133_close_state_titan(child);
   }
   return 0;
 }
 static int bootstrap(lua_State *L) {
   int index = (int)lua_tointeger(L, 1);
-  titan_browser_attach(L); /* earliest finalized object, before openlibs */
+  titan_browser_\u2133_attach_titan(L); /* earliest finalized object, before openlibs */
   luaL_openlibs(L);
   titan_install_searcher(L);
   luaL_requiref(L, "titan", luaopen_titan, 0); lua_pop(L, 1);
@@ -173,7 +263,7 @@ void *titan_bridge_test_detach_state(lua_State *L, TValue value) {
   return child;
 }
 void titan_bridge_test_close_detached(void *state) {
-  if (state) titan_browser_close_state((lua_State *)state);
+  if (state) titan_browser_\u2133_close_state_titan((lua_State *)state);
 }
 static int check_worker(lua_State *L) {
   lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);
@@ -185,70 +275,4 @@ void titan_bridge_test_check_state(lua_State *L, TValue value) {
   independent_owner *owner = get_owner(L, value);
   assert(owner->child);
   protected_call(L, owner->child, check_worker, 0);
-}
-
-static void io_admitted(lua_State *L, titan_browser_response *response,
-    titan_browser_identity *done, titan_browser_identity *failed) {
-  uint32_t status = response->status;
-  /* The SDK C caller owns this request unit until its terminal notification;
-   * state-wide retirement covers an interrupted test. No borrowed data stays. */
-  if (status == TITAN_BROWSER_OK) {
-    assert(response->value.kind == TITAN_BROWSER_REQUEST);
-    assert(!titan_browser_host_identity_live(response->state, response->value.slot,
-        response->value.generation, TITAN_BROWSER_HANDLE));
-    assert(!titan_browser_host_identity_live(response->state, response->value.slot,
-        response->value.generation, TITAN_BROWSER_REQUEST));
-    response->value.slot = 0;
-  } else {
-    if (done->slot) { titan_browser_unpin_callable(L, done); done->slot = 0; }
-    if (failed->slot) { titan_browser_unpin_callable(L, failed); failed->slot = 0; }
-  }
-  titan_browser_response_dispose(response);
-  if (status != TITAN_BROWSER_OK) luaL_error(L, "SDK byte I/O fixture admission failed");
-}
-typedef struct io_context {
-  int read;
-  uint32_t length;
-  const unsigned char *bytes;
-  titan_browser_identity done, failed;
-} io_context;
-static int io_worker(lua_State *L) {
-  io_context *context = (io_context *)lua_touserdata(L, 1);
-  titan_browser_response response = {0};
-  titan_browser_pin_callable(L, lua_totvalue(L, 2), &context->done);
-  titan_browser_pin_callable(L, lua_totvalue(L, 3), &context->failed);
-  if (context->read) {
-    titan_browser_host_read(titan_browser_state(L), context->length,
-        context->done.slot, context->done.generation,
-        context->failed.slot, context->failed.generation, &response);
-  } else {
-    titan_browser_host_write(titan_browser_state(L), TITAN_BROWSER_STDOUT,
-        context->bytes, context->length, context->done.slot, context->done.generation,
-        context->failed.slot, context->failed.generation, &response);
-  }
-  io_admitted(L, &response, &context->done, &context->failed);
-  return 0;
-}
-static void io_request(lua_State *L, TValue success, TValue failure, io_context *context) {
-  int top = lua_gettop(L);
-  luaL_checkstack(L, 12, "SDK callback pin transaction");
-  lua_pushcfunction(L, io_worker);
-  lua_pushlightuserdata(L, context);
-  lua_pushtvalue(L, success);
-  lua_pushtvalue(L, failure);
-  if (lua_pcall(L, 3, 0, 0) != LUA_OK) {
-    if (context->done.slot) titan_browser_unpin_callable(L, &context->done);
-    if (context->failed.slot) titan_browser_unpin_callable(L, &context->failed);
-    lua_error(L);
-  }
-  lua_settop(L, top);
-}
-void titan_bridge_test_write(lua_State *L, TValue success, TValue failure,
-    const unsigned char *bytes, uint32_t length) {
-  io_context context = {0, length, bytes, {0}, {0}};
-  io_request(L, success, failure, &context);
-}
-void titan_bridge_test_read(lua_State *L, TValue success, TValue failure, uint32_t capacity) {
-  io_context context = {1, capacity, NULL, {0}, {0}};
-  io_request(L, success, failure, &context);
 }

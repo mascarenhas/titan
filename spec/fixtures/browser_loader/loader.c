@@ -13,18 +13,18 @@ EM_JS(void, browser_loader_initialize_hook, (), {
         abort: () => abort('loader abort inside bridge binding'),
         watchMemoryCalls: callback => {
             const owner = Module['titanBrowserBridge'];
-            const allocate = Module['_titan_browser_alloc'], free = Module['_titan_browser_free'];
-            Module['_titan_browser_alloc'] = size => {
+            const allocate = Module['_malloc'], free = Module['_free'];
+            Module['_malloc'] = size => {
                 callback(Object.freeze({kind: 'allocate', poisoned: !!owner.terminal}));
                 return allocate(size);
             };
-            Module['_titan_browser_free'] = pointer => {
+            Module['_free'] = pointer => {
                 callback(Object.freeze({kind: 'free', poisoned: !!owner.terminal}));
                 return free(pointer);
             };
             return () => {
-                Module['_titan_browser_alloc'] = allocate;
-                Module['_titan_browser_free'] = free;
+                Module['_malloc'] = allocate;
+                Module['_free'] = free;
             };
         },
         watchResponses: callback => {

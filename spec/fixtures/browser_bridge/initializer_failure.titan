@@ -1,9 +1,35 @@
 local browser = import "browser"
 local coroutine = import "coroutine"
 
-local parked: coroutine.Coroutine?
+local record InitFailure
+  code: integer
+end
 
-function main(_: {string}): integer
+local parked: coroutine.Coroutine?
+local caught_init_record = false
+
+local function initializer_raise_record()
+  raise InitFailure { code = 7 }
+end
+
+function main(args: {string}): integer
+  if not caught_init_record then
+    return 3
+  end
+  local mode? = args[1]
+  if mode == "ok" then
+    return 0
+  elseif mode == "stale-trace" then
+    raise "main failed after caught initializer error"
+  elseif mode == "record" then
+    raise InitFailure { code = 9 }
+  elseif mode == "false" then
+    raise false
+  elseif mode == "browser-error" then
+    local throwing = browser.binding("throw_error")
+    defer throwing:close()
+    throwing:call()
+  end
   local marker = browser.binding("initializer_main")
   defer marker:close()
   marker:call()
@@ -11,13 +37,35 @@ function main(_: {string}): integer
 end
 
 do
-  parked = coroutine.create(function(_: value): value
-    defer do
-      local marker = browser.binding("initializer_close")
-      marker:call()
+  do
+    initializer_raise_record()
+  catch
+    if error is InitFailure then
+      local failure: InitFailure = error
+      caught_init_record = failure.code == 7
     end
-    return coroutine.yield(nil, "failed-initializer")
-  end, "failed-initializer")
-  parked:resume(nil)
-  raise "bridge initializer failed\0\255"
+  end
+  if not caught_init_record then
+    raise "caught initializer error lost its record type"
+  end
+  local allow_main = false
+  do
+    local flag = browser.binding("initializer_allow_main")
+    defer flag:close()
+    case flag:call()
+    when is_boolean(allowed) then allow_main = allowed
+    end
+  catch
+  end
+  if not allow_main then
+    parked = coroutine.create(function(_: value): value
+      defer do
+        local marker = browser.binding("initializer_close")
+        marker:call()
+      end
+      return coroutine.yield(nil, "failed-initializer")
+    end, "failed-initializer")
+    parked:resume(nil)
+    raise "bridge initializer failed\0\255"
+  end
 end

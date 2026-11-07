@@ -43,7 +43,6 @@ export function makeHost(context) {
     successes: [], failures: [], closes: [], independentCloses: [], cleanup: 0,
     r1Responses: [], r1Thrown: undefined,
     r1CloseCount: 0n,
-    ioDone: 0, ioReads: [], ioFailures: [], capacities: [], input: [],
     listeners: new Set(), retainedListeners: [], unregisters: 0, forbiddenRequests: 0,
     sinks: {}, hooks: {}, thrown, values,
   };
@@ -90,7 +89,7 @@ export function makeHost(context) {
     },
     publish(name, callable) {
       context.assert(callable && typeof callable.call === 'function' && typeof callable.release === 'function',
-        'publish did not receive a production branded Callable');
+        'publish did not receive a production branded callable wrapper');
       context.assert(!Object.hasOwn(callable, 'slot') && !Object.hasOwn(callable, 'state') &&
         !Object.hasOwn(callable, 'generation'), 'callable exposed private identity');
       host.callbacks.set(asText(name), callable);
@@ -114,8 +113,8 @@ export function makeHost(context) {
       host.forbiddenRequests++;
       throw new Error('a closing state invoked its forbidden host request');
     },
-    request_success(first, second) {
-      host.successes.push(second === undefined ? [first, binary()] : [first, second.slice()]);
+    request_success(...items) {
+      host.successes.push(items.map(item => item instanceof Uint8Array ? item.slice() : item));
     },
     request_failure(message, value) { host.failures.push([asBytes(message), value]); },
     listener() {
@@ -134,9 +133,9 @@ export function makeHost(context) {
     },
     pin_hold_request() { return host.hooks.pinHoldRequest(); },
     pin_hold_listener() { return host.hooks.pinHoldListener(); },
-    io_done() { host.ioDone++; },
-    io_read(bytes) { host.ioReads.push(bytes.slice()); },
-    io_failure(message, value) { host.ioFailures.push([asBytes(message), value]); },
+    save_and_throw(cb) { host.savedCallable = cb; throw new Error('saved then threw'); },
+    save_and_bad_return(cb) { host.savedCallable = cb; return 1n << 80n; },
+    save_and_refuse_start(cb) { host.savedCallable = cb; return {}; },
     r1_handle_first: Object.freeze({r1: 'first'}),
     r1_handle_last: Object.freeze({r1: 'last'}),
     r1_start_source() { return host.hooks.r1Start(); },
@@ -157,11 +156,6 @@ export function makeHost(context) {
     bindings,
     stdout(bytes) { host.stdout.push(bytes.slice()); return host.sinks.stdout?.(bytes); },
     stderr(bytes) { host.stderr.push(bytes.slice()); return host.sinks.stderr?.(bytes); },
-    stdin(capacity) {
-      host.capacities.push(capacity);
-      if (!host.input.length) throw new Error('test byte source is exhausted');
-      return host.input.shift();
-    },
     onNotificationError(event) { host.notificationErrors.push(event); host.hooks.notificationError?.(event); },
     requestDrain() { host.hooks.requestDrain?.(); },
   };
@@ -171,7 +165,7 @@ export function makeHost(context) {
     return host.instance.call(callable, ...args);
   };
   host.releaseObservations = () => {
-    host.controls = host.instance = host.r1Thrown = undefined;
+    host.controls = host.instance = host.r1Thrown = host.savedCallable = undefined;
     host.hooks.r1Release = host.hooks.r1Throw = undefined;
     host.hooks.r1Start = host.hooks.r1Listen = undefined;
     host.hooks.pinHoldRequest = host.hooks.pinHoldListener = undefined;

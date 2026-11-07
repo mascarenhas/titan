@@ -59,7 +59,7 @@ async function nativeRun(context, host, args = []) {
     'native browser.tests failed:\n' + decode(join(host.stdout)) + decode(join(host.stderr)));
   const summary = decode(join(host.stdout)).match(/\[  PASSED  \] (\d+) tests?\./);
   context.assert(summary && Number(summary[1]) > 0, 'native test owner did not report its passing cases');
-  context.assert(host.callbacks.size >= 26, 'native owner omitted published production Callables');
+  context.assert(host.callbacks.size >= 26, 'native owner omitted published production callable wrappers');
   return Number(summary[1]);
 }
 
@@ -172,7 +172,7 @@ async function argumentMaterialization(context, image) {
       context.equalBytes(await copying, binary(), 'native byte view was not snapshotted at call time');
     }
     bytes.set(binary());
-    host.instance.notify(host.callbacks.get('sdk_write'), bytes);
+    host.instance.notify(host.callbacks.get('stdio_append'), bytes);
     bytes.fill(90);
     await host.instance.drain();
     context.equalBytes(host.stdout.at(-1), binary(), 'native byte view was not snapshotted at notify time');
@@ -202,28 +202,6 @@ async function argumentMaterialization(context, image) {
 }
 
 async function hostValueMaterialization(context, host) {
-  const checks = [];
-  let byteReads = 0, lengthReads = 0;
-  const reads = host.ioReads.length;
-  host.input.push({
-    get bytes() {
-      byteReads++;
-      checks.push(rejected(context, host.call('valid_after_failure'), 'REENTRY'));
-      return binary();
-    },
-    get length() {
-      lengthReads++;
-      checks.push(rejected(context, host.instance.drain(), 'REENTRY'));
-      return 4;
-    },
-  });
-  await host.call('sdk_read', 4n);
-  await Promise.all(checks);
-  await host.instance.drain();
-  context.assert(byteReads > 0 && lengthReads > 0 && host.ioReads.length === reads + 1,
-    'counted stdin getters did not complete under their existing operation owner');
-  context.equalBytes(host.ioReads.at(-1), binary());
-
   const source = gate(), successes = host.successes.length, failures = host.failures.length;
   host.bindings.admission_result = formBinding({kind: 'detachable', promise: source.promise});
   await host.call('start_request', 'admission_result');
@@ -259,7 +237,7 @@ async function hostValueMaterialization(context, host) {
   context.equalBytes(host.failures.at(-1)[0], encode('host rejection reentry'));
   await host.call('close_request');
   delete host.bindings.admission_rejection;
-  return {countedGetters: 1, completionGetters: 1, rejectionCoercions: 1};
+  return {completionGetters: 1, rejectionCoercions: 1};
 }
 
 async function disposalMaterialization(context, image) {
@@ -327,7 +305,7 @@ async function values(context, host, completions) {
       context.equalBytes(result, binary());
     }
   }
-  for (const text of ['', 'ascii', 'hello 🌍\0world']) {
+  for (const text of ['', 'ascii', 'hello 🌍\0world', '\ufeffx', '\ufeff']) {
     context.assert((await host.call('echo_value', text)) === text, 'UTF-8 string roundtrip changed text');
   }
   await rejected(context, host.call('bad_utf8_result'), 'TITAN');
@@ -357,18 +335,48 @@ async function values(context, host, completions) {
   }
 
   // Variant rejections happen inside the Titan callable and reject with TITAN error + trace.
-  for (const call of [
-    () => host.call('typed_echo', false, 1, 0, binary()),
-    () => host.call('typed_echo', 0, 1n, 0, binary()),
-    () => host.call('typed_echo', true, 1n, 1n, binary()),
-    () => host.call('typed_echo', true, 1n, 1, 'bytes'),
-    () => host.call('typed_echo', true, 1n, 1),
-    () => host.call('one_nil', 1n),
+  for (const [call, expectedMessage] of [
+    [() => host.call('typed_echo', false, 1, 0, binary()), 'expected BrowserValue.is_integer'],
+    [() => host.call('typed_echo', 0, 1n, 0, binary()), 'expected BrowserValue.is_boolean'],
+    [() => host.call('typed_echo', true, 1n, 1n, binary()), 'expected BrowserValue.is_float'],
+    [() => host.call('typed_echo', true, 1n, 1, 'bytes'), 'expected BrowserValue.is_bytes'],
+    [() => host.call('typed_echo', true, 1n, 1), 'typed_echo expects 4 arguments'],
+    [() => host.call('one_nil', 1n), 'one_nil expects nil or no arguments'],
   ]) {
     const variantError = await captureRejection(context, call(), 'TITAN');
+    context.equalBytes(variantError.bytes, encode(expectedMessage),
+      'callable variant rejection did not carry the callable error message');
     context.assert(variantError.trace instanceof Uint8Array && variantError.trace.length > 0,
       'callable variant rejection omitted its Titan trace');
   }
+
+  // Non-string error objects raised by callables use the base conversion rule and preserve original traces.
+  for (const [mode, expectedMessage] of [
+    [1n, '(error object is a boolean value)'],
+    [2n, '(error object is a table value)'],
+    [3n, 'custom error tostring'],
+    [4n, 'error while reporting browser failure'],
+    [5n, 'converted after inner catch'],
+    [6n, '(error object is a userdata value)'],
+    [7n, 'error while reporting browser failure'],
+  ]) {
+    const raisedError = await captureRejection(context, host.call('raise_error_kind', mode), 'TITAN');
+    context.equalBytes(raisedError.bytes, encode(expectedMessage),
+      `callable non-string error mode ${mode} returned wrong message: ${decode(raisedError.bytes)}`);
+    const traceText = decode(raisedError.trace);
+    context.assert(traceText.includes('tests.browser.titan') && !traceText.includes('inner_caught_worker'),
+      `callable non-string error mode ${mode} lost or replaced its original trace: ${traceText}`);
+    if (mode === 7n) {
+      context.assert((await host.call('finish_invoke_oom')) > 0n, 'error-formatting OOM did not trigger');
+    }
+    context.assert((await host.call('valid_after_failure')) === 42n,
+      `callable non-string error mode ${mode} damaged subsequent calls`);
+  }
+  await host.call('arm_invoke_oom', 1n);
+  const invokeOomError = await captureRejection(context, host.call('echo_value', 1n), 'TITAN');
+  context.equalBytes(invokeOomError.bytes, encode('not enough memory'));
+  context.assert((await host.call('finish_invoke_oom')) > 0n, 'invoke setup OOM did not trigger');
+  context.assert((await host.call('valid_after_failure')) === 42n, 'invoke setup OOM poisoned the instance');
 
   const object = Object.freeze({opaque: true});
   const jsFn = x => x + 1n;
@@ -511,6 +519,26 @@ async function resultRepairs(context, host, engineFailures) {
     context.assert((await host.call('pin_holders_collected')) === 3n,
       'closing the last holder did not drop the completion and failure pins');
     host.successes.length = 0;
+    // 5. Queued request-hold drop survives a failed wrapper re-export in the same operation (R-H4).
+    host.hooks.pinHoldListener = () => ({kind: 'listener', subscribe() { return () => {}; }});
+    await host.call('lost_release_regression');
+    await host.instance.drain();
+    context.assert((await host.call('pin_holders_collected')) === 64n,
+      'provisional wrapper rollback deleted a queued request-hold drop');
+
+    // 6. Wrapper exposed to host JS before the host throws, returns an unmarshallable value, or refuses start stays live (R-H5).
+    for (const mode of [1n, 2n, 3n]) {
+      const collectedBeforeRelease = await host.call('test_host_saved_wrapper', mode);
+      context.assert(collectedBeforeRelease === (mode === 3n ? 30n : 0n),
+        `saved-wrapper mode ${mode} did not preserve exposed wrapper or roll back unexposed request holds`);
+      context.assert(host.savedCallable && (await host.savedCallable.call(21n)) === 42n,
+        `saved-wrapper mode ${mode} revoked a wrapper already handed to host JavaScript`);
+      host.savedCallable.release();
+      host.savedCallable = undefined;
+      await host.instance.drain();
+      context.assert((await host.call('pin_holders_collected')) === (mode === 3n ? 133n : 100n + mode),
+        `saved-wrapper mode ${mode} did not retire after explicit release()`);
+    }
   } finally {
     host.hooks.r1Release = undefined;
     host.hooks.pinHoldRequest = host.hooks.pinHoldListener = undefined;
@@ -581,7 +609,7 @@ async function admissionRepairs(context, host, engineFailures) {
   await host.call('r1_prepare_admissions');
   let restore;
   try {
-    for (const name of ['r1_admit_start', 'r1_admit_listener', 'sdk_read', 'sdk_write']) {
+    for (const name of ['r1_admit_start', 'r1_admit_listener']) {
       await host.call('r1_close_admission');
       await host.call('force_gc');
       const source = gate();
@@ -594,23 +622,18 @@ async function admissionRepairs(context, host, engineFailures) {
         accepted++;
         return {kind: 'listener', subscribe() { return () => { cancelled++; }; }};
       };
-      if (name === 'sdk_read') host.input.push(source.promise);
       const before = host.controls.snapshot();
-      const counts = [host.successes.length, host.failures.length, host.ioDone,
-        host.ioReads.length, host.ioFailures.length, host.stdout.length, host.capacities.length];
+      const counts = [host.successes.length, host.failures.length, host.stdout.length];
       restore = host.controls.exhaustSlotIdentities();
       try {
-        const args = name === 'sdk_read' ? [4n] : name === 'sdk_write' ? [binary()] : [];
-        await rejected(context, host.call(name, ...args), 'TITAN');
+        await rejected(context, host.call(name), 'TITAN');
       } finally { restore(); restore = undefined; }
       context.assert(accepted === 0 && cancelled === 0 && host.controls.snapshot().requests === 0 &&
-        host.controls.snapshot().units === before.units && host.stdout.length === counts[5] &&
-        host.capacities.length === counts[6], 'slot refusal occurred after host/source/output acceptance: ' + name);
-      if (name === 'sdk_read') context.assert(host.input.pop() === source.promise, 'rejected stdin consumed its host source');
+        host.controls.snapshot().units === before.units && host.stdout.length === counts[2],
+        'slot refusal occurred after host acceptance: ' + name);
       source.resolve(96n);
       await context.tick(); await host.instance.drain();
-      context.assert(host.successes.length === counts[0] && host.failures.length === counts[1] &&
-        host.ioDone === counts[2] && host.ioReads.length === counts[3] && host.ioFailures.length === counts[4],
+      context.assert(host.successes.length === counts[0] && host.failures.length === counts[1],
         'unaccepted request produced a terminal notification: ' + name);
       context.assert(engineFailures.length === 0 && (await host.call('valid_after_failure')) === 42n,
         'request-unit refusal poisoned later admission: ' + name);
@@ -670,31 +693,11 @@ async function admissionRepairs(context, host, engineFailures) {
       host.controls.snapshot().requests === 0 && host.controls.snapshot().units === units,
       'reserved listener unregister or late-event/unit retirement was not exact');
 
-    const input = gate(), reads = host.ioReads.length, capacities = host.capacities.length;
-    let readAccepted = 0;
-    host.input.push({
-      get kind() {
-        if (!restore) { readAccepted++; restore = host.controls.exhaustSlotIdentities(); }
-        return 'detachable';
-      },
-      promise: input.promise,
-    });
-    try { await host.call('sdk_read', 4n); }
-    finally { restore?.(); restore = undefined; }
-    context.assert(readAccepted === 1 && host.capacities.length === capacities + 1 &&
-      host.controls.snapshot().requests === 1, 'stdin did not reserve its owner before source acceptance');
-    input.resolve(binary());
-    await context.tick(); await host.instance.drain();
-    context.assert(host.ioReads.length === reads + 1 && host.controls.snapshot().requests === 0,
-      'accepted stdin did not complete and retire its actual source');
-    context.equalBytes(host.ioReads.at(-1), binary());
-    context.assert(engineFailures.length === 0 && (await host.call('valid_after_failure')) === 42n,
-      'reserved request/source publication poisoned later calls');
   } finally {
     restore?.();
     host.hooks.r1Start = host.hooks.r1Listen = undefined;
   }
-  return {rejectedBeforeAcceptance: 4, acceptedStarts: 2, acceptedListeners: 1, acceptedReads: 1};
+  return {rejectedBeforeAcceptance: 2, acceptedStarts: 2, acceptedListeners: 1};
 }
 
 async function notifications(context, host, completions) {
@@ -710,6 +713,12 @@ async function notifications(context, host, completions) {
     if (number === 1n) host.instance.notify(callback, 3n);
   };
   const before = host.controls.snapshot();
+  for (const invalidArg of [1n << 63n, -(1n << 63n) - 1n, '\ud800']) {
+    let threwTypeError = false;
+    try { host.instance.notify(callback, invalidArg); }
+    catch (cause) { threwTypeError = cause instanceof TypeError; }
+    context.assert(threwTypeError, 'notify() did not throw TypeError for unmarshallable argument');
+  }
   for (const number of [1n, -1n, 2n]) host.instance.notify(callback, number);
   const queued = host.controls.snapshot();
   context.assert(queued.operationId === before.operationId && queued.slots === before.slots &&
@@ -791,7 +800,7 @@ async function requests(context, host) {
   context.assert(host.successes.length === 0 && host.controls.snapshot().operationId === snapshot.operationId &&
     host.controls.snapshot().slots === snapshot.slots, 'request settlement entered Lua or eagerly allocated a slot');
   await host.instance.drain();
-  context.assert(host.successes.length === 1 && host.successes[0][0] === 23n);
+  context.assert(host.successes.length === 1 && host.successes[0].length === 1 && host.successes[0][0] === 23n);
   await host.call('close_request');
 
   const failed = gate();
@@ -805,7 +814,7 @@ async function requests(context, host) {
     host.controls.snapshot().operationId === snapshot.operationId, 'request rejection bypassed copied notification admission');
   await host.instance.drain();
   context.assert(host.failures.length === 1 && host.failures[0][1] === rejection && host.notificationErrors.length === errors,
-    'host rejection did not reach exactly its mandatory failure Callable with original thrown identity');
+    'host rejection did not reach exactly its mandatory failure callable with original thrown identity');
   await host.call('close_request');
 
   // Primitive rejection still arrives as a BrowserHandle in the failure callable (M9).
@@ -863,7 +872,8 @@ async function requests(context, host) {
   await host.call('start_listener');
   context.assert(host.successes.length === initial, 'synchronously fired listener entered inline');
   await host.instance.drain();
-  context.assert(host.successes.at(-1)[0] === 31n);
+  context.assert(host.successes.at(-1).length === 2 && host.successes.at(-1)[0] === 31n);
+  context.equalBytes(host.successes.at(-1)[1], binary());
   for (const emit of host.listeners) { emit(32n, binary()); emit(33n, binary()); }
   await host.instance.drain();
   context.assert(host.successes.slice(initial).map(item => item[0]).join(',') === '31,32,33', 'listener events lost FIFO order');
@@ -872,6 +882,34 @@ async function requests(context, host) {
   await context.tick(); await host.instance.drain();
   context.assert(host.unregisters === 1 && host.listeners.size === 0 && host.successes.length === initial + 3,
     'listener unregister or late-event retirement was not exact');
+  // Unmarshallable start settlement or listener emission routes to the failure callable as TypeError (R-M9, R-L6).
+  for (const badSettlement of [1n << 63n, '\ud800']) {
+    const badStart = gate();
+    host.bindings.unmarshallable_start = formBinding({kind: 'detachable', promise: badStart.promise});
+    const failuresBefore = host.failures.length;
+    await host.call('start_request', 'unmarshallable_start');
+    badStart.resolve(badSettlement);
+    await context.tick(); await host.instance.drain();
+    context.assert(host.failures.length === failuresBefore + 1 && host.failures.at(-1)[1] instanceof TypeError,
+      'unmarshallable start settlement was not routed to the failure callable as TypeError');
+    await host.call('close_request');
+  }
+  const originalListener = host.bindings.listener;
+  let badEmit;
+  host.bindings.listener = () => ({kind: 'listener', subscribe(emit) {
+    badEmit = emit;
+    return () => { badEmit = undefined; };
+  }});
+  const failuresBeforeEmit = host.failures.length;
+  await host.call('start_listener');
+  badEmit(1n << 63n);
+  badEmit('\ud800');
+  await context.tick(); await host.instance.drain();
+  context.assert(host.failures.length === failuresBeforeEmit + 2 &&
+    host.failures.at(-2)[1] instanceof TypeError && host.failures.at(-1)[1] instanceof TypeError,
+    'unmarshallable listener emission was not routed to the failure callable as TypeError');
+  await host.call('close_request');
+  host.bindings.listener = originalListener;
   for (const [name, binding] of [
     ['ordinary_runtime', () => { throw new WebAssembly.RuntimeError('ordinary host RuntimeError'); }],
     ['bare_request', () => Promise.resolve(1n)],
@@ -955,94 +993,55 @@ async function stdio(context, host) {
   context.assert(appendFailure.cause === cause);
   host.sinks.stdout = undefined;
   context.assert((await host.call('valid_after_failure')) === 42n,
-    'latched C-only sink failure poisoned an unrelated output-free call');
-  await host.instance.drain();
-  const beforeFailure = host.ioFailures.length, beforeSuccess = host.ioDone;
-  const delayed = await captureRejection(context, host.call('sdk_write', encode('after-append')), 'SINK');
-  context.assert(delayed === appendFailure, 'next completion-carrying write lost the C-only append failure');
-  await host.instance.drain();
-  context.assert(host.ioFailures.length === beforeFailure + 1 && host.ioFailures.at(-1)[1] === appendFailure &&
-    host.ioDone === beforeSuccess, 'latched append failure did not reach exactly its next write failure target');
-  await host.call('sdk_write', encode('after-latch'));
-  await host.instance.drain();
-  context.assert(host.ioDone === beforeSuccess + 1, 'consumed C-stdio latch suppressed a later write');
+    'C-stdio sink failure poisoned an unrelated output-free call');
   const alias = new AliasingBytes(binary());
-  host.instance.notify(host.callbacks.get('sdk_write'), alias);
+  host.instance.notify(host.callbacks.get('stdio_append'), alias);
   alias.fill(90);
   await host.instance.drain();
   context.equalBytes(host.stdout.at(-1), binary(), 'notification argument slice-as-view escaped snapshot ownership');
-  await host.instance.drain();
-  const payloads = [binary(), new Uint8Array(), encode('unterminated-tail')];
+  const payloads = [new Uint8Array(1024).fill(65), new Uint8Array(1024).fill(66), encode('unterminated-tail')];
   let pending = 0, maximum = 0, calls = 0;
   const output = gate();
   host.sinks.stdout = () => {
     pending++; calls++; maximum = Math.max(maximum, pending);
     return (calls === 1 ? output.promise : Promise.resolve()).then(() => { pending--; });
   };
-  const beforeDone = host.ioDone, beforeChunks = host.stdout.length;
-  for (const bytes of payloads) host.instance.notify(host.callbacks.get('sdk_write'), bytes);
+  const beforeChunks = host.stdout.length;
+  for (const bytes of payloads) host.instance.notify(host.callbacks.get('stdio_append'), bytes);
   const draining = host.instance.drain();
   await until(context, () => calls === 1, 'ordered output did not start its first sink');
   await rejected(context, host.call('valid_after_failure'), 'REENTRY');
   await rejected(context, host.instance.drain(), 'REENTRY');
-  context.assert(host.ioDone === beforeDone && calls === 1, 'pending sink overlapped another write or callback');
+  context.assert(calls === 1, 'pending sink overlapped another write or callback');
   output.resolve();
   await draining;
-  context.assert(calls === 3 && maximum === 1 && host.ioDone === beforeDone, 'stream did not serialize the detached write batch');
+  context.assert(calls === 3 && maximum === 1, 'stream did not serialize the detached write batch');
   for (let index = 0; index < payloads.length; index++) {
     context.equalBytes(host.stdout[beforeChunks + index], payloads[index]);
   }
-  await host.instance.drain();
-  context.assert(host.ioDone === beforeDone + 3, 'write completion callbacks did not use the following protected batch');
 
   for (const behavior of ['throw', 'reject']) {
-    const cause = new Error(`ordered sink ${behavior}`);
-    host.sinks.stdout = behavior === 'throw' ? () => { throw cause; } : () => Promise.reject(cause);
-    const done = host.ioDone, failed = host.ioFailures.length;
-    const error = await captureRejection(context, host.call('sdk_write', binary()), 'SINK');
-    context.assert(error.cause === cause, 'write operation replaced its original sink cause');
+    const sinkCause = new Error(`ordered sink ${behavior}`);
+    host.sinks.stdout = behavior === 'throw' ? () => { throw sinkCause; } : () => Promise.reject(sinkCause);
+    const error = await captureRejection(context, host.call('stdio_append', binary()), 'SINK');
+    context.assert(error.cause === sinkCause, 'write operation replaced its original sink cause');
     host.sinks.stdout = undefined;
-    await host.instance.drain();
-    context.assert(host.ioDone === done && host.ioFailures.length === failed + 1 && host.ioFailures.at(-1)[1] === error,
-      'failed completion-carrying write did not deliver its own failure Callable');
-    await host.call('sdk_write', binary());
-    await host.instance.drain();
-    context.assert(host.ioDone === done + 1, 'sink failure suppressed a later entry');
+    await host.call('stdio_append', binary());
   }
   host.sinks.stdout = undefined;
-
-  const bytes = new Uint8Array([0, 255, 195, 40, 88, 99]);
-  host.input.push({bytes, length: 4});
-  await host.call('sdk_read', 4n);
-  bytes.fill(90);
-  context.assert(host.ioReads.length === 0, 'stdin completion was entered synchronously');
-  await host.instance.drain();
-  context.equalBytes(host.ioReads[0], binary(), 'stdin did not copy exact returned length');
-  const source = gate();
-  host.input.push({kind: 'detachable', promise: source.promise});
-  await host.call('sdk_read', 8n);
-  source.resolve(new Uint8Array([1, 2, 3]));
-  await context.tick(); await host.instance.drain();
-  context.equalBytes(host.ioReads.at(-1), new Uint8Array([1, 2, 3]));
-  const failures = host.ioFailures.length;
-  host.input.push(new Uint8Array(5));
-  await host.call('sdk_read', 4n);
-  await host.instance.drain();
-  context.assert(host.ioFailures.length === failures + 1 && host.ioFailures.at(-1)[1] instanceof TypeError,
-    'over-capacity stdin bypassed mandatory failure delivery');
-  context.assert(host.capacities.map(Number).join(',') === '4,8,4', 'stdin requested capacity changed');
-  return {writes: host.ioDone - beforeDone, maximumInflight: maximum, reads: host.ioReads.length};
+  return {writes: payloads.length + 2, maximumInflight: maximum};
 }
 
 async function prepareRetainedDisposal(context, host) {
   await host.call('close_detached');
-  const request = gate(), input = gate();
+  const request = gate(), second = gate();
   let cancellations = 0;
   host.bindings.retained_request = formBinding({kind: 'retained', promise: request.promise,
     cancel() { cancellations++; }});
   await host.call('start_request', 'retained_request');
-  host.input.push({kind: 'retained', promise: input.promise, cancel() { cancellations++; }});
-  await host.call('sdk_read', 16n);
+  host.bindings.second_retained_request = formBinding({kind: 'retained', promise: second.promise,
+    cancel() { cancellations++; }});
+  await host.call('start_request', 'second_retained_request');
   const references = host.controls.weakTargets();
   const trace = host.instance.trace;
   const disposal = host.instance.dispose(), marker = watch(disposal);
@@ -1054,11 +1053,11 @@ async function prepareRetainedDisposal(context, host) {
   request.resolve(99n);
   await context.tick();
   context.assert(!marker.settled, 'one terminal request freed another retained owner');
-  input.resolve(binary());
+  second.resolve(binary());
   await disposal;
   context.assert(Object.isFrozen(host.instance.trace) && host.instance.trace.state === trace.state &&
     host.instance.trace.reason === trace.reason, 'ordinary disposal discarded its final trace snapshot');
-  context.assert(host.successes.length === 0 && host.ioReads.length === 0 && host.closes.length === 2,
+  context.assert(host.successes.length === 0 && host.closes.length === 2,
     'retirement admitted an application callback or skipped close');
   context.assert(host.controls.snapshot().units === 0 && host.controls.snapshot().requests === 0,
     'retained disposal leaked state-owned units');
@@ -1073,9 +1072,9 @@ async function retainedDisposal(context, host) {
 }
 
 async function prepareDetachableDisposal(context, host) {
-  const input = gate();
-  host.input.push({kind: 'detachable', promise: input.promise});
-  await host.call('sdk_read', 16n);
+  const pending = gate();
+  host.bindings.detachable_disposal_request = formBinding({kind: 'detachable', promise: pending.promise});
+  await host.call('start_request', 'detachable_disposal_request');
   await host.call('start_listener');
   const references = host.controls.weakTargets();
   const retainedPromise = host.retainedPromise;
@@ -1089,13 +1088,13 @@ async function prepareDetachableDisposal(context, host) {
   context.assert(decode(join(host.stdout)).endsWith('bridge-finalizer\n'), 'ordinary disposal omitted finalizer output');
   context.assert(host.controls.snapshot().units === 0 && host.controls.snapshot().requests === 0,
     'close-phase-created units survived statewide retirement');
-  const successes = host.successes.length, reads = host.ioReads.length;
+  const successes = host.successes.length;
   for (const emit of emitters) emit(98n, binary());
-  input.resolve(binary());
+  pending.resolve(binary());
   host.instance.notify(undefined, Object.freeze({postDispose: true})); // Inert after disposal.
   await context.tick();
-  context.assert(host.successes.length === successes && host.ioReads.length === reads && host.unregisters === 2,
-    'disposed listener/stdin admitted late application work');
+  context.assert(host.successes.length === successes && host.unregisters === 2,
+    'disposed listener/request admitted late application work');
   host.releaseObservations();
   return {references, retainedPromise, opaquePromise, emitters};
 }
@@ -1117,13 +1116,13 @@ async function prepareInterruptedSink(context, image) {
   const output = gate();
   const observation = {calls: 0};
   host.sinks.stdout = () => { observation.calls++; return output.promise; };
-  const interrupted = rejected(context, host.call('sdk_write', binary()), 'DISPOSED');
+  const interrupted = rejected(context, host.call('stdio_append', binary()), 'DISPOSED');
   await until(context, () => observation.calls === 1, 'pending output sink was not entered');
   const references = host.controls.weakTargets();
   let disposal = host.instance.dispose();
   await interrupted;
   await rejected(context, disposal, 'DISPOSED');
-  context.assert(observation.calls === 1 && host.closes.length === 2 && host.ioDone === 0 && host.ioFailures.length === 0,
+  context.assert(observation.calls === 1 && host.closes.length === 2,
     'pending-sink disposal overlapped finalizer output or delivered application completion');
   disposal = undefined; // Its completed Error observation is not the pending sink under test.
   host.releaseObservations();
@@ -1371,19 +1370,51 @@ async function initializationFailure(context, image) {
       await instance.dispose().catch(() => {});
     }
   }
+  for (const [arg, expectedStatus, expectedMessage, forbiddenFrame] of [
+    ['ok', 0, undefined, undefined],
+    ['stale-trace', 1, 'main failed after caught initializer error', 'initializer_raise_record'],
+    ['record', 1, '(error object is a userdata value)', 'initializer_raise_record'],
+    ['false', 1, '(error object is a boolean value)', 'initializer_raise_record'],
+    ['browser-error', 1, '(error object is a userdata value)', 'initializer_raise_record'],
+  ]) {
+    const stderr = [];
+    const instance = image.create({locateFile: image.locateFile,
+      stderr: bytes => { stderr.push(bytes); },
+      bindings: {
+        initializer_allow_main() { return true; },
+        throw_error() { throw new Error('uncaught binding error in main'); },
+      }});
+    try {
+      const result = await instance.run([arg]);
+      if (expectedMessage === undefined) {
+        context.assert(result.kind === 'returned' && result.status === expectedStatus,
+          `caught initializer record test returned ${result.kind} status ${result.status}`);
+      } else {
+        context.assert(result.kind === 'failed' && result.status === expectedStatus,
+          `main error case ${arg} did not report failed status 1`);
+        context.equalBytes(result.bytes, encode(expectedMessage),
+          `main error case ${arg} returned wrong message: ${decode(result.bytes)}`);
+        const stderrText = decode(join(stderr));
+        context.assert(stderrText.includes(`initializer_failure: ${expectedMessage}`) &&
+          stderrText.includes('stack traceback:') &&
+          stderrText.includes('initializer_failure.main') &&
+          !stderrText.includes(forbiddenFrame),
+          `main error case ${arg} stderr report was wrong: ${stderrText}`);
+      }
+    } finally {
+      await instance.dispose();
+    }
+  }
 }
 
 async function operationIdentities(context, image) {
-  const host = createHost(context, image, {stdin: undefined});
+  const host = createHost(context, image);
   let unwatch;
   const records = [];
   try {
     await host.instance.initialize();
     await nativeRun(context, host);
     await host.call('close_detached');
-    await rejected(context, host.call('sdk_read', 1n), 'TITAN');
-    context.assert(host.controls.snapshot().requests === 0 && (await host.call('valid_after_failure')) === 42n,
-      'missing stdin silently supplied data, accepted a request or poisoned the intact owner');
     const signedBoundary = (1n << 63n) - 1n;
     host.controls.advanceOperationId(signedBoundary - 1n);
     unwatch = host.controls.watchCompletions(record => { records.push({id: record.id, kind: record.kind}); });

@@ -23,7 +23,7 @@ local function build(info, assertions, tree, module, name, is_test, c_source)
     if c_source then
         argv[#argv + 1] = "--c-source"
         argv[#argv + 1] = c_source
-        argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_state"
+        argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live"
     end
     if is_test then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = module

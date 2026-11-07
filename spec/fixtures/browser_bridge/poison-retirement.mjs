@@ -1,4 +1,4 @@
-import {binary, encode, gate, makeHost} from './bindings.mjs';
+import {binary, encode, formBinding, gate, makeHost} from './bindings.mjs';
 
 // Expected abort70 plus marker: fatal reference disposal must not run native
 // finalizers, admit late callbacks, or translate settlement into observer errors.
@@ -16,9 +16,10 @@ export async function run(context) {
     context.assert(native.kind === 'returned' && native.status === 0, 'native owner failed before poison proof');
     await host.instance.call(host.callbacks.get('close_detached'));
     const fulfilled = gate(), rejected = gate();
-    host.input.push({kind: 'detachable', promise: fulfilled.promise}, {kind: 'detachable', promise: rejected.promise});
-    await host.instance.call(host.callbacks.get('sdk_read'), 16n);
-    await host.instance.call(host.callbacks.get('sdk_read'), 16n);
+    host.bindings.fulfilled_request = formBinding({kind: 'detachable', promise: fulfilled.promise});
+    host.bindings.rejected_request = formBinding({kind: 'detachable', promise: rejected.promise});
+    await host.instance.call(host.callbacks.get('start_request'), 'fulfilled_request');
+    await host.instance.call(host.callbacks.get('start_request'), 'rejected_request');
     await host.instance.call(host.callbacks.get('start_listener'));
     host.bindings.abort_request = () => host.controls.abort();
     try { await host.instance.call(host.callbacks.get('start_request'), 'abort_request'); }
@@ -30,8 +31,8 @@ export async function run(context) {
     for (const emit of host.retainedListeners) emit(99n, binary());
     fulfilled.resolve(binary()); rejected.reject(Object.freeze({late: 'after poison'}));
     await context.tick();
-    context.assert(host.successes.length === 0 && host.failures.length === 0 && host.ioReads.length === 0 &&
-      host.ioFailures.length === 0 && host.notificationErrors.length === 0,
+    context.assert(host.successes.length === 0 && host.failures.length === 0 &&
+      host.notificationErrors.length === 0,
       'poisoned request/listener settlement reached application delivery or notification observer');
     for (const promise of [host.instance.initialize(), host.instance.run(), host.instance.call(undefined), host.instance.drain()]) {
       let error;

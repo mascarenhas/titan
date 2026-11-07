@@ -26,8 +26,8 @@ EM_JS(void, gate_test_publish, (), {
       return owner.operate('guarded', () => owner.entry('gate_guarded')).then(result => result.status);
     },
     rawGuarded: () => Module['_titan_browser_gate_guarded'](0n),
-    allocate: size => Module['_titan_browser_alloc'](size),
-    free: pointer => Module['_titan_browser_free'](pointer),
+    allocate: size => Module['_malloc'](size || 1),
+    free: pointer => Module['_free'](pointer),
     abort: () => abort('bridge fixture owned abort'),
     armResponseOwnerFailure: () => Module['_titan_bridge_test_arm_response_owner_failure'](),
     failNextRelease() {

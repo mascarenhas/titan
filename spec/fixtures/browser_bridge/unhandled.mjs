@@ -1,6 +1,6 @@
 import {makeHost} from './bindings.mjs';
 
-// Returning this Promise through call_handle must not attach a bridge-owned
+// Returning this Promise through handle:call must not attach a bridge-owned
 // rejection observer: it remains ordinary host data with ordinary host policy.
 function unhandledPromise() { return Promise.reject(new Error('bridge unhandled opaque promise')); }
 
