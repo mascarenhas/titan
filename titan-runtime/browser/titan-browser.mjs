@@ -17,11 +17,17 @@ const responseStatus = Object.freeze({ok: 0, titanError: 1, jsError: 2, state: 3
 const operationKinds = Object.freeze({initialize: 1, entry: 2, invoke: 3,
   release_callable: 4, close: 5, gate_guarded: 3});
 
+const bridgeFailures = new WeakSet();
+function ownFailure(value, code) {
+  return bridgeFailures.has(value) && value.code === `TITAN_BROWSER_${code}`;
+}
+
 function failure(code, message, cause, stream) {
   const error = new Error(message, cause === undefined ? undefined : {cause});
   error.name = 'TitanBrowserError';
   error.code = `TITAN_BROWSER_${code}`;
   if (stream !== undefined) error.stream = stream;
+  bridgeFailures.add(error);
   return error;
 }
 
@@ -177,13 +183,13 @@ class OutputChannel {
           }
         }
       } catch (cause) {
-        const error = cause?.code === 'TITAN_BROWSER_DISPOSED' || cause?.code === 'TITAN_BROWSER_SINK' ? cause :
+        const error = ownFailure(cause, 'DISPOSED') || ownFailure(cause, 'SINK') ? cause :
           failure('SINK', `browser ${this.stream} sink failed`, cause, this.stream);
         current = error === token.interrupted?.error ? token.interrupted : {error};
         (failures ||= []).push(current);
         captureFailure(token, error, current);
       }
-      if (current) this.firstFailure ||= current;
+      if (current && current !== token.primaryFault) this.firstFailure ||= current;
     }
     return failures;
   }
@@ -231,7 +237,7 @@ async function drainOutput(drain) {
     try {
       if (drain.sink) await sinkResult(drain.sink(entry.bytes), drain.stream);
     } catch (cause) {
-      const error = cause?.code === 'TITAN_BROWSER_SINK' ? cause :
+      const error = ownFailure(cause, 'SINK') ? cause :
         failure('SINK', `browser ${drain.stream} sink failed`, cause, drain.stream);
       const current = {error};
       first ||= current;
@@ -1295,9 +1301,14 @@ class BrowserOwner {
 }
 
 async function retireOwner(owner) {
+  let interruptedFailure;
   if (owner.active) {
-    try { await owner.active.promise; }
+    const token = owner.active;
+    try { await token.promise; }
     catch { /* The interrupted operation reports its own failure. */ }
+    if (token.failed && token.primaryFault && token.primaryFault !== token.interrupted) {
+      interruptedFailure = token.primaryFault;
+    }
   }
   await Promise.all([...owner.requests].map(request => request.terminal.promise));
   let error = owner.retirementFailure;
@@ -1315,7 +1326,7 @@ async function retireOwner(owner) {
   if (owner.backend) owner.backend.blocked = true;
   for (const state of owner.states.keys()) owner.closeState(state);
   const drains = [owner.out.takeDrain(), owner.err.takeDrain()];
-  const disposal = {drains, failure: error ? {error} : undefined,
+  const disposal = {drains, failure: error ? {error} : interruptedFailure,
     observer: owner.options?.onNotificationError};
   owner.lastTrace = owner.trace();
   owner.module = owner.backend = owner.factory = owner.options = undefined;

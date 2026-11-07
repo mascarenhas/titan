@@ -77,18 +77,20 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    wrappers whose own preambles fit inside the trampoline's `LUA_MINSTACK`
    reservation and call `invoke_work` / `release_work` inside their installed
    `errorJmp`. All argument decoding, execution, rollback, and formatted error
-   reporting run inside `invoke_work` / `release_work`. If `invoke_work` or
-   `release_work` raises at its own preamble (`titan_ensure_stack`) or during
-   error formatting/completion allocation in its inner `catch`, the outer
-   function-scope `catch` in `invoke_entry` / `release_entry` runs with no Titan
-   helper calls, no stack growth, and no Lua allocations: it rolls back any
-   provisional invoke wrapper inline (into `free_slots` pre-grown during
-   `allocate_pin`), writes `"not enough memory"` into `state_record.fallback`
-   via inline FFI struct writes, flushes `stdout`/`stderr`, and calls
-   `titan_browser_complete`. Non-string error objects raised by callables are
-   formatted in Titan (`format_error_value` under `catch`) using the same
-   `__tostring` / `(error object is a <type> value)` rule as the launcher while
-   preserving the outer `catch`'s `traceback` local.
+   reporting run inside `invoke_work` / `release_work`. In `invoke_work`, a
+   failed completion flush rolls back the provisional wrapper inline into
+   `free_slots`, pre-grown during `allocate_pin`. The inner `catch` performs
+   the same rollback before calling `complete_titan_failure`. If a work
+   function raises at its own preamble (`titan_ensure_stack`) or while
+   reporting an error from its inner `catch`, the outer function-scope `catch`
+   in `invoke_entry` / `release_entry` writes `"not enough memory"` into
+   `state_record.fallback` via inline FFI
+   struct writes, flushes `stdout`/`stderr`, and calls `titan_browser_complete`.
+   That outer handler does not roll back wrappers or call Titan helpers, grow
+   the stack, or allocate Lua objects. Non-string error objects raised by
+   callables are formatted in Titan (`format_error_value` under `catch`) using
+   the same `__tostring` / `(error object is a <type> value)` rule as the
+   launcher while preserving `invoke_work`'s inner `catch`'s `traceback` local.
 
 | Export | Operation kind | Role |
 | --- | --- | --- |
@@ -121,14 +123,13 @@ copied stream queues and disposal outcomes.
 before `luaL_openlibs`, preloads, or any user initializer, and is idempotent.
 Its 0-uservalue `titan_browser_state_record` userdata is the first finalizable
 object in that state and is anchored in the Lua registry under the private
-lightuserdata key `titan_ftop(state_gc)` (the pre-module lifecycle exception to
-rule 4: no module variable exists yet when `attach` runs, and the userdata must
-survive
-until `lua_close` finalizes it last). `attach` passes the record pointer to
-`titan_browser_host_state_open(state)`, which allocates the opaque host state
-token and maps `token -> record` in the JS owner's `stateRecords` table; no
-JavaScript application API exposes a `lua_State *`, and no C static state list
-exists.
+lightuserdata key `ffi.lmacro_cfunc_key(state_gc)` (the pre-module lifecycle
+exception to rule 4: no module variable exists yet when `attach` runs, and the
+userdata must survive until `lua_close` finalizes it last). `attach` passes the
+record pointer to `titan_browser_host_state_open(state)`, which allocates the
+opaque host state token and maps `token -> record` in the JS owner's
+`stateRecords` table; no JavaScript application API exposes a `lua_State *`,
+and no C static state list exists.
 
 When `titan.browser` initializes in a state, its `do ... end` block calls
 `attach(L)`, caches the `titan_browser_state_record *` in its module variable
@@ -141,8 +142,9 @@ finalizer. Its `state_gc` finalizer (a `local foreign function` in
 `titan/browser.browser.titan`) calls `mark_closing`, clears `state.token = 0`,
 and notifies `titan_browser_host_state_closed(token)`, which removes the state's
 record, callable targets, notifications, requests, and JavaScript slot units.
-Collecting an unattached userdata whose token is zero does not invalidate
-anything; the caller remains responsible for a later close.
+If `attach` fails before assigning a token, collecting its token-zero userdata
+does not invalidate anything or close the state. The creator of that Lua state
+remains responsible for calling `close_state` or `lua_close`.
 
 An independent state created in a C test fixture calls
 `titan_browser_\u2133_attach_titan(L)` at construction. `state_closing()` and
@@ -194,11 +196,13 @@ module variables (`pins_by_slot: {Pin}`, `pins_by_fn: {value: Pin}`,
   successful completion result. A nested import triggered during marshalling
   (such as a GC finalizer calling another binding) exposes only the callables
   decoded by its own crossing. If a crossing fails before its own `valuesAt`
-  completes, `rollback_provisioned` calls `titan_browser_host_callable_closed`
-  (which discards the unexposed wrapper without touching queued request-hold
-  drops and returns `1`) and retires the pin if unused; once exposed to host
-  JavaScript, `titan_browser_host_callable_closed` returns `0` and the wrapper
-  stays live until its own `release()`.
+  completes, host calls and starts use `rollback_provisioned`, while invoke
+  completions use `invoke_work`'s inline rollback. Both call
+  `titan_browser_host_callable_closed`, which discards the unexposed wrapper
+  without touching queued request-hold drops and returns `1`, then retire the
+  pin if unused. Once exposed to host JavaScript,
+  `titan_browser_host_callable_closed` returns `0` and the wrapper stays live
+  until its own `release()`.
 
 ## Fixed wasm32 layout
 

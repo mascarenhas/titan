@@ -378,12 +378,28 @@ async function values(context, host, completions) {
   context.assert((await host.call('finish_invoke_oom')) > 0n, 'invoke setup OOM did not trigger');
   context.assert((await host.call('valid_after_failure')) === 42n, 'invoke setup OOM poisoned the instance');
 
-  // R-H3(a): stack-growth failure at invoke_work preamble with 21 free slots (between 20 and 23) after handler push.
+  // invoke_entry leaves 15 free slots here; invoke_work's 34-slot preamble must grow.
   host.controls.failNextEntryStack('invoke', 22, 2);
   const preambleStackError = await captureRejection(context, host.call('echo_value', 1n), 'TITAN');
   context.equalBytes(preambleStackError.bytes, encode('not enough memory'));
   context.assert((await host.call('finish_invoke_oom')) > 0n, 'invoke preamble stack-growth OOM did not trigger');
   context.assert((await host.call('valid_after_failure')) === 42n, 'invoke preamble stack-growth OOM poisoned the instance');
+
+  // With only 19 free slots, the trampoline's non-raising 20-slot check fails.
+  const trampolineCompletions = [];
+  const unwatchTrampoline = host.controls.watchCompletions(record => {
+    trampolineCompletions.push({kind: record.kind, failed: record.failed});
+  });
+  try {
+    host.controls.failNextEntryStack('invoke', 19, 2);
+    const trampolineError = await captureRejection(context, host.call('echo_value', 1n), 'TITAN');
+    context.equalBytes(trampolineError.bytes, encode('not enough memory'));
+    context.assert(trampolineError.trace.length === 0 &&
+      trampolineCompletions.length === 1 && trampolineCompletions[0].kind === 3 &&
+      trampolineCompletions[0].failed, 'invoke trampoline did not emit exactly one untraced fallback');
+  } finally { unwatchTrampoline(); }
+  context.assert((await host.call('finish_invoke_oom')) === 1n, 'invoke trampoline stack check did not fail once');
+  context.assert((await host.call('valid_after_failure')) === 42n, 'invoke trampoline failure poisoned the instance');
   const object = Object.freeze({opaque: true});
   const jsFn = x => x + 1n;
   for (const value of [object, jsFn]) {
@@ -558,7 +574,8 @@ async function resultRepairs(context, host, engineFailures) {
     // R-H3(b): outer invoke handler after inner-handler OOM rolls back provisional callable and emits fallback completion.
     const outerInvokeErr = await captureRejection(context, host.call('nested_finalizer_rollback', 1n), 'TITAN');
     context.equalBytes(outerInvokeErr.bytes, encode('not enough memory'));
-    context.assert((await host.call('finish_invoke_oom')) > 0n, 'outer invoke OOM did not trigger');
+    context.assert((await host.call('finish_invoke_oom')) === 2n,
+      'outer invoke OOM did not fail both the error handler and the inner reporting helper');
     context.assert((await host.call('nested_finalizer_ran')) === true,
       'outer invoke OOM test did not execute nested finalizer before OOM');
     context.assert((await host.call('pin_holders_collected')) === 77n,
@@ -575,6 +592,31 @@ async function resultRepairs(context, host, engineFailures) {
     context.assert((await host.call('pin_holders_collected')) === 55n,
       'outer release OOM did not retire the released pin');
     context.assert((await host.call('valid_after_failure')) === 42n, 'outer release OOM poisoned the instance');
+
+    for (const [freeSlots, weight] of [[22, 66n], [19, 77n]]) {
+      // 22 reaches release_work's preamble; 19 fails the trampoline's stack check.
+      const wrapper = await host.call('make_pinned_wrapper', weight);
+      const records = [];
+      const unwatch = host.controls.watchCompletions(record => {
+        records.push({kind: record.kind, failed: record.failed});
+      });
+      try {
+        host.controls.failNextEntryStack('release_callable', freeSlots, 2);
+        wrapper.release();
+        const failure = await captureRejection(context, host.instance.drain(), 'TITAN');
+        context.equalBytes(failure.bytes, encode('not enough memory'));
+        context.assert(records.length === 1 && records[0].kind === 4 && records[0].failed,
+          `release with ${freeSlots} free slots did not emit exactly one failed completion`);
+        if (freeSlots === 19) context.assert(failure.trace.length === 0,
+          'release trampoline fallback unexpectedly captured a Titan trace');
+      } finally { unwatch(); }
+      context.assert((await host.call('finish_invoke_oom')) === 1n,
+        `release with ${freeSlots} free slots did not fail its stack growth`);
+      context.assert((await host.call('pin_holders_collected')) === 0n,
+        'failed release preamble/trampoline retired a pin before state close');
+      context.assert((await host.call('valid_after_failure')) === 42n,
+        `release with ${freeSlots} free slots poisoned the instance`);
+    }
   } finally {
     host.hooks.r1Release = undefined;
     host.hooks.pinHoldRequest = host.hooks.pinHoldListener = undefined;
@@ -1023,6 +1065,13 @@ async function listenerBatchCancellation(context, image) {
 }
 
 async function stdio(context, host) {
+  const cause = new Error('latched C-stdio append failure');
+  host.sinks.stdout = () => { throw cause; };
+  const appendFailure = await captureRejection(context, host.call('stdio_append', binary()), 'SINK');
+  context.assert(appendFailure.cause === cause);
+  host.sinks.stdout = undefined;
+  context.assert((await host.call('valid_after_failure')) === 42n,
+    'C-stdio sink failure poisoned an unrelated output-free call');
   const alias = new AliasingBytes(binary());
   host.instance.notify(host.callbacks.get('stdio_append'), alias);
   alias.fill(90);
@@ -1048,8 +1097,60 @@ async function stdio(context, host) {
   for (let index = 0; index < payloads.length; index++) {
     context.equalBytes(host.stdout[beforeChunks + index], payloads[index]);
   }
-  host.sinks.stdout = undefined;
-  return {writes: payloads.length, maximumInflight: maximum};
+
+  for (const behavior of ['throw', 'reject']) {
+    const sinkCause = new Error(`ordered sink ${behavior}`);
+    host.sinks.stdout = behavior === 'throw' ? () => { throw sinkCause; } : () => Promise.reject(sinkCause);
+    const error = await captureRejection(context, host.call('stdio_append', binary()), 'SINK');
+    context.assert(error.cause === sinkCause, 'write operation replaced its original sink cause');
+    host.sinks.stdout = undefined;
+    await host.call('stdio_append', binary());
+  }
+  return {writes: payloads.length + 2, maximumInflight: maximum};
+}
+
+async function sinkFailureValues(context, image) {
+  let cases = 0;
+  for (const phase of ['call', 'dispose']) {
+    for (const behavior of ['throw', 'reject']) {
+      for (const shape of ['accessor', 'lookalike']) {
+        let reads = 0, calls = 0;
+        const cause = shape === 'accessor' ? Object.defineProperty({}, 'code', {
+          get() { reads++; throw new Error('sink code getter must not run'); },
+        }) : {code: 'TITAN_BROWSER_SINK'};
+        const host = createHost(context, image);
+        try {
+          await host.instance.initialize();
+          if (phase === 'call') await nativeRun(context, host);
+          host.sinks.stdout = () => {
+            calls++;
+            if (behavior === 'throw') throw cause;
+            return Promise.reject(cause);
+          };
+          const operation = phase === 'call' ? host.call('stdio_append', binary()) : host.instance.dispose();
+          const error = await captureRejection(context, operation, 'SINK');
+          context.assert(error instanceof Error && error.name === 'TitanBrowserError' &&
+            error.stream === 'stdout' && error.cause === cause && reads === 0 && calls === 1,
+            `${phase} ${behavior} ${shape} sink value was inspected, lost or passed through`);
+          host.sinks.stdout = undefined;
+          if (phase === 'call') {
+            context.assert((await host.call('valid_after_failure')) === 42n,
+              'arbitrary sink failure poisoned a later operation');
+            // The handled primary failure is not pending for disposal.
+            await host.instance.dispose();
+          }
+          context.assert(host.notificationErrors.length === 0 && host.controls.snapshot().units === 0,
+            'sink failure was reported twice or skipped state-close cleanup');
+          cases++;
+        } finally {
+          host.sinks.stdout = undefined;
+          await host.instance?.dispose().catch(() => {});
+          host.releaseObservations();
+        }
+      }
+    }
+  }
+  return cases;
 }
 
 async function prepareRetainedDisposal(context, host) {
@@ -1571,6 +1672,7 @@ export async function run(context) {
     collectedTargets += await finalizerDrain(context, image, false);
     collectedTargets += await finalizerDrain(context, image, true);
     collectedTargets += await disposalFromImport(context, image);
+    const sinkValues = await sinkFailureValues(context, image);
     const cleanup = await cleanupFailures(context, image);
     await interruptedFailure(context, image);
     await initializationFailure(context, failedImage);
@@ -1578,7 +1680,7 @@ export async function run(context) {
     context.stdout(encode('BRIDGE ' + JSON.stringify({verdict: 'PASS', nativeCases: counts,
       instances: 2, interleavedSwitches: switches, operations: completions.length, requestDrain: announcements,
       notifications: first.notifications.length, requests: first.successes.length + first.failures.length,
-      io, repairs, cleanup, identities, materialization, listenerCancellation, collectedTargets, finalizerDrains: 2}) + '\n'));
+      io, repairs, cleanup, identities, materialization, listenerCancellation, sinkValues, collectedTargets, finalizerDrains: 2}) + '\n'));
   } finally {
     unwatchFirst?.(); unwatchSecond?.(); unwatchCompletions?.();
     await Promise.all([first, second].map(host => host.instance?.dispose().catch(() => {})));

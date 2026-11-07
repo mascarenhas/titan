@@ -4,13 +4,12 @@
 #include <lauxlib.h>
 #include <lualib.h>
 #include <titan.h>
+#include <titan/browser.titan.h>
 #include "../../stdlib/titan/browser/native.h"
 #include "../browser_runtime/fixture_controls.h"
 
 extern int luaopen_titan(lua_State *L);
 extern int luaopen_browser_independent(lua_State *L);
-extern void *titan_browser_\u2133_attach_titan(void *L);
-extern void titan_browser_\u2133_close_state_titan(void *L);
 typedef struct independent_owner { lua_State *child; } independent_owner;
 
 /* Wrap titan_browser_host_identity_live in the dedicated bridge test image to
@@ -150,10 +149,6 @@ static void *alloc_failure_allocate(void *ud, void *pointer, size_t old_size, si
     if (alloc_failure.after > 0) {
       alloc_failure.after--;
     } else {
-      if (alloc_failure.saved_stack_last != NULL) {
-        alloc_failure.L->stack_last.p = alloc_failure.saved_stack_last;
-        alloc_failure.saved_stack_last = NULL;
-      }
       if (++alloc_failure.failures >= alloc_failure.max_failures) restore_alloc_failure();
       return NULL;
     }
@@ -176,6 +171,9 @@ void titan_bridge_test_arm_alloc_failure(lua_State *L, int after) {
 static void titan_bridge_test_arm_inner_catch_oom(lua_State *L) {
   lua_State *main_L = mainthread(G(L));
   titan_bridge_test_arm_alloc_failure_count(main_L, 0, 2);
+  /* Keep the reduced stack limit through the first failure in errorhandler.
+   * The second growth fails in the inner catch's reporting helper, forcing
+   * invoke_entry's outer fallback; restore_alloc_failure then restores it. */
   alloc_failure.saved_stack_last = main_L->stack_last.p;
   main_L->stack_last.p = main_L->top.p + 2;
 }

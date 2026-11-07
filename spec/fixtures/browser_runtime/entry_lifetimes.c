@@ -5,14 +5,13 @@
 #include <lauxlib.h>
 #include <lualib.h>
 #include <titan.h>
+#include <titan/browser.titan.h>
 #include "gate.h"
 #include "fixture_controls.h"
 
 extern int luaopen_titan(lua_State *L);
 extern int luaopen_titan_coroutine(lua_State *L);
 extern int luaopen_entry_lifetimes(lua_State *L);
-extern void *titan_browser_\u2133_attach_titan(void *L);
-extern void titan_browser_\u2133_close_state_titan(void *L);
 static lua_State *owned_state;
 static int phase;
 

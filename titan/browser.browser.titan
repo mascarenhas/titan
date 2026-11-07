@@ -74,11 +74,12 @@ end
 local pins_by_slot: {Pin} = {}
 local pins_by_fn: {value: Pin} = {}
 -- Pre-sized at module init and pre-grown in allocate_pin so pin retirement
--- and invoke_entry rollback never reallocate the Array or table.
+-- and invoke_work rollback never reallocate the Array or table.
 local free_slots: {integer} = { 0, 0, 0, 0, 0, 0, 0, 0 }
 local slot_generations: {integer} = {}
 local next_slot: integer = 1
 local invoke_provisional_item = ProvisionalPin { pin = nil, wrapper = true }
+-- Reserve the reusable rollback slot before any invoke can fail.
 local invoke_provisioned: {ProvisionalPin} = { ProvisionalPin { pin = nil, wrapper = true } }
 local fallback_completion: owned *titan_browser_completion =
     foreign titan_browser_completion.new()
@@ -631,6 +632,7 @@ local function invoke_work(
     completion.results = encoded
     flush_completion(completion)
     if completion.status ~= ffi.TITAN_BROWSER_OK then
+      -- Stay helper-free and non-raising after completion: a raise would emit twice.
       local prov_pin? = invoke_provisional_item.pin
       if prov_pin ~= nil then
         invoke_provisional_item.pin = nil
@@ -653,6 +655,7 @@ local function invoke_work(
     end
   catch
     local trace = traceback
+    -- Stay helper-free and non-raising so rollback finishes before error reporting.
     local prov_pin? = invoke_provisional_item.pin
     if prov_pin ~= nil then
       invoke_provisional_item.pin = nil
@@ -710,6 +713,7 @@ local function release_work(
     generation: foreign uint32_t,
     wrapper: foreign uint32_t)
   do
+    -- Stay helper-free and non-raising so pin retirement cannot escape half-done.
     local current = state_record
     local closing = current == nil or current.token == 0
     if not closing then
@@ -1035,6 +1039,7 @@ function BrowserHandle:listen(
 end
 
 do
+  -- Clear the reservation sentinels without shrinking rollback storage.
   for index = #free_slots, 1, -1 do
     free_slots[index] = nil
   end
