@@ -555,26 +555,27 @@ The instance has the following methods:
   Ordinary initializer or main failure is a failed/status1 result, not a
   fatal-engine rejection. A prior initializer failure is reused without a
   second report.
-* `call(callable, ...args)` invokes a callable wrapper that Titan created with
-  [`browser.callable`](standard-library-browser.md#original-closures) and
-  passed to JavaScript. It requires successful initialization and remains
+* `call(callable, ...args)` invokes a callable wrapper that Titan exported
+  through [`BrowserValue.is_callable`](standard-library-browser.md#callables-and-pinning)
+  and passed to JavaScript. It requires successful initialization and remains
   available after main returns. Both this method and `callable.call(...args)`
-  resolve one dense result Array: `[]` for zero results, `[value]` for one,
-  and the complete tuple for many. A nil result is `null`, including trailing
-  nils. Promise and thenable JSHandle values remain untouched elements of that
-  Array; the call does not await or handle their rejections. Destructure a
-  result explicitly, then separately await it if that is what the application
-  intends.
-  Byte arguments are snapshotted synchronously before either method returns
-  its promise; later mutations do not change that call.
+  marshal arguments by runtime type into `BrowserValue` and resolve to the
+  single decoded return value (`null` for `is_nil()`, `BigInt` for
+  `is_integer`, `Uint8Array` for `is_bytes`, string for `is_string`, and the
+  underlying JavaScript value for `is_handle`). Returning a `BrowserHandle`
+  that holds a `Promise` or thenable causes the user-facing `call` promise to
+  adopt it, while internal operation admission and `dispose()` depend only on
+  the Wasm entry's completion.
+  Byte and string arguments are snapshotted synchronously before either method
+  returns its promise; later mutations do not change that call.
 * `notify(callable, ...args)` synchronously snapshots and enqueues one
-  notification without entering Wasm. It copies byte arrays and keeps raw
-  JavaScript values by reference. It does not allocate Wasm buffers or handle
-  slots. Because it is synchronous, a wrong instance state, a foreign or
-  released wrapper, or arguments that do not match the callable's signature
-  throw immediately; after disposal begins, `notify` does nothing. Logically
-  released arguments are rejected again before delivery; released or closed
-  targets retire without delivery.
+  notification without entering Wasm. It copies byte arrays, UTF-8-encodes
+  well-formed strings, and keeps raw JavaScript values by reference. It does
+  not allocate Wasm buffers or handle slots. Because it is synchronous, a wrong
+  instance state, a foreign or released wrapper, an out-of-range `BigInt`, or
+  an ill-formed UTF-16 string throws immediately; after disposal begins,
+  `notify` does nothing. Logically released arguments are rejected again before
+  delivery; released or closed targets retire without delivery.
 * `drain()` requires successful initialization and delivers one detached FIFO
   batch. A handler error is reported as a `"callback"` event through
   `onNotificationError`, with its captured Titan data, and later
@@ -663,11 +664,16 @@ enter Lua after cancellation, release, state close, or disposal. If the bridge
 cannot create a request's owner, it neither starts the host source, registers
 the listener, nor appends completion-carrying output.
 Start/listen and completion-carrying byte I/O take both a success callable and
-a mandatory failure callable. Failure receives `(message: string,
-thrown: JSHandle)`: the message is copied bytes and the handle preserves the
-exact rejected JavaScript value. Both outcomes enqueue and use protected
-delivery; a Promise rejection is not merely logged to an observer.
-
+a mandatory failure callable. One-shot `start` completion receives one
+`BrowserValue` argument (the settled value marshalled by runtime type, with
+`undefined` mapped to `is_nil()`); `listen` passes each emitted argument
+marshalled by runtime type. Failure receives `(BrowserValue.is_string(message),
+BrowserValue.is_handle(thrown))`: the diagnostic message text and a handle
+retaining the exact rejected JavaScript value (even for a primitive). Both
+outcomes enqueue and use protected delivery; a Promise rejection is not merely
+logged to an observer. If `completion` or `failure` raises at delivery time
+(for example when rejecting an unexpected argument variant), that failure is
+reported through `onNotificationError`.
 **Observation and errors.** `instance.trace` is a fresh frozen `{state,
 reason}` snapshot, including before initialization. It preserves the last
 map state and reason after ordinary or poisoned disposal without retaining
@@ -689,17 +695,20 @@ where there is one, the original error as `cause`:
 | `TITAN_BROWSER_CAPABILITY` | The engine lacks WebAssembly JSPI. |
 | `TITAN_BROWSER_ABORT`, `TITAN_BROWSER_TRAP`, `TITAN_BROWSER_PROTOCOL` | The engine aborted or trapped, or the image broke the completion protocol. The instance is poisoned: later application methods reject this saved failure, and disposal drops the image without entering Wasm again. |
 
-Invalid `create` options throw `TypeError` synchronously. Arguments that do
-not match a callable's signature (a wrong count, a Number for an integer, a
-non-`Uint8Array` byte value) reject `call` or throw from `notify` with
-`TypeError`, as do invalid `run` arguments.
+Invalid `create` options throw `TypeError` synchronously. Out-of-range `BigInt`
+values (outside signed 64-bit range) and ill-formed UTF-16 strings (containing
+a lone surrogate, where `str.isWellFormed()` is `false`) reject `call` or throw
+from `notify` with `TypeError`, as do invalid `run` arguments. Other argument
+values cross by runtime type as `BrowserValue`, and a Titan callable that
+rejects a variant raises an ordinary Titan error (`TITAN_BROWSER_TITAN`).
 
 Byte argument snapshots for `call`, `callable.call`, `notify` and `run` read
 native `Uint8Array` storage, including subarrays, subclasses and Node Buffers.
 Custom iterators, byte-view accessors and constructor/species hooks cannot
-substitute bytes. A Proxy around a byte array has no native TypedArray slots
-and is rejected with `TypeError`.
-
+substitute bytes. A Proxy around a byte array has no native TypedArray slots,
+so `run` rejects it with `TypeError` while `call` and `notify` marshal it by
+runtime type as an opaque `is_handle(BrowserHandle)` without invoking Proxy
+traps.
 The test runner reports observed aborts and traps even if a test catches their
 operation rejection. A completion-protocol error that the test explicitly
 handles stays local to its poisoned instance; if the operation rejection
@@ -984,7 +993,7 @@ sources as the native standard library, plus the browser-only `titan.browser`:
 | [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
 | [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
 | [`test`](standard-library-test.md) | the test API and the native test runner |
-| [`browser`](standard-library-browser.md) | typed JavaScript bindings, original-closure callables, handles, and tracked host requests |
+| [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
 
 Each of the thirteen shared modules is complete. Every public declaration, including the raw
 C functions `protobuf.write_resource_index`,

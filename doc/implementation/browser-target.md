@@ -395,7 +395,7 @@ native targets and need no browser-specific defines.
 
 The provider adds a fourteenth root, the browser-only `titan.browser` in
 `titan/browser.browser.titan`, with no native placeholder. It imports only
-`gc` and `reflect`; its [protected C runtime](browser-bridge.md) lives in the
+`gc`; its [C shims and state-token list](browser-bridge.md) live in the
 browser runtime archive, not in a native-only dependency or a second coroutine
 driver.
 
@@ -2759,13 +2759,13 @@ acknowledges physical context retirement only; its numeric value is never
 application status. Neither completion arrival nor an intermediate safe point
 reopens public admission or invokes sinks.
 
-`call` and `Callable.call` return the existing decoded result Array for every
-arity, without another copy: zero results are `[]`, one nil is `[null]`, and a
-single JSHandle is `[value]`. Returning a sole raw value from an async helper
-would adopt a Promise/thenable, lose its identity, and keep logical admission
-pending on unrelated host work. Keeping the carrier intact preserves opaque
-values and lets native retirement, sink flush, and disposal finish independently.
-
+`invokeTarget` boxes the single decoded result as `{value}` inside `operate` so
+that internal operation completion, `this.active` release, and `dispose()`
+never await a `Promise` or thenable returned in a `BrowserHandle`. Public
+`call` and `Callable.call` unwrap `.then(box => box.value)`, resolving to the
+bare value (`null` for `is_nil()`, `BigInt` for `is_integer`, string for
+`is_string`, `Uint8Array` for `is_bytes`, and the underlying value for
+`is_handle`).
 Callable wrappers have module-private WeakMap brands and state/slot/generation
 records. Logical release invalidates immediately, while physical root removal
 uses a protected release entry at a complete safe point. A detached FIFO batch
@@ -2786,9 +2786,9 @@ No implicit scheduler or fairness policy is installed.
 Potentially throwing bridge imports catch at their own boundary and fill the
 shared header's status/message/exact-thrown-handle response. Titan raises only
 after normal import return. Trusted adoption, release, and state invalidation
-remain nonthrowing. Scalar, bytes, and void results reject promises;
-`call_handle` deliberately treats one as an opaque value and does not handle
-its rejection on the application's behalf.
+remain nonthrowing. Binding call results marshal by runtime type into
+`BrowserValue`; a returned Promise becomes `is_handle(BrowserHandle)` and the
+bridge does not handle its rejection on the application's behalf.
 
 Requests declare detachable or guaranteed-terminal retained ownership.
 Listeners declare subscription/unregistration and enqueue synchronous events.
@@ -2806,10 +2806,12 @@ unreturned unit; an already accepted retained operation still owns its terminal
 retirement even if cancellation reports an error. C-only output needs no request
 unit.
 
-Every request has both a success target and a mandatory failure target with
-exact `(BYTES, HANDLE) → ()` signature. Promise rejection queues that failure
-notification with copied message bytes and the exact raw thrown value, creating
-its state-owned handle only on delivery. `onNotificationError` is not a
+Every request has both a success target and a mandatory failure target.
+One-shot `start` settlement enqueues one argument (the settled value marshalled
+by runtime type, with `undefined` mapped to `is_nil`), `listen` emissions
+enqueue each emitted argument by runtime type, and Promise rejection queues the
+failure notification with `(is_string(message), is_handle(thrown))`, creating
+`thrown`'s state-owned handle only on delivery. `onNotificationError` is not a
 substitute for the rejected request's outcome. It receives
 `{kind: 'callback' | 'cleanup', operation, error}` for errors without another
 caller: callback failures, secondary cleanup failures, and callerless physical

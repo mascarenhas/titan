@@ -13,7 +13,7 @@ export async function run(context) {
       abort_binding() {
         if (mode === 'throw') controls.abort();
         if (mode === 'return') { abortAndReturn(); return; }
-        if (mode === 'bytes') return {get bytes() { abortAndReturn(); return new Uint8Array([65]); }, length: 1};
+        if (mode === 'bytes') return new Uint8Array([65]);
         if (mode === 'format') throw {get message() { abortAndReturn(); return 'owned abort during error formatting'; }};
         throw new Error('owned abort during error allocation');
       },
@@ -29,6 +29,11 @@ export async function run(context) {
     await instance.initialize();
     unwatchResponses = controls.watchResponses(value => { probe = value; });
     unwatchMemory = controls.watchMemoryCalls(event => {
+      if (mode === 'bytes' && probe && event.kind === 'allocate' && !allocationAbort) {
+        allocationAbort = true;
+        abortAndReturn();
+        return;
+      }
       if (event.poisoned) afterPoison.push(event.kind);
       if (mode === 'allocation' && probe && event.kind === 'allocate' && !allocationAbort) {
         allocationAbort = true;

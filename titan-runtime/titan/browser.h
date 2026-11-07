@@ -14,10 +14,10 @@ enum titan_browser_kind {
   TITAN_BROWSER_BOOLEAN = 1,
   TITAN_BROWSER_INTEGER = 2,
   TITAN_BROWSER_FLOAT = 3,
-  TITAN_BROWSER_BYTES = 4,
-  TITAN_BROWSER_HANDLE = 5,
-  TITAN_BROWSER_CALLABLE = 6,
-  TITAN_BROWSER_VOID = 7,
+  TITAN_BROWSER_STRING = 4,
+  TITAN_BROWSER_BYTES = 5,
+  TITAN_BROWSER_HANDLE = 6,
+  TITAN_BROWSER_CALLABLE = 7,
   TITAN_BROWSER_REQUEST = 8
 };
 enum titan_browser_status {
@@ -25,8 +25,7 @@ enum titan_browser_status {
   TITAN_BROWSER_TITAN_ERROR = 1,
   TITAN_BROWSER_JS_ERROR = 2,
   TITAN_BROWSER_STATE = 3,
-  TITAN_BROWSER_SIGNATURE = 4,
-  TITAN_BROWSER_MEMORY = 5
+  TITAN_BROWSER_MEMORY = 4
 };
 enum titan_browser_operation {
   TITAN_BROWSER_INITIALIZE = 1,
@@ -51,7 +50,7 @@ typedef union titan_browser_scalar {
 typedef struct titan_browser_value {
   uint32_t kind;
   uint32_t state;
-  /* For BYTES results scalar.integer is the allocated byte capacity. */
+  /* For STRING and BYTES results scalar.integer is the allocated byte capacity. */
   titan_browser_scalar scalar;
   const unsigned char *bytes;
   uint32_t length;
@@ -63,18 +62,12 @@ typedef struct titan_browser_identity {
   uint32_t slot;
   uint32_t generation;
 } titan_browser_identity;
-typedef struct titan_browser_signature {
-  uint32_t parameter_count;
-  uint32_t result_count;
-  const uint32_t *parameters;
-  const uint32_t *results;
-} titan_browser_signature;
 
 /* Imports fill a zero-initialized response and always return normally.
  * status is independent of value kind; state is filled on every status.
  * thrown_slot/generation own the exact thrown JS value, even undefined/null/
  * false. The caller clears adopted slots; dispose releases remaining units.
- * Nonempty message and BYTES result
+ * Nonempty message and STRING/BYTES result
  * buffers are malloc-owned; dispose frees them even on a failed import.
  * JS must use current memory views after allocating. Capacity is validated
  * before copying and length is the exact returned byte count, not capacity. */
@@ -115,9 +108,6 @@ _Static_assert(offsetof(titan_browser_value, length) == 20, "browser length offs
 _Static_assert(offsetof(titan_browser_value, slot) == 24, "browser slot offset");
 _Static_assert(offsetof(titan_browser_value, generation) == 28, "browser generation offset");
 _Static_assert(sizeof(titan_browser_identity) == 12, "browser identity layout");
-_Static_assert(sizeof(titan_browser_signature) == 16, "browser signature layout");
-_Static_assert(offsetof(titan_browser_signature, parameters) == 8, "browser parameters offset");
-_Static_assert(offsetof(titan_browser_signature, results) == 12, "browser results offset");
 _Static_assert(sizeof(titan_browser_response) == 56, "browser response layout");
 _Static_assert(offsetof(titan_browser_response, state) == 4, "browser response state offset");
 _Static_assert(offsetof(titan_browser_response, value) == 8, "browser response value offset");
@@ -158,11 +148,13 @@ uint32_t titan_browser_attach(lua_State *L);
 uint32_t titan_browser_state(lua_State *L);
 int titan_browser_state_closing(lua_State *L);
 void titan_browser_close_state(lua_State *L);
-void titan_browser_configure(lua_State *L, TValue handle_factory,
-    TValue callable_factory, TValue handle_identity, TValue callable_identity);
-void titan_browser_root_callable(lua_State *L, TValue original,
-    const titan_browser_signature *signature, titan_browser_identity *out);
-void titan_browser_drop_callable(lua_State *L, const titan_browser_identity *identity);
+void titan_browser_configure(lua_State *L, Udata *module,
+    TValue invoke_handler, TValue release_handler,
+    TValue pin_handler, TValue unpin_handler);
+void titan_browser_pin_callable(lua_State *L, TValue callable,
+    titan_browser_identity *out);
+void titan_browser_unpin_callable(lua_State *L,
+    const titan_browser_identity *identity);
 void titan_browser_response_dispose(titan_browser_response *response);
 
 /* Generated-image bootstrap collaborators, not additional exported gateways. */
@@ -182,7 +174,7 @@ uint32_t titan_browser_host_state_open(void);
 void titan_browser_host_state_closing(uint32_t state);
 void titan_browser_host_state_closed(uint32_t state);
 void titan_browser_host_callable(uint32_t state, uint32_t slot,
-    uint32_t generation, const titan_browser_signature *signature);
+    uint32_t generation);
 void titan_browser_host_callable_closed(uint32_t state, uint32_t slot,
     uint32_t generation);
 void titan_browser_host_release(uint32_t state, uint32_t slot, uint32_t generation);
@@ -195,7 +187,7 @@ int titan_browser_host_identity_live(uint32_t state, uint32_t slot,
 void titan_browser_host_binding(uint32_t state, const unsigned char *name,
     uint32_t length, titan_browser_response *response);
 void titan_browser_host_call(uint32_t state, uint32_t slot, uint32_t generation,
-    uint32_t argc, const titan_browser_value *args, uint32_t result_kind,
+    uint32_t argc, const titan_browser_value *args,
     titan_browser_response *response);
 void titan_browser_host_start(uint32_t state, uint32_t slot, uint32_t generation,
     uint32_t argc, const titan_browser_value *args, uint32_t completion_slot,
@@ -206,8 +198,8 @@ void titan_browser_host_cancel(uint32_t state, uint32_t slot, uint32_t generatio
 
 /* SDK byte I/O admissions. completion_slot==0 appends output synchronously
  * (including close-phase output); otherwise the exact callable is notified
- * with zero arguments on success. Reads notify a one-BYTES-parameter callable.
- * Both require a failure callable with exact (BYTES, HANDLE) -> () signature;
+ * with zero arguments on success. Reads notify with one BYTES argument.
+ * Both require a failure callable notified with (STRING, HANDLE);
  * host rejection is a queued terminal notification, not a callback error.
  * Imports do not await a sink/source and return a REQUEST owner. */
 void titan_browser_host_write(uint32_t state, uint32_t stream,

@@ -21,7 +21,7 @@ export async function run(context) {
     await host.instance.call(host.callbacks.get('sdk_read'), 16n);
     await host.instance.call(host.callbacks.get('start_listener'));
     host.bindings.abort_request = () => host.controls.abort();
-    try { await host.instance.call(host.callbacks.get('start_request'), encode('abort_request')); }
+    try { await host.instance.call(host.callbacks.get('start_request'), 'abort_request'); }
     catch (error) { saved = error; }
     context.assert(saved?.code === 'TITAN_BROWSER_ABORT' && observed?.kind === 'abort' && observed.cause === saved,
       'real owned abort did not preserve its engine latch');

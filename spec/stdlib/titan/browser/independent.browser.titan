@@ -4,10 +4,12 @@ local test = import "test"
 local gc = import "gc"
 foreign import "native.h"
 
+local type Value = browser.BrowserValue
+
 local index = 0
 local parked: coroutine.Coroutine?
-local success: browser.Callable?
-local failure: browser.Callable?
+local success: (function (...: browser.BrowserValue): browser.BrowserValue)?
+local failure: (function (...: browser.BrowserValue): browser.BrowserValue)?
 
 local record PublicationCapture
   local marker: integer
@@ -17,41 +19,99 @@ local function publication_finalize(candidate: value)
   local capture: PublicationCapture = candidate
   publication_collected = publication_collected + capture.marker
 end
-local function failed_publication()
-  local capture = PublicationCapture { marker = 1 }
+
+local function make_captured_callable(weight: integer):
+    function (...: browser.BrowserValue): browser.BrowserValue
+  local capture = PublicationCapture { marker = weight }
   gc.finalizable<|value|>(capture, publication_finalize)
-  local original = function(): integer return capture.marker end
-  local caught = false
-  ffi.titan_bridge_test_arm_generation_failure(L)
-  do
-    browser.callable(original)
-  catch
-    caught = true
+  return function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_integer(capture.marker)
   end
-  local observed = ffi.titan_bridge_test_finish_generation_failure(L)
-  test.assert(caught and observed == 15,
-    "generation failure did not follow committed root, allocation failure and exact unref rollback")
 end
+
+local function failed_publication()
+  local target = browser.binding("publish")
+  defer target:close()
+  local non_callable = browser.binding("false_value")
+  defer non_callable:close()
+  local bad_request = browser.binding("throw_error")
+  defer bad_request:close()
+
+  -- 1. Later argument raises during marshalling (invalid UTF-8 in is_string).
+  local caught_marshal = false
+  do
+    target:call(Value.is_callable(make_captured_callable(1)),
+                Value.is_string("\255"))
+  catch
+    caught_marshal = true
+  end
+
+  -- 2. Host call fails before decoding arguments (target is not a function).
+  local caught_call = false
+  do
+    non_callable:call(Value.is_callable(make_captured_callable(2)))
+  catch
+    caught_call = true
+    if error is browser.BrowserError then
+      local err: browser.BrowserError = error
+      err:close()
+    end
+  end
+
+  -- 3. Host start refuses (binding throws), rolling back completion, failure, and arg pins.
+  local caught_start = false
+  do
+    bad_request:start(
+        make_captured_callable(4),
+        make_captured_callable(8),
+        Value.is_callable(make_captured_callable(16)))
+  catch
+    caught_start = true
+    if error is browser.BrowserError then
+      local err: browser.BrowserError = error
+      err:close()
+    end
+  end
+
+  test.assert(caught_marshal and caught_call and caught_start,
+      "provisional pin rollback cases did not raise as expected")
+end
+
 function publication(_: integer)
   publication_collected = 0
   failed_publication()
   gc.collect()
   gc.collect()
-  test.assert(publication_collected == 1, "unpublished callable retained its discarded capture")
+  test.assert(publication_collected == 31,
+      "unpublished provisional pins retained their discarded captures")
   local target = browser.binding("publish")
   defer target:close()
-  browser.call_void(target, {browser.Argument.is_bytes("r1_publication_recovery"),
-    browser.Argument.is_callable(browser.callable(function(): integer return 42 end))})
+  target:call(Value.is_string("r1_publication_recovery"),
+    Value.is_callable(function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(42)
+    end))
 end
 
 function prepare(number: integer)
   index = number
-  success = browser.callable(function() end)
-  failure = browser.callable(function(_: string, thrown: browser.JSHandle) thrown:close() end)
+  success = function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_nil()
+  end
+  failure = function(...: browser.BrowserValue): browser.BrowserValue
+    case ...[2]
+    when is_handle(thrown) then thrown:close()
+    end
+    return Value.is_nil()
+  end
   local target = browser.binding("publish")
   defer target:close()
-  browser.call_void(target, {browser.Argument.is_bytes("independent_" .. number),
-    browser.Argument.is_callable(browser.callable(function(item: integer): integer return item + index end))})
+  target:call(Value.is_string("independent_" .. number),
+    Value.is_callable(function(...: browser.BrowserValue): browser.BrowserValue
+      case ...[1]
+      when is_integer(item) then return Value.is_integer(item + index)
+      end
+      raise "independent expects an integer"
+    end))
   parked = coroutine.create(function(_: value): value
     defer do
       local observer = browser.binding("independent_close")
@@ -59,24 +119,24 @@ function prepare(number: integer)
       local request_target = browser.binding("detachable_request")
       local rejected = false
       do
-        browser.start(request_target, {}, success, failure)
+        request_target:start(success, failure)
       catch
         rejected = true
       end
       test.assert(rejected, "independent close admitted an asynchronous request")
       -- Intentionally leave newly created close-phase slots to the earliest
       -- registry, because Lua suppresses their reachability finalizers here.
-      browser.call_void(observer, {browser.Argument.is_integer(index),
-                                   browser.Argument.is_boolean(rejected),
-                                   browser.Argument.is_handle(item)})
+      observer:call(Value.is_integer(index),
+                    Value.is_boolean(rejected),
+                    Value.is_handle(item))
       do
         local throwing = browser.binding("throw_value")
-        browser.call_void(throwing, {})
+        throwing:call()
       catch
-        local error_value: browser.Error = error
-        browser.call_void(observer, {browser.Argument.is_integer(index),
-                                     browser.Argument.is_boolean(true),
-                                     browser.Argument.is_handle(error_value.thrown)})
+        local error_value: browser.BrowserError = error
+        observer:call(Value.is_integer(index),
+                      Value.is_boolean(true),
+                      Value.is_handle(error_value.thrown))
       end
     end
     return coroutine.yield(nil, "independent-close")
@@ -88,5 +148,8 @@ function check()
   test.assert(index > 0 and parked:status() == "suspended")
   local target = browser.binding("echo_integer")
   defer target:close()
-  test.assert(browser.call_integer(target, {browser.Argument.is_integer(index)}) == index)
+  case target:call(Value.is_integer(index))
+  when is_integer(actual) then test.assert(actual == index)
+  else raise "echo_integer did not return an integer"
+  end
 end

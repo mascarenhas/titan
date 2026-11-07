@@ -23,9 +23,7 @@ local function build(info, assertions, tree, module, name, is_test, c_source)
     if c_source then
         argv[#argv + 1] = "--c-source"
         argv[#argv + 1] = c_source
-        for _, symbol in ipairs({ "luaL_ref", "luaL_unref", "lua_rawseti", "lua_callk", "luaL_checkstack" }) do
-            argv[#argv + 1] = "--ldflag=-Wl,--wrap=" .. symbol
-        end
+        argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_state"
     end
     if is_test then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = module

@@ -25,6 +25,14 @@ export function join(chunks) {
   return bytes;
 }
 
+function asText(name) {
+  return typeof name === 'string' ? name : decode(name);
+}
+
+function asBytes(value) {
+  return typeof value === 'string' ? encode(value) : value.slice();
+}
+
 export function makeHost(context) {
   const thrown = {throw_error: new Error('bridge failure'), throw_string: 'bridge failure string',
     throw_value: Object.freeze({message: 'bridge failure value', marker: 332})};
@@ -43,9 +51,19 @@ export function makeHost(context) {
     __titanTest(controls) { host.controls = controls; },
     echo_boolean(value) { context.assert(typeof value === 'boolean'); return value; },
     echo_integer(value) { context.assert(typeof value === 'bigint'); return value; },
+    overflow_bigint() { return 1n << 63n; },
     echo_float(value) { context.assert(typeof value === 'number'); return value; },
+    echo_string(value) { context.assert(typeof value === 'string'); return value; },
+    ill_formed_string() { return '\ud800'; },
     echo_bytes(value) { context.assert(value instanceof Uint8Array); return value.slice(); },
-    short_bytes() { return {bytes: new Uint8Array([0, 255, 195, 40, 88, 99]), length: 4}; },
+    return_null(value) { context.assert(value === null); return null; },
+    return_undefined() { return undefined; },
+    make_js_adder(base) {
+      context.assert(typeof base === 'bigint');
+      return delta => base + delta;
+    },
+    check_same_wrapper(left, right) { return left === right; },
+    echo_callable(callable) { return callable; },
     large_bytes() {
       const length = 20 * 1024 * 1024;
       const pointer = host.controls.allocate(length);
@@ -58,13 +76,12 @@ export function makeHost(context) {
       queueMicrotask(() => host.controls.free(pointer));
       return bytes;
     },
-    invalid_bytes() { return {bytes: binary(), length: 5}; },
     throw_error() { throw thrown.throw_error; },
     throw_string() { throw thrown.throw_string; },
     throw_value() { throw thrown.throw_value; },
-    check_thrown(name, value) { return value === thrown[decode(name)]; },
+    check_thrown(name, value) { return value === thrown[asText(name)]; },
     ...values,
-    check_value(name, value) { return Object.is(value, values[decode(name)]); },
+    check_value(name, value) { return Object.is(value, values[asText(name)]); },
     promise_value() { return Promise.resolve('opaque promise'); },
     is_promise(value) { return value instanceof Promise; },
     handle_count() {
@@ -76,7 +93,7 @@ export function makeHost(context) {
         'publish did not receive a production branded Callable');
       context.assert(!Object.hasOwn(callable, 'slot') && !Object.hasOwn(callable, 'state') &&
         !Object.hasOwn(callable, 'generation'), 'callable exposed private identity');
-      host.callbacks.set(decode(name), callable);
+      host.callbacks.set(asText(name), callable);
     },
     notification(value) { host.notifications.push(value); host.hooks.notification?.(value); },
     allocation_cleanup() {
@@ -97,8 +114,10 @@ export function makeHost(context) {
       host.forbiddenRequests++;
       throw new Error('a closing state invoked its forbidden host request');
     },
-    request_success(number, bytes) { host.successes.push([number, bytes.slice()]); },
-    request_failure(message, value) { host.failures.push([message.slice(), value]); },
+    request_success(first, second) {
+      host.successes.push(second === undefined ? [first, binary()] : [first, second.slice()]);
+    },
+    request_failure(message, value) { host.failures.push([asBytes(message), value]); },
     listener() {
       return {kind: 'listener', subscribe(emit) {
         host.listeners.add(emit);
@@ -113,9 +132,11 @@ export function makeHost(context) {
         };
       }};
     },
+    pin_hold_request() { return host.hooks.pinHoldRequest(); },
+    pin_hold_listener() { return host.hooks.pinHoldListener(); },
     io_done() { host.ioDone++; },
     io_read(bytes) { host.ioReads.push(bytes.slice()); },
-    io_failure(message, value) { host.ioFailures.push([message.slice(), value]); },
+    io_failure(message, value) { host.ioFailures.push([asBytes(message), value]); },
     r1_handle_first: Object.freeze({r1: 'first'}),
     r1_handle_last: Object.freeze({r1: 'last'}),
     r1_start_source() { return host.hooks.r1Start(); },
@@ -128,7 +149,7 @@ export function makeHost(context) {
     r1_release_result(position) { host.hooks.r1Release(position); },
     r1_response_throw() { host.hooks.r1Throw?.(); throw host.r1Thrown; },
     r1_response_observe(message, value, hasThrown) {
-      host.r1Responses.push({message: message.slice(), value, hasThrown,
+      host.r1Responses.push({message: asBytes(message), value, hasThrown,
         units: host.controls.snapshot().units});
     },
   };
@@ -153,6 +174,7 @@ export function makeHost(context) {
     host.controls = host.instance = host.r1Thrown = undefined;
     host.hooks.r1Release = host.hooks.r1Throw = undefined;
     host.hooks.r1Start = host.hooks.r1Listen = undefined;
+    host.hooks.pinHoldRequest = host.hooks.pinHoldListener = undefined;
     host.r1Responses.length = 0;
     // Awaited assertion promises hold returned Errors and their native stack closures.
     host.checks.length = 0;

@@ -34,10 +34,9 @@ addToLibrary({
   titan_browser_host_state_closed: state => TitanBridge.trusted('closeState', state >>> 0),
 
   titan_browser_host_callable__deps: ['$TitanBridge'],
-  titan_browser_host_callable__sig: 'viiip',
-  titan_browser_host_callable: (state, slot, generation, signature) =>
-    TitanBridge.trusted('registerCallable', state >>> 0, slot >>> 0, generation >>> 0, signature >>> 0),
-
+  titan_browser_host_callable__sig: 'viii',
+  titan_browser_host_callable: (state, slot, generation) =>
+    TitanBridge.trusted('registerCallable', state >>> 0, slot >>> 0, generation >>> 0),
   titan_browser_host_callable_closed__deps: ['$TitanBridge'],
   titan_browser_host_callable_closed__sig: 'viii',
   titan_browser_host_callable_closed: (state, slot, generation) =>
@@ -67,11 +66,10 @@ addToLibrary({
     TitanBridge.response(response, state, () => Module['titanBrowserBridge'].binding(name >>> 0, length >>> 0, state >>> 0)),
 
   titan_browser_host_call__deps: ['$TitanBridge'],
-  titan_browser_host_call__sig: 'viiiipip',
-  titan_browser_host_call: (state, slot, generation, argc, args, kind, response) =>
+  titan_browser_host_call__sig: 'viiiipp',
+  titan_browser_host_call: (state, slot, generation, argc, args, response) =>
     TitanBridge.response(response, state, () => Module['titanBrowserBridge'].hostCall(
-      state >>> 0, slot >>> 0, generation >>> 0, argc >>> 0, args >>> 0, kind >>> 0)),
-
+      state >>> 0, slot >>> 0, generation >>> 0, argc >>> 0, args >>> 0)),
   titan_browser_host_start__deps: ['$TitanBridge'],
   titan_browser_host_start__sig: 'viiiipiiiiip',
   titan_browser_host_start: (state, slot, generation, argc, args, successSlot, successGeneration,

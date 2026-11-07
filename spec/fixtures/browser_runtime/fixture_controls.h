@@ -12,6 +12,7 @@ EM_JS(void, gate_test_publish, (), {
   if (!publish) return;
   publish(Object.freeze({
     snapshot: () => Object.freeze({owner: !!backend.owner, safe: backend.safe(),
+      active: !!owner.active,
       current: backend.current, contexts: backend.contexts.size,
       operationId: owner.operationId, slots: owner.slots.size,
       units: [...owner.slots.values()].reduce((n, slot) => n + slot.units, 0),

@@ -10,7 +10,7 @@ export async function run(context) {
     peer.instance = image.create({locateFile: image.locateFile,
       bindings: {
         __titanTest(controls) { peer.controls = controls; },
-        publish(name, callback) { peer.callbacks.set(new TextDecoder().decode(name), callback); },
+        publish(name, callback) { peer.callbacks.set(name, callback); },
       },
       stdout(bytes) {
         const snapshot = peer.controls.snapshot();
@@ -47,7 +47,7 @@ export async function run(context) {
         const call = peer.instance.call(peer.callbacks.get(name));
         context.assert(call instanceof Promise, 'production protected invoke did not return a promise');
         const result = await call;
-        context.assert(Array.isArray(result) && result.length === 0, 'zero-result lifetime callback returned a nonempty carrier');
+        context.assert(result === null, 'nil-result lifetime callback returned a non-null value');
         const snapshot = peer.controls.snapshot();
         context.assert(snapshot.safe && !snapshot.owner && snapshot.current === 0,
           'a completed promised entry retained execution ownership');
