@@ -110,18 +110,25 @@ code that follows it. [Foreign functions](foreign-functions.md) and the
 same pairs for agents under "Guard-rails for standard-library and runtime C",
 with compiled examples.
 
-1. **Layering.** Wrong (`titan-browser.c` at `843b446e`):
-   `titan_browser_root_callable` validates the closure, copies its signature
-   into a new userdata and roots it, all in C. Right: the libuv callbacks are
-   Titan foreign functions that only recover their context and call a Titan
-   handler ([standard-library foreign
-   callbacks](foreign-functions.md#standard-library-foreign-callbacks)); their
-   one C helper, `titan_uv_push_owner` in `titan/uv/callback.h`, wraps the
-   `setuvalue` macro that the FFI cannot spell.
+1. **Layering.** Wrong (`titan-browser.c` at `843b446e`): a 600-line runtime C
+   file (`titan-browser.c`) hand-writing the Emscripten exports, the image
+   launcher `protected_entry`, a C `states` linked list, and
+   `titan_browser_root_callable` (validating the closure, copying its signature
+   into a new userdata, and rooting it in C). Right: `titan-browser.c` is
+   gone; `browserentry.lua` generates the launcher (sharing `errmsg_tostring`
+   with native `main`) and one-line weak forwards (`titan_browser_invoke`,
+   `titan_browser_release_callable`) to public `foreign function`s in
+   `titan/browser.browser.titan`; `attach`, `close_state`, `state_gc` (`__gc`
+   pointer), and `mark_closing` are foreign functions in `titan.browser`; the
+   cross-state token map lives in the JavaScript registry; and the libuv
+   callbacks are local `foreign function`s whose one C helper,
+   `titan_uv_push_owner` in `titan/uv/callback.h`, wraps the `setuvalue` macro
+   that the FFI cannot spell ([standard-library foreign
+   callbacks](foreign-functions.md#standard-library-foreign-callbacks)).
 2. **Plain C stays plain C.** Wrong (`titan-browser.c` at `843b446e`):
    `root_callable_worker`, pushed with a light-userdata context and run under
    `lua_pcall` only so that `luaL_ref` can raise, be caught, `luaL_unref`'d and
-   raised again. Right: a C helper that returns a status for its caller to act
+   raised again. Right: a helper that returns a status for its caller to act
    on, as each `uv_*` call returns its status to the Titan wrapper.
 3. **Protected work belongs in Titan.** Wrong (`titan-browser.c` at
    `843b446e`): the invoke and release entries each run a C worker under
@@ -129,14 +136,16 @@ with compiled examples.
    (`original_trace`, `error_description`, `restore_trace`) to rebuild the
    message and trace that a Titan `catch` has as `error` and `traceback`.
    Right: `timer_callback` and its handler `timer_deliver` in
-   `titan/uv/uv.native.titan`, and `invoke_entry` and `release_entry` in
-   `titan/browser.browser.titan`.
+   `titan/uv/uv.native.titan`, and `invoke` / `invoke_entry` and
+   `release_callable` / `release_entry` in `titan/browser.browser.titan`.
 4. **Pinning.** Wrong (`titan-browser.c` at `843b446e`): the first bridge's
    callable roots and generations, `luaL_ref` slots in tables hanging off a
    registry userdata's uservalues. Right: `loop.handles`, which `timer_init`
    sets and `timer_closed` clears ([public native
    owners](libuv-extension-guide.md#public-native-owners)), and the per-state
-   `pins_by_slot`/`pins_by_fn` module Maps in `titan/browser.browser.titan`.
+   `pins_by_slot` Array and `pins_by_fn` Map in `titan/browser.browser.titan`
+   (with the Lua registry used only in `attach` to anchor the earliest
+   `state_gc` userdata before any module variable exists).
 5. **Rooting.** Wrong (`browser.browser.titan` at `843b446e`): `invoke`,
    `request` and `callable` push their parameters, and `invoke` and `request`
    push an `extra` buffer declared inside an `if`. Right: an owner local

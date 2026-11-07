@@ -19,7 +19,7 @@ are never evaluated. A JavaScript function needing a particular `this` must be
 bound by the host. `binding(name)` returns a `BrowserHandle` for the exact
 value, including `false`, `0`, `null`, and `undefined`.
 
-```titan
+```text
 record BrowserHandle
 record BrowserRequest
 record BrowserError
@@ -70,8 +70,9 @@ runtime type without separate signature descriptors:
 
 Calls into JavaScript are `target:call(...)` with one `BrowserValue` result,
 since a JavaScript function returns one value; callers `case` on the returned
-`BrowserValue`. Several values travel as one Array copied through the protobuf
-codec path, which a higher-level binding library can wrap.
+`BrowserValue`. A JavaScript Array or plain object crosses as an opaque
+`is_handle(BrowserHandle)`, and a Titan callable likewise returns one
+`BrowserValue`.
 
 Integer values cross as signed 64-bit integers and JavaScript `BigInt`, even
 below $2^{53}$. Write `5n`, not `5`, on the JavaScript side. Neither direction
@@ -122,8 +123,8 @@ or thrown exceptions are ordinary live handle values, not empty-slot sentinels.
 A Titan function of type `function (...: BrowserValue): BrowserValue` crosses
 into JavaScript as `BrowserValue.is_callable(fn)` (or as the `completion` /
 `failure` callback of `start` / `listen`).
-A callable is pinned when it first crosses into JavaScript, in a per-state
-module variable: one slot and one JavaScript wrapper per function per state, so
+A callable is pinned when it first crosses into JavaScript: one slot and one
+JavaScript wrapper per function per state, so
 the same function always reaches JavaScript as the same wrapper (`w1 === w2`),
 and passing that wrapper back to Titan recovers the original function. Two
 exported closures sharing a mutable local keep sharing that cell; this is not
@@ -139,9 +140,14 @@ JavaScript wrapper's `release()` is synchronous and logically invalidates that
 wrapper immediately; physical unpinning in Titan occurs at a safe point once no
 holder remains. Re-exporting the same callable before a queued wrapper release
 is delivered cancels that queued release and issues a fresh live wrapper. If a
-crossing fails before JavaScript takes the value (for example, a later argument
-raises, a host call fails before decoding, or `start` refuses), any provisional
-pin created for that crossing is rolled back in the same operation.
+crossing fails before JavaScript receives the callable wrapper (for example, a
+later argument raises during marshalling, or a host `call` or `start` target is
+not callable), any provisional pin created for that crossing is rolled back in
+the same operation. Once a wrapper has been passed into a host binding
+function, it remains live even if that binding later throws, returns an
+unmarshallable value, or returns an invalid request ownership form; for a
+refused `start` or `listen`, only the request's `completion` and `failure`
+holds are rolled back.
 
 Cross-heap cycles are explicit ownership: a JavaScript object retaining a
 Titan callable wrapper which retains a `BrowserHandle` back to that object
@@ -166,7 +172,7 @@ For example, this complete module publishes two closures over one counter:
 ```titan
 local browser = import "browser"
 local type Value = browser.BrowserValue
-local function expect_integer(v: browser.BrowserValue): integer
+local function expect_integer(v: Value): integer
   case v
   when is_integer(n) then return n
   end
@@ -177,11 +183,11 @@ function main(args: {string}): integer
   local count = 0
   local publish = browser.binding("publish")
   defer publish:close()
-  local increment = function(...: browser.BrowserValue): browser.BrowserValue
+  local increment = function(...: Value): Value
     count = count + expect_integer(...[1])
     return Value.is_integer(count)
   end
-  local read = function(...: browser.BrowserValue): browser.BrowserValue
+  local read = function(...: Value): Value
     return Value.is_integer(count)
   end
   publish:call(Value.is_callable(increment), Value.is_callable(read))
@@ -293,7 +299,11 @@ Both methods invoke the host binding synchronously with the supplied
 - For both, `failure` receives two arguments:
   `(BrowserValue.is_string(message), BrowserValue.is_handle(thrown))`—the
   diagnostic message text and a `BrowserHandle` retaining the exact
-  thrown/rejected JavaScript value (even when a primitive was thrown).
+  thrown/rejected JavaScript value (even when a primitive was thrown). If a
+  `start` settlement value or `listen` emission argument cannot be marshalled
+  (for example, an out-of-range `BigInt`, an ill-formed UTF-16 string with a
+  lone surrogate, or a foreign/released callable wrapper), that marshalling
+  `TypeError` or bridge handle error is delivered to `failure` in the same way.
 
 Because callables are not signature-checked at registration time, type errors
 move from registration to call time: if `completion` or `failure` raises when
@@ -348,9 +358,9 @@ Warnings from Lua finalizers are stderr bytes, not an invented failed call.
 ## C SDK
 
 The installed `titan/browser.h` declares the checked wasm32 scalar/slot,
-response, completion, state-registry, callable pin/unpin shims, and byte-I/O
-boundary. Its API requires the same instance execution owner as the generated
-gateway; it is not a raw `lua_State *` application gateway. See
+response, completion, and state-registry boundary. Its API requires the same
+instance execution owner as the generated gateway; it is not a raw
+`lua_State *` application gateway. See
 [the bridge implementation](../implementation/browser-bridge.md) for exact
 layout, ownership, initialization, and close rules. Native SDKs may install the
 header, but native providers do not contain `titan.browser` or a fake bridge

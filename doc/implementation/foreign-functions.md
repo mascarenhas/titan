@@ -460,6 +460,12 @@ foreign functions compiled into the owning module objects:
   `http.o`, and `api.o`.
 * `titan/transfer.titan` and `titan/thread/*.titan` define the C-ABI packet and
   channel callbacks.
+* `titan/browser.browser.titan` defines the browser bridge's public foreign
+  functions (`attach`, `close_state`, `invoke`, `release_callable`) and local
+  foreign functions (`state_gc` for `__gc`, `mark_closing`); `browserentry.lua`
+  emits one-line weak C forwards (`titan_browser_invoke`,
+  `titan_browser_release_callable`) to those public foreign functions, so the
+  browser runtime needs no hand-written C file.
 
 The runtime SDK archive therefore contains only `titan.o` and `minicoro.o`; no
 adapter object carries callback code. The Lua-internal macro bridges these

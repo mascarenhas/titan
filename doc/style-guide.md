@@ -608,17 +608,39 @@ justifies each one against a rule; [standard-library
 maintenance](implementation/standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do)
 pairs each rule with a wrong and a right example.
 
-1. **Layering.** Write the work in Titan. Ordinary C operations, including
-   reviewed public libuv calls, belong in Titan behind `foreign import`, with
-   their error translation, rooting, and ownership in the Titan wrapper rather
-   than in a C forwarding function. A C-ABI callback is a restricted
-   `foreign function`. Write C only where Titan cannot: an exact exported C
-   name (an Emscripten export), a protected call before any Titan module
-   exists (running the image initializer), or an opaque-layout or
-   compile-time fact the FFI cannot spell, such as a required function-like
-   macro. Such C is a narrow, namespaced shim that recovers its context and
-   hands over to Titan at once, with an immediately preceding comment that
-   names and justifies the exception.
+1. **Layering.** Write the work in Titan; do not add hand-written runtime C
+   files for standard-library bindings. Place each piece of a native boundary
+   by how C reaches it:
+   - *Called through a function pointer* (libuv callbacks, `__gc` and other
+     `lua_CFunction`s): a `local foreign function`, address taken.
+   - *Called by name where any C symbol works*: a public `foreign function`; C
+     callers use the generated `.titan.h` (or the mangled declaration).
+   - *Needs an exact unmangled C symbol* (an Emscripten export, a symbol a C
+     library looks up): a compiler-generated one-line forward to a public
+     `foreign function` (with a weak declaration when the owning module may be
+     absent), never a hand-written runtime C wrapper.
+   - *Program entry and image lifecycle* (native `main`, browser
+     `initialize`/`entry`/`close`): a compiler-generated launcher sharing one
+     error-conversion and trace implementation; protected calls live there, not
+     in runtime libraries.
+   - *Data placement*: per-state roots in module variables or owner fields;
+     cross-state maps with the host that already owns the lifetime (such as the
+     browser's JavaScript registry), not C statics in runtime code; the Lua
+     registry only to anchor an object before any module variable exists,
+     explicitly justified.
+   - *Struct access and marshalling*: in Titan through `foreign import`; the
+     only C in headers is one-line inline macro bridges (`lmacro_*` in
+     `titan/ffi.h`) for macros the FFI cannot spell.
+   - *Test-only C*: stays in test fixtures.
+
+   ```text
+   -- In titan/browser.browser.titan: public foreign function called by the
+   -- compiler-generated `titan_browser_invoke` weak forward in browserentry.lua.
+   foreign function invoke(
+       raw_id: unsigned long long, raw_token: unsigned int,
+       raw_slot: unsigned int, raw_generation: unsigned int,
+       raw_argc: unsigned int, raw_args: const *void): int
+   ```
 2. **Plain C stays plain C.** Data that only C uses lives in C locals,
    formals, and return codes, never on the Lua stack. Never `lua_pcall` a C
    function that Lua never sees just to get a protected region; return a
@@ -631,7 +653,9 @@ pairs each rule with a wrong and a right example.
    the stack top.
 4. **Pinning.** Per-state roots live in a module variable (a Map or Array) or
    in an owner record's field, as `loop.handles` does in `titan.uv`, never in
-   `luaL_ref` slots, registry tables, or userdata uservalue tables.
+   `luaL_ref` slots, registry tables, or userdata uservalue tables (except a
+   justified pre-module lifecycle anchor such as `attach`'s `state_gc`
+   userdata).
 5. **Rooting.** A Titan parameter is rooted by its caller's provenance, and a
    local by its frame slot, which is refreshed at its declaration and at every
    assignment and is reused by sibling scopes once its block ends ([the

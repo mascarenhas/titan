@@ -11,146 +11,147 @@ loader, the runner, deployment, and fatal engine classifications.
 
 | Owner | Files |
 | --- | --- |
-| Installed C contract | `titan-runtime/titan/browser.h` |
-| State-token list, launcher entry, and C→Titan shims | `titan-runtime/browser/titan-browser.c` |
-| Browser-only Titan API, pin table, and protected invoke/release entries | `titan/browser.browser.titan` |
-| Generated image C exports | `titan-compiler/browserentry.lua` |
-| Generated module bootstrap/main | `driver.browser_entrypoint_contents` |
+| Installed C layout and JS import contract | `titan-runtime/titan/browser.h` |
+| Browser-only Titan API, pin table, foreign trampolines, and protected entries | `titan/browser.browser.titan` |
+| Generated image launcher and weak C export forwards | `titan-compiler/browserentry.lua` and `driver.browser_entrypoint_contents` |
 | JSPI owner, bridge imports and loader | `titan-runtime/browser/titan-browser-library.js`, `titan-browser-bridge.js`, and `titan-browser.mjs` |
 | Browser runtime/provider staging | `Makefile` and `scripts/browser_sdk.lua` |
 
-The runtime C object is added only to the browser runtime archive: the native
-runtime archive keeps its four objects, and the native standard provider has
-no `titan.browser`. The common installed header is not a native placeholder.
-The browser provider adds `titan.browser` beside the thirteen shared modules.
-It imports only `gc`, and the [member
+There is no hand-written C runtime file for the browser bridge: `libtitan.a`
+contains the same four objects (`titan.o`, `minicoro.o`, `titan_path.o`,
+`ltitanlib.o`) on both native and browser targets. The native standard provider
+has no `titan.browser`, while the browser provider adds `titan.browser` beside
+the thirteen shared modules. It imports only `gc`, and the [member
 inventory](browser-target.md#interface-derived-member-inventory) skips it
 because it has no native interface to compare.
 
-## Persistent lifetime and C shims
+## Generated launcher and foreign-function trampolines
 
-Generated initialization and main are separate workers. Initialization creates
-the owner state, attaches the C state-token record, then opens libraries,
-installs the existing Titan searcher/preloads, and requires image roots. It
-does not call main. Main retrieves the initialized root from the ordinary
-loaded-module table, constructs its counted byte-argument Array, and invokes
-main once through the existing optional bootstrap hook. It does not close
-Lua. Module initialization remains idempotent through the existing protocol.
+`browserentry.lua` and `driver.browser_entrypoint_contents` generate the image
+launcher next to native `main`, following the [Titan-first native-binding
+rules](../style-guide.md#write-native-bindings-titan-first):
 
-The runtime remembers successful initialization separately from attempted
-initialization and main-started. A partially initialized state remains owned
-and disposable after an ordinary failure, but cannot run main or an owner
-application callback. The loader saves the failed initialization record and
-report for a subsequent failed/status1 run without a repeated report.
-
-Every public Lua-running entry consumes a nonzero operation id and expected
-operation kind from the existing JSPI execution owner. The owner spans private
-coroutine transfers, allocation-triggered GC cleanup, and terminal engine
-retirement. Public loader admission additionally spans marshaling, every
-contained C entry, and output flush. A sink or import cannot admit another
-application operation between contained entries.
-
-Before publishing an operation, reverse-call argument snapshotting reads only
-primitive tags, well-formed UTF-16 strings, captured TypedArray tag/length
-getters and `set`, and WeakMap callable identities. This keeps `call` and
-`notify` snapshots synchronous without a host-code gap before publication.
+1. **Shared launcher and error conversion (`browserentry.lua`):** Initialization
+   creates the owner `lua_State *`, attaches its state record (or opens a bare
+   host state token in C-only images that do not link `titan.browser`), opens
+   the Lua libraries, installs the Titan searcher and preloads, and requires
+   the root module without calling `main`. `titan_browser_entry` retrieves the
+   initialized module from `LUA_LOADED_TABLE`, constructs its counted string
+   Array, and runs `main` once. Both run under `titan_browser_protected_entry`
+   with plain `errorhandler` as the `lua_pcall` message handler. On failure,
+   `titan_browser_complete_failure` snapshots `TITAN_BACKTRACE_KEY` on the
+   stack, converts the final escaped error object once under `lua_pcall` using
+   the `errmsg_tostring` and `strip_bootstrap_prefix` implementation shared
+   with native `main`, restores the `TITAN_BACKTRACE_KEY` snapshot, writes
+   `<progname>: <message>` and `stack traceback:` to `stderr`, and flushes the
+   completion. Caught raises inside module initializers are never converted,
+   and stale traces never leak into `main`. The owner state keeps
+   `luaL_newstate`'s warning handler, including its prefix, warning controls,
+   and multipart messages; its stderr output enters the byte queue. Attaching
+   an independent state preserves the warning handler its creator chose.
+2. **One-line weak forwards (`titan_browser_invoke`,
+   `titan_browser_release_callable`):** `browserentry.lua` declares
+   `titan_browser_\u2133_invoke_titan`,
+   `titan_browser_\u2133_release_callable_titan`,
+   `titan_browser_\u2133_attach_titan`, and
+   `titan_browser_\u2133_close_state_titan` as `__attribute__((weak))`. When
+   `titan.browser` is linked into the image, `titan_browser_invoke` and
+   `titan_browser_release_callable` forward in one line to those public
+   `foreign function`s in `titan/browser.browser.titan`; in C-only protocol or
+   probe images without `titan.browser`, the weak pointers are `NULL` and the
+   exports reject cleanly with `titan_browser_invalid_entry` (`TITAN_BROWSER_STATE`).
+3. **Foreign trampolines (`invoke`, `release_callable`) and protected Titan
+   entries (`invoke_entry`, `release_entry`):** The public foreign functions in
+   `titan/browser.browser.titan` use header-free C primitive parameter types so
+   consumers of `"browser"` need no `foreign import`. Each trampoline checks
+   `titan_browser_entry_allowed`, recovers the `titan_browser_state_record *`
+   from the JS registry via `titan_browser_host_state_record(token)`, checks
+   close admission and `lua_checkstack(L, LUA_MINSTACK)`, recovers `module`
+   (`upvalue[0]`) and the native entry pointer (`upvalue[2]`) from the handler
+   closure stored in the state record, installs `errorhandler` as `L->errfunc`,
+   calls `invoke_entry` or `release_entry`, and restores `L->errfunc` and the
+   stack top.
+4. **Function-scope protected boundaries:** Both `invoke_entry` and
+   `release_entry` have a function-scope `catch` with an allocation-free
+   fallback completion (`complete_fallback_failure`) wrapping an inner
+   `do ... catch` block, so even an out-of-memory error at entry setup or
+   during error formatting/rollback emits one `TITAN_BROWSER_TITAN_ERROR`
+   completion and leaves the instance usable. Non-string error objects raised
+   by callables are formatted in Titan (`format_error_value` under `catch`)
+   using the same `__tostring` / `(error object is a <type> value)` rule as the
+   launcher while preserving the outer `catch`'s `traceback` local.
 
 | Export | Operation kind | Role |
 | --- | --- | --- |
-| `titan_browser_initialize(uint64_t)` | INITIALIZE1 | Protected bootstrap, once |
-| `titan_browser_entry(uint64_t, int, argv, lengths)` | MAIN2 | Protected main, once |
-| `titan_browser_invoke(uint64_t, state, slot, generation, argc, args)` | INVOKE3 | C shim to Titan `invoke_entry` |
-| `titan_browser_release_callable(uint64_t, state, slot, generation)` | RELEASE4 | C shim to Titan `release_entry` |
-| `titan_browser_close(uint64_t)` | CLOSE5 | Owner-held state close |
+| `titan_browser_initialize(uint64_t)` | INITIALIZE1 | Generated protected bootstrap, once |
+| `titan_browser_entry(uint64_t, int, argv, lengths)` | MAIN2 | Generated protected main, once |
+| `titan_browser_invoke(uint64_t, state, slot, generation, argc, args)` | INVOKE3 | 1-line weak forward to `titan.browser` `invoke` |
+| `titan_browser_release_callable(uint64_t, state, slot, generation, wrapper)` | RELEASE4 | 1-line weak forward to `titan.browser` `release_callable` |
+| `titan_browser_close(uint64_t)` | CLOSE5 | Generated owner-held state close (`close_state` or fallback) |
 
 `operation_id` is an instance-local never-reused unsigned 64-bit identity.
 JavaScript uses a BigInt counter; exhaustion rejects instead of wrapping to
 zero. Export return values are admission only. Exactly one completion with
 the same id/kind carries application values/status/errors, and the loader
 settles only after both completion and promised-export/context retirement.
-A private engine entry is not an application gateway. The only owner-free
-exports are documented C allocation/free and backend stack-metadata helpers.
+A private engine entry is not an application gateway. The loader uses
+Emscripten's exported `_malloc` and `_free` for temporary argument buffers.
 
-## Protected launcher helper and Titan entry shims
+Close is deliberately different. `close_state` (a public `foreign function` in
+`titan/browser.browser.titan`) marks the state closing, clears `configured = 0`,
+and invokes `lua_close` directly while the JSPI execution owner is held. It is
+never a `lua_pcall` on the Lua state being freed. Lua's own per-finalizer
+protection remains authoritative. Warnings alone do not convert successful
+close into an invented application failure. Both libc streams are flushed,
+preserving the first error while attempting both; the loader then handles
+copied stream queues and disposal outcomes.
 
-`titan-browser.c` follows the [Titan-first native-binding
-rules](../style-guide.md#write-native-bindings-titan-first):
+## State records and the Titan pin table
 
-1. **Image initialization and main (`protected_entry`):** Because
-   `titan_browser_initialize_image` runs before any Titan module exists and
-   `titan_browser_main_image` must also work in C-only protocol/probe images
-   that do not link `titan.browser`, those two launcher entries share one
-   `lua_pcall` with `entry_errorhandler`. The message handler captures the
-   unified trace via `errorhandler` and converts non-string error objects while
-   preserving the original `TITAN_BACKTRACE_KEY` snapshot even if `__tostring`
-   raises.
-2. **Invoke and release shims (`titan_browser_invoke`,
-   `titan_browser_release_callable`):** When `titan.browser` initializes in a
-   Lua state, its `do ... end` block roots its entry closures in module
-   variables (`invoke_handler`, `release_handler`, `pin_handler`,
-   `unpin_handler`) and registers the module `Udata *`, `CClosure *`, and
-   native entry pointers with `titan_browser_configure`. Each exported C shim
-   checks `titan_browser_entry_allowed`, looks up `bridge_state` by token,
-   reserves `LUA_MINSTACK` with `lua_checkstack`, saves `lua_gettop`, calls the
-   Titan native entry directly, and restores `lua_settop`. Neither shim uses
-   `lua_pcall`.
-3. **Titan `invoke_entry` and `release_entry`:** Both are ordinary Titan
-   functions in `titan/browser.browser.titan` whose whole body is protected by
-   `catch`. `invoke_entry` reads the `titan_browser_value` argument array
-   through the FFI, builds the `{BrowserValue}` arguments, rechecks incoming
-   handle/callable identities through the nonthrowing
-   `titan_browser_host_identity_live` import, invokes the pinned Titan
-   function, encodes its single `BrowserValue` result, rechecks outgoing
-   handle/callable liveness, flushes `stdout` and `stderr`, and calls
-   `titan_browser_complete`. On any raise, the `catch` block rolls back any
-   provisional pin from the failed encoding, formats `error`, and completes
-   with `TITAN_BROWSER_TITAN_ERROR`, the message bytes, and the `traceback`
-   string captured by Titan's error boundary.
+`attach` (a public `foreign function` in `titan/browser.browser.titan`) runs
+before `luaL_openlibs`, preloads, or any user initializer, and is idempotent.
+Its 0-uservalue `titan_browser_state_record` userdata is the first finalizable
+object in that state and is anchored in the Lua registry under
+`"__titan_browser_state"` (the pre-module lifecycle exception to rule 4: no
+module variable exists yet when `attach` runs, and the userdata must survive
+until `lua_close` finalizes it last). `attach` passes the record pointer to
+`titan_browser_host_state_open(state)`, which allocates the opaque host state
+token and maps `token -> record` in the JS owner's `stateRecords` table; no
+JavaScript application API exposes a `lua_State *`, and no C static state list
+exists.
 
-Close is deliberately different. `titan_browser_close_state` marks the state
-closing, clears the cached module and entry pointers, and invokes `lua_close`
-directly while the JSPI execution owner is held. It is never a `lua_pcall` on
-the Lua state being freed. Lua's own per-finalizer protection remains
-authoritative. Warnings alone do not convert successful close into an invented
-application failure. Both libc streams are flushed, preserving the first error
-while attempting both; the loader then handles copied stream queues and
-disposal outcomes.
+When `titan.browser` initializes in a state, its `do ... end` block calls
+`attach(L)`, caches the `titan_browser_state_record *` in its module variable
+`state_record`, roots `invoke_entry` and `release_entry` in module variables,
+and writes their `TValue` closures into `state_record` (`configured = 1`).
 
-## State tokens and the Titan pin table
+Lua closes latest-finalized-first. The earliest `titan_browser_state_record`
+userdata therefore invalidates last, after coroutine unwinding and user/module
+finalizers. Its `state_gc` finalizer (a `local foreign function` in
+`titan/browser.browser.titan`) calls `mark_closing`, clears `state.token = 0`,
+and notifies `titan_browser_host_state_closed(token)`, which removes the state's
+record, callable targets, notifications, requests, and JavaScript slot units
+once. Explicit close and reachability close use that same endpoint. Detach does
+not invalidate anything; the caller remains responsible for a later close.
 
-`titan_browser_attach` runs before `luaL_openlibs`, preloads, or any user
-initializer. Its 0-uservalue `bridge_state` userdata is the first finalizable
-object in that state and is strongly rooted in the Lua registry. The C list
-maps opaque host-issued state tokens to live `bridge_state` records; no
-JavaScript application API exposes a `lua_State *`. Tokens distinguish reused
-state addresses.
-
-Lua closes latest-finalized-first. The earliest `bridge_state` userdata
-therefore invalidates last, after coroutine unwinding and user/module
-finalizers. Its `state_gc` finalizer marks closing, invalidates the full
-state's callable targets, notifications, requests, and JavaScript slot units
-once via `titan_browser_host_state_closed`, unlinks its C state record, and
-clears its token. Explicit close and reachability close use that same endpoint.
-Detach does not invalidate anything; the caller remains responsible for a later
-close.
-
-An independent state must attach at construction too. `titan_browser_state` and
-`titan_browser_state_closing` walk the C `states` list without touching the Lua
-stack and detect `GCSTPCLS` on ordinary bridge use, so a direct independent
-`lua_close` closes asynchronous/reverse admission before a finalizer's first
-binding call, even when the whole instance is not disposing. Synchronous
-binding lookup/call, copied output admission, and nonthrowing release remain
-valid until final invalidation. Every new JS slot is charged to the state,
-including slots allocated during close when Lua suppresses new reachability
-finalizers.
+An independent state created in a C test fixture calls
+`titan_browser_\u2133_attach_titan(L)` at construction. `state_closing()` and
+`current_state()` in `titan/browser.browser.titan` read `state_record` from the
+module variable and check `lmacro_gc_closing(L)` (`G(L)->gcstp & GCSTPCLS`), so
+a direct independent `lua_close` closes asynchronous/reverse admission before a
+finalizer's first binding call, even when the whole instance is not disposing.
+Synchronous binding lookup/call, copied output admission, and nonthrowing
+release remain valid until final invalidation. Every new JS slot is charged to
+the state, including slots allocated during close when Lua suppresses new
+reachability finalizers.
 
 `BrowserHandle` registers the allocation-free
 `gc.finalizable<|value|>(owner, finalizer)` callback shape, initially with an
 inert slot, then adopts the live unit.
 
 Callable pinning lives entirely in `titan/browser.browser.titan` in per-state
-module variables (`pins_by_slot: {integer: Pin}`, `pins_by_fn: {value: Pin}`,
-`free_slots: {integer}`, `slot_generations: {integer: integer}`, and
+module variables (`pins_by_slot: {Pin}`, `pins_by_fn: {value: Pin}`,
+`free_slots: {integer}`, `slot_generations: {integer}`, and
 `next_slot: integer`), with no `luaL_ref`, registry tables, or uservalue tables:
 
 - One `Pin` and one JavaScript `CallableView` wrapper exist per function per
@@ -160,24 +161,30 @@ module variables (`pins_by_slot: {integer: Pin}`, `pins_by_fn: {value: Pin}`,
     holds the pin (set when the callable crosses as `BrowserValue.is_callable`
     and no live wrapper exists in JavaScript).
   - `holds: integer` counts active request and listener holds (incremented for
-    `completion` and `failure` at `BrowserHandle:start` / `BrowserHandle:listen`
-    and C SDK `titan_browser_pin_callable`).
-- JavaScript reports each hold drop once via `release_callable`:
-  `wrapper.release()` drops the wrapper hold (`wrapper_live = false`), and
-  request retirement (after any queued settlement notification finishes in
-  `drain()`, or upon cancellation/discard) drops the request's holds on
-  `completion` and `failure`. When `!pin.wrapper_live && pin.holds <= 0`,
-  `release_entry` removes the pin from `pins_by_slot` and `pins_by_fn`,
-  recycles its slot with a monotonically increasing generation, and notifies
-  `titan_browser_host_callable_closed`.
+    `completion` and `failure` at `BrowserHandle:start` / `BrowserHandle:listen`).
+- JavaScript reports each hold drop once via `release_callable(id, state, slot,
+  generation, wrapper)`: `wrapper.release()` passes `wrapper = 1` (setting
+  `wrapper_live = false`), and request retirement (after any queued settlement
+  notification finishes in `drain()`, or upon cancellation/discard) passes
+  `wrapper = 0` (decrementing `holds`). When `!pin.wrapper_live && pin.holds <= 0`,
+  `Pin:retire_if_unused()` removes the pin from `pins_by_slot` and `pins_by_fn`
+  and recycles its slot with a monotonically increasing generation.
+- Every pin allocation and hold mutation is exception-atomic: `allocate_pin`
+  undoes partial table insertions on raise before mutating `free_slots` or
+  `next_slot`, and `pin_wrapper` / `pin_request_hold` allocate and append their
+  `ProvisionalPin` rollback record before `allocate_pin` or mutating `Pin`.
 - Re-exporting a callable while its wrapper release is queued in JavaScript
-  cancels that queued wrapper release and issues a fresh `CallableView` wrapper
-  for the existing pin.
-- Any provisional pin or request hold created while marshalling a crossing that
-  fails before JavaScript takes the value (a later argument raises in Titan,
-  the host call or request start fails in `importResponse`, or result
-  validation fails before `titan_browser_complete`) is rolled back in the same
-  operation.
+  cancels only that queued wrapper release (`entry.wrapper === true`) while
+  preserving any queued request-hold drops (`entry.wrapper === false`), and
+  issues a fresh `CallableView` wrapper for the existing pin.
+- Provisional wrappers are tracked per crossing in `this.provisionalCallables`
+  and marked `exposed = true` when handed to a host binding function or decoded
+  from a successful completion. If a crossing fails before exposure,
+  `rollback_provisioned` calls `titan_browser_host_callable_closed` (which
+  discards the unexposed wrapper without touching queued request-hold drops and
+  returns `1`) and retires the pin if unused; once exposed to host JavaScript,
+  `titan_browser_host_callable_closed` returns `0` and the wrapper stays live
+  until its own `release()`.
 
 ## Fixed wasm32 layout
 
@@ -186,11 +193,10 @@ assertions check sizes and offsets for wasm32. There is no native packet
 serialization, schema codec, attachment index, or per-call JSON/protobuf step.
 
 Kinds are `NIL = 0`, `BOOLEAN = 1`, `INTEGER = 2`, `FLOAT = 3`, `STRING = 4`,
-`BYTES = 5`, `HANDLE = 6`, `CALLABLE = 7`, and `REQUEST = 8`. `REQUEST` is an
-import result kind for `host_start`, `host_read`, and completion-carrying
-`host_write`. Statuses are `OK = 0`, `TITAN_ERROR = 1`, `JS_ERROR = 2`,
-`STATE = 3`, and `MEMORY = 4`. All fields below use unsigned 32-bit widths
-unless specified otherwise.
+`BYTES = 5`, `HANDLE = 6`, `CALLABLE = 7`, and `REQUEST = 8`. `REQUEST` is the
+import result kind for `host_start`. Statuses are `OK = 0`, `TITAN_ERROR = 1`,
+`JS_ERROR = 2`, `STATE = 3`, and `MEMORY = 4`. All fields below use unsigned
+32-bit widths unless specified otherwise.
 
 ### `titan_browser_value` — 32 bytes, alignment 8
 
@@ -203,9 +209,6 @@ unless specified otherwise.
 | 20 | `length` | Exact byte count |
 | 24 | `slot` | State-local handle/callable slot |
 | 28 | `generation` | Exact live generation |
-
-`titan_browser_identity` is three u32 fields (`state`, `slot`, `generation`),
-12 bytes.
 
 ### `titan_browser_response` — 56 bytes, alignment 8
 
@@ -225,20 +228,24 @@ and raises `browser.BrowserError` after return, retaining that exact value. A
 `MEMORY`/error response without a thrown unit instead raises an ordinary
 protected memory/diagnostic error before constructing an owner; zero
 slot/generation never reaches trusted adoption. Message and `STRING`/`BYTES`
-result buffers are freed by `titan_browser_response_dispose` on every path.
-Unadopted `HANDLE`, `REQUEST`, and thrown-value units are released there too;
-wrappers clear fields when their completed Titan owner adopts a unit. Thus
-allocation while building a Titan owner/error cannot leak an unowned host slot.
+result buffers are freed by `response_dispose` in `titan/browser.browser.titan`
+on every path. Unadopted `HANDLE`, `REQUEST`, and thrown-value units are
+released there too; wrappers clear fields when their completed Titan owner
+adopts a unit. Thus allocation while building a Titan owner/error cannot leak
+an unowned host slot.
 
 For reverse-call `BrowserHandle` arguments, the marshaler initially owns
-temporary slots. The Titan constructor rejects an absent identity, registers
-its inert finalizer, and checks the actual host unit again after that
-potentially allocating setup before trusted `host_adopt(state, slot,
-generation)`. Slots never adopted are released on failed delivery. Trusted
-adoption, release, state, and callable-registration imports are nonthrowing.
-Close validates its potentially raising state access before clearing an owner's
-slot; a contained admission failure leaves the original ownership available for
-retry.
+temporary slots (`entry.temporary = true`). `new_handle` rejects an absent
+identity, registers its inert finalizer, and checks the actual host unit again
+after that potentially allocating setup before trusted
+`titan_browser_host_adopt(state, slot, generation)`, which clears
+`entry.temporary = false`. `invokeTarget`'s `finally` block releases only slots
+whose `entry.temporary` is still `true`, so a callback may store an adopted
+`BrowserHandle` and then raise without invalidating the stored handle. Slots
+never adopted are released on failed delivery. Trusted adoption, release, state,
+and callable-registration imports are nonthrowing. Close validates its
+potentially raising state access before clearing an owner's slot; a contained
+admission failure leaves the original ownership available for retry.
 
 ### `titan_browser_completion` — 48 bytes, alignment 8
 
@@ -281,7 +288,8 @@ Both directions marshal by runtime type into `BrowserValue`:
   are validated as UTF-8 in Titan before crossing into C/JS imports (so invalid
   UTF-8 raises an ordinary catchable Titan error with traceback and never
   poisons `receiveCompletion`) and decoded in JavaScript with
-  `TextDecoder('utf-8', {fatal: true})`.
+  `TextDecoder('utf-8', {fatal: true, ignoreBOM: true})`, preserving a leading
+  `U+FEFF`.
 - Genuine `Uint8Array` views (identified via the `%TypedArray%` `@@toStringTag`
   getter, without invoking Proxy traps, iterators, accessors, or species hooks)
   are copied as `TITAN_BROWSER_BYTES` (`is_bytes`) and return to JavaScript as
@@ -292,7 +300,7 @@ Both directions marshal by runtime type into `BrowserValue`:
   `Promise`s, `Proxy`s, and JavaScript functions) cross as
   `TITAN_BROWSER_HANDLE` (`is_handle`).
 
-## Request and SDK I/O boundary
+## Request boundary
 
 `host_start` receives target identity, counted `titan_browser_value` arguments,
 completion and failure slot/generation pairs, mode `START = 0` / `LISTEN = 1`,
@@ -301,8 +309,10 @@ and host invocation.
 - One-shot `start` settlement enqueues one argument (the resolved value
   marshalled by runtime type, with `undefined` mapped to `is_nil`).
 - `listen` emissions enqueue every emitted argument marshalled by runtime type.
-- Failure settlement enqueues `(is_string(message), is_handle(thrown))`, where
-  `thrown` is always wrapped in a handle slot even for a primitive rejection.
+- Failure settlement (including a `start` settlement or `listen` emission that
+  fails marshalling with `TypeError` or a handle error) enqueues
+  `(is_string(message), is_handle(thrown))`, where `thrown` is always wrapped in
+  a handle slot even for a primitive rejection.
 
 Detachable mailbox and guaranteed-terminal retained ownership, cancellation,
 listener removal, late-settlement dropping, FIFO batching, and disposal all
@@ -315,31 +325,34 @@ retirement alone does not cancel that queued completion, and the request's pin
 holds on `completion` and `failure` are released only after that queued
 notification finishes in `drain()` (or is discarded).
 
-The SDK also declares completion-carrying `host_write` and `host_read`, plus
-`titan_browser_pin_callable` and `titan_browser_unpin_callable` (which delegate
-to `pin_sdk_entry` and `unpin_sdk_entry` in `titan.browser`). Streams are
-`STDOUT = 1` and `STDERR = 2`. A write with `completion_slot == 0` is copied
-append admission and remains usable during close. Otherwise write completion is
-invoked with zero arguments; read completion receives one `is_bytes` argument
-bounded by the requested capacity; and failure receives `(is_string(message),
-is_handle(thrown))`.
-
 ## Test layers
 
 Public behavior belongs to the browser-target native Titan owner under
 `spec/stdlib/titan/browser/`, linked against the real JavaScript bridge and
-explicit test bindings. Its native cases cover exact scalars, UTF-8 strings and
-invalid-UTF-8/lone-surrogate rejection, counted bytes, original captures,
-wrapper identity and round-tripping, GC finalizers, cross-entry/STACKED
-resumption, hidden allocation cleanup, provisional pin rollback, requests, and
-SDK byte admissions. A test-owned C fixture constructs truly independent Lua
-states with the same earliest registry and exercises explicit, GC, and
-detach-then-later close. Initializer failure has a separate real Titan image
-with a suspended cleanup coroutine.
+explicit test bindings. Its native cases cover exact scalars, UTF-8 strings
+(including leading `U+FEFF` and invalid-UTF-8/lone-surrogate rejection),
+copied bytes, original captures, wrapper identity and round-tripping, GC
+finalizers, cross-entry/STACKED resumption, hidden allocation cleanup,
+provisional pin rollback (including allocation failures and host-retained
+wrappers), requests, and C stdio output. A test-owned C fixture constructs
+truly independent Lua states with the same earliest registry (`attach` /
+`close_state`) and exercises explicit, GC, and detach-then-later close.
+Initializer failure has a separate real Titan image with a suspended cleanup
+coroutine and `main` error-conversion checks.
 
 Busted owns provider/header/runtime inventories, native-target absence,
-generated bootstrap mechanics, final artifacts and link integration. The
+generated bootstrap mechanics, final artifacts, and link integration. The
 JavaScript integration driver exercises public promises, two instances,
-runtime-type marshalling, variant rejections, pin hold lifetimes, re-export
-cancelling a queued release, notification batches, disposal, sinks, requests,
-and WeakRef ownership with real linked images.
+runtime-type marshalling, variant rejections, non-string callable errors, pin
+hold lifetimes, re-export cancelling a queued release, notification batches,
+disposal, sinks, requests, and WeakRef ownership with real linked images.
+Test-only C instrumentation may hand explicit frozen controls to a supplied
+fixture binding; the generated application API never exposes the raw Emscripten
+Module or factory.
+
+Each collection case prepares and releases its targets in a helper frame that
+returns before the driver performs at most forty acknowledged-GC checks. The
+waiting frame keeps the WeakRefs and the deliberately retained host promises or
+listener continuations, not locals that formerly held the targets. This keeps a
+suspended fixture frame from conservatively retaining an otherwise retired
+object. The target set and collection oracle are the same on every engine.

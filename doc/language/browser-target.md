@@ -607,11 +607,10 @@ Options are:
 | Option | Contract |
 | --- | --- |
 | `stdout`, `stderr` | Functions receiving copied `Uint8Array` chunks, which they may keep. A sink returns `undefined` or a promise; anything else is a sink failure. An absent sink discards its stream. |
-| `stdin(capacity)` | Serves explicit byte reads from the [C SDK](standard-library-browser.md#c-sdk). It returns a `Uint8Array`, a counted `{bytes, length}` source with `length` at most `capacity`, a promise of either, or an explicit detachable or retained request form. C `stdin` is unaffected and always at end of file; without this option an SDK read fails with a bridge error. |
 | `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
 | `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
 | `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. |
-| `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks and secondary or callerless cleanup failures. A host Promise rejection instead goes to its mandatory typed failure callable. |
+| `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks and secondary or callerless cleanup failures. A host Promise rejection instead goes to its mandatory failure callable. |
 | `requestDrain()` | A coalesced announcement of queued work at a complete logical safe point; the application chooses when to call and await `drain()`. |
 | `onEngineFailure({kind, cause})` | Observes a terminal engine failure after the instance has been poisoned; `kind` is `"abort"`, `"trap"`, or `"protocol"`. Observer exceptions cannot replace that failure. |
 
@@ -634,11 +633,10 @@ cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
 message and trace remain primary while deliverable output and deferred
 retirement are still attempted. There is no cross-stream ordering guarantee.
-A completion-carrying write receives its own outcome. A C-only append failure
-is returned by the operation that flushes it and stays pending for the next
-completion-carrying write, or disposal if no such write consumes it. Empty
-flushes and unrelated output-free operations do not fail again with that
-pending error, and observing it does not report the same failure twice.
+A C-stdio sink failure is returned by the operation that flushes it, or by
+disposal if the operation already failed in Titan; empty flushes and unrelated
+output-free operations do not fail again with that error, and observing it does
+not report the same failure twice.
 
 Disposal interrupts a pending sink by detaching its continuation and making
 that stream terminal; it never overlaps the old sink with a finalizer write.
@@ -661,19 +659,22 @@ detachable. A listener uses
 events only enqueue. Cancellation signals the host; it is not proof that
 retained work has physically retired. Late and duplicate settlements never
 enter Lua after cancellation, release, state close, or disposal. If the bridge
-cannot create a request's owner, it neither starts the host source, registers
-the listener, nor appends completion-carrying output.
-Start/listen and completion-carrying byte I/O take both a success callable and
-a mandatory failure callable. One-shot `start` completion receives one
-`BrowserValue` argument (the settled value marshalled by runtime type, with
-`undefined` mapped to `is_nil()`); `listen` passes each emitted argument
-marshalled by runtime type. Failure receives `(BrowserValue.is_string(message),
-BrowserValue.is_handle(thrown))`: the diagnostic message text and a handle
-retaining the exact rejected JavaScript value (even for a primitive). Both
-outcomes enqueue and use protected delivery; a Promise rejection is not merely
-logged to an observer. If `completion` or `failure` raises at delivery time
-(for example when rejecting an unexpected argument variant), that failure is
-reported through `onNotificationError`.
+cannot create a request's owner, it neither starts the host source nor
+registers the listener.
+
+Start and listen take both a success callable and a mandatory failure callable.
+One-shot `start` completion receives one `BrowserValue` argument (the settled
+value marshalled by runtime type, with `undefined` mapped to `is_nil()`);
+`listen` passes each emitted argument marshalled by runtime type. Failure
+receives `(BrowserValue.is_string(message), BrowserValue.is_handle(thrown))`:
+the diagnostic message text and a handle retaining the exact rejected
+JavaScript value (even for a primitive). An unmarshallable `start` settlement
+or `listen` emission is delivered to `failure` as a `TypeError` (or bridge
+handle error). Both outcomes enqueue and use protected delivery; a Promise
+rejection is not merely logged to an observer. If `completion` or `failure`
+raises at delivery time (for example when rejecting an unexpected argument
+variant), that failure is reported through `onNotificationError`.
+
 **Observation and errors.** `instance.trace` is a fresh frozen `{state,
 reason}` snapshot, including before initialization. It preserves the last
 map state and reason after ordinary or poisoned disposal without retaining
@@ -709,6 +710,7 @@ substitute bytes. A Proxy around a byte array has no native TypedArray slots,
 so `run` rejects it with `TypeError` while `call` and `notify` marshal it by
 runtime type as an opaque `is_handle(BrowserHandle)` without invoking Proxy
 traps.
+
 The test runner reports observed aborts and traps even if a test catches their
 operation rejection. A completion-protocol error that the test explicitly
 handles stays local to its poisoned instance; if the operation rejection
@@ -820,8 +822,7 @@ unterminated last line) is delivered then. The state and callable handles
 remain alive until explicit disposal. The runner awaits disposal and its
 finalizer output before reporting completion. Output is binary: NUL, `0xFF`,
 and invalid UTF-8 pass through unchanged. C standard input is always at end of
-file; the loader's `stdin` option serves only explicit SDK reads, and the
-command-line runner supplies none.
+file.
 
 ### Traces
 
