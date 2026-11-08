@@ -1,7 +1,11 @@
 -- Callables that the scheduler harness invokes as calls and Task-form calls:
 -- drives that it disposes or that exit, while relinquished and mid-turn.
 
+foreign import "stdio.h"
+
 local child_state: value = nil
+-- Kept until the state closes, so its finalizer runs in dispose().
+local exit_witness: {string}? = nil
 
 local function ignore(...: Value): Value
   return Value.is_nil()
@@ -187,6 +191,11 @@ local function exit_drive(...: Value): Value
     async.request_exit(code)
     return nil
   end)
+  local witness: {string} = {}
+  gc.finalizable(witness, function (_: {string})
+    ffi.fputs("exit finalizer\n", ffi.stdout)
+  end)
+  exit_witness = witness
   async.loop()
   return Value.is_nil()
 end

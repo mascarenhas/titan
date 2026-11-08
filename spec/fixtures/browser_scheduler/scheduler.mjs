@@ -234,7 +234,7 @@ async function crowd(context, image) {
   return count;
 }
 
-// The exit latch with a running Runtime.
+// The exit latch with a running Runtime, and dispose() after an exit.
 async function exits(context, image) {
   let host = makeHost(context, image);
   try {
@@ -253,6 +253,9 @@ async function exits(context, image) {
       context.assert(error.status === 3, 'a later entry lost the exit status');
     }
     thrown(context, () => host.instance.notify(host.fn('echo'), 1n), 'EXITED');
+    await host.instance.dispose();
+    context.assert(decode(join(host.stdout)).endsWith('exit finalizer\n'),
+      `dispose() after the exit did not run the state's finalizers: ${decode(join(host.stdout))}`);
   } finally { await host.close(); }
 
   host = makeHost(context, image);

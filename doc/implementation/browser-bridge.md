@@ -469,7 +469,8 @@ cleanup and with no drive, disposal of Tasks parked on a retained request
 (`dispose()` settles only after that request does) and on a detachable one
 (its late settlement is dropped), disposal of 2,000 parked Tasks after which
 the harness's acknowledged collection must clear a `WeakRef` to the instance,
-the exit latch, and refused child-state calls during a drive.
+the exit latch with a `dispose()` afterwards that still runs the state's
+finalizers, and refused child-state calls during a drive.
 
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The
