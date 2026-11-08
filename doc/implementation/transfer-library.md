@@ -457,8 +457,8 @@ library](browser-target.md#the-browser-standard-library) because its imports
 `iteration`) reach no native-only module. It is delivered for same-instance
 data behavior: encoding, decoding, copying, and discarding packets, the scoped
 resource table, and `transfer_load_module` through the image's static preload
-table. The packet consumers (`thread`, `async`, and `lua`) are not available
-there, so no packet leaves the instance. Nominal encoding and decoding use
+table. The packet consumers (`thread`, `lua`, and `async`'s Receivers) are not
+available there, so no packet leaves the instance. Nominal encoding and decoding use
 protobuf's shared [nesting limit](protobuf-library.md#nesting-limit): 127
 accepted record levels on both native and browser targets.
 

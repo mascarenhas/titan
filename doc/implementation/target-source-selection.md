@@ -398,26 +398,32 @@ effect, and the extension adds no target setting.
 
 The standard library's native-only modules keep their canonical mains as
 target variants: the flat `titan/{timer,io,fs,net,ssl,os}.native.titan`
-and the folder mains `titan/{uv,async,http,websocket,sqlite3,lua,thread}/<name>.native.titan`.
-These thirteen families have no default and no `browser` member, so for
+and the folder mains `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`.
+These twelve families have no default and no `browser` member, so for
 `browser` the resolver selects no main: the module is absent (an import
-reports `module 'titan.<name>' not found`), and the folder's contributors
-(plain names, or `native` variants in `titan/async/`) are neither composed nor
-resolvable as flat modules. Native selection, logical names, and canonical output stems (such as
-`titan/uv/uv.titan.h`) are unchanged; only the physical main is a variant.
-The other thirteen standard modules have no variants and form the shared part
-of the [browser standard library](browser-target.md#the-browser-standard-library).
-The browser-only `titan/browser.browser.titan` is the opposite case: its
+reports `module 'titan.<name>' not found`), and the folder's contributors are
+neither composed nor resolvable as flat modules. Native selection, logical
+names, and canonical output stems (such as `titan/uv/uv.titan.h`) are
+unchanged; only the physical main is a variant. The other thirteen standard
+modules have no variants and form the shared part of the [browser standard
+library](browser-target.md#the-browser-standard-library). `titan.async` has
+the shared main `titan/async/async.titan`; its contributor families have
+`native` and `browser` members (`runtime`, `external`) or only `native` ones
+(`receiver`, `foreign`), so each target composes its own members and the
+browser drops the native-only families. The browser-only
+`titan/browser.browser.titan` is the opposite of a native-only module: its
 family has only a `browser` member, so native targets select no main for
 `titan.browser`.
 
 * The native Makefile source lists (`UV_TITAN_SOURCES` and the other stdlib
-  lists under `STDLIB_TITAN_SOURCES`) name every native source explicitly. A
-  variant follows its default when the family has one; a variant-only family
-  lists just its variants, as each native-only main does. There are no
-  wildcards. The lists are audit inventories, not Make prerequisites:
-  `titanc --incremental` certifies the module graph. The browser provider
-  instead names logical roots in `BROWSER_STDLIB_ROOTS`, so the browser-only
+  lists under `STDLIB_TITAN_SOURCES`) name every source of a native module
+  explicitly. A variant follows its default when the family has one; a
+  variant-only family lists just its variants, as each native-only main does,
+  and `ASYNC_TITAN_SOURCES` lists both members of each `async` family, so the
+  list-versus-disk audit sees every folder file. There are no wildcards. The
+  lists are audit inventories, not Make prerequisites: `titanc --incremental`
+  certifies the module graph. The browser provider instead names logical
+  roots in `BROWSER_STDLIB_ROOTS`, so the browser-only
   `titan/browser.browser.titan` appears in no native source list.
 * `spec/libuv_build_spec.lua` reads the inventory with `stdlib_source_files()`
   and groups it with `source_families()`, which uses

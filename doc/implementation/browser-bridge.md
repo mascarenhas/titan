@@ -444,7 +444,18 @@ delivery, queued and refused calls (including one made between internal
 coroutine hops), Task-form calls with `AbortSignal`, the SDK timer sources,
 output at relinquish points, disposal with a running, cleanup and shutdown
 drive, and the exit latch, under Node and Chromium in both assertion builds.
-`mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
+`mini-driver-abort.mjs` forces a checked C-stack overflow during a drive. The
+same spec builds the real `async` driver's scheduler gate, the browser-only
+test owner `spec/stdlib/titan/async/browser_tests/`, with a C helper
+(`scheduler_child.c`) that creates child states loading
+`spec/stdlib/titan/async/browser_child.browser.titan`. `scheduler.mjs` runs its
+Titan cases (Tasks over host requests across hundreds of turns, inline
+registrations, cleanup under cancellation, fatal and ordinary failures,
+combinators, channels and a listener-fed subscription, nested coroutines, and
+child-state refusals) and then drives the owner's published entries:
+Task-form calls, disposal while relinquished, mid-turn, with an orphaned
+cleanup and with no drive, the exit latch, and refused child-state calls
+during a drive.
 
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The

@@ -44,22 +44,31 @@ Thirteen shared modules form the portable part of the [browser standard
 library](browser-target.md#the-browser-standard-library): `coroutine`, `gc`,
 `iteration`, `math`, `test`, `reflect`, `json`, `protobuf`, `transfer`, `peg`,
 `string`, `url`, and `path`. None of them may gain an import path to `uv`,
-`async`, or another native-only module (`timer`, `io`, `fs`, `net`, `ssl`,
-`http`, `websocket`, `os`, `lua`, `sqlite3`, `thread`), and their only native
+`async`, `titan.browser`, or a native-only module (`timer`, `io`, `fs`, `net`,
+`ssl`, `http`, `websocket`, `os`, `lua`, `sqlite3`, `thread`), and their only native
 payload and include path is LPegLabel: a libuv, OpenSSL, llhttp, or SQLite
 header, archive, or symbol fails the [dependency-closure
 check](browser-target.md#the-dependency-closure-check) in `make browser-sdk`
 and `make titan-stdlib-browser-test`. A new shared module or member keeps
 its native signature and behavior; the [member
 inventory](browser-target.md#interface-derived-member-inventory) fails on any
-difference between the native and browser interfaces. Read a target-dependent
-constant from a target C define through `ffi`, as `coroutine`, `protobuf`,
+difference between the native and browser interfaces that it does not record.
+Read a target-dependent constant from a target C define through `ffi`, as
+`coroutine`, `protobuf`,
 `json`, and `path` do, rather than adding a `.browser.titan` copy; reserve a
 variant for a real behavioral difference. The native-only modules keep their
 canonical mains as `<name>.native.titan`, so a later browser composition adds
 a selected `.browser.titan` main or contributors without renaming them back.
 
-The browser provider's fourteenth module, `titan.browser`
+`titan.async` is a browser module through its own browser composition: its
+shared main and the `runtime.browser.titan` and `external.browser.titan`
+contributors, which import `titan.browser`. Its browser omissions and its
+opaque `ExternalWait` are recorded in the member inventory, so a new public
+`async` member that the browser cannot provide must be recorded there, and a
+shared one must type-check without `uv`. Only the browser contributors of
+`async` may import `titan.browser`.
+
+The browser provider's other target-specific module, `titan.browser`
 (`titan/browser.browser.titan`), is the one reviewed browser-only exception.
 It has no native placeholder or native interface, so the member inventory
 skips it. It imports only `gc`, defines its native entry points as foreign

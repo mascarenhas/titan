@@ -15,7 +15,7 @@ operation number.
 ## Module and type ownership
 
 `Error`, `OperationError`, `ResumeToken`, `CancellationReason<|B|>`,
-`TaskStatus<|A,B|>`, and `Task<|A,B|>` are declared in `titan/async/async.native.titan`; UV
+`TaskStatus<|A,B|>`, and `Task<|A,B|>` are declared in `titan/async/async.titan`; UV
 declares none of them. `titan.transfer` owns `TransferValue` and the native
 packet format ([transfer policy](transfer-library.md)). Async re-exports
 `TransferValue` as a transparent alias and owns `Receiver` and `ExternalWait`.
@@ -23,15 +23,18 @@ packet format ([transfer policy](transfer-library.md)). Async re-exports
 uses its own `titan_lua_value` carrier
 ([Lua chapter](lua-library.md#cross-state-transfer)).
 
-The folder's main, `async.native.titan`, holds the public Task, wait,
-combinator, channel, and subscription surface and the scheduling core.
-Contributors hold the native-only parts: `runtime.native.titan` the libuv
-backend (loop acquisition and Lua-state close, the shared wake timer, the
-libuv-typed await helpers, the driver `loop`, and `version`),
-`external.native.titan` the external wake bridge and `ExternalWait`,
-`receiver.native.titan` the cross-state `Receiver`, and `foreign.native.titan`
-`run_foreign`. The main has only a `native` member, so the browser target has
-no `titan.async` ([folder modules](folder-modules.md#titanuv-dogfooding)).
+The folder's main, `async.titan`, is shared by every target. It holds the
+public Task, wait, combinator, channel, and subscription surface and the
+scheduling core. The native contributors hold the native-only parts:
+`runtime.native.titan` the libuv backend (loop acquisition and Lua-state close,
+the shared wake timer, the libuv-typed await helpers, the driver `loop`, and
+`version`), `external.native.titan` the external wake bridge and
+`ExternalWait`, `receiver.native.titan` the cross-state `Receiver`, and
+`foreign.native.titan` `run_foreign`. On the browser target,
+`runtime.browser.titan` is the [browser driver](#browser-driver) and
+`external.browser.titan` keeps `ExternalWait` as an opaque record; the
+`receiver` and `foreign` families have no browser member and are dropped
+([target source selection](target-source-selection.md#the-resolver)).
 
 The scheduling core reaches libuv and native retirement only through seams that
 the native contributors define. Natively, `Runtime.backend` is a `Backend`
@@ -202,6 +205,67 @@ the Completion and number; terminal callbacks copy these to local roots and
 detach the old slot before settling. A shared stream cannot supply one
 completion slot to overlapping writes. Legacy callback-triple closures raise
 `"async operation already settled"` on duplicate settlement (`legacy_settle`).
+
+## Browser driver
+
+On the browser target `runtime.browser.titan` replaces the libuv backend. It
+imports `titan.browser` and drives through its low-level
+[drive interface](../language/standard-library-browser.md#driver-interface-low-level);
+the loader side (relinquish import, turn source, admission, queue, disposal
+and exit latch) is in [the browser target](browser-target.md). The browser
+`Backend` holds one field, `relinquished`, true while the driver is suspended
+in `browser.relinquish`; `Request` is `browser.BrowserRequest`.
+
+The seams have browser bodies:
+
+| Seam | Browser body |
+| --- | --- |
+| `new_backend` | `Backend {relinquished = false}` |
+| `start_backend` | raises `"async Runtime is unavailable in a non-owner browser state"` unless `browser.is_owner()` |
+| `arm_ready`, `stop_backend` | `browser.wake()` while `relinquished` (only Titan code that runs during a relinquished drive can queue work then) |
+| `unbind_backend` | nothing: no transfer loop |
+| `cancel_request` | `request:cancel()`; unreachable, because no browser member creates a cancellable wait |
+| `runtime_finalize` | the native guards, `retire_tasks_at_close`, and `active_runtime = nil` |
+| `initialize_backend` | in the owner state only, registers `spawn_call` and `shutdown_call` through the reserved `titan:driver` binding |
+| `ExternalWait` methods | raise `"internal error: ExternalWait has no browser constructor"`: no browser value of the type exists, so every `cleanup_wait` and `final_wait` is nil |
+
+`loop()` keeps the native entry rules (main thread, no current Task, no
+second drive), first refuses a non-owner state, then calls
+`browser.drive_begin()` and runs turns until no Task and no ready entry
+remain:
+
+1. After a failure, the shared per-Task recovery (`recover_task`) and
+   `cancel_shutdown_tasks`.
+2. `available = ready_count`, then `browser.deliver()` (request settlements,
+   listener events, notifications and queued calls present when it starts,
+   each outside any Task, then the deferred releases), then
+   `drain_ready(runtime, available)`. Taking `available` before delivery puts
+   a Task that a delivered completion resumed and that then yields in a later
+   turn. Delivery or drain failures go to `fail_runtime`.
+3. With no Task and no ready entry, `notify_runtime_closed`, clearing
+   `active_runtime`, and re-raising the first failure, as natively.
+4. Otherwise `browser.relinquish(ready_head == nil)`: a turn when work is
+   ready, else a wait. `RELINQUISH_DISPOSING` cancels every unfinished Task
+   with `"instance disposed"` (`cancel_for_disposal`; it repeats on each
+   disposing relinquish, so Tasks that cleanup starts are cancelled too).
+   `RELINQUISH_IDLE` records `"async Runtime became idle while Tasks were
+   waiting"` unless a failure is already recorded, then runs the shared
+   `unwind_orphans`.
+
+A `defer` clears `driving` and `relinquished` and calls
+`browser.drive_end(runtime.exit_code)`, which latches the instance as exited
+when an exit was requested; the bootstrap still returns the exit code.
+
+The loader reaches two entries through `titan:driver`. `spawn_call(target,
+settle, ...)` implements `instance.callTask`: it starts the target as a Task,
+reports `("started", cancel)` through the `settle` handle, then from a
+terminal listener one of `("succeeded", result)`, `("failed", message,
+trace)` (message by `error_text`), or `("cancelled", reason)`, and closes
+`settle`. A Task cancelled while the Runtime has an exit code reports
+nothing, so the drive's exit latch rejects the call with the exit status. It
+drives with `loop()` unless a drive is already running, in which case it ran
+as a queued call. `shutdown_call` serves `dispose()` with no drive active: it
+cancels every Task for disposal and drives their cleanup.
 
 ## Wait policies and native ownership
 
@@ -1098,6 +1162,11 @@ the Runtime until every Task and native cleanup has retired, and returns the
 first requested exit code, main's successful integer, or a failure status.
 Explicit-drive clients use `--no-uv-bootstrap` and pair `run` with `loop`
 themselves.
+
+On the browser target `initialize_backend` performs no signal or argument
+setup. In the owner state it registers the [browser driver](#browser-driver)'s
+Task-form and disposal entries; the bootstrap hook is registered on both
+targets.
 
 ### Supervised error handoff
 

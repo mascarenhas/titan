@@ -2,7 +2,8 @@
 
 Titan's public asynchronous scheduling API is the `async` module. Titan code
 imports it with `local async = import "async"`; Lua uses
-`require "titan.async"`. The module supports Linux and macOS; the Windows port remains experimental. The public
+`require "titan.async"`. The module supports Linux, macOS and the
+[browser target](#the-browser-target); the Windows port remains experimental. The public
 `titan.uv` binding supplies typed libuv owners and callbacks. `titan.async`
 combines those callbacks with Titan coroutines to own Tasks and waits. Ordinary
 applications can use `async`, `timer`, `fs`, `net`, `io`, and `os`; library
@@ -1653,7 +1654,9 @@ An async Runtime has one non-reentrant event-loop driver. Only top-level
 loop with `uv.run`, from the Lua main thread. Independent low-level clients may
 construct and drive their own public UV loop as described in the
 [UV reference](standard-library-uv.md#start-with-an-explicit-loop). Neither
-registration, a callback, nor a resumed Task drives any loop recursively.
+registration, a callback, nor a resumed Task drives any loop recursively. On
+the browser target the driver gives the page's event loop back between turns
+instead ([the browser driver](#the-browser-driver)).
 
 An ordinary completion follows this path:
 
@@ -2091,3 +2094,93 @@ caller's own `defer` must then skip that release: a flag that is set before
 the call and cleared after it returns and in `catch` is still set only after
 an abandoned wait. `lua.Lua:run_async` releases its independent state this
 way.
+
+## The browser target
+
+`async` is available on the [browser target](browser-target.md). Tasks,
+cancellation, `await` and `await_cleanup`, `suspend`, combinators, channels,
+string streams, subscriptions, close listeners and `request_exit` behave as
+this chapter describes. The members that need libuv or another thread are
+absent: `current_loop`, `await_with`, `await_cleanup_with`,
+`await_cancellable_with`, `await_cancellable`, `run_foreign`, the external-wait
+functions (`prepare_external_wait`, `prepare_native_retirement`,
+`wait_external`, `wait_external_cleanup`, `wait_external_native`), `version`,
+and Receivers (`receiver`, `send`, `Receiver`). `ExternalWait` remains only as
+a type, with no constructor and no methods, so the `final_wait` of
+`run_with_cleanup` is always `nil`. Initializing `async` on the browser
+changes no signal disposition and reads no process arguments.
+
+### The browser driver
+
+A page has one event loop, and Titan code shares it with the page. The driver
+runs Tasks in turns. A turn first delivers the host work queued when it
+begins: request settlements, listener events, notifications and queued calls,
+in order. It then runs at most 64 Tasks that were ready before the turn, and
+gives the event loop back for one macrotask (`setImmediate` in Node, a
+`MessageChannel` message in browsers, never a clamped timer). With nothing
+ready, it waits until host work settles or a call arrives. Work that a turn
+makes ready runs in a later turn, so `async.yield()` never resumes in the same
+browser task, and the page keeps running while Tasks wait or yield. A Task
+that neither finishes nor waits still blocks the page, as it blocks the
+native loop.
+
+If every remaining Task is waiting and nothing can wake one (no queued host
+work, open request or listener), the driver stops the Runtime with
+`"async Runtime became idle while Tasks were waiting"` and unwinds the waiting
+Tasks, as a native drive does with its own message.
+
+A Task waits for the host with `await`, `await_cleanup` or `suspend` around
+[host requests](standard-library-browser.md#requests-and-listeners): the
+request's completion settles the wait. Pass `suspend` a cancel action that
+cancels the request when cancellation must end the wait early; an `await` of
+host work that never settles keeps waiting through cancellation, as it does
+natively. Authored C that suspends the whole WebAssembly stack inside a Task
+(`emscripten_sleep`, `EM_ASYNC_JS`) stalls every other Task until it returns;
+use host requests instead.
+
+### Drives and entries
+
+A drive starts inside a JavaScript entry and ends with it:
+
+- The program's `main` runs as a Task through the standalone bootstrap, and
+  `run()` drives until every Task finishes.
+- A `call()` whose callable calls `async.loop()` drives until the Runtime's
+  Tasks finish.
+- `instance.callTask(callable, args)` runs the callable as a Task and drives
+  the Runtime ([Task-form calls](browser-target.md#task-form-calls)).
+
+A call or notification handler on an idle instance may start Tasks with
+`async.run`; they run at the next drive. While a drive runs, JavaScript calls
+and Task-form calls made outside any binding are queued and delivered between
+turns ([calls during a drive](browser-target.md#calls-during-a-drive)). A
+queued call runs outside any Task, and `async.loop()` inside it raises
+`"async.loop is already being driven"`.
+
+### Ownership
+
+Only the instance's owner state, the Lua state that runs its entries, drives.
+In any other state, such as one that C code created, `async.loop()` raises
+`"async.loop must be driven by the browser instance's owner state"` at once,
+whether or not the owner has Tasks waiting, and starting a Task raises
+`"async Runtime is unavailable in a non-owner browser state"`. The owner's
+drive continues, and synchronous work in other states runs as usual. While the
+owner drives, calls and notifications for other states are refused before
+they enter WebAssembly.
+
+### Exit and disposal
+
+`request_exit(code)` keeps its meaning inside a Task: the first code wins,
+every Task is cancelled with `"program exit"`, and cleanup awaits still run.
+When the drive ends, the instance is latched as exited
+([exit](browser-target.md#exit)): the entry reports the status, later entries
+reject with `TITAN_BROWSER_EXITED`, and nothing closes the page or the Node
+process. An entry that failed reports its failure even when an exit was
+requested.
+
+`dispose()` with an active Runtime cancels every unfinished Task with
+`"instance disposed"` and drives their cleanup before the state closes; with
+no drive running, disposal drives that cleanup itself. Tasks that cleanup
+starts are cancelled at the next turn. Cleanup can await host work started
+before `dispose()`, but cannot start new host work: `start` and `listen` raise
+`browser.BrowserError` with the message `"browser state is closing"`
+([disposal with a running Runtime](browser-target.md#disposal-with-a-running-runtime)).

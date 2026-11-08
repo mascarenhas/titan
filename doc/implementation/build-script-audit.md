@@ -249,8 +249,10 @@ browser SDK, emsdk, Node 26+ with JSPI and a JSPI-capable headless Chromium.
 Its root check rejects an empty or duplicate `TITAN_STDLIB_BROWSER_TEST_ROOTS`
 inventory before build setup. Under `BROWSER_SDK_ENV`, with `TITAN_PATH_0_6`
 pointing at the installed browser SDK, one installed
-`titanc -q --target browser --test --incremental` invocation compiles every
-root with `--c-source spec/fixtures/browser_runtime/close.c`.
+`titanc -q --target browser --test --incremental --no-uv-bootstrap`
+invocation compiles every root with
+`--c-source spec/fixtures/browser_runtime/close.c`; like the native
+aggregate, the owners drive their own `async` Runtimes.
 
 The image is `images/stdlib.mjs` with its `.wasm` and `.wasm.map`, below
 `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`); compiler
