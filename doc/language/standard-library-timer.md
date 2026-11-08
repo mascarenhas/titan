@@ -85,3 +85,28 @@ the native handle; it remains usable from a cancelled Task's cleanup.
 A live Ticker belongs to the Runtime that created it. It cannot be used for
 native work in another Runtime. A session closes any Ticker that application
 code leaves open once no live Task remains.
+
+## On the browser
+
+`timer` is part of the
+[browser standard library](browser-target.md#the-browser-standard-library),
+with the same functions and contract. It runs on JavaScript timers that the
+SDK owns instead of libuv, so their timing is the browser's:
+
+- `sleep(milliseconds)` arms one `setTimeout` and resumes the Task when it
+  fires. The delay is at least the requested time, subject to the browser's
+  clamping and throttling: timers in a background tab can fire much later.
+  Cancelling an accepted sleep clears its JavaScript timer at once.
+- A negative duration raises the same `OperationError`, with name `"EINVAL"`
+  and operation `"timer.sleep"`; its `code` is the browser's negated `EINVAL`.
+- `sleep(0)` and `yield()` arm no JavaScript timer. The Task resumes in a
+  later turn of the [browser driver](async-io.md#the-browser-target), after
+  the driver gives the event loop one macrotask, so never in the same browser
+  task. This also avoids the 4 ms minimum that nested `setTimeout` calls get.
+- A Ticker runs on `setInterval`. Missed or throttled intervals coalesce into
+  one pending tick, as above.
+- A Ticker left open closes when its Runtime closes, after the last Task
+  finishes, and later `tick()` calls return `false`.
+- Disposing the instance cancels every Task with `"instance disposed"`, so a
+  sleep in a Task's cleanup raises that cancellation, as natively. No new
+  JavaScript timer starts after `dispose()`.

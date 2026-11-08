@@ -338,7 +338,7 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
 4. `titanc --target browser --output <build> --source-first --incremental
    -X <titan_bin>/libtitan-lpeglabel.a <BROWSER_STDLIB_ROOTS>` publishes
    `<build>/titan.a` through ordinary library mode, which runs the executing
-   protocol check against the runtime and runner staged in step 3. The fifteen
+   protocol check against the runtime and runner staged in step 3. The sixteen
    roots and the payload are described in [the browser standard
    library](#the-browser-standard-library). No `titan.a` or manifest exists
    yet, and none is required.
@@ -348,11 +348,11 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    runs the [dependency-closure
    check](#the-dependency-closure-check) over the staged provider, the
    LPegLabel archive, and every object and link certificate under `<build>`,
-   requires exactly fifteen keys, in bytewise order: `titan.async`,
+   requires exactly sixteen keys, in bytewise order: `titan.async`,
    `titan.browser`, `titan.coroutine`, `titan.gc`, `titan.iteration`,
    `titan.json`, `titan.math`, `titan.path`, `titan.peg`, `titan.protobuf`,
-   `titan.reflect`, `titan.string`, `titan.test`, `titan.transfer`, and
-   `titan.url`; copies it to `titan.a`; and
+   `titan.reflect`, `titan.string`, `titan.test`, `titan.timer`,
+   `titan.transfer`, and `titan.url`; copies it to `titan.a`; and
    finally writes `sdk-digests` with `incremental.write_sdk_digests` and the
    existing schema.
 
@@ -412,8 +412,16 @@ outside `titan.async` is rejected on both targets, as
 `spec/coder/browser_stdlib_closure_spec.lua` checks against the installed
 native and browser providers.
 
-The other twelve standard modules are absent at compile time: their
-canonical mains are the `native` variants `titan/{timer,io,fs,net,ssl,os}.native.titan`
+The sixteenth root is `titan.timer`, whose flat variant `titan/timer.browser.titan`
+sits beside `titan/timer.native.titan` with the same public interface. It
+imports `async`, `titan.browser` and `errno.h`, and builds one-shot sleeps on
+the SDK's `titan:timeout` source and tickers on `titan:interval`
+([browser timers](libuv-runtime.md#browser-timers)). Its `Ticker` keeps its
+methods but holds a host request instead of a uv timer, so the member
+inventory records it as an opaque record.
+
+The other eleven standard modules are absent at compile time: their
+canonical mains are the `native` variants `titan/{io,fs,net,ssl,os}.native.titan`
 and `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
 ([Make inventories](target-source-selection.md#make-inventories-and-audits)).
 For `browser` the resolver finds no main, so an import reports the ordinary
@@ -423,7 +431,6 @@ them is provisional:
 
 | Modules | Browser plan (provisional) |
 | --- | --- |
-| `timer` | a browser composition over the SDK's timer sources and the async driver |
 | `io`, `os`, `lua` | browser compositions with `io.print`, streams, clocks, and Lua loading |
 | `http` | a browser composition; the only absent module that may bring llhttp into the browser closure |
 | `fs` | only together with a virtual filesystem |
@@ -442,7 +449,7 @@ unless it is built with `--no-uv-bootstrap`; otherwise the
 
 ### Provider recipe
 
-`BROWSER_STDLIB_ROOTS` in the `Makefile` names the fifteen logical roots, and
+`BROWSER_STDLIB_ROOTS` in the `Makefile` names the sixteen logical roots, and
 [`make browser-sdk`](#make-browser-sdk) step 4 compiles them in one library-mode
 `titanc --target browser` invocation. The provider's native payload and
 include path are LPegLabel only:
@@ -466,7 +473,7 @@ include path ([standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image));
 native link inputs come from invocation options, not module metadata, so the
 browser recipe states its closure explicitly. The published `titan.a` holds
-the fifteen module objects (with their split parts) and the five LPegLabel
+the sixteen module objects (with their split parts) and the five LPegLabel
 members.
 
 ### The dependency-closure check
@@ -613,8 +620,9 @@ delivered.
 | `url` | yes | none | `url.tests` | builds the URL patterns | none |
 | `path` | yes | none | `path.tests` | separator from `TITAN_PATH_WINDOWS` (POSIX on the browser) | none |
 | `async` | yes, from its shared main and browser contributors | the libuv-typed `current_loop`, `await_with`, `await_cleanup_with`, `await_cancellable_with`, `await_cancellable`; the native-only `run_foreign`, `prepare_native_retirement`, `wait_external_native`, `prepare_external_wait`, `wait_external`, `wait_external_cleanup`, `version`, `receiver`, `send`, `Receiver`; and `ExternalWait:close`, `:wait`, `:wait_cleanup`, with `ExternalWait` kept opaque | `async.tests` (its portable contributors; the rest are `.native.titan` contributors), and the scheduler gate owner `async.browser_tests` driven by the scheduler spec | builds the nil-result caches, registers `titan:driver` in the owner state, and registers the bootstrap hook | none |
+| `timer` | yes, from its browser variant `titan/timer.browser.titan` | none, with `Ticker` kept opaque | `timer.tests` (portable cases; the native-only ones are in `tests/timers.native.titan`), and the timer cases of `async.browser_tests` | none | none |
 
-The table covers the thirteen shared modules and `async`. The provider's
+The table covers the thirteen shared modules, `async` and `timer`. The provider's
 browser-only `titan.browser` has no native counterpart; its owners and tests
 are described in [browser bridge runtime](browser-bridge.md#test-layers).
 
@@ -649,22 +657,24 @@ Initialization audit:
 
 Each browser test owner imports only delivered modules, owner-local support,
 and the portable helpers `support.common.titan`, `support.runtime.titan`, and
-`support.async.titan`. Cases that need `lua`, `fs`, `thread`, `timer`, `uv`,
-or a host command live in native-only owners or contributors in the same
-source tree: `test.host_tests`, `reflect.lua_tests`, `json.lua_tests`,
+`support.async.titan`. Cases that need `lua`, `fs`, `thread`, `uv`, or a host
+command live in native-only owners or contributors in the same source tree:
+`test.host_tests`, `reflect.lua_tests`, `json.lua_tests`,
 `protobuf.resource_tests`, the `coroutine.tests` contributor
-`tests/lua_boundary_test.native.titan`, and the `async.tests` contributors
-named `*.native.titan` (libuv callbacks, Receivers, foreign work, external
-waits, child Lua states, and, until the browser has `titan.timer`, the cases
-that sleep). Same-instance `transfer` cases belong to `transfer.tests`; the
+`tests/lua_boundary_test.native.titan`, the `async.tests` contributors named
+`*.native.titan` (libuv callbacks, Receivers, foreign work, external waits,
+and child Lua states), and the `timer.tests` contributor
+`tests/timers.native.titan`. That contributor also counts the native timer
+handles that the portable timer cases check; on the browser
+`native_timers()` is nil and the scheduler gate counts JavaScript timers
+instead. Same-instance `transfer` cases belong to `transfer.tests`; the
 Task, thread, and independent-state transfer cases belong to `async.tests`'
 native contributors and `thread.tests`. Both suites share the browser roots
 and their portable cases, while target-selected contributors (such as
 `coroutine.tests`' `tests/close.browser.titan` and
 `tests/unwind_test.native.titan`) add cases to one target only.
 `support.async` keeps its libuv-driving `drive_until` in the native
-contributor `drive.native.titan`, and `async.test_support` its timer-backed
-helpers in `sleep.native.titan`.
+contributor `drive.native.titan`.
 `spec/support/stdlib_test_modules.mk` lists the browser
 roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
 `TITAN_STDLIB_TEST_ROOTS`:
@@ -672,10 +682,10 @@ roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
 ```text
 coroutine.tests iteration.tests gc.tests math.tests peg.tests
 string.core_test string.format_pack_test string.regex_test url.tests path.tests
-test.tests reflect.tests json.tests protobuf.tests transfer.tests async.tests
+test.tests reflect.tests json.tests protobuf.tests transfer.tests async.tests timer.tests
 ```
 
-All sixteen owners are compiled into `images/stdlib.mjs`, with its `.wasm`
+All seventeen owners are compiled into `images/stdlib.mjs`, with its `.wasm`
 and `.wasm.map` siblings. `TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK` rejects an
 empty or duplicate root inventory before build setup. The compiler's
 [general image bounds](#build-time-image-bounds) apply; the suite has no
@@ -1511,7 +1521,7 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
   filename inside `Type.Module` remains an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
-fifteen [browser stdlib](#the-browser-standard-library) modules resolve from it,
+sixteen [browser stdlib](#the-browser-standard-library) modules resolve from it,
 ahead of the Titan path and source. The native-only standard modules have no
 browser source either, so their imports fail with the ordinary
 `module 'titan.<name>' not found` diagnostic ([target source
@@ -2444,13 +2454,15 @@ at assertions 2 and 0), against the former fixed `-sINITIAL_MEMORY=16777216`:
 | --- | ---: | ---: | ---: |
 | `hello` program | 1,131,776 | 16,777,216 | 16,908,288 |
 | Browser stdlib suite, 15 owners | 15,147,968 | 16,777,216 | 30,932,992 |
-| Browser stdlib suite with `async.tests`, 16 owners | 19,020,192 | link fails | 34,799,616 |
+| Browser stdlib suite with `async.tests`, 16 owners | 18,991,888 | link fails | 34,734,080 |
+| Browser stdlib suite with `timer.tests`, 17 owners | 19,905,472 | link fails | 35,651,584 |
 
 Under the fixed size, the 16-owner suite fails with `wasm-ld: error: initial
-memory too small, 18203136 bytes needed`. The same objects linked with room
-(the new profile, or a fixed 64 MiB for comparison) have the 19,020,192-byte
-heap base shown. The 15-owner suite had 1,629,248 bytes of initial heap under
-the fixed size and now has 15 MiB like every image.
+memory too small, 18203136 bytes needed`, measured when it first exceeded the
+fixed size. The 16-owner row is the suite at the merged browser `async`
+(`87c15623`), and the 17-owner row adds `timer.tests` and the browser
+`timer`. The 15-owner suite had 1,629,248 bytes of initial heap under the
+fixed size and now has 15 MiB like every image.
 
 `STACK_OVERFLOW_CHECK=2` stays enabled. Each switch saves SP and the current
 stack base/end, restores the destination limits and SP before its Wasm
@@ -3517,7 +3529,7 @@ hosts`).
   before execution or provider publication.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
-  `TITAN_EXTRA_CPPFLAGS`, the fifteen-module provider whose non-compiler
+  `TITAN_EXTRA_CPPFLAGS`, the sixteen-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
   order and contents, and the standalone `-shared-mem` archive regression.
 * `spec/browser_stdlib_spec.lua` (emsdk-free) and
@@ -3525,7 +3537,7 @@ hosts`).
   check](#the-dependency-closure-check) and its negative fixtures, the
   interface-derived [member inventory](#interface-derived-member-inventory)
   (raw foreign functions, nominal members, named-call metadata, unrecorded
-  differences, exact recorded omissions and opaque records), the sixteen-owner
+  differences, exact recorded omissions and opaque records), the seventeen-owner
   root inventory and its rejection of empty or
   duplicate inventories before build setup, the cold and warm single-image
   layout and filtered runs, the CI failure artifact's image and per-engine log
