@@ -13230,7 +13230,7 @@ describe("target-aware source resolver", function()
 
     local stdlib_root = paths.to_slash(lfs.currentdir())
     local excluded_stdlib = {
-        { "timer", "timer" }, { "io", "io" },
+        { "io", "io" },
         { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" }, { "os", "os" },
         { "uv", "uv/uv", "tcp" },
         { "http", "http/http", "client" },
@@ -13298,6 +13298,17 @@ describe("target-aware source resolver", function()
                         paths.to_slash(blocked.contributor), target .. " " .. part)
                 end
             end
+        end
+    end)
+
+    it("selects titan.timer's native variant on native targets and its browser variant on the browser", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local member = target == "browser" and "browser" or "native"
+            local selected = assert(driver.resolve_source(context(target), "titan.timer", stdlib_root))
+            assert.equal("flat", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/timer." .. member .. ".titan", paths.to_slash(selected.main), target)
+            assert.equal(stdlib_root .. "/titan/timer.titan", paths.to_slash(selected.native_output), target)
+            assert.same({ selected.main }, selected.files, target)
         end
     end)
 

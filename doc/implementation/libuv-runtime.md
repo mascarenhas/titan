@@ -876,6 +876,48 @@ waits for native timer close before returning or finishing cancellation unwind.
 A `Ticker` is a persistent coalescing subscription that uses its typed close
 callback only for ownership retirement. Neither promises an exact libuv phase.
 
+### Browser timers
+
+`titan/timer.browser.titan` is the browser variant of `timer`, with the same
+public interface. It imports `async` and `titan.browser`, never `uv`, and
+opens the SDK's `titan:timeout` and `titan:interval` sources once per Lua
+state.
+
+- **`sleep(ms)`** runs `async.checkpoint()` first, as natively, then rejects a
+  negative delay with `OperationError(-EINVAL, "EINVAL", "invalid argument",
+  "timer.sleep")`, whose code is the target's negated `EINVAL`.
+  - A zero delay is `async.yield()`: no host request, and the Task resumes in
+    a later turn, after the driver's one-macrotask relinquish, without the
+    clamp that HTML puts on nested `setTimeout`.
+  - Any other delay starts a detachable `titan:timeout` request whose
+    completion resumes the Task's `ResumeToken`, and suspends with a cancel
+    action that cancels the request. Cancellation therefore clears the host
+    timer and ends the wait at once, and the loader drops a settlement that
+    arrives later. Native `sleep` passes no cancel action and retires its uv
+    timer in a deferred close instead.
+  - A host failure resumes the Task, which then raises
+    `OperationError(-EIO, "EIO", <host message>, "timer.sleep")`.
+  - After `dispose()` the request cannot start (`browser.BrowserError`,
+    `"browser state is closing"`). A disposal cleanup never gets that far,
+    because its checkpoint raises the Task's cancellation first.
+- **`ticker(ms)`** registers a close listener with the Runtime, then a
+  `CoalescingSubscription` whose producer opens a `titan:interval` listener.
+  - Each event publishes `true`, so missed firings, including throttled ones,
+    coalesce into one pending tick.
+  - `stop` cancels the listener, and `close` marks the ticker closed and
+    closes its request.
+  - The close listener does the same when the Runtime closes, so a ticker
+    left open is Runtime-bound, like a native ticker whose loop closed. Close
+    listeners run in registration order with the user's, whereas a native
+    loop closes its leftover timers before any close listener runs.
+- **`Ticker:tick()`** returns `false` once the ticker is closed. Natively it
+  also compares the ticker's loop with the current one.
+
+The browser `Ticker` keeps its methods but holds a host request instead of a
+uv timer, so the [member
+inventory](browser-target.md#interface-derived-member-inventory) records it as
+an opaque record.
+
 ## Allocation profile
 
 These properties of the current design were established by matched allocation

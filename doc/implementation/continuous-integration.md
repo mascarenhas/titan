@@ -350,10 +350,11 @@ After step 7, `browser-stdlib` runs:
 8. **Complete browser core stdlib suite.** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
    unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
-   builds all sixteen browser-portable owners into one validation-profile
+   builds all seventeen browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
    checks dependency closure and the native/browser member inventory of the
-   thirteen shared modules and `async` (with its recorded omissions), then
+   thirteen shared modules, `async` and `timer` (with their recorded
+   differences), then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
    `TITAN_CHROME`. Each engine must execute every owner with complete nonzero
    status/count/timing accounting

@@ -1,4 +1,4 @@
--- Task cases that need titan.timer; native-only until the browser target has it.
+-- Task cases that need titan.timer.
 local function cancel_join_with_finalizable(
     operand: async.Task, callback: function (value): ())
   local sentinel: {string: value} = {}

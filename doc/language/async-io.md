@@ -2136,7 +2136,8 @@ cancels the request when cancellation must end the wait early; an `await` of
 host work that never settles keeps waiting through cancellation, as it does
 natively. Authored C that suspends the whole WebAssembly stack inside a Task
 (`emscripten_sleep`, `EM_ASYNC_JS`) stalls every other Task until it returns;
-use host requests instead.
+use host requests instead. `timer` waits on JavaScript timers this way
+([timer on the browser](standard-library-timer.md#on-the-browser)).
 
 ### Drives and entries
 

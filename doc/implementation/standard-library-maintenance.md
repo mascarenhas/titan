@@ -44,7 +44,7 @@ Thirteen shared modules form the portable part of the [browser standard
 library](browser-target.md#the-browser-standard-library): `coroutine`, `gc`,
 `iteration`, `math`, `test`, `reflect`, `json`, `protobuf`, `transfer`, `peg`,
 `string`, `url`, and `path`. None of them may gain an import path to `uv`,
-`async`, `titan.browser`, or a native-only module (`timer`, `io`, `fs`, `net`,
+`async`, `timer`, `titan.browser`, or a native-only module (`io`, `fs`, `net`,
 `ssl`, `http`, `websocket`, `os`, `lua`, `sqlite3`, `thread`), and their only native
 payload and include path is LPegLabel: a libuv, OpenSSL, llhttp, or SQLite
 header, archive, or symbol fails the [dependency-closure
@@ -65,8 +65,11 @@ shared main and the `runtime.browser.titan` and `external.browser.titan`
 contributors, which import `titan.browser`. Its browser omissions and its
 opaque `ExternalWait` are recorded in the member inventory, so a new public
 `async` member that the browser cannot provide must be recorded there, and a
-shared one must type-check without `uv`. Only the browser contributors of
-`async` may import `titan.browser`.
+shared one must type-check without `uv`. `titan.timer` is one through its
+flat variant `titan/timer.browser.titan`, built on public `async` and the
+SDK's timer sources; a member added to `timer.native.titan` needs its browser
+twin, and its opaque `Ticker` is recorded in the inventory. Only these browser
+files of `async` and `timer` may import `titan.browser`.
 
 The browser provider's other target-specific module, `titan.browser`
 (`titan/browser.browser.titan`), is the one reviewed browser-only exception.

@@ -57,6 +57,16 @@ catch
   raise
 end
 
+-- A sleep in cleanup checks the Task's cancellation before it starts a host
+-- timer, as natively, so after dispose() it raises the Task's reason.
+local function try_sleep(reason: async.CancellationReason<|value|>?): string
+  timer.sleep(10)
+  return "slept"
+catch
+  if reason ~= nil and error == reason then return "cancelled" end
+  raise
+end
+
 -- A Runtime whose Task waits until it is cancelled; its cleanup awaits host
 -- work started before dispose(). With `drive`, the call drives until disposal
 -- retires the Task; without it, dispose() drives the cleanup itself.
@@ -79,6 +89,7 @@ local function parked_runtime(prefix: string, ms: integer, drive: boolean)
     defer slow_request:close()
     note(prefix .. " cleanup " .. reason_text(reason))
     note(prefix .. " new work: " .. try_new_work())
+    note(prefix .. " sleep: " .. try_sleep(reason))
     local result = async.await_cleanup<|integer, string|>(function (resolve, _reject, _fatal)
       local item? = settled
       if item ~= nil then resolve(item) else resolve_settled = resolve end

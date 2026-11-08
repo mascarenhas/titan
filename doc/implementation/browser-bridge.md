@@ -583,9 +583,16 @@ test owner `spec/stdlib/titan/async/browser_tests/`, with a C helper
 `spec/stdlib/titan/async/browser_child.browser.titan`. `scheduler.mjs` runs its
 Titan cases (Tasks over host requests across hundreds of turns, inline
 registrations, cleanup under cancellation, fatal and ordinary failures,
-combinators, channels and a listener-fed subscription, nested coroutines, and
-child-state refusals) and then drives the owner's published entries:
-Task-form calls, disposal while relinquished, mid-turn, with an orphaned
+combinators, channels and a listener-fed subscription, nested coroutines,
+child-state refusals, and the `timer` cases). The timer cases are sleeps mixed
+with host requests, zero delays and yields resuming in a later browser task
+(a marker armed on the driver's turn source must have run), and sleeps,
+tickers and a ticker left open past its Runtime that leave no JavaScript
+timer armed (the harness wraps the global timer functions to count them).
+It then drives the owner's published entries:
+Task-form calls, disposal while relinquished (where the cleanup shows that new
+host work raises the closing error and a sleep raises the Task's
+cancellation), mid-turn, with an orphaned
 cleanup and with no drive, disposal of Tasks parked on a retained request
 (`dispose()` settles only after that request does) and on a detachable one
 (its late settlement is dropped), disposal of 2,000 parked Tasks after which

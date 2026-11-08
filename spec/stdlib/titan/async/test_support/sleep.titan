@@ -1,5 +1,4 @@
--- Timer-backed Task helpers. They are native-only until the browser target
--- has titan.timer.
+-- Timer-backed Task helpers.
 local timer = import "timer"
 
 local function sleeping(milliseconds: integer,

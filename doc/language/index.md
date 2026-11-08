@@ -92,7 +92,7 @@ use the chapters below for the normative language reference.
 | [Asynchronous I/O and tasks](async-io.md) | Tasks, their status, errors, and cancellation; scheduling and driving a Runtime; adapting callbacks with `await`; persistent subscriptions; waits on other OS threads and retirement gates for Tasks that own native resources; coalescing cross-state receivers; bounded same-state channels and Reader/Writer adapters; terminal listeners and combinators; exact-token resume; resources and shutdown, including Lua-state close with an active Runtime; and the browser target's driver, entries, ownership, exit and disposal. |
 | [Thread standard library](standard-library-thread.md) | Bounded cross-thread FIFO channels (`Sender`, `Receiver`) with nil-preserving iteration, transferable endpoints, and the state-close rule for blocked channel operations; standalone OS worker threads (`Thread`, `ThreadStatus`, `Error`) with `join()`, cooperative cancellation, finalized handles, and an `async.Task` proxy that becomes terminal only after the OS thread is joined and cancels its thread when its state closes; and bounded `Group` execution with first-error cancellation and explicit retry boundaries. |
 | [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, and ownership-safe line iteration. |
-| [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
+| [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, explicit close, and browser timing on JavaScript timers. |
 | [Mathematical standard library](standard-library-math.md) | Typed C99 numeric operations, Lua 5.5-compatible xoshiro256** random sequences, and length-bounded numeric conversion. |
 | [Filesystem standard library](standard-library-fs.md) | Binary file I/O, missing-aware metadata, canonical paths, path operations, Runtime-bound filesystem watchers, and closing open Files at Lua-state close. |
 | [TCP networking standard library](standard-library-net.md) | Asynchronous DNS and TCP clients/servers, opt-in shared-port listeners, binary stream reads, pending-input snapshots and observers, libuv-ordered writes, shutdown, close, and cancellation. Opt-in demand-driven reads support Windows connection handoff after callback retirement. |
@@ -247,8 +247,9 @@ remains rejected.
   file/line attribution on Chromium, Firefox, and Node; function-level reduced
   fidelity on WebKit and Safari), but its standard library currently provides
   the thirteen modules that need no libuv, [`async`](async-io.md#the-browser-target)
-  with a browser driver, and typed
-  [JavaScript bindings](standard-library-browser.md), without `timer`, `io`,
+  with a browser driver, [`timer`](standard-library-timer.md#on-the-browser)
+  on JavaScript timers, and typed
+  [JavaScript bindings](standard-library-browser.md), without `io`,
   `os`, files, or networking
   ([browser target](browser-target.md#the-browser-standard-library)).
 

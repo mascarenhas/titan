@@ -1,5 +1,5 @@
 -- Task helpers for async.tests on both targets; the timer-backed helpers are
--- native-only until the browser target has titan.timer (sleep.native.titan).
+-- in sleep.titan.
 local test = import "test"
 local async = import "async"
 local transfer = import "transfer"
