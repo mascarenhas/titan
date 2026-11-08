@@ -226,6 +226,11 @@ uint32_t titan_browser_relinquish(uint32_t state, uint32_t mode);
 void titan_browser_host_owner(uint32_t state);
 void titan_browser_host_drive_begin(uint32_t state);
 void titan_browser_host_drive_end(uint32_t state, int32_t exit_status, uint32_t exited);
+/* The async bootstrap's main Task failed: run() resolves failed, status 1,
+ * with this message and raw trace, unless the entry failed or a drive latched
+ * an exit. The loader copies the bytes; it marks only a pending run entry. */
+void titan_browser_host_main_failed(uint32_t state, const char *message, size_t message_len,
+    const char *trace, size_t trace_len);
 void titan_browser_host_wake(uint32_t state);
 uint32_t titan_browser_host_batch(uint32_t state);
 int titan_browser_host_item(uint32_t state, titan_browser_delivery *out);
@@ -234,8 +239,3 @@ int titan_browser_host_release_next(uint32_t state, titan_browser_delivery *out)
 void titan_browser_host_settle(const titan_browser_completion *record);
 
 #endif
-/* The async bootstrap's main Task failed: run() resolves failed, status 1,
- * with this message and raw trace, unless the entry failed or a drive latched
- * an exit. The loader copies the bytes; it marks only a pending run entry. */
-void titan_browser_host_main_failed(uint32_t state, const char *message, size_t message_len,
-    const char *trace, size_t trace_len);
