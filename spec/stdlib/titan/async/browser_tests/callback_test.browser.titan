@@ -1,0 +1,132 @@
+-- No-switch mode: what coroutine and async do inside a synchronous C callback
+-- (browser.call_sync, the entry an Emscripten trampoline calls). No stack can
+-- switch there, so explicit switches raise, the current coroutine and Task
+-- are hidden, settlements are queued, and an abandoned coroutine collected
+-- there unwinds at a later collection.
+foreign import "stdlib.h"
+foreign import "titan/browser.h"
+foreign import "titan/ffi.h"
+
+-- Run `body` as a synchronous C callback and require that it returned.
+local function in_callback(body: function ())
+  local pin = browser.pin(function (...: Value): Value
+    body()
+    return Value.is_nil()
+  end)
+  defer pin:close()
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  local state, slot, generation = pin:identity()
+  identity.state = state
+  identity.slot = slot
+  identity.generation = generation
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  local status: integer = browser.call_sync(identity, 0, nil, result)
+  ffi.free(ffi.lmacro_unconst(result.message))
+  ffi.free(ffi.lmacro_unconst(result.trace))
+  test.assert(status == 0, "the synchronous callback failed with status " .. status)
+end
+
+local function raised(action: function ()): string
+  do action()
+  catch
+    if error is string then return error as string end
+    return "non-string error"
+  end
+  return "returned"
+end
+
+function test_synchronous_callbacks_cannot_switch_coroutines(_: test.Context)
+  local suspended = coroutine.create(function (_: value): value
+    coroutine.yield(nil, "callback")
+    return nil
+  end, "callback")
+  suspended:resume(nil)
+  local fresh = coroutine.create(function (_: value): value return nil end, "callback")
+  local outer = coroutine.create(function (_: value): value
+    test.assert(coroutine.running() ~= nil, "a coroutine did not see itself")
+    in_callback(function ()
+      test.assert(coroutine.running() == nil, "a callback saw the coroutine that called it")
+      test.assert(not coroutine.is_yieldable("outer"), "a callback could yield")
+      test.assert(raised(function () coroutine.yield(nil, "outer") end) ==
+        "coroutine.yield is unavailable in a synchronous callback", "yield did not raise")
+      test.assert(raised(function () fresh:resume(nil) end) ==
+        "coroutine.resume is unavailable in a synchronous callback", "resume did not raise")
+      test.assert(raised(function () suspended:error("injected") end) ==
+        "coroutine.error is unavailable in a synchronous callback", "error did not raise")
+      test.assert(raised(function () suspended:transfer(nil, nil, false) end) ==
+        "coroutine.transfer is unavailable in a synchronous callback", "transfer did not raise")
+    end)
+    test.assert(coroutine.running() ~= nil, "the coroutine lost itself after a callback")
+    return "done"
+  end, "outer")
+  test.assert(outer:resume(nil) == "done", "the calling coroutine did not finish")
+  test.assert(fresh:status() == "suspended" and suspended:status() == "suspended",
+    "a refused switch changed a coroutine")
+  test.assert(suspended:resume(nil) == nil and suspended:status() == "dead",
+    "a coroutine refused in a callback could not resume afterwards")
+end
+
+-- A started coroutine that nothing references any more; its defers record
+-- their order in `events`.
+local function abandoned_coroutine(events: {string})
+  local abandoned = coroutine.create(function (_: value): value
+    defer events[#events + 1] = "outer defer"
+    do
+      defer events[#events + 1] = "inner defer"
+      coroutine.yield(nil, "abandoned")
+    end
+    return nil
+  end, "abandoned")
+  abandoned:resume(nil)
+end
+
+function test_a_coroutine_collected_in_a_callback_unwinds_later(_: test.Context)
+  local events: {string} = {}
+  abandoned_coroutine(events)
+  in_callback(function ()
+    gc.collect()
+    gc.collect()
+    test.assert(#events == 0, "a coroutine unwound inside a synchronous callback")
+  end)
+  test.assert(#events == 0, "a deferred coroutine unwound before the next collection")
+  gc.collect()
+  gc.collect()
+  test.assert(#events == 2 and events[1] == "inner defer" and events[2] == "outer defer",
+    "the deferred coroutine did not unwind in order at the next collection")
+end
+
+function test_async_in_a_synchronous_callback_runs_outside_any_task(_: test.Context)
+  runtime_test.run(function ()
+    local resolve_later: (function (integer): ())? = nil
+    local waiter = async.run<|integer, value|>(function (): integer
+      case async.await<|integer, string|>(function (resolve, _reject, _fatal)
+        resolve_later = resolve
+      end)
+      when success(item) then return item
+      end
+      raise "the awaited value failed"
+    end)
+    task_support.cleanup_task(waiter, "callback waiter cleanup")
+    while waiter:status():as_string() == "ready" do async.yield() end
+    local started = false
+    in_callback(function ()
+      test.assert(raised(function () async.running() end) ==
+        "asynchronous operation must be called from an async Task",
+        "a callback called from a Task saw that Task")
+      test.assert(raised(function () async.yield() end) ==
+        "asynchronous operation must be called from an async Task", "a callback could yield its Task")
+      local resolve = resolve_later as function (integer): ()
+      resolve(42)
+      test.assert(waiter:status():as_string() == "waiting",
+        "a settlement in a callback resumed its Task inline")
+      async.run<|nil, value|>(function (): nil
+        started = true
+        return nil
+      end)
+      test.assert(not started, "a Task started in a callback ran inline")
+    end)
+    local ok, item? = async.join(waiter):has_succeeded()
+    test.assert(ok and item == 42, "the settlement made in a callback was lost")
+    while not started do async.yield() end
+  end)
+end
