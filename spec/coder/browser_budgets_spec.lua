@@ -47,7 +47,7 @@ describe("browser measured delivered budget limits", function()
         local plan = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
         assert.same({
             stack_size = 1048576,
-            initial_memory = 16777216,
+            initial_heap = 15728640,
             maximum_memory = 2147483648,
         }, plan.identity_inputs.budgets)
 
@@ -145,7 +145,10 @@ describe("browser measured delivered budget limits", function()
                     elseif mode == "create-failure" then
                         assert.truthy(log:find("deterministic_mco_failure=1 fresh_after_failure=1", 1, true), log)
                     elseif mode == "exhaust" then
-                        assert.truthy(log:find("initial_heap=16777216 exhausted_heap=2147483648 released_heap=2147483648 maximum=2147483648", 1, true), log)
+                        -- Initial memory is static data and the stack plus the heap.
+                        local initial = tonumber(log:match("initial_heap=(%d+) exhausted_heap=2147483648 " ..
+                            "released_heap=2147483648 maximum=2147483648"))
+                        assert.truthy(initial and initial % 65536 == 0 and initial > 1048576 + 15728640, log)
                         assert.truthy(log:find("existing_canary=42 fresh_after_gc=43", 1, true), log)
                     end
                     io.stdout:write(string.format("BUDGET MODE assertions=%d engine=%s mode=%s elapsed_ms=%.2f PASS\n",

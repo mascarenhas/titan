@@ -1215,7 +1215,7 @@ extras unless `options.purpose` is `baseline`, `minicoro`, or `budget`, as well
 as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
 `NO_` prefix, of `SUPPORT_LONGJMP`, `WASM_LEGACY_EXCEPTIONS`, `ASYNCIFY`,
 every `ASYNCIFY_*` setting, `JSPI`, every `JSPI_*` setting,
-`BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`,
+`BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`, `INITIAL_HEAP`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
 `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
 `FILESYSTEM`, `MINIMAL_RUNTIME`, `PRINTF_LONG_DOUBLE`, `EXPORTED_FUNCTIONS`,
@@ -1555,10 +1555,10 @@ flag list.
   `baseline` (`invalid browser link optimization override`); it yields
   `compile_flags = {"-O1"}` or `{"-O2"}` and the matching link flag.
 * `budgets` overrides `stack_size` (a positive multiple of 16),
-  `initial_memory`, and `maximum_memory` (positive multiples of 65536,
-  initial at most maximum, maximum at most 2147483648), only for `budget`
-  (`browser budget overrides require the budget profile`, `invalid browser
-  budget override <key>`, `invalid browser memory budgets`).
+  `initial_heap`, and `maximum_memory` (positive multiples of 65536, stack and
+  heap together at most maximum, maximum at most 2147483648), only for
+  `budget` (`browser budget overrides require the budget profile`, `invalid
+  browser budget override <key>`, `invalid browser memory budgets`).
 * `entry` defaults to `titan`; the only alternative, `lua-main`, is for the
   `baseline` measurement of the fork's own Lua interpreter (`invalid browser
   link entry`).
@@ -1575,7 +1575,7 @@ flag list.
 | `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"] -sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke","titan_browser_release_callable","titan_browser_close","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports for the five Lua-running bridge entries and the private coroutine entry. The bridge library's [relinquish import](#the-relinquish-import) is the third suspending import of a `titan` entry; the interpreter baseline (`lua-main`) keeps only the coroutine pair and promises `main`. The `gate` purpose adds its guarded export and `emscripten_sleep`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
 | `-sSUPPORT_LONGJMP=<sjlj> -sWASM_LEGACY_EXCEPTIONS=1` | the record's verified longjmp mode, `wasm`, with Emscripten 6.0.13's legacy EH encoding, matching every object and `liblua.a` |
 | `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
-| `-sINITIAL_MEMORY=16777216 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
+| `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | initial memory is the image's static data and main stack plus a 15 MiB heap, so static data never outgrows a fixed initial size (15 MiB is the heap a data-free image had under the former fixed 16 MiB; [measured sizes](#budgets)); coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
 | `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
 | `-sFORCE_FILESYSTEM=1` | keeps Emscripten's filesystem and TTY layer in every image (see below) |
@@ -2077,7 +2077,8 @@ passed seven. The zero-case runs measure initialization only, not functional
 success. Node maxRSS is a process high-water mark, while Chromium RSS and
 VmData/VSZ are renderer samples at a requested 10-ms interval; VmData and VSZ
 are different virtual-memory measures, not resident RAM. Linear memory grew
-from 16,777,216 to 20,185,088 bytes during combined-image initialization.
+from 16,777,216 to 20,185,088 bytes during combined-image initialization,
+under the former fixed 16 MiB initial memory.
 Default tiering and sandboxing were unchanged, with no memory feature or
 forced optimizing-only compiler. These are individual measurements, not
 maximum startup-memory guarantees.
@@ -2402,8 +2403,25 @@ Linear stack and heap sizes are explicit image/SDK identity inputs:
 | --- | --- | --- |
 | Main linear C stack | `-sSTACK_SIZE=1048576` | the root entry's address-taken locals and Lua/Titan protected-call data |
 | Coroutine linear C stack | `-DTITAN_COROUTINE_STACK_SIZE=262144` | one disjoint minicoro allocation; native default remains 2 MiB |
-| Linear memory | `-sINITIAL_MEMORY=16777216 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648` | freed blocks can be reused but the grown Wasm heap never shrinks |
+| Linear memory | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648` | initial memory is static data, the main stack and a 15 MiB heap; freed blocks can be reused but the grown Wasm heap never shrinks |
 | Engine continuation stacks | JSPI engine-managed | not bounded by the linear C-stack sizes |
+
+Initial memory is the image's memory-section minimum: wasm-ld places static
+data and then the 1 MiB stack, and adds the 15 MiB heap to that heap base,
+rounded up to a 64-KiB page. Measured on validation-profile images (the same
+at assertions 2 and 0), against the former fixed `-sINITIAL_MEMORY=16777216`:
+
+| Image | Heap base (static data and stack) | Fixed 16 MiB | `INITIAL_HEAP=15728640` |
+| --- | ---: | ---: | ---: |
+| `hello` program | 1,131,776 | 16,777,216 | 16,908,288 |
+| Browser stdlib suite, 15 owners | 15,147,968 | 16,777,216 | 30,932,992 |
+| Browser stdlib suite with `async.tests`, 16 owners | 19,020,192 | link fails | 34,799,616 |
+
+Under the fixed size, the 16-owner suite fails with `wasm-ld: error: initial
+memory too small, 18203136 bytes needed`. The same objects linked with room
+(the new profile, or a fixed 64 MiB for comparison) have the 19,020,192-byte
+heap base shown. The 15-owner suite had 1,629,248 bytes of initial heap under
+the fixed size and now has 15 MiB like every image.
 
 `STACK_OVERFLOW_CHECK=2` stays enabled. Each switch saves SP and the current
 stack base/end, restores the destination limits and SP before its Wasm
@@ -2638,8 +2656,8 @@ flush notifications. C `stdin` returns null, which is end of file. No user
 sink or unrelated notification runs during an internal coroutine transfer,
 including a collector finalizer's cleanup. `safe()` means that the contained
 C entry has released its owner; the loader delivers buffered streams after
-its whole logical operation retires, and during a drive also at each
-relinquish point, once the drive has suspended ([output, disposal, and
+its whole logical operation retires, and during a drive also from each parked
+relinquish gate, once the drive has suspended ([output, disposal, and
 observation](#output-disposal-and-observation)).
 
 ### JSPI coroutine contexts
@@ -2717,11 +2735,14 @@ main context is current (`TitanBrowser.current === 0`), then hands the call to
 the loader owner, which also requires the state's active drive with no gate
 parked and no item in delivery.
 
-A relinquish point settles the queued calls whose outcomes arrived and
-schedules both output pumps on a microtask, so sinks run once the drive has
-suspended, never inside the import. Disposal is signalled once: the first
-relinquish after `dispose()` began (or a gate parked when it began) resolves
-`DISPOSING` after one turn. A turn (`mode` 0), or a wait with a queued owner
+A relinquish point settles the queued calls whose outcomes arrived. Outside
+disposal, every branch that parks a gate also schedules both output pumps on
+a microtask, so sinks run once the drive has suspended, never inside the
+import, and only while that gate is still parked; a numeric `IDLE` schedules
+none, so the coroutine switches of orphan unwinding that may follow it never
+meet a sink. Disposal is signalled once: the first relinquish after
+`dispose()` began (or a gate parked when it began) resolves `DISPOSING` after
+one turn. A turn (`mode` 0), or a wait with a queued owner
 item, parks a gate and schedules one turn-source macrotask. A wait with no
 wake source returns `IDLE` as a plain number, so JSPI does not suspend; the
 terminal `titan_mco_transfer` path already relies on that. Otherwise the wait
@@ -2798,7 +2819,7 @@ kind and copies all result/error/trace data while C owns it. Duplicate,
 mismatched, or missing completion poisons the image. The export promise
 acknowledges physical context retirement only; its numeric value is never
 application status. Neither completion arrival nor an intermediate safe point
-reopens public admission. Only a drive's relinquish points start sinks
+reopens public admission. Only a drive's parked relinquish gates start sinks
 inside an operation ([drives](#drives-the-call-queue-and-wake-sources)).
 
 `invokeTarget` boxes the single decoded result as `{value}` inside `operate` so
@@ -2940,8 +2961,13 @@ Each `OutputChannel` has a copied-byte FIFO, a coalesced C-byte tail, and at
 most one actual sink invocation. C hooks append synchronously and never invoke
 the sink. A logical operation flushes both streams after all its C entries
 retire; later entries still run after a throw/rejection. During a drive, each
-relinquish point also starts a single-runner pump on both streams without
-awaiting it, so a slow or forever-pending sink never stalls the drive; the
+parked relinquish gate also publishes both streams' C-byte tails into their
+FIFOs and starts a single-runner pump without awaiting it, so a slow or
+forever-pending sink never stalls the drive. A runner still waiting on a sink
+call takes the newly published entries when that call resolves, and it
+retires in the same step that finds its FIFO empty, so the next gate either
+feeds it or starts another runner. Bytes written after a gate wait for the
+next gate or the final flush, never for a sink call to resolve. The
 operation's final flush awaits a running pump, then flushes again, and the
 pump's failures join that flush's. A sink call increments `inHost`.
 Titan failure remains primary while both deliverable stream flushes and
