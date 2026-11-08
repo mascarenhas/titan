@@ -1,0 +1,307 @@
+local record GateMarker
+  name: string
+end
+
+-- Gate 1: forty Tasks interleave host requests and yields while a yielder
+-- crosses three hundred turns; each Task keeps its own order and result.
+function test_tasks_wait_on_host_requests_across_relinquishes(_: test.Context)
+  runtime_test.run(function ()
+    local before = macrotasks()
+    local workers: {async.Task<|integer, value|>} = {}
+    local finished = 0
+    for worker = 1, 40 do
+      local task = async.run<|integer, value|>(function (): integer
+        local total = 0
+        for step = 1, 5 do
+          local item = await_delay((worker + step) % 4, worker * 10 + step, false)
+          test.assert(item == worker * 10 + step, "a host request settled another Task's wait")
+          total = total + item
+          async.yield()
+        end
+        finished = finished + 1
+        return total
+      end)
+      task_support.cleanup_task(task, "request worker cleanup")
+      workers[worker] = task
+    end
+    local yielder = async.run<|integer, value|>(function (): integer
+      for _ = 1, 300 do async.yield() end
+      return 300
+    end)
+    task_support.cleanup_task(yielder, "yielder cleanup")
+    for worker = 1, 40 do
+      local ok, total? = async.join(workers[worker]):has_succeeded()
+      test.assert(ok and total == worker * 50 + 15, "request worker " .. worker .. " lost its result")
+    end
+    local ok, yields? = async.join(yielder):has_succeeded()
+    test.assert(ok and yields == 300 and finished == 40, "a worker or the yielder did not finish")
+    test.assert(macrotasks() - before >= 150,
+      "three hundred turns gave the event loop fewer than 150 macrotasks")
+  end)
+end
+
+-- Gate 2: registrations that settle inline resume without a relinquish while
+-- a suspended wait stays pending.
+function test_inline_registrations_do_not_relinquish(_: test.Context)
+  runtime_test.run(function ()
+    local waiter = async.run<|integer, value|>(function (): integer
+      return await_delay(5, 7, false)
+    end)
+    task_support.cleanup_task(waiter, "suspended waiter cleanup")
+    async.yield()
+    local before = macrotasks()
+    local sum = 0
+    for index = 1, 200 do
+      sum = sum + delay_value(async.await<|integer, string|>(function (resolve, _reject, _fatal)
+        resolve(integer_of(call_binding("echo_integer", Value.is_integer(index))))
+      end))
+    end
+    test.assert(macrotasks() == before, "inline-completing registrations relinquished")
+    test.assert(sum == 20100 and waiter:status():as_string() == "waiting",
+      "inline registrations lost a result or settled the suspended wait")
+    local ok, item? = async.join(waiter):has_succeeded()
+    test.assert(ok and item == 7, "the suspended wait did not complete")
+  end)
+end
+
+-- Gate 3: a Task cancelled while its cleanup awaits a host request finishes in
+-- order, and the cleanup's await is not cancelled.
+function test_cleanup_await_completes_under_cancellation(_: test.Context)
+  runtime_test.run(function ()
+    local order: {string} = {}
+    local task = async.run_with_cleanup<|string, value|>(function (): string
+      order[#order + 1] = "body"
+      return "body result"
+    end, function (_: async.CancellationReason<|value|>?)
+      order[#order + 1] = "cleanup"
+      order[#order + 1] = "cleanup awaited " .. await_delay(20, 11, true)
+    end)
+    task:add_terminal_listener(function (_: async.TaskStatus<|string, value|>)
+      order[#order + 1] = "terminal"
+    end)
+    while order[#order] ~= "cleanup" do async.yield() end
+    task:cancel(async.CancellationReason<|value|>.simple("cancelled during cleanup"))
+    local status = async.join(task)
+    test.assert(#order == 4 and order[1] == "body" and order[2] == "cleanup" and
+      order[3] == "cleanup awaited 11" and order[4] == "terminal",
+      "cleanup, its await and the terminal status ran out of order")
+    test.assert(reason_text(cancellation_of(status)) == "cancelled during cleanup",
+      "the Task did not finish with its cancellation")
+  end)
+end
+
+local function cancellation_of(status: async.TaskStatus<|string, value|>): async.CancellationReason<|value|>?
+  local cancelled, reason? = status:has_cancelled()
+  if not cancelled then return nil end
+  return reason
+end
+
+-- Gate 4: a Completion:fatal call from a host callback records the first
+-- error, cancels the peers, runs their cleanup and the close listeners in
+-- order, and loop re-raises it with its trace.
+function test_fatal_host_callback_stops_the_runtime_in_order(context: test.Context)
+  context:log("BEGIN expected fatal callback diagnostic")
+  local order: {string} = {}
+  local marker = GateMarker("fatal host callback")
+  local origin_trace = ""
+  local peer = async.run_with_cleanup<|nil, value|>(function (): nil
+    order[#order + 1] = "peer waiting"
+    await_delay(30, 0, false)
+    order[#order + 1] = "peer resumed"
+    return nil
+  end, function (_: async.CancellationReason<|value|>?)
+    order[#order + 1] = "peer cleanup " .. await_delay(5, 9, true)
+  end)
+  local source = browser.binding("delay")
+  defer source:close()
+  local request: browser.BrowserRequest? = nil
+  async.run<|nil, value|>(function (): nil
+    async.await<|nil, value|>(function (_resolve, _reject, fatal)
+      request = source:start(function (...: Value): Value
+        do raise marker
+        catch
+          origin_trace = traceback
+          fatal(error, traceback)
+        end
+        return Value.is_nil()
+      end, function (...: Value): Value return Value.is_nil() end,
+        Value.is_integer(5), Value.is_integer(0))
+    end)
+    return nil
+  end)
+  async.add_close_listener(function () order[#order + 1] = "close listener" end)
+  local caught: value = nil
+  local trace = ""
+  do async.loop()
+  catch
+    caught = error
+    trace = traceback
+  end
+  request:close()
+  test.assert(caught == marker and trace == origin_trace,
+    "loop did not re-raise the first error with its trace")
+  test.assert(#order == 3 and order[1] == "peer waiting" and order[2] == "peer cleanup 9" and
+    order[3] == "close listener", "fatal shutdown ran cleanup and close listeners out of order")
+  local cancelled, reason? = peer:status():has_cancelled()
+  test.assert(cancelled and reason_text(reason) == "async Runtime stopped after callback failure",
+    "the fatal failure did not cancel the peer")
+  context:log("END expected fatal callback diagnostic")
+end
+
+-- Gate 5: an ordinary failed Task leaves its peers running; its failure is
+-- visible through status and join, and the Runtime finishes when no Task
+-- remains.
+function test_failed_task_leaves_peers_running(context: test.Context)
+  context:log("BEGIN expected uncaught async Task diagnostic")
+  runtime_test.run(function ()
+    local failing = async.run<|nil, value|>(function (): nil
+      await_delay(2, 0, false)
+      raise "ordinary Task failure"
+    end)
+    local peer = async.run<|integer, value|>(function (): integer
+      local total = 0
+      for step = 1, 5 do total = total + await_delay(3, step, false) end
+      return total
+    end)
+    task_support.cleanup_task(peer, "peer of a failed Task cleanup")
+    local failed, failure? = async.join(failing):has_failed()
+    test.assert(failed and failure.error == "ordinary Task failure" and #failure.traceback > 0,
+      "the failed Task lost its error or trace")
+    local ok, total? = async.join(peer):has_succeeded()
+    test.assert(ok and total == 15, "a peer of the failed Task did not finish")
+  end)
+  context:log("END expected uncaught async Task diagnostic")
+end
+
+-- Gate 7: combinators, a channel and a subscription fed by a host listener,
+-- all across real relinquish points.
+function test_structures_across_relinquishes(_: test.Context)
+  runtime_test.run(function ()
+    local slow = async.run<|integer, value|>(function (): integer return await_delay(30, 1, false) end)
+    local fast = async.run<|integer, value|>(function (): integer return await_delay(1, 2, false) end)
+    task_support.cleanup_task(slow, "slow operand cleanup")
+    task_support.cleanup_task(fast, "fast operand cleanup")
+    case async.any_two(slow, fast)
+    when second(item) then test.assert(item == 2, "any_two lost the faster result")
+    else raise "any_two did not take the first finished operand"
+    end
+    local first, second = async.all_two(slow, fast)
+    test.assert(first == 1 and second == 2, "all_two lost a result")
+    local late = async.run<|integer, value|>(function (): integer return await_delay(30, 3, false) end)
+    local early = async.run<|integer, value|>(function (): integer return await_delay(1, 4, false) end)
+    task_support.cleanup_task(late, "late operand cleanup")
+    task_support.cleanup_task(early, "early operand cleanup")
+    case async.race_two(late, early)
+    when second(status) then test.assert(status:has_succeeded(), "race_two lost the earlier status")
+    else raise "race_two did not take the first finished operand"
+    end
+    local send, receive = async.channel<|integer|>(1)
+    local producer = async.run<|nil, value|>(function (): nil
+      for item = 1, 5 do send(await_delay(1, item * 10, false)) end
+      return nil
+    end)
+    task_support.cleanup_task(producer, "channel producer cleanup")
+    for item = 1, 5 do
+      test.assert(receive() == item * 10, "the channel reordered or lost an item")
+    end
+    local stream = async.BufferedSubscription<|integer, string|>(
+      function (publish, fail, finish): async.SubscriptionActions<|integer|>
+        local source = browser.binding("ticks")
+        defer source:close()
+        local request = source:listen(function (...: Value): Value
+          local item = integer_of(...[1])
+          publish(item)
+          if item == 5 then finish() end
+          return Value.is_nil()
+        end, function (...: Value): Value
+          fail("ticks failed")
+          return Value.is_nil()
+        end, Value.is_integer(5))
+        return async.SubscriptionActions<|integer|>(
+          function () do request:cancel() catch end end,
+          function (drain: function (): (async.SubscriptionBatch<|integer|>))
+            drain()
+            request:close()
+          end)
+      end)
+    defer stream:close()
+    local seen = 0
+    local stream_ended = false
+    while not stream_ended do
+      case stream:next()
+      when item(tick) then
+        seen = seen + 1
+        test.assert(tick == seen, "listener events lost their order")
+      when ended() then stream_ended = true
+      else raise "the listener subscription failed or closed"
+      end
+    end
+    test.assert(seen == 5, "the subscription missed listener events")
+  end)
+end
+
+-- Gate 8: tagged coroutines nested in a Task keep their suspended stacks across
+-- relinquishes and collections; an abandoned coroutine unwinds when an
+-- allocation in a turn collects it; an error raised after a resumption runs
+-- the Task's cleanup.
+function test_coroutines_inside_tasks_across_turns(context: test.Context)
+  runtime_test.run(function ()
+    local nested = async.run<|integer, value|>(function (): integer
+      local inner = coroutine.create(function (_: value): value
+        coroutine.yield(1, "inner")
+        coroutine.yield(2, "inner")
+        return 3
+      end, "inner")
+      local outer = coroutine.create(function (_: value): value
+        local total = 0
+        for _ = 1, 3 do
+          total = total + (inner:resume(nil) as integer)
+          coroutine.yield(total, "outer")
+        end
+        return total
+      end, "outer")
+      local last = 0
+      for _ = 1, 3 do
+        last = outer:resume(nil) as integer
+        gc.collect()
+        async.yield()
+        await_delay(1, 0, false)
+      end
+      return last
+    end)
+    task_support.cleanup_task(nested, "nested coroutine cleanup")
+    local ok, total? = async.join(nested):has_succeeded()
+    test.assert(ok and total == 6, "nested coroutines lost their stacks across turns")
+
+    local log: {string} = {}
+    local abandoning = async.run<|nil, value|>(function (): nil
+      local generator = coroutine.create(function (_: value): value
+        defer log[#log + 1] = "abandoned defer"
+        coroutine.yield("first", "generator")
+        return nil
+      end, "generator")
+      test.assert(generator:resume(nil) == "first", "the generator did not start")
+      return nil
+    end)
+    async.join(abandoning)
+    local garbage: {string} = {}
+    local rounds = 0
+    while #log == 0 and rounds < 100000 do
+      rounds = rounds + 1
+      garbage[rounds % 64 + 1] = string.rep("x", 1024) .. rounds
+    end
+    test.assert(#log == 1 and log[1] == "abandoned defer",
+      "an allocation in a turn did not unwind the abandoned coroutine")
+
+    context:log("BEGIN expected uncaught async Task diagnostic")
+    local cleaned = false
+    local failing = async.run_with_cleanup<|nil, value|>(function (): nil
+      await_delay(2, 0, false)
+      raise "failure after resumption"
+    end, function (_: async.CancellationReason<|value|>?) cleaned = true end)
+    local failed, failure? = async.join(failing):has_failed()
+    test.assert(failed and failure.error == "failure after resumption" and cleaned and
+      #failure.traceback > 0, "an error after resumption lost its cleanup or trace")
+    context:log("END expected uncaught async Task diagnostic")
+  end)
+end

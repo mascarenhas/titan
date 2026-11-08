@@ -159,7 +159,7 @@ catch
 end
 
 -- instance.callTask: spawn_call(target, settle, ...arguments) starts the
--- target as a Task and reports ("started", cancel), then exactly one of
+-- target as a Task and reports ("started", cancel), then one of
 -- ("succeeded", result), ("failed", message, trace) or ("cancelled", reason),
 -- through the loader's settle handle. An idle instance drives here; during a
 -- drive this is a queued call and the running driver runs the Task.
@@ -176,6 +176,10 @@ local function spawn_call(...: Value): Value
   end))
   task:add_terminal_listener(function (status: TaskStatus<|Value, value|>)
     defer settle:close()
+    -- A Task cancelled while the Runtime exits reports nothing: the drive's
+    -- exit latch then rejects the call with the exit status, even when the
+    -- drive relinquishes again before it ends.
+    if status:has_cancelled() and task.runtime.exit_code ~= nil then return end
     settle_outcome(settle, status)
   end)
   if not task.runtime.driving then loop() end

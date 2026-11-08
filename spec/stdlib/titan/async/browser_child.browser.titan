@@ -1,0 +1,35 @@
+-- Loaded by spec/fixtures/browser_scheduler/scheduler_child.c in a C-created
+-- child state, which never owns the browser instance: it can neither drive
+-- nor create an async Runtime.
+local async = import "async"
+local browser = import "browser"
+local test = import "test"
+
+local type Value = browser.BrowserValue
+
+local function refusal(action: function (): ()): string
+  do action()
+  catch
+    if error is string then return error as string end
+    return "non-string refusal"
+  end
+  return "accepted"
+end
+
+function publication()
+  local target = browser.binding("publish")
+  defer target:close()
+  target:call(Value.is_string("child_echo"), Value.is_callable(function (...: Value): Value
+    return ...[1]
+  end))
+end
+
+function check()
+  test.assert(not browser.is_owner(), "a C-created state claimed instance ownership")
+  test.assert(refusal(function () async.loop() end) ==
+    "async.loop must be driven by the browser instance's owner state",
+    "a child state's async.loop did not refuse at once")
+  test.assert(refusal(function () async.run<|nil, value|>(function (): nil return nil end) end) ==
+    "async Runtime is unavailable in a non-owner browser state",
+    "a child state created an async Runtime")
+end
