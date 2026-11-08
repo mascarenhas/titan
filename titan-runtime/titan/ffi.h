@@ -275,4 +275,12 @@ static inline void lmacro_sethvalue(lua_State *L, TValue *o, Table *t) {
   sethvalue(L, o, t);
 }
 
+TITAN_RUNTIME_FUNC void titan_unwind_clear_trace(lua_State *L);
+
+static inline lua_State *lmacro_mainthread(lua_State *L) { return mainthread(G(L)); }
+static inline ptrdiff_t lmacro_get_errfunc(lua_State *L) { return L->errfunc; }
+static inline void lmacro_set_errfunc(lua_State *L, ptrdiff_t old) { L->errfunc = old; }
+static inline ptrdiff_t lmacro_savestack_top(lua_State *L) { return savestack(L, L->top.p - 1); }
+static inline void *lmacro_unconst(const void *p) { return (void *)p; }
+
 #endif

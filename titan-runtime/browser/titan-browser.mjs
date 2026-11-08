@@ -3,6 +3,8 @@ const stateMessage = 'browser instance is not initialized';
 const maximumOperationId = (1n << 64n) - 1n;
 const maximumApplicationOperationId = maximumOperationId - 1n; // Reserve the final id for intact-state close.
 const wrapperRecords = new WeakMap();
+const stringIsWellFormed = String.prototype.isWellFormed;
+const utf8Decoder = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const typedArrayTag = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag).get;
 const typedArrayLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'length').get;
@@ -10,15 +12,22 @@ const typedArraySet = typedArrayPrototype.set;
 // titan/browser.h's asserted wasm32 layout and discriminants.
 const valueSize = 32;
 const kind = Object.freeze({nil: 0, boolean: 1, integer: 2, float: 3,
-  bytes: 4, handle: 5, callable: 6, void: 7, request: 8});
+  string: 4, bytes: 5, handle: 6, callable: 7, request: 8});
+const responseStatus = Object.freeze({ok: 0, titanError: 1, jsError: 2, state: 3, memory: 4});
 const operationKinds = Object.freeze({initialize: 1, entry: 2, invoke: 3,
   release_callable: 4, close: 5, gate_guarded: 3});
+
+const bridgeFailures = new WeakSet();
+function ownFailure(value, code) {
+  return bridgeFailures.has(value) && value.code === `TITAN_BROWSER_${code}`;
+}
 
 function failure(code, message, cause, stream) {
   const error = new Error(message, cause === undefined ? undefined : {cause});
   error.name = 'TitanBrowserError';
   error.code = `TITAN_BROWSER_${code}`;
   if (stream !== undefined) error.stream = stream;
+  bridgeFailures.add(error);
   return error;
 }
 
@@ -28,13 +37,24 @@ function deferred() {
   return {promise, resolve, reject};
 }
 
+function isUint8Array(value) {
+  return typedArrayTag.call(value) === 'Uint8Array';
+}
+
 function copiedBytes(value) {
   // Call/notify snapshot before publication: native slots cannot reenter through
   // a Proxy, iterator, accessor, constructor or species hook.
-  if (typedArrayTag.call(value) !== 'Uint8Array') throw new TypeError('browser bytes must be a Uint8Array');
+  if (!isUint8Array(value)) throw new TypeError('browser bytes must be a Uint8Array');
   const copy = new Uint8Array(typedArrayLength.call(value));
   typedArraySet.call(copy, value);
   return copy;
+}
+
+function encodeString(value) {
+  if (typeof value !== 'string' || !stringIsWellFormed.call(value)) {
+    throw new TypeError('browser string must be well-formed UTF-16');
+  }
+  return new TextEncoder().encode(value);
 }
 
 function messageBytes(cause) {
@@ -87,20 +107,9 @@ function requestRejected(cell, cause) {
   if (target) target.owner.settleRequest(target.request, false, cause);
 }
 
-function checkedReadSpan(value, capacity) {
-  const counted = value instanceof Uint8Array ? {bytes: value, length: value.length} : value;
-  const bytes = counted?.bytes, length = counted?.length;
-  if (!(bytes instanceof Uint8Array) || !Number.isSafeInteger(length) || length < 0 ||
-      length > bytes.length || length > capacity) {
-    throw new TypeError('browser input returned an invalid byte length or capacity');
-  }
-  // The notification queue copies this validated prefix before it escapes.
-  return new Uint8Array(bytes.buffer, bytes.byteOffset, length);
-}
-
 function observe(promise) {
   // Only bridge-owned retirement promises are observed here. User promises
-  // returned as opaque JSHandle values retain their host rejection semantics.
+  // returned as opaque BrowserHandle values retain their host rejection semantics.
   promise.catch(() => {});
   return promise;
 }
@@ -152,30 +161,11 @@ class OutputChannel {
     }
   }
 
-  append(bytes, completion) {
-    this.seal();
-    if (this.terminal) {
-      const error = failure('DISPOSED', `browser ${this.stream} stream is disposed`);
-      this.firstFailure ||= {error};
-      completion?.reject(error);
-      return;
-    }
-    this.queue.push({bytes: copiedBytes(bytes), completion});
-  }
-
   async flush(token) {
     this.seal();
     let failures;
     while (this.queue.length && !this.terminal) {
       const entry = this.queue.shift();
-      // A C-byte fault is consumed only by a completing write, not by an
-      // unrelated flush. Its observed bit prevents reporting it twice.
-      const pending = entry.completion ? this.firstFailure : undefined;
-      if (entry.completion) this.firstFailure = undefined;
-      if (pending) {
-        (failures ||= []).push(pending);
-        captureFailure(token, pending.error, pending);
-      }
       let current;
       try {
         if (this.sink) {
@@ -193,17 +183,13 @@ class OutputChannel {
           }
         }
       } catch (cause) {
-        const error = cause?.code === 'TITAN_BROWSER_DISPOSED' || cause?.code === 'TITAN_BROWSER_SINK' ? cause :
+        const error = ownFailure(cause, 'DISPOSED') || ownFailure(cause, 'SINK') ? cause :
           failure('SINK', `browser ${this.stream} sink failed`, cause, this.stream);
         current = error === token.interrupted?.error ? token.interrupted : {error};
         (failures ||= []).push(current);
         captureFailure(token, error, current);
       }
-      const error = pending?.error || current?.error;
-      if (error) {
-        if (entry.completion) entry.completion.reject(error);
-        else this.firstFailure ||= current;
-      } else entry.completion?.resolve();
+      if (current && current !== token.primaryFault) this.firstFailure ||= current;
     }
     return failures;
   }
@@ -219,10 +205,10 @@ class OutputChannel {
   }
 
   discard(error, fault) {
-    if (error.code === 'TITAN_BROWSER_DISPOSED' &&
-        (this.tail.length || this.queue.some(entry => !entry.completion))) this.firstFailure ||= fault || {error};
+    if (error.code === 'TITAN_BROWSER_DISPOSED' && (this.tail.length || this.queue.length)) {
+      this.firstFailure ||= fault || {error};
+    }
     this.tail = [];
-    for (const entry of this.queue) entry.completion?.reject(error);
     this.queue = [];
   }
 
@@ -250,14 +236,12 @@ async function drainOutput(drain) {
   for (const entry of drain.entries) {
     try {
       if (drain.sink) await sinkResult(drain.sink(entry.bytes), drain.stream);
-      if (first) entry.completion?.reject(first.error);
-      else entry.completion?.resolve();
     } catch (cause) {
-      const error = failure('SINK', `browser ${drain.stream} sink failed`, cause, drain.stream);
+      const error = ownFailure(cause, 'SINK') ? cause :
+        failure('SINK', `browser ${drain.stream} sink failed`, cause, drain.stream);
       const current = {error};
       first ||= current;
       (failures ||= []).push(current);
-      entry.completion?.reject(error);
     }
   }
   drain.sink = undefined;
@@ -340,6 +324,7 @@ class BrowserOwner {
     this.freeSlots = [];
     this.nextSlot = 1;
     this.states = new Map();
+    this.stateRecords = new Map();
     this.requests = new Set();
     this.drainAnnouncement = false;
     this.drainAnnounced = false;
@@ -574,7 +559,7 @@ class BrowserOwner {
   allocate(size, allocations) {
     if (this.terminal) throw this.terminal;
     if (!size) return 0;
-    const pointer = this.module._titan_browser_alloc(size) >>> 0;
+    const pointer = this.module._malloc(size) >>> 0;
     if (this.terminal) throw this.terminal;
     if (!pointer) throw new RangeError('not enough memory for browser arguments');
     allocations.push(pointer);
@@ -584,7 +569,7 @@ class BrowserOwner {
   free(allocations) {
     if (!this.terminal && this.module) {
       for (let index = allocations.length - 1; index >= 0 && !this.terminal; --index) {
-        this.module._titan_browser_free(allocations[index]);
+        this.module._free(allocations[index]);
       }
     }
   }
@@ -617,26 +602,18 @@ class BrowserOwner {
     return record;
   }
 
-  wrapCallable(state, slot, generation, signature) {
-    const key = `${state}:${slot}:${generation}`;
-    let record = this.callables.get(key);
-    if (!record) {
-      record = {owner: this, state, slot, generation, signature, released: false, key};
-      const wrapper = Object.freeze(new CallableView());
-      wrapperRecords.set(wrapper, record);
-      record.wrapper = wrapper;
-      this.callables.set(key, record);
-    }
-    return record.wrapper;
-  }
-
   releaseCallable(record) {
     if (record.released) return;
     record.released = true;
     record.owner = undefined;
     this.callables.delete(record.key);
-    if (this.states.get(record.state) !== 'closed' && !this.closing && !this.terminal) {
-      this.releases.push({state: record.state, slot: record.slot, generation: record.generation});
+    this.queueCallableRelease(record.state, record.slot, record.generation, true);
+  }
+
+  queueCallableRelease(state, slot, generation, wrapper = false) {
+    if (!slot || !generation) return;
+    if (this.states.get(state) !== 'closed' && !this.closing && !this.terminal) {
+      this.releases.push({state, slot, generation, wrapper});
       this.scheduleSafePoint();
     }
   }
@@ -645,19 +622,22 @@ class BrowserOwner {
     while (this.releases.length && !this.terminal && this.operationId < maximumApplicationOperationId) {
       const release = this.releases.shift();
       if (this.states.get(release.state) === 'closed') continue;
-      const result = await this.entry('release_callable', release.state, release.slot, release.generation);
+      const result = await this.entry(
+        'release_callable', release.state, release.slot, release.generation, release.wrapper ? 1 : 0);
       if (result.failed) throw this.titanError(result);
     }
   }
 
-  async invoke(record, args) {
-    this.validateCallable(record.wrapper);
+  async invokeTarget(state, slot, generation, args) {
     const allocations = [], temporary = [];
     try {
-      const argv = this.marshalValues(record, args, allocations, temporary);
-      const result = await this.entry('invoke', record.state, record.slot, record.generation, args.length, argv);
+      const argv = this.marshalValues(state, args, allocations, temporary);
+      const result = await this.entry('invoke', state, slot, generation, args.length, argv);
       if (result.failed) throw this.titanError(result);
-      return result.values;
+      if (result.values.length !== 1) throw failure('PROTOCOL', 'browser invoke must return one value');
+      // Box the decoded value inside operate() so an opaque thenable/Promise in a
+      // BrowserHandle cannot hold logical admission or disposal open.
+      return {value: result.values[0]};
     } finally {
       this.free(allocations);
       for (const handle of temporary) {
@@ -673,10 +653,13 @@ class BrowserOwner {
     let record, copied;
     try {
       record = this.validateCallable(value);
-      copied = this.snapshotArguments(record, args);
+      copied = this.snapshotArguments(record.state, args);
     } catch (cause) { return Promise.reject(cause); }
     this.state = 'active';
-    return this.operate('call', () => this.invoke(record, copied));
+    return this.operate('call', () => {
+      this.validateCallable(record.wrapper);
+      return this.invokeTarget(record.state, record.slot, record.generation, copied);
+    }).then(box => box.value);
   }
 
   notify(value, args) {
@@ -684,8 +667,8 @@ class BrowserOwner {
     if (this.terminal) throw this.terminal;
     if (this.state === 'created' || this.state === 'failed') throw failure('STATE', stateMessage);
     const record = this.validateCallable(value);
-    const copied = this.snapshotArguments(record, args);
-    this.queue.push({record, args: copied});
+    const copied = this.snapshotArguments(record.state, args);
+    this.queue.push({record, target: record, args: copied});
     this.scheduleSafePoint();
   }
 
@@ -699,17 +682,22 @@ class BrowserOwner {
     return this.operate('drain', async () => {
       try {
         for (const notification of batch) {
-          if (this.closing) break;
-          const {record, args, request} = notification;
-          // Cancellation filters the live queue, not this detached batch.
-          // Normally settled one-shots are retired too, but still deliver.
-          if (request?.cancelled || record.released || this.states.get(record.state) === 'closed') continue;
-          try { await this.invoke(record, this.snapshotArguments(record, args)); }
-          catch (cause) {
+          try {
+            if (this.closing) continue;
+            const {record, target, args, request} = notification;
+            // Cancellation filters the live queue, not this detached batch.
+            // Normally settled one-shots are retired too, but still deliver.
+            if (request?.cancelled || record?.released || this.states.get(target.state) === 'closed') continue;
+            await this.invokeTarget(target.state, target.slot, target.generation, args);
+          } catch (cause) {
             if (this.terminal) throw this.terminal;
             this.reportNotification('callback', 'drain', cause);
           } finally {
-            notification.record = notification.args = undefined;
+            if (notification.request) {
+              notification.request.pendingNotifications--;
+              this.releaseRequestHolds(notification.request);
+            }
+            notification.record = notification.target = notification.args = notification.request = undefined;
           }
         }
       } finally { batch.length = 0; }
@@ -733,13 +721,15 @@ class BrowserOwner {
     }
   }
 
-  registerState(state) {
+  registerState(state, record = 0) {
     if (this.states.has(state)) throw failure('PROTOCOL', 'duplicate browser state identity');
     this.states.set(state, 'open');
+    if (record) this.stateRecords.set(state, record >>> 0);
   }
 
   closeState(state) {
     this.states.set(state, 'closed');
+    this.stateRecords.delete(state);
     for (const record of this.callables.values()) {
       if (record.state === state) {
         record.released = true;
@@ -747,10 +737,11 @@ class BrowserOwner {
         this.callables.delete(record.key);
       }
     }
-    this.queue = this.queue.filter(entry => entry.record.state !== state);
+    this.queue = this.queue.filter(entry => entry.target.state !== state);
     this.releases = this.releases.filter(entry => entry.state !== state);
     for (const request of this.requests) {
       if (request.state === state) {
+        request.holdsReleased = true;
         try { this.cancelRequest(request); }
         catch (cause) { this.retirementFailure ||= failure('HOST', 'browser host cancellation failed', cause); }
       }
@@ -763,7 +754,7 @@ class BrowserOwner {
     }
   }
 
-  newSlot(state, value, kind = 'value') {
+  newSlot(state, value, kind = 'value', temporary = false) {
     if (this.states.get(state) === 'closed' || !this.states.has(state)) {
       throw failure('HANDLE', 'browser handle belongs to a closed state');
     }
@@ -781,7 +772,7 @@ class BrowserOwner {
       slot = this.nextSlot++;
       generation = 1;
     }
-    this.slots.set(slot, {value, state, generation, kind, units: 1});
+    this.slots.set(slot, {value, state, generation, kind, units: 1, temporary});
     return {slot, generation};
   }
 
@@ -835,110 +826,112 @@ class BrowserOwner {
     return this.module.HEAPU8.slice(pointer, pointer + length);
   }
 
-  signatureAt(pointer) {
-    const view = this.heapView(pointer, 16);
-    const parameters = view.getUint32(0, true), results = view.getUint32(4, true);
-    const read = (address, count) => {
-      const data = this.heapView(address, count * 4);
-      const values = [];
-      for (let index = 0; index < count; ++index) {
-        const value = data.getUint32(index * 4, true);
-        if (value > kind.callable) throw failure('PROTOCOL', 'unsupported browser callable descriptor');
-        values.push(value);
-      }
-      return Object.freeze(values);
-    };
-    return Object.freeze({params: read(view.getUint32(8, true), parameters),
-      results: read(view.getUint32(12, true), results)});
-  }
-
-  registerCallable(state, slot, generation, pointer) {
-    this.wrapCallable(state, slot, generation, this.signatureAt(pointer));
+  registerCallable(state, slot, generation) {
+    // Re-exporting a callable cancels any queued, undelivered wrapper release,
+    // while preserving any queued request-hold drops for the same pin.
+    const index = this.releases.findIndex(entry =>
+      entry.wrapper && entry.state === state && entry.slot === slot && entry.generation === generation);
+    if (index !== -1) this.releases.splice(index, 1);
+    const key = `${state}:${slot}:${generation}`;
+    if (this.callables.has(key)) return 0;
+    const record = {owner: this, state, slot, generation, released: false, exposed: false, key};
+    const wrapper = Object.freeze(new CallableView());
+    wrapperRecords.set(wrapper, record);
+    record.wrapper = wrapper;
+    this.callables.set(key, record);
+    return 1;
   }
 
   invalidateCallable(state, slot, generation) {
     const key = `${state}:${slot}:${generation}`;
     const record = this.callables.get(key);
-    if (!record) return;
+    if (!record) return 1;
+    if (record.exposed) return 0;
     record.released = true;
     record.owner = undefined;
     this.callables.delete(key);
+    return 1;
   }
 
-  callableAt(state, slot, generation) {
+  callableRecordAt(state, slot, generation) {
     const record = this.callables.get(`${state}:${slot}:${generation}`);
     if (!record) throw failure('HANDLE', 'browser callable is released');
     this.validateCallable(record.wrapper, state);
-    return record.wrapper;
+    return record;
   }
 
-  snapshotArguments(record, args) {
-    if (args.length !== record.signature.params.length) {
-      throw new TypeError(`browser callable expects exactly ${record.signature.params.length} arguments`);
-    }
-    return args.map((value, index) => {
-      switch (record.signature.params[index]) {
-        case kind.nil:
-          if (value !== null) throw new TypeError('browser nil argument must be null');
-          break;
-        case kind.boolean:
-          if (typeof value !== 'boolean') throw new TypeError('browser boolean argument must be a boolean');
-          break;
-        case kind.integer:
-          if (typeof value !== 'bigint' || value < -(1n << 63n) || value >= 1n << 63n) {
-            throw new TypeError('browser integer argument must be a signed i64 BigInt');
-          }
-          break;
-        case kind.float:
-          if (typeof value !== 'number') throw new TypeError('browser float argument must be a Number');
-          break;
-        case kind.bytes: return copiedBytes(value);
-        case kind.handle:
-          if (wrapperRecords.has(value)) this.validateCallable(value, record.state);
-          break;
-        case kind.callable: this.validateCallable(value, record.state); break;
-        default: throw failure('PROTOCOL', 'unsupported browser argument descriptor');
+  snapshotFailureArguments(message, cause) {
+    return [
+      {kind: kind.string, bytes: message},
+      {kind: kind.handle, value: cause},
+    ];
+  }
+
+  snapshotArguments(state, args) {
+    return args.map(value => {
+      if (value === null || value === undefined) return {kind: kind.nil};
+      if (typeof value === 'boolean') return {kind: kind.boolean, value};
+      if (typeof value === 'bigint') {
+        if (value < -(1n << 63n) || value >= 1n << 63n) {
+          throw new TypeError('browser integer argument must be a signed i64 BigInt');
+        }
+        return {kind: kind.integer, value};
       }
-      return value;
+      if (typeof value === 'number') return {kind: kind.float, value};
+      if (typeof value === 'string') return {kind: kind.string, bytes: encodeString(value)};
+      if (isUint8Array(value)) return {kind: kind.bytes, bytes: copiedBytes(value)};
+      if (wrapperRecords.has(value)) {
+        this.validateCallable(value, state);
+        return {kind: kind.callable, wrapper: value};
+      }
+      return {kind: kind.handle, value};
     });
   }
 
-  marshalValues(record, args, allocations, temporary) {
+  writeValue(address, state, item, allocations, handles, temporary = false) {
+    const type = item.kind;
+    let bytes, length = 0, handle;
+    if (type === kind.string || type === kind.bytes) {
+      if (this.terminal) throw this.terminal;
+      length = item.bytes.length;
+      if (length > 0xffffffff) throw new TypeError('browser byte result has an invalid length or capacity');
+      bytes = this.allocate(length, allocations);
+      if (length) this.module.HEAPU8.set(item.bytes, bytes);
+    } else if (type === kind.handle) {
+      handle = this.newSlot(state, item.value, 'value', temporary);
+      handles.push(handle);
+    } else if (type === kind.callable) {
+      handle = this.validateCallable(item.wrapper, state);
+    }
+    if (this.terminal) throw this.terminal;
+    const view = this.heapView(address, valueSize);
+    view.setUint32(0, type, true);
+    view.setUint32(4, state, true);
+    if (type === kind.boolean) view.setBigInt64(8, item.value ? 1n : 0n, true);
+    else if (type === kind.integer) view.setBigInt64(8, item.value, true);
+    else if (type === kind.float) view.setFloat64(8, item.value, true);
+    else if (type === kind.string || type === kind.bytes) {
+      view.setBigInt64(8, BigInt(length), true);
+      view.setUint32(16, bytes, true);
+      view.setUint32(20, length, true);
+    } else if (handle) {
+      view.setUint32(24, handle.slot, true);
+      view.setUint32(28, handle.generation, true);
+    }
+  }
+
+  marshalValues(state, args, allocations, temporary) {
     const pointer = this.allocate(args.length * valueSize, allocations);
     if (args.length) this.module.HEAPU8.fill(0, pointer, pointer + args.length * valueSize);
     for (let index = 0; index < args.length; ++index) {
-      const value = args[index], type = record.signature.params[index];
-      const address = pointer + index * valueSize;
-      let bytes, handle;
-      if (type === kind.bytes) {
-        bytes = this.allocate(value.length, allocations);
-        if (value.length) this.module.HEAPU8.set(value, bytes);
-      } else if (type === kind.handle) {
-        handle = this.newSlot(record.state, value);
-        this.slots.get(handle.slot).temporary = true;
-        temporary.push(handle);
-      } else if (type === kind.callable) handle = this.validateCallable(value, record.state);
-      // Allocations above may have grown Wasm memory.
-      const view = this.heapView(address, valueSize);
-      view.setUint32(0, type, true);
-      if (type === kind.boolean) view.setBigInt64(8, value ? 1n : 0n, true);
-      else if (type === kind.integer) view.setBigInt64(8, value, true);
-      else if (type === kind.float) view.setFloat64(8, value, true);
-      else if (type === kind.bytes) {
-        view.setUint32(16, bytes, true);
-        view.setUint32(20, value.length, true);
-      } else if (handle) {
-        view.setUint32(4, record.state, true);
-        view.setUint32(24, handle.slot, true);
-        view.setUint32(28, handle.generation, true);
-      }
+      this.writeValue(pointer + index * valueSize, state, args[index], allocations, temporary, true);
     }
     return pointer;
   }
 
   valuesAt(pointer, count, state) {
     const view = this.heapView(pointer, count * valueSize);
-    const values = [];
+    const values = [], callables = [];
     for (let index = 0; index < count; ++index) {
       const address = index * valueSize, type = view.getUint32(address, true);
       switch (type) {
@@ -951,6 +944,11 @@ class BrowserOwner {
         }
         case kind.integer: values.push(view.getBigInt64(address + 8, true)); break;
         case kind.float: values.push(view.getFloat64(address + 8, true)); break;
+        case kind.string: {
+          const bytes = this.bytesAt(view.getUint32(address + 16, true), view.getUint32(address + 20, true));
+          values.push(utf8Decoder.decode(bytes));
+          break;
+        }
         case kind.bytes:
           values.push(this.bytesAt(view.getUint32(address + 16, true), view.getUint32(address + 20, true)));
           break;
@@ -959,13 +957,19 @@ class BrowserOwner {
           const ownerState = view.getUint32(address + 4, true);
           if (state !== undefined && ownerState !== state) throw failure('HANDLE', 'browser argument belongs to another state');
           const slot = view.getUint32(address + 24, true), generation = view.getUint32(address + 28, true);
-          values.push(type === kind.handle ? this.getSlot(ownerState, slot, generation).value :
-            this.callableAt(ownerState, slot, generation));
+          if (type === kind.handle) {
+            values.push(this.getSlot(ownerState, slot, generation).value);
+          } else {
+            const record = this.callableRecordAt(ownerState, slot, generation);
+            callables.push(record);
+            values.push(record.wrapper);
+          }
           break;
         }
         default: throw failure('PROTOCOL', 'browser value has an invalid kind');
       }
     }
+    for (const record of callables) record.exposed = true;
     return values;
   }
 
@@ -980,19 +984,25 @@ class BrowserOwner {
     }
     pending.completed = true;
     const status = view.getUint32(12, true);
+    const values = status === 0 ? this.valuesAt(view.getUint32(24, true), view.getUint32(20, true)) : [];
     const record = {id, kind: operation, failed: status !== 0,
       status: view.getInt32(16, true),
       bytes: this.bytesAt(view.getUint32(28, true), view.getUint32(32, true)),
       trace: this.bytesAt(view.getUint32(36, true), view.getUint32(40, true)),
-      values: this.valuesAt(view.getUint32(24, true), view.getUint32(20, true))};
+      values};
     this.complete(record);
   }
 
-  openState() {
+  openState(record = 0) {
     this.nextState = (this.nextState ?? 0) + 1;
     if (this.nextState > 0xffffffff) throw failure('STATE', 'browser state identity exhausted');
-    this.registerState(this.nextState);
+    this.registerState(this.nextState, record >>> 0);
     return this.nextState;
+  }
+
+  stateRecord(state) {
+    if (this.terminal || !state || this.states.get(state) === 'closed') return 0;
+    return this.stateRecords.get(state) ?? 0;
   }
 
   markStateClosing(state) {
@@ -1022,36 +1032,50 @@ class BrowserOwner {
     return {kind: kind.handle, value: bindings[name], state};
   }
 
-  hostCall(state, slot, generation, count, pointer, resultKind) {
+  hostCall(state, slot, generation, count, pointer) {
     const target = this.getSlot(state, slot, generation).value;
     if (typeof target !== 'function') throw new TypeError('browser binding is not callable');
     const args = this.valuesAt(pointer, count, state);
-    return {kind: resultKind, value: target(...args), state};
+    return {value: target(...args), state};
   }
 
-  completionTarget(state, slot, generation, parameters) {
-    const wrapper = this.callableAt(state, slot, generation);
-    const record = this.validateCallable(wrapper, state);
-    if (record.signature.results.length ||
-        parameters && (record.signature.params.length !== parameters.length ||
-          parameters.some((type, index) => record.signature.params[index] !== type))) {
-      throw new TypeError('browser request completion has an incompatible signature');
+  newRequest(state, successSlot, successGeneration, failureSlot, failureGeneration) {
+    if (!state || !successSlot || !successGeneration || !failureSlot || !failureGeneration ||
+        !this.states.has(state) || this.states.get(state) === 'closed') {
+      throw failure('HANDLE', 'browser callable is foreign, released, or belongs to a closed state');
     }
-    return record;
-  }
-
-  newRequest(state, success, rejected) {
     if (this.closing || this.states.get(state) !== 'open') {
       throw failure('DISPOSED', 'browser state is closing');
     }
-    const request = {state, success, rejected, kind: 'starting', cancelled: false,
-      cancelSignalled: false, retired: false, cancel: undefined,
-      terminal: deferred(), cell: undefined};
+    const request = {state,
+      success: {state, slot: successSlot, generation: successGeneration},
+      rejected: {state, slot: failureSlot, generation: failureGeneration},
+      kind: 'starting', cancelled: false, cancelSignalled: false, retired: false,
+      holdsReleased: false, pendingNotifications: 0,
+      cancel: undefined, terminal: deferred(), cell: undefined};
     request.cell = {target: {owner: this, request}};
     // Reserve the native owner before host acceptance or output publication.
     request.identity = this.newSlot(state, request, 'request');
     this.requests.add(request);
     return request;
+  }
+
+  releaseRequestHolds(request) {
+    if (request.holdsReleased || !request.retired || request.pendingNotifications > 0) return;
+    request.holdsReleased = true;
+    if (request.success) this.queueCallableRelease(request.state, request.success.slot, request.success.generation);
+    if (request.rejected) this.queueCallableRelease(request.state, request.rejected.slot, request.rejected.generation);
+    request.success = request.rejected = undefined;
+  }
+
+  abortRequest(request) {
+    request.holdsReleased = true;
+    this.retireRequest(request, true);
+    this.releaseSlot(request.identity.slot, request.identity.generation);
+  }
+
+  dropQueuedRequest(request) {
+    this.queue = this.queue.filter(entry => entry.request !== request || (--request.pendingNotifications, false));
   }
 
   startRequest(request, target, args, listener) {
@@ -1080,8 +1104,7 @@ class BrowserOwner {
       }
       request.kind = ownership;
     } catch (cause) {
-      this.retireRequest(request, true);
-      this.releaseSlot(request.identity.slot, request.identity.generation);
+      this.abortRequest(request);
       throw cause;
     }
     // Disposal may have been requested by the binding/subscribe import. Its
@@ -1091,6 +1114,7 @@ class BrowserOwner {
       try { this.cancelRequest(request); }
       catch (cause) {
         if (this.closing) this.retirementFailure ||= failure('HOST', 'browser host cancellation failed', cause);
+        request.holdsReleased = true;
         this.releaseSlot(request.identity.slot, request.identity.generation);
         throw cause;
       }
@@ -1100,11 +1124,14 @@ class BrowserOwner {
 
   emitRequest(request, args, rejected = false) {
     if (request.retired || request.cancelled || this.closing || this.terminal) return;
-    const record = rejected ? request.rejected : request.success;
-    if (record.released || this.states.get(request.state) !== 'open') return;
+    const target = rejected ? request.rejected : request.success;
+    if (!target || this.states.get(request.state) !== 'open') return;
     try {
-      this.notify(record.wrapper, args);
-      this.queue[this.queue.length - 1].request = request;
+      const copied = rejected ? this.snapshotFailureArguments(args[0], args[1]) :
+        this.snapshotArguments(request.state, args);
+      request.pendingNotifications++;
+      this.queue.push({target, args: copied, request});
+      this.scheduleSafePoint();
     } catch (cause) {
       if (!rejected) this.emitRequest(request, [messageBytes(cause), cause], true);
       else this.reportNotification('callback', 'notify', cause);
@@ -1114,32 +1141,8 @@ class BrowserOwner {
   settleRequest(request, success, value) {
     if (request.retired) return;
     if (!request.cancelled && !this.closing && !this.terminal) {
-      if (success) {
-        try {
-          if (request.capacity !== undefined) value = checkedReadSpan(value, request.capacity);
-          const count = request.success.signature.params.length;
-          let args;
-          if (count === 0) {
-            if (value !== undefined) throw new TypeError('zero-argument completion requires undefined');
-            args = [];
-          } else if (count === 1) args = [value];
-          else {
-            if (!Array.isArray(value) || value.length !== count) {
-              throw new TypeError('multiple-argument completion requires an exact dense array');
-            }
-            // Host indices may reenter or dispose. Materialize under the request
-            // owner before emitRequest checks liveness and publishes a notification.
-            args = [];
-            for (let index = 0; index < count; ++index) {
-              if (!Object.hasOwn(value, index)) {
-                throw new TypeError('multiple-argument completion requires an exact dense array');
-              }
-              args.push(value[index]);
-            }
-          }
-          this.emitRequest(request, args);
-        } catch (cause) { this.emitRequest(request, [messageBytes(cause), cause], true); }
-      } else this.emitRequest(request, [messageBytes(value), value], true);
+      if (success) this.emitRequest(request, [value]);
+      else this.emitRequest(request, [messageBytes(value), value], true);
     }
     this.retireRequest(request);
   }
@@ -1148,10 +1151,11 @@ class BrowserOwner {
     if (request.retired) return;
     request.retired = true;
     request.cell.target = undefined;
-    if (discard) this.queue = this.queue.filter(entry => entry.request !== request);
+    if (discard) this.dropQueuedRequest(request);
     request.terminal.resolve();
     this.requests.delete(request);
-    request.success = request.rejected = request.cancel = undefined;
+    request.cancel = undefined;
+    this.releaseRequestHolds(request);
   }
 
   cancelRequest(request) {
@@ -1166,18 +1170,18 @@ class BrowserOwner {
       request.cancel = undefined;
     }
     if (request.kind !== 'retained') this.retireRequest(request, true);
-    else this.queue = this.queue.filter(entry => entry.request !== request);
+    else this.dropQueuedRequest(request);
     if (error) throw error;
   }
 
   hostStart(state, slot, generation, count, pointer, successSlot, successGeneration,
       failureSlot, failureGeneration, listener) {
-    const success = this.completionTarget(state, successSlot, successGeneration);
-    const rejected = this.completionTarget(state, failureSlot, failureGeneration, [kind.bytes, kind.handle]);
     const target = this.getSlot(state, slot, generation).value;
     if (typeof target !== 'function') throw new TypeError('browser request binding is not callable');
-    const args = this.valuesAt(pointer, count, state);
-    const request = this.newRequest(state, success, rejected);
+    const request = this.newRequest(state, successSlot, successGeneration, failureSlot, failureGeneration);
+    let args;
+    try { args = this.valuesAt(pointer, count, state); }
+    catch (cause) { this.abortRequest(request); throw cause; }
     this.startRequest(request, target, args, listener);
     return {kind: kind.request, value: request};
   }
@@ -1185,44 +1189,7 @@ class BrowserOwner {
   hostCancel(state, slot, generation) {
     const request = this.getSlot(state, slot, generation, 'request').value;
     this.cancelRequest(request);
-    return {kind: kind.void, value: undefined};
-  }
-
-  hostRead(state, capacity, successSlot, successGeneration, failureSlot, failureGeneration) {
-    const success = this.completionTarget(state, successSlot, successGeneration, [kind.bytes]);
-    const rejected = this.completionTarget(state, failureSlot, failureGeneration, [kind.bytes, kind.handle]);
-    const source = this.options.stdin;
-    if (!source) throw new Error('browser stdin source is unavailable');
-    const request = this.newRequest(state, success, rejected);
-    request.capacity = capacity;
-    this.startRequest(request, () => {
-      const result = source(capacity);
-      return result?.kind === 'retained' || result?.kind === 'detachable' ? result :
-        {kind: 'detachable', promise: result};
-    }, [], false);
-    return {kind: kind.request, value: request};
-  }
-
-  hostWrite(state, stream, pointer, length, successSlot, successGeneration, failureSlot, failureGeneration) {
-    const channel = stream === 1 ? this.out : stream === 2 ? this.err : undefined;
-    if (!channel) throw new TypeError('browser output stream must be STDOUT or STDERR');
-    this.heapView(pointer, length);
-    let completion, request;
-    if (successSlot !== 0) {
-      const success = this.completionTarget(state, successSlot, successGeneration, []);
-      const rejected = this.completionTarget(state, failureSlot, failureGeneration, [kind.bytes, kind.handle]);
-      request = this.newRequest(state, success, rejected);
-      request.kind = 'detachable';
-      completion = {resolve: requestFulfilled.bind(undefined, request.cell),
-        reject: requestRejected.bind(undefined, request.cell)};
-    }
-    try {
-      channel.append(this.module.HEAPU8.subarray(pointer, pointer + length), completion);
-    } catch (cause) {
-      if (request) this.releaseSlot(request.identity.slot, request.identity.generation);
-      throw cause;
-    }
-    return request ? {kind: kind.request, value: request} : {kind: kind.void, value: undefined};
+    return {kind: kind.nil, value: undefined};
   }
 
   importResponse(pointer, state, action) {
@@ -1250,7 +1217,7 @@ class BrowserOwner {
         const address = this.allocate(message.length, []);
         if (message.length) this.module.HEAPU8.set(message, address);
         const view = this.heapView(pointer, 56);
-        view.setUint32(0, 2, true);
+        view.setUint32(0, responseStatus.jsError, true);
         view.setUint32(40, address, true);
         view.setUint32(44, message.length, true);
         view.setUint32(48, thrown.slot, true);
@@ -1258,7 +1225,7 @@ class BrowserOwner {
       } catch {
         if (this.terminal) throw this.terminal;
         const view = this.heapView(pointer, 56);
-        view.setUint32(0, thrown ? 2 : 5, true);
+        view.setUint32(0, thrown ? responseStatus.jsError : responseStatus.memory, true);
         if (thrown) {
           view.setUint32(48, thrown.slot, true);
           view.setUint32(52, thrown.generation, true);
@@ -1269,65 +1236,28 @@ class BrowserOwner {
     }
   }
 
-  writeResponseValue(pointer, state, type, value, allocations, handles) {
-    let handle, bytes, length = 0;
-    switch (type) {
-      case kind.void:
-        if (value !== undefined) throw new TypeError('browser void binding must return undefined');
-        break;
-      case kind.boolean:
-        if (typeof value !== 'boolean') throw new TypeError('browser boolean binding must return a boolean');
-        break;
-      case kind.integer:
-        if (typeof value !== 'bigint' || value < -(1n << 63n) || value >= 1n << 63n) {
-          throw new TypeError('browser integer binding must return a signed i64 BigInt');
-        }
-        break;
-      case kind.float:
-        if (typeof value !== 'number') throw new TypeError('browser float binding must return a Number');
-        break;
-      case kind.bytes: {
-        const counted = value instanceof Uint8Array ? {bytes: value, length: value.length} : value;
-        const returned = counted?.bytes, count = counted?.length;
-        if (this.terminal) throw this.terminal;
-        if (!(returned instanceof Uint8Array) || !Number.isSafeInteger(count) || count < 0 ||
-            count > returned.length || count > 0xffffffff) {
-          throw new TypeError('browser byte result has an invalid length or capacity');
-        }
-        let source = new Uint8Array(returned.buffer, returned.byteOffset, count);
-        if (this.terminal) throw this.terminal;
-        // A host may return this image's own heap. Preserve that span before
-        // allocating its response buffer can grow/detach the current memory.
-        if (source.buffer === this.module.HEAPU8.buffer) source = new Uint8Array(source);
-        length = count;
-        bytes = this.allocate(length, allocations);
-        if (length) this.module.HEAPU8.set(source, bytes);
-        break;
-      }
-      case kind.handle:
-        if (wrapperRecords.has(value)) this.validateCallable(value, state);
-        handle = this.newSlot(state, value);
-        handles.push(handle);
-        break;
-      case kind.request:
-        handle = value.identity;
-        this.getSlot(state, handle.slot, handle.generation, 'request');
-        handles.push(handle);
-        break;
-      default: throw new TypeError('unsupported browser binding result kind');
+  writeResponseValue(pointer, state, explicitKind, value, allocations, handles) {
+    if (explicitKind === undefined) {
+      const [item] = this.snapshotArguments(state, [value]);
+      this.writeValue(pointer, state, item, allocations, handles);
+      return;
     }
-    if (this.terminal) throw this.terminal;
+    let handle;
+    if (explicitKind === kind.handle) {
+      if (wrapperRecords.has(value)) this.validateCallable(value, state);
+      handle = this.newSlot(state, value);
+      handles.push(handle);
+    } else if (explicitKind === kind.request) {
+      handle = value.identity;
+      this.getSlot(state, handle.slot, handle.generation, 'request');
+      handles.push(handle);
+    } else if (explicitKind !== kind.nil) {
+      throw new TypeError('unsupported browser binding result kind');
+    }
     const view = this.heapView(pointer, valueSize);
-    view.setUint32(0, type, true);
+    view.setUint32(0, explicitKind, true);
     view.setUint32(4, state, true);
-    if (type === kind.boolean) view.setBigInt64(8, value ? 1n : 0n, true);
-    else if (type === kind.integer) view.setBigInt64(8, value, true);
-    else if (type === kind.float) view.setFloat64(8, value, true);
-    else if (type === kind.bytes) {
-      view.setBigInt64(8, BigInt(length), true);
-      view.setUint32(16, bytes, true);
-      view.setUint32(20, length, true);
-    } else if (handle) {
+    if (handle) {
       view.setUint32(24, handle.slot, true);
       view.setUint32(28, handle.generation, true);
     }
@@ -1351,8 +1281,15 @@ class BrowserOwner {
     if (this.active) this.active.interrupted = fault;
     this.out.interrupt(error, fault);
     this.err.interrupt(error, fault);
+    for (const entry of this.queue) {
+      if (entry.request) {
+        entry.request.pendingNotifications = 0;
+        entry.request.holdsReleased = true;
+      }
+    }
     this.queue = [];
     for (const request of this.requests) {
+      request.holdsReleased = true;
       try { this.cancelRequest(request); }
       catch (cause) { this.retirementFailure ||= failure('HOST', 'browser host cancellation failed', cause); }
     }
@@ -1363,9 +1300,14 @@ class BrowserOwner {
 }
 
 async function retireOwner(owner) {
+  let interruptedFailure;
   if (owner.active) {
-    try { await owner.active.promise; }
+    const token = owner.active;
+    try { await token.promise; }
     catch { /* The interrupted operation reports its own failure. */ }
+    if (token.failed && token.primaryFault && token.primaryFault !== token.interrupted) {
+      interruptedFailure = token.primaryFault;
+    }
   }
   await Promise.all([...owner.requests].map(request => request.terminal.promise));
   let error = owner.retirementFailure;
@@ -1383,13 +1325,14 @@ async function retireOwner(owner) {
   if (owner.backend) owner.backend.blocked = true;
   for (const state of owner.states.keys()) owner.closeState(state);
   const drains = [owner.out.takeDrain(), owner.err.takeDrain()];
-  const disposal = {drains, failure: error ? {error} : undefined,
+  const disposal = {drains, failure: error ? {error} : interruptedFailure,
     observer: owner.options?.onNotificationError};
   owner.lastTrace = owner.trace();
   owner.module = owner.backend = owner.factory = owner.options = undefined;
   owner.pending = undefined;
   owner.queue = owner.releases = owner.freeSlots = [];
   owner.slots.clear();
+  owner.stateRecords.clear();
   owner.callables.clear();
   owner.requests.clear();
   owner.state = 'disposed';
@@ -1399,7 +1342,7 @@ async function retireOwner(owner) {
 /** Create one persistent instance; the image supplies its private factory. */
 export function create(factory, options = {}) {
   if (typeof factory !== 'function') throw new TypeError('browser factory must be a function');
-  for (const name of ['stdout', 'stderr', 'stdin', 'locateFile', 'onNotificationError', 'requestDrain', 'onEngineFailure']) {
+  for (const name of ['stdout', 'stderr', 'locateFile', 'onNotificationError', 'requestDrain', 'onEngineFailure']) {
     if (options[name] !== undefined && typeof options[name] !== 'function') {
       throw new TypeError(`browser ${name} must be a function`);
     }

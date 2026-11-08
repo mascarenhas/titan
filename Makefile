@@ -288,7 +288,7 @@ TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O) $(TITAN_PATH_O) $(LTITANLIB_
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
 TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
 	titan-runtime/titan_path.c titan-runtime/ltitanlib.c
-BROWSER_RUNTIME_SOURCES := $(TITAN_RUNTIME_SOURCES) titan-runtime/browser/titan-browser.c
+BROWSER_RUNTIME_SOURCES := $(TITAN_RUNTIME_SOURCES)
 BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
 	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk

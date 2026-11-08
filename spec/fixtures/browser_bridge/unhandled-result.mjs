@@ -11,9 +11,9 @@ export async function run(context) {
     context.assert(result.kind === 'returned' && result.status === 0, 'native owner failed before rejection proof');
     await host.instance.call(host.callbacks.get('close_detached'));
     const value = Promise.reject(new Error('bridge unhandled reverse result'));
-    const values = await host.instance.call(host.callbacks.get('handle_echo'), value);
-    context.assert(values.length === 1 && values[0] === value, 'reverse result adopted its opaque rejected Promise');
-    // Deliberately no handler on values[0]. A carrier is not a rejection observer.
+    host.instance.call(host.callbacks.get('handle_echo'), value);
+    while (host.controls.snapshot().owner || !host.controls.snapshot().safe || host.controls.snapshot().active) await context.tick();
+    // Deliberately no handler on the adopted call() result.
   } finally {
     await host.instance.dispose();
     host.releaseObservations();

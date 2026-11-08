@@ -256,7 +256,7 @@ describe("browser image profile and SDK readiness", function()
             "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
                 '"_titan_browser_release_callable","_titan_browser_close",' ..
-                '"_titan_browser_alloc","_titan_browser_free","_titan_browser_trace_identity"]',
+                '"_malloc","_free","_titan_browser_trace_identity"]',
             '-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
             "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
@@ -286,7 +286,7 @@ describe("browser image profile and SDK readiness", function()
             "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
                 '"_titan_browser_release_callable","_titan_browser_close",' ..
-                '"_titan_browser_alloc","_titan_browser_free","_titan_browser_trace_identity"]',
+                '"_malloc","_free","_titan_browser_trace_identity"]',
             '-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]',
             '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
             "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
@@ -788,7 +788,7 @@ describe("real browser test image", function()
             info.sdk_root .. "/libtitan.a", { target = fixtures.fingerprint() }))
         local members = {}
         for index, member in ipairs(runtime.members) do members[index] = member.display_name end
-        assert.same({ "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o", "titan-browser.o" }, members)
+        assert.same({ "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }, members)
         assert.is_true(driver.validate_browser_provider(runtime))
         for _, image in ipairs({ "image_main", "explicit-program" }) do
             assert.equal("file", lfs.attributes(workspace .. "/out/" .. image .. ".mjs", "mode"))
@@ -796,7 +796,7 @@ describe("real browser test image", function()
             local exports = {}
             for _, item in ipairs(inventory.exports) do exports[item.name] = true end
             for _, name in ipairs({ "titan_browser_initialize", "titan_browser_entry", "titan_browser_invoke",
-                    "titan_browser_release_callable", "titan_browser_close", "titan_browser_alloc", "titan_browser_free" }) do
+                    "titan_browser_release_callable", "titan_browser_close", "malloc", "free" }) do
                 assert.is_true(exports[name], "missing browser gateway " .. name)
             end
             assert.is_nil(exports.titan_browser_gate_guarded)
@@ -1204,7 +1204,7 @@ end
         assert.truthy(map:find('"x_titan_function_names":[', 1, true))
         image_identity(info, workspace .. "/out/image_case.mjs", "image_case.titan")
         for _, name in ipairs({ "titan_browser_initialize", "titan_browser_invoke", "titan_browser_release_callable",
-                "titan_browser_close", "titan_browser_alloc", "titan_browser_free" }) do
+                "titan_browser_close", "malloc", "free" }) do
             assert.is_true(exports[name], "missing browser gateway " .. name)
         end
         assert.is_nil(exports.titan_browser_gate_guarded)

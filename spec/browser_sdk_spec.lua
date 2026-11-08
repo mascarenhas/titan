@@ -17,7 +17,7 @@ local temporary = require "spec.support.temporary"
 local files = require "spec.fixtures.target_selection.support"
 
 local EXPECTED_RUNTIME_MEMBERS = {
-    "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o", "titan-browser.o",
+    "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o",
 }
 
 local EXPECTED_LPEGLABEL_MEMBERS = {

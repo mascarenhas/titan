@@ -277,20 +277,22 @@ for `lua_State`, `TValue`, `Udata`, and `CClosure`. `TValue` remains a distinct
 C type in Titan's FFI type graph. Private runtime helpers can move values across
 that boundary through explicit `value` <-> C `TValue` coercions.
 
-The header also defines typed `static inline` bridges, `lmacro_*`, that evaluate
-real Lua function-like macros inside C, where the host preprocessor can see
-them: value extractors (`lmacro_thvalue`, `lmacro_uvalue`, `lmacro_clCvalue`,
+The header also defines typed one-expression `static inline` bridges,
+`lmacro_*`, for operations the FFI cannot spell directly. These include real
+Lua function-like macros, evaluated where the host preprocessor can see them:
+value extractors (`lmacro_thvalue`, `lmacro_uvalue`, `lmacro_clCvalue`,
 `lmacro_pvalue`, `lmacro_fvalue`, `lmacro_ccl_f`, `lmacro_getudatamem`), tag
 tests (`lmacro_ttype`, `lmacro_ttypetag`, `lmacro_ttisLclosure`,
 `lmacro_ttisCclosure`, `lmacro_ttisfulluserdata`, `lmacro_ttislcf`,
 `lmacro_ttislightuserdata`), and writes (`lmacro_sethvalue`,
 `lmacro_luaC_barrierback`, whose untyped object casts to `GCObject *` rather
 than through `obj2gco`, which reads the object's tag under `-DLUAI_ASSERT`).
-They are the deliberately narrow exception to
-Titan's lack of general function-like-macro inference, used by trusted
-standard-library foreign functions (uv, HTTP, coroutine, transfer, thread) to
-recover generated callback state. Add a bridge here rather than inferring a
-function-like macro.
+Other bridges access internal fields of incomplete structs
+(`lmacro_get_errfunc`, `lmacro_set_errfunc`) or remove `const` for native
+deallocation (`lmacro_unconst`). These are narrow support for trusted
+standard-library foreign functions, not general function-like-macro
+inference. Add a one-expression bridge here for such an unsupported operation
+rather than inferring a function-like macro.
 
 The same header defines `lua_totvalue`, `lua_pushtvalue`,
 `lua_pushconstlightuserdata`, `lua_togco`, and `titan_newthread` as small typed

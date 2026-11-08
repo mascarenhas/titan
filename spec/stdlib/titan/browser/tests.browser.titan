@@ -1,17 +1,62 @@
+local early_close = import "browser.early_close"
 local browser = import "browser"
 local test = import "test"
 local gc = import "gc"
 local reflect = import "reflect"
 local coroutine = import "coroutine"
 local string = import "string"
-local independent = import "browser.independent"
+local _ = import "browser.independent"
 foreign import "native.h"
 
-local function publish(name: string, callback: value)
+local type Value = browser.BrowserValue
+local type Callable = function (...: browser.BrowserValue): browser.BrowserValue
+
+local function publish(name: string, callback: Callable)
   local target = browser.binding("publish")
   defer target:close()
-  browser.call_void(target, {browser.Argument.is_bytes(name),
-                            browser.Argument.is_callable(browser.callable(callback))})
+  target:call(Value.is_string(name), Value.is_callable(callback))
+end
+
+local function expect_boolean(item: browser.BrowserValue): boolean
+  case item
+  when is_boolean(flag) then return flag
+  end
+  raise "expected BrowserValue.is_boolean"
+end
+
+local function expect_integer(item: browser.BrowserValue): integer
+  case item
+  when is_integer(number) then return number
+  end
+  raise "expected BrowserValue.is_integer"
+end
+
+local function expect_float(item: browser.BrowserValue): float
+  case item
+  when is_float(number) then return number
+  end
+  raise "expected BrowserValue.is_float"
+end
+
+local function expect_string(item: browser.BrowserValue): string
+  case item
+  when is_string(text) then return text
+  end
+  raise "expected BrowserValue.is_string"
+end
+
+local function expect_bytes(item: browser.BrowserValue): string
+  case item
+  when is_bytes(bytes) then return bytes
+  end
+  raise "expected BrowserValue.is_bytes"
+end
+
+local function expect_handle(item: browser.BrowserValue): browser.BrowserHandle
+  case item
+  when is_handle(handle) then return handle
+  end
+  raise "expected BrowserValue.is_handle"
 end
 
 local function expect_bridge_error(target_name: string, expected: string)
@@ -19,18 +64,19 @@ local function expect_bridge_error(target_name: string, expected: string)
   defer target:close()
   local caught = false
   do
-    browser.call_void(target, {})
+    target:call()
   catch
     caught = true
-    test.assert(error is browser.Error, "host failure did not become browser.Error")
-    local failure: browser.Error = error
+    test.assert(error is browser.BrowserError, "host failure did not become browser.BrowserError")
+    local failure: browser.BrowserError = error
     defer failure:close()
     test.assert(string.find(failure.message, expected) ~= nil, "host diagnostic lost its message")
     local checker = browser.binding("check_thrown")
     defer checker:close()
-    test.assert(browser.call_boolean(checker, {browser.Argument.is_bytes(target_name),
-                                             browser.Argument.is_handle(failure.thrown)}),
-                "thrown JavaScript value lost its original identity")
+    test.assert(expect_boolean(checker:call(
+        Value.is_string(target_name),
+        Value.is_handle(failure.thrown))),
+        "thrown JavaScript value lost its original identity")
   end
   test.assert(caught, "host failure unexpectedly returned")
 end
@@ -39,10 +85,10 @@ function test_boolean_roundtrip(context: test.Context)
   local target = browser.binding("echo_boolean")
   context:cleanup(function() target:close() end)
   context:run("false", function(_: test.Context)
-    test.assert(not browser.call_boolean(target, {browser.Argument.is_boolean(false)}))
+    test.assert(not expect_boolean(target:call(Value.is_boolean(false))))
   end)
   context:run("true", function(_: test.Context)
-    test.assert(browser.call_boolean(target, {browser.Argument.is_boolean(true)}))
+    test.assert(expect_boolean(target:call(Value.is_boolean(true))))
   end)
 end
 
@@ -50,9 +96,10 @@ local function integer_case(context: test.Context, name: string, input: integer)
   context:run(name, function(_: test.Context)
     local target = browser.binding("echo_integer")
     defer target:close()
-    test.assert(browser.call_integer(target, {browser.Argument.is_integer(input)}) == input)
+    test.assert(expect_integer(target:call(Value.is_integer(input))) == input)
   end)
 end
+
 function test_i64_exact(context: test.Context)
   integer_case(context, "minimum", 0x8000000000000000)
   integer_case(context, "maximum", 0x7fffffffffffffff)
@@ -60,14 +107,28 @@ function test_i64_exact(context: test.Context)
   integer_case(context, "at_2_53", 9007199254740992)
   integer_case(context, "above_2_53", 9007199254740993)
   integer_case(context, "negative_above_2_53", -9007199254740993)
+  context:run("out_of_range_bigint_from_js", function(_: test.Context)
+    local target = browser.binding("overflow_bigint")
+    defer target:close()
+    local rejected = false
+    do
+      target:call()
+    catch
+      rejected = true
+      test.assert(error is browser.BrowserError)
+      local failure: browser.BrowserError = error
+      failure:close()
+    end
+    test.assert(rejected, "out-of-range BigInt result was accepted")
+  end)
 end
 
 function test_argument_array_exceeds_inline_storage(_: test.Context)
-  local arguments: {browser.Argument} = {}
-  for index = 1, 10 do arguments[index] = browser.Argument.is_integer(index) end
+  local arguments: {browser.BrowserValue} = {}
+  for index = 1, 10 do arguments[index] = Value.is_integer(index) end
   local target = browser.binding("echo_integer")
   defer target:close()
-  test.assert(browser.call_integer(target, arguments) == 1,
+  test.assert(expect_integer(target:call(...arguments)) == 1,
               "rooted dynamic argument storage did not survive marshaling")
 end
 
@@ -75,7 +136,7 @@ function test_float_preserves_kind_and_bits(context: test.Context)
   context:run("integral_float", function(_: test.Context)
     local target = browser.binding("echo_float")
     defer target:close()
-    local result = browser.call_float(target, {browser.Argument.is_float(17.0)})
+    local result = expect_float(target:call(Value.is_float(17.0)))
     case reflect.inspect(result)
     when is_float(item) then test.assert(item == 17.0)
     else raise "integral float changed runtime tag"
@@ -84,55 +145,100 @@ function test_float_preserves_kind_and_bits(context: test.Context)
   context:run("negative_zero", function(_: test.Context)
     local target = browser.binding("echo_float")
     defer target:close()
-    local result = browser.call_float(target, {browser.Argument.is_float(-0.0)})
+    local result = expect_float(target:call(Value.is_float(-0.0)))
     test.assert(result == 0.0 and 1.0 / result < 0.0)
   end)
   context:run("nan", function(_: test.Context)
     local target = browser.binding("echo_float")
     defer target:close()
-    local result = browser.call_float(target, {browser.Argument.is_float(0.0 / 0.0)})
+    local result = expect_float(target:call(Value.is_float(0.0 / 0.0)))
     test.assert(result ~= result)
   end)
 end
 
-function test_counted_bytes(context: test.Context)
+function test_strings_and_utf8(context: test.Context)
+  context:run("empty", function(_: test.Context)
+    local target = browser.binding("echo_string")
+    defer target:close()
+    test.assert(expect_string(target:call(Value.is_string(""))) == "")
+  end)
+  context:run("utf8_and_nul", function(_: test.Context)
+    local target = browser.binding("echo_string")
+    defer target:close()
+    local text = "hello \240\159\140\141\0world"
+    test.assert(expect_string(target:call(Value.is_string(text))) == text)
+  end)
+  context:run("leading_bom_and_bom_only", function(_: test.Context)
+    local target = browser.binding("echo_string")
+    defer target:close()
+    local with_bom = "\239\187\191x"
+    local bom_only = "\239\187\191"
+    test.assert(expect_string(target:call(Value.is_string(with_bom))) == with_bom)
+    test.assert(expect_string(target:call(Value.is_string(bom_only))) == bom_only)
+  end)
+  context:run("invalid_utf8_from_titan_raises", function(_: test.Context)
+    local target = browser.binding("echo_string")
+    defer target:close()
+    local rejected = false
+    do
+      target:call(Value.is_string("\0\255\195("))
+    catch
+      rejected = true
+    end
+    test.assert(rejected, "invalid UTF-8 in BrowserValue.is_string was accepted")
+  end)
+  context:run("ill_formed_utf16_from_js_raises", function(_: test.Context)
+    local target = browser.binding("ill_formed_string")
+    defer target:close()
+    local rejected = false
+    do
+      target:call()
+    catch
+      rejected = true
+      test.assert(error is browser.BrowserError)
+      local failure: browser.BrowserError = error
+      failure:close()
+    end
+    test.assert(rejected, "ill-formed UTF-16 JS string result was accepted")
+  end)
+end
+
+function test_bytes_roundtrip(context: test.Context)
   context:run("empty", function(_: test.Context)
     local target = browser.binding("echo_bytes")
     defer target:close()
-    test.assert(browser.call_bytes(target, {browser.Argument.is_bytes("")}) == "")
+    test.assert(expect_bytes(target:call(Value.is_bytes(""))) == "")
   end)
   context:run("binary", function(_: test.Context)
     local target = browser.binding("echo_bytes")
     defer target:close()
     local bytes = "\0\255\195("
-    test.assert(browser.call_bytes(target, {browser.Argument.is_bytes(bytes)}) == bytes)
-  end)
-  context:run("short_count", function(_: test.Context)
-    local target = browser.binding("short_bytes")
-    defer target:close()
-    test.assert(browser.call_bytes(target, {}) == "\0\255\195(")
+    test.assert(expect_bytes(target:call(Value.is_bytes(bytes))) == bytes)
   end)
   context:run("memory_growth", function(_: test.Context)
     local target = browser.binding("large_bytes")
     defer target:close()
-    local bytes = browser.call_bytes(target, {})
+    local bytes = expect_bytes(target:call())
     test.assert(#bytes == 20 * 1024 * 1024)
     test.assert(string.sub(bytes, 1, 4) == "\0\255\195(")
     test.assert(string.sub(bytes, #bytes - 3) == "\0\255\195(")
   end)
-  context:run("invalid_count", function(_: test.Context)
-    local target = browser.binding("invalid_bytes")
-    defer target:close()
-    local rejected = false
-    do
-      browser.call_bytes(target, {})
-    catch
-      rejected = true
-      test.assert(error is browser.Error)
-      local failure: browser.Error = error
-      failure:close()
+end
+
+function test_nil_bindings(context: test.Context)
+  context:run("null_and_undefined_to_is_nil", function(_: test.Context)
+    local null_fn = browser.binding("return_null")
+    defer null_fn:close()
+    local undef_fn = browser.binding("return_undefined")
+    defer undef_fn:close()
+    case null_fn:call(Value.is_nil())
+    when is_nil() then
+    else raise "null return was not BrowserValue.is_nil"
     end
-    test.assert(rejected, "over-capacity bytes were accepted")
+    case undef_fn:call()
+    when is_nil() then
+    else raise "undefined return was not BrowserValue.is_nil"
+    end
   end)
 end
 
@@ -144,7 +250,7 @@ function test_js_exceptions_are_recoverable(context: test.Context)
       expect_bridge_error(name, "bridge failure")
       local target = browser.binding("echo_integer")
       defer target:close()
-      test.assert(browser.call_integer(target, {browser.Argument.is_integer(42)}) == 42)
+      test.assert(expect_integer(target:call(Value.is_integer(42))) == 42)
     end)
   end
 end
@@ -158,8 +264,9 @@ function test_opaque_falsy_values_and_promise(context: test.Context)
       defer item:close()
       local target = browser.binding("check_value")
       defer target:close()
-      test.assert(browser.call_boolean(target, {browser.Argument.is_bytes(name),
-                                               browser.Argument.is_handle(item)}))
+      test.assert(expect_boolean(target:call(
+          Value.is_string(name),
+          Value.is_handle(item))))
       item:close()
       item:close()
     end)
@@ -167,24 +274,18 @@ function test_opaque_falsy_values_and_promise(context: test.Context)
   context:run("promise_handle", function(_: test.Context)
     local target = browser.binding("promise_value")
     defer target:close()
-    local promise = browser.call_handle(target, {})
+    local promise = expect_handle(target:call())
     defer promise:close()
     local checker = browser.binding("is_promise")
     defer checker:close()
-    test.assert(browser.call_boolean(checker, {browser.Argument.is_handle(promise)}))
+    test.assert(expect_boolean(checker:call(Value.is_handle(promise))))
   end)
-  context:run("promise_not_scalar", function(_: test.Context)
-    local target = browser.binding("promise_value")
-    defer target:close()
-    local rejected = false
-    do
-      browser.call_integer(target, {})
-    catch
-      rejected = true
-      local failure: browser.Error = error
-      failure:close()
-    end
-    test.assert(rejected)
+  context:run("js_function_handle", function(_: test.Context)
+    local maker = browser.binding("make_js_adder")
+    defer maker:close()
+    local adder = expect_handle(maker:call(Value.is_integer(5)))
+    defer adder:close()
+    test.assert(expect_integer(adder:call(Value.is_integer(37))) == 42)
   end)
 end
 
@@ -195,52 +296,76 @@ function test_unreachable_handle_finalizers(_: test.Context)
   local counter = browser.binding("handle_count")
   defer counter:close()
   gc.collect()
-  local before = browser.call_integer(counter, {})
+  local before = expect_integer(counter:call())
   drop_handles()
   gc.collect()
   gc.collect()
-  test.assert(browser.call_integer(counter, {}) == before, "unreachable JSHandle units survived collection")
+  test.assert(expect_integer(counter:call()) == before, "unreachable BrowserHandle units survived collection")
 end
 
-local function rejected_signature(callback: value)
-  local rejected = false
-  do
-    browser.callable(callback)
-  catch
-    rejected = true
+local state_close_marker: ({string: integer})?
+function test_user_state_close_finalizer(_: test.Context)
+  local pending: browser.BrowserHandle?
+  local source = browser.binding("state_close_request")
+  defer source:close()
+  local notify = function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_nil()
   end
-  test.assert(rejected, "unsupported callback signature was accepted")
+  local request = source:start(notify, notify)
+  request:cancel()
+  -- Keep the cancelled request's owning slot for the earlier finalizer too.
+  early_close.set_finalizer(function()
+    local handle = pending
+    handle:close()
+    handle:close()
+    request:close()
+    request:close()
+    ffi.titan_bridge_test_earlier_cleanup(0)
+    browser.binding("state_close_handle") -- Must raise after record invalidation.
+  end)
+  local marker: {string: integer} = {}
+  gc.finalizable<|value|>(marker, function(_: value)
+    local handle = browser.binding("state_close_handle")
+    handle:close()
+    pending = browser.binding("state_close_handle")
+    local observer = browser.binding("state_close_observe")
+    defer observer:close()
+    observer:call(Value.is_integer(0))
+  end)
+  state_close_marker = marker
 end
-function test_callback_signature_rejection(context: test.Context)
-  context:run("value", function(_: test.Context)
-    rejected_signature(function(item: value): value return item end)
-  end)
-  context:run("option", function(_: test.Context)
-    rejected_signature(function(item: integer?): integer? return item end)
-  end)
-  context:run("array", function(_: test.Context)
-    rejected_signature(function(item: {integer}): integer return #item end)
-  end)
-  context:run("vararg", function(_: test.Context)
-    rejected_signature(function(...: integer): integer return 1 end)
-  end)
-  context:run("flexret", function(_: test.Context)
-    rejected_signature(function(): (...: integer) return 1, 2 end)
-  end)
-  context:run("lua_function", function(_: test.Context)
-    local callback: value = ffi.titan_bridge_test_lua_function(L)
-    rejected_signature(callback)
-  end)
-  context:run("c_function", function(_: test.Context)
-    local callback: value = ffi.titan_bridge_test_c_function(L)
-    rejected_signature(callback)
-  end)
+
+function test_callable_wrapper_identity_and_roundtrip(_: test.Context)
+  local base = 5
+  local fn = function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_integer(expect_integer(...[1]) + base)
+  end
+  local same_checker = browser.binding("check_same_wrapper")
+  defer same_checker:close()
+  test.assert(expect_boolean(same_checker:call(
+      Value.is_callable(fn),
+      Value.is_callable(fn))),
+      "same Titan callable did not receive one wrapper per state")
+  local echo = browser.binding("echo_callable")
+  defer echo:close()
+  case echo:call(Value.is_callable(fn))
+  when is_callable(roundtripped) then
+    test.assert(roundtripped == fn, "callable wrapper did not round-trip to original function")
+    test.assert(expect_integer(roundtripped(Value.is_integer(10))) == 15)
+  else
+    raise "echo_callable did not return is_callable"
+  end
 end
 
 local function export_shared_captures()
   local count = 0
-  publish("increment", function(delta: integer): integer count = count + delta; return count end)
-  publish("read_capture", function(): integer return count end)
+  publish("increment", function(...: browser.BrowserValue): browser.BrowserValue
+    count = count + expect_integer(...[1])
+    return Value.is_integer(count)
+  end)
+  publish("read_capture", function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_integer(count)
+  end)
 end
 function test_export_original_capture_roots(_: test.Context)
   export_shared_captures()
@@ -248,31 +373,96 @@ function test_export_original_capture_roots(_: test.Context)
   gc.collect()
 end
 
-function test_export_exact_signatures(_: test.Context)
-  publish("zero_results", function() end)
-  publish("one_nil", function(): nil return nil end)
-  publish("trailing_nil", function(item: integer, absent: nil): (integer, nil, boolean, nil)
-    test.assert(absent == nil)
-    return item, nil, false, nil
+function test_export_callbacks(_: test.Context)
+  publish("one_nil", function(...: browser.BrowserValue): browser.BrowserValue
+    if #... > 0 then
+      case ...[1]
+      when is_nil() then return Value.is_nil()
+      else raise "one_nil expects nil or no arguments"
+      end
+    end
+    return Value.is_nil()
   end)
-  publish("typed_echo", function(flag: boolean, whole: integer, number: float, bytes: string): (boolean, integer, float, string)
-    return flag, whole, number, bytes
+  publish("echo_value", function(...: browser.BrowserValue): browser.BrowserValue
+    return ...[1]
   end)
-  publish("wide_echo", function(a: integer, b: integer, c: integer, d: integer, e: integer,
-                                f: integer, g: integer, h: integer, i: integer, j: integer):
-                                (integer, integer, integer, integer, integer, integer, integer, integer, integer, integer)
-    return a, b, c, d, e, f, g, h, i, j
+  publish("typed_echo", function(...: browser.BrowserValue): browser.BrowserValue
+    if #... ~= 4 then raise "typed_echo expects 4 arguments" end
+    local _ = expect_boolean(...[1])
+    local _ = expect_integer(...[2])
+    local _ = expect_float(...[3])
+    local bytes = expect_bytes(...[4])
+    return Value.is_bytes(bytes)
   end)
-  publish("handle_echo", function(item: browser.JSHandle): browser.JSHandle return item end)
-  publish("callable_echo", function(item: browser.Callable): browser.Callable return item end)
-  publish("titan_failure", function(): integer raise "Titan bridge failure\0\255" end)
-  publish("valid_after_failure", function(): integer return 42 end)
-  publish("force_gc", function() gc.collect(); gc.collect() end)
-  publish("notification", function(item: integer)
+  publish("wide_sum", function(...: browser.BrowserValue): browser.BrowserValue
+    local total = 0
+    for index = 1, #... do
+      total = total + expect_integer(...[index])
+    end
+    return Value.is_integer(total)
+  end)
+  publish("bad_utf8_result", function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_string("\0\255\195(")
+  end)
+  publish("handle_echo", function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_handle(expect_handle(...[1]))
+  end)
+  publish("callable_echo", function(...: browser.BrowserValue): browser.BrowserValue
+    case ...[1]
+    when is_callable(fn) then return Value.is_callable(fn)
+    end
+    raise "callable_echo expects a callable"
+  end)
+  publish("titan_failure", function(...: browser.BrowserValue): browser.BrowserValue raise "Titan bridge failure\0\255" end)
+  publish("valid_after_failure", function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_integer(42)
+  end)
+  publish("force_gc", function(...: browser.BrowserValue): browser.BrowserValue
+    gc.collect()
+    gc.collect()
+    return Value.is_nil()
+  end)
+  publish("notification", function(...: browser.BrowserValue): browser.BrowserValue
+    local item = expect_integer(...[1])
     local target = browser.binding("notification")
     defer target:close()
-    browser.call_void(target, {browser.Argument.is_integer(item)})
+    target:call(Value.is_integer(item))
     if item == -1 then raise "notification failure" end
+    return Value.is_nil()
+  end)
+  publish("arm_invoke_oom", function(...: browser.BrowserValue): browser.BrowserValue
+    ffi.titan_bridge_test_arm_alloc_failure(L, expect_integer(...[1]))
+    return Value.is_nil()
+  end)
+  publish("arm_invoke_oom_count", function(...: browser.BrowserValue): browser.BrowserValue
+    ffi.titan_bridge_test_arm_alloc_failure_count(
+        L, expect_integer(...[1]), expect_integer(...[2]))
+    return Value.is_nil()
+  end)
+  publish("finish_invoke_oom", function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_integer(ffi.titan_bridge_test_finish_alloc_failure(L))
+  end)
+  publish("raise_error_kind", function(...: browser.BrowserValue): browser.BrowserValue
+    local mode = expect_integer(...[1])
+    if mode == 1 then
+      raise true
+    elseif mode == 2 then
+      local tbl: {string: integer} = { ["a"] = 1 }
+      raise tbl
+    elseif mode == 3 then
+      raise ffi.titan_bridge_test_make_error_object(L, 1)
+    elseif mode == 4 then
+      raise ffi.titan_bridge_test_make_error_object(L, 2)
+    elseif mode == 5 then
+      raise ffi.titan_bridge_test_make_error_object(L, 3)
+    elseif mode == 6 then
+      local fail_binding = browser.binding("throw_error")
+      defer fail_binding:close()
+      fail_binding:call()
+    elseif mode == 7 then
+      raise ffi.titan_bridge_test_make_error_object(L, 4)
+    end
+    return Value.is_nil()
   end)
 end
 
@@ -282,7 +472,11 @@ function test_export_cross_entry_resumption(_: test.Context)
     return first
   end, "bridge-single")
   test.assert(child:resume(nil) == "parked")
-  publish("resume_single", function(item: integer): integer return child:resume(item) end)
+  publish("resume_single", function(...: browser.BrowserValue): browser.BrowserValue
+    local item = expect_integer(...[1])
+    local resumed: integer = child:resume(item)
+    return Value.is_integer(resumed)
+  end)
   local inner = coroutine.create(function(_: value): value
     return coroutine.yield("chain-parked", "bridge-outer")
   end, "bridge-inner")
@@ -290,10 +484,11 @@ function test_export_cross_entry_resumption(_: test.Context)
   local outer = coroutine.create(function(_: value): value return middle:resume(nil) end, "bridge-outer")
   test.assert(outer:resume(nil) == "chain-parked")
   test.assert(inner:status() == "stacked" and middle:status() == "stacked")
-  publish("resume_stacked", function(item: integer): integer
+  publish("resume_stacked", function(...: browser.BrowserValue): browser.BrowserValue
+    local item = expect_integer(...[1])
     local result: integer = outer:resume(item)
     test.assert(outer:status() == "dead" and inner:status() == "dead" and middle:status() == "dead")
-    return result
+    return Value.is_integer(result)
   end)
 end
 
@@ -303,7 +498,7 @@ local function abandon_for_allocation(log: {string})
       log[#log + 1] = "closed"
       local target = browser.binding("allocation_cleanup")
       defer target:close()
-      browser.call_void(target, {})
+      target:call()
     end
     coroutine.yield(nil, "bridge-abandoned")
     raise "abandoned callback resumed normally"
@@ -311,7 +506,7 @@ local function abandon_for_allocation(log: {string})
   child:resume(nil)
 end
 function test_export_allocation_cleanup_callback(_: test.Context)
-  publish("allocation_gc", function(): integer
+  publish("allocation_gc", function(...: browser.BrowserValue): browser.BrowserValue
     gc.incremental()
     gc.pause_percent(0)
     gc.stepmul(1000)
@@ -325,92 +520,280 @@ function test_export_allocation_cleanup_callback(_: test.Context)
       if #log > 0 then break end
     end
     test.assert(#log == 1)
-    return 42
+    return Value.is_integer(42)
   end)
 end
 
-local pending: browser.Request?
+local pending: browser.BrowserRequest?
+
+local record PinMarker
+  local weight: integer
+end
+local pin_markers_collected = 0
+local function pin_marker_finalize(candidate: value)
+  local marker: PinMarker = candidate
+  pin_markers_collected = pin_markers_collected + marker.weight
+end
 
 function test_export_requests_and_listeners(_: test.Context)
   local stop_after_success: boolean?
-  local completion = browser.callable(function(number: integer, bytes: string)
+  local completion = function(...: browser.BrowserValue): browser.BrowserValue
     local observer = browser.binding("request_success")
     defer observer:close()
-    browser.call_void(observer, {browser.Argument.is_integer(number), browser.Argument.is_bytes(bytes)})
+    if #... == 1 then
+      observer:call(...[1])
+    else
+      observer:call(Value.is_integer(expect_integer(...[1])),
+                    Value.is_bytes(expect_bytes(...[2])))
+    end
     if stop_after_success ~= nil then
       if stop_after_success then pending:close() else pending:cancel() end
     end
-  end)
-  local failure = browser.callable(function(message: string, thrown: browser.JSHandle)
+    return Value.is_nil()
+  end
+  local failure = function(...: browser.BrowserValue): browser.BrowserValue
+    local message = expect_string(...[1])
+    local thrown = expect_handle(...[2])
     defer thrown:close()
     local observer = browser.binding("request_failure")
     defer observer:close()
-    browser.call_void(observer, {browser.Argument.is_bytes(message), browser.Argument.is_handle(thrown)})
-  end)
-  publish("start_request", function(name: string)
+    observer:call(Value.is_string(message), Value.is_handle(thrown))
+    return Value.is_nil()
+  end
+  local bad_failure = function(...: browser.BrowserValue): browser.BrowserValue
+    -- Rejects its (is_string, is_handle) arguments at delivery time.
+    local _ = expect_integer(...[1])
+    return Value.is_nil()
+  end
+  publish("start_request", function(...: browser.BrowserValue): browser.BrowserValue
+    local name = expect_string(...[1])
     local target = browser.binding(name)
     defer target:close()
-    pending = browser.start(target, {}, completion, failure)
+    pending = target:start(completion, failure)
+    return Value.is_nil()
   end)
-  publish("start_listener", function()
+  publish("start_bad_failure_request", function(...: browser.BrowserValue): browser.BrowserValue
+    local name = expect_string(...[1])
+    local target = browser.binding(name)
+    defer target:close()
+    pending = target:start(completion, bad_failure)
+    return Value.is_nil()
+  end)
+  publish("start_listener", function(...: browser.BrowserValue): browser.BrowserValue
     local target = browser.binding("listener")
     defer target:close()
-    pending = browser.listen(target, {}, completion, failure)
+    pending = target:listen(completion, failure)
+    return Value.is_nil()
   end)
-  publish("stop_listener_on_success", function(should_close: boolean) stop_after_success = should_close end)
-  publish("cancel_request", function() if pending ~= nil then pending:cancel() end end)
-  publish("close_request", function() if pending ~= nil then pending:close() end end)
+  publish("stop_listener_on_success", function(...: browser.BrowserValue): browser.BrowserValue
+    case ...[1]
+    when is_nil() then stop_after_success = nil
+    when is_boolean(flag) then stop_after_success = flag
+    else raise "stop_listener_on_success expects boolean or nil"
+    end
+    return Value.is_nil()
+  end)
+  publish("cancel_request", function(...: browser.BrowserValue): browser.BrowserValue
+    if pending ~= nil then pending:cancel() end
+    return Value.is_nil()
+  end)
+  publish("close_request", function(...: browser.BrowserValue): browser.BrowserValue
+    if pending ~= nil then pending:close() end
+    return Value.is_nil()
+  end)
+
+  local hold_request: browser.BrowserRequest?
+  local hold_listener: browser.BrowserRequest?
+  publish("prepare_pin_holders", function(...: browser.BrowserValue): browser.BrowserValue
+    pin_markers_collected = 0
+    local marker = PinMarker { weight = 1 }
+    gc.finalizable<|value|>(marker, pin_marker_finalize)
+    local shared_cb = function(...: browser.BrowserValue): browser.BrowserValue
+      local observer = browser.binding("request_success")
+      defer observer:close()
+      observer:call(Value.is_integer(expect_integer(...[1]) + marker.weight))
+      return Value.is_integer(marker.weight)
+    end
+    local fail_marker = PinMarker { weight = 2 }
+    gc.finalizable<|value|>(fail_marker, pin_marker_finalize)
+    local shared_fail = function(...: browser.BrowserValue): browser.BrowserValue
+      case ...[2]
+      when is_handle(thrown) then thrown:close()
+      end
+      return Value.is_integer(fail_marker.weight)
+    end
+    local req_target = browser.binding("pin_hold_request")
+    defer req_target:close()
+    hold_request = req_target:start(shared_cb, shared_fail)
+    local list_target = browser.binding("pin_hold_listener")
+    defer list_target:close()
+    hold_listener = list_target:listen(shared_cb, shared_fail)
+    return Value.is_callable(shared_cb)
+  end)
+  publish("close_pin_holders", function(...: browser.BrowserValue): browser.BrowserValue
+    if hold_request ~= nil then hold_request:close(); hold_request = nil end
+    if hold_listener ~= nil then hold_listener:close(); hold_listener = nil end
+    return Value.is_nil()
+  end)
+  publish("pin_holders_collected", function(...: browser.BrowserValue): browser.BrowserValue
+    gc.collect()
+    gc.collect()
+    return Value.is_integer(pin_markers_collected)
+  end)
+  publish("lost_release_regression", function(...: browser.BrowserValue): browser.BrowserValue
+    pin_markers_collected = 0
+    local marker = PinMarker { weight = 64 }
+    gc.finalizable<|value|>(marker, pin_marker_finalize)
+    local done = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(marker.weight)
+    end
+    local fail_cb = function(...: browser.BrowserValue): browser.BrowserValue
+      case ...[2]
+      when is_handle(thrown) then thrown:close()
+      end
+      return Value.is_nil()
+    end
+    local list_target = browser.binding("pin_hold_listener")
+    defer list_target:close()
+    local req = list_target:listen(done, fail_cb)
+    req:close()
+    local echo = browser.binding("echo_string")
+    defer echo:close()
+    local caught = false
+    do
+      echo:call(Value.is_callable(done), Value.is_string("\255"))
+    catch
+      caught = true
+    end
+    test.assert(caught, "invalid UTF-8 argument did not raise")
+    return Value.is_nil()
+  end)
+  local run_saved_wrapper_case = function(mode: integer)
+    local marker = PinMarker { weight = 100 + mode }
+    gc.finalizable<|value|>(marker, pin_marker_finalize)
+    local cb = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(expect_integer(...[1]) * 2 + (marker.weight - (100 + mode)))
+    end
+    local caught = false
+    if mode == 1 or mode == 2 then
+      local name = mode == 1 and "save_and_throw" or "save_and_bad_return"
+      local target = browser.binding(name)
+      defer target:close()
+      do
+        target:call(Value.is_callable(cb))
+      catch
+        caught = true
+        if error is browser.BrowserError then
+          local err: browser.BrowserError = error
+          err:close()
+        end
+      end
+    else
+      local done_marker = PinMarker { weight = 10 }
+      gc.finalizable<|value|>(done_marker, pin_marker_finalize)
+      local done_cb = function(...: browser.BrowserValue): browser.BrowserValue
+        return Value.is_integer(done_marker.weight)
+      end
+      local fail_marker = PinMarker { weight = 20 }
+      gc.finalizable<|value|>(fail_marker, pin_marker_finalize)
+      local fail_cb = function(...: browser.BrowserValue): browser.BrowserValue
+        return Value.is_integer(fail_marker.weight)
+      end
+      local target = browser.binding("save_and_refuse_start")
+      defer target:close()
+      do
+        target:start(done_cb, fail_cb, Value.is_callable(cb))
+      catch
+        caught = true
+        if error is browser.BrowserError then
+          local err: browser.BrowserError = error
+          err:close()
+        end
+      end
+    end
+    test.assert(caught, "host saved-wrapper failure did not raise BrowserError")
+  end
+  publish("test_host_saved_wrapper", function(...: browser.BrowserValue): browser.BrowserValue
+    local mode = expect_integer(...[1])
+    pin_markers_collected = 0
+    run_saved_wrapper_case(mode)
+    gc.collect()
+    gc.collect()
+    return Value.is_integer(pin_markers_collected)
+  end)
+  publish("make_pinned_wrapper", function(...: browser.BrowserValue): browser.BrowserValue
+    local weight = expect_integer(...[1])
+    pin_markers_collected = 0
+    local captured = PinMarker { weight = weight }
+    gc.finalizable<|value|>(captured, pin_marker_finalize)
+    local fn = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(captured.weight)
+    end
+    return Value.is_callable(fn)
+  end)
+  local nested_finalizer_ran = false
+  local arm_nested_finalizer = function()
+    local finalizer_obj: {string: integer} = {}
+    gc.finalizable<|value|>(finalizer_obj, function(_: value)
+      local nested = browser.binding("echo_integer")
+      defer nested:close()
+      if expect_integer(nested:call(Value.is_integer(7))) == 7 then
+        nested_finalizer_ran = true
+      end
+    end)
+  end
+  publish("nested_finalizer_rollback", function(...: browser.BrowserValue): browser.BrowserValue
+    local arm_oom = expect_integer(...[1])
+    pin_markers_collected = 0
+    nested_finalizer_ran = false
+    arm_nested_finalizer()
+    local captured = PinMarker { weight = arm_oom ~= 0 and 77 or 88 }
+    gc.finalizable<|value|>(captured, pin_marker_finalize)
+    local first = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(captured.weight)
+    end
+    ffi.titan_bridge_test_arm_identity_gc_and_fail(L, 1, arm_oom)
+    return Value.is_callable(first)
+  end)
+  publish("nested_finalizer_ran", function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_boolean(nested_finalizer_ran)
+  end)
 end
 
-function test_export_sdk_byte_io(_: test.Context)
-  local failure = function(message: string, thrown: browser.JSHandle)
-    defer thrown:close()
-    local observer = browser.binding("io_failure")
-    defer observer:close()
-    browser.call_void(observer, {browser.Argument.is_bytes(message), browser.Argument.is_handle(thrown)})
-  end
-  local written = function()
-    local observer = browser.binding("io_done")
-    defer observer:close()
-    browser.call_void(observer, {})
-  end
-  local read = function(bytes: string)
-    local observer = browser.binding("io_read")
-    defer observer:close()
-    browser.call_void(observer, {browser.Argument.is_bytes(bytes)})
-  end
-  publish("stdio_append", function(bytes: string)
-    local written = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
-                               #bytes as foreign size_t, ffi.stdout)
-    test.assert(written == #bytes, "C stdio append returned a short count")
+function test_export_stdio(_: test.Context)
+  publish("stdio_append", function(...: browser.BrowserValue): browser.BrowserValue
+    local bytes = expect_bytes(...[1])
+    local count = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
+                             #bytes as foreign size_t, ffi.stdout)
+    test.assert(count == #bytes, "C stdio append returned a short count")
     test.assert(ffi.fflush(ffi.stdout) == 0, "C stdio append did not flush")
+    return Value.is_nil()
   end)
-  publish("cleanup_failure", function(bytes: string): integer
-    local written = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
-                               #bytes as foreign size_t, ffi.stdout)
-    test.assert(written == #bytes, "primary-failure stdout returned a short count")
+  publish("cleanup_failure", function(...: browser.BrowserValue): browser.BrowserValue
+    local bytes = expect_bytes(...[1])
+    local count = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
+                             #bytes as foreign size_t, ffi.stdout)
+    test.assert(count == #bytes, "primary-failure stdout returned a short count")
     test.assert(ffi.fflush(ffi.stdout) == 0, "primary-failure stdout did not flush")
-    written = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
-                         #bytes as foreign size_t, ffi.stderr)
-    test.assert(written == #bytes, "primary-failure stderr returned a short count")
+    count = ffi.fwrite(bytes as foreign const *char, 1 as foreign size_t,
+                       #bytes as foreign size_t, ffi.stderr)
+    test.assert(count == #bytes, "primary-failure stderr returned a short count")
     test.assert(ffi.fflush(ffi.stderr) == 0, "primary-failure stderr did not flush")
     raise "Titan bridge failure\0\255"
   end)
-  publish("sdk_write", function(bytes: string)
-    ffi.titan_bridge_test_write(L, written, failure, bytes as foreign const *unsigned char, #bytes)
-  end)
-  publish("sdk_read", function(capacity: integer)
-    ffi.titan_bridge_test_read(L, read, failure, capacity)
-  end)
 end
 
-local stored_callable: browser.Callable?
+local stored_callable: Callable?
 function test_export_callable_reuse(_: test.Context)
-  publish("make_callable", function(): browser.Callable
-    stored_callable = browser.callable(function(): integer return 77 end)
-    return stored_callable
+  publish("make_callable", function(...: browser.BrowserValue): browser.BrowserValue
+    stored_callable = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(77)
+    end
+    return Value.is_callable(stored_callable)
   end)
-  publish("stored_callable", function(): browser.Callable return stored_callable end)
+  publish("reexport_callable", function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_callable(stored_callable)
+  end)
 end
 
 local function abandon_independent()
@@ -431,23 +814,22 @@ function test_independent_detach_then_later_close(_: test.Context)
   local owner: value = ffi.titan_bridge_test_new_state(L, 3)
   ffi.titan_bridge_test_check_state(L, owner)
   local detached = ffi.titan_bridge_test_detach_state(L, owner)
-  publish("close_detached", function()
+  publish("close_detached", function(...: browser.BrowserValue): browser.BrowserValue
     if detached ~= nil then
       ffi.titan_bridge_test_close_detached(detached)
       detached = nil
     end
+    return Value.is_nil()
   end)
 end
 
-local r1_first_handle: browser.JSHandle?
-local r1_last_handle: browser.JSHandle?
-local r1_first_callable: browser.Callable?
-local r1_last_callable: browser.Callable?
-local r1_response_target: browser.JSHandle?
-local r1_response_observer: browser.JSHandle?
-local r1_start_target: browser.JSHandle?
-local r1_listener_target: browser.JSHandle?
-local r1_admission: browser.Request?
+local r1_first_handle: browser.BrowserHandle?
+local r1_first_callable: Callable?
+local r1_response_target: browser.BrowserHandle?
+local r1_response_observer: browser.BrowserHandle?
+local r1_start_target: browser.BrowserHandle?
+local r1_listener_target: browser.BrowserHandle?
+local r1_admission: browser.BrowserRequest?
 
 local record R1ReleaseMarker
   local position: integer
@@ -456,7 +838,7 @@ local function r1_collect_release(candidate: value)
   local marker: R1ReleaseMarker = candidate
   local target = browser.binding("r1_release_result")
   defer target:close()
-  browser.call_void(target, {browser.Argument.is_integer(marker.position)})
+  target:call(Value.is_integer(marker.position))
 end
 local function r1_release_marker(position: integer)
   local marker = R1ReleaseMarker { position = position }
@@ -464,52 +846,65 @@ local function r1_release_marker(position: integer)
 end
 
 function test_r1_result_and_response_boundaries(_: test.Context)
-  publish("r1_prepare_results", function(): (browser.JSHandle, browser.Callable, browser.JSHandle, browser.Callable)
+  publish("r1_prepare_handle", function(...: browser.BrowserValue): browser.BrowserValue
     if r1_first_handle ~= nil then r1_first_handle:close() end
-    if r1_last_handle ~= nil then r1_last_handle:close() end
-    if r1_first_callable ~= nil then r1_first_callable:close() end
-    if r1_last_callable ~= nil then r1_last_callable:close() end
     r1_first_handle = browser.binding("r1_handle_first")
-    r1_last_handle = browser.binding("r1_handle_last")
-    r1_first_callable = browser.callable(function(): integer return 101 end)
-    r1_last_callable = browser.callable(function(): integer return 202 end)
-    return r1_first_handle, r1_first_callable, r1_last_handle, r1_last_callable
+    return Value.is_handle(r1_first_handle)
   end)
-  publish("r1_release_results", function(position: integer): (browser.JSHandle, browser.Callable, browser.JSHandle, browser.Callable)
+  publish("r1_prepare_callable", function(...: browser.BrowserValue): browser.BrowserValue
+    r1_first_callable = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_integer(101)
+    end
+    return Value.is_callable(r1_first_callable)
+  end)
+  publish("r1_release_results", function(...: browser.BrowserValue): browser.BrowserValue
+    local position = expect_integer(...[1])
     local target = browser.binding("r1_release_result")
     defer target:close()
-    browser.call_void(target, {browser.Argument.is_integer(position)})
-    return r1_first_handle, r1_first_callable, r1_last_handle, r1_last_callable
+    target:call(Value.is_integer(position))
+    if position == 1 then
+      return Value.is_handle(r1_first_handle)
+    end
+    return Value.is_callable(r1_first_callable)
   end)
-  publish("r1_gc_results", function(position: integer): (browser.JSHandle, browser.Callable, browser.JSHandle, browser.Callable)
-    ffi.titan_bridge_test_arm_identity_gc(L, 4)
+  publish("r1_gc_results", function(...: browser.BrowserValue): browser.BrowserValue
+    local position = expect_integer(...[1])
+    ffi.titan_bridge_test_arm_identity_gc(L, 1)
     r1_release_marker(position)
-    return r1_first_handle, r1_first_callable, r1_last_handle, r1_last_callable
+    if position == 1 then
+      return Value.is_handle(r1_first_handle)
+    end
+    return Value.is_callable(r1_first_callable)
   end)
-  publish("r1_setup_responses", function()
+  publish("r1_setup_responses", function(...: browser.BrowserValue): browser.BrowserValue
     if r1_response_target ~= nil then r1_response_target:close() end
     if r1_response_observer ~= nil then r1_response_observer:close() end
     r1_response_target = browser.binding("r1_response_throw")
     r1_response_observer = browser.binding("r1_response_observe")
+    return Value.is_nil()
   end)
-  publish("r1_response_call", function(): integer
+  publish("r1_response_call", function(...: browser.BrowserValue): browser.BrowserValue
     local observed = false
     local allocations = 0
     ffi.titan_bridge_test_prepare_response_failure(L)
     do
-      browser.call_void(r1_response_target, {})
+      r1_response_target:call()
     catch
       allocations = ffi.titan_bridge_test_finish_response_failure(L)
       observed = true
-      if error is browser.Error then
-        local failure: browser.Error = error
+      if error is browser.BrowserError then
+        local failure: browser.BrowserError = error
         defer failure:close()
-        browser.call_void(r1_response_observer, {browser.Argument.is_bytes(failure.message),
-          browser.Argument.is_handle(failure.thrown), browser.Argument.is_boolean(true)})
+        r1_response_observer:call(
+            Value.is_string(failure.message),
+            Value.is_handle(failure.thrown),
+            Value.is_boolean(true))
       else
         local message: string = error
-        browser.call_void(r1_response_observer, {browser.Argument.is_bytes(message),
-          browser.Argument.is_nil(), browser.Argument.is_boolean(false)})
+        r1_response_observer:call(
+            Value.is_string(message),
+            Value.is_nil(),
+            Value.is_boolean(false))
       end
     end
     if not observed then
@@ -517,46 +912,63 @@ function test_r1_result_and_response_boundaries(_: test.Context)
       raise "response fixture did not return its ordinary error"
     end
     test.assert(allocations == 0 or allocations == 2, "native response failure omitted the actual allocator retry")
-    return allocations
+    return Value.is_integer(allocations)
   end)
 
-  local succeeded = browser.callable(function(number: integer, bytes: string)
+  local succeeded = function(...: browser.BrowserValue): browser.BrowserValue
     local target = browser.binding("request_success")
     defer target:close()
-    browser.call_void(target, {browser.Argument.is_integer(number), browser.Argument.is_bytes(bytes)})
-  end)
-  local failed = browser.callable(function(message: string, thrown: browser.JSHandle)
+    if #... == 1 then
+      target:call(...[1])
+    else
+      target:call(Value.is_integer(expect_integer(...[1])),
+                  Value.is_bytes(expect_bytes(...[2])))
+    end
+    return Value.is_nil()
+  end
+  local failed = function(...: browser.BrowserValue): browser.BrowserValue
+    local message = expect_string(...[1])
+    local thrown = expect_handle(...[2])
     defer thrown:close()
     local target = browser.binding("request_failure")
     defer target:close()
-    browser.call_void(target, {browser.Argument.is_bytes(message), browser.Argument.is_handle(thrown)})
-  end)
-  publish("r1_prepare_admissions", function()
+    target:call(Value.is_string(message), Value.is_handle(thrown))
+    return Value.is_nil()
+  end
+  publish("r1_prepare_admissions", function(...: browser.BrowserValue): browser.BrowserValue
     if r1_admission ~= nil then r1_admission:close(); r1_admission = nil end
     if r1_start_target ~= nil then r1_start_target:close() end
     if r1_listener_target ~= nil then r1_listener_target:close() end
     r1_start_target = browser.binding("r1_start_source")
     r1_listener_target = browser.binding("r1_listener_source")
+    return Value.is_nil()
   end)
-  publish("r1_admit_start", function()
+  publish("r1_admit_start", function(...: browser.BrowserValue): browser.BrowserValue
     test.assert(r1_admission == nil, "admission fixture still owns an earlier request")
-    r1_admission = browser.start(r1_start_target, {}, succeeded, failed)
+    r1_admission = r1_start_target:start(succeeded, failed)
+    return Value.is_nil()
   end)
-  publish("r1_admit_listener", function()
+  publish("r1_admit_listener", function(...: browser.BrowserValue): browser.BrowserValue
     test.assert(r1_admission == nil, "admission fixture still owns an earlier listener")
-    r1_admission = browser.listen(r1_listener_target, {}, succeeded, failed)
+    r1_admission = r1_listener_target:listen(succeeded, failed)
+    return Value.is_nil()
   end)
-  publish("r1_cancel_admission", function()
+  publish("r1_cancel_admission", function(...: browser.BrowserValue): browser.BrowserValue
     if r1_admission ~= nil then r1_admission:cancel() end
+    return Value.is_nil()
   end)
-  publish("r1_close_admission", function()
+  publish("r1_close_admission", function(...: browser.BrowserValue): browser.BrowserValue
     if r1_admission ~= nil then r1_admission:close(); r1_admission = nil end
+    return Value.is_nil()
   end)
 end
 
-function test_r1_callable_publication_transaction(_: test.Context)
+function test_r1_callable_pin_rollback(_: test.Context)
   local owner: value = ffi.titan_bridge_test_new_state(L, 0)
-  publish("r1_close_publication", function() ffi.titan_bridge_test_close_state(L, owner) end)
+  publish("r1_close_publication", function(...: browser.BrowserValue): browser.BrowserValue
+    ffi.titan_bridge_test_close_state(L, owner)
+    return Value.is_nil()
+  end)
 end
 
 function test_r1_close_retains_owner_on_admission_failure(context: test.Context)
@@ -572,7 +984,7 @@ function test_r1_close_retains_owner_on_admission_failure(context: test.Context)
     defer checker:close()
     local counter = browser.binding("handle_count")
     defer counter:close()
-    local before = browser.call_integer(counter, {})
+    local before = expect_integer(counter:call())
     local caught = false
     ffi.titan_bridge_test_arm_admission_failure(L)
     do
@@ -581,11 +993,13 @@ function test_r1_close_retains_owner_on_admission_failure(context: test.Context)
       caught = true
     end
     test.assert(ffi.titan_bridge_test_finish_admission_failure(L) == 1 and caught)
-    test.assert(browser.call_boolean(checker, {browser.Argument.is_bytes("false_value"),
-      browser.Argument.is_handle(owner)}), "failed close lost its still-live handle")
+    test.assert(expect_boolean(checker:call(
+        Value.is_string("false_value"),
+        Value.is_handle(owner))),
+        "failed close lost its still-live handle")
     owner:close()
     owner:close()
-    test.assert(browser.call_integer(counter, {}) == before - 1, "later handle close did not retire its unit once")
+    test.assert(expect_integer(counter:call()) == before - 1, "later handle close did not retire its unit once")
   end)
   context:run("request", function(_: test.Context)
     local was_paused = gc.paused()
@@ -597,13 +1011,18 @@ function test_r1_close_retains_owner_on_admission_failure(context: test.Context)
     defer target:close()
     local counter = browser.binding("r1_close_count")
     defer counter:close()
-    local succeeded = browser.callable(function() end)
-    defer succeeded:close()
-    local failed = browser.callable(function(_: string, thrown: browser.JSHandle) thrown:close() end)
-    defer failed:close()
-    local owner = browser.start(target, {}, succeeded, failed)
+    local succeeded = function(...: browser.BrowserValue): browser.BrowserValue
+      return Value.is_nil()
+    end
+    local failed = function(...: browser.BrowserValue): browser.BrowserValue
+      case ...[2]
+      when is_handle(thrown) then thrown:close()
+      end
+      return Value.is_nil()
+    end
+    local owner = target:start(succeeded, failed)
     defer owner:close()
-    local before = browser.call_integer(counter, {})
+    local before = expect_integer(counter:call())
     local caught = false
     ffi.titan_bridge_test_arm_admission_failure(L)
     do
@@ -612,10 +1031,10 @@ function test_r1_close_retains_owner_on_admission_failure(context: test.Context)
       caught = true
     end
     test.assert(ffi.titan_bridge_test_finish_admission_failure(L) == 1 and caught)
-    test.assert(browser.call_integer(counter, {}) == before, "failed close canceled its still-owned request")
+    test.assert(expect_integer(counter:call()) == before, "failed close canceled its still-owned request")
     owner:close()
     owner:close()
-    test.assert(browser.call_integer(counter, {}) == before + 1, "later request close did not retire its owner once")
+    test.assert(expect_integer(counter:call()) == before + 1, "later request close did not retire its owner once")
   end)
 end
 
@@ -625,16 +1044,16 @@ do
   initializer_coroutine = coroutine.create(function(_: value): value
     defer do
       -- These owners are created while GCSTPCLS suppresses their finalizers.
-      -- The earliest registry must release them at state-wide retirement.
+      -- The browser state record releases them at state-wide retirement.
       local item = browser.binding("close_value")
       local observer = browser.binding("close_observe")
-      browser.call_void(observer, {browser.Argument.is_handle(item)})
+      observer:call(Value.is_handle(item))
       do
         local target = browser.binding("throw_string")
-        browser.call_void(target, {})
+        target:call()
       catch
-        local failure: browser.Error = error
-        browser.call_void(observer, {browser.Argument.is_handle(failure.thrown)})
+        local failure: browser.BrowserError = error
+        observer:call(Value.is_handle(failure.thrown))
       end
       ffi.fputs("bridge-finalizer\n", ffi.stdout)
     end

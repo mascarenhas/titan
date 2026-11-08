@@ -147,7 +147,7 @@ function M.profile(descriptor, options)
     local exports = entry == "titan" and
         '"_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
         '"_titan_browser_release_callable","_titan_browser_close",' ..
-        '"_titan_browser_alloc","_titan_browser_free","_titan_browser_trace_identity"' or
+        '"_malloc","_free","_titan_browser_trace_identity"' or
         '"_main","_malloc","_free"'
     if purpose == "gate" then
         exports = exports .. ',"_titan_browser_gate_guarded","_titan_browser_gate_observe"'

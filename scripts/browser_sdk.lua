@@ -255,7 +255,7 @@ if action == "prepare" then
 elseif action == "stage-runtime" then
     local build_dir = assert(select(2, ...), "build_dir is required")
     local repo_root = assert(select(3, ...), "repo_root is required")
-    local runtime_members = { "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o", "titan-browser.o" }
+    local runtime_members = { "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }
     local lpeg_members = { "lplcap.o", "lplcode.o", "lplprint.o", "lpltree.o", "lplvm.o" }
     local total_expected = #runtime_members + #lpeg_members
     local all_paths = {}

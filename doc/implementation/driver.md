@@ -2199,8 +2199,10 @@ path with `.mjs` appended. The details are in the browser-target chapter:
 
 * **The browser entrypoint** replaces `main(argc, argv)` with the generated
   `titan_browser_initialize`, `titan_browser_entry`, and `titan_browser_close`
-  exports, which bind the program's workers to the shared protected bridge
-  runtime. Initialization creates the persistent state and requires the main
+  launcher exports in `browserentry.lua` (sharing `errmsg_tostring` and
+  `strip_bootstrap_prefix` with native `main`) and one-line weak forwards for
+  `titan_browser_invoke` and `titan_browser_release_callable`. Initialization
+  creates the persistent state and requires the main
   module without running `main`; the main entry runs `main` once on that state
   under one `lua_pcall` with `errorhandler`, reports an uncaught error in the
   standalone format, drains `stdout` and `stderr`, and reports the result

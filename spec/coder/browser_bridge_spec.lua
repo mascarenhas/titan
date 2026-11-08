@@ -23,9 +23,7 @@ local function build(info, assertions, tree, module, name, is_test, c_source)
     if c_source then
         argv[#argv + 1] = "--c-source"
         argv[#argv + 1] = c_source
-        for _, symbol in ipairs({ "luaL_ref", "luaL_unref", "lua_rawseti", "lua_callk", "luaL_checkstack" }) do
-            argv[#argv + 1] = "--ldflag=-Wl,--wrap=" .. symbol
-        end
+        argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live,--wrap=titan_browser_host_state_closed"
     end
     if is_test then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = module
@@ -53,7 +51,7 @@ describe("persistent core JavaScript bridge", function()
     end)
 
     for _, assertions in ipairs({ 2, 0 }) do
-        it("executes real native owners, queue/retirement and byte I/O with ASSERTIONS=" .. assertions, function()
+        it("executes real native owners, queue/retirement and BrowserValue marshalling with ASSERTIONS=" .. assertions, function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
             if not info then pending(why) return end
             fixture = files.new()

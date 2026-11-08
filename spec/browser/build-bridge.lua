@@ -57,13 +57,9 @@ require("titan-compiler.driver").browser_link_options = {purpose=%q, assertions=
     if target.source then
       argv[#argv + 1] = "--c-source"
       argv[#argv + 1] = target.source
-      -- The native fixture arms real publication/allocation and GC controls.
+      -- The native fixture injects GC and observes final state invalidation.
       -- Initializer-failure images have no C helper and stay unwrapped.
-      argv[#argv + 1] = "--ldflag=-Wl,--wrap=luaL_ref"
-      argv[#argv + 1] = "--ldflag=-Wl,--wrap=luaL_unref"
-      argv[#argv + 1] = "--ldflag=-Wl,--wrap=lua_rawseti"
-      argv[#argv + 1] = "--ldflag=-Wl,--wrap=lua_callk"
-      argv[#argv + 1] = "--ldflag=-Wl,--wrap=luaL_checkstack"
+      argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live,--wrap=titan_browser_host_state_closed"
     end
     if target.testing then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = target.owner

@@ -1,0 +1,17 @@
+local gc = import "gc"
+
+-- This module deliberately has no browser dependency and is imported first.
+local anchor: {string: integer} = {}
+local callback: (function (): ())?
+
+local function finalize(_: value)
+  if callback then callback() end
+end
+
+function set_finalizer(action: function (): ())
+  callback = action
+end
+
+do
+  gc.finalizable<|value|>(anchor, finalize)
+end

@@ -30,8 +30,7 @@ function main(args: {string}): integer
     local target = browser.binding("abort_binding")
     defer target:close()
     do
-      if args[2] == "bytes" then browser.call_bytes(target, {})
-      else browser.call_void(target, {}) end
+      target:call()
     catch
       output("abort-translated-to-titan\n")
     end
