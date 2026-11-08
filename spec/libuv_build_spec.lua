@@ -6275,6 +6275,7 @@ printf '%s\n' "${schedule[@]}"
                     "spec/coder/browser_stdlib_closure_spec.lua",
                     "spec/coder/browser_entry_gate_spec.lua",
                     "spec/coder/browser_bridge_spec.lua",
+                    "spec/coder/browser_scheduler_spec.lua",
                     "spec/coder/browser_stdlib_gate_spec.lua",
                     "spec/coder/browser_fixtures_spec.lua",
                     "spec/minicoro_spec.lua",

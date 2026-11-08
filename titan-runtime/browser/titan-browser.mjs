@@ -16,6 +16,10 @@ const kind = Object.freeze({nil: 0, boolean: 1, integer: 2, float: 3,
 const responseStatus = Object.freeze({ok: 0, titanError: 1, jsError: 2, state: 3, memory: 4});
 const operationKinds = Object.freeze({initialize: 1, entry: 2, invoke: 3,
   release_callable: 4, close: 5, gate_guarded: 3});
+const relinquishStatus = Object.freeze({resumed: 0, idle: 1, disposing: 2});
+const deliveryKind = Object.freeze({notify: 1, call: 2, release: 3});
+const deliverySize = 32;
+const anotherStateMessage = 'calls for another Lua state are not admitted while the owner drives';
 
 const bridgeFailures = new WeakSet();
 function ownFailure(value, code) {
@@ -107,6 +111,72 @@ function requestRejected(cell, cause) {
   if (target) target.owner.settleRequest(target.request, false, cause);
 }
 
+// The driver's turn source: one unclamped macrotask per relinquish point or
+// coalesced wake. Its handler sees only the owner's detachable cell.
+function turnFired(cell) {
+  const owner = cell.target;
+  if (owner) owner.turnFired();
+}
+
+// A Task-form call's AbortSignal listener; settlement or disposal detaches it.
+function taskAborted(cell) {
+  const target = cell.target;
+  if (target) target.owner.abortTask(target.item);
+}
+
+// SDK-owned sources reached through the reserved `titan:` binding names.
+// They capture no instance: request ownership belongs to the bridge.
+const maximumTimerDelay = 2147483647;
+
+function timeoutSource(ms) {
+  if (typeof ms !== 'number' || !(ms >= 0)) throw new TypeError('titan:timeout delay must be a nonnegative Number');
+  const timer = {id: undefined, resolve: undefined};
+  const promise = new Promise(resolve => { timer.resolve = resolve; });
+  armTimeout(timer, ms);
+  return {kind: 'detachable', promise, cancel: cancelTimeout.bind(undefined, timer)};
+}
+
+// Delays beyond the host's 32-bit timer range are re-armed in chunks.
+function armTimeout(timer, remaining) {
+  const delay = Math.min(remaining, maximumTimerDelay);
+  timer.id = setTimeout(timeoutElapsed, delay, timer, remaining - delay);
+}
+
+function timeoutElapsed(timer, remaining) {
+  timer.id = undefined;
+  if (remaining > 0) {
+    armTimeout(timer, remaining);
+    return;
+  }
+  const resolve = timer.resolve;
+  timer.resolve = undefined;
+  resolve?.(undefined);
+}
+
+function cancelTimeout(timer) {
+  clearTimeout(timer.id);
+  timer.id = timer.resolve = undefined;
+}
+
+function intervalSource(ms) {
+  if (typeof ms !== 'number' || !(ms > 0)) throw new TypeError('titan:interval period must be a positive Number');
+  return {kind: 'listener', subscribe: intervalSubscribe.bind(undefined, Math.min(ms, maximumTimerDelay))};
+}
+
+function intervalSubscribe(ms, emit) {
+  return stopInterval.bind(undefined, setInterval(intervalTick, ms, emit));
+}
+
+function intervalTick(emit) { emit(); }
+
+function stopInterval(id) { clearInterval(id); }
+
+const sdkBindings = Object.freeze(Object.assign(Object.create(null), {
+  'titan:timeout': () => timeoutSource,
+  'titan:interval': () => intervalSource,
+  'titan:driver': (owner, state) => owner.registerDriver.bind(owner, state),
+}));
+
 function observe(promise) {
   // Only bridge-owned retirement promises are observed here. User promises
   // returned as opaque BrowserHandle values retain their host rejection semantics.
@@ -134,14 +204,17 @@ function captureFailure(token, error, fault) {
 }
 
 class OutputChannel {
-  constructor(sink, stream) {
+  constructor(sink, stream, host) {
     this.sink = sink;
     this.stream = stream;
+    this.host = host;
     this.queue = [];
     this.tail = [];
     this.inflight = undefined;
     this.terminal = false;
     this.firstFailure = undefined;
+    this.running = undefined;
+    this.pumped = undefined;
   }
 
   byte(byte) {
@@ -161,7 +234,26 @@ class OutputChannel {
     }
   }
 
+  // A relinquish point starts one flush without awaiting it, so a slow sink
+  // never stalls the drive. Its failures wait for the operation's final flush.
+  pump(token) {
+    if (this.running || this.terminal) return;
+    this.running = this.flushQueue(token).then(failures => {
+      if (failures) (this.pumped ||= []).push(...failures);
+    }).finally(() => { this.running = undefined; });
+  }
+
   async flush(token) {
+    while (this.running) await this.running;
+    const failures = await this.flushQueue(token);
+    const pumped = this.pumped;
+    this.pumped = undefined;
+    if (!pumped) return failures;
+    if (failures) pumped.push(...failures);
+    return pumped;
+  }
+
+  async flushQueue(token) {
     this.seal();
     let failures;
     while (this.queue.length && !this.terminal) {
@@ -175,7 +267,12 @@ class OutputChannel {
           const cell = {target: gate};
           this.inflight = cell;
           try {
-            relayPromise(sinkResult(this.sink(entry.bytes), this.stream), cell);
+            // A sink is host code: an immediate reverse call from it rejects.
+            let result;
+            this.host.inHost++;
+            try { result = this.sink(entry.bytes); }
+            finally { this.host.inHost--; }
+            relayPromise(sinkResult(result, this.stream), cell);
             await gate.promise;
           } finally {
             cell.target = undefined;
@@ -272,6 +369,12 @@ class CallableView {
       Promise.reject(failure('DISPOSED', 'browser callable is disposed'));
   }
 
+  callTask(args = [], options = {}) {
+    const record = wrapperRecords.get(this);
+    return record?.owner ? record.owner.callTask(this, args, options) :
+      Promise.reject(failure('DISPOSED', 'browser callable is disposed'));
+  }
+
   release() {
     const record = wrapperRecords.get(this);
     record?.owner?.releaseCallable(record);
@@ -280,8 +383,8 @@ class CallableView {
 
 function announceDrain(owner) {
   owner.drainAnnouncement = false;
-  if (owner.active || owner.closing || owner.terminal || !owner.queue.length ||
-      owner.drainAnnounced || !owner.options?.requestDrain) return;
+  if (owner.active || owner.closing || owner.terminal || owner.drainAnnounced ||
+      !owner.options?.requestDrain || !owner.queue.some(entry => entry.kind !== 'call')) return;
   owner.drainAnnounced = true;
   try { owner.options.requestDrain(); }
   catch (cause) { owner.reportNotification('callback', 'requestDrain', cause); }
@@ -294,6 +397,15 @@ function releaseAtSafePoint(owner) {
   observe(owner.operate('release_callable', () => owner.retireCallables()).catch(cause => {
     if (!owner.terminal) owner.reportNotification('cleanup', 'release_callable', cause);
   }));
+}
+
+// A call queued during a drive that ended before delivering it runs at the
+// next safe point as an ordinary idle call, in queue order.
+function runQueuedCall(owner) {
+  owner.callsScheduled = false;
+  if (owner.active || owner.closing || owner.terminal || owner.inHost) return;
+  const index = owner.queue.findIndex(entry => entry.kind === 'call');
+  if (index !== -1) owner.runQueued(owner.queue.splice(index, 1)[0]);
 }
 
 class BrowserOwner {
@@ -329,14 +441,32 @@ class BrowserOwner {
     this.drainAnnouncement = false;
     this.drainAnnounced = false;
     this.notificationFailure = undefined;
-    this.out = new OutputChannel(options.stdout, 'stdout');
-    this.err = new OutputChannel(options.stderr, 'stderr');
+    // Driver state (titan.browser's drive interface and the call queue).
+    this.ownerState = undefined;
+    this.drive = undefined;
+    this.exited = undefined;
+    this.driver = undefined;
+    this.inHost = 0;
+    this.batch = [];
+    this.delivering = undefined;
+    this.settling = [];
+    this.turnCell = {target: this};
+    this.turnScheduled = false;
+    this.turnChannel = undefined;
+    this.retainOwnerWork = false;
+    this.disposalDriven = false;
+    this.callsScheduled = false;
+    this.out = new OutputChannel(options.stdout, 'stdout', this);
+    this.err = new OutputChannel(options.stderr, 'stderr', this);
   }
 
+  // Every application method rejects after exit; a host invocation in flight
+  // (binding, listener subscribe, sink) refuses a reverse entry even when idle.
   admission(requireReady = true) {
     if (this.terminal) return this.terminal;
+    if (this.exited) return this.exitedError();
     if (this.closing) return failure('DISPOSED', 'browser instance is disposed');
-    if (this.active) return failure('REENTRY', reentryMessage);
+    if (this.active || this.inHost > 0) return failure('REENTRY', reentryMessage);
     if (requireReady && this.state !== 'ready') return failure('STATE', stateMessage);
     if (this.operationId >= maximumApplicationOperationId) return failure('STATE', 'browser operation identity exhausted');
   }
@@ -353,6 +483,9 @@ class BrowserOwner {
     this.backend?.poison(error);
     this.out.interrupt(error);
     this.err.interrupt(error);
+    // Queued calls share the saved failure; a suspended drive never resumes.
+    this.failQueuedCalls(error);
+    this.drive = undefined;
     // Poison is visible to every application method before observing failure.
     try { this.options?.onEngineFailure?.(Object.freeze({kind, cause: error})); }
     catch { /* An observer cannot replace the engine's original failure. */ }
@@ -384,6 +517,7 @@ class BrowserOwner {
       // Fulfillment is physical retirement, not an application return value.
       await Promise.race([entry(id, ...args), this.active.fatal.promise]);
       if (this.terminal) throw this.terminal;
+      if (this.drive) throw failure('PROTOCOL', 'browser entry returned during its drive');
       if (!this.backend.safe()) throw failure('PROTOCOL', 'browser entry retained its execution owner');
       if (pending.completion === undefined) throw failure('PROTOCOL', 'browser entry returned without completion');
       return pending.completion;
@@ -395,7 +529,7 @@ class BrowserOwner {
   }
 
   operate(operation, action, deferOutput = false) {
-    const token = {fatal: deferred(), interrupted: undefined, promise: undefined,
+    const token = {fatal: deferred(), interrupted: undefined, promise: undefined, operation,
       failed: false, error: undefined, failureCaptured: false, primaryFault: undefined};
     observe(token.fatal.promise);
     this.active = token;
@@ -544,8 +678,12 @@ class BrowserOwner {
     });
   }
 
+  // A failed completion stays failed even when its drive latched an exit, as
+  // native bootstrap reports a failure that loop() re-raises.
   runResult(result) {
-    return Object.freeze({kind: result.failed ? 'failed' : 'returned', status: result.status, bytes: result.bytes});
+    const kind = result.failed ? 'failed' : this.exited ? 'exited' : 'returned';
+    const status = kind === 'exited' ? this.exited.status : result.status;
+    return Object.freeze({kind, status, bytes: result.bytes});
   }
 
   titanError(result) {
@@ -638,45 +776,262 @@ class BrowserOwner {
       // Box the decoded value inside operate() so an opaque thenable/Promise in a
       // BrowserHandle cannot hold logical admission or disposal open.
       return {value: result.values[0]};
-    } finally {
-      this.free(allocations);
-      for (const handle of temporary) {
-        const entry = this.slots.get(handle.slot);
-        if (entry?.generation === handle.generation && entry.temporary) this.releaseSlot(handle.slot, handle.generation);
-      }
+    } finally { this.releaseMarshalled(allocations, temporary); }
+  }
+
+  // Frees an invocation's argument buffers and the handle slots Titan never adopted.
+  releaseMarshalled(allocations, temporary) {
+    this.free(allocations);
+    for (const handle of temporary) {
+      const entry = this.slots.get(handle.slot);
+      if (entry?.generation === handle.generation && entry.temporary) this.releaseSlot(handle.slot, handle.generation);
     }
   }
 
+  // During a drive only a host invocation in flight refuses call and callTask;
+  // otherwise they queue for the driver. Idle calls use ordinary admission.
+  callAdmission() {
+    if (this.drive && !this.terminal && !this.exited && !this.closing && this.inHost === 0) return undefined;
+    return this.admission();
+  }
+
   call(value, args) {
-    const error = this.admission();
+    const error = this.callAdmission();
     if (error) return Promise.reject(error);
     let record, copied;
     try {
       record = this.validateCallable(value);
       copied = this.snapshotArguments(record.state, args);
     } catch (cause) { return Promise.reject(cause); }
+    const item = {kind: 'call', record, target: record, args: copied, deferred: undefined,
+      task: undefined, outcome: undefined, settled: false};
+    if (this.drive) return this.queueCall(item);
     this.state = 'active';
-    return this.operate('call', () => {
-      this.validateCallable(record.wrapper);
-      return this.invokeTarget(record.state, record.slot, record.generation, copied);
-    }).then(box => box.value);
+    return this.operate('call', () => this.runCall(item)).then(box => box.value);
+  }
+
+  async runCall(item) {
+    const record = item.record;
+    this.validateCallable(record.wrapper);
+    const box = await this.invokeTarget(record.state, record.slot, record.generation, item.args);
+    // A call whose own entry drove the instance to exit reports the exit.
+    if (this.exited) throw this.exitedError();
+    return box;
+  }
+
+  // A Task-form call runs the callable as an async Task through the spawn
+  // callable that async's browser backend registered as `titan:driver`.
+  callTask(value, args, options) {
+    const error = this.callAdmission();
+    if (error) return Promise.reject(error);
+    let item;
+    try { item = this.taskItem(value, args, options); }
+    catch (cause) { return Promise.reject(cause); }
+    const signal = item.task.signal;
+    if (signal?.aborted) return Promise.reject(this.cancelledError(signal.reason));
+    if (this.drive) return this.queueCall(item);
+    this.state = 'active';
+    return this.operate('callTask', () => this.runTask(item)).then(box => box.value);
+  }
+
+  taskItem(value, args, options) {
+    if (!Array.isArray(args)) throw new TypeError('browser Task-form arguments must be an array');
+    if (options === null || typeof options !== 'object') throw new TypeError('browser Task-form options must be an object');
+    const signal = options.signal;
+    if (signal !== undefined && (signal === null || typeof signal !== 'object' ||
+        typeof signal.addEventListener !== 'function' || typeof signal.removeEventListener !== 'function')) {
+      throw new TypeError('browser Task-form signal must be an AbortSignal');
+    }
+    const record = this.validateCallable(value);
+    if (record.state !== this.ownerState) {
+      throw failure('STATE', 'browser Task-form calls run only in the instance owner state');
+    }
+    const spawn = this.driver?.spawn;
+    if (!spawn) throw failure('STATE', 'browser image has no async Runtime');
+    this.validateCallable(spawn.wrapper);
+    const copied = this.snapshotArguments(record.state, args);
+    const item = {kind: 'call', record: spawn, target: spawn, args: undefined, deferred: undefined,
+      task: {signal, cancel: undefined, cell: undefined, listener: undefined, signalled: false,
+        signalReason: undefined, done: false},
+      outcome: undefined, settled: false};
+    item.args = [{kind: kind.callable, wrapper: record.wrapper},
+      {kind: kind.handle, value: this.taskSettled.bind(this, item)}, ...copied];
+    return item;
+  }
+
+  async runTask(item) {
+    try {
+      const spawn = item.record;
+      this.validateCallable(spawn.wrapper);
+      // The spawn entry drives until the Task retires. A failed entry wins
+      // over a stored outcome, and a drive that exited reports the exit.
+      await this.invokeTarget(spawn.state, spawn.slot, spawn.generation, item.args);
+      if (this.exited) throw this.exitedError();
+      if (!item.outcome) throw failure('STATE', 'browser Task-form call returned before its Task finished');
+      const outcome = this.taskOutcome(item);
+      if (outcome.error) throw outcome.error;
+      return {value: outcome.value};
+    } finally { this.detachTask(item); }
+  }
+
+  // The spawn callable's settle protocol: ("started", cancel), then one of
+  // ("succeeded", value), ("failed", message, trace) or ("cancelled", reason).
+  taskSettled(item, phase, value, extra) {
+    const task = item.task;
+    if (task.done) return;
+    if (phase === 'started') {
+      if (!wrapperRecords.has(value)) throw new TypeError('browser Task-form start requires a cancel callable');
+      task.cancel = value;
+      const signal = task.signal;
+      if (!signal || item.settled) return;
+      if (signal.aborted) {
+        this.abortTask(item);
+        return;
+      }
+      task.cell = {target: {owner: this, item}};
+      task.listener = taskAborted.bind(undefined, task.cell);
+      signal.addEventListener('abort', task.listener, {once: true});
+      return;
+    }
+    if (phase === 'succeeded') item.outcome = {value};
+    else if (phase === 'failed') item.outcome = {error: this.taskFailure(value, extra)};
+    else if (phase === 'cancelled') item.outcome = {cancelled: String(value)};
+    else throw new TypeError('browser Task-form settlement has an unknown kind');
+    task.done = true;
+    this.detachTask(item);
+  }
+
+  taskFailure(message, trace) {
+    if (!isUint8Array(message) || !isUint8Array(trace)) {
+      throw new TypeError('browser Task-form failure requires message and trace bytes');
+    }
+    const error = failure('TITAN', new TextDecoder().decode(message));
+    error.bytes = message;
+    error.trace = trace;
+    error.status = 1;
+    return error;
+  }
+
+  // The first abort queues one notification of the Task's cancel callable.
+  abortTask(item) {
+    const task = item.task;
+    if (task.signalled || task.done || item.settled || !task.cancel) return;
+    task.signalled = true;
+    task.signalReason = task.signal.reason;
+    try { this.notify(task.cancel, [String(task.signalReason)]); }
+    catch { /* An exited or poisoned instance settles the call itself. */ }
+  }
+
+  detachTask(item) {
+    const task = item.task;
+    if (!task) return;
+    if (task.listener) task.signal.removeEventListener('abort', task.listener);
+    if (task.cell) task.cell.target = undefined;
+    task.listener = task.cell = undefined;
+    const cancel = task.cancel;
+    task.cancel = undefined;
+    cancel?.release();
+  }
+
+  taskOutcome(item) {
+    const outcome = item.outcome;
+    if (outcome.cancelled === undefined) return outcome;
+    if (this.exited) return {error: this.exitedError()};
+    if (this.closing) return {error: failure('DISPOSED', 'browser instance is disposed')};
+    const task = item.task;
+    const reason = task.signalled && outcome.cancelled === String(task.signalReason) ?
+      task.signalReason : outcome.cancelled;
+    return {error: this.cancelledError(reason)};
+  }
+
+  exitedError() {
+    const error = failure('EXITED', 'browser instance has exited');
+    error.status = this.exited.status;
+    return error;
+  }
+
+  cancelledError(reason) {
+    const error = failure('CANCELLED', 'browser Task-form call was cancelled');
+    error.reason = reason;
+    return error;
+  }
+
+  queueCall(item) {
+    if (item.record.state !== this.ownerState) return Promise.reject(failure('REENTRY', anotherStateMessage));
+    if (this.operationId >= maximumApplicationOperationId) {
+      return Promise.reject(failure('STATE', 'browser operation identity exhausted'));
+    }
+    item.deferred = deferred();
+    this.queue.push(item);
+    this.wakeDriver();
+    return item.deferred.promise;
+  }
+
+  runQueued(item) {
+    this.state = 'active';
+    this.operate(item.task ? 'callTask' : 'call', () => item.task ? this.runTask(item) : this.runCall(item))
+      .then(box => this.finishCall(item, {value: box.value}), error => this.finishCall(item, {error}));
+  }
+
+  // Settle one queued call once; the outcome defaults to its stored result.
+  finishCall(item, outcome) {
+    if (item.settled) return;
+    item.settled = true;
+    outcome ||= item.task ? this.taskOutcome(item) : item.outcome;
+    this.detachTask(item);
+    if (outcome.error) item.deferred.reject(outcome.error);
+    else item.deferred.resolve(outcome.value);
+    item.record = item.target = item.args = undefined;
+  }
+
+  // Relinquish points settle the queued calls whose outcomes arrived.
+  settleOutcomes() {
+    const waiting = [];
+    for (const item of this.settling) {
+      if (item.settled) continue;
+      if (item.outcome) this.finishCall(item);
+      else waiting.push(item);
+    }
+    this.settling = waiting;
+  }
+
+  // Settle every admitted, unsettled queued call: queued, in the current
+  // batch, in delivery, or waiting for its outcome.
+  settleQueuedCalls(outcomeFor) {
+    const items = [...this.queue, ...this.batch].filter(entry => entry.kind === 'call');
+    const current = this.delivering?.item;
+    if (current?.kind === 'call') items.push(current);
+    items.push(...this.settling);
+    this.queue = this.queue.filter(entry => entry.kind !== 'call');
+    this.batch = this.batch.filter(entry => entry.kind !== 'call');
+    this.settling = [];
+    for (const item of items) if (!item.settled) this.finishCall(item, outcomeFor(item));
+  }
+
+  failQueuedCalls(error) {
+    this.settleQueuedCalls(() => ({error}));
   }
 
   notify(value, args) {
     if (this.closing) return;
     if (this.terminal) throw this.terminal;
+    if (this.exited) throw this.exitedError();
     if (this.state === 'created' || this.state === 'failed') throw failure('STATE', stateMessage);
     const record = this.validateCallable(value);
     const copied = this.snapshotArguments(record.state, args);
-    this.queue.push({record, target: record, args: copied});
-    this.scheduleSafePoint();
+    const owner = record.state === this.ownerState;
+    if (this.drive && !owner) throw failure('REENTRY', anotherStateMessage);
+    this.queue.push({kind: 'notify', record, target: record, args: copied});
+    if (this.drive) this.wakeDriver();
+    else this.scheduleSafePoint();
   }
 
   drain() {
     const error = this.admission();
     if (error) return Promise.reject(error);
-    const batch = this.queue;
-    this.queue = [];
+    // Calls left by an ended drive are not notifications: they run on their own.
+    const batch = this.queue.filter(entry => entry.kind !== 'call');
+    this.queue = this.queue.filter(entry => entry.kind === 'call');
     this.drainAnnounced = false;
     this.state = 'active';
     return this.operate('drain', async () => {
@@ -719,6 +1074,10 @@ class BrowserOwner {
       this.drainAnnouncement = true;
       queueMicrotask(announceDrain.bind(undefined, this));
     }
+    if (!this.callsScheduled && this.queue.some(entry => entry.kind === 'call')) {
+      this.callsScheduled = true;
+      queueMicrotask(runQueuedCall.bind(undefined, this));
+    }
   }
 
   registerState(state, record = 0) {
@@ -737,7 +1096,12 @@ class BrowserOwner {
         this.callables.delete(record.key);
       }
     }
+    const dropped = [...this.queue, ...this.batch].filter(entry => entry.target.state === state);
     this.queue = this.queue.filter(entry => entry.target.state !== state);
+    this.batch = this.batch.filter(entry => entry.target.state !== state);
+    const closed = failure('HANDLE', 'browser callable belongs to a closed state');
+    for (const entry of dropped) if (entry.kind === 'call') this.finishCall(entry, {error: closed});
+    if (state === this.ownerState) this.driver = undefined;
     this.releases = this.releases.filter(entry => entry.state !== state);
     for (const request of this.requests) {
       if (request.state === state) {
@@ -983,14 +1347,275 @@ class BrowserOwner {
       return;
     }
     pending.completed = true;
+    this.complete(this.completionAt(view, id, operation));
+  }
+
+  // Copies a completion's values, message and raw trace while C still owns them.
+  completionAt(view, id, operation) {
     const status = view.getUint32(12, true);
     const values = status === 0 ? this.valuesAt(view.getUint32(24, true), view.getUint32(20, true)) : [];
-    const record = {id, kind: operation, failed: status !== 0,
+    return {id, kind: operation, failed: status !== 0,
       status: view.getInt32(16, true),
       bytes: this.bytesAt(view.getUint32(28, true), view.getUint32(32, true)),
       trace: this.bytesAt(view.getUint32(36, true), view.getUint32(40, true)),
       values};
-    this.complete(record);
+  }
+
+  setOwnerState(state) {
+    if (this.ownerState !== undefined && this.ownerState !== state) {
+      this.poison(failure('PROTOCOL', 'browser instance reported a second owner state'));
+      return;
+    }
+    this.ownerState = state;
+  }
+
+  // The `titan:driver` binding: only the owner state's Runtime serves
+  // Task-form calls and disposal; other states' registrations are ignored.
+  registerDriver(state, spawn, shutdown) {
+    if (state !== this.ownerState) return;
+    this.driver = {spawn: this.validateCallable(spawn, state), shutdown: this.validateCallable(shutdown, state)};
+  }
+
+  driveBegin(state) {
+    if (this.terminal) return;
+    if (state !== this.ownerState || !this.active || this.drive) {
+      this.poison(failure('PROTOCOL', 'browser drive began outside an owner operation'));
+      return;
+    }
+    this.drive = {state, gate: undefined, disposalSignalled: false};
+    if (this.closing) this.disposalDriven = true;
+  }
+
+  driveEnd(state, status, exited) {
+    if (this.terminal) return;
+    if (this.drive?.state !== state || this.delivering) {
+      this.poison(failure('PROTOCOL', 'browser drive ended outside its drive'));
+      return;
+    }
+    this.drive = undefined;
+    if (this.batch.length) {
+      this.queue.unshift(...this.batch);
+      this.batch = [];
+    }
+    if (exited) {
+      this.exited = Object.freeze({status});
+      // A Task-form call that joined the drive, and a call it never
+      // delivered, report the exit; a delivered call keeps its result.
+      const error = this.exitedError();
+      this.settleQueuedCalls(item => !item.task && item.outcome ? item.outcome : {error});
+      return;
+    }
+    this.settleOutcomes();
+    for (const item of this.settling) {
+      this.finishCall(item, {error: failure('STATE', 'browser drive ended before the Task-form call finished')});
+    }
+    this.settling = [];
+  }
+
+  wakeDriver(state = this.drive?.state) {
+    if (this.drive && state === this.drive.state) this.scheduleTurn();
+  }
+
+  // One macrotask per relinquish point or coalesced wake: setImmediate where
+  // the host has it (Node), otherwise one MessageChannel per instance.
+  scheduleTurn() {
+    if (this.turnScheduled || this.terminal) return;
+    this.turnScheduled = true;
+    if (typeof setImmediate === 'function') {
+      setImmediate(turnFired, this.turnCell);
+      return;
+    }
+    if (!this.turnChannel) {
+      this.turnChannel = new MessageChannel();
+      this.turnChannel.port1.onmessage = turnFired.bind(undefined, this.turnCell);
+    }
+    this.turnChannel.port2.postMessage(undefined);
+  }
+
+  turnFired() {
+    this.turnScheduled = false;
+    const drive = this.drive, gate = drive?.gate;
+    if (!gate) return;
+    drive.gate = undefined;
+    gate.resolve(this.closing ? relinquishStatus.disposing : relinquishStatus.resumed);
+  }
+
+  relinquish(state, mode) {
+    const drive = this.drive;
+    if (this.terminal) return new Promise(() => {});
+    if (drive?.state !== state || drive.gate || this.delivering) {
+      this.poison(failure('PROTOCOL', 'browser relinquish outside its drive'));
+      return new Promise(() => {});
+    }
+    // A relinquish point: queued calls settle now, and output reaches the
+    // sinks once the drive has suspended, never from inside this import.
+    this.settleOutcomes();
+    if (!this.closing) queueMicrotask(() => this.pumpStreams());
+    // Disposal is signalled once, after one macrotask, before idle detection.
+    if (this.closing && !drive.disposalSignalled) {
+      drive.disposalSignalled = true;
+      return this.parkDrive(drive, true);
+    }
+    if (mode === 0 || this.queue.some(entry => entry.target.state === state)) return this.parkDrive(drive, true);
+    if (!this.hasWakeSources()) return relinquishStatus.idle;
+    return this.parkDrive(drive, false);
+  }
+
+  parkDrive(drive, turn) {
+    const gate = deferred();
+    drive.gate = gate;
+    if (turn) this.scheduleTurn();
+    return gate.promise;
+  }
+
+  pumpStreams() {
+    const token = this.active;
+    if (!token || token.interrupted || this.closing || this.terminal) return;
+    this.out.pump(token);
+    this.err.pump(token);
+  }
+
+  // A later JS call is not a wake source: only queued owner work, an open
+  // owner request or listener, or an already scheduled wake.
+  hasWakeSources() {
+    const owner = this.ownerState;
+    if (this.turnScheduled || this.queue.some(entry => entry.target.state === owner)) return true;
+    for (const request of this.requests) if (request.state === owner) return true;
+    return false;
+  }
+
+  operationName() {
+    return this.active?.operation ?? 'drive';
+  }
+
+  requireDelivery(state) {
+    if (this.drive?.state === state && !this.delivering) return true;
+    this.poison(failure('PROTOCOL', 'browser delivery outside its drive'));
+    return false;
+  }
+
+  // The owner's items queued now form the turn's batch, in FIFO order.
+  batchItems(state) {
+    if (this.terminal || !this.requireDelivery(state)) return 0;
+    const keep = [];
+    for (const entry of this.queue) (entry.target.state === state ? this.batch : keep).push(entry);
+    this.queue = keep;
+    return this.batch.length;
+  }
+
+  nextItem(state, pointer) {
+    if (this.terminal || !this.requireDelivery(state)) return 0;
+    while (this.batch.length) {
+      const item = this.batch.shift();
+      if (item.settled) continue;
+      const {record, target, request} = item;
+      // Released targets retire undelivered and cancelled requests drop their
+      // events; a settled one-shot still delivers, as in drain().
+      if (request?.cancelled || record?.released || this.states.get(target.state) === 'closed') {
+        if (item.kind === 'call') {
+          this.finishCall(item, {error: failure('HANDLE', 'browser callable is foreign, released, or belongs to a closed state')});
+        } else this.finishNotification(item);
+        continue;
+      }
+      const allocations = [], temporary = [];
+      let argv;
+      try {
+        if (this.operationId >= maximumApplicationOperationId) throw failure('STATE', 'browser operation identity exhausted');
+        argv = this.marshalValues(target.state, item.args, allocations, temporary);
+      } catch (cause) {
+        if (this.terminal) return 0;
+        this.releaseMarshalled(allocations, temporary);
+        if (item.kind === 'call') this.finishCall(item, {error: cause});
+        else {
+          this.reportNotification('callback', this.operationName(), cause);
+          this.finishNotification(item);
+        }
+        continue;
+      }
+      const id = ++this.operationId;
+      this.delivering = {id, item, allocations, temporary, settled: false};
+      const view = this.heapView(pointer, deliverySize);
+      view.setBigUint64(0, id, true);
+      view.setUint32(8, item.kind === 'call' ? deliveryKind.call : deliveryKind.notify, true);
+      view.setUint32(12, target.slot, true);
+      view.setUint32(16, target.generation, true);
+      view.setUint32(20, item.args.length, true);
+      view.setUint32(24, argv, true);
+      view.setUint32(28, 0, true);
+      return 1;
+    }
+    return 0;
+  }
+
+  finishNotification(item) {
+    const request = item.request;
+    if (request) {
+      request.pendingNotifications--;
+      this.releaseRequestHolds(request);
+    }
+    item.record = item.target = item.args = item.request = undefined;
+  }
+
+  settleQueued(pointer) {
+    if (this.terminal) return;
+    const view = this.heapView(pointer, 48);
+    const id = view.getBigUint64(0, true), operation = view.getUint32(8, true);
+    const delivering = this.delivering;
+    if (!delivering || delivering.id !== id || delivering.settled || operation !== operationKinds.invoke) {
+      this.poison(failure('PROTOCOL', 'browser delivery reported a duplicate or mismatched settlement'));
+      return;
+    }
+    delivering.settled = true;
+    const record = this.completionAt(view, id, operation);
+    const item = delivering.item;
+    if (item.kind !== 'call') {
+      // A notification's value is discarded; its failure has no caller.
+      if (record.failed) this.reportNotification('callback', this.operationName(), this.titanError(record));
+      return;
+    }
+    if (item.settled) return;
+    if (record.failed) item.outcome = {error: this.titanError(record)};
+    else if (record.values.length !== 1) {
+      this.poison(failure('PROTOCOL', 'browser invoke must return one value'));
+      return;
+    } else if (!item.task) item.outcome = {value: record.values[0]};
+    this.settling.push(item);
+  }
+
+  itemDone(state, id) {
+    const delivering = this.delivering;
+    if (this.terminal) {
+      this.delivering = undefined;
+      return;
+    }
+    if (delivering?.id !== id || this.drive?.state !== state) {
+      this.poison(failure('PROTOCOL', 'browser delivery finished an unknown item'));
+      return;
+    }
+    this.delivering = undefined;
+    this.releaseMarshalled(delivering.allocations, delivering.temporary);
+    if (!delivering.settled) {
+      this.poison(failure('PROTOCOL', 'browser delivery returned without settlement'));
+      return;
+    }
+    if (delivering.item.kind !== 'call') this.finishNotification(delivering.item);
+  }
+
+  // Deferred physical releases of the driving state, applied between turns.
+  nextRelease(state, pointer) {
+    if (this.terminal || !this.requireDelivery(state)) return 0;
+    const index = this.releases.findIndex(entry => entry.state === state);
+    if (index === -1) return 0;
+    const [release] = this.releases.splice(index, 1);
+    const view = this.heapView(pointer, deliverySize);
+    view.setBigUint64(0, 0n, true);
+    view.setUint32(8, deliveryKind.release, true);
+    view.setUint32(12, release.slot, true);
+    view.setUint32(16, release.generation, true);
+    view.setUint32(20, 0, true);
+    view.setUint32(24, 0, true);
+    view.setUint32(28, release.wrapper ? 1 : 0, true);
+    return 1;
   }
 
   openState(record = 0) {
@@ -1027,16 +1652,30 @@ class BrowserOwner {
 
   binding(pointer, length, state) {
     const name = new TextDecoder('utf-8', {fatal: true}).decode(this.bytesAt(pointer, length));
+    // Reserved `titan:` names resolve only to SDK sources, never to user bindings.
+    if (name.startsWith('titan:')) {
+      const source = sdkBindings[name];
+      if (!source) throw new Error(`unknown browser binding ${name}`);
+      return {kind: kind.handle, value: source(this, state), state};
+    }
     const bindings = this.options.bindings;
     if (!bindings || !Object.hasOwn(bindings, name)) throw new Error(`unknown browser binding ${name}`);
     return {kind: kind.handle, value: bindings[name], state};
+  }
+
+  // A binding, listener subscription, cancel or sink runs as host code: an
+  // immediate reverse entry from it rejects with REENTRY.
+  hostInvoke(target, thisValue, args) {
+    this.inHost++;
+    try { return Reflect.apply(target, thisValue, args); }
+    finally { this.inHost--; }
   }
 
   hostCall(state, slot, generation, count, pointer) {
     const target = this.getSlot(state, slot, generation).value;
     if (typeof target !== 'function') throw new TypeError('browser binding is not callable');
     const args = this.valuesAt(pointer, count, state);
-    return {value: target(...args), state};
+    return {value: this.hostInvoke(target, undefined, args), state};
   }
 
   newRequest(state, successSlot, successGeneration, failureSlot, failureGeneration) {
@@ -1080,7 +1719,7 @@ class BrowserOwner {
 
   startRequest(request, target, args, listener) {
     try {
-      const form = target(...args);
+      const form = this.hostInvoke(target, undefined, args);
       const ownership = form?.kind;
       if (!form || listener && ownership !== 'listener' ||
           !listener && !['detachable', 'retained'].includes(ownership)) {
@@ -1089,7 +1728,7 @@ class BrowserOwner {
       if (listener) {
         const subscribe = form.subscribe;
         if (typeof subscribe !== 'function') throw new TypeError('browser listener requires subscribe(emit)');
-        const unregister = subscribe.call(form, listenerEvent.bind(undefined, request.cell));
+        const unregister = this.hostInvoke(subscribe, form, [listenerEvent.bind(undefined, request.cell)]);
         if (typeof unregister !== 'function') throw new TypeError('browser listener requires an unregister function');
         request.cancel = unregister;
       } else {
@@ -1122,16 +1761,21 @@ class BrowserOwner {
     return request;
   }
 
+  // While disposal's cleanup drive is active or pending, the owner state's
+  // settlements keep flowing so Task cleanup can await work started earlier.
   emitRequest(request, args, rejected = false) {
-    if (request.retired || request.cancelled || this.closing || this.terminal) return;
+    if (request.retired || request.cancelled || this.terminal) return;
+    const owner = request.state === this.ownerState;
+    if (this.closing && !(owner && this.retainOwnerWork)) return;
     const target = rejected ? request.rejected : request.success;
     if (!target || this.states.get(request.state) !== 'open') return;
     try {
       const copied = rejected ? this.snapshotFailureArguments(args[0], args[1]) :
         this.snapshotArguments(request.state, args);
       request.pendingNotifications++;
-      this.queue.push({target, args: copied, request});
-      this.scheduleSafePoint();
+      this.queue.push({kind: 'notify', target, args: copied, request});
+      if (owner && this.drive) this.wakeDriver();
+      else this.scheduleSafePoint();
     } catch (cause) {
       if (!rejected) this.emitRequest(request, [messageBytes(cause), cause], true);
       else this.reportNotification('callback', 'notify', cause);
@@ -1140,7 +1784,7 @@ class BrowserOwner {
 
   settleRequest(request, success, value) {
     if (request.retired) return;
-    if (!request.cancelled && !this.closing && !this.terminal) {
+    if (!request.cancelled && !this.terminal) {
       if (success) this.emitRequest(request, [value]);
       else this.emitRequest(request, [messageBytes(value), value], true);
     }
@@ -1165,7 +1809,7 @@ class BrowserOwner {
     let error;
     if (!request.cancelSignalled) {
       request.cancelSignalled = true;
-      try { request.cancel?.(); }
+      try { if (request.cancel) this.hostInvoke(request.cancel, undefined, []); }
       catch (cause) { error = cause; }
       request.cancel = undefined;
     }
@@ -1281,21 +1925,47 @@ class BrowserOwner {
     if (this.active) this.active.interrupted = fault;
     this.out.interrupt(error, fault);
     this.err.interrupt(error, fault);
-    for (const entry of this.queue) {
-      if (entry.request) {
-        entry.request.pendingNotifications = 0;
-        entry.request.holdsReleased = true;
+    // Close-admission: queued application calls reject (an already captured
+    // failure stays primary) and application notifications drop. With a
+    // Runtime to clean up, the owner state's request events keep flowing and
+    // request cancellation waits until that cleanup drive ends.
+    this.retainOwnerWork = !this.terminal && !this.exited &&
+      (this.drive !== undefined || this.driver !== undefined);
+    this.disposalDriven = this.drive !== undefined;
+    this.settleQueuedCalls(item => item.outcome?.error ? {error: item.outcome.error} : {error});
+    this.queue = this.dropNotifications(this.queue);
+    this.batch = this.dropNotifications(this.batch);
+    if (!this.retainOwnerWork) this.cancelRequests();
+    // A parked drive resumes with the one-shot disposal signal.
+    if (this.drive?.gate) {
+      this.drive.disposalSignalled = true;
+      this.scheduleTurn();
+    }
+    // The final drain's continuation is module-scoped, not an instance method.
+    disposal.resolve(retireOwner(this).then(finishDisposal));
+    return this.disposed;
+  }
+
+  // Keeps the owner state's request events while its cleanup drive needs them.
+  dropNotifications(entries) {
+    const kept = [];
+    for (const entry of entries) {
+      const request = entry.request;
+      if (request && this.retainOwnerWork && request.state === this.ownerState) kept.push(entry);
+      else if (request) {
+        request.pendingNotifications = 0;
+        request.holdsReleased = true;
       }
     }
-    this.queue = [];
+    return kept;
+  }
+
+  cancelRequests() {
     for (const request of this.requests) {
       request.holdsReleased = true;
       try { this.cancelRequest(request); }
       catch (cause) { this.retirementFailure ||= failure('HOST', 'browser host cancellation failed', cause); }
     }
-    // The final drain's continuation is module-scoped, not an instance method.
-    disposal.resolve(retireOwner(this).then(finishDisposal));
-    return this.disposed;
   }
 }
 
@@ -1309,8 +1979,29 @@ async function retireOwner(owner) {
       interruptedFailure = token.primaryFault;
     }
   }
+  // Cleanup: with no drive since disposal began, async's shutdown callable
+  // cancels the Runtime's Tasks and drives until they retire. An exited
+  // instance has no Runtime left to clean up.
+  let cleanupError;
+  const shutdown = owner.driver?.shutdown;
+  if (shutdown && owner.module && !owner.terminal && !owner.exited && !owner.disposalDriven) {
+    try {
+      await owner.operate('dispose', async () => {
+        await owner.invokeTarget(shutdown.state, shutdown.slot, shutdown.generation, []);
+      }, true);
+    } catch (cause) { cleanupError = cause; }
+  }
+  // Final disposal: the deferred request cancellation, then retirement.
+  owner.retainOwnerWork = false;
+  owner.queue = owner.dropNotifications(owner.queue);
+  owner.batch = owner.dropNotifications(owner.batch);
+  owner.cancelRequests();
   await Promise.all([...owner.requests].map(request => request.terminal.promise));
   let error = owner.retirementFailure;
+  if (cleanupError && !owner.terminal) {
+    if (error) owner.reportNotification('cleanup', 'dispose', error);
+    error = cleanupError;
+  }
   if (owner.module && !owner.terminal) {
     try {
       await owner.operate('dispose', async () => {
@@ -1331,6 +2022,17 @@ async function retireOwner(owner) {
   owner.module = owner.backend = owner.factory = owner.options = undefined;
   owner.pending = undefined;
   owner.queue = owner.releases = owner.freeSlots = [];
+  owner.batch = [];
+  owner.settling = [];
+  owner.drive = owner.driver = owner.delivering = undefined;
+  // Pending turn macrotasks keep only the detached cell.
+  owner.turnCell.target = undefined;
+  if (owner.turnChannel) {
+    owner.turnChannel.port1.onmessage = null;
+    owner.turnChannel.port1.close();
+    owner.turnChannel.port2.close();
+    owner.turnChannel = undefined;
+  }
   owner.slots.clear();
   owner.stateRecords.clear();
   owner.callables.clear();
@@ -1352,11 +2054,15 @@ export function create(factory, options = {}) {
   }
   if (options.bindings !== undefined && (options.bindings === null ||
       typeof options.bindings !== 'object')) throw new TypeError('browser bindings must be an object');
+  for (const name of Object.keys(options.bindings ?? {})) {
+    if (name.startsWith('titan:')) throw new TypeError(`browser binding name ${name} is reserved for the Titan SDK`);
+  }
   const owner = new BrowserOwner(factory, {...options});
   return Object.freeze({
     initialize: () => owner.initialize(),
     run: (args = []) => owner.run(args),
     call: (callable, ...args) => owner.call(callable, args),
+    callTask: (callable, args = [], options = {}) => owner.callTask(callable, args, options),
     notify: (callable, ...args) => owner.notify(callable, args),
     drain: () => owner.drain(),
     dispose: () => owner.dispose(),

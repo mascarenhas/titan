@@ -38,6 +38,24 @@ enum titan_browser_request_mode {
   TITAN_BROWSER_START = 0,
   TITAN_BROWSER_LISTEN = 1
 };
+enum titan_browser_relinquish_mode {
+  TITAN_BROWSER_TURN = 0,
+  TITAN_BROWSER_WAIT = 1
+};
+/* A wait with no wake source returns IDLE without suspending. The first
+ * relinquish after dispose() began resolves DISPOSING once; afterwards every
+ * resumed relinquish reports DISPOSING instead of RESUMED. */
+enum titan_browser_relinquish_status {
+  TITAN_BROWSER_RESUMED = 0,
+  TITAN_BROWSER_IDLE = 1,
+  TITAN_BROWSER_DISPOSING = 2
+};
+enum titan_browser_delivery_kind {
+  TITAN_BROWSER_DELIVER_NONE = 0,
+  TITAN_BROWSER_DELIVER_NOTIFY = 1,
+  TITAN_BROWSER_DELIVER_CALL = 2,
+  TITAN_BROWSER_DELIVER_RELEASE = 3
+};
 
 typedef union titan_browser_scalar {
   int64_t integer;
@@ -88,6 +106,20 @@ typedef struct titan_browser_completion {
   uint32_t trace_length;
 } titan_browser_completion;
 
+/* One host item that deliver() runs inside a drive, or one deferred physical
+ * release. id names the item for item_done and settle; args stay host-owned
+ * until titan_browser_host_item_done. wrapper is the RELEASE kind's flag:
+ * 1 for a wrapper release, 0 for a request-hold drop. */
+typedef struct titan_browser_delivery {
+  uint64_t id;
+  uint32_t kind;
+  uint32_t slot;
+  uint32_t generation;
+  uint32_t argc;
+  const titan_browser_value *args;
+  uint32_t wrapper;
+} titan_browser_delivery;
+
 typedef struct titan_browser_state_record {
   lua_State *L;
   uint32_t token;
@@ -125,6 +157,13 @@ _Static_assert(offsetof(titan_browser_completion, message) == 28, "browser compl
 _Static_assert(offsetof(titan_browser_completion, message_length) == 32, "browser completion length offset");
 _Static_assert(offsetof(titan_browser_completion, trace) == 36, "browser completion trace offset");
 _Static_assert(offsetof(titan_browser_completion, trace_length) == 40, "browser completion trace length offset");
+_Static_assert(sizeof(titan_browser_delivery) == 32, "browser delivery layout");
+_Static_assert(offsetof(titan_browser_delivery, kind) == 8, "browser delivery kind offset");
+_Static_assert(offsetof(titan_browser_delivery, slot) == 12, "browser delivery slot offset");
+_Static_assert(offsetof(titan_browser_delivery, generation) == 16, "browser delivery generation offset");
+_Static_assert(offsetof(titan_browser_delivery, argc) == 20, "browser delivery count offset");
+_Static_assert(offsetof(titan_browser_delivery, args) == 24, "browser delivery arguments offset");
+_Static_assert(offsetof(titan_browser_delivery, wrapper) == 28, "browser delivery wrapper offset");
 #endif
 
 /* Stateful promised exports. Only _malloc/_free and the backend stack metadata
@@ -139,6 +178,9 @@ int titan_browser_release_callable(uint64_t operation_id, uint32_t state,
 int titan_browser_close(uint64_t operation_id);
 int titan_browser_invalid_entry(uint64_t operation_id, uint32_t operation,
     const char *message);
+/* Generated launcher: the owner state's main thread. It is set before any
+ * module initializer runs and cleared before lua_close. */
+lua_State *titan_browser_owner_thread(void);
 
 /* JS imports. All host_* potentially throwing boundaries catch at the import
  * and fill response; C/Titan raises only after their normal return. Trusted
@@ -172,5 +214,23 @@ void titan_browser_host_start(uint32_t state, uint32_t slot, uint32_t generation
     uint32_t failure_generation, uint32_t mode, titan_browser_response *response);
 void titan_browser_host_cancel(uint32_t state, uint32_t slot, uint32_t generation,
     titan_browser_response *response);
+
+/* Driver imports. titan_browser_relinquish is the bridge's only suspending
+ * import: it returns a titan_browser_relinquish_status after one turn-source
+ * macrotask (TURN), or after a wake (WAIT); a WAIT with no wake source returns
+ * IDLE at once. The others are trusted and nonthrowing. host_item marshals
+ * arguments into host allocations; it reports a marshalling failure (a
+ * callback error or a call rejection), skips that item, and returns 0 once the
+ * batch is exhausted. host_settle receives the delivered item's completion. */
+uint32_t titan_browser_relinquish(uint32_t state, uint32_t mode);
+void titan_browser_host_owner(uint32_t state);
+void titan_browser_host_drive_begin(uint32_t state);
+void titan_browser_host_drive_end(uint32_t state, int32_t exit_status, uint32_t exited);
+void titan_browser_host_wake(uint32_t state);
+uint32_t titan_browser_host_batch(uint32_t state);
+int titan_browser_host_item(uint32_t state, titan_browser_delivery *out);
+void titan_browser_host_item_done(uint32_t state, uint64_t id);
+int titan_browser_host_release_next(uint32_t state, titan_browser_delivery *out);
+void titan_browser_host_settle(const titan_browser_completion *record);
 
 #endif

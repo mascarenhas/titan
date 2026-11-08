@@ -1,8 +1,10 @@
 # Browser bridge runtime
 
 The core JavaScript bridge uses the browser JSPI backend and the single
-persistent image lifecycle. It does not add another coroutine driver,
-scheduler, native message format, or synchronous reverse-call backend. The
+persistent image lifecycle. It does not add another coroutine driver, native
+message format, or synchronous reverse-call backend, and it supplies the
+[drive interface](#drive-interface-and-delivery) a scheduler uses rather than
+a scheduler. The
 public Titan API is [JavaScript bindings](../language/standard-library-browser.md);
 [the browser target](browser-target.md) owns link profiles, the embedded
 loader, the runner, deployment, and fatal engine classifications.
@@ -115,6 +117,13 @@ Warnings alone do not convert successful close into an application failure.
 Both libc streams are flushed, preserving the first error while attempting
 both; the loader then handles copied stream queues and disposal outcomes.
 
+The launcher also defines `titan_browser_owner_thread()`, a C function that
+returns its owner `lua_State *` (set before any initializer runs, cleared
+before `lua_close`). It is not a JavaScript export: `titan.browser`'s
+initializer compares it once with its own state's main thread to decide
+whether it initializes in the instance owner ([drive
+interface](#drive-interface-and-delivery)).
+
 ## State records and the Titan pin table
 
 The `titan.browser` module initializer allocates an
@@ -202,6 +211,53 @@ module variables (`pins_by_slot: {Pin}`, `pins_by_fn: {value: Pin}`,
   `titan_browser_host_callable_closed` returns `0` and the wrapper stays live
   until its own `release()`.
 
+## Drive interface and delivery
+
+`titan.browser` exposes the primitives of a browser drive (`is_owner`,
+`drive_begin`, `drive_end`, `relinquish`, `deliver`, `wake`; [language
+contract](../language/standard-library-browser.md#driver-interface-low-level)).
+They are ordinary Titan functions over trusted JavaScript imports: no C entry
+drives, and `titan.browser` never learns about Tasks.
+
+- **Owner identity.** The initializer sets the module variable `owner_state`
+  once, comparing `titan_browser_owner_thread()` with the state's main thread,
+  and, when true, reports its token with `titan_browser_host_owner`. A
+  C-created state compares a different main `lua_State *` and is never the
+  owner, whatever order states load `titan.browser` in. The loader poisons on
+  a second distinct owner token.
+- **Drive state.** Two more module variables, `drive_active` and
+  `delivering`, make the refusals structural: `drive_begin` requires
+  `owner_state` and `L == lmacro_mainthread(L)` (not a coroutine thread);
+  `deliver`, `relinquish` and `drive_end` require an active drive, the main
+  thread and no delivery in progress. `drive_begin` and `drive_end` report to
+  the loader through `titan_browser_host_drive_begin` and the nonthrowing
+  `titan_browser_host_drive_end(state, status, exited)`, which latches an exit
+  status (the low 32 bits as a signed value) so the driver can call it from a
+  `defer`.
+- **Relinquish.** `relinquish(wait)` flushes C `stdout` and `stderr`, then
+  calls the suspending import `titan_browser_relinquish(state, mode)`
+  ([relinquish import](browser-target.md#the-relinquish-import)). The
+  import's resolved value is the status.
+- **Delivery.** `deliver` sets `delivering` for its extent, asks
+  `titan_browser_host_batch` to snapshot the owner's queued items, and for
+  each one lets `titan_browser_host_item` marshal it into a
+  `titan_browser_delivery` record (skipping released targets and reporting
+  marshalling failures itself). It runs the item through `invoke_work`, the
+  same body as an `invoke` entry, with `queued = true`: the completion record
+  goes to `titan_browser_host_settle` instead of `titan_browser_complete`,
+  because the entry that hosts the drive still owns the one ordinary
+  completion. An inline `catch` around each item keeps `invoke_entry`'s
+  allocation-free fallback, settling through the same import, so one item can
+  never leave the delivery half done. `titan_browser_host_item_done` then
+  frees the item's host allocations and releases unadopted temporaries.
+- **Deferred releases.** After the batch, `titan_browser_host_release_next`
+  hands back the owner's queued wrapper releases and request-hold drops, and
+  `apply_release` (the pin block shared with `release_work`) retires them, so a
+  long drive does not accumulate pinned callables. Other states' releases
+  wait for the loader's next safe point after the drive.
+- **Wake.** `wake` calls `titan_browser_host_wake(state)`; the loader ignores
+  it unless that state is driving.
+
 ## Fixed wasm32 layout
 
 The installed header is the sole C/JavaScript layout contract. C layout
@@ -225,6 +281,21 @@ import result kind for `host_start`. Statuses are `OK = 0`, `TITAN_ERROR = 1`,
 | 20 | `length` | Exact byte count |
 | 24 | `slot` | State-local handle/callable slot |
 | 28 | `generation` | Exact live generation |
+
+### `titan_browser_delivery` — 32 bytes, alignment 8
+
+| Offset | Field | Meaning |
+| --- | --- | --- |
+| 0 | `id` | Unsigned 64-bit item identity for `item_done` and the settlement record |
+| 8 | `kind` | `NOTIFY = 1`, `CALL = 2`, or `RELEASE = 3` |
+| 12 | `slot` | Target callable slot, or the released pin's slot |
+| 16 | `generation` | Its generation |
+| 20 | `argc` | Argument count |
+| 24 | `args` | Host-owned `titan_browser_value` array, valid until `item_done` |
+| 28 | `wrapper` | `RELEASE` only: 1 for a wrapper release, 0 for a request-hold drop |
+
+Relinquish modes are `TURN = 0` and `WAIT = 1`; statuses are `RESUMED = 0`,
+`IDLE = 1`, and `DISPOSING = 2`.
 
 ### `titan_browser_response` — 56 bytes, alignment 8
 
@@ -340,7 +411,8 @@ cancellation can remove entries from the live queue, not the already-detached
 batch. A normally settled one-shot marks its request retired before delivery;
 retirement alone does not cancel that queued completion, and the request's pin
 holds on `completion` and `failure` are released only after that queued
-notification finishes in `drain()` (or is discarded).
+notification finishes in `drain()` (or is discarded). A drive's `deliver`
+applies the same checks to its batch.
 
 ## Test layers
 
@@ -355,9 +427,24 @@ wrappers), requests, and C stdio output. A test-owned C fixture constructs
 independent Lua states, loads their modules normally, and exercises explicit,
 GC, and detach-then-later close. User-module finalizers close handles before
 record invalidation; an earlier object's finalizer verifies inert close and
-release, followed by the expected binding-error warning. Initializer failure
-has a separate real Titan image with a suspended cleanup coroutine and `main`
-error-conversion checks.
+release, followed by the expected binding-error warning. The same owner checks
+that the owner state reports `is_owner()`, that a C-created state does not and
+cannot begin a drive, and that the drive members refuse outside a drive or
+from a coroutine. Initializer failure has a separate real Titan image with a
+suspended cleanup coroutine and `main` error-conversion checks.
+
+Drives themselves are exercised by `spec/coder/browser_scheduler_spec.lua`
+with the fixture `spec/fixtures/browser_scheduler/`: a test-owned mini driver
+(`mini_driver.titan`) runs "jobs" in place of Tasks over the drive interface
+and registers `titan:driver` callables that follow the `async` spawn and
+settle protocol, a test-only C helper creates a child state
+(`mini_child.titan`) and publishes loader observations, and
+`mini-driver.mjs` checks turn and wait relinquishes, idle detection,
+delivery, queued and refused calls (including one made between internal
+coroutine hops), Task-form calls with `AbortSignal`, the SDK timer sources,
+output at relinquish points, disposal with a running, cleanup and shutdown
+drive, and the exit latch, under Node and Chromium in both assertion builds.
+`mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
 
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The

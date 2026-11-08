@@ -54,6 +54,9 @@ function BrowserRequest:close()
 function BrowserError:close()
 ```
 
+The low-level [drive interface](#driver-interface-low-level) that `async`
+uses to run Tasks has its own section.
+
 Values cross the boundary as `BrowserValue` in both directions, marshalled by
 runtime type without separate signature descriptors:
 
@@ -267,11 +270,13 @@ call on an intact instance can succeed. Traps, aborts, backend transfer
 failures, and completion protocol corruption instead poison the instance;
 they are not catchable `browser.BrowserError` values.
 
-An immediate `instance.call()` or `drain()` attempted inside an active import
-returns a rejected `TITAN_BROWSER_REENTRY` promise. It does not throw
-synchronously into the import, and is not automatically propagated into
+An immediate `instance.call()`, `callTask()` or `drain()` attempted inside an
+active import returns a rejected `TITAN_BROWSER_REENTRY` promise. It does not
+throw synchronously into the import, and is not automatically propagated into
 Titan. Observe the rejection, enqueue a notification, or use a tracked request
-instead.
+instead. While a drive is active, a call made outside any import is queued
+for the driver rather than rejected
+([calls during a drive](browser-target.md#calls-during-a-drive)).
 
 ## Requests and listeners
 
@@ -307,9 +312,10 @@ Both methods invoke the host binding synchronously with the supplied
 
 Because callables are not signature-checked at registration time, type errors
 move from registration to call time: if `completion` or `failure` raises when
-delivered in `drain()`, that callback failure is reported through
-`onNotificationError` (`kind: "callback", operation: "drain"`). Host promise
-rejection itself is delivered to `failure`, not `onNotificationError`.
+delivered, that callback failure is reported through `onNotificationError`
+(`kind: "callback"`, with `operation: "drain"`, or the operation that contains
+the drive). Host promise rejection itself is delivered to `failure`, not
+`onNotificationError`.
 
 A start binding returns one of two explicit forms:
 
@@ -333,12 +339,109 @@ Cancelling or closing a listener from one of its callbacks also suppresses its
 remaining events in the current detached batch. A normally settled one-shot
 request still delivers its queued success or failure notification.
 
-The host explicitly calls `drain()` to deliver one detached FIFO batch.
-Imports which enqueue more work add it to the next batch. No implicit timer,
-fairness policy, async scheduler, or nested synchronous callback is supplied
-here. A released target is retired without delivery; a released queued
-argument is reported without entering Lua. Disposal first closes application
-admission, then permits only physical retirement, then closes the state.
+On an idle instance the host calls `drain()` to deliver one detached FIFO
+batch. While a drive is active, the driver delivers the owner state's queued
+notifications and request events between its turns instead, in the same FIFO
+order and at most once each; `drain()` then rejects with
+`TITAN_BROWSER_REENTRY`. Imports which enqueue more work add it to the next
+batch. A released target is retired without delivery; a released queued
+argument is reported without entering Lua.
+
+Disposal first closes application admission, then permits only physical
+retirement, then closes the state. With an active drive or an `async` Runtime
+to clean up, the owner state's settlements and listener events keep flowing
+to the cleanup until that drive ends, so cleanup that awaits host work
+started before `dispose()` receives its outcome. Cleanup cannot start new
+host work: after `dispose()`, `start` and `listen` raise a
+`browser.BrowserError` whose message is `"browser state is closing"`.
+Requests still open when the cleanup ends are cancelled then: listeners
+unregister, detachable requests retire at once, and retained requests keep
+their owner until they settle.
+
+## Reserved SDK bindings
+
+Binding names that start with `titan:` belong to the SDK: `binding(name)`
+resolves them to sources the loader owns, never to a `create({bindings})`
+entry, and `create` rejects a `bindings` key with that prefix with
+`TypeError`. An unknown `titan:` name raises like any unknown binding.
+
+| Name | Use | Behavior |
+| --- | --- | --- |
+| `titan:timeout` | `start(completion, failure, is_float(ms))` | A detachable one-shot timer: `completion` receives `is_nil()` after `ms` milliseconds. Delays beyond the host's 32-bit timer range are re-armed in chunks. `cancel` clears the host timer. A negative or non-`Number` delay makes `start` raise a `browser.BrowserError` holding a `TypeError`. |
+| `titan:interval` | `listen(tick, failure, is_float(ms))` | A listener: `tick` receives no arguments every `ms` milliseconds (at most 2³¹−1). Unregistering clears the host interval. A non-positive or non-`Number` period makes `listen` raise a `browser.BrowserError` holding a `TypeError`. |
+| `titan:driver` | reserved | The registration point for the `async` runtime's Task entry points. Only the instance owner state's registration is used; others are ignored. |
+
+Their callbacks are ordinary queued notifications, delivered by `drain()` or
+a drive.
+
+## Driver interface (low-level)
+
+These members are the primitives of a browser drive, which the `async`
+runtime's driver uses to run Tasks. Applications use `async`; a program that
+drives the instance itself takes over the same contract.
+
+```text
+const RELINQUISH_RESUMED = 0
+const RELINQUISH_IDLE = 1
+const RELINQUISH_DISPOSING = 2
+function is_owner(): boolean
+function drive_begin()
+function drive_end(exit_code: integer?)
+function relinquish(wait: boolean): integer
+function deliver()
+function wake()
+```
+
+- `is_owner()` is true only in the Lua state the generated launcher created
+  for the instance. A state created by C code never owns the instance.
+- `drive_begin()` starts the instance's drive. Only the owner state's main
+  thread (not a coroutine or Task) may drive, and only one drive runs at a
+  time; otherwise it raises `"browser drive requires the instance owner's main
+  thread"` or `"browser drive is already active"`. While the drive runs,
+  JavaScript calls made outside any binding or sink are queued for it.
+- `deliver()` runs the owner state's host items queued when it starts:
+  notifications, request settlements and listener events, and queued calls.
+  Each runs once, in FIFO order, outside any Task; a failure is reported
+  through `onNotificationError` (a notification) or rejects that call's
+  promise. Items queued while it runs wait for the next `deliver()`. It then
+  performs the callable releases the bridge deferred to a safe point.
+- `relinquish(wait)` gives the event loop back. It first hands buffered
+  output, including C standard I/O, to the sinks and settles the queued calls
+  whose results arrived. With `wait = false` it resumes after one host
+  macrotask (`setImmediate` in Node, a `MessageChannel` message in browsers,
+  never a clamped timer) and returns `RELINQUISH_RESUMED`. With `wait = true`
+  it returns `RELINQUISH_IDLE` at once when the state has no wake source (no
+  queued item, open request or listener, or pending wake); otherwise it
+  resumes after a wake source fires, from a macrotask, with
+  `RELINQUISH_RESUMED`. Once `dispose()` has begun, the first relinquish
+  returns `RELINQUISH_DISPOSING` after one macrotask and every later resumed
+  relinquish returns `RELINQUISH_DISPOSING`; a wait with no wake source still
+  returns `RELINQUISH_IDLE`.
+- `drive_end(exit_code)` ends the drive. A present `exit_code` latches the
+  instance as exited with its low 32 bits as a signed status: `run()`
+  reports `exited` and later entries reject `TITAN_BROWSER_EXITED`
+  ([loader exit](browser-target.md#exit)).
+- `deliver()`, `relinquish()` and `drive_end()` require the driving owner's
+  main thread outside a delivered handler and raise `"browser delivery …"`,
+  `"browser relinquish …"` or `"browser drive_end requires the driving
+  owner's main thread outside delivery"` otherwise.
+- `wake()` wakes a relinquished drive. It is harmless from any state, thread
+  or handler, and without a drive.
+
+A minimal drive that waits until a delivered callback reports completion:
+
+```titan
+local browser = import "browser"
+
+function drive_until(done: function (): boolean)
+  browser.drive_begin()
+  defer browser.drive_end(nil)
+  while not done() do
+    browser.deliver()
+    if done() or browser.relinquish(true) ~= browser.RELINQUISH_RESUMED then return end
+  end
+end
+```
 
 ## State close
 

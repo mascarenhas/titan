@@ -73,6 +73,10 @@ static lua_State *titan_browser_owner;
 static uint32_t titan_browser_owner_token;
 static int titan_browser_initialized, titan_browser_owner_ready, titan_browser_main_started;
 
+/* titan.browser compares its state's main thread with this once, at module
+ * initialization: only the launcher's owner state may drive the instance. */
+lua_State *titan_browser_owner_thread(void) { return titan_browser_owner; }
+
 $ERROR_HELPERS
 
 static void titan_browser_flush_completion(titan_browser_completion *completion) {

@@ -119,7 +119,11 @@ function M.profile(descriptor, options)
         add("-sBINARYEN_EXTRA_PASSES=" .. passes)
     end
     add("-sJSPI=1")
-    local imports = '"titan_mco_transfer","titan_mco_destroy"'
+    -- The bridge library's driver relinquish is the only other suspending
+    -- import; images without the bridge library keep the coroutine pair.
+    local imports = entry == "titan" and
+        '"titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"' or
+        '"titan_mco_transfer","titan_mco_destroy"'
     local promised = entry == "titan" and
         '"titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
         '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"' or '"main"'

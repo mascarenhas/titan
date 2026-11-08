@@ -102,7 +102,8 @@ if (expectedSource) {
 const create = (await import(pathToFileURL(image).href)).default;
 const instance = create({locateFile: name => resolve(dirname(image), name)});
 try {
-    assert.deepEqual(Object.keys(instance).sort(), ['initialize', 'run', 'call', 'notify', 'drain', 'dispose', 'trace'].sort());
+    assert.deepEqual(Object.keys(instance).sort(),
+        ['initialize', 'run', 'call', 'callTask', 'notify', 'drain', 'dispose', 'trace'].sort());
     await instance.initialize();
     assert.ok(Object.isFrozen(instance.trace));
     // Ready means the eager adapter checked the private C export's identity
@@ -246,7 +247,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({
             "-O1", "-fno-inline", "-fno-optimize-sibling-calls", "-gsource-map", "-g2",
             "-sJSPI=1",
-            '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"]',
+            '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"]',
             '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
                 '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"]',
             "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
@@ -276,7 +277,7 @@ describe("browser image profile and SDK readiness", function()
         assert.same({
             "-O3", "-gsource-map", "-g2",
             "-sJSPI=1",
-            '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy"]',
+            '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"]',
             '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
                 '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"]',
             "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
