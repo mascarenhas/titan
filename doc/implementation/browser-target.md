@@ -1824,18 +1824,30 @@ trace gate's production program rows require the shown Titan frames to be an
 ordered subsequence of the row's exact frames, with the exact file and
 execution line (file only on WebKit), and each name to be the matched frame's
 or that of a later expected frame, the enclosing caller it was inlined into
-(D28, D32). At least one of the program's own Titan frames must appear, and
-the outermost of them must be the entry: `trace_uncaught.main` is called from
-C, and `trace_async.main`, which runs as the async bootstrap Task (titan#334),
-through a function value, so neither can be inlined away. The uncaught row
-shows no other Titan frame; in the async row only the async runtime's frames
-(the bootstrap Task's root and the driver that resumed it) may follow the
-entry. Every other line must be a `[C]` frame, a Lua frame, or a documented
-marker, so an unparsed line fails the row. Lua frames, markers, fallbacks, and
-merge order stay exact, and no `titanentry` symbol or mangled C name may
-appear. Test-image and validation rows stay byte-exact. The gate takes the
-installation profile from `manifest.json` and fails without a valid one, so a
-missing profile cannot weaken a production program row.
+(D28, D32). The program's own Titan frames come first, at least one of them
+must appear, and the outermost must be the entry: `trace_uncaught.main` is
+called from C, and `trace_async.main`, which runs as the async bootstrap Task
+(titan#334), through a function value, so neither can be inlined away. The
+uncaught row shows no other Titan frame. In the async row only the async
+runtime's frames may follow the entry: the bootstrap and Task-root closures,
+`coro_entry` and its trampoline, and the driver's `resume_root`,
+`advance_task`, `drain_ready`, `loop` and `bootstrap`. Their lines are the
+runtime's own, so they are matched by file (`async.titan`, `coroutine.titan`,
+`runtime.browser.titan`) and name. A production image inlines minicoro's C
+`titan_coroutine_enter` into the trampoline, whose frame then shows that C
+callee's location under the trampoline's name, the same inlining rendering
+with a C callee. A production async row accepts exactly that frame,
+`minicoro.c:<line>: in titan.coroutine.coro_entry_trampoline` (no line on
+WebKit; D23). Every other line must be a `[C]` frame, a Lua frame, or a
+documented marker, so an unparsed line fails the row. Lua frames, markers,
+fallbacks, and merge order stay exact, and no `titanentry` symbol or mangled
+C name may appear. Test-image rows stay byte-exact, and a validation program
+row shows every one of its own frames exactly and in order, followed only by
+the frames its row allows. Each program row also checks that its oracle
+rejects the same trace without its entry frame, with an unrelated trailing
+Titan frame, and with that C location under another runtime name. The gate
+takes the installation profile from `manifest.json` and fails without a valid
+one, so a missing profile cannot weaken a production program row.
 
 ### Historical instrumentation measurements
 
