@@ -19,6 +19,7 @@ export function makeHost(context, image, extra = {}) {
     const snapshot = host.controls?.snapshot();
     if (snapshot?.driving && !snapshot.parked) host.unparkedSinks++;
   };
+  host.held = [];
   host.bindings = {
     __miniDriver(controls) { host.controls = controls; },
     publish(name, callable) { host.callables.set(name, callable); },
@@ -37,6 +38,8 @@ export function makeHost(context, image, extra = {}) {
     },
     cleanup_note(text) { host.cleanup.push(text); },
     shutdown_ran() { host.shutdowns++; },
+    // A detachable request that settles only when the harness calls settleHeld().
+    held() { return {kind: 'detachable', promise: new Promise(resolve => { host.held.push(resolve); })}; },
     never() { return {kind: 'detachable', promise: new Promise(() => {})}; },
     slow(ms) { return {kind: 'detachable', promise: new Promise(resolve => { setTimeout(resolve, ms); })}; },
   };
@@ -60,6 +63,7 @@ export function makeHost(context, image, extra = {}) {
     return callable;
   };
   host.call = (name, ...args) => observe(host.instance.call(host.fn(name), ...args));
+  host.settleHeld = () => { for (const resolve of host.held.splice(0)) resolve(); };
   host.task = (name, args = [], options = {}) => observe(host.instance.callTask(host.fn(name), args, options));
   host.snapshot = () => host.controls.snapshot();
   return host;

@@ -175,10 +175,16 @@ async function requests(context, image) {
     observed['request settlement (owner)'] = describe(await inDrive(host, host.task('nap', [5])));
     observed['listener event (owner)'] = describe(await inDrive(host, host.task('ticks', [3n, 5])));
     await end();
-    await host.call('child_wait', 20);
+    // The harness settles the child's request only after the owner parked. A
+    // wrong wake would show as a scheduled turn ('turn') or, once that turn
+    // ran and re-parked, as another probe.
+    await host.call('child_wait');
     end = await parkDrive(context, host);
+    const probes = host.probes.length;
+    host.settleHeld();
     await until(context, () => host.snapshot().queue === 1, "the child's settlement never arrived");
-    const parked = where(host) === 'parked' && !host.notes.includes('child settled');
+    const parked = where(host) === 'parked' && host.probes.length === probes &&
+      !host.notes.includes('child settled');
     await end();
     await host.instance.drain();
     observed['request settlement (other state)'] = (parked ? 'queued in drive' : 'woke the drive') +

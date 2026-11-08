@@ -458,7 +458,9 @@ the exit latch, under Node and Chromium in both assertion builds.
 method, `_malloc`/`_free` and the trace view, each from a parked wait, a
 macrotask between turns, a microtask between internal coroutine hops, and a
 binding the drive invoked. It also covers owner and other-state request
-settlements, `dispose()` from each of those contexts, and the idle-instance
+settlements (the harness settles the child state's request only after the
+owner parked, and the owner takes no turn for it), `dispose()` from each of
+those contexts, and the idle-instance
 rows (entries start after the calling method returns; `notify()` waits for a
 later `drain()` or drive). The rows that need a synchronous C callback are
 reported as pending until that entry exists. `measure.mjs` is run by hand,

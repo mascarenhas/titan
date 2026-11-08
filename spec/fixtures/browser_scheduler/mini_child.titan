@@ -30,12 +30,13 @@ local function child_probe(...: Value): Value
   return Value.is_string(role .. ": " .. refusal)
 end
 
--- Starts `slow` host work from this state: its settlement is a notification
--- for this state, which an owner drive never delivers.
+-- Starts host work from this state that the harness settles (held): its
+-- settlement is a notification for this state, which an owner drive never
+-- delivers.
 local function child_wait(...: Value): Value
-  local slow = browser.binding("slow")
-  defer slow:close()
-  pending = slow:start(function(...: Value): Value
+  local held = browser.binding("held")
+  defer held:close()
+  pending = held:start(function(...: Value): Value
     local noted = browser.binding("noted")
     defer noted:close()
     noted:call(Value.is_string("child settled"))
@@ -45,7 +46,7 @@ local function child_wait(...: Value): Value
     return Value.is_nil()
   end, function(...: Value): Value
     return Value.is_nil()
-  end, ...)
+  end)
   return Value.is_nil()
 end
 
