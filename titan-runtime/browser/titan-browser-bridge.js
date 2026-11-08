@@ -88,4 +88,43 @@ addToLibrary({
   titan_browser_host_cancel__sig: 'viiip',
   titan_browser_host_cancel: (state, slot, generation, response) =>
     TitanBridge.response(response, state, () => Module['titanBrowserBridge'].hostCancel(state >>> 0, slot >>> 0, generation >>> 0)),
+
+  // Driver imports: trusted owner calls; a broken protocol poisons, never throws.
+  titan_browser_host_owner__deps: ['$TitanBridge'],
+  titan_browser_host_owner__sig: 'vi',
+  titan_browser_host_owner: state => TitanBridge.trusted('setOwnerState', state >>> 0),
+
+  titan_browser_host_drive_begin__deps: ['$TitanBridge'],
+  titan_browser_host_drive_begin__sig: 'vi',
+  titan_browser_host_drive_begin: state => TitanBridge.trusted('driveBegin', state >>> 0),
+
+  titan_browser_host_drive_end__deps: ['$TitanBridge'],
+  titan_browser_host_drive_end__sig: 'viii',
+  titan_browser_host_drive_end: (state, status, exited) =>
+    TitanBridge.trusted('driveEnd', state >>> 0, status | 0, exited !== 0),
+
+  titan_browser_host_wake__deps: ['$TitanBridge'],
+  titan_browser_host_wake__sig: 'vi',
+  titan_browser_host_wake: state => TitanBridge.trusted('wakeDriver', state >>> 0),
+
+  titan_browser_host_batch__deps: ['$TitanBridge'],
+  titan_browser_host_batch__sig: 'ii',
+  titan_browser_host_batch: state => TitanBridge.trusted('batchItems', state >>> 0),
+
+  titan_browser_host_item__deps: ['$TitanBridge'],
+  titan_browser_host_item__sig: 'iip',
+  titan_browser_host_item: (state, out) => TitanBridge.trusted('nextItem', state >>> 0, out >>> 0),
+
+  titan_browser_host_item_done__deps: ['$TitanBridge'],
+  titan_browser_host_item_done__sig: 'vij',
+  titan_browser_host_item_done: (state, id) =>
+    TitanBridge.trusted('itemDone', state >>> 0, BigInt.asUintN(64, id)),
+
+  titan_browser_host_release_next__deps: ['$TitanBridge'],
+  titan_browser_host_release_next__sig: 'iip',
+  titan_browser_host_release_next: (state, out) => TitanBridge.trusted('nextRelease', state >>> 0, out >>> 0),
+
+  titan_browser_host_settle__deps: ['$TitanBridge'],
+  titan_browser_host_settle__sig: 'vp',
+  titan_browser_host_settle: record => TitanBridge.trusted('settleQueued', record >>> 0),
 });

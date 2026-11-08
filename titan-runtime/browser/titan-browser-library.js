@@ -188,6 +188,24 @@ addToLibrary({
       });
     },
 
+    // The driver's suspending import. It is legal only on the main context of
+    // the promised entry that holds the owner; the loader then decides
+    // whether the drive suspends (a promise) or reports IDLE (a number).
+    // A poisoned drive never resumes: disposal drops its suspended stack.
+    relinquish(state, mode) {
+      if (!TitanBrowser.owner || TitanBrowser.current !== 0) {
+        TitanBrowser.poison(TitanBrowser.error('PROTOCOL',
+          'Titan stack switch outside a promising entry or inside a synchronous callback'));
+        return new Promise(() => {});
+      }
+      try {
+        return Module['titanBrowserBridge'].relinquish(state >>> 0, mode >>> 0);
+      } catch (cause) {
+        TitanBrowser.poison(cause);
+        return new Promise(() => {});
+      }
+    },
+
     install() {
       if (typeof WebAssembly.promising !== 'function' || typeof WebAssembly.Suspending !== 'function') {
         throw TitanBrowser.error('CAPABILITY', 'Titan browser images require WebAssembly JSPI (Node 26 or a JSPI-capable browser)');
@@ -234,6 +252,10 @@ addToLibrary({
   titan_mco_destroy__deps: ['$TitanBrowser'],
   titan_mco_destroy__sig: 'vp',
   titan_mco_destroy: id => TitanBrowser.destroy(id),
+
+  titan_browser_relinquish__deps: ['$TitanBrowser'],
+  titan_browser_relinquish__sig: 'iii',
+  titan_browser_relinquish: (state, mode) => TitanBrowser.relinquish(state, mode),
 
   titan_browser_entry_allowed__deps: ['$TitanBrowser'],
   titan_browser_entry_allowed__sig: 'iji',
