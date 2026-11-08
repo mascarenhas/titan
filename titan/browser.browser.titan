@@ -1309,6 +1309,8 @@ local function call_sync_work(identity: foreign const *titan_browser_identity,
                               args: foreign const *titan_browser_value,
                               result: foreign *titan_browser_sync_result)
   local state = identity.state
+  -- The handler rolls back `provisioned`, so it lives outside the protected
+  -- block: a body and its catch are sibling scopes.
   local provisioned: {ProvisionalPin} = {}
   do
     local pin? = pins_by_slot[identity.slot]

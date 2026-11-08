@@ -1083,9 +1083,7 @@ local function same_bytes(bytes: foreign const *unsigned char, length: integer, 
   if length ~= #expected then return false end
   local wanted = expected as foreign const *unsigned char
   for index = 0, length - 1 do
-    local actual: integer = bytes[index]
-    local byte: integer = wanted[index]
-    if actual ~= byte then return false end
+    if bytes[index] ~= wanted[index] then return false end
   end
   return true
 end
@@ -1120,8 +1118,7 @@ function test_pin_runs_a_synchronous_c_callback(_: test.Context)
   local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
   defer free_result(result)
   local status: integer = browser.call_sync(identity, 2, args, result)
-  local kind: integer = result.value.kind
-  test.assert(status == 0 and result.status == 0 and kind == ffi.TITAN_BROWSER_STRING,
+  test.assert(status == 0 and result.status == 0 and result.value.kind == ffi.TITAN_BROWSER_STRING,
               "a synchronous callback did not return its string")
   test.assert(calls == 1 and sum == 42, "the callback did not run once, synchronously, with its arguments")
   test.assert(same_bytes(result.value.bytes, result.value.length, "sum 42"), "the callback result changed")
@@ -1224,8 +1221,7 @@ function test_callback_bracket_admits_hand_written_trampolines(_: test.Context)
   local frame: foreign *titan_browser_callback_frame = foreign titan_browser_callback_frame.new()
   test.assert(browser.callback_enter(state, frame) == 0, "the callback bracket refused an open state")
   defer browser.callback_leave(frame)
-  local depth: integer = frame.depth
-  test.assert(frame.L ~= nil and depth == 1 and ffi.titan_no_switch(L) ~= 0,
+  test.assert(frame.L ~= nil and frame.depth == 1 and ffi.titan_no_switch(L) ~= 0,
               "the callback bracket did not choose a callback thread")
   local nested: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
   defer free_result(nested)
@@ -1261,10 +1257,8 @@ function test_pin_holds_its_callable_until_closed_or_collected(_: test.Context)
   gc.collect()
   local held: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
   defer free_result(held)
-  local kind: integer = 0
   test.assert(browser.call_sync(identity, 0, nil, held) == 0, "an open pin lost its callable")
-  kind = held.value.kind
-  test.assert(kind == ffi.TITAN_BROWSER_BOOLEAN and held.value.scalar.integer == 1,
+  test.assert(held.value.kind == ffi.TITAN_BROWSER_BOOLEAN and held.value.scalar.integer == 1,
               "an open pin's callable returned the wrong value")
 end
 
@@ -1289,12 +1283,9 @@ function test_synchronous_callback_callable_results_follow_their_holders(_: test
   local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
   defer free_result(result)
   test.assert(browser.call_sync(identity, 0, nil, result) == 0, "a callable result failed")
-  local kind: integer = result.value.kind
-  local result_slot: integer = result.value.slot
-  local result_generation: integer = result.value.generation
   local _, slot, generation = held_pin:identity()
-  test.assert(kind == ffi.TITAN_BROWSER_CALLABLE and result_slot == slot and
-              result_generation == generation, "a pinned callable result lost its identity")
+  test.assert(result.value.kind == ffi.TITAN_BROWSER_CALLABLE and result.value.slot == slot and
+              result.value.generation == generation, "a pinned callable result lost its identity")
   local called: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
   defer free_result(called)
   test.assert(call_result(result, called) == 0 and called.value.scalar.integer == 11,
@@ -1308,8 +1299,7 @@ function test_synchronous_callback_callable_results_follow_their_holders(_: test
   local fresh: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
   defer free_result(fresh)
   test.assert(browser.call_sync(identity, 0, nil, fresh) == 0, "a fresh callable result failed")
-  kind = fresh.value.kind
-  test.assert(kind == ffi.TITAN_BROWSER_CALLABLE, "a fresh callable result changed kind")
+  test.assert(fresh.value.kind == ffi.TITAN_BROWSER_CALLABLE, "a fresh callable result changed kind")
   local stale: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
   defer free_result(stale)
   test.assert(call_result(fresh, stale) == 1 and
@@ -1325,9 +1315,8 @@ local function expect_memory(identity: foreign *titan_browser_identity, after: i
   ffi.titan_bridge_test_fail_malloc(after)
   defer ffi.titan_bridge_test_fail_malloc(-1)
   local status: integer = browser.call_sync(identity, 0, nil, result)
-  local kind: integer = result.value.kind
   test.assert(status == ffi.TITAN_BROWSER_MEMORY and result.status == ffi.TITAN_BROWSER_MEMORY and
-              result.message == nil and result.trace == nil and kind == ffi.TITAN_BROWSER_NIL,
+              result.message == nil and result.trace == nil and result.value.kind == ffi.TITAN_BROWSER_NIL,
               label .. " did not report MEMORY without data")
 end
 
@@ -1378,8 +1367,7 @@ function test_synchronous_callback_handle_arguments_are_borrowed(_: test.Context
   local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
   defer free_result(result)
   test.assert(browser.call_sync(identity, 0, nil, result) == 0, "a handle result failed")
-  local kind: integer = result.value.kind
-  test.assert(kind == ffi.TITAN_BROWSER_HANDLE, "the handle result changed kind")
+  test.assert(result.value.kind == ffi.TITAN_BROWSER_HANDLE, "the handle result changed kind")
   -- C passes its borrowed result back as an argument, as an Emscripten
   -- trampoline would pass a handle it keeps.
   local args: foreign *titan_browser_value = foreign titan_browser_value.new_array(1)
