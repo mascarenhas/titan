@@ -31,7 +31,10 @@ export function makeHost(context, image, extra = {}) {
     sink_count() { return BigInt(host.sinkChunks); },
     kick() { host.hooks.kick?.(); },
     reenter() { host.hooks.reenter?.(); },
-    noted(value) { host.notes.push(value); },
+    noted(value) {
+      host.notes.push(value);
+      host.hooks.noted?.(value);
+    },
     cleanup_note(text) { host.cleanup.push(text); },
     shutdown_ran() { host.shutdowns++; },
     never() { return {kind: 'detachable', promise: new Promise(() => {})}; },

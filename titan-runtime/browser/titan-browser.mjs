@@ -254,31 +254,33 @@ class OutputChannel {
     }
   }
 
-  // A relinquish point publishes the buffered tail and starts at most one
-  // runner without awaiting it, so a slow sink never stalls the drive. Bytes
-  // written after that point wait for the next one, not for a sink call to
-  // resolve. Pump failures wait for the operation's final flush.
+  // A parked relinquish gate publishes the buffered tail and starts at most
+  // one runner without awaiting it, so a slow sink never stalls the drive.
+  // Pump failures wait for the operation's final flush.
   pump(token) {
     if (this.terminal) return;
     this.seal();
-    if (!this.running && this.queue.length) this.running = this.runPump(token);
+    if (this.running || !this.queue.length) return;
+    const runner = {token, done: undefined};
+    this.running = runner;
+    runner.done = this.runPump(runner);
   }
 
-  // The runner retires in the same step that finds the queue empty, so the
-  // next relinquish point either feeds it or starts another one.
-  async runPump(token) {
+  // The runner retires in the same step as its last take, so the next gate
+  // either feeds it or starts another one.
+  async runPump(runner) {
     try {
-      do {
-        const current = await this.send(token, this.queue.shift());
+      for (let entry = this.take(runner.token, false); entry; entry = this.take(runner.token, false)) {
+        const current = await this.send(runner.token, entry);
         if (current) (this.pumped ||= []).push(current);
-      } while (this.queue.length && !this.terminal);
+      }
     } finally {
-      this.running = undefined;
+      if (this.running === runner) this.running = undefined;
     }
   }
 
   async flush(token) {
-    while (this.running) await this.running;
+    while (this.running) await this.running.done;
     const failures = await this.flushQueue(token);
     const pumped = this.pumped;
     this.pumped = undefined;
@@ -287,14 +289,25 @@ class OutputChannel {
     return pumped;
   }
 
+  // The final flush, after the operation's entries retired, drains the rest.
   async flushQueue(token) {
     this.seal();
     let failures;
-    while (this.queue.length && !this.terminal) {
-      const current = await this.send(token, this.queue.shift());
+    for (let entry = this.take(token, true); entry; entry = this.take(token, true)) {
+      const current = await this.send(token, entry);
       if (current) (failures ||= []).push(current);
     }
     return failures;
+  }
+
+  // The one place a chunk leaves the FIFO for a sink call. The final flush
+  // takes every chunk; a pump takes one only while the drive is parked on a
+  // relinquish gate. A runner whose sink call settles while the drive runs
+  // stops there, and the next gate starts it again, so no sink call starts
+  // inside a Wasm import or an internal coroutine handoff.
+  take(token, final) {
+    if (this.terminal || !this.queue.length || !final && !this.host.pumpable(token)) return undefined;
+    return this.queue.shift();
   }
 
   // One sink call. Its failure is captured for the operation and returned.
@@ -718,11 +731,21 @@ class BrowserOwner {
   }
 
   // A failed completion stays failed even when its drive latched an exit, as
-  // native bootstrap reports a failure that loop() re-raises.
+  // native bootstrap reports a failure that loop() re-raises. Otherwise the
+  // exit latch wins over a main Task failure that titan.browser marked.
   runResult(result) {
-    const kind = result.failed ? 'failed' : this.exited ? 'exited' : 'returned';
-    const status = kind === 'exited' ? this.exited.status : result.status;
-    return Object.freeze({kind, status, bytes: result.bytes});
+    let kind = 'returned', status = result.status, bytes = result.bytes, trace = result.trace ?? new Uint8Array();
+    if (result.failed) {
+      kind = 'failed';
+    } else if (this.exited) {
+      kind = 'exited';
+      status = this.exited.status;
+    } else if (this.active?.mainFailure) {
+      ({bytes, trace} = this.active.mainFailure);
+      kind = 'failed';
+      status = 1;
+    }
+    return Object.freeze({kind, status, bytes, trace});
   }
 
   titanError(result) {
@@ -1451,6 +1474,14 @@ class BrowserOwner {
     this.settling = [];
   }
 
+  // titan_browser_host_main_failed: the async bootstrap's main Task failed.
+  // Only the owner's pending run entry takes the mark (runResult).
+  mainFailed(state, message, length, trace, traceLength) {
+    const token = this.active;
+    if (this.terminal || token?.operation !== 'run' || state !== this.ownerState) return;
+    token.mainFailure = {bytes: this.bytesAt(message, length), trace: this.bytesAt(trace, traceLength)};
+  }
+
   wakeDriver(state = this.drive?.state) {
     if (this.drive && state === this.drive.state) this.scheduleTurn();
   }
@@ -1512,9 +1543,16 @@ class BrowserOwner {
 
   pumpStreams(gate) {
     const token = this.active;
-    if (this.drive?.gate !== gate || !token || token.interrupted || this.closing || this.terminal) return;
+    if (this.drive?.gate !== gate || !this.pumpable(token)) return;
     this.out.pump(token);
     this.err.pump(token);
+  }
+
+  // A pump may start a sink call only while the operation's drive is
+  // suspended on a relinquish gate.
+  pumpable(token) {
+    return token !== undefined && this.active === token && !token.interrupted && !this.closing &&
+      !this.terminal && this.drive?.gate !== undefined;
   }
 
   // A later JS call is not a wake source: only queued owner work, an open

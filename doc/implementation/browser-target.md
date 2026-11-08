@@ -2655,9 +2655,9 @@ value, `onExit`, or Emscripten keepalive state.
 flush notifications. C `stdin` returns null, which is end of file. No user
 sink or unrelated notification runs during an internal coroutine transfer,
 including a collector finalizer's cleanup. `safe()` means that the contained
-C entry has released its owner; the loader delivers buffered streams after
-its whole logical operation retires, and during a drive also from each parked
-relinquish gate, once the drive has suspended ([output, disposal, and
+C entry has released its owner. Every sink call starts either from the
+operation's final flush, after its whole logical operation retires, or during
+a drive while the drive is parked on a relinquish gate ([output, disposal, and
 observation](#output-disposal-and-observation)).
 
 ### JSPI coroutine contexts
@@ -2901,6 +2901,14 @@ once and accepts a drive only from that state inside an active operation.
   call whose drive exited rejects `TITAN_BROWSER_EXITED`, as does every
   queued call the exiting drive never delivered and every Task-form call
   that joined it.
+- **Main failure.** `titan_browser_host_main_failed(state, message, length,
+  trace, length)`, the import behind `browser.main_failed`, copies both byte
+  ranges onto the active operation's token when that operation is `run` and
+  the state is the owner, and ignores the call otherwise. `runResult` then
+  resolves, in order: a failed completion as `failed`, the exit latch as
+  `exited`, the mark as `failed` with status 1 and the copied message and
+  trace, and otherwise `returned`. Every result carries `bytes` and `trace`,
+  empty unless failed.
 - **Disposal.** `dispose()` settles every unsettled queued call with
   `TITAN_BROWSER_DISPOSED` (an outcome that already failed keeps its failure)
   and drops application notifications. With a drive active, or a registered
@@ -2963,13 +2971,18 @@ the sink. A logical operation flushes both streams after all its C entries
 retire; later entries still run after a throw/rejection. During a drive, each
 parked relinquish gate also publishes both streams' C-byte tails into their
 FIFOs and starts a single-runner pump without awaiting it, so a slow or
-forever-pending sink never stalls the drive. A runner still waiting on a sink
-call takes the newly published entries when that call resolves, and it
-retires in the same step that finds its FIFO empty, so the next gate either
-feeds it or starts another runner. Bytes written after a gate wait for the
-next gate or the final flush, never for a sink call to resolve. The
-operation's final flush awaits a running pump, then flushes again, and the
-pump's failures join that flush's. A sink call increments `inHost`.
+forever-pending sink never stalls the drive. One invariant governs every sink
+call: `OutputChannel.take`, the only place a chunk leaves the FIFO, gives the
+final flush every chunk and gives a pump a chunk only while the drive is
+parked on a relinquish gate. A runner whose sink call settles while the drive
+is parked takes the next published chunk; one whose call settles while the
+drive runs (a turn, an internal coroutine handoff) stops there, and the next
+gate starts a runner again. A runner retires in the same step as its last
+take, so the next gate either feeds it or starts another. Chunks published or
+sealed after a gate therefore wait for the next gate or the final flush, never
+only for a sink call to resolve. The operation's final flush awaits a running
+pump, then flushes again and drains everything left, and the pump's failures
+join that flush's. A sink call increments `inHost`.
 Titan failure remains primary while both deliverable stream flushes and
 deferred retirement are attempted. An otherwise successful operation returns
 its first cleanup failure; every secondary failure is reported once through

@@ -103,6 +103,11 @@ addToLibrary({
   titan_browser_host_drive_end: (state, status, exited) =>
     TitanBridge.trusted('driveEnd', state >>> 0, status | 0, exited !== 0),
 
+  titan_browser_host_main_failed__deps: ['$TitanBridge'],
+  titan_browser_host_main_failed__sig: 'vipppp',
+  titan_browser_host_main_failed: (state, message, length, trace, traceLength) =>
+    TitanBridge.trusted('mainFailed', state >>> 0, message >>> 0, length >>> 0, trace >>> 0, traceLength >>> 0),
+
   titan_browser_host_wake__deps: ['$TitanBridge'],
   titan_browser_host_wake__sig: 'vi',
   titan_browser_host_wake: state => TitanBridge.trusted('wakeDriver', state >>> 0),

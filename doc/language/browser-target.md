@@ -550,12 +550,15 @@ The instance has the following methods:
   bytes and status 1, but no Titan trace because no Titan code ran.
 * `run(args = [])` initializes when needed, then invokes `main` once. Strings
   in `args` are UTF-8 encoded; `Uint8Array` arguments are copied byte for byte.
-  It resolves `{kind, status, bytes}`, with `"returned"`, `"failed"` or
-  `"exited"`, a signed 32-bit status, and copied error bytes (empty unless
-  failed). Ordinary initializer or main failure is a failed/status1 result,
-  not a fatal-engine rejection. A prior initializer failure is reused without
-  a second report. `"exited"` reports the status a drive latched with
-  [exit](#exit).
+  It resolves `{kind, status, bytes, trace}`, with `"returned"`, `"failed"` or
+  `"exited"`, a signed 32-bit status, and copied error and raw trace bytes
+  (empty unless failed). Ordinary initializer or main failure is a
+  failed/status1 result, not a fatal-engine rejection. A prior initializer
+  failure is reused without a second report. `"exited"` reports the status a
+  drive latched with [exit](#exit). An entry that failed stays `"failed"` even
+  when its drive latched an exit; otherwise the exit latch wins, then a main
+  Task failure the `async` bootstrap reported, which resolves `"failed"` with
+  status 1 and that Task's message and trace.
 * `call(callable, ...args)` invokes a callable wrapper that Titan exported
   through [`BrowserValue.is_callable`](standard-library-browser.md#callables-and-pinning)
   and passed to JavaScript. It requires successful initialization and remains
@@ -647,9 +650,11 @@ otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 flight. The loader flushes after all entries in the containing operation,
 including unterminated C-stdio tails, and during a drive also whenever the
 drive relinquishes the event loop, without waiting there for a pending sink
-call: output queued behind that call reaches the sink once it resolves, even
-while the drive stays relinquished. Later chunks continue after a sink
-throws or rejects. An otherwise successful operation rejects with its first
+call: output queued behind that call reaches the sink once the call settles,
+if the drive is still relinquished, and otherwise at its next relinquish or
+the operation's end. A sink call starts only then, never while the drive
+runs. Later chunks continue after a sink throws or rejects. An otherwise
+successful operation rejects with its first
 cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
 message and trace remain primary while deliverable output and deferred
