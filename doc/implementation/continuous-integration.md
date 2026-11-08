@@ -471,8 +471,9 @@ runner with a 60-minute timeout after `build-compiler`:
    notification, request, stdio, state-close and collection suite;
    `counter.mjs` clicks the counter's buttons on the page (`COUNTER
    {"verdict":"PASS"`), and `responsive.mjs` measures a 10 ms `setInterval`
-   and `requestAnimationFrame` while Tasks wait, yield continuously, resume
-   from requests that settle together, and while one call busy-waits
+   and `requestAnimationFrame` while Tasks wait (against a no-Titan baseline of
+   the page's own timer cadence, D22), yield continuously, resume from requests
+   that settle together, and while one call busy-waits
    (`RESPONSIVE {"verdict":"PASS"`; titan#334). Separate
    processes require unhandled-rejection status74 for opaque imported and
    reverse-call Promise values, and abort status70 for the poisoned-owner

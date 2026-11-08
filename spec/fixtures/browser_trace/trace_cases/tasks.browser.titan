@@ -143,11 +143,13 @@ function test_delivered_handler_trace(_context: test.Context)
 end
 
 -- A failed Task's async.Error raised in its joiner keeps the failed Task's
--- saved trace, not a new one from the joiner's raise.
-function test_task_error_raise_handoff(_context: test.Context)
+-- saved trace, not a new one from the joiner's raise. The child's failure is
+-- also reported as an uncaught Task error.
+function test_task_error_raise_handoff(context: test.Context)
   local trace = ""
   local saved = ""
   drive(function ()
+    context:log("BEGIN expected uncaught async Task diagnostics")
     local failing = async.run<|value, value|>(function (): value
       timer.yield()
       direct_outer()
@@ -163,6 +165,7 @@ function test_task_error_raise_handoff(_context: test.Context)
         trace = traceback
       end
     end
+    context:log("END expected uncaught async Task diagnostics")
   end)
   test.assert(saved ~= "", "the failing Task did not fail")
   test.assert(trace == saved, "the handoff replaced the saved trace\n" .. trace)
@@ -202,7 +205,7 @@ function test_task_rethrow_and_fresh_raise_across_await(_context: test.Context)
   test.assert(count_frames(rethrown, ": in trace_cases.original_leaf") == 1, rethrown)
   emit("task_rethrow", rethrown)
   test.assert(not contains(fresh, "in trace_cases.original_leaf"), fresh)
-  frame(fresh, "tasks.browser.titan", 191, "trace_cases.fresh_after_await")
+  frame(fresh, "tasks.browser.titan", 194, "trace_cases.fresh_after_await")
   emit("task_fresh", fresh)
 end
 

@@ -1020,8 +1020,11 @@ unified Titan/Lua contract as native builds:
 **Optimized frames.** As in a native production build, a `production` image
 has no frame for a function that the optimizer inlined into its caller. A
 frame that does appear is still exact, and an inlined function's line is
-reported under the name of the function that absorbed it. Titan's own trace
-fixture `trace_uncaught.titan` shows the difference:
+reported under the name of the function that absorbed it, even when the
+inlined code is the runtime's own C: a production `async` program's traces
+can show `minicoro.c:66: in titan.coroutine.coro_entry_trampoline` where
+`validation` shows `coroutine.titan:44`. Titan's own trace fixture
+`trace_uncaught.titan` shows the difference:
 
 ```titan
 foreign import "stdio.h"
