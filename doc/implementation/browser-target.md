@@ -264,7 +264,7 @@ prefix`.
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
-| `provider` | `titan.a` | the browser standard provider: thirteen shared core roots, browser-only `titan.browser`, and five LPegLabel members |
+| `provider` | `titan.a` | the browser standard provider: thirteen shared core roots, `titan.async` and `titan.timer` with browser variants, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
 
 None of the five runtime sources is compiled with `-fPIC`, LTO, or

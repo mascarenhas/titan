@@ -458,8 +458,8 @@ host's row, so the specs run unchanged on every platform:
   spellings), a stubbed `FreeBSD` host, cached-descriptor admission,
   publication re-resolution, logical split artifacts, and the real standard
   library's native-only mains (native selection with canonical output paths on
-  every native target, the ordinary missing-module diagnostic for each of the
-  thirteen modules on `browser`, and blocked folder contributors on every
+  every native target, the ordinary missing-module diagnostic for each
+  native-only module on `browser`, and blocked folder contributors on every
   target);
 * `spec/titanc_parallel_spec.lua`: the CLI vocabulary, flag precedence, empty
   values, validation order, and `--print-root`;

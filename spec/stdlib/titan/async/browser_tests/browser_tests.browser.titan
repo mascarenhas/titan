@@ -94,7 +94,7 @@ local function suspend_on(name: string, ...: Value)
   end
   local request = source:start(wake, wake, ...)
   defer request:close()
-  async.suspend(token, function () do request:cancel() catch end end)
+  async.suspend(token, function () request:cancel() catch end)
 end
 
 do

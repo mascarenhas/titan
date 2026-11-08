@@ -539,7 +539,7 @@ in [The browser Lua and SDK](#the-browser-lua-and-sdk), adds
 record `lib/browser/liblua-config.txt`. `make browser-sdk` adds
 `lib/titan-browser/0.6/`: the browser runtime `libtitan.a`, the browser PEG
 engine `libtitan-lpeglabel.a`, the browser standard library `titan.a` (the
-[fourteen modules](browser-target.md#the-browser-standard-library) available to
+[standard modules](browser-target.md#the-browser-standard-library) available to
 browser programs, with the PEG engine linked in), the loader input
 `titan-browser.mjs` and its Emscripten libraries `titan-browser-library.js`,
 `titan-browser-bridge.js`, and `titan-browser-trace.js`, the runner
