@@ -300,8 +300,9 @@ local browser_only_modules = { ["titan.browser"] = true }
 -- a top-level member, or a method of a record the browser keeps (omitting a
 -- record omits its fields, variants and methods). `opaque` names records the
 -- browser keeps under the native name with its own private fields and no
--- constructor, so their semantic declarations differ in private layout and in
--- the methods recorded as omitted.
+-- public constructor, so their semantic declarations differ in private
+-- layout and in any methods recorded as omitted; their other public methods
+-- are still compared one by one.
 M.browser_differences = {
     ["titan.async"] = {
         omitted = {
@@ -316,6 +317,11 @@ M.browser_differences = {
             "ExternalWait:close", "ExternalWait:wait", "ExternalWait:wait_cleanup",
         },
         opaque = { "ExternalWait" },
+    },
+    -- Ticker keeps its methods; its private fields hold a host request instead
+    -- of a uv timer.
+    ["titan.timer"] = {
+        opaque = { "Ticker" },
     },
 }
 

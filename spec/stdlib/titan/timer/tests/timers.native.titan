@@ -1,0 +1,79 @@
+-- Native timer inventory for the portable cases, and the cases that drive
+-- libuv or io directly.
+local stream = import "io"
+local uv = import "uv"
+
+-- Count the loop's native handles on its main thread without advancing it.
+-- Cleanup registration also permits observing native retirement when
+-- cancellation is pending.
+local function native_timers(): integer?
+  local outcome = async.await_cleanup<|integer, nil|>(function (resolve, _reject, _fatal)
+    local count = 0
+    uv.walk(async.current_loop(), function (_handle: uv.handle_t, _: value)
+      count = count + 1
+    end)
+    resolve(count)
+  end)
+  case outcome
+  when success(count) then return count
+  else raise "native handle inventory failed"
+  end
+end
+
+function test_timer_ticker_is_an_io_closer(_context: test.Context)
+  runtime_test.run(function ()
+    local baseline? = native_timers()
+    local ticker = timer.ticker(1)
+    local closer: stream.Closer = ticker
+    closer:close()
+    closer:close()
+    test.assert(not ticker:tick(), "a Ticker closed as an io.Closer produced a tick")
+    check_native_timers(baseline, 0, "a Ticker closed as an io.Closer kept its native handle")
+  end)
+end
+
+function test_timer_sleep_closes_after_native_resume_queue_failure(
+    _context: test.Context)
+  local unwound, returned, native_closed = false, false, false
+  local wake: uv.timer_t? = nil
+  local sleeper = async.run<|nil, value|>(function (): nil
+    local trigger = uv.timer_t.new()
+    test.assert(uv.timer_init(async.current_loop(), trigger) == 0,
+        "sleep fault trigger initialization failed")
+    test.assert(uv.timer_start(trigger, function (owner: uv.timer_t)
+      uv.timer_close(owner, function (_: uv.timer_t) native_closed = true end)
+      -- Fault injection only: application adapters do not own this handle.
+      -- This earlier zero timer closes the wake before sleep's callback tries
+      -- to schedule its token. The consumed sleep callback must remain able
+      -- to reach deferred native close during Runtime shutdown.
+      uv.timer_close(wake as uv.timer_t)
+    end, 0, 0) == 0, "sleep fault trigger start failed")
+    defer unwound = true
+    timer.sleep(0)
+    returned = true
+    return nil
+  end)
+  -- run creates the Runtime but defers Task entry. Inventory its sole timer
+  -- here on the owning main thread, before the Task creates native work.
+  uv.walk(async.current_loop(), function (handle: uv.handle_t, _: value)
+    case handle
+    when timer(owner) then wake = owner
+    else
+    end
+  end)
+  test.assert(wake ~= nil, "Runtime did not expose its initialized wake")
+  local failed = false
+  do async.loop()
+  catch
+    failed = error is async.OperationError
+  end
+  test.assert(failed and unwound and not returned and native_closed,
+      "failed native token wake stranded sleep cleanup")
+  test.assert(sleeper:status():has_cancelled(),
+      "failed native token wake lost shutdown cancellation")
+  runtime_test.run(function ()
+    local baseline? = native_timers()
+    timer.sleep(0)
+    check_native_timers(baseline, 0, "failed sleep left native state in the next Runtime")
+  end)
+end

@@ -1,38 +1,31 @@
+-- Delays, yields and tickers of titan.timer on every target. Native timers
+-- are uv handles that must close before a sleep or ticker returns: the
+-- timers contributor counts them natively (native_timers) and holds the cases
+-- that drive libuv or io directly. The browser has no native timers; the
+-- async scheduler gate (spec/stdlib/titan/async/browser_tests) counts its
+-- JavaScript timers instead.
 local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"
-local stream = import "io"
 local timer = import "timer"
-local uv = import "uv"
 local gc = import "gc"
 local task_support = import "support.async.titan"
 
-local function native_handle_count(): integer
-  -- Walk on the loop's main thread without advancing it. Cleanup registration
-  -- also permits observing native retirement when cancellation is pending.
-  local outcome = async.await_cleanup<|integer, nil|>(function (resolve, _reject, _fatal)
-    local count = 0
-    uv.walk(async.current_loop(), function (_handle: uv.handle_t, _: value)
-      count = count + 1
-    end)
-    resolve(count)
-  end)
-  case outcome
-  when success(count) then return count
-  else raise "native handle inventory failed"
-  end
+-- Check that the native timer count is `delta` above `baseline`, where the
+-- target has native timers.
+local function check_native_timers(baseline: integer?, delta: integer, message: string)
+  local count? = native_timers()
+  if baseline ~= nil and count ~= nil then test.assert(count == baseline + delta, message) end
 end
 
 function test_timer_yield_and_sleep(_context: test.Context)
   runtime_test.run(function ()
-    local baseline_handles = native_handle_count()
+    local baseline? = native_timers()
     timer.yield()
     timer.sleep(0)
-    test.assert(native_handle_count() == baseline_handles,
-                "zero sleep returned before its native timer closed")
+    check_native_timers(baseline, 0, "zero sleep returned before its native timer closed")
     timer.sleep(2)
-    test.assert(native_handle_count() == baseline_handles,
-                "sleep returned before its native timer closed")
+    check_native_timers(baseline, 0, "sleep returned before its native timer closed")
 
     local rejected = false
     do
@@ -44,15 +37,14 @@ function test_timer_yield_and_sleep(_context: test.Context)
       rejected = true
     end
     test.assert(rejected, "negative sleep was accepted")
-    test.assert(native_handle_count() == baseline_handles,
-                "negative sleep initialized a native timer")
+    check_native_timers(baseline, 0, "negative sleep initialized a native timer")
   end)
 end
 
 function test_timer_ticker_waited_and_retained_ticks(
     _context: test.Context)
   runtime_test.run(function ()
-    local baseline_handles = native_handle_count()
+    local baseline? = native_timers()
     local ticker = timer.ticker(1)
     defer ticker:close()
 
@@ -69,19 +61,17 @@ function test_timer_ticker_waited_and_retained_ticks(
     test.assert(ticker:tick(),
                 "Ticker did not retain its latest unwaited tick")
 
-    local closer: stream.Closer = ticker
-    closer:close()
-    closer:close()
+    ticker:close()
+    ticker:close()
     test.assert(not ticker:tick(), "closed Ticker produced another tick")
-    test.assert(native_handle_count() == baseline_handles,
-                "Ticker close returned before native retirement")
+    check_native_timers(baseline, 0, "Ticker close returned before native retirement")
   end)
 end
 
 function test_timer_ticker_pending_close_and_invalid_period(
     _context: test.Context)
   runtime_test.run(function ()
-    local baseline_handles = native_handle_count()
+    local baseline? = native_timers()
     local ticker = timer.ticker(10000)
     defer ticker:close()
     local ticked = true
@@ -119,15 +109,14 @@ function test_timer_ticker_pending_close_and_invalid_period(
       invalid = error == "ticker interval must be positive"
     end
     test.assert(invalid, "Ticker accepted a nonpositive interval")
-    test.assert(native_handle_count() == baseline_handles,
-                "closed or rejected Ticker left a native handle")
+    check_native_timers(baseline, 0, "closed or rejected Ticker left a native handle")
   end)
 end
 
 function test_timer_sleep_owner_survives_collection_until_close(
     _context: test.Context)
   runtime_test.run(function ()
-    local baseline_handles = native_handle_count()
+    local baseline? = native_timers()
     local resumed = false
     local unwound = false
     local sleeper = async.run<|value, value|>(function (): value
@@ -140,8 +129,7 @@ function test_timer_sleep_owner_survives_collection_until_close(
     while sleeper:status():as_string() == "ready" do timer.yield() end
     test.assert(sleeper:status():as_string() == "waiting",
                 "one-shot timer did not suspend")
-    test.assert(native_handle_count() == baseline_handles + 1,
-                "accepted sleep did not own its native timer")
+    check_native_timers(baseline, 1, "accepted sleep did not own its native timer")
 
     gc.collect()
     local reason = async.CancellationReason<|value|>.simple("close collected timer")
@@ -152,62 +140,14 @@ function test_timer_sleep_owner_survives_collection_until_close(
     local cancelled, actual? = sleeper:status():has_cancelled()
     test.assert(cancelled and actual == reason and unwound and not resumed,
                 "collected timer owner lost its close continuation")
-    test.assert(native_handle_count() == baseline_handles,
-                "cancelled sleep retained its native timer")
-  end)
-end
-
-function test_timer_sleep_closes_after_native_resume_queue_failure(
-    _context: test.Context)
-  local unwound, returned, native_closed = false, false, false
-  local wake: uv.timer_t? = nil
-  local sleeper = async.run<|nil, value|>(function (): nil
-    local trigger = uv.timer_t.new()
-    test.assert(uv.timer_init(async.current_loop(), trigger) == 0,
-        "sleep fault trigger initialization failed")
-    test.assert(uv.timer_start(trigger, function (owner: uv.timer_t)
-      uv.timer_close(owner, function (_: uv.timer_t) native_closed = true end)
-      -- Fault injection only: application adapters do not own this handle.
-      -- This earlier zero timer closes the wake before sleep's callback tries
-      -- to schedule its token. The consumed sleep callback must remain able
-      -- to reach deferred native close during Runtime shutdown.
-      uv.timer_close(wake as uv.timer_t)
-    end, 0, 0) == 0, "sleep fault trigger start failed")
-    defer unwound = true
-    timer.sleep(0)
-    returned = true
-    return nil
-  end)
-  -- run creates the Runtime but defers Task entry. Inventory its sole timer
-  -- here on the owning main thread, before the Task creates native work.
-  uv.walk(async.current_loop(), function (handle: uv.handle_t, _: value)
-    case handle
-    when timer(owner) then wake = owner
-    else
-    end
-  end)
-  test.assert(wake ~= nil, "Runtime did not expose its initialized wake")
-  local failed = false
-  do async.loop()
-  catch
-    failed = error is async.OperationError
-  end
-  test.assert(failed and unwound and not returned and native_closed,
-      "failed native token wake stranded sleep cleanup")
-  test.assert(sleeper:status():has_cancelled(),
-      "failed native token wake lost shutdown cancellation")
-  runtime_test.run(function ()
-    local baseline_handles = native_handle_count()
-    timer.sleep(0)
-    test.assert(native_handle_count() == baseline_handles,
-        "failed sleep left native state in the next Runtime")
+    check_native_timers(baseline, 0, "cancelled sleep retained its native timer")
   end)
 end
 
 function test_timer_ticker_replaces_cancelled_waiter_before_unwind(
     _context: test.Context)
   runtime_test.run(function ()
-    local baseline_handles = native_handle_count()
+    local baseline? = native_timers()
     local ticker = timer.ticker(60000)
     defer ticker:close()
     local unwound, delivered = false, false
@@ -247,15 +187,14 @@ function test_timer_ticker_replaces_cancelled_waiter_before_unwind(
     async.join(observer)
     test.assert(observer:status():has_succeeded(),
                 "replacement Ticker observer failed")
-    test.assert(native_handle_count() == baseline_handles,
-                "replacement Ticker retained its native handle")
+    check_native_timers(baseline, 0, "replacement Ticker retained its native handle")
   end)
 end
 
 function test_timer_cancellation_precedes_competing_waiter_error(
     _context: test.Context)
   runtime_test.run(function ()
-    local baseline_handles = native_handle_count()
+    local baseline? = native_timers()
     local ticker = timer.ticker(60000)
     defer ticker:close()
     local ticked = true
@@ -292,7 +231,21 @@ function test_timer_cancellation_precedes_competing_waiter_error(
     async.join(waiter)
     test.assert(waiter:status():has_succeeded() and not ticked,
                 "cancelled caller's close did not release the existing Ticker waiter")
-    test.assert(native_handle_count() == baseline_handles,
-                "cancelled Ticker close retained its native handle")
+    check_native_timers(baseline, 0, "cancelled Ticker close retained its native handle")
+  end)
+end
+
+-- Tickers are Runtime-bound: one left open when its Runtime closes no longer
+-- ticks, and closing it later does nothing.
+function test_timer_ticker_from_an_earlier_runtime(_context: test.Context)
+  local leftover: timer.Ticker? = nil
+  runtime_test.run(function ()
+    leftover = timer.ticker(60000)
+  end)
+  runtime_test.run(function ()
+    local ticker = leftover as timer.Ticker
+    test.assert(not ticker:tick(), "a Ticker from an earlier Runtime ticked")
+    ticker:close()
+    test.assert(not ticker:tick(), "closing an earlier Runtime's Ticker revived it")
   end)
 end
