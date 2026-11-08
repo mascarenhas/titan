@@ -1,4 +1,6 @@
 #include <emscripten.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <lauxlib.h>
 #include <lualib.h>
 #include <titan.h>
@@ -7,13 +9,31 @@
 extern int luaopen_titan(lua_State *L);
 extern int luaopen_mini_child(lua_State *L);
 
+/* A synchronous C callback, the way an Emscripten API makes one: JavaScript
+ * calls this function through the Wasm table and it calls the pinned
+ * callable through titan_browser_call_sync. */
+static int mini_driver_fire(uint32_t state, uint32_t slot, uint32_t generation) {
+  titan_browser_identity identity = {state, slot, generation};
+  titan_browser_sync_result result = {0};
+  int status = titan_browser_call_sync(&identity, 0, NULL, &result);
+  free((void *)result.message);
+  free((void *)result.trace);
+  if (result.value.kind == TITAN_BROWSER_STRING || result.value.kind == TITAN_BROWSER_BYTES)
+    free((void *)result.value.bytes);
+  return status;
+}
+
 /* Loader observations for the harness, published only to its explicit
  * __miniDriver binding; generated images never expose the Module. `allocate`
- * calls the plain _malloc/_free exports, which no admission gate guards. */
-EM_JS(void, mini_driver_publish_controls, (), {
+ * calls the plain _malloc/_free exports, which no admission gate guards.
+ * `fire` makes a synchronous C callback; `hooks.poke` is what
+ * mini_driver_poke calls, JavaScript reached from C without a binding. */
+EM_JS_DEPS(mini_driver, "$getWasmTableEntry");
+EM_JS(void, mini_driver_controls, (int fire), {
   var owner = Module['titanBrowserBridge'];
   var publish = owner.options.bindings?.__miniDriver;
   if (!publish) return;
+  var hooks = Module['miniDriverHooks'] = {poke: undefined};
   publish(Object.freeze({
     snapshot: () => Object.freeze({driving: !!owner.drive, parked: !!owner.drive?.gate,
       queue: owner.queue.length, batch: owner.batch.length, releases: owner.releases.length,
@@ -25,8 +45,23 @@ EM_JS(void, mini_driver_publish_controls, (), {
       Module['_free'](pointer);
       return pointer !== 0;
     },
+    fire: (state, slot, generation) => getWasmTableEntry(fire)(state, slot, generation),
+    hooks,
   }));
 });
+
+EM_JS(void, mini_driver_poke, (), {
+  Module['miniDriverHooks']?.poke?.();
+});
+
+void mini_driver_publish_controls(void) {
+  mini_driver_controls((int)(intptr_t)mini_driver_fire);
+}
+
+/* Authored C that switches stacks inside a synchronous callback. */
+int mini_driver_switch(uint32_t state) {
+  return (int)titan_browser_relinquish(state, TITAN_BROWSER_TURN);
+}
 
 /* A C-created child state never owns the instance. */
 typedef struct child_owner { lua_State *child; } child_owner;
