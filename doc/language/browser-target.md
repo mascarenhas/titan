@@ -645,9 +645,10 @@ otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 
 **Output.** Each stream has one FIFO and at most one actual sink invocation in
 flight. The loader flushes after all entries in the containing operation,
-including unterminated C-stdio tails, and during a drive also at each
-relinquish point, without waiting there for a pending sink call. Later chunks
-continue after a sink
+including unterminated C-stdio tails, and during a drive also whenever the
+drive relinquishes the event loop, without waiting there for a pending sink
+call: output queued behind that call reaches the sink once it resolves, even
+while the drive stays relinquished. Later chunks continue after a sink
 throws or rejects. An otherwise successful operation rejects with its first
 cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
@@ -762,8 +763,8 @@ an idle call, except that starting another drive inside it fails. A call
 queued too late for the drive's last turn runs on its own once the drive's
 operation ends. Request settlements, listener events and notifications for
 the owner state wake a relinquished drive; they never enter Wasm themselves.
-Buffered output reaches the sinks at the drive's relinquish points, before
-the drive ends, and a slow or forever-pending sink never stalls the drive.
+Buffered output reaches the sinks while the drive is relinquished, before the
+drive ends, and a slow or forever-pending sink never stalls the drive.
 
 ### Task-form calls
 
@@ -1321,14 +1322,14 @@ record observed startup memory for a large-function program and a complete
 standard-library test image on Linux and macOS; they are measurements, not a
 startup-memory guarantee.
 
-A browser program runs with these fixed sizes:
+A browser program runs with these sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
 | Main linear C stack | 1 MiB | Checked C-stack overflow aborts rather than silently overwriting memory. Lua's ordinary C-call limit can reject mixed recursion first. |
 | Coroutine linear C stack | 256 KiB per coroutine (2 MiB natively) | The same checks and bounds follow each continuation across suspension and memory growth. |
 | Engine continuation stack | Managed by the JSPI implementation | Engine stack exhaustion is fatal; the linear-stack budget does not bound engine memory. |
-| Linear memory | 16 MiB initially, growing to at most 2 GiB | A failed native allocation produces the ordinary Lua/Titan allocation error when the state still has enough memory to report it. Engine allocation failures are fatal. |
+| Linear memory | The program's static data and main stack plus a 15 MiB heap initially (about 16 MiB for a small program), growing to at most 2 GiB | A failed native allocation produces the ordinary Lua/Titan allocation error when the state still has enough memory to report it. Engine allocation failures are fatal. |
 
 Linear coroutine stacks are allocated when a coroutine is created. A finished
 engine invocation retires before its native allocation can be freed or reused.

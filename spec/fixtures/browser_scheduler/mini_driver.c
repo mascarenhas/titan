@@ -8,7 +8,8 @@ extern int luaopen_titan(lua_State *L);
 extern int luaopen_mini_child(lua_State *L);
 
 /* Loader observations for the harness, published only to its explicit
- * __miniDriver binding; generated images never expose the Module. */
+ * __miniDriver binding; generated images never expose the Module. `allocate`
+ * calls the plain _malloc/_free exports, which no admission gate guards. */
 EM_JS(void, mini_driver_publish_controls, (), {
   var owner = Module['titanBrowserBridge'];
   var publish = owner.options.bindings?.__miniDriver;
@@ -18,7 +19,12 @@ EM_JS(void, mini_driver_publish_controls, (), {
       queue: owner.queue.length, batch: owner.batch.length, releases: owner.releases.length,
       settling: owner.settling.length, requests: owner.requests.size, inHost: owner.inHost,
       ownerState: owner.ownerState, exited: owner.exited ? owner.exited.status : null,
-      operationId: owner.operationId, active: !!owner.active}),
+      operationId: owner.operationId, active: !!owner.active, turnScheduled: !!owner.turnScheduled}),
+    allocate: () => {
+      var pointer = Module['_malloc'](16);
+      Module['_free'](pointer);
+      return pointer !== 0;
+    },
   }));
 });
 
