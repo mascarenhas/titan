@@ -518,14 +518,19 @@ library's source, from the SDK directory or the browser Titan path described
 
 ### C helpers and Emscripten APIs
 
+Emscripten C declarations can be imported directly, including
+`foreign import "emscripten/html5.h"`. Function-like macros are not imported:
+call the underlying declared function when one is available. For example,
+`emscripten_set_click_callback_on_thread` with
+`EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD` is the declared-function form of
+the `emscripten_set_click_callback` macro.
+
 `--c-source FILE` adds a C helper to a program or test image, compiled with
-the same Emscripten settings. Emscripten's C APIs (`emscripten.h`,
-`emscripten/html5.h`, and the rest) and `EM_JS` or `EM_ASM` blocks belong in
-such helpers, behind a small header with ordinary C types that Titan imports.
-Titan's C importer does not handle `emscripten/html5.h`
-([#380](https://github.com/mascarenhas/titan/issues/380)). An API that
-calls back into C runs the callback synchronously; to run Titan code there,
-pin a handler and call `titan_browser_call_sync`
+the same Emscripten settings. Use it for `EM_JS` or `EM_ASM` blocks and C
+operations the FFI cannot express, behind a small header Titan imports; it
+is not required merely to call an Emscripten API. An API that calls back
+into C runs the callback synchronously. To run Titan code there, pin a
+handler and call `titan_browser_call_sync`
 ([synchronous C callbacks](standard-library-browser.md#synchronous-c-callbacks)).
 
 ## The loader API

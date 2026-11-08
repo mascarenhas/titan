@@ -654,9 +654,12 @@ Module or factory.
 
 The html5 click counter of the [language
 chapter](../language/standard-library-browser.md#synchronous-c-callbacks)
-(`counter.titan`, `counter.c` and the page test `counter.mjs` in
-`spec/fixtures/browser_bridge/`) clicks real buttons whose Emscripten click
-callbacks call pinned handlers through `titan_browser_call_sync`. It needs a
+(`counter.titan`, `counter.{h,c}` and the page test `counter.mjs` in
+`spec/fixtures/browser_bridge/`) imports `emscripten/html5.h` directly in
+Titan and registers real buttons through `emscripten_set_click_callback_on_thread`.
+The small C callback owns its automatic zero-initialized synchronous-result
+aggregate and calls pinned handlers through `titan_browser_call_sync`; its
+header exposes only that callback, not registration wrappers. It needs a
 page's DOM, so the bridge spec runs it on Chromium only and the Playwright
 bridge gate on Chromium, Firefox and WebKit.
 
