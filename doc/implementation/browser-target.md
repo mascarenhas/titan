@@ -399,8 +399,8 @@ The provider adds a fourteenth root, the browser-only `titan.browser` in
 dependency or a second coroutine driver.
 
 The other thirteen standard modules are absent at compile time: their
-canonical mains are the `native` variants `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
-and `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
+canonical mains are the `native` variants `titan/{timer,io,fs,net,ssl,os}.native.titan`
+and `titan/{uv,async,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
 ([Make inventories](target-source-selection.md#make-inventories-and-audits)).
 For `browser` the resolver finds no main, so an import reports the ordinary
 `module 'titan.<name>' not found`, and a contributor of a folder whose main is

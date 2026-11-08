@@ -14,6 +14,7 @@ local platform = require "titan-compiler.platform"
 local paths = require "titan-compiler.path"
 local source_inventory = require "spec.support.source_inventory"
 local staticmetadata = require "titan-compiler.staticmetadata"
+local stdlib_objects = require "spec.support.stdlib_objects"
 local _, close_contexts, resolver_options =
     require("spec.support.resolver_contexts")(driver)
 after_each(close_contexts)
@@ -2894,10 +2895,8 @@ int main(void) {
                     end
                 end
             end
-            -- Folder modules name their object after the main.
-            local folder = module == "async" or module == "sqlite3"
-            local object = stdlib_artifact(folder and
-                "titan/" .. module .. "/" .. module .. ".o" or "titan/" .. module .. ".o")
+            local object = stdlib_artifact((paths.to_slash(stdlib_objects.object(
+                resolver_options().context, "titan." .. module, ".", ".")):gsub("^%./", "")))
             local output = module_symbols.collect(object, run_argv).undefined_text
             for symbol in output:gmatch("[^\r\n]+") do
                 assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
@@ -2911,6 +2910,24 @@ int main(void) {
             return entries
         end)())
         assert.falsy(read_file("Makefile"):find("titan/fs.titan.h", 1, true))
+    end)
+
+    -- spec/support/check_windows_stdlib.lua derives its objects with the same
+    -- helper; a cold build has no flat object left behind by a folder split.
+    it("finds every stdlib object where the Windows stdlib check derives it", function()
+        if platform.windows then
+            pending("the Windows stdlib-check gate reads its own build tree")
+            return
+        end
+        local objectmetadata = require "titan-compiler.objectmetadata"
+        local context = resolver_options().context
+        for _, module in ipairs(STDLIB_MODULES) do
+            local modname = "titan." .. module
+            local object = stdlib_objects.object(context, modname, ".", "out")
+            local entry, err = objectmetadata.read(read_file(object), object)
+            assert.truthy(entry and entry.type, err)
+            assert.equal(modname, entry.type.name, object)
+        end
     end)
 
     it("keeps filesystem request cleanup before settlement and watchers on scoped generic batches", function()
