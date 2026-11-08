@@ -407,6 +407,10 @@ and `external.browser.titan` (an opaque `ExternalWait`); its native-only
 `coroutine`, `gc`, `string`, `transfer`, and `titan.browser`, the only
 standard module that imports the bridge. Its omitted members and opaque
 record are recorded in the [member inventory](#interface-derived-member-inventory).
+The opaque `ExternalWait` keeps one private field, so a record literal of it
+outside `titan.async` is rejected on both targets, as
+`spec/coder/browser_stdlib_closure_spec.lua` checks against the installed
+native and browser providers.
 
 The other twelve standard modules are absent at compile time: their
 canonical mains are the `native` variants `titan/{timer,io,fs,net,ssl,os}.native.titan`
@@ -3514,7 +3518,8 @@ hosts`).
   layout and filtered runs, the CI failure artifact's image and per-engine log
   paths, the per-owner audit of a failed run, the stdout-only audit of a run
   whose stderr arrives in the middle of a report line, and the strict
-  single-image audit of timing, owner, failure, skip, and filter accounting.
+  single-image audit of timing, owner, failure, skip, and filter accounting,
+  and the rejected `ExternalWait` record literal on both targets.
 * `spec/coder/browser_stdlib_gate_spec.lua` — the [initialization and
   fidelity gate](#initialization-and-fidelity-gate).
 * `spec/coder/browser_entry_gate_spec.lua` — the [entry gate](#the-entry-gate-decision).
