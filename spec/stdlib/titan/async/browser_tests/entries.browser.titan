@@ -130,6 +130,29 @@ local function orphan(...: Value): Value
   return Value.is_nil()
 end
 
+-- Thousands of Tasks parked on host requests until disposal cancels them.
+-- The last Task to park and the last cleanup each leave one note.
+local function crowd(...: Value): Value
+  local count = integer_of(...[1])
+  local parked = 0
+  local cleaned = 0
+  for _ = 1, count do
+    async.run_with_cleanup<|nil, value|>(function (): nil
+      parked = parked + 1
+      if parked == count then note("crowd parked " .. count) end
+      suspend_on("never")
+      return nil
+    end, function (reason: async.CancellationReason<|value|>?)
+      local text = reason_text(reason)
+      if text ~= "instance disposed" then note("crowd cleanup " .. text) end
+      cleaned = cleaned + 1
+      if cleaned == count then note("crowd cleaned " .. count) end
+    end)
+  end
+  async.loop()
+  return Value.is_nil()
+end
+
 local function exit_drive(...: Value): Value
   local code = integer_of(...[1])
   async.run_with_cleanup<|nil, value|>(function (): nil
@@ -193,6 +216,7 @@ local function publish_entries()
   publish(target, "park_idle", park_idle)
   publish(target, "dispose_mid_turn", dispose_mid_turn)
   publish(target, "orphan", orphan)
+  publish(target, "crowd", crowd)
   publish(target, "exit_drive", exit_drive)
   publish(target, "exit_and_fail", exit_and_fail)
   publish(target, "make_child", make_child)

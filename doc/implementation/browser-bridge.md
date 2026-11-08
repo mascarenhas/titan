@@ -465,8 +465,9 @@ registrations, cleanup under cancellation, fatal and ordinary failures,
 combinators, channels and a listener-fed subscription, nested coroutines, and
 child-state refusals) and then drives the owner's published entries:
 Task-form calls, disposal while relinquished, mid-turn, with an orphaned
-cleanup and with no drive, the exit latch, and refused child-state calls
-during a drive.
+cleanup and with no drive, disposal of 2,000 parked Tasks after which the
+harness's acknowledged collection must clear a `WeakRef` to the instance, the
+exit latch, and refused child-state calls during a drive.
 
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The

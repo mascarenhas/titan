@@ -165,6 +165,48 @@ async function disposal(context, image) {
   return summary;
 }
 
+// until() with room for thousands of Task starts.
+async function eventually(context, predicate, message) {
+  for (let attempt = 0; attempt < 5000; attempt++) {
+    if (predicate()) return;
+    await context.tick();
+  }
+  context.assert(false, message);
+}
+
+// Thousands of Tasks parked on host requests: disposal cancels every one with
+// "instance disposed". It returns before collection is checked, so no
+// suspended frame of this function retains the instance.
+async function prepareCrowd(context, image, count) {
+  const host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    const driving = host.call('crowd', BigInt(count));
+    await eventually(context, () => host.notes.length > 0, 'the crowd did not park');
+    const reference = new WeakRef(host.instance);
+    const disposing = host.instance.dispose();
+    await rejection(context, driving, 'DISPOSED');
+    await disposing;
+    context.assert(notes(host) === `crowd parked ${count}|crowd cleaned ${count}`, `crowd notes: ${notes(host)}`);
+    return reference;
+  } finally {
+    await host.close();
+    host.instance = undefined;
+    host.callables.clear();
+  }
+}
+
+// The disposed instance is collectable after thousands of Tasks.
+async function crowd(context, image) {
+  const count = 2000;
+  const reference = await prepareCrowd(context, image, count);
+  for (let attempt = 0; attempt < 40 && reference.deref() !== undefined; attempt++) {
+    await context.tick(); await context.gc(); await context.tick();
+  }
+  context.assert(reference.deref() === undefined, `a disposed instance survived collection after ${count} Tasks`);
+  return count;
+}
+
 // The exit latch with a running Runtime.
 async function exits(context, image) {
   let host = makeHost(context, image);
@@ -232,6 +274,7 @@ export async function run(context) {
   report.gate = await gate(context, image);
   report.entries = await entries(context, image);
   report.disposal = await disposal(context, image);
+  report.crowd = await crowd(context, image);
   await exits(context, image);
   await ownership(context, image);
   context.stdout(encode('SCHEDULER ' + JSON.stringify(report) + '\n'));
