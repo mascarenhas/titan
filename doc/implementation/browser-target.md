@@ -3261,9 +3261,12 @@ state-neutral observer stays callable. Timer/RAF responsiveness measures an
 admitted entry containing real external waits; it does not turn internal
 coroutine transfers into browser-turn scheduler checkpoints.
 
-Bridge handles/callback queues and scheduler policy remain separate work;
-they must use the existing logical owner rather than inventing admission
-based on absence of live Wasm frames.
+Bridge notifications and drives follow this rule. Notifications run under a
+logical operation, and a drive keeps its entry's logical owner across
+relinquish points: the loader delivers queued calls and notifications through
+`deliver` inside the drive ([drives, the call queue and wake
+sources](#drives-the-call-queue-and-wake-sources)) and never admits an entry
+because no Wasm frame is live.
 
 `entry_lifetimes.titan` and its test-owned C guard keep an independent Lua
 state across three distinct promised C-entry lifetimes: park ordinary and

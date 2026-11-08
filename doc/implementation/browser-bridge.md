@@ -1,8 +1,10 @@
 # Browser bridge runtime
 
 The core JavaScript bridge uses the browser JSPI backend and the single
-persistent image lifecycle. It does not add another coroutine driver,
-scheduler, native message format, or synchronous reverse-call backend. The
+persistent image lifecycle. It does not add another coroutine driver, native
+message format, or synchronous reverse-call backend, and it supplies the
+[drive interface](#drive-interface-and-delivery) a scheduler uses rather than
+a scheduler. The
 public Titan API is [JavaScript bindings](../language/standard-library-browser.md);
 [the browser target](browser-target.md) owns link profiles, the embedded
 loader, the runner, deployment, and fatal engine classifications.
