@@ -516,6 +516,17 @@ library's source, from the SDK directory or the browser Titan path described
 `--c-source FILE` compiles C helpers with the same Emscripten settings.
 `--incremental` reuses unchanged objects exactly as for native builds.
 
+### C helpers and Emscripten APIs
+
+`--c-source FILE` adds a C helper to a program or test image, compiled with
+the same Emscripten settings. Emscripten's C APIs (`emscripten.h`,
+`emscripten/html5.h`, and the rest) and `EM_JS` or `EM_ASM` blocks belong in
+such helpers, behind a small header with ordinary C types that Titan imports.
+Titan's C importer does not handle `emscripten/html5.h` (#NNN). An API that
+calls back into C runs the callback synchronously; to run Titan code there,
+pin a handler and call `titan_browser_call_sync`
+([synchronous C callbacks](standard-library-browser.md#synchronous-c-callbacks)).
+
 ## The loader API
 
 Every generated program or test ES module exports one default
@@ -819,6 +830,30 @@ reaching the owner state, so cleanup that awaits that work completes; new
 host work fails with `"browser state is closing"`. Requests still open when
 the cleanup ends are then cancelled, retained ones settle, and the state
 closes. An exited instance has no Runtime left to clean up.
+
+### Synchronous C callbacks
+
+An Emscripten API that calls a C callback, such as an `html5.h` event
+handler, calls it synchronously. A callback that runs Titan code through
+`titan_browser_call_sync` is not an entry and does not wait for one: it runs
+whenever the instance is open, during a drive or not, and is refused once
+`dispose()` has begun, after an exit, or after an engine failure. JavaScript
+reached from a callback follows the usual rules: a binding that the callback's
+Titan code calls counts as inside a binding, and the JavaScript that dispatched
+the callback does not. On an idle instance:
+
+| JavaScript during a synchronous callback | Result |
+| --- | --- |
+| `call()`, `callTask()`, `drain()` or `run()` in a binding the callback's Titan code called | rejects `TITAN_BROWSER_REENTRY` |
+| the same outside any binding, for example in the code that dispatched the event | admitted; the entry starts after the callback returns |
+| `notify()` | queued for a later `drain()` or drive |
+| `dispose()` | closes admission at once; the state closes after the callback returns |
+
+A callback that ends by an exception instead of returning, including
+authored C that suspends inside it, poisons the instance (`onEngineFailure`
+kind `"protocol"`). The [JavaScript bindings
+chapter](standard-library-browser.md#synchronous-c-callbacks) describes the
+Titan and C side.
 
 ## Testing with `titan-browser-run`
 

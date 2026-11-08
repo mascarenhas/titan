@@ -2677,6 +2677,10 @@ or finishes. Tagged yield activates the selected handler's BACK directly;
 intermediate stacked contexts remain parked. Before every continuation runs,
 the driver restores its linear SP and Emscripten stack-limit globals and
 checks its cookie. Engine stacks are separate from those linear allocations.
+Inside a [synchronous C callback](browser-bridge.md#synchronous-c-callbacks),
+or with no promising entry holding the owner, `titan_mco_transfer` and the
+suspending path of `titan_mco_destroy` poison instead of switching; destroying
+a never-started or finished context does not suspend and stays legal there.
 
 A terminal transfer records its destination without parking the dead stack
 or waking its resumer. `_mco_main` returns out of the engine invocation
@@ -2730,8 +2734,10 @@ claiming normal cleanup.
 import for a [drive](browser-bridge.md#drive-interface-and-delivery). The
 library half (`$TitanBrowser.relinquish`) poisons with
 `TITAN_BROWSER_PROTOCOL` (`"Titan stack switch outside a promising entry or
-inside a synchronous callback"`) unless the execution owner is held and the
-main context is current (`TitanBrowser.current === 0`), then hands the call to
+inside a synchronous callback"`) when no promising entry holds the execution
+owner, when a [synchronous C callback](browser-bridge.md#synchronous-c-callbacks)
+runs (it then throws to the callback's caller), or when the main context is
+not current (`TitanBrowser.current !== 0`). Otherwise it hands the call to
 the loader owner, which also requires the state's active drive with no gate
 parked and no item in delivery.
 
@@ -2879,11 +2885,22 @@ once and accepts a drive only from that state inside an active operation.
   relinquish point, or when the drive ends; a call queued too late for the
   drive's last batch runs at the next safe point as an ordinary call.
 - **Wake sources.** A queued owner item, an open owner request or listener,
-  or an already scheduled wake keeps a waiting relinquish parked; a JS call
-  that might come later does not. Every enqueue of an owner item, `dispose()`
-  and `titan_browser_host_wake` schedule the one coalesced turn-source
-  macrotask that resolves the parked gate ([relinquish
-  import](#the-relinquish-import)).
+  an open owner `BrowserPin` (the loader's `holds` count, kept by
+  `titan_browser_host_hold`), or an already scheduled wake keeps a waiting
+  relinquish parked; a JS call that might come later does not. Every enqueue
+  of an owner item, `dispose()`, `titan_browser_host_wake`, and the close of
+  the owner's last pin schedule the one coalesced turn-source macrotask that
+  resolves the parked gate ([relinquish import](#the-relinquish-import)), so
+  a parked wait re-checks its wake sources.
+- **Synchronous C callbacks.** A C callback that enters Titan through
+  `titan_browser_call_sync` is not an operation and takes no admission.
+  `callbackAdmit(state)`, behind `titan_browser_host_callback`, admits it
+  unless the instance is closing, exited or poisoned or the state is no
+  longer open, during a drive or not. JavaScript reached from the callback
+  gets ordinary admission: a binding the callback's Titan code calls counts
+  in `inHost`, so reverse entries there reject `TITAN_BROWSER_REENTRY`, and an
+  entry requested anywhere else starts in a microtask after the callback's
+  synchronous chain returns.
 - **Task-form calls.** `callTask` validates that the callable belongs to the
   owner state and that the owner registered `titan:driver`, then invokes the
   registered spawn callable with `[callable, settleFn, ...args]`, where
@@ -3523,7 +3540,8 @@ hosts`).
   independent-state C helper and the failed-initializer image, driven by
   `integration.mjs` through lifecycle, typed values, callbacks, notifications,
   requests, stdio, state close, and WeakRef collection, plus the
-  unhandled-rejection (74) and poisoned-retirement (70) diagnostics
+  unhandled-rejection (74) and poisoned-retirement (70) diagnostics, and the
+  html5 click counter of synchronous C callbacks on Chromium
   ([browser bridge runtime](browser-bridge.md#test-layers)).
 * `spec/coder/browser_deployment_spec.lua` with
   `spec/fixtures/browser_bridge/deployment.mjs` — a real program loaded over
