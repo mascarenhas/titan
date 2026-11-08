@@ -1308,14 +1308,14 @@ record observed startup memory for a large-function program and a complete
 standard-library test image on Linux and macOS; they are measurements, not a
 startup-memory guarantee.
 
-A browser program runs with these fixed sizes:
+A browser program runs with these sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
 | Main linear C stack | 1 MiB | Checked C-stack overflow aborts rather than silently overwriting memory. Lua's ordinary C-call limit can reject mixed recursion first. |
 | Coroutine linear C stack | 256 KiB per coroutine (2 MiB natively) | The same checks and bounds follow each continuation across suspension and memory growth. |
 | Engine continuation stack | Managed by the JSPI implementation | Engine stack exhaustion is fatal; the linear-stack budget does not bound engine memory. |
-| Linear memory | 16 MiB initially, growing to at most 2 GiB | A failed native allocation produces the ordinary Lua/Titan allocation error when the state still has enough memory to report it. Engine allocation failures are fatal. |
+| Linear memory | The program's static data and main stack plus a 15 MiB heap initially (about 16 MiB for a small program), growing to at most 2 GiB | A failed native allocation produces the ordinary Lua/Titan allocation error when the state still has enough memory to report it. Engine allocation failures are fatal. |
 
 Linear coroutine stacks are allocated when a coroutine is created. A finished
 engine invocation retires before its native allocation can be freed or reused.

@@ -251,7 +251,7 @@ describe("browser image profile and SDK readiness", function()
             '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
                 '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"]',
             "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
-            "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
+            "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
             "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
@@ -281,7 +281,7 @@ describe("browser image profile and SDK readiness", function()
             '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
                 '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"]',
             "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
-            "-sINITIAL_MEMORY=16777216", "-sALLOW_MEMORY_GROWTH=1",
+            "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
             "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
@@ -332,11 +332,14 @@ describe("browser image profile and SDK readiness", function()
             { purpose = "gate", assertions = 1 }, { purpose = "program", assertions = 2, unknown = true },
             { purpose = "gate", assertions = 2, entry = "lua-main" },
             { purpose = "budget", assertions = 2, budgets = { stack_size = 17 } },
-            { purpose = "budget", assertions = 2, budgets = { initial_memory = 2147549184 } } }) do
+            { purpose = "budget", assertions = 2, budgets = { initial_memory = 16777216 } },
+            { purpose = "budget", assertions = 2, budgets = { initial_heap = 32768 } },
+            { purpose = "budget", assertions = 2, budgets = { initial_heap = 2146500608 } } }) do
             assert.is_nil(browserlink.profile(descriptor, options))
         end
         local budget = assert(browserlink.profile(descriptor, { purpose = "budget", assertions = 2,
-            optimization = "O1", budgets = { stack_size = 65536 } }))
+            optimization = "O1", budgets = { stack_size = 65536, initial_heap = 65536 } }))
+        assert.truthy(table.concat(budget.link_flags, " "):find("-sSTACK_SIZE=65536 -sINITIAL_HEAP=65536 ", 1, true))
         assert.same({ "-O1" }, budget.compile_flags)
         local baseline = assert(browserlink.profile(descriptor, { purpose = "baseline", assertions = 2,
             entry = "lua-main", optimization = "O2" }))
@@ -563,6 +566,7 @@ describe("browser image profile and SDK readiness", function()
             { "-sJSPI=0" }, { "-s", "JSPI_EXPORTS=[]" }, { "-sNO_JSPI=1" },
             { "-sJSPI_IMPORTS=[]" }, { "-DJSPI=0" }, { "-U", "JSPI_EXPORTS" },
             { "-sFORCE_FILESYSTEM=0" }, { "-sFILESYSTEM=0" }, { "-sMINIMAL_RUNTIME=1" },
+            { "-sINITIAL_MEMORY=33554432" }, { "-sINITIAL_HEAP=33554432" },
             { "--js-library=x.js" }, { "--no-entry" } }) do
             assert.is_nil(browserlink.validate_extras(flags))
         end

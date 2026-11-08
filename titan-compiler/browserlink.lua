@@ -44,8 +44,10 @@ local purposes = { program = true, test = true, protocol = true, gate = true,
     minicoro = true, budget = true, baseline = true }
 local option_keys = { purpose = true, assertions = true, optimization = true,
     budgets = true, entry = true }
+-- Initial memory is the image's static data and stack plus `initial_heap`;
+-- 15 MiB is the heap a data-free image had under a fixed 16 MiB.
 local defaults = { stack_size = 1048576,
-    initial_memory = 16777216, maximum_memory = 2147483648 }
+    initial_heap = 15728640, maximum_memory = 2147483648 }
 
 function M.profile(descriptor, options)
     if type(options) ~= "table" then return nil, "browser link profile options are required" end
@@ -72,13 +74,14 @@ function M.profile(descriptor, options)
             return nil, "browser budget overrides require the budget profile"
         end
         for key, value in pairs(options.budgets) do
-            local alignment = (key == "initial_memory" or key == "maximum_memory") and 65536 or 16
+            local alignment = (key == "initial_heap" or key == "maximum_memory") and 65536 or 16
             if defaults[key] == nil or math.type(value) ~= "integer" or value <= 0 or value % alignment ~= 0 then
                 return nil, "invalid browser budget override " .. tostring(key)
             end
             budgets[key] = value
         end
-        if budgets.initial_memory > budgets.maximum_memory or budgets.maximum_memory > 2147483648 then
+        if budgets.stack_size + budgets.initial_heap > budgets.maximum_memory or
+                budgets.maximum_memory > 2147483648 then
             return nil, "invalid browser memory budgets"
         end
     end
@@ -136,7 +139,7 @@ function M.profile(descriptor, options)
     add("-sSUPPORT_LONGJMP=" .. descriptor.lua.record.sjlj)
     add("-sWASM_LEGACY_EXCEPTIONS=1")
     add("-sSTACK_SIZE=" .. budgets.stack_size)
-    add("-sINITIAL_MEMORY=" .. budgets.initial_memory)
+    add("-sINITIAL_HEAP=" .. budgets.initial_heap)
     add("-sALLOW_MEMORY_GROWTH=1")
     add("-sMAXIMUM_MEMORY=" .. budgets.maximum_memory)
     add("-sABORTING_MALLOC=0")
@@ -180,7 +183,7 @@ end
 -- unrelated Emscripten settings, but reject every spelling of an owned one.
 local owned = { SUPPORT_LONGJMP = true, WASM_LEGACY_EXCEPTIONS = true,
     JSPI = true, STACK_SIZE = true,
-    INITIAL_MEMORY = true, ALLOW_MEMORY_GROWTH = true, MAXIMUM_MEMORY = true,
+    INITIAL_MEMORY = true, INITIAL_HEAP = true, ALLOW_MEMORY_GROWTH = true, MAXIMUM_MEMORY = true,
     ABORTING_MALLOC = true, EXIT_RUNTIME = true, INVOKE_RUN = true,
     MODULARIZE = true, EXPORT_ES6 = true, ENVIRONMENT = true,
     FORCE_FILESYSTEM = true, FILESYSTEM = true, MINIMAL_RUNTIME = true, PRINTF_LONG_DOUBLE = true,

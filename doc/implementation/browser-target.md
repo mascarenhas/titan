@@ -1215,7 +1215,7 @@ extras unless `options.purpose` is `baseline`, `minicoro`, or `budget`, as well
 as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
 `NO_` prefix, of `SUPPORT_LONGJMP`, `WASM_LEGACY_EXCEPTIONS`, `ASYNCIFY`,
 every `ASYNCIFY_*` setting, `JSPI`, every `JSPI_*` setting,
-`BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`,
+`BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`, `INITIAL_HEAP`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
 `INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
 `FILESYSTEM`, `MINIMAL_RUNTIME`, `PRINTF_LONG_DOUBLE`, `EXPORTED_FUNCTIONS`,
@@ -1555,10 +1555,10 @@ flag list.
   `baseline` (`invalid browser link optimization override`); it yields
   `compile_flags = {"-O1"}` or `{"-O2"}` and the matching link flag.
 * `budgets` overrides `stack_size` (a positive multiple of 16),
-  `initial_memory`, and `maximum_memory` (positive multiples of 65536,
-  initial at most maximum, maximum at most 2147483648), only for `budget`
-  (`browser budget overrides require the budget profile`, `invalid browser
-  budget override <key>`, `invalid browser memory budgets`).
+  `initial_heap`, and `maximum_memory` (positive multiples of 65536, stack and
+  heap together at most maximum, maximum at most 2147483648), only for
+  `budget` (`browser budget overrides require the budget profile`, `invalid
+  browser budget override <key>`, `invalid browser memory budgets`).
 * `entry` defaults to `titan`; the only alternative, `lua-main`, is for the
   `baseline` measurement of the fork's own Lua interpreter (`invalid browser
   link entry`).
@@ -1575,7 +1575,7 @@ flag list.
 | `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"] -sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke","titan_browser_release_callable","titan_browser_close","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports for the five Lua-running bridge entries and the private coroutine entry. The bridge library's [relinquish import](#the-relinquish-import) is the third suspending import of a `titan` entry; the interpreter baseline (`lua-main`) keeps only the coroutine pair and promises `main`. The `gate` purpose adds its guarded export and `emscripten_sleep`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
 | `-sSUPPORT_LONGJMP=<sjlj> -sWASM_LEGACY_EXCEPTIONS=1` | the record's verified longjmp mode, `wasm`, with Emscripten 6.0.13's legacy EH encoding, matching every object and `liblua.a` |
 | `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
-| `-sINITIAL_MEMORY=16777216 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
+| `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | initial memory is the image's static data and main stack plus a 15 MiB heap, so static data never outgrows a fixed initial size (15 MiB is the heap a data-free image had under the former fixed 16 MiB; [measured sizes](#budgets)); coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
 | `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
 | `-sFORCE_FILESYSTEM=1` | keeps Emscripten's filesystem and TTY layer in every image (see below) |
@@ -2077,7 +2077,8 @@ passed seven. The zero-case runs measure initialization only, not functional
 success. Node maxRSS is a process high-water mark, while Chromium RSS and
 VmData/VSZ are renderer samples at a requested 10-ms interval; VmData and VSZ
 are different virtual-memory measures, not resident RAM. Linear memory grew
-from 16,777,216 to 20,185,088 bytes during combined-image initialization.
+from 16,777,216 to 20,185,088 bytes during combined-image initialization,
+under the former fixed 16 MiB initial memory.
 Default tiering and sandboxing were unchanged, with no memory feature or
 forced optimizing-only compiler. These are individual measurements, not
 maximum startup-memory guarantees.
@@ -2402,8 +2403,25 @@ Linear stack and heap sizes are explicit image/SDK identity inputs:
 | --- | --- | --- |
 | Main linear C stack | `-sSTACK_SIZE=1048576` | the root entry's address-taken locals and Lua/Titan protected-call data |
 | Coroutine linear C stack | `-DTITAN_COROUTINE_STACK_SIZE=262144` | one disjoint minicoro allocation; native default remains 2 MiB |
-| Linear memory | `-sINITIAL_MEMORY=16777216 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648` | freed blocks can be reused but the grown Wasm heap never shrinks |
+| Linear memory | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648` | initial memory is static data, the main stack and a 15 MiB heap; freed blocks can be reused but the grown Wasm heap never shrinks |
 | Engine continuation stacks | JSPI engine-managed | not bounded by the linear C-stack sizes |
+
+Initial memory is the image's memory-section minimum: wasm-ld places static
+data and then the 1 MiB stack, and adds the 15 MiB heap to that heap base,
+rounded up to a 64-KiB page. Measured on validation-profile images (the same
+at assertions 2 and 0), against the former fixed `-sINITIAL_MEMORY=16777216`:
+
+| Image | Heap base (static data and stack) | Fixed 16 MiB | `INITIAL_HEAP=15728640` |
+| --- | ---: | ---: | ---: |
+| `hello` program | 1,131,776 | 16,777,216 | 16,908,288 |
+| Browser stdlib suite, 15 owners | 15,147,968 | 16,777,216 | 30,932,992 |
+| Browser stdlib suite with `async.tests`, 16 owners | 19,020,192 | link fails | 34,799,616 |
+
+Under the fixed size, the 16-owner suite fails with `wasm-ld: error: initial
+memory too small, 18203136 bytes needed`. The same objects linked with room
+(the new profile, or a fixed 64 MiB for comparison) have the 19,020,192-byte
+heap base shown. The 15-owner suite had 1,629,248 bytes of initial heap under
+the fixed size and now has 15 MiB like every image.
 
 `STACK_OVERFLOW_CHECK=2` stays enabled. Each switch saves SP and the current
 stack base/end, restores the destination limits and SP before its Wasm
