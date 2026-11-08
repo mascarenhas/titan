@@ -74,6 +74,31 @@ incompatible declarations or implicit conversions during baseline or final
 generated-C compilation; Titan does not promise an earlier error for every C
 conflict.
 
+### Include suppression and depth
+
+The built-in preprocessor executes `#pragma once` in active conditional branches.
+It marks the current file when the directive is reached, so includes above it
+are not suppressed retroactively. Later entries in the same C environment are
+skipped by the followed file's device/inode identity, including symbolic and
+hard links. Strategies without device/inode information use the resolved header
+spelling instead; they cannot deduplicate distinct spellings of one file.
+Forced `-include` and `-imacros` inputs share that environment's once state.
+Other pragmas and `#error` remain ignored. Generated `.ffi.h` files retain their
+ordinary `#ifndef` guards.
+
+The top-level input has include depth zero. Up to 200 nested includes are
+accepted; an attempted entry at depth 201 returns a preprocessing diagnostic
+naming the offending header and the input at the top of its include chain,
+rather than exhausting the Lua stack. This also bounds unguarded cycles and
+cycles whose only pragma occurs after the recursive include.
+
+`preprocessor_semantic_digest` includes the once policy and the include-depth
+limit alongside the configured include paths and predefined macros. The changed
+digest invalidates header graphs produced under different preprocessing
+semantics without changing a cache format version.
+Certified reuse does not observe every byte-identical once-header alias
+retarget; see the [incremental cache limit](incremental-compilation.md#semantic-c-header-identity-summary).
+
 The completed C environment is visible throughout the Titan module, including
 earlier module-variable closures and initializers. Ordinary Titan import and
 variable frontiers, direct source-private visibility, physical provider
@@ -1198,7 +1223,7 @@ as an owner.
   outside that subset can fail during preprocessing or parsing.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
-  macros). `#error` and `#pragma` are ignored.
+  macros). `#error` and pragmas other than `#pragma once` are ignored.
 * Function-like macros are invisible to general Titan FFI inference; the
   `lmacro_*` bridges in `titan/ffi.h` are ordinary C functions whose bodies
   evaluate selected Lua macros. An object-like macro is
