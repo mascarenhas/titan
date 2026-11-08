@@ -679,7 +679,7 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       test.assert(res_failed and raw_res == nil and res_error ~= nil and
                   denied[0] > denied_before_res,
                   "resource-bearing decode under OOM did not consume slot or raise")
-      -- The >40-byte qualified nominal name allocates in copy_native_bytes
+      -- The >40-byte qualified nominal name allocates during its string copy
       -- before the probe decoder can claim either attached resource.
       test.assert(res_c1[0] == 1 and res_c2[0] == 1,
                   "resource-bearing decode under OOM did not release unclaimed units before GC")

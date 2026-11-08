@@ -507,7 +507,7 @@ local function codec_handoff(request_value: value, item: value, context: value,
   -- Implementation notes: doc/implementation/protobuf-library.md#generated-nominal-codecs
   local request = request_value as foreign *TitanCodecHandoff
   local op: integer = request.op
-  local owner = c_text(request.owner)
+  local owner = request.owner as string
   local number: integer = request.number
   local depth: integer = request.depth
   local variant: integer = request.variant
