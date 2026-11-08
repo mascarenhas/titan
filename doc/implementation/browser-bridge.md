@@ -448,8 +448,10 @@ delivery, queued and refused calls (including one made between internal
 coroutine hops), Task-form calls with `AbortSignal`, the SDK timer sources,
 output at relinquish points (on both streams, a sink call still pending when
 the next gate publishes output and released at swept points around the pump
-runner's retirement, and no sink during the coroutine switches that follow an
-`IDLE` relinquish), disposal with a running, cleanup and shutdown drive, and
+runner's retirement, no sink call started by a held call that settles during
+a later turn's coroutine switches, including over full 1024-byte chunks, and
+no sink during the coroutine switches that follow an `IDLE` relinquish),
+disposal with a running, cleanup and shutdown drive, and
 the exit latch, under Node and Chromium in both assertion builds.
 `mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
 `admission.mjs` runs the admission matrix of the loader: every application
@@ -459,7 +461,13 @@ binding the drive invoked. It also covers owner and other-state request
 settlements, `dispose()` from each of those contexts, and the idle-instance
 rows (entries start after the calling method returns; `notify()` waits for a
 later `drain()` or drive). The rows that need a synchronous C callback are
-reported as pending until that entry exists.
+reported as pending until that entry exists. `measure.mjs` is run by hand,
+never by the spec (`titan-browser-run --js-test measure.mjs -- <image>`): it
+prints a `MEASURE` line with macrotask chain costs (`setImmediate`,
+`MessageChannel`, `setTimeout(0)`), the per-turn cost of drives with 1 and 64
+jobs, the wake latency from `notify()` to delivery in a parked drive, and
+`call()` round trips on an idle instance and into a parked drive, in
+microseconds.
 The same spec builds the real `async` driver's scheduler gate, the browser-only
 test owner `spec/stdlib/titan/async/browser_tests/`, with a C helper
 (`scheduler_child.c`) that creates child states loading

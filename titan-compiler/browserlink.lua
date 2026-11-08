@@ -80,8 +80,10 @@ function M.profile(descriptor, options)
             end
             budgets[key] = value
         end
-        if budgets.stack_size + budgets.initial_heap > budgets.maximum_memory or
-                budgets.maximum_memory > 2147483648 then
+        -- Compare before subtracting: an aligned override can be any positive
+        -- integer, and their sum could wrap.
+        if budgets.maximum_memory > 2147483648 or budgets.stack_size > budgets.maximum_memory or
+                budgets.initial_heap > budgets.maximum_memory - budgets.stack_size then
             return nil, "invalid browser memory budgets"
         end
     end

@@ -334,7 +334,11 @@ describe("browser image profile and SDK readiness", function()
             { purpose = "budget", assertions = 2, budgets = { stack_size = 17 } },
             { purpose = "budget", assertions = 2, budgets = { initial_memory = 16777216 } },
             { purpose = "budget", assertions = 2, budgets = { initial_heap = 32768 } },
-            { purpose = "budget", assertions = 2, budgets = { initial_heap = 2146500608 } } }) do
+            { purpose = "budget", assertions = 2, budgets = { initial_heap = 2146500608 } },
+            -- Aligned values whose sum with the other budget would wrap.
+            { purpose = "budget", assertions = 2, budgets = { initial_heap = 0x7fffffffffff0000 } },
+            { purpose = "budget", assertions = 2, budgets = { stack_size = 0x7ffffffffffffff0 } },
+            { purpose = "budget", assertions = 2, budgets = { stack_size = 2147483648 } } }) do
             assert.is_nil(browserlink.profile(descriptor, options))
         end
         local budget = assert(browserlink.profile(descriptor, { purpose = "budget", assertions = 2,

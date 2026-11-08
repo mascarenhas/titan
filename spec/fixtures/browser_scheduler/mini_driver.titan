@@ -34,6 +34,8 @@ local turn = 0
 local child_owner: value
 -- False under titan-browser-run, which supplies no fixture bindings.
 local harness = false
+-- The measurement harness turns the per-turn probe binding call off.
+local probing = true
 
 local function binding_call(name: string, ...: Value): Value
   local target = browser.binding(name)
@@ -247,7 +249,7 @@ local function drive()
     if #open == 0 then return end
     local status = browser.relinquish(#ready == 0)
     turn = turn + 1
-    if harness then binding_call("probe", Value.is_integer(turn), Value.is_integer(status)) end
+    if harness and probing then binding_call("probe", Value.is_integer(turn), Value.is_integer(status)) end
     if status == browser.RELINQUISH_DISPOSING then
       cancel_all("instance disposed")
     elseif status == browser.RELINQUISH_IDLE then
@@ -460,6 +462,35 @@ local function drive_job(...: Value): Value
   return Value.is_string("drove")
 end
 
+-- Takes the given number of turns, one step each.
+local function count_turns(...: Value): Value
+  local job = current
+  job.turns = job.turns + 1
+  if job.turns >= expect_integer(...[1]) then return Value.is_integer(job.turns) end
+  job.again = true
+  return Value.is_nil()
+end
+
+-- A plain call that drives the given number of count_turns jobs, each for
+-- the given number of turns, and returns the drive's relinquishes.
+local function drive_counters(...: Value): Value
+  local jobs = expect_integer(...[1])
+  local turns = expect_integer(...[2])
+  local first = turn
+  for _ = 1, jobs do Job(count_turns, {Value.is_integer(turns)}, nil) end
+  drive()
+  return Value.is_integer(turn - first)
+end
+
+local function set_probes(...: Value): Value
+  case ...[1]
+  when is_boolean(enabled) then
+    probing = enabled
+    return Value.is_nil()
+  end
+  raise "set_probes expects a boolean"
+end
+
 local function owner_probe(...: Value): Value
   local refusal = "no refusal"
   do
@@ -512,6 +543,15 @@ function main(args: {string}): integer
     Job(exit_with, {Value.is_integer(4)}, nil)
     drive()
     raise "main failed after its drive exited"
+  elseif mode == "main-failed" then
+    -- As the async bootstrap reports a failed main Task, then returns 1.
+    browser.main_failed("main task failed", "main task trace")
+    return 1
+  elseif mode == "main-failed-exit" then
+    browser.main_failed("main task failed", "main task trace")
+    Job(exit_with, {Value.is_integer(7)}, nil)
+    drive()
+    return 1
   end
   return 7
 end
@@ -541,18 +581,11 @@ do
     publish("ticks", ticks)
     publish("register", register)
     publish("drive_job", drive_job)
+    publish("drive_counters", drive_counters)
+    publish("set_probes", set_probes)
     publish("park_idle", park_idle)
     publish("owner_probe", owner_probe)
     publish("spare", spare)
     child_owner = ffi.mini_driver_new_child(L)
   end
 end
-  elseif mode == "main-failed" then
-    -- As the async bootstrap reports a failed main Task, then returns 1.
-    browser.main_failed("main task failed", "main task trace")
-    return 1
-  elseif mode == "main-failed-exit" then
-    browser.main_failed("main task failed", "main task trace")
-    Job(exit_with, {Value.is_integer(7)}, nil)
-    drive()
-    return 1
