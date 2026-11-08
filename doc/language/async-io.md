@@ -2124,6 +2124,24 @@ browser task, and the page keeps running while Tasks wait or yield. A Task
 that neither finishes nor waits still blocks the page, as it blocks the
 native loop.
 
+Titan's browser tests measure how responsive the page stays, on a page with a
+10 ms `setInterval` and animation frames:
+
+- While Tasks wait, the interval keeps within 10% of the page's own timer
+  cadence, which the test measures on the same page with no Titan code running.
+  The bound is relative to that cadence because engines differ. With no Titan
+  code, a 10 ms interval fires about 60 times in 600 ms on Chromium 156, 57 to
+  58 times on Firefox 157 and 50 to 51 times on WebKit 27.2 (about every
+  12 ms).
+- While 128 Tasks yield continuously, animation frames keep advancing, no
+  driver turn shares a macrotask with the next, and the largest gap between
+  interval ticks stays under 100 ms. The measured gaps were 11 to 16 ms on
+  Chromium, 13 to 21 ms on Firefox and 16 to 17 ms on WebKit.
+
+Those Tasks do no work between yields. A turn runs up to 64 ready Tasks before
+the page runs again, so the gap grows with the work each Task does before it
+waits or yields.
+
 If every remaining Task is waiting and nothing can wake one (no queued host
 work, open request or listener), the driver stops the Runtime with
 `"async Runtime became idle while Tasks were waiting"` and unwinds the waiting
