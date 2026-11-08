@@ -527,11 +527,46 @@ function check_explicit_cast_relation(node, st, errors)
         end
     end
     checkexp(node.exp, st, errors, cast_context)
+    if node.length then checkexp(node.length, st, errors) end
     local source = node.exp._type
     local target = node.target
     if source._tag == "Type.Invalid" or target._tag == "Type.Invalid" then
         node._written_cast_failed = true
         node._written_cast = maybe3.none()
+        return target
+    end
+    if node.length then
+        local length_type = types.resolve_c_typedef(node.length._type)
+        local message
+        if checker._foreign_function_depth > 0 then
+            message = "counted string conversion is unavailable in a foreign function body"
+        elseif not types.is_pointer_to_string_cast(source, target) then
+            message = "counted string conversion requires a character or void pointer and a string target"
+        elseif length_type._tag ~= "Type.Integer"
+           and length_type._tag ~= "Type.CInteger" then
+            message = "counted string length must be an integer or C integer"
+        end
+        local profile, profile_error
+        if not message then profile, profile_error = ensure_c_profile(st) end
+        local size_entry = profile and profile.integers[profile.size_t]
+        if not message and not (size_entry and size_entry.type) then
+            message = profile_error or "counted string conversion requires the target size_t type"
+        end
+        if message then
+            checker.typeerror(errors, node.loc, "%s", message)
+            node._written_cast_failed = true
+            node._written_cast = maybe3.none()
+        else
+            node._written_cast = maybe3.just({
+                kind = "written_cast", op = "explicit",
+                source = source, target = target,
+                conversion = {
+                    kind = "explicit_conversion", op = "counted_pointer_to_string",
+                    source = source, target = target,
+                    length_type = node.length._type, size_type = size_entry.type,
+                },
+            })
+        end
         return target
     end
     if reject_const_c_mutable_address(

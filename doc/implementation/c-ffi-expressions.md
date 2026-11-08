@@ -529,6 +529,49 @@ it formed an address or array decay. The direct source declaration is added to
 the call's `_c_mutated_decls`, marks address-taken/assigned state, and feeds the
 try-spill analysis below.
 
+## Counted pointer-to-string conversion
+
+The optional `length` expression on `Ast.ExpCast` and `Ast.ExpIs` represents
+`pointer as string(length)` and its predicate. The parser consumes its
+parentheses without newline sensitivity, at the existing cast precedence.
+The target can be a transparent string alias; semantic checking rejects
+other targets, pointer categories outside the existing character/`void`
+pointer domain, non-integer counts, and restricted foreign-body use.
+
+`check_explicit_cast_relation` checks both operands and records an explicit
+`counted_pointer_to_string` conversion. Its `length_type` retains the native
+count representation, and `size_type` comes from the active C profile's
+authoritative `size_t` entry. It is not a host-width approximation or an
+implicit conversion chain. The coder validates this plan before lowering.
+
+`coder._code_counted_string` materializes the pointer first, then the count.
+The cast uses the shared checked native numeric conversion in boundary mode,
+including for C-integer-to-C-integer counts: this is not a wrapping written
+C numeric cast. It then rejects a count at or above
+`MAX_SIZE - sizeof(TString)` and a nonzero count with a NULL pointer. The
+existing `makestring` path calls `luaS_newlstr`, with `""` as the source for
+zero length so no NULL address reaches a C copy operation.
+
+The new `TString` is published into its scanned temporary before
+`luaC_checkGC`. This preserves the allocation/publication/poll order of a Lua
+counted-string push, without a byte-copy stack transaction, and allows tight
+copy loops to service GC debt before their next Titan function entry. The
+result is then available to its ordinary destination. C-argument lowering
+must retain this operation too, rather than treating it as a raw C cast.
+
+The predicate uses the same native range predicate in boundary mode. A
+short-circuit expression tests the converted count against the Lua size bound
+and the zero-or-non-NULL condition. It never dereferences the pointer, copies
+bytes, allocates, or predicts allocation exhaustion; operand evaluation keeps
+its ordinary effects and errors.
+
+The length is an evaluated child, not metadata. Initializer dependency and
+callable-exposure checking, generic lowering, call-effect ordering, and the
+read/write/try-spill walker visit it after the pointer. Ordinary variable
+checking establishes its captures. Structural completion, binary-use, linear,
+and foreign-body walks include it as a public AST field.
+
+
 ## Target-directed automatic aggregates and fixed arrays
 
 `Ast.TypeCArray` represents unsized foreign arrays. At a direct initialized

@@ -155,7 +155,7 @@ function generic_interface_downcast_expression(
         exp, source, target, state, subject)
     local downcast = interface_downcast_plan(source, target, state.st)
     if not downcast then return nil end
-    local node = ast.ExpCast(exp.loc, exp, target)
+    local node = ast.ExpCast(exp.loc, exp, target, nil)
     node._type = target
     node._implicit_coercion = true
     node._interface_downcast = downcast
@@ -1003,6 +1003,9 @@ function generic_lower_expression(node, state)
         end
         if node.exp then node.exp = generic_lower_expression(node.exp, state) end
     elseif tag == "Ast.ExpCast" then
+        if node.length then
+            node.length = generic_lower_expression(node.length, state)
+        end
         local surface_target = node._type
         local generic_adjustment = node._adjustment
             and types.contains_generic(node._adjustment)
@@ -1034,6 +1037,9 @@ function generic_lower_expression(node, state)
                 node.target, state)
         end
     elseif tag == "Ast.ExpIs" then
+        if node.length then
+            node.length = generic_lower_expression(node.length, state)
+        end
         local surface_target = node.target
         local generic_written = node._written_cast.tag == "just"
             and types.contains_generic(maybe3.get_checked(node._written_cast, "written cast"))

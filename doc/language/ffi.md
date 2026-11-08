@@ -433,6 +433,8 @@ Allowed conversions include:
   within `T`; a const/captured binding or temporary is not mutable storage;
 * Titan `string` to `char *` or `void *` for calls;
 * C `char *` or `void *` to Titan `string` with an explicit `as string`;
+* C character or `void` pointers to a binary Titan `string` with an explicit
+  `as string(length)` counted copy;
 * a counted owned array of C `char`, `signed char`, or `unsigned char` to
   Titan `string`, copying its exact allocated byte length;
 * a foreign C function name to a compatible C function pointer type;
@@ -749,6 +751,62 @@ end
 
 Raw C pointers are not owned by Titan. Memory obtained from C must be released
 through the matching C API.
+
+### Counted byte copies
+
+Use `pointer as string(length)` when a native buffer has an explicit byte
+count rather than a terminating NUL:
+
+```titan
+function copy_binary(): string
+    local bytes = foreign unsigned char.new_array(4)
+    bytes[0] = 65
+    bytes[1] = 0
+    bytes[2] = 66
+    bytes[3] = 0
+    local pointer: foreign *unsigned char = bytes
+    return pointer as string(4)       -- "A\0B\0", all four bytes
+end
+```
+
+The conversion copies exactly the selected bytes, including embedded and
+trailing NULs. It accepts pointers to `char`, `signed char`, `unsigned char`,
+or `void`, including typedefs and qualifiers. Other object pointers and
+function pointers are not byte buffers. A C array or owner can first use its
+existing explicit pointer conversion; the counted form does not add an
+implicit conversion chain. A transparent alias of `string` can be the target,
+but an optional or other target type cannot.
+
+The length must be a Titan `integer` or a C integer, including a native
+integer typedef. It is checked against the active target's `size_t` range
+rather than wrapped or truncated. A negative count, a count outside that
+range, or a count too large for a Lua string raises before copying. Floating,
+Titan boolean, optional, and dynamic counts must be explicitly converted or
+unwrapped first.
+
+Zero length returns `""` without reading the pointer, even when it is NULL.
+A NULL pointer with positive length raises. The caller must provide a live,
+readable interval of the requested size; the conversion does not validate
+native memory, take ownership, or free it. The resulting immutable string is
+independent of subsequent writes to or disposal of the native buffer.
+
+The pointer is evaluated once and frozen before the length is evaluated once.
+After both evaluations complete, validation and copying run. The same order
+and effects apply at zero length and when a later check rejects the inputs.
+The form is available in ordinary Titan expressions, including otherwise
+valid module initializers, but not in a restricted `foreign function` body.
+
+`pointer is string(length)` evaluates the same operands in the same order and
+tests the count bounds and zero-or-non-NULL condition. The predicate itself
+does not copy, allocate, or read native bytes. It cannot establish that the
+interval is readable or predict allocation exhaustion. In particular, a NULL
+pointer `is string(0)` but does not satisfy the uncounted `is string` test.
+
+Without a length, `pointer as string` retains its NUL-terminated behavior.
+The exact-length `owned_characters as string` conversion also remains
+unchanged. Parentheses after a cast continue it even across a newline; use
+`;` before a separate parenthesized-call statement (see the
+[grammar](grammar.md#expressions)).
 
 ## C Arrays And Length
 

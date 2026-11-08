@@ -95,7 +95,7 @@ local function expression_children(node, visit)
             or tag == "Ast.ExpCast" or tag == "Ast.ExpIs"
             or tag == "Ast.ExpAdjust" or tag == "Ast.ExpDotsIndex"
             or tag == "Ast.ExpExtra" or tag == "Ast.ExpMethodRef" then
-        return visit(node.exp)
+        return visit(node.exp) or (node.length and visit(node.length))
     elseif tag == "Ast.ExpBinop" then
         return visit(node.lhs) or visit(node.rhs)
     elseif tag == "Ast.ExpConcat" then

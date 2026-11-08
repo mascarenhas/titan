@@ -752,7 +752,7 @@ function reject_const_c_mutable_address(source, target, errors, use)
 end
 
 function failed_c_adjustment(source, target)
-    local n = ast.ExpCast(source.loc, source, target)
+    local n = ast.ExpCast(source.loc, source, target, nil)
     n._implicit_coercion = true
     n._c_conversion_failed = true
     n._type = target
@@ -883,7 +883,7 @@ function adjust_unsafe_c_pointer(source, target, errors, use)
     if not conversion then
         return rejected and failed_c_adjustment(source, target) or source
     end
-    local n = ast.ExpCast(source.loc, source, target)
+    local n = ast.ExpCast(source.loc, source, target, nil)
     n._implicit_coercion = true
     n._c_conversion = conversion
     n._type = target
@@ -901,7 +901,7 @@ function trycoerce(source, target, errors, use,
        and types.c_mutable_address_coerceable(source._type, target)
        and not types.c_address_coerceable(source._type, target) then
         mark_mutable_c_address_source(source)
-        local n = ast.ExpCast(source.loc, source, target)
+        local n = ast.ExpCast(source.loc, source, target, nil)
         n._implicit_coercion = true
         n._adjustment = {
             kind = "direct_coercion",
@@ -970,7 +970,7 @@ function trycoerce(source, target, errors, use,
         -- already-classified plan as the existing cast node; the child keeps
         -- its actual type and no metadata copy is left to trigger a second
         -- lowering pass.
-        local n = ast.ExpCast(source.loc, source, target)
+        local n = ast.ExpCast(source.loc, source, target, nil)
         n._implicit_coercion = true
         n._adjustment = adjustment
         n._callable_adapter = checker.freeze_callable_adapter(
@@ -986,7 +986,7 @@ function trycoerce(source, target, errors, use,
     elseif adjustment.kind == "gradual_view" then
         assert(adjustment.op == "inject" or adjustment.op == "project",
             "unknown gradual assignment view")
-        local n = ast.ExpCast(source.loc, source, target)
+        local n = ast.ExpCast(source.loc, source, target, nil)
         n._implicit_coercion = true
         n._adjustment = adjustment
         n._interface_conversion = interface_conversion
@@ -996,14 +996,14 @@ function trycoerce(source, target, errors, use,
         -- Keep one node for the one checker decision. Option force/wrap/map
         -- plans already carry their inner operation; the coder lowers that
         -- recorded plan without asking the relation again.
-        local n = ast.ExpCast(source.loc, source, target)
+        local n = ast.ExpCast(source.loc, source, target, nil)
         n._implicit_coercion = true
         n._adjustment = adjustment
         n._interface_conversion = interface_conversion
         n._type = target
         return n, adjustment
     elseif adjustment.kind == "written_cast" then
-        local n = ast.ExpCast(source.loc, source, target)
+        local n = ast.ExpCast(source.loc, source, target, nil)
         n._implicit_coercion = true
         n._adjustment = adjustment
         n._written_cast = maybe3.just(adjustment)
@@ -1038,7 +1038,7 @@ end
 --    returns node wrapped in a coercion, or original node
 function tryforce(node)
     if node._type._tag == "Type.Option" then
-        local n = ast.ExpCast(node.loc, node, node._type.base)
+        local n = ast.ExpCast(node.loc, node, node._type.base, nil)
         n._implicit_coercion = true
         n._adjustment = assert(types.assignment_adjustment(
             node._type, node._type.base),
@@ -1056,7 +1056,7 @@ end
 function truthiness(node)
     if node._type._tag == "Type.Boolean" then return node end
     local target = types.Boolean()
-    local n = ast.ExpCast(node.loc, node, target)
+    local n = ast.ExpCast(node.loc, node, target, nil)
     n._implicit_coercion = true
     n._operator_conversion = {
         kind = "operator_conversion",
@@ -1072,7 +1072,7 @@ function trytostr(node)
     local source = node._type
     if source._tag == "Type.Integer" or
        source._tag == "Type.Float" then
-        local n = ast.ExpCast(node.loc, node, types.String())
+        local n = ast.ExpCast(node.loc, node, types.String(), nil)
         n._implicit_coercion = true
         n._operator_conversion = {
             kind = "operator_conversion",

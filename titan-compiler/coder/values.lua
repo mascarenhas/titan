@@ -1456,6 +1456,7 @@ end
 
 coder._explicit_conversion_ops = {
     pointer_to_string = true,
+    counted_pointer_to_string = true,
     gc_identity_to_void_pointer = true,
     legacy_pointer_to_c_void = true,
     c_function_pointer_to_void = true,
@@ -1535,6 +1536,16 @@ function coder._checked_explicit_conversion_plan(
     elseif op == "pointer_to_string" then
         assert(types.is_pointer_to_string_cast(source, target),
             use .. " has a mismatched pointer-to-string operation")
+    elseif op == "counted_pointer_to_string" then
+        local length_type = types.resolve_c_typedef(conversion.length_type)
+        local size_type = types.resolve_c_typedef(conversion.size_type)
+        assert(types.is_pointer_to_string_cast(source, target)
+               and length_type
+               and (length_type._tag == "Type.Integer"
+                    or length_type._tag == "Type.CInteger")
+               and size_type and size_type._tag == "Type.CInteger"
+               and size_type.signed == false,
+            use .. " has a mismatched counted-pointer-to-string operation")
     elseif op == "counted_owner_to_string" then
         assert(types.is_counted_c_character_owner(source)
                and target._tag == "Type.String",

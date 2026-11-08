@@ -836,6 +836,9 @@ end
 
 -- Implementation notes: doc/implementation/codegen-constructs.md#type-tests-expis
 function coder._codeis(ctx, node)
+    if node.length then
+        return coder._code_counted_string(ctx, node, true)
+    end
     if node._interface_downcast then
         return coder._code_interface_downcast(ctx, node, true)
     elseif node._interface_test then

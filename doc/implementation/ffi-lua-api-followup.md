@@ -114,6 +114,12 @@ follows these rules:
   callback, and borrowed-pointer behavior at the use site and in the ledger
   below. The exception must not grow into an untyped public Lua C API surface.
 
+Current-state C byte-buffer copies use `pointer as string(length)` (or the
+existing NUL-terminated `pointer as string`), not a stack transaction. Keep
+`lua_pushlstring` only when the bytes are an actual Lua stack argument, key,
+or result, including work in an explicitly owned independent state. See
+[counted pointer-to-string conversion](c-ffi-expressions.md#counted-pointer-to-string-conversion).
+
 ## Operation ledger
 
 The operations used by trusted sites, with their stack effect and obligations.
