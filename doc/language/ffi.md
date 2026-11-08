@@ -62,6 +62,15 @@ filenames, with the label component removed and `.titan` included. Files the
 target does not select contribute nothing; see [target source
 selection](target-source-selection.md#folder-modules).
 
+An active `#pragma once` suppresses later entries of that header in this
+environment, including a self-include or mutual include after the pragma.
+Files are matched by physical identity where available, so symbolic and hard
+links to one header are deduplicated; otherwise the resolved spelling is used.
+Includes above the pragma are not suppressed retroactively. Conventional
+`#ifndef`/`#define` guards also work. Other pragmas and `#error` are ignored.
+At most 200 nested includes are allowed below the top-level C input; exceeding
+that depth reports the offending header and the top of its include chain.
+
 An explicit source import, such as `local a = import "A.titan"`, first includes
 A's C environment. Direct source dependencies come first, in Titan import
 order; the current module's foreign directives follow in source order. This C

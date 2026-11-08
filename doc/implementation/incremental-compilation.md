@@ -898,6 +898,14 @@ declarations or checking `.ffi.h` descriptors are restored. Any changed,
 missing, unreadable, or racing input returns
 `c-input <path>: content|provenance|missing|unreadable|candidate|changed-during-read`.
 
+`#pragma once` deduplication uses physical file identity within one preprocessing
+run. Certified reuse does not observe a retarget that only changes which
+byte-identical once-header an alias resolves to when that alias contributed no
+output and therefore has no nominal `origin` dependency. Clean the output tree
+after such a retarget. Physical identities remain observation metadata rather
+than certificate identities so identical republished or relocated inputs retain
+their ordinary reuse guarantees.
+
 ## Interface digests, contextual owners, and bindings
 
 ### Producer self digests and per-module binary digests
