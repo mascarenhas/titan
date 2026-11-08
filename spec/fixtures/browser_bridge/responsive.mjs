@@ -1,8 +1,9 @@
 // Responsiveness of the browser driver on a real page (titan#334). Each
 // scenario of responsive.titan runs as a Task-form call while the page samples
 // a 10 ms setInterval and requestAnimationFrame:
-// - while Tasks wait, the interval keeps within 10% of its ideal count and
-//   frames advance;
+// - while Tasks wait, the interval keeps within 10% of the page's own cadence,
+//   sampled first with no Titan entry running (D22: an engine's interval need
+//   not reach its ideal count by itself), and frames advance;
 // - while 128 Tasks yield continuously, both still advance, with the largest
 //   interval gap under GAP_BOUND_MS;
 // - no driver turn shares a macrotask with the next one, while Tasks yield
@@ -11,6 +12,7 @@
 //   in two turns;
 // - a busy-wait control shows no ticks while it runs.
 const GAP_BOUND_MS = 100;
+const WAIT_MS = 600;
 
 // Starts sampling; the returned function stops it and summarizes.
 function sample() {
@@ -78,13 +80,19 @@ export async function run(context) {
     const task = (name, ...args) => instance.callTask(callables.get(name), args);
 
     let stop = sample();
-    await task('wait_tasks', 8n, 600n);
+    await new Promise(resolve => { setTimeout(resolve, WAIT_MS); });
+    const baseline = stop();
+    stop = sample();
+    await task('wait_tasks', 8n, BigInt(WAIT_MS));
     const waiting = stop();
-    const ideal = Math.floor(waiting.ms / 10);
-    result.wait = {ms: round(waiting.ms), ticks: waiting.ticks.length, ideal, frames: waiting.frames,
-      gap: round(waiting.gap)};
-    context.assert(Math.abs(waiting.ticks.length - ideal) <= Math.ceil(ideal / 10),
-      `while Tasks waited the interval ticked ${waiting.ticks.length} times, ideal ${ideal}`);
+    // The page's own cadence over the waiting window, from the baseline.
+    const expected = baseline.ticks.length * waiting.ms / baseline.ms;
+    result.wait = {ms: round(waiting.ms), ticks: waiting.ticks.length, ideal: Math.floor(waiting.ms / 10),
+      baseline: {ms: round(baseline.ms), ticks: baseline.ticks.length, gap: round(baseline.gap)},
+      expected: round(expected), frames: waiting.frames, gap: round(waiting.gap)};
+    context.assert(Math.abs(waiting.ticks.length - expected) <= Math.ceil(expected / 10),
+      `while Tasks waited the interval ticked ${waiting.ticks.length} times, outside 10% of the page's own ` +
+      `cadence (${JSON.stringify(result.wait)})`);
     context.assert(waiting.frames > 0, 'animation frames stopped while Tasks waited');
 
     let macrotasks = ticker();
