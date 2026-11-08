@@ -68,7 +68,7 @@ static inline int titan_receiver_guard_calls(
   return guard != NULL ? guard->calls : 0;
 }
 /* A separate, loop-thread-only native retirement domain. Its C-only callbacks
- * live in external_wait_test.titan and use only public UV wake capabilities.
+ * live in external_wait_test.native.titan and use only public UV wake capabilities.
  * No production state layout, allocator, epoch, or callback is modified. */
 typedef struct titan_external_retirement_fixture {
   void *target;

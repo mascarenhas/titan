@@ -57,6 +57,11 @@ addToLibrary({
   titan_browser_host_adopt: (state, slot, generation) =>
     TitanBridge.trusted('adoptSlot', state >>> 0, slot >>> 0, generation >>> 0),
 
+  titan_browser_host_retain__deps: ['$TitanBridge'],
+  titan_browser_host_retain__sig: 'viii',
+  titan_browser_host_retain: (state, slot, generation) =>
+    TitanBridge.trusted('retainSlot', state >>> 0, slot >>> 0, generation >>> 0),
+
   titan_browser_host_identity_live__deps: ['$TitanBridge'],
   titan_browser_host_identity_live__sig: 'iiiii',
   titan_browser_host_identity_live: (state, slot, generation, kind) => {
@@ -88,4 +93,53 @@ addToLibrary({
   titan_browser_host_cancel__sig: 'viiip',
   titan_browser_host_cancel: (state, slot, generation, response) =>
     TitanBridge.response(response, state, () => Module['titanBrowserBridge'].hostCancel(state >>> 0, slot >>> 0, generation >>> 0)),
+
+  // Driver imports: trusted owner calls; a broken protocol poisons, never throws.
+  titan_browser_host_owner__deps: ['$TitanBridge'],
+  titan_browser_host_owner__sig: 'vi',
+  titan_browser_host_owner: state => TitanBridge.trusted('setOwnerState', state >>> 0),
+
+  titan_browser_host_drive_begin__deps: ['$TitanBridge'],
+  titan_browser_host_drive_begin__sig: 'vi',
+  titan_browser_host_drive_begin: state => TitanBridge.trusted('driveBegin', state >>> 0),
+
+  titan_browser_host_drive_end__deps: ['$TitanBridge'],
+  titan_browser_host_drive_end__sig: 'viii',
+  titan_browser_host_drive_end: (state, status, exited) =>
+    TitanBridge.trusted('driveEnd', state >>> 0, status | 0, exited !== 0),
+
+  titan_browser_host_main_failed__deps: ['$TitanBridge'],
+  titan_browser_host_main_failed__sig: 'vipppp',
+  titan_browser_host_main_failed: (state, message, length, trace, traceLength) =>
+    TitanBridge.trusted('mainFailed', state >>> 0, message >>> 0, length >>> 0, trace >>> 0, traceLength >>> 0),
+
+  titan_browser_host_wake__deps: ['$TitanBridge'],
+  titan_browser_host_wake__sig: 'vi',
+  titan_browser_host_wake: state => TitanBridge.trusted('wakeDriver', state >>> 0),
+
+  titan_browser_host_batch__deps: ['$TitanBridge'],
+  titan_browser_host_batch__sig: 'ii',
+  titan_browser_host_batch: state => TitanBridge.trusted('batchItems', state >>> 0),
+
+  titan_browser_host_item__deps: ['$TitanBridge'],
+  titan_browser_host_item__sig: 'iip',
+  titan_browser_host_item: (state, out) => TitanBridge.trusted('nextItem', state >>> 0, out >>> 0),
+
+  titan_browser_host_item_done__deps: ['$TitanBridge'],
+  titan_browser_host_item_done__sig: 'vij',
+  titan_browser_host_item_done: (state, id) =>
+    TitanBridge.trusted('itemDone', state >>> 0, BigInt.asUintN(64, id)),
+
+  titan_browser_host_release_next__deps: ['$TitanBridge'],
+  titan_browser_host_release_next__sig: 'iip',
+  titan_browser_host_release_next: (state, out) => TitanBridge.trusted('nextRelease', state >>> 0, out >>> 0),
+
+  titan_browser_host_settle__deps: ['$TitanBridge'],
+  titan_browser_host_settle__sig: 'vp',
+  titan_browser_host_settle: record => TitanBridge.trusted('settleQueued', record >>> 0),
+
+  // Open BrowserPins per state: a wake source for the owner's drive.
+  titan_browser_host_hold__deps: ['$TitanBridge'],
+  titan_browser_host_hold__sig: 'vii',
+  titan_browser_host_hold: (state, delta) => TitanBridge.trusted('hold', state >>> 0, delta | 0),
 });

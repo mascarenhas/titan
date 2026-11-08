@@ -350,10 +350,11 @@ After step 7, `browser-stdlib` runs:
 8. **Complete browser core stdlib suite.** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
    unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
-   builds all fifteen browser-portable owners into one validation-profile
+   builds all seventeen browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
    checks dependency closure and the native/browser member inventory of the
-   thirteen shared modules, then
+   thirteen shared modules, `async` and `timer` (with their recorded
+   differences), then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
    `TITAN_CHROME`. Each engine must execute every owner with complete nonzero
    status/count/timing accounting
@@ -363,7 +364,7 @@ After step 7, `browser-stdlib` runs:
 9. **Strict gate.** With the same `TITAN_ROOT`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN`, and `TITAN_PROBE_CACHE_DISABLE` settings
    as the `browser-toolchain` gate, the prefix's installed `busted -c -o gtest
-   -v` runs the eleven real-toolchain files
+   -v` runs the twelve real-toolchain files
    `spec/coder/browser_providers_spec.lua`,
    `spec/coder/browser_incremental_spec.lua`,
    `spec/coder/browser_images_spec.lua`,
@@ -371,15 +372,19 @@ After step 7, `browser-stdlib` runs:
    `spec/coder/browser_stdlib_closure_spec.lua`,
    `spec/coder/browser_entry_gate_spec.lua`,
    `spec/coder/browser_bridge_spec.lua`,
+   `spec/coder/browser_scheduler_spec.lua`,
    `spec/coder/browser_stdlib_gate_spec.lua`,
    `spec/coder/browser_fixtures_spec.lua`, and `spec/minicoro_spec.lua` under
    LuaCov, with output copied to `$RUNNER_TEMP/browser-stdlib-gate.log`. A
    missing gate file fails with the same message before Busted starts. The
-   entry-gate and bridge specs build their own assertion-on and assertion-off
-   images, and the entry, bridge, stdlib gate, fixture, and minicoro specs run
-   both engines. The bridge uses its dedicated native Titan test owner with
-   explicit JavaScript bindings, rather than adding it to the ordinary core
-   aggregate.
+   entry-gate, bridge and scheduler specs build their own assertion-on and
+   assertion-off images, and the entry, bridge, scheduler, stdlib gate,
+   fixture, and minicoro specs run both engines. The bridge uses its dedicated
+   native Titan test owner with explicit JavaScript bindings, rather than
+   adding it to the ordinary core aggregate; the scheduler spec drives the
+   bridge's drive interface with a test-owned mini driver and runs the real
+   `async` driver's scheduler gate owner and an async bootstrap program with
+   their own harnesses.
 10. **Browser SDK and stdlib compiler coverage.** The same report commands
     produce `luacov.codecov.out`, which uploads with `name: browser-stdlib`
     and otherwise the same options, so the real provider, image, SDK, and
@@ -427,23 +432,25 @@ runner with a 60-minute timeout after `build-compiler`:
 4. **Staged trace gate (`assertions-2` and `assertions-0`).** `lua -E
    spec/browser/build-trace.lua "$TITAN_TRACE_OUTPUT"`
    (`out/browser/trace-<profile>-<engine>`, logged to
-   `$RUNNER_TEMP/browser-playwright-build.log`) builds the test and uncaught
-   images for both assertion modes with the cell's installed `titanc` and stages
-   the degraded-map variants, `trace.test.mjs`, and `manifest.json`.
+   `$RUNNER_TEMP/browser-playwright-build.log`) builds the test image and the
+   uncaught and async-bootstrap program images for both assertion modes with
+   the cell's installed `titanc` and stages the degraded-map variants,
+   `trace.test.mjs`, and `manifest.json`.
 5. **Positive trace gate.** `"$TITAN_NODE" spec/browser/playwright-run.mjs --engine
    "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 --sdk
    "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT"
    "$TITAN_TRACE_OUTPUT/trace.test.mjs"`
    (`$RUNNER_TEMP/browser-playwright-trace.log`) runs the full file/line,
    contributor, wrapper-family, merge-order, descriptor-safety,
-   pin/rethrow/clear, coroutine-append, SpiderMonkey saved-parent cutoff and
-   128-frame ceiling, held-storage nested capture, and merge-OOM guard-recovery
-   checks on `chromium` and `firefox`, and the reduced-fidelity no-line
-   counterpart with the same 512-record capacity on `webkit`. The gate reads
-   the installation profile from
-   `manifest.json`: every row is exact except a `production` cell's uncaught
-   program rows, which use the [ordered-subsequence
-   contract](browser-target.md#test-images) for inlined frames.
+   pin/rethrow/clear, coroutine-append, post-suspension Task and entry
+   (titan#334), SpiderMonkey saved-parent cutoff and 128-frame ceiling,
+   held-storage nested capture, and merge-OOM guard-recovery checks on
+   `chromium` and `firefox`, and the reduced-fidelity no-line counterpart with
+   the same 512-record capacity on `webkit`. The gate reads the installation
+   profile from `manifest.json`: every row is exact except a `production`
+   cell's program rows (`uncaught` and `async_uncaught`), which use the
+   [ordered-subsequence contract](browser-target.md#test-images) for inlined
+   frames.
 6. **Degraded-mode policy and fallback checks.** Every row in
    `manifest.degradedCases` is first run with `playwright-run.mjs ... --image
    <row.image>` without `--allow-degraded-trace` and must fail with exit status
@@ -455,16 +462,25 @@ runner with a 60-minute timeout after `build-compiler`:
    loaded)` marker, and original-error preservation.
 7. **Persistent bridge gate (all six cells).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
-   `browser.tests` image with its independent-state C helper and the failed
-   initializer image, each with assertions 2 and 0. It stages those images and
-   the portable JavaScript fixtures in `out/browser/bridge-<profile>-<engine>`.
+   `browser.tests` image with its independent-state C helper, the failed
+   initializer image, the html5 click counter of synchronous C callbacks
+   with its C helper, and the async driver's responsiveness program
+   (`responsive.titan`), each with assertions 2 and 0. It stages those images
+   and the portable JavaScript fixtures in `out/browser/bridge-<profile>-<engine>`.
    The cell's managed engine runs the full lifecycle, typed values, callbacks,
-   notification, request, stdio, state-close and collection suite. Separate
+   notification, request, stdio, state-close and collection suite;
+   `counter.mjs` clicks the counter's buttons on the page (`COUNTER
+   {"verdict":"PASS"`), and `responsive.mjs` measures a 10 ms `setInterval`
+   and `requestAnimationFrame` while Tasks wait (against a no-Titan baseline of
+   the page's own timer cadence, D22), yield continuously, resume from requests
+   that settle together, and while one call busy-waits
+   (`RESPONSIVE {"verdict":"PASS"`; titan#334). Separate
    processes require unhandled-rejection status74 for opaque imported and
    reverse-call Promise values, and abort status70 for the poisoned-owner
    retirement case. Each negative case must also emit its expected marker;
    an early failure with the same status cannot satisfy it. The production
-   Chromium cell repeats the same bridge cases on Node; validation Node is
+   Chromium cell repeats the same bridge cases on Node, except the two page
+   tests, which need a page's DOM; validation Node is
    covered by `browser-stdlib`. Logs are
    `$RUNNER_TEMP/browser-playwright-bridge-build.log` and
    `$RUNNER_TEMP/browser-playwright-bridge.log`.

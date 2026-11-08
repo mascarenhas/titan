@@ -110,15 +110,102 @@ async function executeRow(context, row, degraded, recordCost, profile) {
   function exact(trace, file, line, name) {
     return exactLine(trace, exactFrame(file, line, name));
   }
+  // Program rows: their own exact frames, innermost first, ending at the
+  // entry, and the only frames that may follow it. A main run as the async
+  // bootstrap Task (titan#334, D14) is followed by the async runtime: the
+  // bootstrap and Task-root closures, the coroutine entry and the driver that
+  // resumed the Task. Their lines are the runtime's own, so they match by
+  // file and name; a production image may drop or rename them within this
+  // set when it inlines (D28).
+  const asyncRuntimeFiles = new Set(["async.titan", "coroutine.titan", "runtime.browser.titan"]);
+  const asyncRuntimeNames = new Set(["titan.async.bootstrap", "titan.async.loop", "titan.async.drain_ready",
+    "titan.async.advance_task", "titan.async.resume_root", "titan.coroutine.coro_entry",
+    "titan.coroutine.coro_entry_trampoline"]);
+  const asyncRuntimeFrame = frame => asyncRuntimeFiles.has(frame.file) &&
+    (asyncRuntimeNames.has(frame.name) || /^anonymous function at (?:.*[/\\])?async[.]titan:[0-9]+$/.test(frame.name));
+  // D23: a production image may inline minicoro's C titan_coroutine_enter into
+  // the coroutine trampoline. Its frame then shows that C callee's own
+  // location under the trampoline's name, the inlining rendering of D32 with
+  // a C callee, and carries a line exactly where Titan frames do.
+  const inlinedRuntimeC = /^(minicoro[.]c)(?::([0-9]+))?: in (titan[.]coroutine[.]coro_entry_trampoline)$/;
+  function inlinedRuntimeFrame(line) {
+    const match = inlinedRuntimeC.exec(line);
+    if (!match || (webkit ? match[2] !== undefined : !(Number(match[2]) > 0))) return undefined;
+    return {file: match[1], line: match[2] === undefined ? undefined : Number(match[2]), name: match[3], text: line};
+  }
+  const programs = {
+    uncaught: {file: "trace_uncaught.titan", entry: "trace_uncaught.main", inlinedC: false,
+      trailing: () => false, frames: [
+        ["trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf"],
+        ["trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle"],
+        ["trace_uncaught.titan", 16, "trace_uncaught.main"],
+      ]},
+    async_uncaught: {file: "trace_async.titan", entry: "trace_async.main", inlinedC: true,
+      trailing: frame => asyncRuntimeFrame(frame) || frame.file === "minicoro.c", frames: [
+        ["trace_async.titan", 7, "trace_async.async_leaf"],
+        ["trace_async.titan", 11, "trace_async.async_middle"],
+        ["trace_async.titan", 16, "trace_async.main"],
+      ]},
+  };
+  // The program-row oracle: the first way `trace` breaks the contract, or
+  // undefined. Every line is a Titan frame, a `[C]` or Lua frame, or a
+  // documented marker; a production async row may also show the D23 frame.
+  // The program's own frames come first and end at its entry, which is
+  // called from C or by the async bootstrap through a function value and so
+  // is never inlined away; only `program.trailing` frames follow. Test images
+  // and the validation profile show every own frame exactly, in order. A
+  // production image may keep fewer of them, in this order, and an inlined
+  // callee keeps its own physical line under the surviving enclosing
+  // function's name, exactly as native production does (D28, D32).
+  function programViolation(program, trace) {
+    const shown = [], unexplained = [];
+    for (const line of trace.split("\n")) {
+      const frame = titanFrameLines(line)[0] ||
+        (program.inlinedC && orderedSubsequence ? inlinedRuntimeFrame(line) : undefined);
+      if (frame) shown.push(frame);
+      else if (line.length > 0 && !acceptedNonTitan(line)) unexplained.push(line);
+    }
+    if (unexplained.length > 0) return "program trace has unparsed lines: " + unexplained.join(" | ");
+    const count = shown.findIndex(frame => frame.file !== program.file);
+    const ownFrames = shown.slice(0, count < 0 ? shown.length : count);
+    if (ownFrames.length === 0) return "program trace does not start with its own frames";
+    const outside = shown.slice(ownFrames.length).find(frame => !program.trailing(frame));
+    if (outside) return "program trace has a frame outside its expectation: " + outside.text;
+    if (ownFrames.at(-1).name !== program.entry) return "program trace omitted the entry frame " + program.entry;
+    if (!orderedSubsequence) {
+      const expected = program.frames.map(([file, line, name]) => exactFrame(file, line, name));
+      if (ownFrames.length !== expected.length || ownFrames.some((frame, index) => frame.text !== expected[index])) {
+        return "program frames are not exactly " + expected.join(" | ");
+      }
+      return undefined;
+    }
+    let next = 0;
+    for (const frame of ownFrames) {
+      const index = program.frames.findIndex(([file, line], position) =>
+        position >= next && frame.file === file && frame.line === (webkit ? undefined : line));
+      if (index < 0) return "program frame outside the exact expectation: " + frame.text;
+      // The surviving name is either the matched frame's own name or one of
+      // the enclosing callers it was inlined into, which are exactly the
+      // later expected frames.
+      if (!program.frames.slice(index).some(([, , name]) => name === frame.name)) {
+        return "program frame name is not the matched frame or an enclosing caller: " + frame.text;
+      }
+      next = index + 1;
+    }
+    return undefined;
+  }
   function checkTrace(label, trace, missingSymbols) {
     let currentStateTrace = trace;
     if (label === "nested_outer") {
       // Only these parent-runner frames are absent from the capturing state's
       // names table. D15 requires their exact raw fallbacks, not a blanket
-      // exception for nested traces or arbitrary mangled function names.
+      // exception for nested traces or arbitrary mangled function names. The
+      // generated runner numbers the sorted cases, so adding a case before
+      // test_nested_capture or anywhere in the list moves these (and the
+      // matching pair in trace_support.c).
       const parentLines = new Set();
-      for (const [line, symbol] of [[109, "titan_test_runner_ℳ_run_test_27_titan"],
-                                    [189, "titan_test_runner_ℳ_main_titan"]]) {
+      for (const [line, symbol] of [[113, "titan_test_runner_ℳ_run_test_28_titan"],
+                                    [239, "titan_test_runner_ℳ_main_titan"]]) {
         parentLines.add(exact(trace, "trace_cases__test_runner.titan", line, symbol));
         context.assert(frameCount(trace, ": in " + symbol) === 1,
           "nested trace duplicated/omitted parent raw fallback " + symbol);
@@ -138,53 +225,30 @@ async function executeRow(context, row, degraded, recordCost, profile) {
     }
     if (label === "host_failed" || label === "lua_fallback_failed" || label.startsWith("degraded")) return;
     context.assert(!trace.includes(unavailable) && !trace.includes(captureFailed), "positive trace degraded: " + label);
-    if (label === "uncaught") {
-      // The row's exact frames, as the validation profile renders them. A
-      // production program image may keep fewer of them, in this order, and
-      // an inlined callee keeps its own physical line under the surviving
-      // enclosing function's name, exactly as native production does (D28).
-      const uncaughtFrames = [
-        ["trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf"],
-        ["trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle"],
-        ["trace_uncaught.titan", 16, "trace_uncaught.main"],
-      ];
+    const program = programs[label];
+    if (program) {
+      const violation = programViolation(program, trace);
+      context.assert(violation === undefined, violation + "\n" + trace);
       if (orderedSubsequence) {
-        const shown = titanFrameLines(trace);
-        const lines = trace.split("\n").filter(line => line.length > 0);
-        const titanTexts = new Set(shown.map(frame => frame.text));
-        const unexplained = lines.filter(line => !titanTexts.has(line) && !acceptedNonTitan(line));
-        context.assert(unexplained.length === 0,
-          "program trace has unparsed lines: " + unexplained.join(" | ") + "\n" + trace);
-        // The program entry is called from C and cannot be inlined away, so a
-        // production program row always shows at least one Titan frame and the
-        // outermost of them is the entry frame.
-        context.assert(shown.length > 0, "program trace showed no Titan frame:\n" + trace);
-        context.assert(shown.at(-1).name === "trace_uncaught.main",
-          "program trace omitted the entry frame trace_uncaught.main:\n" + trace);
-        let next = 0;
-        for (const frame of shown) {
-          const index = uncaughtFrames.findIndex(([file, line], position) =>
-            position >= next && frame.file === file && frame.line === (webkit ? undefined : line));
-          context.assert(index >= 0,
-            "program frame outside the exact expectation: " + frame.text + "\n" + trace);
-          // The surviving name is either the matched frame's own name or one
-          // of the enclosing callers it was inlined into, which are exactly
-          // the later expected frames (D32).
-          const enclosing = uncaughtFrames.slice(index).map(([, , name]) => name);
-          context.assert(enclosing.includes(frame.name),
-            "program frame name is not the matched frame or an enclosing caller: " +
-            frame.text + "\n" + trace);
-          next = index + 1;
-        }
-        emit({programFrames: shown.map(frame => frame.text),
-          expectedFrames: uncaughtFrames.map(([file, line, name]) => exactFrame(file, line, name))});
-      } else {
-        for (const [file, line, name] of uncaughtFrames.slice(0, 2)) exact(trace, file, line, name);
-        for (const name of ["uncaught_leaf", "uncaught_middle"]) {
-          context.assert(frameCount(trace, ": in trace_uncaught." + name) === 1,
-            "uncaught report duplicated/omitted " + name);
-        }
+        emit({programFrames: titanFrameLines(trace).filter(frame => frame.file === program.file).map(frame => frame.text),
+          expectedFrames: program.frames.map(([file, line, name]) => exactFrame(file, line, name))});
       }
+      // Oracle negatives: the same trace without its entry frame, with an
+      // unrelated Titan frame after its last one, or with the D23 C location
+      // under any other runtime name, must be rejected.
+      const lines = trace.split("\n");
+      const last = lines.findLastIndex(line => titanFrameLines(line).length > 0);
+      const appended = extra => [...lines.slice(0, last + 1), extra, ...lines.slice(last + 1)].join("\n");
+      const negatives = {
+        "a trace without its entry frame": lines.filter(line => !line.endsWith(": in " + program.entry)).join("\n"),
+        "an unrelated trailing Titan frame": appended(exactFrame("unrelated.titan", 1, "unrelated.saved_resumer")),
+        "an inlined C location under another runtime name": appended(
+          `minicoro.c:${webkit ? "" : "66:"} in titan.async.loop`),
+      };
+      for (const [what, mutated] of Object.entries(negatives)) {
+        context.assert(programViolation(program, mutated) !== undefined, `${label} oracle accepted ${what}:\n${mutated}`);
+      }
+      emit({programOracle: label, negativesRejected: Object.keys(negatives).length});
       return;
     }
     if (missingSymbols) {
@@ -204,6 +268,25 @@ async function executeRow(context, row, degraded, recordCost, profile) {
       context.assert(!trace.includes("in trace_cases.test_") && !trace.includes("in titan.test."),
         "in-fiber trace included saved resumer/test-runner history: " + label + "\n" + trace);
     }
+    // Post-suspension traces in async Tasks (titan#334, tasks.browser.titan):
+    // the same exact frames after turn and wait relinquishes, in a delivered
+    // handler, through an async.Error handoff and in a cancellation cleanup;
+    // and across entries: a Task-form call failing after a turn, and a call
+    // and a notification failing where the driver delivers them.
+    if (["task_after_turn", "task_after_timer", "task_after_request", "task_after_channel",
+         "delivered_handler", "task_handoff", "task_cleanup",
+         "entry_task", "entry_call", "entry_notify"].includes(label)) {
+      exact(trace, "trace_cases.titan", 80, "trace_cases.original_leaf");
+      exact(trace, "trace_cases.titan", 84, "trace_cases.direct_middle");
+      exact(trace, "trace_cases.titan", 88, "trace_cases.direct_outer");
+    }
+    if (label.startsWith("task_after_") || label.startsWith("entry_")) {
+      context.assert(!trace.includes("in trace_cases.test_") && !trace.includes("in titan.test."),
+        "Task or entry trace included saved resumer/test-runner history: " + label + "\n" + trace);
+    }
+    if (label === "task_rethrow") exact(trace, "trace_cases.titan", 80, "trace_cases.original_leaf");
+    if (label === "task_fresh") exact(trace, "tasks.browser.titan", 194, "trace_cases.fresh_after_await");
+    if (label === "task_append") exact(trace, "coroutines.titan", 42, "trace_cases.resumed_leaf");
     if (label === "lambda") context.assert(new RegExp("^wrappers[.]titan:" + (webkit ? "" : "108:") +
       " in anonymous function at (?:.*[/\\\\])?wrappers[.]titan:107$", "m").test(trace), "lambda execution/definition locations changed");
     if (label === "fresh") exact(trace, "errors.titan", 14, "trace_cases.fresh_raise");
@@ -267,7 +350,8 @@ async function executeRow(context, row, degraded, recordCost, profile) {
     const originalWarn = console.warn;
     const originalError = console.error;
     let controls, output = "", stderr = "", hostCalls = 0, fetchCalls = 0, located = 0, warnings = 0, recoveries = 0;
-    let expectedLimit, expectedPrepare;
+    let expectedLimit, expectedPrepare, targets, releaseHold;
+    const notificationErrors = [];
     const suffix = row.name.split(".").at(-1);
     const hostMode = suffix;
     const notice = values => { warnings += values.reduce((sum, value) => sum + occurrences(String(value), "Titan browser trace: "), 0); };
@@ -284,11 +368,58 @@ async function executeRow(context, row, degraded, recordCost, profile) {
           expectedLimit = own(Error, "stackTraceLimit"); expectedPrepare = own(Error, "prepareStackTrace");
           recoveries++;
         },
+        // test_task_entry_targets publishes its targets; hold awaits traceHold.
+        traceTaskTargets(...callables) { targets = callables; },
+        traceHold() { return {kind: "detachable", promise: new Promise(resolve => { releaseHold = resolve; })}; },
       },
+      onNotificationError(event) { notificationErrors.push(event); },
       locateFile(name) { located++; return image.locateFile(name); },
       stdout(chunk) { output += decoder.decode(chunk, {stream:true}); context.stdout(chunk); },
       stderr(chunk) { stderr += decoder.decode(chunk, {stream:true}); context.stderr(chunk); },
     });
+    async function rejected(promise) {
+      try { await promise; } catch (error) { return error; }
+      context.assert(false, "a failing entry resolved");
+    }
+    async function until(predicate, message) {
+      for (let attempt = 0; attempt < 200 && !predicate(); attempt++) await context.tick();
+      context.assert(predicate(), message);
+    }
+    // A failed entry carries Titan's error data and the raw trace (titan#334).
+    function checkEntry(label, error) {
+      context.assert(error?.code === "TITAN_BROWSER_TITAN" && error.status === 1 &&
+        decoder.decode(error.bytes) === "trace-original" && error.trace instanceof Uint8Array,
+        label + " lost its Titan error data: " + error?.code + " " + error?.message);
+      const trace = decoder.decode(error.trace);
+      context.stdout(encoder.encode(`TRACE-BEGIN ${label}\n${trace}\nTRACE-END ${label}\n`));
+      checkTrace(label, trace, false);
+    }
+    // After the case: a Task-form call that fails after a turn, then a call
+    // and a notification that fail where the driver delivers them, during a
+    // drive held on a JavaScript request.
+    async function entries() {
+      context.assert(Array.isArray(targets) && targets.length === 3, "trace fixture did not publish its entry targets");
+      const [failAfterTurn, failDirect, hold] = targets;
+      // The failed Task-form call is also reported as an uncaught Task error,
+      // which the operation delivers to the stderr sink before it settles.
+      const before = stderr.length;
+      context.stderr(encoder.encode("BEGIN expected uncaught async Task diagnostics\n"));
+      checkEntry("entry_task", await rejected(failAfterTurn.callTask([])));
+      context.assert(occurrences(stderr.slice(before), "uncaught error in async Task: trace-original\n") === 1,
+        "the failed Task-form call was not reported once as an uncaught Task error");
+      context.stderr(encoder.encode("END expected uncaught async Task diagnostics\n"));
+      const holding = hold.callTask([]);
+      await until(() => releaseHold !== undefined, "the held Task never started its request");
+      const queued = rejected(instance.call(failDirect));
+      instance.notify(failDirect);
+      checkEntry("entry_call", await queued);
+      await until(() => notificationErrors.length > 0, "the driver did not deliver the failing notification");
+      releaseHold();
+      context.assert(await holding === null, "the held Task-form call did not return nil");
+      context.assert(notificationErrors.length === 1 && notificationErrors[0].kind === "callback" &&
+        notificationErrors[0].operation === "callTask", "the failing notification was not reported once from its drive");
+      checkEntry("entry_notify", notificationErrors[0].error);
+    }
     try {
       await instance.initialize();
       context.assert(controls, "trace fixture did not publish its test-owned observations");
@@ -320,7 +451,10 @@ async function executeRow(context, row, degraded, recordCost, profile) {
       if (originalFetch && typeof originalFetch.value === "function") Object.defineProperty(globalThis, "fetch", {
         ...originalFetch, value(...args) { fetchCalls++; return originalFetch.value.apply(this, args); }});
       const result = await instance.run(row.args);
+      if (suffix === "task_entries") await entries();
       await instance.dispose();
+      context.assert(notificationErrors.length === (suffix === "task_entries" ? 1 : 0),
+        "unexpected notification errors: " + notificationErrors.map(event => event.kind + "/" + event.operation).join(", "));
       context.assert(equalDescriptor(own(Error, "stackTraceLimit"), expectedLimit) &&
         equalDescriptor(own(Error, "prepareStackTrace"), expectedPrepare), "capture did not restore exact own descriptors");
       context.assert(equalDescriptor(own(globalThis, "Error"), originalConstructor), "Error constructor identity changed");
@@ -339,8 +473,17 @@ async function executeRow(context, row, degraded, recordCost, profile) {
         nativeExecutions += row.testCount;
         const traces = frames(output);
         for (const {label, trace} of traces) checkTrace(label, trace, suffix === "missing_symbols");
-        const noTraceCases = ["test_public_backtrace_and_pin", "test_caught_trace_clearing"];
+        // task_entries checks its entries' traces in entries().
+        const noTraceCases = ["test_public_backtrace_and_pin", "test_caught_trace_clearing", "task_entries"];
         context.assert(traces.length > 0 || noTraceCases.includes(suffix), "native trace fixture emitted no evidence");
+      } else if (suffix === "async_uncaught") {
+        // D14: the uncaught-Task report is the only stderr report, and run()
+        // returns that report's message and trace.
+        const trace = decoder.decode(result.trace);
+        context.assert(decoder.decode(result.bytes) === "trace-async-original", "async main failure replaced its payload");
+        context.assert(stderr === "uncaught error in async Task: trace-async-original\nstack traceback:\n" + trace + "\n",
+          "async main stderr is not exactly the Task report of run()'s trace:\n" + stderr);
+        checkTrace("async_uncaught", trace, false);
       } else {
         context.assert(decoder.decode(result.bytes) === "trace-uncaught-original", "uncaught completion replaced original payload");
         const raw = stderr.split("\n").filter(line => line.startsWith("\t")).map(line => line.slice(1)).join("\n");

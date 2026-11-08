@@ -1,0 +1,81 @@
+-- A click counter: html5.h click callbacks call pinned Titan handlers
+-- synchronously, and each handler shows the count through a binding.
+local browser = import "browser"
+foreign import "counter.h"
+
+local type Value = browser.BrowserValue
+
+local count = 0
+
+local function show()
+  local label = browser.binding("show")
+  defer label:close()
+  label:call(Value.is_integer(count))
+end
+
+local function increment(...: Value): Value
+  count = count + 1
+  show()
+  return Value.is_nil()
+end
+
+local function reset(...: Value): Value
+  count = 0
+  show()
+  return Value.is_nil()
+end
+
+-- A registered click callback. The pin keeps its handler callable, and C
+-- keeps the address of the identity as the callback's user data, so both
+-- stay reachable until the callback is unregistered.
+local record Listener
+  selector: string
+  pin: browser.BrowserPin
+  identity: owned *titan_browser_identity
+end
+
+local listeners: {Listener} = {}
+
+-- The listener is rooted in `listeners` before C receives the identity, so no
+-- allocation can fail after the registration and leave C a dangling pointer.
+local function listen(selector: string, handler: function (...: Value): Value)
+  local pin = browser.pin(handler)
+  local identity: owned *titan_browser_identity = foreign titan_browser_identity.new()
+  local state, slot, generation = pin:identity()
+  identity.state = state
+  identity.slot = slot
+  identity.generation = generation
+  local index = #listeners + 1
+  listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
+  if ffi.counter_listen(selector, identity) ~= 0 then
+    listeners[index] = nil
+    pin:close()
+    raise "cannot listen for clicks on " .. selector
+  end
+end
+
+-- Unregisters each callback before closing its pin.
+local function stop(...: Value): Value
+  for index = #listeners, 1, -1 do
+    local listener = listeners[index]
+    ffi.counter_unlisten(listener.selector)
+    listener.pin:close()
+    listeners[index] = nil
+  end
+  return Value.is_nil()
+end
+
+-- args[1] names the reset button, so a test can make the second registration
+-- fail. A failure after a registration unregisters what was registered.
+function main(args: {string}): integer
+  listen("#increment", increment)
+  listen(args[1] or "#reset", reset)
+  show()
+  local ready = browser.binding("ready")
+  defer ready:close()
+  ready:call(Value.is_callable(stop))
+  return 0
+catch
+  stop()
+  raise
+end

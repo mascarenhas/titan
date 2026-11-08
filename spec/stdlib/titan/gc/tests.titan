@@ -440,6 +440,49 @@ function test_gc_controls_state_modes_steps_and_counts(
   test.assert(gclib.generational())
 end
 
+-- A probe whose finalizer sets its metatable again on each run, until it has
+-- run `times` times; returned through `runs.count` only, so the probe itself
+-- is unreachable once this frame returns.
+local function rearming_probe(times: integer): {string: integer}
+  local arm = support.lua_helper([[
+return function(candidate, times)
+  local runs = {count = 0}
+  local metatable = {}
+  metatable.__gc = function(object)
+    runs.count = runs.count + 1
+    if runs.count < times then debug.setmetatable(object, metatable) end
+  end
+  debug.setmetatable(candidate, metatable)
+  return runs
+end
+]]) as function (value, integer): ({string: integer})
+  return arm(FinalizableProbe.new(times), times)
+end
+
+-- Setting an object's metatable again inside its finalizer marks it for
+-- finalization once more, under both collectors: coroutine defers an
+-- abandoned coroutine's unwind this way inside a synchronous browser
+-- callback. Each full collection runs the finalizer once until it stops
+-- re-arming.
+function test_gc_finalizer_rearms_by_setting_its_metatable_again(
+    _context: test.Context)
+  local originally_incremental = gclib.incremental()
+  defer do
+    if originally_incremental then gclib.incremental() else gclib.generational() end
+  end
+  for mode = 1, 2 do
+    if mode == 1 then gclib.incremental() else gclib.generational() end
+    local runs = rearming_probe(3)
+    for cycle = 1, 3 do
+      gclib.collect()
+      test.assert(runs["count"] == cycle, "collection " .. cycle .. " in mode " .. mode ..
+                  " ran the re-armed finalizer " .. runs["count"] .. " times in total")
+    end
+    gclib.collect()
+    test.assert(runs["count"] == 3, "a finalizer that stopped re-arming ran again in mode " .. mode)
+  end
+end
+
 local function round_trip_parameters(select_mode: ModeSelector,
                                      accessors: {ParameterAccessor},
                                      originals: {integer})

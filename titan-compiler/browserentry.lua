@@ -65,11 +65,19 @@ extern int $INVOKE_FN(
 extern int $RELEASE_FN(
     unsigned long long operation_id, unsigned int state, unsigned int slot,
     unsigned int generation, unsigned int wrapper) __attribute__((weak));
+extern int $CALL_SYNC_FN(const void *identity, unsigned int argc, const void *args,
+    void *result) __attribute__((weak));
+extern int $CALLBACK_ENTER_FN(unsigned int state, void *frame) __attribute__((weak));
+extern void $CALLBACK_LEAVE_FN(void *frame) __attribute__((weak));
 
 static lua_State *titan_browser_owner;
 /* Images without titan.browser use a launcher-owned bare token. */
 static uint32_t titan_browser_owner_token;
 static int titan_browser_initialized, titan_browser_owner_ready, titan_browser_main_started;
+
+/* titan.browser compares its state's main thread with this once, at module
+ * initialization: only the launcher's owner state may drive the instance. */
+lua_State *titan_browser_owner_thread(void) { return titan_browser_owner; }
 
 $ERROR_HELPERS
 
@@ -255,6 +263,22 @@ int titan_browser_release_callable(uint64_t operation_id, uint32_t state,
                   "browser state is closed"));
 }
 
+/* C-callable synchronous callback entries for authored C in the image. */
+int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t argc,
+        const titan_browser_value *args, titan_browser_sync_result *result) {
+    if ($CALL_SYNC_FN) return $CALL_SYNC_FN(callable, argc, args, result);
+    if (result) result->status = TITAN_BROWSER_STATE;
+    return TITAN_BROWSER_STATE;
+}
+
+int titan_browser_callback_enter(uint32_t state, titan_browser_callback_frame *frame) {
+    return $CALLBACK_ENTER_FN ? $CALLBACK_ENTER_FN(state, frame) : TITAN_BROWSER_STATE;
+}
+
+void titan_browser_callback_leave(titan_browser_callback_frame *frame) {
+    if ($CALLBACK_LEAVE_FN) $CALLBACK_LEAVE_FN(frame);
+}
+
 int titan_browser_close(uint64_t operation_id) {
     titan_browser_completion completion = {0};
     if (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_CLOSE))
@@ -281,6 +305,9 @@ function M.contents(worker, options)
         ERROR_HELPERS = M.error_helpers,
         INVOKE_FN = coder._foreign_func_name("titan.browser", "invoke"),
         RELEASE_FN = coder._foreign_func_name("titan.browser", "release_callable"),
+        CALL_SYNC_FN = coder._foreign_func_name("titan.browser", "call_sync"),
+        CALLBACK_ENTER_FN = coder._foreign_func_name("titan.browser", "callback_enter"),
+        CALLBACK_LEAVE_FN = coder._foreign_func_name("titan.browser", "callback_leave"),
         DECLARATIONS = options.declarations or "",
         INITIALIZER = options.initializer or
             "static int titan_browser_initialize_worker(lua_State *L) { (void)L; return 0; }",

@@ -1,0 +1,170 @@
+--- Task-aware one-shot delays and recurring coalescing tickers.
+-- @module titan.timer
+-- @usage standard-library-timer.md
+
+local async = import "async"
+local browser = import "browser"
+
+foreign import "errno.h"
+
+local type Value = browser.BrowserValue
+
+--- A Runtime-bound recurring timer that coalesces missed firings.
+-- @usage standard-library-timer.md#recurring-tickers
+record Ticker
+  local request: browser.BrowserRequest?
+  local subscription: async.CoalescingSubscription<|boolean, async.OperationError|>?
+  local closed: boolean
+  local remove_close_listener: (function (): ())?
+end
+
+-- The SDK's timer sources, opened once per Lua state.
+local timeout: browser.BrowserHandle? = nil
+local interval: browser.BrowserHandle? = nil
+
+local function timeout_source(): browser.BrowserHandle
+  local source? = timeout
+  if source == nil then
+    source = browser.binding("titan:timeout")
+    timeout = source
+  end
+  return source
+end
+
+local function interval_source(): browser.BrowserHandle
+  local source? = interval
+  if source == nil then
+    source = browser.binding("titan:interval")
+    interval = source
+  end
+  return source
+end
+
+-- A host timer that fails reports the host's message as an I/O error: the
+-- browser has no error code for it. The thrown JavaScript value is released.
+local function host_error(message: Value, thrown: Value, operation: string): async.OperationError
+  case thrown
+  when is_handle(handle) then handle:close()
+  end
+  local text = "host timer failed"
+  case message
+  when is_string(host_message) then text = host_message
+  end
+  return async.OperationError(-ffi.EIO, "EIO", text, operation)
+end
+
+--- Suspend the current Task until a one-shot timer fires.
+-- @param milliseconds Delay or interval in milliseconds.
+-- @usage standard-library-timer.md#one-shot-delays
+function sleep(milliseconds: integer)
+  async.checkpoint()
+  if milliseconds < 0 then
+    raise async.OperationError(-ffi.EINVAL, "EINVAL", "invalid argument", "timer.sleep")
+  end
+  -- A zero delay is a yield: no host timer, and the Task resumes in a later
+  -- turn, after the driver gives the event loop one macrotask.
+  if milliseconds == 0 then
+    async.yield()
+    return
+  end
+  local task = async.running()
+  local token = async.ResumeToken("timer.sleep")
+  local failure: async.OperationError? = nil
+  local request = timeout_source():start(function (...: Value): Value
+    task:resume(token)
+    return Value.is_nil()
+  end, function (...: Value): Value
+    failure = host_error(...[1], ...[2], "timer.sleep")
+    task:resume(token)
+    return Value.is_nil()
+  end, Value.is_float(milliseconds))
+  defer request:close()
+  -- Cancellation clears the host timer and ends the wait at once; the loader
+  -- drops a settlement that arrives later.
+  async.suspend(token, function () request:cancel() catch end)
+  local failed? = failure
+  if failed ~= nil then raise failed end
+end
+
+--- Yield the current Task to a later event-loop turn.
+-- @usage standard-library-timer.md#one-shot-delays
+function yield()
+  async.yield()
+end
+
+-- Close the ticker's listener request. The Runtime's close listener calls
+-- this too: tickers are Runtime-bound, and close listeners run outside Tasks,
+-- where the subscription itself cannot close.
+local function Ticker:retire_request()
+  self.closed = true
+  local open? = self.request
+  if open ~= nil then
+    self.request = nil
+    open:close()
+  end
+end
+
+--- Create a recurring timer with a positive interval in milliseconds.
+-- @param milliseconds Delay or interval in milliseconds.
+-- @return New Runtime-bound recurring ticker; the caller owns closing it.
+-- @usage standard-library-timer.md#recurring-tickers
+function ticker(milliseconds: integer): Ticker
+  if milliseconds <= 0 then raise "ticker interval must be positive" end
+  async.checkpoint()
+  local recurring: Ticker = {request = nil, subscription = nil, closed = false, remove_close_listener = nil}
+  local remove = async.add_close_listener(function () recurring:retire_request() end)
+  recurring.remove_close_listener = remove
+  local accepted = false
+  defer do
+    if not accepted then remove() end
+  end
+  recurring.subscription = async.CoalescingSubscription<|boolean, async.OperationError|>(
+    function (publish, fail, _finish): async.SubscriptionActions<|boolean|>
+      local stop = function ()
+        local open? = recurring.request
+        if open ~= nil then open:cancel() end
+      end
+      local close = function (_drain: function (): (async.SubscriptionBatch<|boolean|>))
+        recurring:retire_request()
+      end
+      local actions = async.SubscriptionActions<|boolean|>(stop, close)
+      recurring.request = interval_source():listen(function (...: Value): Value
+        publish(true)
+        return Value.is_nil()
+      end, function (...: Value): Value
+        fail(host_error(...[1], ...[2], "timer.ticker"))
+        return Value.is_nil()
+      end, Value.is_float(milliseconds))
+      return actions
+    end)
+  accepted = true
+  return recurring
+end
+
+--- Wait for one firing, or return false after the ticker closes.
+-- @return True for a firing, or false when the ticker is closed.
+-- @usage standard-library-timer.md#recurring-tickers
+function Ticker:tick(): boolean
+  async.checkpoint()
+  if self.closed then return false end
+  if self.subscription:has_waiter() then raise "Ticker already has a waiting Task" end
+  local outcome = self.subscription:next()
+  case outcome
+  when item(value) then return value
+  when error(failure) then raise failure
+  else return false
+  end
+end
+
+--- Stop and retire this ticker, waking a waiting Task with false.
+-- @usage standard-library-timer.md#recurring-tickers
+function Ticker:close()
+  async.running()
+  if self.closed then return end
+  self.subscription:close()
+  local remove? = self.remove_close_listener
+  if remove ~= nil then
+    self.remove_close_listener = nil
+    remove()
+  end
+end

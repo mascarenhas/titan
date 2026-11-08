@@ -303,4 +303,24 @@ end
             end)
         end
     end
+
+    -- Browser ExternalWait is opaque, so only its private field keeps a record
+    -- literal of it rejected outside titan.async, as natively.
+    it("rejects an ExternalWait record literal on the native and browser targets", function()
+        local info = fixture()
+        if not info then return end
+        write("external_literal.titan", 'local async = import "async"\nlocal wait: async.ExternalWait = {}\n')
+        for _, target in ipairs({ "native", "browser" }) do
+            local argv = { info.prefix .. "/bin/titanc", "-q", "--tree", workspace,
+                "--output", workspace .. "/" .. target, "-c", "external_literal" }
+            if target == "browser" then
+                argv[#argv + 1] = "--target"
+                argv[#argv + 1] = "browser"
+            end
+            local result = strategy:run(argv, { stderr_to_stdout = true })
+            assert.is_false(result.ok, target .. "\n" .. result.output)
+            assert.truthy(result.output:find("cannot construct record type 'titan.async.ExternalWait' outside " ..
+                "module 'titan.async' because it has local fields", 1, true), target .. "\n" .. result.output)
+        end
+    end)
 end)

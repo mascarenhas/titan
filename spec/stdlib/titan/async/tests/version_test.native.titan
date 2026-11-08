@@ -1,0 +1,3 @@
+function test_async_version_is_the_bundled_libuv_version(_context: test.Context)
+  test.assert(async.version() == uv.version_string(), "async advertised a different backend version")
+end

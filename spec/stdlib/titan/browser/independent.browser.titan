@@ -280,4 +280,13 @@ function check()
   local req = req_target:start(success, failure)
   req:cancel()
   req:close()
+  -- A C-created state is never the instance owner and cannot begin a drive.
+  test.assert(not browser.is_owner(), "an independent state claimed instance ownership")
+  local refused = false
+  do
+    browser.drive_begin()
+  catch
+    refused = error == "browser drive requires the instance owner's main thread"
+  end
+  test.assert(refused, "an independent state began a drive")
 end

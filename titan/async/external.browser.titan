@@ -1,0 +1,54 @@
+-- Browser member of the external family. ExternalWait keeps run_with_cleanup's
+-- native signature; the browser has no constructor for it, so only nil reaches
+-- run_with_cleanup and none of the shared core's ExternalWait seams can run.
+
+-- The private field keeps the record from being literal-constructible.
+record ExternalWait
+  local unavailable: boolean
+end
+
+local const NO_CONSTRUCTOR = "internal error: ExternalWait has no browser constructor"
+
+local function ExternalWait:check_cleanup_binding(_runtime: Runtime)
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:bind_cleanup(_runtime: Runtime, _task: Task)
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:unbind_cleanup(_task: Task)
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:admit_cleanup()
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:rollback_cleanup()
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:designates(_task: Task, _operation: Wait?): boolean
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:retired_natively(): boolean
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:complete_retirement(_task: Task): boolean
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:poll_retirement(_task: Task)
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:notify_if_ready()
+  raise NO_CONSTRUCTOR
+end
+
+local function ExternalWait:unaccepted(_waiting: Wait): boolean
+  raise NO_CONSTRUCTOR
+end

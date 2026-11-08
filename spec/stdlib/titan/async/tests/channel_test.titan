@@ -595,12 +595,12 @@ function test_channel_tolerates_stale_latched_wake(_: test.Context)
       end
       local drive = function (window: task_support.WakeWindow, receiver: async.Task)
         window.open = false
-        timer.yield()
+        async.yield()
         window.open = true
         send(1)
         for _ = 1, 50 do
           if stage == 3 and receiver:status():as_string() == "waiting" then break end
-          timer.yield()
+          async.yield()
         end
         if stage == 3 then send(3) end
       end

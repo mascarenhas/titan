@@ -39,8 +39,12 @@ for _, assertions in ipairs({2, 0}) do
   for _, target in ipairs({
     {name="bridge", owner="browser.tests", testing=true,
       tree=path.join(repository, "spec/stdlib/titan"),
-      source=path.join(fixture, "independent_states.c")},
+      source=path.join(fixture, "independent_states.c"), wrap=true},
     {name="initializer-failure", owner="initializer_failure", tree=fixture},
+    -- Page tests of their own images, which need a DOM: the html5 click
+    -- counter of synchronous C callbacks and the async driver's responsiveness.
+    {name="counter", owner="counter", tree=fixture, source=path.join(fixture, "counter.c")},
+    {name="responsive", owner="responsive", tree=fixture},
   }) do
     -- Use the installed compiler and the existing assertion/profile controls,
     -- exactly as the portable trace builder does. No mock runtime is linked.
@@ -57,8 +61,10 @@ require("titan-compiler.driver").browser_link_options = {purpose=%q, assertions=
     if target.source then
       argv[#argv + 1] = "--c-source"
       argv[#argv + 1] = target.source
+    end
+    if target.wrap then
       -- The native fixture injects GC and observes final state invalidation.
-      -- Initializer-failure images have no C helper and stay unwrapped.
+      -- The other images have no such helper and stay unwrapped.
       argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live,--wrap=titan_browser_host_state_closed"
     end
     if target.testing then argv[#argv + 1] = "--test" end
@@ -80,7 +86,7 @@ require("titan-compiler.driver").browser_link_options = {purpose=%q, assertions=
 end
 
 for _, name in ipairs({"bindings.mjs", "integration.mjs", "unhandled.mjs", "unhandled-result.mjs",
-    "poison-retirement.mjs"}) do
+    "poison-retirement.mjs", "counter.mjs", "responsive.mjs"}) do
   write(path.join(output, name), read(path.join(fixture, name)))
 end
-io.stdout:write(string.format("BRIDGE-GATE %s profile=%s assertionModes=2 images=4\n", output, profile))
+io.stdout:write(string.format("BRIDGE-GATE %s profile=%s assertionModes=2 images=8\n", output, profile))

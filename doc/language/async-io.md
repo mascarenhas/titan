@@ -2,7 +2,8 @@
 
 Titan's public asynchronous scheduling API is the `async` module. Titan code
 imports it with `local async = import "async"`; Lua uses
-`require "titan.async"`. The module supports Linux and macOS; the Windows port remains experimental. The public
+`require "titan.async"`. The module supports Linux, macOS and the
+[browser target](#the-browser-target); the Windows port remains experimental. The public
 `titan.uv` binding supplies typed libuv owners and callbacks. `titan.async`
 combines those callbacks with Titan coroutines to own Tasks and waits. Ordinary
 applications can use `async`, `timer`, `fs`, `net`, `io`, and `os`; library
@@ -1653,7 +1654,9 @@ An async Runtime has one non-reentrant event-loop driver. Only top-level
 loop with `uv.run`, from the Lua main thread. Independent low-level clients may
 construct and drive their own public UV loop as described in the
 [UV reference](standard-library-uv.md#start-with-an-explicit-loop). Neither
-registration, a callback, nor a resumed Task drives any loop recursively.
+registration, a callback, nor a resumed Task drives any loop recursively. On
+the browser target the driver gives the page's event loop back between turns
+instead ([the browser driver](#the-browser-driver)).
 
 An ordinary completion follows this path:
 
@@ -2091,3 +2094,150 @@ caller's own `defer` must then skip that release: a flag that is set before
 the call and cleared after it returns and in `catch` is still set only after
 an abandoned wait. `lua.Lua:run_async` releases its independent state this
 way.
+
+## The browser target
+
+`async` is available on the [browser target](browser-target.md). Tasks,
+cancellation, `await` and `await_cleanup`, `suspend`, combinators, channels,
+string streams, subscriptions, close listeners and `request_exit` behave as
+this chapter describes. The members that need libuv or another thread are
+absent: `current_loop`, `await_with`, `await_cleanup_with`,
+`await_cancellable_with`, `await_cancellable`, `run_foreign`, the external-wait
+functions (`prepare_external_wait`, `prepare_native_retirement`,
+`wait_external`, `wait_external_cleanup`, `wait_external_native`), `version`,
+and Receivers (`receiver`, `send`, `Receiver`). `ExternalWait` remains only as
+a type, with no constructor and no methods, so the `final_wait` of
+`run_with_cleanup` is always `nil`. Initializing `async` on the browser
+changes no signal disposition and reads no process arguments.
+
+### The browser driver
+
+A page has one event loop, and Titan code shares it with the page. The driver
+runs Tasks in turns. A turn first delivers the host work queued when it
+begins: request settlements, listener events, notifications and queued calls,
+in order. It then runs at most 64 Tasks that were ready before the turn, and
+gives the event loop back for one macrotask (`setImmediate` in Node, a
+`MessageChannel` message in browsers, never a clamped timer). With nothing
+ready, it waits until host work settles or a call arrives. Work that a turn
+makes ready runs in a later turn, so `async.yield()` never resumes in the same
+browser task, and the page keeps running while Tasks wait or yield. A Task
+that neither finishes nor waits still blocks the page, as it blocks the
+native loop.
+
+Titan's browser tests measure how responsive the page stays, on a page with a
+10 ms `setInterval` and animation frames:
+
+- While Tasks wait, the interval keeps within 10% of the page's own timer
+  cadence, which the test measures on the same page with no Titan code running.
+  The bound is relative to that cadence because engines differ. With no Titan
+  code, a 10 ms interval fires about 60 times in 600 ms on Chromium 156, 57 to
+  58 times on Firefox 157 and 50 to 51 times on WebKit 27.2 (about every
+  12 ms).
+- While 128 Tasks yield continuously, animation frames keep advancing, no
+  driver turn shares a macrotask with the next, and the largest gap between
+  interval ticks stays under 100 ms. The measured gaps were 11 to 16 ms on
+  Chromium, 13 to 21 ms on Firefox and 16 to 17 ms on WebKit.
+
+Those Tasks do no work between yields. A turn runs up to 64 ready Tasks before
+the page runs again, so the gap grows with the work each Task does before it
+waits or yields.
+
+If every remaining Task is waiting and nothing can wake one (no queued host
+work, open request or listener), the driver stops the Runtime with
+`"async Runtime became idle while Tasks were waiting"` and unwinds the waiting
+Tasks, as a native drive does with its own message.
+
+A Task waits for the host with `await`, `await_cleanup` or `suspend` around
+[host requests](standard-library-browser.md#requests-and-listeners): the
+request's completion settles the wait. Pass `suspend` a cancel action that
+cancels the request when cancellation must end the wait early; an `await` of
+host work that never settles keeps waiting through cancellation, as it does
+natively. Authored C that suspends the whole WebAssembly stack inside a Task
+(`emscripten_sleep`, `EM_ASYNC_JS`) stalls every other Task until it returns;
+use host requests instead. `timer` waits on JavaScript timers this way
+([timer on the browser](standard-library-timer.md#on-the-browser)).
+
+### Drives and entries
+
+A drive starts inside a JavaScript entry and ends with it:
+
+- The program's `main` runs as a Task through the standalone bootstrap, and
+  `run()` drives until every Task finishes.
+- A `call()` whose callable calls `async.loop()` drives until the Runtime's
+  Tasks finish.
+- `instance.callTask(callable, args)` runs the callable as a Task and drives
+  the Runtime ([Task-form calls](browser-target.md#task-form-calls)).
+
+`run()` resolves `returned` with `main`'s integer. A failed `main` Task prints
+its uncaught report on stderr, as natively, and `run()` resolves `failed` with
+status 1 and the Task's message and trace. A cancelled `main` resolves
+`returned` with status 1, and an exit that any Task requests resolves `exited`
+with its code, even after `main` failed
+([the loader's `run()`](browser-target.md#the-loader-api)).
+
+A call or notification handler on an idle instance may start Tasks with
+`async.run`; they run at the next drive. While a drive runs, JavaScript calls
+and Task-form calls made outside any binding are queued and delivered between
+turns ([calls during a drive](browser-target.md#calls-during-a-drive)). A
+queued call runs outside any Task, and `async.loop()` inside it raises
+`"async.loop is already being driven"`.
+
+### Ownership
+
+Only the instance's owner state, the Lua state that runs its entries, drives.
+In any other state, such as one that C code created, `async.loop()` raises
+`"async.loop must be driven by the browser instance's owner state"` at once,
+whether or not the owner has Tasks waiting, and starting a Task raises
+`"async Runtime is unavailable in a non-owner browser state"`. The owner's
+drive continues, and synchronous work in other states runs as usual. While the
+owner drives, calls and notifications for other states are refused before
+they enter WebAssembly.
+
+### Synchronous callbacks
+
+A [synchronous C callback](standard-library-browser.md#synchronous-c-callbacks)
+runs outside every Task, even when it runs inside a binding that a Task
+called. While a Runtime is active, `async.running()` raises `"asynchronous
+operation must be called from an async Task"` there, so every operation that
+needs a Task, such as `await`, `yield` or `suspend`, raises that error too.
+With no active Runtime it raises `"async Runtime is not active"`, as it does
+anywhere else.
+
+What a callback starts takes effect in a later turn of the drive:
+
+- resolving or rejecting a `Completion` or an `await` operation;
+- `Task:resume` and `Task:cancel`;
+- publishing to a subscription;
+- `async.run`.
+
+The waiting Task does not resume inside the callback. A callback that runs
+while the drive waits for host work wakes the drive.
+
+Reporting a fatal failure, through the `fatal` capability of `await` or
+`Completion:fatal`, still depends on the Task that is really current. Inside
+a binding that a Task called, that Task is current even though
+`async.running()` hides it, so `fatal` raises `"async fatal callback must run
+outside an async Task"` as it would in the Task itself. A callback that no
+Task called, such as one that runs while the drive waits for host work or
+inside a request's settlement callback, can report it: the Runtime failure is
+recorded at once, the waiting Task raises its own operation's error at its
+`await` in a later turn, and `async.loop()` then rethrows the Runtime's first
+error.
+
+### Exit and disposal
+
+`request_exit(code)` keeps its meaning inside a Task: the first code wins,
+every Task is cancelled with `"program exit"`, and cleanup awaits still run.
+When the drive ends, the instance is latched as exited
+([exit](browser-target.md#exit)): the entry reports the status, later entries
+reject with `TITAN_BROWSER_EXITED`, and nothing closes the page or the Node
+process. An entry that failed reports its failure even when an exit was
+requested.
+
+`dispose()` with an active Runtime cancels every unfinished Task with
+`"instance disposed"` and drives their cleanup before the state closes; with
+no drive running, disposal drives that cleanup itself. Tasks that cleanup
+starts are cancelled at the next turn. Cleanup can await host work started
+before `dispose()`, but cannot start new host work: `start` and `listen` raise
+`browser.BrowserError` with the message `"browser state is closing"`
+([disposal with a running Runtime](browser-target.md#disposal-with-a-running-runtime)).

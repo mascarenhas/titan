@@ -290,7 +290,8 @@ TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
 	titan-runtime/titan_path.c titan-runtime/ltitanlib.c
 BROWSER_RUNTIME_SOURCES := $(TITAN_RUNTIME_SOURCES)
 BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
-	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser
+	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser \
+	titan.async titan.timer
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -368,6 +369,11 @@ UV_TITAN_HEADERS := \
 	titan/uv/utility_bits.h \
 	titan/uv/version-native.h \
 	titan/uv/work-data.h
+ASYNC_TITAN_SOURCES := titan/async/async.titan \
+	titan/async/external.native.titan titan/async/external.browser.titan \
+	titan/async/foreign.native.titan titan/async/receiver.native.titan \
+	titan/async/runtime.native.titan titan/async/runtime.browser.titan
+ASYNC_TITAN_HEADERS := titan/async/async_receiver_native.h titan/async/async_signal_platform.h
 STDLIB_HTTP_SOURCES := titan/http/http.native.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan titan/http/pool.titan \
 	titan/http/server.titan titan/http/transfer.titan titan/http/upgrade.titan
@@ -396,7 +402,7 @@ STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer titan.thread
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
-	titan/async.native.titan titan/timer.native.titan titan/io.native.titan titan/fs.native.titan \
+	$(ASYNC_TITAN_SOURCES) titan/timer.native.titan titan/timer.browser.titan titan/io.native.titan titan/fs.native.titan \
 	titan/net.native.titan titan/ssl.native.titan titan/url.titan \
 	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.native.titan titan/path.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
@@ -410,12 +416,12 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES) \
 	$(JSON_TITAN_SOURCES) $(PROTOBUF_TITAN_SOURCES) titan/transfer.titan $(THREAD_TITAN_SOURCES)
 STDLIB_GENERATED_FFI_HEADERS := $(addprefix $(TITAN_OUTPUT_DIR)/,$(addsuffix .ffi.h, \
-	$(addprefix titan/,$(filter-out uv http websocket peg string sqlite3 json lua protobuf thread,$(STDLIB_MODULES))) \
-	titan/uv/uv titan/http/http titan/websocket/websocket titan/peg/peg titan/string/string \
+	$(addprefix titan/,$(filter-out uv async http websocket peg string sqlite3 json lua protobuf thread,$(STDLIB_MODULES))) \
+	titan/uv/uv titan/async/async titan/http/http titan/websocket/websocket titan/peg/peg titan/string/string \
 	titan/sqlite3/sqlite3 titan/json/json titan/lua/lua titan/protobuf/protobuf titan/thread/thread))
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	$(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.titan.h \
-	titan/uv/uv.titan.h titan/async.titan.h titan/http/http.titan.h \
+	titan/uv/uv.titan.h titan/async/async.titan.h titan/http/http.titan.h \
 	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h titan/protobuf/protobuf.titan.h \
 	titan/transfer.titan.h titan/thread/thread.titan.h)
 STDLIB_CONTAINER := $(TITAN_OUTPUT_DIR)/titan.so
@@ -1329,7 +1335,7 @@ titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all
 	echo "Browser stdlib building image: stdlib"; \
 	started=$$(date +%s); \
 	$(BROWSER_SDK_ENV) TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)) \
-	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc) -q --target browser --test --incremental \
+	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc) -q --target browser --test --incremental --no-uv-bootstrap \
 	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	  --output "$$compiler_dir" --exe "$$build_dir/images/stdlib.mjs" -j$(TITAN_JOBS) \
 	  --c-source $(call make_shell_quote,$(abspath spec/fixtures/browser_runtime/close.c)) "$$@"; \

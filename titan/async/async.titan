@@ -10,13 +10,10 @@ foreign import "errno.h"
 foreign import "stdint.h"
 foreign import "stdlib.h"
 foreign import "string.h"
-foreign import "async_receiver_native.h"
-local uv = import "uv"
 local coroutine = import "coroutine"
 local gc = import "gc"
 local string = import "string"
 local transfer = import "transfer"
-local iteration = import "iteration"
 
 --- Nonyielding cancellation callback that detaches one exact explicit-suspension waiter.
 -- @usage async-io.md
@@ -26,60 +23,6 @@ type SuspendCancelAction = function (): ()
 -- Transparent alias of transfer.TransferValue; constructors and methods are identical.
 -- @usage async-io.md#transfer-values
 type TransferValue = transfer.TransferValue
-
--- One persistent single-reader state per waiting Receiver, created by its first
--- wait: later waits reserve by setting task and reuse the token and action.
-local record ReceiverReader
-  task: Task<|value, value|>?
-  token: ResumeToken
-  withdraw: SuspendCancelAction?
-end
-
---- A lossy latest-value receiver whose borrowed handle can cross Lua states.
--- Values decode eagerly in wait; overwritten packets are disposed entirely in C.
--- @usage async-io.md#cross-state-receivers
-record Receiver
-  local native: foreign titan_async_receiver
-  local native_handle: uv.async_t
-  local handle_view: uv.handle_t
-  local reader: ReceiverReader?
-end
-
--- Positive status 2 rejects admission; libuv's zero/negative statuses follow
--- publication. Clear the actual caller slot before disposal or notification.
--- Send/close and borrowed-handle lifetime remain externally serialized.
-local foreign function receiver_send_native(receiver: *titan_async_receiver,
-    source: *(*void)): int
-  if receiver.closed ~= 0 then return 2 end
-  local message = source[0] as foreign *titan_async_message
-  local previous = ffi.titan_async_receiver_exchange(receiver, message)
-  source[0] = nil
-  transfer.discard_message(previous)
-  return receiver.send(receiver.handle)
-end
-
-local foreign function receiver_take_native(receiver: *titan_async_receiver,
-    destination: *(*void)): int
-  if receiver.closed ~= 0 then return 2 end
-  local message = ffi.titan_async_receiver_exchange(receiver, nil)
-  destination[0] = message as foreign *void
-  if message == nil then return 0 end
-  return 1
-end
-
-local foreign function receiver_disable_native(receiver: *titan_async_receiver)
-  receiver.closed = 1
-  transfer.discard_message(ffi.titan_async_receiver_exchange(receiver, nil))
-end
-
-local foreign function retirement_poll_native(state: *titan_async_retirement): int
-  if state.ready ~= 0 then return 0 end
-  if state.status < 0 then return state.status end
-  local status = state.retire(state.context)
-  state.status = status
-  if status == 0 then state.ready = 1 end
-  return status
-end
 
 local ASYNC_TAG: value = {}
 local YIELD_TAG: value = {}
@@ -363,14 +306,14 @@ end
 -- @usage async-io.md
 record Completion<|C, T, E|>
   local stored_context: C
-  local register: (function (Completion<|C, T, E|>, integer): (uv.req_t?))?
+  local register: (function (Completion<|C, T, E|>, integer): (Request?))?
   local task: Task
   local epoch: integer
   local policy: integer
   local phase: integer
   local kind: integer
   local payload: value
-  local request: uv.req_t?
+  local request: Request?
 end
 
 local type Wait = Completion<|value, value, value|>
@@ -392,8 +335,8 @@ local record CloseRegistration
 end
 
 local record Runtime
-  local loop: uv.loop_t
-  local wake: uv.timer_t
+  -- Per-target backend state, declared by the runtime contributor.
+  local backend: Backend
   local ready_head: Task?
   local ready_tail: Task?
   local ready_count: integer
@@ -407,39 +350,7 @@ local record Runtime
   local shutdown_cancelled: boolean
   local exit_code: integer?
   local close_registrations: {CloseRegistration}
-  local external: ExternalBridge?
   local retirement_error: ExternalWait?
-  -- Releases of run_foreign jobs whose wait a Lua state close abandoned.
-  local abandoned_work: {ForeignWork}
-end
-
-local record ExternalBridge
-  runtime: Runtime
-  wake: uv.external_wake_t
-  waits: {integer: ExternalWait}
-  next_identity: integer
-  closed: boolean
-end
-
-record ExternalWait
-  local bridge: ExternalBridge
-  local identity: integer
-  local target: foreign *void
-  local register_fn: (function (foreign *void): boolean)?
-  local unregister_fn: (function (): ())?
-  local token: ResumeToken
-  local cancel_action: (function (): ())?
-  local done: Wait?
-  local number: integer
-  local used: boolean
-  local registered: boolean
-  local notified: boolean
-  local retired: boolean
-  local cleanup_task: Task?
-  local native: foreign titan_async_retirement
-  local native_owner: value
-  local awaited: boolean
-  local close_requested: boolean
 end
 
 --- Deferred cooperative computation with typed success and complex-cancellation payloads.
@@ -571,14 +482,6 @@ function Task:add_terminal_listener(listener: function (TaskStatus<|A, B|>): ())
   end
 end
 
-local function operation_error(code: integer, operation: string): OperationError
-  return OperationError(code, uv.err_name(code), uv.strerror(code), operation)
-end
-
-local function check_status(code: integer, operation: string)
-  if code < 0 then raise operation_error(code, operation) end
-end
-
 local function has_tasks(runtime: Runtime): boolean
   for index = 1, runtime.next_task - 1 do
     if runtime.tasks[index] ~= nil then return true end
@@ -612,33 +515,17 @@ function Error:raise()
   rethrow_failure(self)
 end
 
--- lua_close runs every finalizer, latest registration first, before freeing
--- any object. This Runtime registers before its Receivers, external wake owner
--- and Task coroutines exist, so those are already finalized here. A Runtime
--- never driven to retirement (only bootstrapped, or left after its driver
--- raised) still owns an initialized loop whose native state is not GC memory:
--- retire every handle without resuming a Task, then close the loop. Close
--- listeners belong to ordinary retirement and do not run here.
-local function runtime_finalize(candidate: value)
-  -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
-  local runtime: Runtime = candidate
-  if active_runtime ~= runtime then return end
-  require_main_thread()
-  runtime.closing = true
-  runtime.driving = true
-  -- Keep shutdown admission and recursive driver entry closed throughout
-  -- native retirement, even though UV suppresses every user callback.
-  uv.unbind_transfer_loop(runtime.loop)
-  -- Task coroutines were unwound (their defers and cleanup ran inside their
-  -- finalizers) and destroyed. Retire every Task and the ready queue: a late
-  -- settlement finds no current Wait and raises, a resume finds no token, and
-  -- no queued continuation remains, so no callback can enter a Task. A
-  -- finalizer registered before this Runtime may still read a Task's status,
-  -- so publish a terminal state with the phase. A pending body outcome never
-  -- finished its cleanup or native retirement and is not published, and no
-  -- terminal listener runs. Terminal status follows native retirement, so a
-  -- Task whose retirement gate is still armed (the gate finish_task refuses
-  -- on) stays nonterminal.
+-- At Lua-state close, Task coroutines were already unwound (their defers and
+-- cleanup ran inside their finalizers) and destroyed. Retire every Task and the
+-- ready queue: a late settlement finds no current Wait and raises, a resume
+-- finds no token, and no queued continuation remains, so no callback can enter
+-- a Task. A finalizer registered before this Runtime may still read a Task's
+-- status, so publish a terminal state with the phase. A pending body outcome
+-- never finished its cleanup or native retirement and is not published, and no
+-- terminal listener runs. Terminal status follows native retirement, so a Task
+-- whose retirement gate is still armed (the gate finish_task refuses on) stays
+-- nonterminal.
+local function retire_tasks_at_close(runtime: Runtime)
   local abandoned = CancellationReason.simple(ABANDONED_AT_CLOSE)
   for index = 1, runtime.next_task - 1 do
     local task? = runtime.tasks[index]
@@ -646,7 +533,7 @@ local function runtime_finalize(candidate: value)
       task.wait = nil
       clear_suspension(task)
       local barrier? = task.cleanup_wait
-      if barrier == nil or barrier.native.ready ~= 0 then
+      if barrier == nil or barrier:retired_natively() then
         task.phase = TASK_FINISHED
         task.state = TaskStatus.cancelled(task.cancel_value or abandoned)
       end
@@ -656,16 +543,6 @@ local function runtime_finalize(candidate: value)
   runtime.ready_tail = nil
   runtime.ready_count = 0
   runtime.wake_armed = false
-  check_status(uv.loop_abandon(runtime.loop), "runtime.loop.abandon")
-  active_runtime = nil
-  -- Every accepted job has returned. Release what abandoned run_foreign
-  -- waits handed over, here on the closing thread: such a release may itself
-  -- wait for the worker pool, which no abandoned job occupies any more.
-  local abandoned_work = runtime.abandoned_work
-  runtime.abandoned_work = {}
-  for index = 1, #abandoned_work do
-    abandoned_work[index]:release_abandoned()
-  end
 end
 
 local function new_runtime(): Runtime
@@ -675,23 +552,13 @@ local function new_runtime(): Runtime
   if ffi.titan_state_closing(L) ~= 0 then
     raise "cannot create an async Runtime during Lua state close"
   end
-  local runtime = Runtime {loop = uv.loop_t.new(), wake = uv.timer_t.new(),
+  local runtime = Runtime {backend = new_backend(),
     ready_head = nil, ready_tail = nil, ready_count = 0, wake_armed = false,
     tasks = {}, next_task = 1,
-    current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}, external = nil, retirement_error = nil,
-    abandoned_work = {}}
+    current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}, retirement_error = nil}
   -- Register before native acquisition so lua_close can retire this loop.
   gc.finalizable<|value|>(runtime, runtime_finalize)
-  check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
-  do uv.bind_transfer_loop(runtime.loop)
-  catch uv.loop_close(runtime.loop); raise end
-  local status = uv.timer_init(runtime.loop, runtime.wake)
-  if status < 0 then
-    uv.unbind_transfer_loop(runtime.loop)
-    uv.loop_close(runtime.loop)
-    raise operation_error(status, "runtime.timer.init")
-  end
-  uv.timer_set_data(runtime.wake, runtime)
+  start_backend(runtime)
   return runtime
 end
 
@@ -701,15 +568,6 @@ local function ensure_runtime(): Runtime
   local created = new_runtime()
   active_runtime = created
   return created
-end
-
---- Borrow the active Runtime loop without creating or driving a Runtime.
--- @return Runtime-owned loop; valid from Tasks, registration, and loop callbacks.
--- @usage async-io.md
-function current_loop(): uv.loop_t
-  local runtime? = active_runtime
-  if runtime == nil then raise "async Runtime is not active" end
-  return runtime.loop
 end
 
 -- Domain resource constructors may reject shutdown without turning their
@@ -752,7 +610,7 @@ function add_close_listener(listener: function (): ()): function (): ()
 end
 
 local function notify_runtime_closed(runtime: Runtime)
-  uv.unbind_transfer_loop(runtime.loop)
+  unbind_backend(runtime)
   runtime.closing = true
   local registrations = runtime.close_registrations
   runtime.close_registrations = {}
@@ -775,7 +633,11 @@ function running(): Task<|value, value|>
   local runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
   local task? = runtime.current_task
-  if task == nil then raise "asynchronous operation must be called from an async Task" end
+  -- A synchronous callback sees no current Task, even when it runs inside a
+  -- binding that a Task called: it cannot wait or switch.
+  if task == nil or ffi.titan_no_switch(L) ~= 0 then
+    raise "asynchronous operation must be called from an async Task"
+  end
   return task
 end
 
@@ -808,13 +670,7 @@ local function begin_suspension(task: Task, operation: Wait?)
   if final_wait ~= nil then
     -- The reserved epoch belongs to one prepared retirement capability, not
     -- arbitrary yielding code reached while its cleanup callback is running.
-    -- Named function values are canonical module closures, so this comparison
-    -- is identity-preserving and cannot allocate a callable adapter.
-    local registrar: value = start_native_retirement_wait
-    local designated = task.cleanup_active and operation ~= nil and
-      operation.policy == WAIT_CLEANUP and operation.stored_context == final_wait and
-      operation.register == registrar
-    if not designated then limit = limit - 1 end
+    if not final_wait:designates(task, operation) then limit = limit - 1 end
   end
   if task.epoch >= limit then
     raise "async Task suspension epoch exhausted"
@@ -831,7 +687,7 @@ end
 
 local function finish_task(task: Task, state: TaskStatus)
   local barrier? = task.cleanup_wait
-  if barrier ~= nil and barrier.native.ready == 0 then return end
+  if barrier ~= nil and not barrier:retired_natively() then return end
   -- An exceptional Result allocation can occur after task.wait was detached.
   local cached? = task.completion
   if cached ~= nil then cached.phase = WAIT_RETIRED; release_completion(cached) end
@@ -854,9 +710,9 @@ local function finish_task(task: Task, state: TaskStatus)
   end
   task.runtime.tasks[task.root_index] = nil
   if not has_tasks(task.runtime) then
-    uv.unbind_transfer_loop(task.runtime.loop)
+    unbind_backend(task.runtime)
     task.runtime.closing = true
-    uv.stop(task.runtime.loop)
+    stop_backend(task.runtime)
   end
 end
 
@@ -920,23 +776,7 @@ local function publish_terminal(task: Task)
   if not task.root_done or task.terminal_kind == TERMINAL_NONE or
       task.phase == TASK_FINISHED then return end
   local barrier? = task.cleanup_wait
-  if barrier ~= nil then
-    local status = retirement_poll_native(barrier.native)
-    if status > 0 then return end
-    if status < 0 then
-      if task.runtime.retirement_error == nil then task.runtime.retirement_error = barrier end
-      uv.stop(task.runtime.loop)
-      return
-    end
-    -- Native retirement is complete before clearing the map/borrow and
-    -- consuming the registration. There is no ordinary entry in this interval.
-    local target = barrier.target
-    barrier.target = nil
-    barrier.bridge.waits[barrier.identity] = nil
-    barrier.registered = false
-    if target ~= nil then barrier.bridge.wake:unregister(target) end
-    barrier:retire()
-  end
+  if barrier ~= nil and not barrier:complete_retirement(task) then return end
   local kind = task.terminal_kind
   local payload = task.terminal_value
   local reason? = task.cancel_value
@@ -1031,9 +871,10 @@ local function settle(wait: Wait, kind: integer, payload: value)
     raise "stale async operation settlement"
   end
   local registering = wait.phase == WAIT_REGISTERING
-  -- A finalizer cannot resume the waiting Task either: queue its delivery.
+  -- A finalizer cannot resume the waiting Task either, nor can a synchronous
+  -- callback: queue its delivery.
   local deferred = not registering and (wait.task.runtime.current_task ~= nil or
-    ffi.titan_in_finalizer(L) ~= 0)
+    ffi.titan_in_finalizer(L) ~= 0 or ffi.titan_no_switch(L) ~= 0)
   -- A peer Task cannot advance this Task inline. Accept its deferred wake
   -- before committing settlement: synchronous scheduling failure leaves the
   -- exact pending wait available for retry or shutdown. The wake cannot run
@@ -1065,11 +906,12 @@ local function fatal(wait: Wait, error: value, trace: string)
     fail_runtime(runtime, error, trace)
     return
   end
-  -- A finalizer cannot resume the Task (coroutine resumes raise there).
+  -- A finalizer cannot resume the Task (coroutine resumes raise there), nor
+  -- can a synchronous callback outside a Task.
   -- Queue delivery of this exact operation's fatal outcome, like a peer
   -- Task's settlement: the wake is accepted before the nonallocating commit,
   -- and the Wait is retired and released at delivery.
-  if ffi.titan_in_finalizer(L) ~= 0 then
+  if ffi.titan_in_finalizer(L) ~= 0 or ffi.titan_no_switch(L) ~= 0 then
     fail_runtime(runtime, error, trace)
     enqueue_ready(task, READY_DELIVER, wait)
     wait.request = nil
@@ -1180,7 +1022,7 @@ local function advance_task(task: Task, failed: boolean, payload: value)
           local wait = operation as Wait
           wait.epoch = task.epoch
           task.wait = wait
-          local request: uv.req_t? = nil
+          local request: Request? = nil
           local registration_failed = false
           do
             local start = wait.register
@@ -1228,7 +1070,7 @@ local function advance_task(task: Task, failed: boolean, payload: value)
               wait.request = request
               wait.phase = WAIT_PENDING
               if policy == WAIT_CANCELLABLE and task.cancel_value ~= nil then
-                uv.cancel(request as uv.req_t)
+                cancel_request(request)
               end
               return
             end
@@ -1237,12 +1079,6 @@ local function advance_task(task: Task, failed: boolean, payload: value)
       end
     end
   end
-end
-
-local function arm_ready(runtime: Runtime)
-  if runtime.wake_armed then return end
-  check_status(uv.timer_start(runtime.wake, ready_tick, 0, 0), "runtime.timer.start")
-  runtime.wake_armed = true
 end
 
 local function enqueue_ready(task: Task, kind: integer, wait: Wait?)
@@ -1268,9 +1104,11 @@ local function enqueue_ready(task: Task, kind: integer, wait: Wait?)
   runtime.ready_count = runtime.ready_count + 1
 end
 
+-- Dispatch the first `available` queued entries, at most READY_BATCH_LIMIT;
+-- entries queued meanwhile wait for the next batch.
 -- Implementation notes: doc/implementation/libuv-runtime.md#driver-and-registration-trampoline
-local function drain_ready(runtime: Runtime)
-  local count = runtime.ready_count
+local function drain_ready(runtime: Runtime, available: integer)
+  local count = available
   if count > READY_BATCH_LIMIT then count = READY_BATCH_LIMIT end
   for index = 1, count do
     local task = runtime.ready_head as Task
@@ -1306,31 +1144,6 @@ local function drain_ready(runtime: Runtime)
   end
 end
 
-local function ready_tick(timer: uv.timer_t)
-  local runtime: Runtime = uv.timer_get_data(timer)
-  runtime.wake_armed = false
-  local failed = false
-  do drain_ready(runtime)
-  catch
-    failed = true
-    fail_runtime(runtime, error, traceback)
-  end
-  -- Undispatched entries remain linked and rooted even after delivery fails.
-  -- Preserve the first error if the replacement wake also fails.
-  if runtime.ready_head ~= nil and not runtime.wake_armed then
-    do arm_ready(runtime)
-    catch
-      failed = true
-      fail_runtime(runtime, error, traceback)
-    end
-  end
-  if failed then rethrow_failure(runtime.failure) end
-end
-
-local function ready_closed(timer: uv.timer_t)
-  uv.timer_set_data(timer, nil)
-end
-
 --- Request sticky cancellation without completing accepted native work early.
 -- @param reason First reason wins; nil selects simple cancellation with message cancelled.
 -- @usage async-io.md
@@ -1345,7 +1158,7 @@ function Task:cancel(reason: CancellationReason<|B|>?)
   local wait? = self.wait
   if wait == nil or wait.phase ~= WAIT_PENDING then return end
   if wait.policy == WAIT_CANCELLABLE and wait.request ~= nil then
-    uv.cancel(wait.request as uv.req_t)
+    cancel_request(wait.request)
   end
   if self.suspended then
     local action? = self.suspend_cancel
@@ -1424,7 +1237,7 @@ function Completion:fatal(number: integer, error: value, trace: string)
   fatal(self as Wait, error, trace)
 end
 
-local function completion<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?), policy: integer): Completion<|C, T, E|>
+local function completion<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (Request?), policy: integer): Completion<|C, T, E|>
   local task = running()
   local saved? = task.completion
   if saved == nil then
@@ -1446,33 +1259,13 @@ local function completion<|C, T, E|>(context: C, start: function (Completion<|C,
   return reused
 end
 
---- Register a typed callback wait and defer cancellation until accepted work completes.
--- @param context Typed context retained until operation retirement.
--- @param start Nonyielding registrar receiving Completion and operation number; may return nil or an accepted request.
--- @return Tagged operation result; cancellable waits may return cancelled.
--- @usage async-io.md
-function await_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): Result<|T, E|>
-  return coroutine.yield(completion(context, start, WAIT_ORDINARY), ASYNC_TAG) as Result<|T, E|>
+-- Register a typed wait under one policy and suspend until its delivery: the
+-- target-neutral path of await, await_cleanup and suspend.
+local function await_registered<|C, T, E|>(context: C,
+    start: function (Completion<|C, T, E|>, integer): (Request?),
+    policy: integer): value
+  return coroutine.yield(completion(context, start, policy), ASYNC_TAG)
 end
-
---- Register a typed ownership-cleanup wait despite pending cancellation or shutdown.
--- @param context Typed context retained until operation retirement.
--- @param start Nonyielding registrar receiving Completion and operation number; may return nil or an accepted request.
--- @return Tagged operation result; cancellable waits may return cancelled.
--- @usage async-io.md
-function await_cleanup_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): Result<|T, E|>
-  return coroutine.yield(completion(context, start, WAIT_CLEANUP), ASYNC_TAG) as Result<|T, E|>
-end
-
---- Register a typed wait, request native cancellation, and still await terminal completion.
--- @param context Typed context retained until operation retirement.
--- @param start Nonyielding registrar receiving Completion and operation number; returns the accepted request or settles inline.
--- @return Tagged operation result; cancellable waits may return cancelled.
--- @usage async-io.md
-function await_cancellable_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): CancellableResult<|T, E|>
-  return coroutine.yield(completion(context, start, WAIT_CANCELLABLE), ASYNC_TAG) as CancellableResult<|T, E|>
-end
-
 
 local function legacy_settle(done: Wait, number: integer, kind: integer, payload: value)
   -- Old closure capabilities belonged to a retired fresh Wait, and duplicate
@@ -1481,14 +1274,7 @@ local function legacy_settle(done: Wait, number: integer, kind: integer, payload
   settle(done, kind, payload)
 end
 
-local function old_start<|T, E|>(done: Completion<|function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?), T, E|>, number: integer): uv.req_t?
-  local op = done:context(number)
-  return op(function (result: T) legacy_settle(done as Wait, number, OUTCOME_SUCCESS, result) end,
-      function (error: E) legacy_settle(done as Wait, number, OUTCOME_ERROR, error) end,
-      function (error: value, trace: string) done:fatal(number, error, trace) end)
-end
-
-local function old_void_start<|T, E|>(done: Completion<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>, number: integer): uv.req_t?
+local function old_void_start<|T, E|>(done: Completion<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>, number: integer): Request?
   local op = done:context(number)
   op(function (result: T) legacy_settle(done as Wait, number, OUTCOME_SUCCESS, result) end,
       function (error: E) legacy_settle(done as Wait, number, OUTCOME_ERROR, error) end,
@@ -1501,7 +1287,7 @@ end
 -- @return Tagged operation result; cancellable waits may return cancelled.
 -- @usage async-io.md
 function await<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): ()): Result<|T, E|>
-  return await_with<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>(op, old_void_start)
+  return await_registered<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>(op, old_void_start, WAIT_ORDINARY) as Result<|T, E|>
 end
 
 --- Wait for ownership cleanup despite pending cancellation or Runtime shutdown.
@@ -1509,15 +1295,7 @@ end
 -- @return Tagged operation result; cancellable waits may return cancelled.
 -- @usage async-io.md
 function await_cleanup<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): ()): Result<|T, E|>
-  return await_cleanup_with<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>(op, old_void_start)
-end
-
---- Request supported native cancellation but wait for the promised terminal callback.
--- @param op Nonyielding registrar receiving resolve, reject, and fatal callbacks; settle exactly once.
--- @return Tagged operation result; cancellable waits may return cancelled.
--- @usage async-io.md
-function await_cancellable<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?)): CancellableResult<|T, E|>
-  return await_cancellable_with<|function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?), T, E|>(op, old_start)
+  return await_registered<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>(op, old_void_start, WAIT_CLEANUP) as Result<|T, E|>
 end
 
 --- Yield the current Task to a callback-deferred later scheduling turn.
@@ -1531,7 +1309,7 @@ end
 -- consume a latch accepted before that. done:context is the last safepoint;
 -- a resume during done:resolve latches again harmlessly. A cancellation in
 -- this window is taken at the acceptance boundary in advance_task.
-local function start_suspend(done: Completion<|ResumeToken, value, value|>, number: integer): uv.req_t?
+local function start_suspend(done: Completion<|ResumeToken, value, value|>, number: integer): Request?
   local token = done:context(number)
   local task = done.task
   task.suspended = true
@@ -1553,7 +1331,7 @@ function suspend(token: ResumeToken, cancel_action: (function (): ())?)
   -- Rejection and setup errors clear the staged action.
   task.suspend_cancel = cancel_action
   defer clear_suspension(task)
-  local result = await_with<|ResumeToken, value, value|>(token, start_suspend)
+  local result = await_registered<|ResumeToken, value, value|>(token, start_suspend, WAIT_ORDINARY) as Result<|value, value|>
   case result
   when error(failure) then raise failure
   else
@@ -1591,21 +1369,6 @@ function run<|A, B|>(func: function (): (A)): Task<|A, B|>
   do enqueue_ready(erased, READY_START, nil)
   catch finish_failure(erased, error, traceback); raise end
   return task
-end
-
-local function ExternalWait:check_cleanup_binding(runtime: Runtime)
-  if self.bridge.runtime ~= runtime then
-    raise "cleanup external wait belongs to another async Runtime"
-  end
-  if self.cleanup_task ~= nil then
-    raise "cleanup external wait is already bound to a Task"
-  end
-  if self.used or self.retired then
-    raise "cleanup external wait is consumed or closed"
-  end
-  if self.native.retire == nil then
-    raise "cleanup external wait requires a native retirement capability"
-  end
 end
 
 --- Schedule a body with deferred cleanup, including pre-start cancellation.
@@ -1669,58 +1432,19 @@ function run_with_cleanup<|A, B|>(
   }
   -- Allocations above may have run finalizers. Revalidate immediately before
   -- exclusive binding; no user code can consume or close the capability now.
-  if final_wait ~= nil then
-    final_wait:check_cleanup_binding(runtime)
-    final_wait.cleanup_task = erased
-  end
+  if final_wait ~= nil then final_wait:bind_cleanup(runtime, erased) end
   local admitted = false
-  defer if not admitted and final_wait ~= nil and final_wait.cleanup_task == erased then
-    final_wait.cleanup_task = nil
-  end
+  defer if not admitted and final_wait ~= nil then final_wait:unbind_cleanup(erased) end
   do
     local index = runtime.next_task
     runtime.next_task = index + 1
     task.root_index = index
     runtime.tasks[index] = erased
-    if final_wait ~= nil then
-      check_status(final_wait.bridge.wake:activate(final_wait.target),
-        "async.native_retirement.activate")
-      -- All callbacks and their traced owner exist before native admission.
-      -- The register contract has no linked waiter/ref on a negative result.
-      local status = final_wait.native.register_wait(
-        final_wait.native.context, final_wait.target)
-      if status < 0 then check_status(status, "async.native_retirement.register") end
-      final_wait.native.armed = 1
-      final_wait.used = true
-      final_wait.registered = status ~= 0
-      if status == 0 then
-        local retired = retirement_poll_native(final_wait.native)
-        if retired > 0 then raise "native retirement is not complete" end
-        check_status(retired, "async.native_retirement.retire")
-        local target = final_wait.target
-        final_wait.target = nil
-        final_wait.bridge.waits[final_wait.identity] = nil
-        final_wait.bridge.wake:unregister(target)
-      end
-    end
+    if final_wait ~= nil then final_wait:admit_cleanup() end
     enqueue_ready(erased, READY_START, nil)
   catch
     if final_wait ~= nil then
-      -- Constructor rollback is native through release. It is not completion:
-      -- the original domain owner still owns any running resource.
-      if final_wait.registered then
-        final_wait.registered = false
-        final_wait.native.unregister_wait(final_wait.native.context)
-      end
-      local target = final_wait.target
-      final_wait.target = nil
-      final_wait.bridge.waits[final_wait.identity] = nil
-      if target ~= nil then final_wait.bridge.wake:unregister(target) end
-      final_wait.native.armed = 0
-      final_wait.retired = true
-      final_wait.cleanup_task = nil
-      final_wait.native_owner = nil
-      final_wait.native.context = nil
+      final_wait:rollback_cleanup()
       task.cleanup_wait = nil
     end
     -- No Task was exposed and no body was entered. Admission failure is the
@@ -1733,405 +1457,14 @@ function run_with_cleanup<|A, B|>(
   return task
 end
 
-local function ExternalWait:detach_domain()
-  if not self.registered then return end
-  self.registered = false
-  if self.native.unregister_wait ~= nil then
-    self.native.unregister_wait(self.native.context)
-  else
-    self.unregister_fn()
-  end
-end
-
-local function ExternalWait:retire()
-  if self.retired then return end
-  if self.native.armed ~= 0 and self.native.ready == 0 then
-    -- The owning Task keeps an accepted retirement barrier even when its
-    -- user-facing wait is closed or an ordinary cleanup entry failed.
-    self.close_requested = true
-    return
-  end
-  self.retired = true
-  local target = self.target
-  self.target = nil
-  self.bridge.waits[self.identity] = nil
-  -- No target borrow survives unregister: it consumes the registration ref.
-  -- The owner method, not the borrow-only native entry: at Lua-state close an
-  -- abandoned Task's cleanup can run after the wake owner's finalizer detached
-  -- the core and dropped this borrow, and then the owner returns EINVAL.
-  -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
-  if target ~= nil then self.bridge.wake:unregister(target) end
-  self.done = nil
-  self.cancel_action = nil
-  self.register_fn = nil
-  self.unregister_fn = nil
-  self.cleanup_task = nil
-  self.native_owner = nil
-  self.native.context = nil
-  self.native.register_wait = nil
-  self.native.unregister_wait = nil
-  self.native.retire = nil
-end
-
-local function ExternalWait:cancel_wait()
-  self:detach_domain()
-  self:retire()
-end
-
-function ExternalWait:close()
-  if self.retired then return end
-  local bound? = self.cleanup_task
-  if bound ~= nil and bound.phase ~= TASK_FINISHED then
-    if bound.runtime.current_task ~= bound or not bound.cleanup_active then
-      raise "external wait is reserved for its Task cleanup"
-    end
-  end
-  if self.done ~= nil then raise "cannot close an active external wait" end
-  if self.native.armed ~= 0 and self.native.ready == 0 then
-    self.close_requested = true
-    return
-  end
-  self:retire()
-end
-
-local function ExternalWait:notify()
-  if self.retired or self.notified then return end
-  if self.native.retire ~= nil and self.native.ready == 0 then return end
-  local bound? = self.cleanup_task
-  if bound ~= nil and bound.root_done and bound.terminal_kind ~= TERMINAL_NONE then
-    if not bound.ready_queued then enqueue_ready(bound, READY_TERMINAL, nil) end
-    self.notified = true
-    return
-  end
-  local done? = self.done
-  if done == nil then return end
-  local task = done.task
-  if done.epoch ~= self.number or task.epoch ~= self.number or
-      task.wait ~= done or done.phase ~= WAIT_PENDING then return end
-  if done.policy == WAIT_CLEANUP then
-    enqueue_ready(task, READY_RESUME, done)
-  else
-    task:resume(self.token)
-  end
-  self.notified = true
-end
-
--- Implementation notes: doc/implementation/libuv-runtime.md#external-wake-bridge
-local function ExternalBridge:drain()
-  if self.closed then return end
-  local identities = foreign unsigned long long.new_array(64)
-  local status, count = self.wake:drain(identities, 64)
-  -- Count remains valid on an error. Schedule the consumed identities before
-  -- reporting status; valid live libuv async handles have no recoverable send failure.
-  local failed = false
-  for index = 0, (count as integer) - 1 do
-    local identity: integer = identities[index]
-    local owner? = self.waits[identity]
-    if owner ~= nil then
-      if owner.native.retire ~= nil then
-        -- The durable native receipt is retired/latching-ready before entering
-        -- any ordinary notification method which could grow the Lua stack.
-        local retired = retirement_poll_native(owner.native)
-        if retired == 0 then
-          local target = owner.target
-          owner.target = nil
-          self.waits[owner.identity] = nil
-          owner.registered = false
-          if target ~= nil then self.wake:unregister(target) end
-        elseif retired < 0 then
-          if self.runtime.retirement_error == nil then self.runtime.retirement_error = owner end
-          uv.stop(self.runtime.loop)
-        end
-      end
-      do owner:notify()
-      catch
-        failed = true
-        fail_runtime(self.runtime, error, traceback)
-        -- The scheduler preserves ready work after its first Runtime failure,
-        -- even when its timer can no longer be armed.
-        owner:notify()
-      end
-    end
-  end
-  check_status(status, "async.external_wait.drain")
-  if failed then rethrow_failure(self.runtime.failure) end
-end
-
-local function external_bridge(runtime: Runtime): ExternalBridge
-  local existing? = runtime.external
-  if existing ~= nil then return existing end
-  local bridge = ExternalBridge {
-    runtime = runtime, wake = uv.external_wake_t.new(), waits = {},
-    next_identity = 1, closed = false
-  }
-  local callback = function (_: uv.external_wake_t) bridge:drain() end
-  check_status(uv.external_wake_init(runtime.loop, bridge.wake, callback),
-    "async.external_wait.init")
-  runtime.external = bridge
-  return bridge
-end
-
-local function prepare_wait(
-    register_fn: (function (foreign *void): boolean)?,
-    unregister_fn: (function (): ())?,
-    native_owner: value, context: foreign *void,
-    native_register: foreign function (*void, *void): int,
-    native_unregister: foreign function (*void): void,
-    native_retire: foreign function (*void): int): ExternalWait
-  local runtime = ensure_runtime()
-  if runtime.closing or runtime.exit_code ~= nil then
-    raise "cannot prepare an external wait while async Runtime is shutting down"
-  end
-  local bridge = external_bridge(runtime)
-  local identity = bridge.next_identity
-  if identity == 0 then raise "async external wait identity exhausted" end
-  if identity == (ffi.LUA_MAXINTEGER as integer) then bridge.next_identity = 0
-  else bridge.next_identity = identity + 1 end
-  local owner = ExternalWait {
-    bridge = bridge, identity = identity, target = nil,
-    register_fn = register_fn, unregister_fn = unregister_fn,
-    token = ResumeToken("async.external_wait"), cancel_action = nil,
-    done = nil, number = 0, used = false, registered = false,
-    notified = false, retired = false, cleanup_task = nil,
-    native = foreign titan_async_retirement.new(), native_owner = native_owner,
-    awaited = false, close_requested = false
-  }
-  owner.native.context = context
-  owner.native.register_wait = native_register
-  owner.native.unregister_wait = native_unregister
-  owner.native.retire = native_retire
-  if native_retire == nil then
-    owner.cancel_action = function () owner:cancel_wait() end
-  end
-  bridge.waits[identity] = owner
-  do
-    local status, target = bridge.wake:reserve(identity)
-    owner.target = target
-    check_status(status, "async.external_wait.reserve")
-  catch
-    owner:close()
-    raise
-  end
-  return owner
-end
-
---- Reserve a single-use external wait without keeping the Runtime loop alive.
--- At await, register_fn rechecks readiness and retains/publishes the wake
--- target only when returning true; false completes inline. unregister_fn must
--- detach a published target before releasing its native reference.
-function prepare_external_wait(
-    register_fn: function (foreign *void): boolean,
-    unregister_fn: function (): ()): ExternalWait
-  return prepare_wait(register_fn, unregister_fn, nil, nil, nil, nil, nil)
-end
-
---- Prepare a native terminal gate for run_with_cleanup; retain owner as a root.
--- C-only register_fn returns 0 (ready), 1 (linked), or a negative native status
--- without admission. retire_fn returns 0 (retired), 1 (pending), or a negative
--- status (retryable through explicit loop entry after admission). unregister_fn
--- rolls back admission.
-function prepare_native_retirement(
-    owner: value, context: foreign *void,
-    register_fn: foreign function (*void, *void): int,
-    unregister_fn: foreign function (*void): void,
-    retire_fn: foreign function (*void): int): ExternalWait
-  -- Implementation notes: doc/implementation/libuv-runtime.md#native-retirement-barriers
-  if register_fn == nil or unregister_fn == nil or retire_fn == nil then
-    raise "native retirement callbacks must not be NULL"
-  end
-  return prepare_wait(nil, nil, owner, context, register_fn, unregister_fn, retire_fn)
-end
-
-local function start_external_wait(
-    done: Completion<|ExternalWait, nil, value|>, number: integer): uv.req_t?
-  local owner = done:context(number)
-  local task = done.task
-  owner.done = done as Wait
-  owner.number = number
-  if done.policy ~= WAIT_CLEANUP then
-    task.suspended = true
-    task.resume_token = owner.token
-    task.resume_pending = false
-    task.suspend_cancel = owner.cancel_action
-  end
-  -- Preparation reserves native storage without keeping the loop alive.
-  -- Activation is allocation-free and precedes native waiter publication.
-  check_status(owner.bridge.wake:activate(owner.target), "async.external_wait.activate")
-  -- The registrar checks readiness and publishes its retained native target
-  -- under its domain mutex. An inline notification cannot run this loop.
-  owner.registered = true
-  local waiting = false
-  do
-    if owner.native.register_wait ~= nil then
-      local status = owner.native.register_wait(owner.native.context, owner.target)
-      if status < 0 then check_status(status, "async.external_wait.register") end
-      waiting = status ~= 0
-    else
-      waiting = owner.register_fn(owner.target)
-    end
-  catch
-    defer owner:retire()
-    owner:detach_domain()
-    raise
-  end
-  if not waiting then
-    owner.registered = false
-    owner:retire()
-    done:resolve(number, nil)
-  end
-  return nil
-end
-
-local function start_native_retirement_wait(
-    done: Completion<|ExternalWait, nil, value|>, number: integer): uv.req_t?
-  local owner = done:context(number)
-  owner.done = done as Wait
-  owner.number = number
-  if owner.native.ready ~= 0 then done:resolve(number, nil) end
-  return nil
-end
-
-local function ExternalWait:await(policy: integer)
-  local task = running()
-  if task.runtime ~= self.bridge.runtime then
-    raise "external wait belongs to another async Runtime"
-  end
-  if self.retired then raise "external wait is consumed or closed" end
-  local bound? = self.cleanup_task
-  if bound ~= nil and (bound ~= task or not task.cleanup_active or policy ~= WAIT_CLEANUP) then
-    raise "external wait is reserved for its Task cleanup"
-  end
-  if self.native.retire ~= nil then
-    if bound == nil then raise "native retirement is not bound to a cleanup Task" end
-    if self.awaited or self.close_requested then raise "external wait is consumed or closed" end
-    self.awaited = true
-    defer do
-      self.done = nil
-      clear_suspension(task)
-    end
-    -- This exact cleanup boundary follows the domain's ordinary forwarding
-    -- attempt. The native callback may begin approved reasonless retirement.
-    local status = retirement_poll_native(self.native)
-    if status == 0 then
-      local target = self.target
-      self.target = nil
-      self.bridge.waits[self.identity] = nil
-      self.registered = false
-      if target ~= nil then self.bridge.wake:unregister(target) end
-      return
-    end
-    if status < 0 then
-      if task.runtime.retirement_error == nil then task.runtime.retirement_error = self end
-      uv.stop(task.runtime.loop)
-    end
-    local result = coroutine.yield(
-      completion<|ExternalWait, nil, value|>(self, start_native_retirement_wait, WAIT_CLEANUP),
-      ASYNC_TAG) as Result<|nil, value|>
-    case result
-    when error(failure) then raise failure
-    else
-    end
-    return
-  end
-  if self.used then raise "external wait is consumed or closed" end
-  self.used = true
-  local completed = false
-  defer do
-    if not completed then self:detach_domain() end
-    self:retire()
-    clear_suspension(task)
-  end
-  local result = coroutine.yield(
-    completion<|ExternalWait, nil, value|>(self, start_external_wait, policy),
-    ASYNC_TAG) as Result<|nil, value|>
-  case result
-  when error(failure) then raise failure
-  else
-  end
-  completed = true
-end
-
---- Await this single-use generic wait with ordinary Task cancellation.
-function ExternalWait:wait()
-  self:await(WAIT_ORDINARY)
-end
-
---- Await with cancellation shielding; native waits require bound Task cleanup.
-function ExternalWait:wait_cleanup()
-  self:await(WAIT_CLEANUP)
-end
-
---- Prepare, await and close one ordinary cancellable external wait.
-function wait_external(register_fn: function (foreign *void): boolean,
-                       unregister_fn: function (): ())
-  running()
-  local owner = prepare_external_wait(register_fn, unregister_fn)
-  defer owner:close()
-  owner:wait()
-end
-
---- Await one ordinary external wait through C-only registrars, rooting owner.
--- Context is borrowed until return, including synchronous cancellation unlink.
--- unregister_fn also runs while the waiting Task unwinds at Lua-state close,
--- possibly after owner was finalized: the linked registration must keep its
--- native object alive (async-io.md, external waits, "State close").
--- register_fn returns 0 (ready), 1 (linked), or a negative status with no link.
--- This is not a native retirement capability and cannot gate Task publication.
-function wait_external_native(owner: value, context: foreign *void,
-    register_fn: foreign function (*void, *void): int,
-    unregister_fn: foreign function (*void): void)
-  running()
-  if register_fn == nil or unregister_fn == nil then
-    raise "native external wait callbacks must not be NULL"
-  end
-  local wait = prepare_wait(nil, nil, owner, context, register_fn, unregister_fn, nil)
-  defer wait:close()
-  wait:wait()
-end
-
---- Prepare, await and close one cancellation-shielded external wait.
-function wait_external_cleanup(register_fn: function (foreign *void): boolean,
-                               unregister_fn: function (): ())
-  running()
-  local owner = prepare_external_wait(register_fn, unregister_fn)
-  defer owner:close()
-  owner:wait_cleanup()
-end
-
-local function ExternalBridge:close()
-  if self.closed then return end
-  for _, owner in iteration.pairs(self.waits) do owner:close() end
-  check_status(self.wake:close(), "async.external_wait.close")
-  self.closed = true
-end
-
-local function close_handles(runtime: Runtime)
-  local external? = runtime.external
-  if external ~= nil then external:close() end
-  uv.walk(runtime.loop, function (handle: uv.handle_t, _: value)
-    if not uv.is_closing(handle) then
-      case handle
-      when timer(owner) then
-        if owner == runtime.wake then uv.timer_close(owner, ready_closed)
-        else uv.close(handle) end
-      when async() then
-        defer uv.close(handle)
-        local data = uv.handle_get_data(handle)
-        if data is Receiver then (data as Receiver):disable() end
-      else uv.close(handle)
-      end
-    end
-  end)
-end
-
 local function fail_runtime(runtime: Runtime, error: value, trace: string)
   if runtime.failure == nil then runtime.failure = Error(error, trace) end
-  uv.unbind_transfer_loop(runtime.loop)
+  unbind_backend(runtime)
   runtime.closing = true
   -- The failing callback may have stopped or closed the borrowed loop's wake
   -- handle. Revalidate it before the driver can block on unrelated handles.
   runtime.wake_armed = false
-  if runtime.driving then uv.stop(runtime.loop) end
+  if runtime.driving then stop_backend(runtime) end
 end
 
 local function cancel_shutdown_tasks(runtime: Runtime, origin: Task?)
@@ -2172,253 +1505,57 @@ local function unwind_orphans(runtime: Runtime)
   end
 end
 
---- Drive the active Runtime on the Lua main thread until Tasks and native cleanup finish.
--- @usage async-io.md
-function loop()
-  -- Implementation notes: doc/implementation/libuv-runtime.md#explicit-negative-status-retry
-  require_main_thread()
-  local runtime? = active_runtime
-  if runtime == nil then return end
-  if runtime.current_task ~= nil then raise "async.loop must be driven from the Lua main thread" end
-  if runtime.driving then raise "async.loop is already being driven" end
-  runtime.driving = true
-  defer runtime.driving = false
-  -- A negative native retirement result leaves this Runtime and every native
-  -- owner intact. Only an explicit new loop() invocation retries those calls.
-  runtime.retirement_error = nil
-  for index = 1, runtime.next_task - 1 do
-    local task? = runtime.tasks[index]
-    if task ~= nil then
-      local barrier? = task.cleanup_wait
-      if barrier ~= nil and barrier.native.status < 0 then barrier.native.status = 1 end
+-- One Task's emergency recovery from the driver's Task inventory. Returns
+-- whether a scheduling failure needs another recovery pass before blocking.
+local function recover_task(runtime: Runtime, task: Task): boolean
+  local recover = false
+  local barrier? = task.cleanup_wait
+  if barrier ~= nil then barrier:poll_retirement(task) end
+  if task.root_done and task.terminal_kind ~= TERMINAL_NONE and
+      (barrier == nil or barrier:retired_natively()) then
+    if not task.ready_queued then
+      do enqueue_ready(task, READY_TERMINAL, nil)
+      catch recover = true; fail_runtime(runtime, error, traceback) end
     end
+  elseif barrier ~= nil then
+    do barrier:notify_if_ready()
+    catch recover = true; fail_runtime(runtime, error, traceback) end
   end
-  local recover_native = true
-  while true do
-    if recover_native or runtime.failure ~= nil then
-      recover_native = false
-      -- Emergency recovery uses the existing Task inventory, not a channel
-      -- registry. It runs before blocking even when a native wait refs UV.
-      for index = 1, runtime.next_task - 1 do
-        local task? = runtime.tasks[index]
-        if task ~= nil then
-          local barrier? = task.cleanup_wait
-          if barrier ~= nil and barrier.native.armed ~= 0 and barrier.native.ready == 0 then
-            local notified = uv.native_external_wake_is_notified(barrier.target) ~= 0
-            if notified or task.root_done or barrier.awaited then
-              local status = retirement_poll_native(barrier.native)
-              if status == 0 then
-                local target = barrier.target
-                barrier.target = nil
-                barrier.bridge.waits[barrier.identity] = nil
-                barrier.registered = false
-                if target ~= nil then barrier.bridge.wake:unregister(target) end
-              elseif status < 0 then
-                if runtime.retirement_error == nil then runtime.retirement_error = barrier end
-              end
-            end
-          end
-          if task.root_done and task.terminal_kind ~= TERMINAL_NONE and
-              (barrier == nil or barrier.native.ready ~= 0) then
-            if not task.ready_queued then
-              do enqueue_ready(task, READY_TERMINAL, nil)
-              catch recover_native = true; fail_runtime(runtime, error, traceback) end
-            end
-          elseif barrier ~= nil and barrier.native.ready ~= 0 and
-              barrier.done ~= nil and not barrier.notified then
-            do barrier:notify()
-            catch recover_native = true; fail_runtime(runtime, error, traceback) end
-          end
-          if runtime.failure ~= nil and not task.root_done and not task.ready_queued then
-            if task.phase == TASK_READY then
-              -- An entry allocation may have failed after dequeue but before
-              -- the startup trampoline ran. Preserve run_with_cleanup's entry.
-              do enqueue_ready(task, READY_START, nil)
-              catch recover_native = true; fail_runtime(runtime, error, traceback) end
-            else
-              local waiting? = task.wait
-              if waiting ~= nil and waiting.phase == WAIT_SETTLED then
-                do enqueue_ready(task, READY_DELIVER, waiting)
-                catch recover_native = true; fail_runtime(runtime, error, traceback) end
-              else
-                local registrar: value = start_native_retirement_wait
-                local unaccepted_native = waiting ~= nil and barrier ~= nil and
-                  waiting.phase == WAIT_REGISTERING and waiting.stored_context == barrier and
-                  waiting.register == registrar
-                if waiting == nil or waiting.phase == WAIT_RETIRED or unaccepted_native then
-                  -- These operations have no outstanding domain acceptance.
-                  -- A cleanup barrier itself remains preaccepted and retained.
-                  task.wait = nil
-                  task.suspended = false
-                  task.resume_token = nil
-                  task.resume_pending = false
-                  task.suspend_cancel = nil
-                  if barrier ~= nil and task.terminal_kind == TERMINAL_NONE then
-                    local failure = runtime.failure as Error
-                    task.terminal_kind = TERMINAL_FAILED
-                    task.terminal_value = failure.error
-                    task.terminal_trace = failure.traceback
-                  end
-                  do enqueue_ready(task, READY_UNWIND, nil)
-                  catch recover_native = true; fail_runtime(runtime, error, traceback) end
-                end
-              end
-            end
-          end
-        end
-      end
-    end
-    local retirement_error? = runtime.retirement_error
-    if retirement_error ~= nil then
-      raise operation_error(retirement_error.native.status, "async.native_retirement.retire")
-    end
-    if runtime.failure ~= nil then cancel_shutdown_tasks(runtime, nil) end
-    if runtime.ready_head ~= nil and not runtime.wake_armed then
-      local wake_failed = false
-      do arm_ready(runtime)
-      catch
-        wake_failed = true
-        fail_runtime(runtime, error, traceback)
-      end
-      if wake_failed then
-        cancel_shutdown_tasks(runtime, nil)
-        -- An unrelated referenced handle may need one of these continuations
-        -- to close it. Recover ready work before a blocking uv.run, not only
-        -- once native liveness reaches zero. Pending native waits stay owned.
-        do drain_ready(runtime) catch fail_runtime(runtime, error, traceback) end
-      end
-    end
-    -- Task-owned cleanup may have accepted a handle-based wait. Leave its
-    -- completion and scheduler wakes intact until every Task has unwound.
-    if not has_tasks(runtime) and runtime.ready_head == nil then
-      uv.unbind_transfer_loop(runtime.loop)
-      runtime.closing = true
-      do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
-    end
-    local mode = uv.RUN_DEFAULT
-    if runtime.ready_head ~= nil and not runtime.wake_armed then mode = uv.RUN_NOWAIT end
-    if recover_native then mode = uv.RUN_NOWAIT end
-    do uv.run(runtime.loop, mode)
-    catch
-      fail_runtime(runtime, error, traceback)
-      recover_native = true
-    end
-    if not uv.loop_alive(runtime.loop) then
-      if runtime.ready_head ~= nil then
-        -- Accepted work remains in the ready queue. The next outer iteration
-        -- rearms it or recovers a bounded batch before classifying orphans.
-        runtime.wake_armed = false
-      elseif has_tasks(runtime) then
-        if runtime.failure == nil then fail_runtime(runtime, "libuv loop became idle while async Tasks were waiting", "") end
-        unwind_orphans(runtime)
+  if runtime.failure ~= nil and not task.root_done and not task.ready_queued then
+    if task.phase == TASK_READY then
+      -- An entry allocation may have failed after dequeue but before
+      -- the startup trampoline ran. Preserve run_with_cleanup's entry.
+      do enqueue_ready(task, READY_START, nil)
+      catch recover = true; fail_runtime(runtime, error, traceback) end
+    else
+      local waiting? = task.wait
+      if waiting ~= nil and waiting.phase == WAIT_SETTLED then
+        do enqueue_ready(task, READY_DELIVER, waiting)
+        catch recover = true; fail_runtime(runtime, error, traceback) end
       else
-        -- Native liveness excludes initialized inactive handles. Last-Task
-        -- retirement can reach this branch before the next outer iteration.
-        do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
-        if not uv.loop_alive(runtime.loop) then
-          local status = uv.loop_close(runtime.loop)
-          if status == 0 then
-            uv.timer_set_data(runtime.wake, nil)
-            notify_runtime_closed(runtime)
-            active_runtime = nil
-            local failure? = runtime.failure
-            if failure ~= nil then rethrow_failure(failure) end
-            return
+        local unaccepted_native = waiting ~= nil and barrier ~= nil and
+          barrier:unaccepted(waiting)
+        if waiting == nil or waiting.phase == WAIT_RETIRED or unaccepted_native then
+          -- These operations have no outstanding domain acceptance.
+          -- A cleanup barrier itself remains preaccepted and retained.
+          task.wait = nil
+          task.suspended = false
+          task.resume_token = nil
+          task.resume_pending = false
+          task.suspend_cancel = nil
+          if barrier ~= nil and task.terminal_kind == TERMINAL_NONE then
+            local failure = runtime.failure as Error
+            task.terminal_kind = TERMINAL_FAILED
+            task.terminal_value = failure.error
+            task.terminal_trace = failure.traceback
           end
-          check_status(status, "runtime.loop.close")
+          do enqueue_ready(task, READY_UNWIND, nil)
+          catch recover = true; fail_runtime(runtime, error, traceback) end
         end
       end
     end
   end
-end
-
---- Return the bundled libuv version string.
--- @return Native libuv version.
--- @usage async-io.md
-function version(): string
-  return uv.version_string()
-end
-
-local record ForeignWork
-  local request: uv.work_t
-  local worker: foreign function (*void): void
-  local argument: foreign *void
-  local done: Completion<|ForeignWork, value, OperationError|>?
-  local number: integer
-  local abandoned: foreign function (*void): void
-end
-
-local function ForeignWork:release_abandoned()
-  local release = self.abandoned
-  release(self.argument)
-end
-
--- Implementation notes: doc/implementation/libuv-runtime.md#foreign-workers
--- A Lua state close unwound the wait before the job returned. The Runtime
--- finalizer releases after its drain, when the job has returned; a Runtime
--- already finalized has drained, so release at once.
-local function ForeignWork:abandon()
-  if not self.abandoned then return end
-  local runtime? = active_runtime
-  if runtime == nil then
-    self:release_abandoned()
-    return
-  end
-  runtime.abandoned_work[#runtime.abandoned_work + 1] = self
-end
-
-local function foreign_work_completed(request: uv.work_t, status: integer)
-  local work: ForeignWork = request:get_data()
-  local done = work.done as Completion<|ForeignWork, value, OperationError|>
-  local number = work.number
-  request:set_data(nil)
-  work.done = nil
-  do
-    if status < 0 then done:reject(number, operation_error(status, "async.run_foreign"))
-    else done:resolve(number, nil) end
-  catch done:fatal(number, error, traceback); raise end
-end
-
-local function start_foreign_work(done: Completion<|ForeignWork, value, OperationError|>, number: integer): uv.req_t?
-  local work = done:context(number)
-  work.done = done
-  work.number = number
-  work.request:set_data(work)
-  local status = uv.queue_work(current_loop(), work.request, work.worker,
-      work.argument, foreign_work_completed, nil)
-  if status < 0 then
-    work.request:set_data(nil)
-    work.done = nil
-    done:reject(number, operation_error(status, "async.run_foreign"))
-  end
-  return nil
-end
-
---- Run one blocking C function-pointer call in the shared worker pool and wait for completion.
--- @param f C-only entry; it must never enter the calling Lua/Titan state. Separately owned states follow the titan.lua isolation protocol.
--- @param arg Native pointer whose owner remains live until after-work completion, including cancellation.
--- @param abandoned Optional C-only release for arg, called on the closing thread after f returns if a Lua state close abandons the wait.
--- @usage async-io.md
-function run_foreign(f: foreign function (*void): void, arg: foreign *void,
-                     abandoned: foreign function (*void): void)
-  if not f then raise "async.run_foreign callback must not be NULL" end
-  local work = ForeignWork(uv.work_t.new(), f, arg, nil, 0, abandoned)
-  -- catch never runs during an unwind, so `waiting` stays set only when a
-  -- Lua state close abandons the wait.
-  local waiting = true
-  defer if waiting and ffi.titan_state_closing(L) ~= 0 then work:abandon() end
-  local result: Result<|value, OperationError|>? = nil
-  do
-    result = await_with<|ForeignWork, value, OperationError|>(work, start_foreign_work)
-  catch
-    waiting = false
-    raise
-  end
-  waiting = false
-  case result
-  when error(failure) then raise failure
-  else
-  end
+  return recover
 end
 
 --- Create a bounded FIFO channel with at most one blocked sender and receiver.
@@ -4492,7 +3629,7 @@ function request_exit(code: integer)
   local task = running()
   local runtime = task.runtime
   if runtime.exit_code == nil then runtime.exit_code = code end
-  uv.unbind_transfer_loop(runtime.loop)
+  unbind_backend(runtime)
   local index = 1
   while index < runtime.next_task do
     local other? = runtime.tasks[index]
@@ -4503,11 +3640,6 @@ function request_exit(code: integer)
   end
   raise task.cancel_value
 end
-
--- Merge declarations into async and the final initializer into its sole root
--- initializer. async already imports lua.h and titan/ffi.h; this header is
--- OS-only and introduces no transitive libuv dependency.
-foreign import "async_signal_platform.h"
 
 local function bootstrap(main_callable: function ({string}): (integer),
                          args: {string}): integer
@@ -4521,6 +3653,7 @@ local function bootstrap(main_callable: function ({string}): (integer),
   if exit_code ~= nil then return exit_code end
   local succeeded = task:status():has_succeeded()
   if succeeded then return result end
+  report_bootstrap_failure(task)
   return 1
 end
 
@@ -4962,156 +4095,10 @@ function BufferedSubscription:wake_batch()
   if waiter ~= nil and waiter.batch then self.core:wake() end
 end
 
-local function Receiver:begin_close()
-  if self.handle_view:is_initialized() and not uv.is_closing(self.handle_view) then
-    uv.close(self.handle_view)
-  end
-end
-
-local function Receiver:wake()
-  local reader? = self.reader
-  if reader == nil then return end
-  local task? = reader.task
-  -- Task:resume wakes a reader suspended on its token and latches the wake of
-  -- a running reader, one about to suspend or one decoding, whose loop in
-  -- wait rechecks the slot after every return; it coalesces repeated wakes.
-  if task ~= nil then task:resume(reader.token) end
-end
-
--- Runtime shutdown disables admission before its generic native handle close.
-local function Receiver:disable()
-  receiver_disable_native(self.native)
-  self:wake()
-end
-
--- lua_close finalizes rooted owners too; senders must already be quiescent.
-local function receiver_finalize(owner: Receiver)
-  receiver_disable_native(owner.native)
-end
-
---- Create a coalescing receiver without driving its Runtime or requiring a Task.
--- Keep this owner and its Lua state alive until all borrowed-handle sends return.
--- After sender quiescence, close and drain the owning loop before releasing roots.
--- @return Receiver retained by its native handle until close completes.
--- @usage async-io.md#cross-state-receivers
-function receiver(): Receiver
-  -- Implementation notes: doc/implementation/libuv-runtime.md#cross-state-receiver-ownership
-  local runtime = ensure_runtime()
-  if runtime.closing or runtime.exit_code ~= nil then
-    raise "cannot create a receiver while async Runtime is shutting down"
-  end
-  local handle = uv.async_t.new()
-  local owner = Receiver {
-    native = foreign titan_async_receiver.new(),
-    native_handle = handle,
-    handle_view = handle:as_handle_t(),
-    reader = nil
-  }
-  owner.native.closed = 1
-  gc.finalizable(owner, receiver_finalize)
-  do
-    -- A notification carries no resource. The actual packet stays in the
-    -- native slot, including while a reader's deferred wake is queued.
-    local callback = function (_: uv.async_t) owner:wake() end
-    uv.handle_set_data(owner.handle_view, owner)
-    owner.native.send = uv.async_send_function()
-    check_status(uv.async_init(runtime.loop, handle, callback), "async.receiver")
-    owner.native.handle = handle:borrow()
-    owner.native.closed = 0
-  catch
-    owner:close()
-    raise
-  end
-  return owner
-end
-
---- Borrow the cross-state send address; retain this receiver and its Lua state.
--- Withdraw the address from all senders and finish in-flight sends before close.
--- @usage async-io.md#cross-state-receivers
-function Receiver:handle(): foreign *void
-  return self.native
-end
-
---- Encode and replace the latest value, disposing any unread predecessor natively.
--- Rejection before exchange discards the encoded packet. Notification failure
--- after exchange still commits delivery ownership; never retry a committed send.
--- Only packet-registered resources are released on discard; manual handoff bytes
--- still require their explicit adoption/disposal protocol.
--- @param handle Borrowed address; retain its Receiver and state through all sends.
--- @param candidate Transferable value or explicit TransferValue copy/borrow policy.
--- @usage async-io.md#cross-state-receivers
-function send(handle: foreign *void, candidate: value)
-  if not handle then raise "receiver handle must not be NULL" end
-  local raw = transfer.encode_message(candidate)
-  defer transfer.discard_message(raw)
-  -- Call at the real guarded local: its volatile home exposes the native clear
-  -- before check_status can enter ordinary Titan code or raise.
-  local status = receiver_send_native(handle as foreign *titan_async_receiver, raw)
-  if status == 2 then raise "receiver is closed" end
-  check_status(status, "async.send")
-end
-
--- Notification-only Receivers never allocate reader state. The first wait
--- publishes it only once complete; every later wait reuses it.
-local function Receiver:create_reader(): ReceiverReader
-  local reader = ReceiverReader(nil, ResumeToken("async.Receiver.wait"), nil)
-  -- Task:cancel runs this only while the reserving Task is suspended in wait,
-  -- so the reservation it withdraws is necessarily that Task's.
-  reader.withdraw = function () reader.task = nil end
-  self.reader = reader
-  return reader
-end
-
---- Reserve the sole reader and consume/decode the latest value, waiting if needed.
--- Cancellation withdraws only the reservation, leaving an unread packet intact.
--- Decode failures consume the packet and raise here; no lazy retry is possible.
--- @return Decoded value, including nil and false as data.
--- @usage async-io.md#cross-state-receivers
-function Receiver:wait(): value
-  local task = running()
-  local reader = self.reader or self:create_reader()
-  if reader.task ~= nil then raise "receiver already has a waiting reader" end
-  -- Cancellation withdraws the reservation before this Task unwinds, so a
-  -- successor may already hold it on exit; release only this Task's own.
-  defer if reader.task == task then reader.task = nil end
-  -- Reserve before even inspecting the slot, not just before suspension.
-  -- Cancellation withdraws only this reservation; it never takes the packet.
-  reader.task = task
-  while true do
-    checkpoint()
-    local raw: foreign *void = nil
-    local status = receiver_take_native(self.native, raw)
-    if status == 2 then raise "receiver is closed" end
-    if status == 1 then
-      -- Guard only after the native take, so no later write reaches `raw`;
-      -- decode consumes and clears that actual local on return and on raise.
-      defer transfer.discard_message(raw)
-      return transfer.decode_message(raw)
-    end
-    -- A stale/coalesced notification may have no packet. Suspend under the same
-    -- reservation: send between the check and registration leaves the UV async
-    -- notification pending until this Task has yielded.
-    suspend(reader.token, reader.withdraw)
-  end
-end
-
---- Close idempotently, dispose an unread packet natively, and wake the reader.
--- @usage async-io.md#cross-state-receivers
-function Receiver:close()
-  defer self:begin_close()
-  self:disable()
-end
-
 do
   SUCCESS_NIL = Result<|value, value|>.success(nil)
   CANCELLABLE_SUCCESS_NIL = CancellableResult<|value, value|>.success(nil)
-  local native_error = ffi.titan_async_ignore_sigpipe_if_default()
-  if native_error ~= 0 then
-    check_status(uv.translate_sys_error(native_error), "runtime.sigpipe")
-  end
-  -- The generated entrypoint has not yet built its Titan argument Array.
-  -- This still runs with --no-uv-bootstrap; only invoking bootstrap is skipped.
-  uv.setup_process_args()
+  initialize_backend()
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then

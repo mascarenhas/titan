@@ -1,0 +1,78 @@
+-- A browser program whose main runs as the async bootstrap Task (titan#334).
+-- It interleaves with a worker across relinquish points, then returns, fails,
+-- is cancelled or exits as its first argument says; "fail-exit" fails at once
+-- while a peer then requests exit. With a second argument it first writes a
+-- line and waits until the harness, having received that line, settles the
+-- `release` request. spec/coder/browser_scheduler_spec.lua builds it without
+-- --no-uv-bootstrap and runs it plainly and through bootstrap.mjs.
+local async = import "async"
+local browser = import "browser"
+
+foreign import "stdio.h"
+
+local type Value = browser.BrowserValue
+
+local function say(text: string)
+  ffi.fputs(text .. "\n", ffi.stdout)
+end
+
+local function await_release()
+  local source = browser.binding("release")
+  defer source:close()
+  local request: browser.BrowserRequest? = nil
+  defer do
+    local open? = request
+    if open ~= nil then open:close() end
+  end
+  case async.await<|nil, string|>(function (resolve: function (nil): (), reject: function (string): (),
+      _fatal: function (value, string): ())
+    request = source:start(function (...: Value): Value
+      resolve(nil)
+      return Value.is_nil()
+    end, function (...: Value): Value
+      reject("release failed")
+      return Value.is_nil()
+    end)
+  end)
+  when error(message) then raise message
+  end
+end
+
+function main(args: {string}): integer
+  local mode = args[1]
+  if mode == "fail-exit" then
+    async.run<|nil, value|>(function (): nil
+      async.yield()
+      async.request_exit(7)
+      return nil
+    end)
+    raise "bootstrap failure"
+  end
+  local order = ""
+  local worker = async.run<|nil, value|>(function (): nil
+    for step = 1, 3 do
+      order = order .. "w" .. step
+      async.yield()
+    end
+    return nil
+  end)
+  for step = 1, 3 do
+    order = order .. "m" .. step
+    async.yield()
+  end
+  local finished = async.join(worker):has_succeeded()
+  if not finished then raise "the worker did not finish" end
+  say("order " .. order)
+  if #args > 1 then
+    say("waiting")
+    await_release()
+    say("released")
+  end
+  if mode == "fail" then raise "bootstrap failure" end
+  if mode == "cancel" then
+    async.running():cancel(async.CancellationReason<|value|>.simple("main cancelled"))
+    async.checkpoint()
+  end
+  if mode == "exit" then async.request_exit(7) end
+  return 3
+end
