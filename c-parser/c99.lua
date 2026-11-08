@@ -593,6 +593,7 @@ arrayDeclaratorContents <-
 arrayDeclaratorQualifiers <- {:array_qualifiers: {| typeQualifier+ |} :}
 
 -- Clang's nullability annotations do not change the imported pointer type.
+-- Ordered choice: keep _Nullable_result before its _Nullable prefix.
 pointerNullability <- ("_Nonnull" / "_Nullable_result" / "_Nullable" / "_Null_unspecified") _
 pointer <- {| ({ "*"/"^" } _ (typeQualifier / pointerNullability)*)+ |}
 
