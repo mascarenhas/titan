@@ -459,16 +459,20 @@ runner with a 60-minute timeout after `build-compiler`:
    loaded)` marker, and original-error preservation.
 7. **Persistent bridge gate (all six cells).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
-   `browser.tests` image with its independent-state C helper and the failed
-   initializer image, each with assertions 2 and 0. It stages those images and
+   `browser.tests` image with its independent-state C helper, the failed
+   initializer image, and the html5 click counter of synchronous C callbacks
+   with its C helper, each with assertions 2 and 0. It stages those images and
    the portable JavaScript fixtures in `out/browser/bridge-<profile>-<engine>`.
    The cell's managed engine runs the full lifecycle, typed values, callbacks,
-   notification, request, stdio, state-close and collection suite. Separate
+   notification, request, stdio, state-close and collection suite, and
+   `counter.mjs` clicks the counter's buttons on the page (`COUNTER
+   {"verdict":"PASS"`). Separate
    processes require unhandled-rejection status74 for opaque imported and
    reverse-call Promise values, and abort status70 for the poisoned-owner
    retirement case. Each negative case must also emit its expected marker;
    an early failure with the same status cannot satisfy it. The production
-   Chromium cell repeats the same bridge cases on Node; validation Node is
+   Chromium cell repeats the same bridge cases on Node, except the counter,
+   which needs a page's DOM; validation Node is
    covered by `browser-stdlib`. Logs are
    `$RUNNER_TEMP/browser-playwright-bridge-build.log` and
    `$RUNNER_TEMP/browser-playwright-bridge.log`.

@@ -2,9 +2,10 @@
 
 The core JavaScript bridge uses the browser JSPI backend and the single
 persistent image lifecycle. It does not add another coroutine driver, native
-message format, or synchronous reverse-call backend, and it supplies the
-[drive interface](#drive-interface-and-delivery) a scheduler uses rather than
-a scheduler. The
+message format, or synchronous JavaScript-to-Titan call (C reaches Titan
+synchronously only through [synchronous callbacks](#synchronous-c-callbacks)),
+and it supplies the [drive interface](#drive-interface-and-delivery) a
+scheduler uses rather than a scheduler. The
 public Titan API is [JavaScript bindings](../language/standard-library-browser.md);
 [the browser target](browser-target.md) owns link profiles, the embedded
 loader, the runner, deployment, and fatal engine classifications.
@@ -60,6 +61,8 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    `foreign function`s in `titan/browser.browser.titan`; in C-only protocol or
    probe images without `titan.browser`, the weak pointers are `NULL` and the
    exports reject cleanly with `titan_browser_invalid_entry` (`TITAN_BROWSER_STATE`).
+   The C entries for [synchronous callbacks](#synchronous-c-callbacks) forward
+   the same way.
 3. **Foreign trampolines (`invoke`, `release_callable`) and protected Titan
    entries (`invoke_entry`, `release_entry`):** The public foreign functions in
    `titan/browser.browser.titan` use header-free C primitive parameter types so
@@ -133,9 +136,10 @@ The userdata owns stable inline C storage. It is finalized through
 function, not a foreign `__gc` callback. No bridge registry anchor, metatable
 construction, or record lookup in the Lua registry is needed.
 
-The initializer roots `invoke_entry` and `release_entry` in module variables,
-writes their `TValue` closures and the module-owned fallback completion pointer
-into the record, then publishes its address with
+The initializer roots `invoke_entry` and `release_entry` (and the callback
+entries `call_sync_entry` and `callback_entry`) in module variables, writes
+their `TValue` closures and the module-owned fallback completion pointer into
+the record, creates the first callback thread, then publishes its address with
 `titan_browser_host_state_open`. That import assigns the opaque token and maps
 `token -> record` in the JS owner's `stateRecords` table. No JavaScript
 application API exposes a `lua_State *`, and there is no C static state list.
@@ -261,6 +265,97 @@ drives, and `titan.browser` never learns about Tasks.
   wait for the loader's next safe point after the drive.
 - **Wake.** `wake` calls `titan_browser_host_wake(state)`; the loader ignores
   it unless that state is driving.
+
+## Synchronous C callbacks
+
+An Emscripten API calls C synchronously from JavaScript, so Titan code in such
+a callback runs below a JavaScript frame and cannot suspend ([language
+contract](../language/standard-library-browser.md#synchronous-c-callbacks)).
+`titan.browser` provides the pin, the C entry and its bracket; core modules
+learn about the callback only through `titan_no_switch`.
+
+- **Pins.** `pin(fn)` adds one hold to the function's existing `Pin`
+  (`holds`, as a request hold does, allocating the pin when the function has
+  none) and returns a `BrowserPin` record with the state token, slot and
+  generation. The record registers the allocation-free `gc.finalizable`
+  shape, so an unreachable pin closes. `BrowserPin:close` is idempotent: it
+  drops the hold, calls `retire_if_unused`, and reports the change with the
+  trusted `titan_browser_host_hold(state, -1)`. The loader counts open pins
+  per state in `holds`, a [wake source](browser-target.md#drives-the-call-queue-and-wake-sources)
+  for the owner, and wakes the drive when the owner's last pin closes, so a
+  parked wait re-checks its wake sources.
+- **C entries.** `browserentry.lua` declares `call_sync`, `callback_enter`
+  and `callback_leave` as weak, like the invoke and release forwards, and
+  defines the C functions `titan_browser_call_sync`,
+  `titan_browser_callback_enter` and `titan_browser_callback_leave` that
+  forward to them. They are C entry points for authored C in the image, not
+  JavaScript exports. Without `titan.browser`, the first two return
+  `TITAN_BROWSER_STATE` and the third does nothing.
+- **Admission.** `call_sync` refuses without entering Lua, with a
+  `malloc`'d message and `TITAN_BROWSER_STATE`, when its identity names no
+  open, configured state record (`callback_state`: record lookup through
+  `titan_browser_host_state_record`, then the closing and configured checks)
+  or when `titan_browser_host_callback(state, 1)` refuses. That import admits
+  unless the bridge library is poisoned or the loader's `callbackAdmit`
+  refuses (closing, exited, terminal, or the state no longer open), and it
+  increments `$TitanBrowser.callbackDepth` on admission.
+- **Callback threads.** The state record gains `callback_handler` and
+  `call_sync_handler` (`TValue` entries like `invoke_handler`),
+  `callback_next` and `callback_depth`. A callback runs on its own Lua thread,
+  so its `CallInfo` chain, error jumps and traceback stay apart from parked
+  drive and coroutine frames. `callback_threads` (a module variable of
+  `CallbackThread` records holding each thread and its `lua_State *`) keeps
+  one thread per nesting level. The initializer creates level 1 and publishes
+  it as `callback_next`. An entry takes `callback_next` (none means
+  `"synchronous callback nesting is too deep"`), reserves `LUA_MINSTACK`
+  on it, increments `callback_depth`, clears `callback_next`, installs
+  `errorhandler` and runs the handler on that thread. The handler's first
+  step, `prepare_callback_thread`, publishes the next level's thread,
+  creating it once (`titan_newthread` in a stack transaction) on first use.
+  `callback_finish` then restores the depth, republishes the thread and
+  calls `titan_browser_host_callback(state, -1)`. Nested callbacks take
+  levels in LIFO order, and the steady state allocates no threads.
+- **Running the callable.** `call_sync_entry`, a function-level `catch`
+  around `call_sync_work`, reports `TITAN_BROWSER_MEMORY` if even that
+  preparation fails. `call_sync_work` looks the pin up by slot and
+  generation (a stale identity raises `"browser callable is released"`),
+  decodes the arguments with `decode_value`, checks handle and callable
+  arguments are live, and calls the function. `encode_sync_result` encodes
+  the one result and copies STRING and BYTES bytes into `malloc`'d memory. A
+  callable result's provisional JavaScript wrapper is rolled back at once,
+  since no wrapper will hold it, so C's copy stays valid only while another
+  holder pins the function. A raise fills `TITAN_BROWSER_TITAN_ERROR` with
+  `malloc`'d copies of the message and raw traceback.
+- **Bracket.** `callback_enter(state, frame)` runs the same admission and
+  thread selection for a standard library's hand-written trampoline and
+  returns the thread in `frame->L`; `callback_leave(frame)` restores the depth
+  and the next thread and ends the admission. The trampoline then follows
+  the raw Lua C API rules of the [guard-rails](../style-guide.md#write-native-bindings-titan-first).
+  It is not an application API.
+- **No-switch mode.** `titan/ffi.h` defines `titan_no_switch(L)` for wasm
+  builds as the import `titan_browser_in_callback()`, true while
+  `callbackDepth > 0`, and as the constant 0 natively. The flag is per
+  instance because the engine stack that cannot suspend is the instance's
+  one stack, whichever Lua state the callback entered. `coroutine` and
+  `async` consult it to refuse or defer switches ([coroutines](coroutines.md)).
+- **Switches that escape the check.** In the bridge library, `transfer`,
+  the suspending path of `destroy` and `relinquish` refuse a switch when no
+  promising entry holds the owner or a callback runs (`switchRefused`): they
+  poison with `TITAN_BROWSER_PROTOCOL`, `"Titan stack switch outside a
+  promising entry or inside a synchronous callback"`, and throw to the
+  callback's caller. V8 throws its `SuspendError` before it calls the import
+  at all, so the bridge also checks after the fact: the first admission of a
+  callback queues a microtask, and no microtask runs while a callback is on
+  the stack, so a depth still above zero then means a callback ended by an
+  exception without its leave (`callbacksLeft`). That poisons with
+  `"a synchronous C callback ended by an exception"`.
+- **Linear stack.** A callback's C frames use the linear stack of the code it
+  interrupted: the main stack, a Task's 256 KiB coroutine stack for a
+  callback nested in a binding that Task called, or, from a microtask between
+  two internal coroutine hops, possibly a coroutine's stack. Titan keeps no
+  C-stack counter of its own and Lua's `LUAI_MAXCCALLS` starts afresh on a
+  callback thread, so Emscripten's checked stack is the limit; overflowing it
+  aborts and poisons the instance.
 
 ## Fixed wasm32 layout
 
@@ -434,7 +529,12 @@ record invalidation; an earlier object's finalizer verifies inert close and
 release, followed by the expected binding-error warning. The same owner checks
 that the owner state reports `is_owner()`, that a C-created state does not and
 cannot begin a drive, and that the drive members refuse outside a drive or
-from a coroutine. Initializer failure has a separate real Titan image with a
+from a coroutine. Its synchronous-callback cases call `call_sync` and the
+bracket from inside an entry: arguments and results, Titan errors as a status,
+every refusal, callback threads reused per nesting depth (no main thread, so
+no drive), `titan_no_switch` set only inside a callback, pins held until
+closed or collected, and callable results that follow their holders.
+Initializer failure has a separate real Titan image with a
 suspended cleanup coroutine and `main` error-conversion checks.
 
 Drives themselves are exercised by `spec/coder/browser_scheduler_spec.lua`
@@ -451,17 +551,26 @@ the next gate publishes output and released at swept points around the pump
 runner's retirement, no sink call started by a held call that settles during
 a later turn's coroutine switches, including over full 1024-byte chunks, and
 no sink during the coroutine switches that follow an `IDLE` relinquish),
-disposal with a running, cleanup and shutdown drive, and
-the exit latch, under Node and Chromium in both assertion builds.
+disposal with a running, cleanup and shutdown drive, the exit latch, an open
+`BrowserPin` keeping a waiting drive parked until a C callback settles its job,
+and authored C that switches stacks inside a callback (idle, from a parked
+drive, and nested in a binding), under Node and Chromium in both assertion
+builds. The fixture's C helper fires callbacks through its Wasm table entry,
+as an Emscripten API does.
 `mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
 `admission.mjs` runs the admission matrix of the loader: every application
 method, `_malloc`/`_free` and the trace view, each from a parked wait, a
 macrotask between turns, a microtask between internal coroutine hops, and a
 binding the drive invoked. It also covers owner and other-state request
-settlements, `dispose()` from each of those contexts, and the idle-instance
+settlements (the harness settles the child state's request only after the
+owner parked, and the owner takes no turn for it), `dispose()` from each of
+those contexts, and the idle-instance
 rows (entries start after the calling method returns; `notify()` waits for a
-later `drain()` or drive). The rows that need a synchronous C callback are
-reported as pending until that entry exists. `measure.mjs` is run by hand,
+later `drain()` or drive). The synchronous-callback rows fire callbacks from a
+parked wait, between turns and nested in a binding, then check the
+idle-instance rows of entries from a callback's binding and from its caller,
+`notify()`, `dispose()`, a nested callback, and a callback after disposal.
+`measure.mjs` is run by hand,
 never by the spec (`titan-browser-run --js-test measure.mjs -- <image>`): it
 prints a `MEASURE` line with macrotask chain costs (`setImmediate`,
 `MessageChannel`, `setTimeout(0)`), the per-turn cost of drives with 1 and 64
@@ -500,6 +609,14 @@ disposal, sinks, requests, and WeakRef ownership with real linked images.
 Test-only C instrumentation may hand explicit frozen controls to a supplied
 fixture binding; the generated application API never exposes the raw Emscripten
 Module or factory.
+
+The html5 click counter of the [language
+chapter](../language/standard-library-browser.md#synchronous-c-callbacks)
+(`counter.titan`, `counter.c` and the page test `counter.mjs` in
+`spec/fixtures/browser_bridge/`) clicks real buttons whose Emscripten click
+callbacks call pinned handlers through `titan_browser_call_sync`. It needs a
+page's DOM, so the bridge spec runs it on Chromium only and the Playwright
+bridge gate on Chromium, Firefox and WebKit.
 
 Each collection case prepares and releases its targets in a helper frame that
 returns before the driver performs at most forty acknowledged-GC checks. The

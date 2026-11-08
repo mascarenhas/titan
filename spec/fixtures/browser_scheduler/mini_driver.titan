@@ -6,6 +6,7 @@ local browser = import "browser"
 local coroutine = import "coroutine"
 local _ = import "mini_child"
 foreign import "stdio.h"
+foreign import "stdlib.h"
 foreign import "mini_driver.h"
 
 local type Value = browser.BrowserValue
@@ -425,6 +426,91 @@ local function ticks(...: Value): Value
   return Value.is_nil()
 end
 
+-- Synchronous C callbacks. pin_callbacks pins these targets and publishes
+-- each identity through the pinned binding; the harness fires them with
+-- controls.fire, the way an Emscripten API calls a C callback.
+local pins: {browser.BrowserPin} = {}
+local awaiting: Job?
+-- The reenter target's identity, for a nested callback from the nested target.
+local nested_identity: owned *titan_browser_identity = foreign titan_browser_identity.new()
+
+local function sync_note(...: Value): Value
+  binding_call("noted", Value.is_string("sync"))
+  return Value.is_string("noted")
+end
+
+local function sync_reenter(...: Value): Value
+  binding_call("reenter")
+  return Value.is_nil()
+end
+
+local function sync_poke(...: Value): Value
+  ffi.mini_driver_poke()
+  return Value.is_nil()
+end
+
+local function sync_nested(...: Value): Value
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  local status: integer = browser.call_sync(nested_identity, 0, nil, result)
+  ffi.free(ffi.lmacro_unconst(result.message))
+  ffi.free(ffi.lmacro_unconst(result.trace))
+  return Value.is_integer(status)
+end
+
+local function sync_switch(...: Value): Value
+  local state, _, _ = pins[1]:identity()
+  ffi.mini_driver_switch(state)
+  return Value.is_nil()
+end
+
+-- Settles the job await_callback left waiting, then wakes the drive.
+local function sync_finish(...: Value): Value
+  local job? = awaiting
+  awaiting = nil
+  if job ~= nil then job:finish("succeeded", Value.is_string("called back"), Value.is_nil()) end
+  browser.wake()
+  return Value.is_nil()
+end
+
+local function publish_pin(name: string, target: Callable)
+  local pin = browser.pin(target)
+  pins[#pins + 1] = pin
+  local state, slot, generation = pin:identity()
+  binding_call("pinned", Value.is_string(name), Value.is_integer(state), Value.is_integer(slot),
+               Value.is_integer(generation))
+  if name == "reenter" then
+    nested_identity.state = state
+    nested_identity.slot = slot
+    nested_identity.generation = generation
+  end
+end
+
+local function pin_callbacks(...: Value): Value
+  publish_pin("note", sync_note)
+  publish_pin("reenter", sync_reenter)
+  publish_pin("poke", sync_poke)
+  publish_pin("nested", sync_nested)
+  publish_pin("switch", sync_switch)
+  publish_pin("finish", sync_finish)
+  return Value.is_nil()
+end
+
+local function unpin_callbacks(...: Value): Value
+  for index = #pins, 1, -1 do
+    pins[index]:close()
+    pins[index] = nil
+  end
+  return Value.is_nil()
+end
+
+-- Waits with no request: only an open pin keeps the drive from going idle.
+local function await_callback(...: Value): Value
+  local job = current
+  job.waiting = true
+  awaiting = job
+  return Value.is_nil()
+end
+
 local function spawn(...: Value): Value
   local target = expect_callable(...[1])
   local handle = expect_handle(...[2])
@@ -586,6 +672,9 @@ do
     publish("park_idle", park_idle)
     publish("owner_probe", owner_probe)
     publish("spare", spare)
+    publish("pin_callbacks", pin_callbacks)
+    publish("unpin_callbacks", unpin_callbacks)
+    publish("await_callback", await_callback)
     child_owner = ffi.mini_driver_new_child(L)
   end
 end

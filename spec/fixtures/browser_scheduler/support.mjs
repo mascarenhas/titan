@@ -13,12 +13,13 @@ export function observe(promise) {
 export function makeHost(context, image, extra = {}) {
   const host = {callables: new Map(), probes: [], notes: [], cleanup: [], stdout: [], stderr: [],
     notificationErrors: [], shutdowns: 0, flag: false, sinkChunks: 0, unparkedSinks: 0, controls: undefined,
-    hooks: {}};
+    hooks: {}, pinned: {}};
   // A sink may run only after the operation or from a parked drive gate.
   const sinkCalled = () => {
     const snapshot = host.controls?.snapshot();
     if (snapshot?.driving && !snapshot.parked) host.unparkedSinks++;
   };
+  host.held = [];
   host.bindings = {
     __miniDriver(controls) { host.controls = controls; },
     publish(name, callable) { host.callables.set(name, callable); },
@@ -37,8 +38,13 @@ export function makeHost(context, image, extra = {}) {
     },
     cleanup_note(text) { host.cleanup.push(text); },
     shutdown_ran() { host.shutdowns++; },
+    // A detachable request that settles only when the harness calls settleHeld().
+    held() { return {kind: 'detachable', promise: new Promise(resolve => { host.held.push(resolve); })}; },
     never() { return {kind: 'detachable', promise: new Promise(() => {})}; },
     slow(ms) { return {kind: 'detachable', promise: new Promise(resolve => { setTimeout(resolve, ms); })}; },
+    pinned(name, state, slot, generation) {
+      host.pinned[name] = [Number(state), Number(slot), Number(generation)];
+    },
   };
   host.instance = image.create({locateFile: image.locateFile, bindings: host.bindings,
     stdout(bytes) {
@@ -60,8 +66,12 @@ export function makeHost(context, image, extra = {}) {
     return callable;
   };
   host.call = (name, ...args) => observe(host.instance.call(host.fn(name), ...args));
+  host.settleHeld = () => { for (const resolve of host.held.splice(0)) resolve(); };
   host.task = (name, args = [], options = {}) => observe(host.instance.callTask(host.fn(name), args, options));
   host.snapshot = () => host.controls.snapshot();
+  // A synchronous C callback of a pinned target; returns its result status.
+  host.fire = name => host.controls.fire(...host.pinned[name]);
+  host.poke = action => { host.controls.hooks.poke = action; };
   return host;
 }
 

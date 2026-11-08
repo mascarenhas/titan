@@ -6,6 +6,7 @@ local reflect = import "reflect"
 local coroutine = import "coroutine"
 local string = import "string"
 local _ = import "browser.independent"
+foreign import "stdlib.h"
 foreign import "native.h"
 
 local type Value = browser.BrowserValue
@@ -1066,6 +1067,245 @@ function test_r1_close_retains_owner_on_admission_failure(context: test.Context)
     owner:close()
     test.assert(expect_integer(counter:call()) == before + 1, "later request close did not retire its owner once")
   end)
+end
+
+-- Synchronous C callbacks. These tests call the public entry an Emscripten
+-- trampoline calls, titan_browser_call_sync (browser.call_sync here), from
+-- inside this test's entry; the callable runs on a callback thread.
+local function set_identity(identity: foreign *titan_browser_identity, pin: browser.BrowserPin)
+  local state, slot, generation = pin:identity()
+  identity.state = state
+  identity.slot = slot
+  identity.generation = generation
+end
+
+local function same_bytes(bytes: foreign const *unsigned char, length: integer, expected: string): boolean
+  if length ~= #expected then return false end
+  local wanted = expected as foreign const *unsigned char
+  for index = 0, length - 1 do
+    local actual: integer = bytes[index]
+    local byte: integer = wanted[index]
+    if actual ~= byte then return false end
+  end
+  return true
+end
+
+local function free_result(result: foreign *titan_browser_sync_result)
+  ffi.free(ffi.lmacro_unconst(result.message))
+  ffi.free(ffi.lmacro_unconst(result.trace))
+  local kind: integer = result.value.kind
+  if kind == ffi.TITAN_BROWSER_STRING or kind == ffi.TITAN_BROWSER_BYTES then
+    ffi.free(ffi.lmacro_unconst(result.value.bytes))
+  end
+end
+
+function test_pin_runs_a_synchronous_c_callback(_: test.Context)
+  local calls = 0
+  local sum = 0
+  local pin = browser.pin(function(...: Value): Value
+    calls = calls + 1
+    sum = expect_integer(...[1]) + expect_integer(...[2])
+    return Value.is_string("sum " .. sum)
+  end)
+  defer pin:close()
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  set_identity(identity, pin)
+  local state, slot, generation = pin:identity()
+  test.assert(state ~= 0 and slot ~= 0 and generation ~= 0, "a pin has no live identity")
+  local args: foreign *titan_browser_value = foreign titan_browser_value.new_array(2)
+  args[0].kind = ffi.TITAN_BROWSER_INTEGER as foreign uint32_t
+  args[0].scalar.integer = 40
+  args[1].kind = ffi.TITAN_BROWSER_INTEGER as foreign uint32_t
+  args[1].scalar.integer = 2
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  local status: integer = browser.call_sync(identity, 2, args, result)
+  local kind: integer = result.value.kind
+  test.assert(status == 0 and result.status == 0 and kind == ffi.TITAN_BROWSER_STRING,
+              "a synchronous callback did not return its string")
+  test.assert(calls == 1 and sum == 42, "the callback did not run once, synchronously, with its arguments")
+  test.assert(same_bytes(result.value.bytes, result.value.length, "sum 42"), "the callback result changed")
+  free_result(result)
+end
+
+function test_synchronous_callback_errors_return_a_status(_: test.Context)
+  local pin = browser.pin(function(...: Value): Value
+    raise "sync callback failed"
+  end)
+  defer pin:close()
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  set_identity(identity, pin)
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  local status: integer = browser.call_sync(identity, 0, nil, result)
+  test.assert(status == 1 and result.status == 1, "a raising callback did not report TITAN_ERROR")
+  test.assert(same_bytes(result.message, result.message_length, "sync callback failed"),
+              "a raising callback lost its message")
+  test.assert(result.trace_length > 0, "a raising callback lost its trace")
+  free_result(result)
+  local again: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(browser.call_sync(identity, 0, nil, again) == 1, "a failed callback disabled the next one")
+  free_result(again)
+end
+
+function test_synchronous_callback_refusals(_: test.Context)
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(browser.call_sync(identity, 0, nil, result) == 3 and result.status == 3,
+              "a callback for no state was not refused with STATE")
+  test.assert(same_bytes(result.message, result.message_length,
+                         "browser state is closed, closing or uninitialized"),
+              "the closed-state refusal changed")
+  free_result(result)
+  local absent: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(browser.call_sync(nil, 0, nil, absent) == 3 and
+              same_bytes(absent.message, absent.message_length, "browser callback identity is absent"),
+              "a callback without an identity was not refused")
+  free_result(absent)
+  test.assert(browser.call_sync(identity, 0, nil, nil) == 3, "a callback without a result record ran")
+  local pin = browser.pin(function(...: Value): Value return Value.is_nil() end)
+  set_identity(identity, pin)
+  pin:close()
+  pin:close()
+  local released: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(browser.call_sync(identity, 0, nil, released) == 1 and
+              same_bytes(released.message, released.message_length, "browser callable is released"),
+              "a closed pin's identity still ran its callable")
+  free_result(released)
+end
+
+function test_synchronous_callbacks_run_on_callback_threads(_: test.Context)
+  test.assert(ffi.titan_no_switch(L) == 0, "an entry ran in no-switch mode")
+  local refusal = ""
+  local no_switch = false
+  local depth = 0
+  local inner = browser.pin(function(...: Value): Value
+    depth = depth + 1
+    return Value.is_integer(depth)
+  end)
+  defer inner:close()
+  local inner_identity: owned *titan_browser_identity = foreign titan_browser_identity.new()
+  set_identity(inner_identity, inner)
+  local outer = browser.pin(function(...: Value): Value
+    no_switch = ffi.titan_no_switch(L) ~= 0
+    do
+      browser.drive_begin()
+    catch
+      if error is string then refusal = error end
+    end
+    -- Two nested callbacks at the next depth reuse that level's thread.
+    for _ = 1, 2 do
+      local nested: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+      test.assert(browser.call_sync(inner_identity, 0, nil, nested) == 0, "a nested callback failed")
+    end
+    return Value.is_nil()
+  end)
+  defer outer:close()
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  set_identity(identity, outer)
+  for round = 1, 3 do
+    local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+    test.assert(browser.call_sync(identity, 0, nil, result) == 0, "an outer callback failed")
+    test.assert(depth == round * 2, "nested callbacks did not run")
+  end
+  test.assert(no_switch, "a synchronous callback was not in no-switch mode")
+  test.assert(refusal == "browser drive requires the instance owner's main thread",
+              "a synchronous callback ran on the main thread")
+  test.assert(ffi.titan_no_switch(L) == 0, "no-switch mode outlived its callback")
+end
+
+function test_callback_bracket_admits_hand_written_trampolines(_: test.Context)
+  local pin = browser.pin(function(...: Value): Value return Value.is_integer(7) end)
+  defer pin:close()
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  set_identity(identity, pin)
+  local state, _, _ = pin:identity()
+  local frame: foreign *titan_browser_callback_frame = foreign titan_browser_callback_frame.new()
+  test.assert(browser.callback_enter(state, frame) == 0, "the callback bracket refused an open state")
+  local depth: integer = frame.depth
+  test.assert(frame.L ~= nil and depth == 1 and ffi.titan_no_switch(L) ~= 0,
+              "the callback bracket did not choose a callback thread")
+  local nested: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(browser.call_sync(identity, 0, nil, nested) == 0, "a callback inside the bracket failed")
+  browser.callback_leave(frame)
+  test.assert(frame.L == nil and ffi.titan_no_switch(L) == 0, "the callback bracket did not end")
+  browser.callback_leave(frame)
+  local closed: foreign *titan_browser_callback_frame = foreign titan_browser_callback_frame.new()
+  test.assert(browser.callback_enter(0, closed) == 3 and closed.L == nil,
+              "the callback bracket admitted a closed state")
+end
+
+-- The pin's only reference dies with this frame, so a collection finalizes it.
+local function pin_and_drop(identity: foreign *titan_browser_identity)
+  local pin = browser.pin(function(...: Value): Value return Value.is_boolean(true) end)
+  set_identity(identity, pin)
+end
+
+function test_pin_holds_its_callable_until_closed_or_collected(_: test.Context)
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  pin_and_drop(identity)
+  gc.collect()
+  gc.collect()
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(browser.call_sync(identity, 0, nil, result) == 1 and
+              same_bytes(result.message, result.message_length, "browser callable is released"),
+              "a collected pin kept its callable")
+  free_result(result)
+  local kept = browser.pin(function(...: Value): Value return Value.is_boolean(true) end)
+  defer kept:close()
+  set_identity(identity, kept)
+  gc.collect()
+  gc.collect()
+  local held: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  local kind: integer = 0
+  test.assert(browser.call_sync(identity, 0, nil, held) == 0, "an open pin lost its callable")
+  kind = held.value.kind
+  test.assert(kind == ffi.TITAN_BROWSER_BOOLEAN and held.value.scalar.integer == 1,
+              "an open pin's callable returned the wrong value")
+end
+
+-- Calls a callable result as C would, through an identity built from it.
+local function call_result(result: foreign *titan_browser_sync_result,
+                           out: foreign *titan_browser_sync_result): integer
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  identity.state = result.value.state
+  identity.slot = result.value.slot
+  identity.generation = result.value.generation
+  return browser.call_sync(identity, 0, nil, out)
+end
+
+function test_synchronous_callback_callable_results_follow_their_holders(_: test.Context)
+  local target = function(...: Value): Value return Value.is_integer(11) end
+  local held_pin = browser.pin(target)
+  defer held_pin:close()
+  local returns_held = browser.pin(function(...: Value): Value return Value.is_callable(target) end)
+  defer returns_held:close()
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  set_identity(identity, returns_held)
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(browser.call_sync(identity, 0, nil, result) == 0, "a callable result failed")
+  local kind: integer = result.value.kind
+  local result_slot: integer = result.value.slot
+  local result_generation: integer = result.value.generation
+  local _, slot, generation = held_pin:identity()
+  test.assert(kind == ffi.TITAN_BROWSER_CALLABLE and result_slot == slot and
+              result_generation == generation, "a pinned callable result lost its identity")
+  local called: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(call_result(result, called) == 0 and called.value.scalar.integer == 11,
+              "a pinned callable result was not callable from C")
+  -- An unpinned closure gets no lasting hold from crossing to C.
+  local returns_fresh = browser.pin(function(...: Value): Value
+    return Value.is_callable(function(...: Value): Value return Value.is_nil() end)
+  end)
+  defer returns_fresh:close()
+  set_identity(identity, returns_fresh)
+  local fresh: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(browser.call_sync(identity, 0, nil, fresh) == 0, "a fresh callable result failed")
+  kind = fresh.value.kind
+  test.assert(kind == ffi.TITAN_BROWSER_CALLABLE, "a fresh callable result changed kind")
+  local stale: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  test.assert(call_result(fresh, stale) == 1 and
+              same_bytes(stale.message, stale.message_length, "browser callable is released"),
+              "an unpinned callable result kept a hold")
+  free_result(stale)
 end
 
 local initializer_coroutine: coroutine.Coroutine?

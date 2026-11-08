@@ -499,6 +499,79 @@ async function timers(context, image) {
   }
 }
 
+// An open BrowserPin is a wake source: a job waiting only for a C callback
+// keeps the drive parked instead of idle, and the callback settles it. With
+// every pin closed the same wait is idle.
+async function pinWakeSource(context, image) {
+  const host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    await host.call('register');
+    await host.call('pin_callbacks');
+    const waiting = host.task('await_callback');
+    await until(context, () => host.snapshot().parked, 'a job waiting on a pin did not park the drive');
+    for (let tick = 0; tick < 5; tick++) await context.tick();
+    context.assert(host.snapshot().parked && !host.probes.some(probe => probe.status === 1),
+      'an open pin did not keep the waiting drive parked');
+    context.assert(host.fire('finish') === 0, 'the settling callback failed');
+    context.assert(await waiting === 'called back', 'the callback did not settle the waiting job');
+    await host.call('unpin_callbacks');
+    const orphaned = await rejection(context, host.task('await_callback'), 'TITAN');
+    context.assert(decode(orphaned.bytes) === 'mini driver became idle while jobs were waiting',
+      'a wait with every pin closed did not go idle');
+    return 'parked until called back';
+  } finally { await host.instance.dispose(); }
+}
+
+// Authored C that switches stacks inside a synchronous callback poisons the
+// instance, whether the callback ran idle, from a parked drive, or nested in a
+// binding of an entry. V8 refuses the suspending import before calling it, so
+// the callback's caller gets the engine's SuspendError, and the bridge poisons
+// once the callback is gone without its leave; later operations reject.
+async function callbackSwitch(context, image) {
+  const report = {};
+  const fireSwitch = host => {
+    try { host.fire('switch'); } catch (error) { return error?.code ?? error?.name ?? String(error); }
+    return 'returned';
+  };
+  let host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    await host.call('pin_callbacks');
+    const unwound = fireSwitch(host);
+    const poison = await rejection(context, host.call('echo', 1n), 'PROTOCOL');
+    report.idle = [unwound, poison.message];
+  } finally { await host.instance.dispose().catch(() => {}); }
+
+  host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    await host.call('register');
+    await host.call('pin_callbacks');
+    const waiting = host.task('await_callback');
+    await until(context, () => host.snapshot().parked, 'a job waiting on a pin did not park the drive');
+    const unwound = fireSwitch(host);
+    const poison = await rejection(context, waiting, 'PROTOCOL');
+    report.parked = [unwound, poison.message];
+  } finally { await host.instance.dispose().catch(() => {}); }
+
+  host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    await host.call('pin_callbacks');
+    let unwound;
+    host.hooks.reenter = () => { unwound = fireSwitch(host); };
+    const poison = await rejection(context, host.call('reenter'), 'PROTOCOL');
+    report.nested = [unwound, poison.message];
+    await rejection(context, host.call('echo', 1n), 'PROTOCOL');
+  } finally { await host.instance.dispose().catch(() => {}); }
+  for (const [where, [unwound, poison]] of Object.entries(report)) {
+    context.assert(unwound === 'SuspendError' && poison === 'a synchronous C callback ended by an exception',
+      `a switching callback (${where}) unwound with ${unwound} and poisoned with "${poison}"`);
+  }
+  return report;
+}
+
 export async function run(context) {
   context.assert(context.args.length === 1, 'pass the mini-driver image');
   const image = await context.image(context.args[0]);
@@ -513,5 +586,7 @@ export async function run(context) {
   report.disposal = await disposal(context, image);
   await exits(context, image);
   report.timers = await timers(context, image);
+  report.pinWakeSource = await pinWakeSource(context, image);
+  report.callbackSwitch = await callbackSwitch(context, image);
   context.stdout(encode('MINI-DRIVER ' + JSON.stringify(report) + '\n'));
 }

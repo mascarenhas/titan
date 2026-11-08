@@ -55,7 +55,8 @@ function BrowserError:close()
 ```
 
 The low-level [drive interface](#driver-interface-low-level) that `async`
-uses to run Tasks has its own section.
+uses to run Tasks has its own section, and so do `BrowserPin` and the C entry
+for [synchronous C callbacks](#synchronous-c-callbacks).
 
 Values cross the boundary as `BrowserValue` in both directions, marshalled by
 runtime type without separate signature descriptors:
@@ -452,6 +453,227 @@ function drive_until(done: function (): boolean)
 end
 ```
 
+## Synchronous C callbacks
+
+An Emscripten API that calls C from JavaScript, such as an
+`emscripten/html5.h` event callback, runs that C function synchronously, with
+JavaScript frames between it and any promising entry. Titan code runs in such
+a callback through a pin and the C entry `titan_browser_call_sync`:
+
+```text
+record BrowserPin
+function pin(callback: function (...: BrowserValue): BrowserValue): BrowserPin
+function BrowserPin:identity(): (integer, integer, integer)
+function BrowserPin:close()
+```
+
+```c
+/* titan/browser.h */
+typedef struct titan_browser_identity {
+  uint32_t state, slot, generation;
+} titan_browser_identity;
+
+typedef struct titan_browser_sync_result {   /* the caller zero-initializes it */
+  uint32_t status;                           /* the returned titan_browser_status */
+  uint32_t reserved;
+  titan_browser_value value;                 /* TITAN_BROWSER_OK: the one result */
+  const unsigned char *message;              /* a failure's message, malloc-owned */
+  uint32_t message_length;
+  const unsigned char *trace;                /* TITAN_BROWSER_TITAN_ERROR: raw trace, malloc-owned */
+  uint32_t trace_length;
+} titan_browser_sync_result;
+
+int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t argc,
+    const titan_browser_value *args, titan_browser_sync_result *result);
+```
+
+- `pin(fn)` holds `fn` for C: it adds one hold to the function's callable pin,
+  the slot its JavaScript wrapper also uses. `identity()` returns the
+  `(state, slot, generation)` that C copies into a `titan_browser_identity`
+  for the callback's user data. `close()` drops the hold; closing again does
+  nothing, and an unreachable pin closes itself. `pin` raises `"browser state
+  is closing"` while its state closes.
+- Keep the pin and the identity's storage reachable, for example an `owned
+  *titan_browser_identity` in a module variable, until the C callback is
+  unregistered. Unregister it before closing the pin or releasing anything else
+  the callback reaches.
+- While a `BrowserPin` of the owner state is open, a drive's `relinquish(true)`
+  waits instead of returning `RELINQUISH_IDLE`, because a callback may still
+  come. An `async` Task waiting for something only a callback provides keeps
+  its Runtime waiting while the pin is open.
+- `titan_browser_call_sync` runs the pinned function with `argc` arguments read
+  from `args` and decoded by runtime type, as for any call into Titan. It
+  stores the status it returns in `result->status`:
+  - `TITAN_BROWSER_OK`: `result->value` is the one result. A STRING or BYTES
+    result has `malloc`'d bytes. A HANDLE result stays valid while its
+    `BrowserHandle` is open, and a CALLABLE result while a `BrowserPin` or a
+    live JavaScript wrapper holds the function.
+  - `TITAN_BROWSER_TITAN_ERROR`: the function raised; `message` and `trace`
+    hold its message and raw traceback. The instance stays usable. A stale
+    identity, whose function no pin or wrapper holds any longer, fails this
+    way with `"browser callable is released"`.
+  - `TITAN_BROWSER_STATE`: refused without running Titan, with a `message`. The
+    pin's state is closed or closing, the instance is disposing, exited or
+    poisoned, or callbacks nest too deeply.
+  - `TITAN_BROWSER_MEMORY`: no message.
+
+  After any status, the caller frees `message`, `trace` and a STRING or BYTES
+  result's bytes with `free`.
+- A callback may run whenever the instance is open: idle, while a drive waits
+  or between its turns, and nested in a binding that Titan code called,
+  including from a Task. It runs on a Lua thread of its own (one per nesting
+  depth, reused), so a parked drive's frames stay untouched.
+- A callback cannot suspend. Inside it, `coroutine.resume`, `coroutine.yield`
+  and the other explicit switches raise, `coroutine.running()` is `nil`, every
+  `async` operation behaves as outside a Task, and resumptions it causes wait
+  for the drive ([coroutines](coroutines.md), [async](async-io.md)).
+- JavaScript that a callback reaches follows the loader's
+  [entry rules](browser-target.md#synchronous-c-callbacks). A binding that the
+  callback's Titan code calls cannot start another entry: `call()`,
+  `callTask()`, `drain()` and `run()` reject `TITAN_BROWSER_REENTRY` there.
+  JavaScript outside any binding, such as the code that dispatched the event,
+  can, and the entry starts after the callback returns. `notify()` queues, and
+  `dispose()` finishes closing after the callback returns.
+- A callback whose frames an exception unwinds, so that
+  `titan_browser_call_sync` never returns, poisons the instance with
+  `TITAN_BROWSER_PROTOCOL`, `"a synchronous C callback ended by an
+  exception"`. Authored C that switches stacks inside the callback by calling a
+  suspending import does that: the engine throws to the callback's JavaScript
+  caller (V8 throws `WebAssembly.SuspendError`).
+- A callback's C frames use the linear stack of the code it interrupted: the
+  main C stack or, for a callback nested in a binding that a Task called, that
+  Task's 256 KiB stack ([limits](browser-target.md#limits)). Deep recursion
+  there fails Emscripten's stack check, which poisons the instance.
+
+For example, this program counts clicks on two buttons. A C helper, compiled
+with `--c-source counter.c`, registers each button's `html5.h` click callback
+with a pinned handler's identity as its user data:
+
+```c
+/* counter.h */
+#include <titan/browser.h>
+
+int counter_listen(const char *selector, const titan_browser_identity *identity);
+int counter_unlisten(const char *selector);
+
+/* counter.c */
+#include <emscripten/html5.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "counter.h"
+
+static bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity) {
+  titan_browser_sync_result result = {0};
+  if (titan_browser_call_sync(identity, 0, NULL, &result) != TITAN_BROWSER_OK && result.message)
+    fprintf(stderr, "click handler failed: %.*s\n", (int)result.message_length, (const char *)result.message);
+  free((void *)result.message);
+  free((void *)result.trace);
+  return false;
+}
+
+int counter_listen(const char *selector, const titan_browser_identity *identity) {
+  return emscripten_set_click_callback(selector, (void *)identity, false, counter_click);
+}
+
+int counter_unlisten(const char *selector) {
+  return emscripten_set_click_callback(selector, NULL, false, NULL);
+}
+```
+
+The Titan module keeps each listener's pin and identity until `stop`
+unregisters it, and shows the count through the page's `show` binding:
+
+```titan
+local browser = import "browser"
+foreign import "counter.h"
+
+local type Value = browser.BrowserValue
+
+local count = 0
+
+local function show()
+  local label = browser.binding("show")
+  defer label:close()
+  label:call(Value.is_integer(count))
+end
+
+local function increment(...: Value): Value
+  count = count + 1
+  show()
+  return Value.is_nil()
+end
+
+local function reset(...: Value): Value
+  count = 0
+  show()
+  return Value.is_nil()
+end
+
+local record Listener
+  selector: string
+  pin: browser.BrowserPin
+  identity: owned *titan_browser_identity
+end
+
+local listeners: {Listener} = {}
+
+local function listen(selector: string, handler: function (...: Value): Value)
+  local pin = browser.pin(handler)
+  local identity: owned *titan_browser_identity = foreign titan_browser_identity.new()
+  local state, slot, generation = pin:identity()
+  identity.state = state
+  identity.slot = slot
+  identity.generation = generation
+  if ffi.counter_listen(selector, identity) ~= 0 then
+    pin:close()
+    raise "cannot listen for clicks on " .. selector
+  end
+  listeners[#listeners + 1] = Listener { selector = selector, pin = pin, identity = identity }
+end
+
+local function stop(...: Value): Value
+  for index = #listeners, 1, -1 do
+    local listener = listeners[index]
+    ffi.counter_unlisten(listener.selector)
+    listener.pin:close()
+    listeners[index] = nil
+  end
+  return Value.is_nil()
+end
+
+function main(args: {string}): integer
+  listen("#increment", increment)
+  listen("#reset", reset)
+  show()
+  local ready = browser.binding("ready")
+  defer ready:close()
+  ready:call(Value.is_callable(stop))
+  return 0
+end
+```
+
+The page supplies `show` and `ready`. Each click runs its handler before
+`click()` returns, so the label is already updated:
+
+```javascript
+import create from './counter.mjs';
+
+const label = document.querySelector('#count');
+let stop;
+const instance = create({bindings: {
+  show: count => { label.textContent = String(count); },
+  ready: callable => { stop = callable; },
+}});
+try {
+  await instance.run([]);
+  document.querySelector('#increment').click();
+  console.log(label.textContent); // "1"
+  await instance.call(stop);
+} finally {
+  await instance.dispose();
+}
+```
+
 ## State close
 
 `titan.browser` registers its state record for finalization when the module
@@ -477,9 +699,13 @@ an invented failed application call.
 ## C SDK
 
 The installed `titan/browser.h` declares the checked wasm32 scalar/slot,
-response, completion, and state-registry boundary. Its API requires the same
-instance execution owner as the generated gateway; it is not a raw
-`lua_State *` application gateway. C-created states load `titan.browser`
+response, completion, and state-registry boundary. Apart from
+`titan_browser_call_sync`, which runs whenever the instance is open
+([synchronous C callbacks](#synchronous-c-callbacks)), its API requires the
+same instance execution owner as the generated gateway; it is not a raw
+`lua_State *` application gateway. `titan_browser_callback_enter` and
+`titan_browser_callback_leave` bracket a standard library's hand-written
+trampolines and are not an application API. C-created states load `titan.browser`
 normally; there is no attachment operation or special bootstrap order.
 `titan.lua` is native-only, so no standard-library API creates independent
 browser states. See [the bridge implementation](../implementation/browser-bridge.md)

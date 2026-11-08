@@ -4,8 +4,8 @@ import {encode, makeHost, observe, rejection, until} from './support.mjs';
 // action runs in each context a drive leaves to JavaScript: a parked wait, a
 // macrotask between turn relinquishes, a microtask between internal coroutine
 // hops, and a synchronous binding the drive's Titan code invoked. Then come
-// the request rows, dispose() from each context, and the idle-instance rows
-// of FD-M1. Rows that need a synchronous C callback wait for WI-D's bracket.
+// the request rows, dispose() from each context, the idle-instance rows of
+// FD-M1, and the synchronous C callback rows.
 
 const actions = [
   ['call(owner)', host => host.instance.call(host.fn('echo'), 5n)],
@@ -31,10 +31,6 @@ const elsewhere = Object.freeze({
 const inHost = Object.freeze({...elsewhere, 'call(owner)': 'REENTRY', 'callTask(owner)': 'REENTRY',
   'callTask(other state)': 'REENTRY'});
 const expected = Object.freeze({parked: elsewhere, turn: elsewhere, hop: elsewhere, host: inHost});
-
-// The callback rows of 4.2 and FD-M1 need titan_browser_call_sync (WI-D).
-const pending = ['drive-sync-callback', 'callback-binding-entry', 'callback-caller-entry',
-  'callback-notify', 'callback-dispose', 'callback-nested-call'];
 
 const code = error => error?.code?.replace(/^TITAN_BROWSER_/, '') ?? error?.name ?? String(error);
 
@@ -175,10 +171,16 @@ async function requests(context, image) {
     observed['request settlement (owner)'] = describe(await inDrive(host, host.task('nap', [5])));
     observed['listener event (owner)'] = describe(await inDrive(host, host.task('ticks', [3n, 5])));
     await end();
-    await host.call('child_wait', 20);
+    // The harness settles the child's request only after the owner parked. A
+    // wrong wake would show as a scheduled turn ('turn') or, once that turn
+    // ran and re-parked, as another probe.
+    await host.call('child_wait');
     end = await parkDrive(context, host);
+    const probes = host.probes.length;
+    host.settleHeld();
     await until(context, () => host.snapshot().queue === 1, "the child's settlement never arrived");
-    const parked = where(host) === 'parked' && !host.notes.includes('child settled');
+    const parked = where(host) === 'parked' && host.probes.length === probes &&
+      !host.notes.includes('child settled');
     await end();
     await host.instance.drain();
     observed['request settlement (other state)'] = (parked ? 'queued in drive' : 'woke the drive') +
@@ -293,6 +295,124 @@ async function idle(context, image) {
   } finally { await host.instance.dispose().catch(() => {}); }
 }
 
+// One synchronous C callback of the note target; ran means status 0 and
+// its noted binding call before the callback returned.
+function fired(host, name = 'note') {
+  const before = host.notes.length;
+  const status = host.fire(name);
+  return status === 0 && host.notes.length === before + 1 ? 'ran' : `status ${status}`;
+}
+
+// Every application method a callback's JavaScript can reach, by row name.
+function entries(host) {
+  return {
+    'call()': observe(host.instance.call(host.fn('echo'), 1n)),
+    'callTask()': observe(host.instance.callTask(host.fn('echo'), [1n])),
+    'drain()': observe(host.instance.drain()),
+    'run()': observe(host.instance.run([])),
+  };
+}
+
+async function codes(attempts) {
+  const observed = {};
+  for (const [name, promise] of Object.entries(attempts)) {
+    observed[name] = await promise.then(() => 'admitted', code);
+  }
+  return observed;
+}
+
+// The synchronous-callback rows of 4.2 and FD-M1. The harness fires C
+// callbacks through the fixture's Wasm table entry, the way an Emscripten API
+// does; the callback's JavaScript is either a binding its Titan code calls
+// (reenter) or JavaScript its C code calls without a binding (poke).
+async function callbacks(context, image) {
+  const observed = {};
+  let host = await driverHost(context, image);
+  try {
+    await host.call('pin_callbacks');
+    const end = await parkDrive(context, host);
+    observed['drive: from a parked wait'] = fired(host);
+    await end();
+    const spinning = host.task('spin', [1000000n]);
+    await until(context, () => host.probes.length > 0, 'spin never relinquished');
+    observed['drive: between turns'] = await new Promise(resolve => {
+      setTimeout(() => resolve(where(host) === 'turn' ? fired(host) : `ran from ${where(host)}`), 0);
+    });
+    host.flag = true;
+    await spinning;
+    let nested;
+    host.hooks.reenter = () => { nested = fired(host); };
+    await host.task('reenter');
+    host.hooks.reenter = undefined;
+    observed['drive: nested in a binding'] = nested;
+
+    let attempts;
+    host.hooks.reenter = () => { attempts = entries(host); };
+    observed['idle: callback status'] = host.fire('reenter') === 0 ? 'ran' : 'refused';
+    host.hooks.reenter = undefined;
+    for (const [name, outcome] of Object.entries(await codes(attempts))) {
+      observed[`idle: ${name} from the callback's binding`] = outcome;
+    }
+
+    let started;
+    host.poke(() => {
+      attempts = {'call()': observe(host.instance.call(host.fn('note'), 'caller entry'))};
+      started = host.notes.includes('caller entry');
+    });
+    host.fire('poke');
+    const deferred = !started && !host.notes.includes('caller entry');
+    await attempts['call()'];
+    observed["idle: call() from the callback's caller"] =
+      (deferred ? 'started after the callback' : 'started inside it') +
+      (host.notes.includes('caller entry') ? ', ran' : ', lost');
+
+    host.poke(() => host.instance.notify(host.fn('note'), 'callback note'));
+    host.fire('poke');
+    const enqueued = host.snapshot().queue === 1 && !host.notes.includes('callback note');
+    await host.instance.drain();
+    observed['idle: notify()'] = (enqueued ? 'enqueued' : 'delivered early') +
+      (host.notes.includes('callback note') ? ', delivered by drain()' : ', lost');
+
+    let reentered;
+    host.hooks.reenter = () => { reentered = observe(host.instance.call(host.fn('echo'), 1n)); };
+    observed['idle: nested callback status'] = host.fire('nested') === 0 ? 'ran' : 'refused';
+    host.hooks.reenter = undefined;
+    observed['idle: call() from a nested callback\'s binding'] = await reentered.then(() => 'admitted', code);
+    host.poke(undefined);
+    await host.call('unpin_callbacks');
+  } finally { await host.instance.dispose(); }
+
+  host = await driverHost(context, image);
+  try {
+    await host.call('pin_callbacks');
+    let disposing, late;
+    host.poke(() => {
+      disposing = observe(host.instance.dispose());
+      late = observe(host.instance.call(host.fn('echo'), 1n));
+    });
+    const status = host.fire('poke');
+    observed['idle: dispose()'] = (status === 0 ? 'callback finished' : `status ${status}`) +
+      `, a later call ${await late.then(() => 'admitted', code)}`;
+    await disposing;
+    observed['after dispose: callback'] = `status ${host.fire('note')}`;
+  } finally { await host.instance.dispose().catch(() => {}); }
+
+  const wanted = {
+    'drive: from a parked wait': 'ran', 'drive: between turns': 'ran', 'drive: nested in a binding': 'ran',
+    'idle: callback status': 'ran',
+    "idle: call() from the callback's binding": 'REENTRY', "idle: callTask() from the callback's binding": 'REENTRY',
+    "idle: drain() from the callback's binding": 'REENTRY', "idle: run() from the callback's binding": 'REENTRY',
+    "idle: call() from the callback's caller": 'started after the callback, ran',
+    'idle: notify()': 'enqueued, delivered by drain()',
+    'idle: nested callback status': 'ran', "idle: call() from a nested callback's binding": 'REENTRY',
+    'idle: dispose()': 'callback finished, a later call DISPOSED', 'after dispose: callback': 'status 3',
+  };
+  for (const [row, outcome] of Object.entries(wanted)) {
+    context.assert(observed[row] === outcome, `callback row "${row}" gave ${observed[row]}, expected ${outcome}`);
+  }
+  return observed;
+}
+
 export async function run(context) {
   context.assert(context.args.length === 1, 'pass the mini-driver image');
   const image = await context.image(context.args[0]);
@@ -301,6 +421,6 @@ export async function run(context) {
   report.requests = await requests(context, image);
   report.disposal = await disposal(context, image);
   report.idle = await idle(context, image);
-  report.pending = pending;
+  report.callbacks = await callbacks(context, image);
   context.stdout(encode('ADMISSION ' + JSON.stringify(report) + '\n'));
 }

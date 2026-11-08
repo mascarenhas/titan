@@ -120,6 +120,37 @@ typedef struct titan_browser_delivery {
   uint32_t wrapper;
 } titan_browser_delivery;
 
+/* A pinned callable's identity, which C keeps as callback user data. Copy it
+ * from BrowserPin:identity(); a stale identity is refused by generation. */
+typedef struct titan_browser_identity {
+  uint32_t state;
+  uint32_t slot;
+  uint32_t generation;
+} titan_browser_identity;
+
+/* The caller zero-initializes the result. After any status it frees message,
+ * trace and a STRING/BYTES value's bytes, all malloc-owned when present. A
+ * HANDLE value stays valid while its Titan BrowserHandle is open, a CALLABLE
+ * one while a BrowserPin or a live JavaScript wrapper holds the function.
+ * MEMORY carries no message. */
+typedef struct titan_browser_sync_result {
+  uint32_t status;
+  uint32_t reserved;
+  titan_browser_value value;
+  const unsigned char *message;
+  uint32_t message_length;
+  const unsigned char *trace;
+  uint32_t trace_length;
+} titan_browser_sync_result;
+
+/* titan_browser_callback_enter fills L, the callback thread to run on, and
+ * depth; titan_browser_callback_leave takes the same frame back. */
+typedef struct titan_browser_callback_frame {
+  lua_State *L;
+  uint32_t state;
+  uint32_t depth;
+} titan_browser_callback_frame;
+
 typedef struct titan_browser_state_record {
   lua_State *L;
   uint32_t token;
@@ -128,6 +159,12 @@ typedef struct titan_browser_state_record {
   TValue invoke_handler;
   TValue release_handler;
   titan_browser_completion *fallback;
+  /* Synchronous C callbacks: entries like invoke_handler, the thread the next
+   * callback level runs on (NULL while it is being prepared), and the depth. */
+  TValue callback_handler;
+  TValue call_sync_handler;
+  lua_State *callback_next;
+  uint32_t callback_depth;
 } titan_browser_state_record;
 
 #if defined(__EMSCRIPTEN__)
@@ -164,6 +201,18 @@ _Static_assert(offsetof(titan_browser_delivery, generation) == 16, "browser deli
 _Static_assert(offsetof(titan_browser_delivery, argc) == 20, "browser delivery count offset");
 _Static_assert(offsetof(titan_browser_delivery, args) == 24, "browser delivery arguments offset");
 _Static_assert(offsetof(titan_browser_delivery, wrapper) == 28, "browser delivery wrapper offset");
+_Static_assert(sizeof(titan_browser_identity) == 12, "browser identity layout");
+_Static_assert(offsetof(titan_browser_identity, slot) == 4, "browser identity slot offset");
+_Static_assert(offsetof(titan_browser_identity, generation) == 8, "browser identity generation offset");
+_Static_assert(sizeof(titan_browser_sync_result) == 56, "browser sync result layout");
+_Static_assert(offsetof(titan_browser_sync_result, value) == 8, "browser sync result value offset");
+_Static_assert(offsetof(titan_browser_sync_result, message) == 40, "browser sync result message offset");
+_Static_assert(offsetof(titan_browser_sync_result, message_length) == 44, "browser sync result length offset");
+_Static_assert(offsetof(titan_browser_sync_result, trace) == 48, "browser sync result trace offset");
+_Static_assert(offsetof(titan_browser_sync_result, trace_length) == 52, "browser sync result trace length offset");
+_Static_assert(sizeof(titan_browser_callback_frame) == 12, "browser callback frame layout");
+_Static_assert(offsetof(titan_browser_callback_frame, state) == 4, "browser callback frame state offset");
+_Static_assert(offsetof(titan_browser_callback_frame, depth) == 8, "browser callback frame depth offset");
 #endif
 
 /* Stateful promised exports. Only _malloc/_free and the backend stack metadata
@@ -237,5 +286,24 @@ int titan_browser_host_item(uint32_t state, titan_browser_delivery *out);
 void titan_browser_host_item_done(uint32_t state, uint64_t id);
 int titan_browser_host_release_next(uint32_t state, titan_browser_delivery *out);
 void titan_browser_host_settle(const titan_browser_completion *record);
+
+/* Synchronous C callbacks. host_hold counts open BrowserPins per state (a
+ * wake source for the owner's drive). host_callback(state, 1) admits a
+ * callback unless the instance is closing, exited or poisoned and returns 0
+ * when it refuses; host_callback(state, -1) ends it. Both are trusted. */
+void titan_browser_host_hold(uint32_t state, int32_t delta);
+int titan_browser_host_callback(uint32_t state, int32_t delta);
+
+/* Generated forwards to titan.browser's public foreign functions, for C in the
+ * image (not JavaScript exports). call_sync runs a pinned callable on a
+ * callback thread and returns the result status; it refuses with STATE
+ * without entering Lua when the state is closed or closing, the instance is
+ * disposing, exited or poisoned, or no callback thread can be prepared.
+ * callback_enter/callback_leave bracket a hand-written trampoline that runs
+ * on frame->L. Without titan.browser, call_sync and enter return STATE. */
+int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t argc,
+    const titan_browser_value *args, titan_browser_sync_result *result);
+int titan_browser_callback_enter(uint32_t state, titan_browser_callback_frame *frame);
+void titan_browser_callback_leave(titan_browser_callback_frame *frame);
 
 #endif
