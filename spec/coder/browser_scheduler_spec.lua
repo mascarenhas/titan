@@ -45,7 +45,7 @@ describe("browser drive interface", function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
             if not info then pending(why) return end
             fixture = files.new()
-            for _, name in ipairs({ "support.mjs", "mini-driver.mjs", "mini-driver-abort.mjs" }) do
+            for _, name in ipairs({ "support.mjs", "mini-driver.mjs", "mini-driver-abort.mjs", "admission.mjs" }) do
                 files.copy(source .. "/" .. name, fixture.source .. "/" .. name)
             end
             local output, image = build(info, assertions)
@@ -64,6 +64,17 @@ describe("browser drive interface", function()
                 assert.truthy(result.output:find('"verdict":"PASS"', 1, true), result.output)
                 assert.truthy(result.output:find('"disposal":{"parked":[2],"cleanup":[2,2],' ..
                     '"orphaned":[2,1],"shutdown":[2,2]}', 1, true), result.output)
+                -- Design 4.2's admission matrix; the synchronous-callback rows
+                -- stay pending until titan_browser_call_sync exists (WI-D).
+                local admitted = execute(info, engine, { "--js-test", fixture.source .. "/admission.mjs", "--", image })
+                io.stdout:write(string.format("\nADMISSION assertions=%d engine=%s\n%s\n",
+                    assertions, engine, admitted.output))
+                io.stdout:flush()
+                assert.is_true(admitted.ok, admitted.output)
+                assert.truthy(admitted.output:find('"verdict":"PASS"', 1, true), admitted.output)
+                assert.truthy(admitted.output:find('"pending":["drive-sync-callback","callback-binding-entry",' ..
+                    '"callback-caller-entry","callback-notify","callback-dispose","callback-nested-call"]', 1, true),
+                    admitted.output)
                 local aborted = execute(info, engine, { "--js-test", fixture.source .. "/mini-driver-abort.mjs",
                     "--", image })
                 assert.equal(70, aborted.status, aborted.output)

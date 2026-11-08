@@ -3,6 +3,9 @@ local browser = import "browser"
 
 local type Value = browser.BrowserValue
 
+-- Keeps the child's host request alive until its settlement is delivered.
+local pending: browser.BrowserRequest?
+
 local function publish(name: string, callback: function (...: Value): Value)
   local target = browser.binding("publish")
   defer target:close()
@@ -27,7 +30,27 @@ local function child_probe(...: Value): Value
   return Value.is_string(role .. ": " .. refusal)
 end
 
+-- Starts `slow` host work from this state: its settlement is a notification
+-- for this state, which an owner drive never delivers.
+local function child_wait(...: Value): Value
+  local slow = browser.binding("slow")
+  defer slow:close()
+  pending = slow:start(function(...: Value): Value
+    local noted = browser.binding("noted")
+    defer noted:close()
+    noted:call(Value.is_string("child settled"))
+    local request? = pending
+    pending = nil
+    if request ~= nil then request:close() end
+    return Value.is_nil()
+  end, function(...: Value): Value
+    return Value.is_nil()
+  end, ...)
+  return Value.is_nil()
+end
+
 function publication()
   publish("child_echo", child_echo)
   publish("child_probe", child_probe)
+  publish("child_wait", child_wait)
 end
