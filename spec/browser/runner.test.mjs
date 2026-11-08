@@ -1082,7 +1082,8 @@ test("completion waits for promised retirement and ignores numeric fulfillment",
         await new Promise(resolve => setImmediate(resolve));
         assert.equal(settled, false, "copied completion released an unretired entry");
         release(-923);
-        assert.deepEqual(await running, {kind: "returned", status: 17, bytes: new Uint8Array([0, 255])});
+        assert.deepEqual(await running,
+            {kind: "returned", status: 17, bytes: new Uint8Array([0, 255]), trace: new Uint8Array()});
     } finally { release(-923); await instance.dispose(); }
 });
 
