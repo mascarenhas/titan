@@ -335,7 +335,7 @@ local record CloseRegistration
 end
 
 local record Runtime
-  -- Per-target native state, declared by the runtime contributor.
+  -- Per-target backend state, declared by the runtime contributor.
   local backend: Backend
   local ready_head: Task?
   local ready_tail: Task?

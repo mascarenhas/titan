@@ -2982,9 +2982,10 @@ int main(void) {
             assert.same({ "titan/thread/native.h" },
                 makefile_words("THREAD_TITAN_HEADERS"))
             assert.same({
-                "titan/async/async.native.titan", "titan/async/external.native.titan",
+                "titan/async/async.titan",
+                "titan/async/external.native.titan", "titan/async/external.browser.titan",
                 "titan/async/foreign.native.titan", "titan/async/receiver.native.titan",
-                "titan/async/runtime.native.titan",
+                "titan/async/runtime.native.titan", "titan/async/runtime.browser.titan",
             }, makefile_words("ASYNC_TITAN_SOURCES"))
             assert.same({}, undeclared_folder_sources(
                 makefile_words("ASYNC_TITAN_SOURCES"), "titan/async", "titan/async/"))
@@ -3043,9 +3044,10 @@ int main(void) {
                 "titan/uv/transfer.titan",
                 "titan/uv/udp.titan",
                 "titan/uv/utilities.titan",
-                "titan/async/async.native.titan", "titan/async/external.native.titan",
+                "titan/async/async.titan",
+                "titan/async/external.native.titan", "titan/async/external.browser.titan",
                 "titan/async/foreign.native.titan", "titan/async/receiver.native.titan",
-                "titan/async/runtime.native.titan",
+                "titan/async/runtime.native.titan", "titan/async/runtime.browser.titan",
                 "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.native.titan", "titan/http/client.titan",
@@ -3117,7 +3119,7 @@ int main(void) {
     -- the Runtime now owns one shared wake and an intrusive FIFO.
 
     it("retires explicit suspension and the exact Wait before terminal listeners", function()
-        local task = read_file("titan/async/async.native.titan")
+        local task = read_file("titan/async/async.titan")
         local first = assert(task:find("local function clear_suspension(task: Task)", 1, true))
         local last = assert(task:find("\nend", first, true))
         local clear = task:sub(first, last - 1)

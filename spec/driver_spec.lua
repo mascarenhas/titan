@@ -13232,8 +13232,7 @@ describe("target-aware source resolver", function()
     local excluded_stdlib = {
         { "timer", "timer" }, { "io", "io" },
         { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" }, { "os", "os" },
-        -- A fourth field names a contributor that is itself a native variant.
-        { "uv", "uv/uv", "tcp" }, { "async", "async/async", "runtime", "runtime.native" },
+        { "uv", "uv/uv", "tcp" },
         { "http", "http/http", "client" },
         { "websocket", "websocket/websocket", "handshake" },
         { "sqlite3", "sqlite3/sqlite3", "bindings" },
@@ -13276,6 +13275,31 @@ describe("target-aware source resolver", function()
         assert.equal("titan.browser", require("titan-compiler.parser").normalize_import("browser"))
     end)
 
+    it("composes titan.async from its shared main and the target's contributor members", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local member = target == "browser" and "browser" or "native"
+            local selected = assert(driver.resolve_source(context(target), "titan.async", stdlib_root))
+            assert.equal("folder", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/async/async.titan", paths.to_slash(selected.main), target)
+            local files = {}
+            for index, filename in ipairs(selected.files) do files[index] = paths.basename(filename) end
+            assert.same(target == "browser" and
+                { "async.titan", "external.browser.titan", "runtime.browser.titan" } or
+                { "async.titan", "external.native.titan", "foreign.native.titan",
+                  "receiver.native.titan", "runtime.native.titan" }, files, target)
+            for _, part in ipairs({ "runtime", "external", "receiver", "foreign" }) do
+                local blocked = driver.resolve_source(context(target), "titan.async." .. part, stdlib_root)
+                if member == "browser" and (part == "receiver" or part == "foreign") then
+                    -- These families have no browser member: an ordinary miss.
+                    assert.is_nil(blocked, part)
+                else
+                    assert.equal("blocked", assert(blocked, part).kind, part)
+                    assert.equal(stdlib_root .. "/titan/async/" .. part .. "." .. member .. ".titan",
+                        paths.to_slash(blocked.contributor), target .. " " .. part)
+                end
+            end
+        end
+    end)
 
     for _, target in ipairs(driver.SOURCE_LABELS) do
         it("blocks native-only stdlib folder contributors on " .. target, function()
@@ -13283,17 +13307,12 @@ describe("target-aware source resolver", function()
                 if entry[3] then
                     local name = "titan." .. entry[1] .. "." .. entry[3]
                     local source = driver.resolve_source(context(target), name, stdlib_root)
-                    if entry[4] and target == "browser" then
-                        -- Its family has no browser member: an ordinary miss.
-                        assert.is_nil(source, name)
-                    else
-                        assert.truthy(source, name)
-                        assert.equal("blocked", source.kind, name)
-                        assert.equal(stdlib_root .. "/titan/" .. entry[2] .. ".native.titan",
-                            paths.to_slash(source.main), name)
-                        assert.equal(stdlib_root .. "/titan/" .. entry[1] .. "/" ..
-                            (entry[4] or entry[3]) .. ".titan", paths.to_slash(source.contributor), name)
-                    end
+                    assert.truthy(source, name)
+                    assert.equal("blocked", source.kind, name)
+                    assert.equal(stdlib_root .. "/titan/" .. entry[2] .. ".native.titan",
+                        paths.to_slash(source.main), name)
+                    assert.equal(stdlib_root .. "/titan/" .. entry[1] .. "/" .. entry[3] .. ".titan",
+                        paths.to_slash(source.contributor), name)
                 end
             end
         end)

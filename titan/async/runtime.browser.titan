@@ -1,0 +1,203 @@
+-- Browser backend of the async Runtime: the Backend state and the seams the
+-- shared core calls, the driver over titan.browser's drive interface,
+-- Lua-state close, and the Task-form call and disposal entries that the loader
+-- reaches through the reserved titan:driver binding.
+local browser = import "browser"
+
+local type Value = browser.BrowserValue
+
+-- The Runtime's browser state (Runtime.backend).
+local record Backend
+  -- The driver is suspended in browser.relinquish. Titan code that runs then
+  -- (a synchronous callback) must wake the host when it queues ready work.
+  relinquished: boolean
+end
+
+-- What a registrar returns to the shared trampoline. No browser member
+-- creates a cancellable wait, so the trampoline never cancels one.
+local type Request = browser.BrowserRequest
+
+local function new_backend(): Backend
+  return Backend {relinquished = false}
+end
+
+-- Only the instance owner's state is ever driven, so a Runtime in any other
+-- state would wait forever.
+local function start_backend(_: Runtime)
+  if not browser.is_owner() then
+    raise "async Runtime is unavailable in a non-owner browser state"
+  end
+end
+
+-- A browser Runtime binds no transfer loop.
+local function unbind_backend(_: Runtime)
+end
+
+local function stop_backend(runtime: Runtime)
+  if runtime.backend.relinquished then browser.wake() end
+end
+
+local function cancel_request(request: Request)
+  request:cancel()
+end
+
+-- lua_close runs every finalizer, latest registration first: the Task
+-- coroutines were already unwound. A Runtime still active here (its Tasks
+-- never finished, or its driver raised) retires every Task without resuming
+-- one. Close listeners belong to ordinary retirement and do not run here.
+local function runtime_finalize(candidate: value)
+  local runtime: Runtime = candidate
+  if active_runtime ~= runtime then return end
+  require_main_thread()
+  runtime.closing = true
+  runtime.driving = true
+  retire_tasks_at_close(runtime)
+  active_runtime = nil
+end
+
+local function arm_ready(runtime: Runtime)
+  if runtime.backend.relinquished then browser.wake() end
+end
+
+-- Disposal cancels every unfinished Task, including those that cleanup
+-- started after the previous disposing relinquish.
+local function cancel_for_disposal(runtime: Runtime)
+  local reason = CancellationReason<|value|>.simple("instance disposed")
+  for index = 1, runtime.next_task - 1 do
+    local task? = runtime.tasks[index]
+    if task ~= nil then
+      do task:cancel(reason) catch end
+    end
+  end
+end
+
+--- Drive the active Runtime on the owner state's Lua main thread until its Tasks finish, giving the browser event loop one macrotask between turns.
+-- @usage async-io.md
+function loop()
+  -- Implementation notes: doc/implementation/libuv-runtime.md#browser-driver
+  require_main_thread()
+  if not browser.is_owner() then
+    raise "async.loop must be driven by the browser instance's owner state"
+  end
+  local runtime? = active_runtime
+  if runtime == nil then return end
+  if runtime.current_task ~= nil then raise "async.loop must be driven from the Lua main thread" end
+  if runtime.driving then raise "async.loop is already being driven" end
+  browser.drive_begin()
+  runtime.driving = true
+  defer do
+    runtime.driving = false
+    runtime.backend.relinquished = false
+    browser.drive_end(runtime.exit_code)
+  end
+  while true do
+    if runtime.failure ~= nil then
+      for index = 1, runtime.next_task - 1 do
+        local task? = runtime.tasks[index]
+        if task ~= nil then recover_task(runtime, task) end
+      end
+      cancel_shutdown_tasks(runtime, nil)
+    end
+    -- Work that delivery makes ready runs in a later turn.
+    local available = runtime.ready_count
+    do browser.deliver() catch fail_runtime(runtime, error, traceback) end
+    do drain_ready(runtime, available) catch fail_runtime(runtime, error, traceback) end
+    if not has_tasks(runtime) and runtime.ready_head == nil then
+      notify_runtime_closed(runtime)
+      active_runtime = nil
+      local failure? = runtime.failure
+      if failure ~= nil then rethrow_failure(failure) end
+      return
+    end
+    runtime.backend.relinquished = true
+    local status = browser.relinquish(runtime.ready_head == nil)
+    runtime.backend.relinquished = false
+    if status == browser.RELINQUISH_DISPOSING then
+      cancel_for_disposal(runtime)
+    elseif status == browser.RELINQUISH_IDLE then
+      if runtime.failure == nil then
+        fail_runtime(runtime, "async Runtime became idle while Tasks were waiting", "")
+      end
+      unwind_orphans(runtime)
+    end
+  end
+end
+
+local function callable_argument(item: Value): function (...: Value): Value
+  case item
+  when is_callable(callable) then return callable
+  end
+  raise "async Task-form call expects a callable target"
+end
+
+local function handle_argument(item: Value): browser.BrowserHandle
+  case item
+  when is_handle(handle) then return handle
+  end
+  raise "async Task-form call expects a settle handle"
+end
+
+-- Report a finished Task-form Task through the loader's settle handle.
+local function settle_outcome(settle: browser.BrowserHandle, status: TaskStatus<|Value, value|>)
+  case status
+  when succeeded(result) then
+    settle:call(Value.is_string("succeeded"), result)
+  when failed(failure) then
+    settle:call(Value.is_string("failed"), Value.is_bytes(error_text(failure.error)),
+      Value.is_bytes(failure.traceback))
+  when cancelled(reason) then
+    case reason
+    when simple(text) then settle:call(Value.is_string("cancelled"), Value.is_string(text))
+    when complex(payload) then settle:call(Value.is_string("cancelled"), Value.is_string(error_text(payload)))
+    end
+  else
+    raise "async Task-form Task settled before it finished"
+  end
+catch
+  -- A result that does not marshal still settles the call.
+  settle:call(Value.is_string("failed"), Value.is_bytes(error_text(error)), Value.is_bytes(traceback))
+end
+
+-- instance.callTask: spawn_call(target, settle, ...arguments) starts the
+-- target as a Task and reports ("started", cancel), then exactly one of
+-- ("succeeded", result), ("failed", message, trace) or ("cancelled", reason),
+-- through the loader's settle handle. An idle instance drives here; during a
+-- drive this is a queued call and the running driver runs the Task.
+local function spawn_call(...: Value): Value
+  local target = callable_argument(...[1])
+  local settle = handle_argument(...[2])
+  local arguments: {Value} = {...[3,]}
+  local task = run<|Value, value|>(function (): Value return target(...arguments) end)
+  settle:call(Value.is_string("started"), Value.is_callable(function (...: Value): Value
+    case ...[1]
+    when is_string(reason) then task:cancel(CancellationReason<|value|>.simple(reason))
+    end
+    return Value.is_nil()
+  end))
+  task:add_terminal_listener(function (status: TaskStatus<|Value, value|>)
+    defer settle:close()
+    settle_outcome(settle, status)
+  end)
+  if not task.runtime.driving then loop() end
+  return Value.is_nil()
+end
+
+-- dispose() with no drive active: cancel every Task with "instance disposed"
+-- and drive their cleanup to the end.
+local function shutdown_call(...: Value): Value
+  local runtime? = active_runtime
+  if runtime ~= nil and not runtime.driving then
+    cancel_for_disposal(runtime)
+    loop()
+  end
+  return Value.is_nil()
+end
+
+-- The owner state registers the Task-form and disposal entries with the
+-- loader; other states keep their own, unused, module state.
+local function initialize_backend()
+  if not browser.is_owner() then return end
+  local driver = browser.binding("titan:driver")
+  defer driver:close()
+  driver:call(Value.is_callable(spawn_call), Value.is_callable(shutdown_call))
+end
