@@ -137,7 +137,7 @@ describe("browser drive interface", function()
                 io.stdout:flush()
                 assert.is_true(result.ok, result.output)
                 assert.truthy(result.output:find('"verdict":"PASS"', 1, true), result.output)
-                assert.truthy(result.output:find('"gate":8', 1, true), result.output)
+                assert.truthy(result.output:find('"gate":11', 1, true), result.output)
                 assert.truthy(result.output:find('"crowd":2000', 1, true), result.output)
             end
         end)

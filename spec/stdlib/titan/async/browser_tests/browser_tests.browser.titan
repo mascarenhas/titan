@@ -1,6 +1,6 @@
 -- Scheduler gate for the browser async driver (titan#334): Tasks across real
--- relinquish points, host requests and listeners, failure and cleanup order,
--- nested coroutines, child-state ownership, and the entries that the
+-- relinquish points, host requests, timers and listeners, failure and cleanup
+-- order, nested coroutines, child-state ownership, and the entries that the
 -- JavaScript harness drives. spec/coder/browser_scheduler_spec.lua builds this
 -- owner with spec/fixtures/browser_scheduler/scheduler_child.c and runs it
 -- through spec/fixtures/browser_scheduler/scheduler.mjs, which supplies the
@@ -13,6 +13,7 @@ local gc = import "gc"
 local runtime_test = import "support.runtime.titan"
 local string = import "string"
 local task_support = import "support.async.titan"
+local timer = import "timer"
 local _ = import "async.browser_child"
 foreign import "child.h"
 
