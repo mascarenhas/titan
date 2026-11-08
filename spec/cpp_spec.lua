@@ -1257,6 +1257,10 @@ third
             it("recognizes " .. (symbolic and "symbolic" or "hard") ..
                 " links to a once header", function()
                 -- Windows' LFS fallback has no physical file identity.
+                if symbolic then
+                    local available, message = require("spec.support.filesystem").symlink_capability()
+                    if not available then pending(message); return end
+                end
                 local strategy = require("titan-compiler.io").new_sync()
                 with_headers({
                     ["main.h"] = '#include "shared.h"\n#include "alias.h"\n',
