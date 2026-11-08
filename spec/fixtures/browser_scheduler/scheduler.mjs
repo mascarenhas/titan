@@ -1,4 +1,4 @@
-import {decode, encode, observe, rejection, thrown, until} from './support.mjs';
+import {decode, encode, observe, rejection, settledMarker, thrown, until} from './support.mjs';
 
 // Harness for the async scheduler owner (spec/stdlib/titan/async/browser_tests):
 // its bindings, a macrotask ticker, and the drives it disposes or that exit.
@@ -11,7 +11,12 @@ function join(chunks) {
 
 function makeHost(context, image) {
   const host = {callables: new Map(), notes: [], stdout: [], stderr: [], notificationErrors: [],
-    ticks: 0, disposing: undefined};
+    ticks: 0, disposing: undefined, cancels: [], settled: []};
+  // Host work that records its cancellation and its settlement, which comes
+  // after `ms` milliseconds even when cancelled.
+  const work = (kind, name, ms) => ({kind,
+    promise: new Promise(resolve => { setTimeout(() => { host.settled.push(name); resolve(null); }, Number(ms)); }),
+    cancel() { host.cancels.push(name); }});
   // A self-renewing MessageChannel ticker: it runs only while Wasm has given
   // the event loop back, so it counts the macrotasks between turns.
   const channel = new MessageChannel();
@@ -30,6 +35,8 @@ function makeHost(context, image) {
       return {kind: 'detachable', promise: new Promise(resolve => { setTimeout(() => resolve(value), Number(ms)); })};
     },
     never() { return {kind: 'detachable', promise: new Promise(() => {})}; },
+    held(ms) { return work('retained', 'held', ms); },
+    late(ms) { return work('detachable', 'late', ms); },
     ticks(count) {
       return {kind: 'listener', subscribe(emit) {
         let emitted = 0;
@@ -110,8 +117,8 @@ async function entries(context, image) {
   } finally { await host.close(); }
 }
 
-// Disposal while relinquished, mid-turn, with an orphaned cleanup wait, and
-// with no drive at all.
+// Disposal while relinquished, mid-turn, with an orphaned cleanup wait, with
+// no drive at all, and with host work that outlives cancellation.
 async function disposal(context, image) {
   const summary = {};
   let host = makeHost(context, image);
@@ -161,6 +168,26 @@ async function disposal(context, image) {
     await host.instance.dispose();
     context.assert(notes(host) === 'idle cleanup instance disposed|' +
       'idle new work: browser state is closing|idle cleanup got 50', `shutdown notes: ${notes(host)}`);
+  } finally { await host.close(); }
+
+  // The retained request keeps dispose() pending until it settles; the
+  // detachable one's late settlement is dropped.
+  host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    const retiring = host.call('retire', 250n, 500n);
+    await until(context, () => host.notes.includes('late parked'), 'retire did not park');
+    const disposing = host.instance.dispose(), marker = settledMarker(disposing);
+    await rejection(context, retiring, 'DISPOSED');
+    context.assert([...host.cancels].sort().join() === 'held,late', `cancelled host work: ${host.cancels}`);
+    context.assert(!marker.settled, 'dispose() settled before its retained request');
+    await disposing;
+    context.assert(host.settled.join() === 'held', `host work settled before dispose() resolved: ${host.settled}`);
+    await eventually(context, () => host.settled.length === 2, 'the detachable request never settled');
+    await context.tick();
+    context.assert(host.notificationErrors.length === 0, 'a settlement after disposal reached the state');
+    context.assert([...host.notes].sort().join('|') === 'held cleanup instance disposed|held parked|' +
+      'late cleanup instance disposed|late parked', `retire notes: ${notes(host)}`);
   } finally { await host.close(); }
   return summary;
 }

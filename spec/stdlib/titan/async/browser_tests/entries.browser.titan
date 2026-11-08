@@ -153,6 +153,26 @@ local function crowd(...: Value): Value
   return Value.is_nil()
 end
 
+-- A Task parked on the host request `name(ms)`; disposal cancels it.
+local function park_on(name: string, ms: Value)
+  async.run_with_cleanup<|nil, value|>(function (): nil
+    note(name .. " parked")
+    suspend_on(name, ms)
+    return nil
+  end, function (reason: async.CancellationReason<|value|>?)
+    note(name .. " cleanup " .. reason_text(reason))
+  end)
+end
+
+-- Host work that outlives disposal's cancellation: a retained request and a
+-- detachable one, each settling after its own delay.
+local function retire(...: Value): Value
+  park_on("held", ...[1])
+  park_on("late", ...[2])
+  async.loop()
+  return Value.is_nil()
+end
+
 local function exit_drive(...: Value): Value
   local code = integer_of(...[1])
   async.run_with_cleanup<|nil, value|>(function (): nil
@@ -217,6 +237,7 @@ local function publish_entries()
   publish(target, "dispose_mid_turn", dispose_mid_turn)
   publish(target, "orphan", orphan)
   publish(target, "crowd", crowd)
+  publish(target, "retire", retire)
   publish(target, "exit_drive", exit_drive)
   publish(target, "exit_and_fail", exit_and_fail)
   publish(target, "make_child", make_child)
