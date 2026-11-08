@@ -533,4 +533,24 @@ stack traceback:
 	test.titan:9: in test.main
 ]=], out)
     end)
+
+    for _, case in ipairs({
+        { name = "integer", expression = "42", message = "42" },
+        { name = "integral float", expression = "2.0", message = "2.0" },
+        { name = "negative zero", expression = "-0.0", message = "-0.0" },
+        { name = "fractional float", expression = "2.5", message = "2.5" },
+        { name = "boolean", expression = "false",
+            message = "(error object is a boolean value)" },
+        { name = "nil", expression = "nil",
+            message = "<no error object>" },
+    }) do
+        it("preserves the message and trace for a raised " .. case.name, function()
+            local status, out = compile_and_run_app(
+                "function main(args: {string}): integer\n" ..
+                "    raise " .. case.expression .. "\nend\n")
+            assert.equal(1, status)
+            assert.equal("test: " .. case.message .. "\nstack traceback:\n" ..
+                "\ttest.titan:2: in test.main\n", out)
+        end)
+    end
 end)

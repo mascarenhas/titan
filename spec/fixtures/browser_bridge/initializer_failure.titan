@@ -25,6 +25,14 @@ function main(args: {string}): integer
     raise InitFailure { code = 9 }
   elseif mode == "false" then
     raise false
+  elseif mode == "float" then
+    raise 2.0
+  elseif mode == "negative-zero" then
+    raise -0.0
+  elseif mode == "integer" then
+    raise 42
+  elseif mode == "fractional" then
+    raise 2.5
   elseif mode == "browser-error" then
     local throwing = browser.binding("throw_error")
     defer throwing:close()
