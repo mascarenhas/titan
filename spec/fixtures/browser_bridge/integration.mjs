@@ -26,7 +26,7 @@ function finalizedState(context, host, index) {
   context.assert(host.stateInvalidations.filter(token => token === observed[0].token).length === 1,
     'browser state did not invalidate exactly once after its user finalizer');
   const warnings = decode(join(host.stderr)).split('\n').filter(line =>
-    line.startsWith('Lua warning: ') && line.includes('browser state is not attached'));
+    line.startsWith('Lua warning: ') && line.includes('browser state is closed'));
   context.assert(warnings.length === host.earlierCloses.length,
     'an earlier-object binding call did not produce its expected Lua finalizer warning');
 }

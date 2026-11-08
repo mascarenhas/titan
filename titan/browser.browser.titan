@@ -128,7 +128,7 @@ end
 local function current_state(): foreign uint32_t
   local current: foreign *titan_browser_state_record = state_record
   if current.token == 0 then
-    raise "browser state is not attached"
+    raise "browser state is closed"
   end
   if current.closing == 0 and ffi.titan_state_closing(L) ~= 0 then
     mark_closing(current)
