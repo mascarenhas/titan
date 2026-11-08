@@ -7,7 +7,7 @@ copying and disposal (`encode_message`, `decode_message`, `copy_message`,
 `transfer_load_module`, custom-record hook selection, closure capture conversion,
 and destination reconstruction. The packet and resource-table layouts are in
 `titan/transfer_native.h`; the `async.Receiver` slot header
-(`titan/async_receiver_native.h`) is separate. `titan.transfer` imports
+(`titan/async/async_receiver_native.h`) is separate. `titan.transfer` imports
 `reflect`, `protobuf` and `gc`, and does not depend on `uv`, `async` or
 `thread`. `async.TransferValue` is a transparent alias.
 

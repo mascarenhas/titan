@@ -1,0 +1,186 @@
+-- Native coalescing cross-state receivers over a UV async handle.
+
+-- One persistent single-reader state per waiting Receiver, created by its first
+-- wait: later waits reserve by setting task and reuse the token and action.
+local record ReceiverReader
+  task: Task<|value, value|>?
+  token: ResumeToken
+  withdraw: SuspendCancelAction?
+end
+
+--- A lossy latest-value receiver whose borrowed handle can cross Lua states.
+-- Values decode eagerly in wait; overwritten packets are disposed entirely in C.
+-- @usage async-io.md#cross-state-receivers
+record Receiver
+  local native: foreign titan_async_receiver
+  local native_handle: uv.async_t
+  local handle_view: uv.handle_t
+  local reader: ReceiverReader?
+end
+
+-- Positive status 2 rejects admission; libuv's zero/negative statuses follow
+-- publication. Clear the actual caller slot before disposal or notification.
+-- Send/close and borrowed-handle lifetime remain externally serialized.
+local foreign function receiver_send_native(receiver: *titan_async_receiver,
+    source: *(*void)): int
+  if receiver.closed ~= 0 then return 2 end
+  local message = source[0] as foreign *titan_async_message
+  local previous = ffi.titan_async_receiver_exchange(receiver, message)
+  source[0] = nil
+  transfer.discard_message(previous)
+  return receiver.send(receiver.handle)
+end
+
+local foreign function receiver_take_native(receiver: *titan_async_receiver,
+    destination: *(*void)): int
+  if receiver.closed ~= 0 then return 2 end
+  local message = ffi.titan_async_receiver_exchange(receiver, nil)
+  destination[0] = message as foreign *void
+  if message == nil then return 0 end
+  return 1
+end
+
+local foreign function receiver_disable_native(receiver: *titan_async_receiver)
+  receiver.closed = 1
+  transfer.discard_message(ffi.titan_async_receiver_exchange(receiver, nil))
+end
+
+local function Receiver:begin_close()
+  if self.handle_view:is_initialized() and not uv.is_closing(self.handle_view) then
+    uv.close(self.handle_view)
+  end
+end
+
+local function Receiver:wake()
+  local reader? = self.reader
+  if reader == nil then return end
+  local task? = reader.task
+  -- Task:resume wakes a reader suspended on its token and latches the wake of
+  -- a running reader, one about to suspend or one decoding, whose loop in
+  -- wait rechecks the slot after every return; it coalesces repeated wakes.
+  if task ~= nil then task:resume(reader.token) end
+end
+
+-- Runtime shutdown disables admission before its generic native handle close.
+local function Receiver:disable()
+  receiver_disable_native(self.native)
+  self:wake()
+end
+
+-- lua_close finalizes rooted owners too; senders must already be quiescent.
+local function receiver_finalize(owner: Receiver)
+  receiver_disable_native(owner.native)
+end
+
+--- Create a coalescing receiver without driving its Runtime or requiring a Task.
+-- Keep this owner and its Lua state alive until all borrowed-handle sends return.
+-- After sender quiescence, close and drain the owning loop before releasing roots.
+-- @return Receiver retained by its native handle until close completes.
+-- @usage async-io.md#cross-state-receivers
+function receiver(): Receiver
+  -- Implementation notes: doc/implementation/libuv-runtime.md#cross-state-receiver-ownership
+  local runtime = ensure_runtime()
+  if runtime.closing or runtime.exit_code ~= nil then
+    raise "cannot create a receiver while async Runtime is shutting down"
+  end
+  local handle = uv.async_t.new()
+  local owner = Receiver {
+    native = foreign titan_async_receiver.new(),
+    native_handle = handle,
+    handle_view = handle:as_handle_t(),
+    reader = nil
+  }
+  owner.native.closed = 1
+  gc.finalizable(owner, receiver_finalize)
+  do
+    -- A notification carries no resource. The actual packet stays in the
+    -- native slot, including while a reader's deferred wake is queued.
+    local callback = function (_: uv.async_t) owner:wake() end
+    uv.handle_set_data(owner.handle_view, owner)
+    owner.native.send = uv.async_send_function()
+    check_status(uv.async_init(runtime.loop, handle, callback), "async.receiver")
+    owner.native.handle = handle:borrow()
+    owner.native.closed = 0
+  catch
+    owner:close()
+    raise
+  end
+  return owner
+end
+
+--- Borrow the cross-state send address; retain this receiver and its Lua state.
+-- Withdraw the address from all senders and finish in-flight sends before close.
+-- @usage async-io.md#cross-state-receivers
+function Receiver:handle(): foreign *void
+  return self.native
+end
+
+--- Encode and replace the latest value, disposing any unread predecessor natively.
+-- Rejection before exchange discards the encoded packet. Notification failure
+-- after exchange still commits delivery ownership; never retry a committed send.
+-- Only packet-registered resources are released on discard; manual handoff bytes
+-- still require their explicit adoption/disposal protocol.
+-- @param handle Borrowed address; retain its Receiver and state through all sends.
+-- @param candidate Transferable value or explicit TransferValue copy/borrow policy.
+-- @usage async-io.md#cross-state-receivers
+function send(handle: foreign *void, candidate: value)
+  if not handle then raise "receiver handle must not be NULL" end
+  local raw = transfer.encode_message(candidate)
+  defer transfer.discard_message(raw)
+  -- Call at the real guarded local: its volatile home exposes the native clear
+  -- before check_status can enter ordinary Titan code or raise.
+  local status = receiver_send_native(handle as foreign *titan_async_receiver, raw)
+  if status == 2 then raise "receiver is closed" end
+  check_status(status, "async.send")
+end
+
+-- Notification-only Receivers never allocate reader state. The first wait
+-- publishes it only once complete; every later wait reuses it.
+local function Receiver:create_reader(): ReceiverReader
+  local reader = ReceiverReader(nil, ResumeToken("async.Receiver.wait"), nil)
+  -- Task:cancel runs this only while the reserving Task is suspended in wait,
+  -- so the reservation it withdraws is necessarily that Task's.
+  reader.withdraw = function () reader.task = nil end
+  self.reader = reader
+  return reader
+end
+
+--- Reserve the sole reader and consume/decode the latest value, waiting if needed.
+-- Cancellation withdraws only the reservation, leaving an unread packet intact.
+-- Decode failures consume the packet and raise here; no lazy retry is possible.
+-- @return Decoded value, including nil and false as data.
+-- @usage async-io.md#cross-state-receivers
+function Receiver:wait(): value
+  local task = running()
+  local reader = self.reader or self:create_reader()
+  if reader.task ~= nil then raise "receiver already has a waiting reader" end
+  -- Cancellation withdraws the reservation before this Task unwinds, so a
+  -- successor may already hold it on exit; release only this Task's own.
+  defer if reader.task == task then reader.task = nil end
+  -- Reserve before even inspecting the slot, not just before suspension.
+  -- Cancellation withdraws only this reservation; it never takes the packet.
+  reader.task = task
+  while true do
+    checkpoint()
+    local raw: foreign *void = nil
+    local status = receiver_take_native(self.native, raw)
+    if status == 2 then raise "receiver is closed" end
+    if status == 1 then
+      -- Guard only after the native take, so no later write reaches `raw`;
+      -- decode consumes and clears that actual local on return and on raise.
+      defer transfer.discard_message(raw)
+      return transfer.decode_message(raw)
+    end
+    -- A stale/coalesced notification may have no packet. Suspend under the same
+    -- reservation: send between the check and registration leaves the UV async
+    -- notification pending until this Task has yielded.
+    suspend(reader.token, reader.withdraw)
+  end
+end
+
+--- Close idempotently, dispose an unread packet natively, and wake the reader.
+-- @usage async-io.md#cross-state-receivers
+function Receiver:close()
+  defer self:begin_close()
+  self:disable()
+end

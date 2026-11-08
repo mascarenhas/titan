@@ -253,7 +253,7 @@ before or during the switch (tag, state, finalizer, minicoro, stack) propagate
 as ordinary raises. The staging and raising helpers stay private to
 `titan/coroutine.titan`.
 
-`titan/async.native.titan` imports `coroutine` through its ordinary public interface
+`titan.async` (`titan/async/`) imports `coroutine` through its ordinary public interface
 and uses `transfer` to drive Task roots; the report policy that decides whether
 to append a driver trace is described in
 [Task status](libuv-runtime.md#explicit-suspend-task-status-listeners-and-combinators).

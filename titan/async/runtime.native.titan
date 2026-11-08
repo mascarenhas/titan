@@ -1,0 +1,339 @@
+-- Native libuv backend of the async Runtime: loop acquisition and Lua-state
+-- close, the shared wake timer, the libuv-typed await helpers, the driver
+-- loop and the bundled libuv version.
+-- async already imports lua.h and titan/ffi.h; this header is OS-only and
+-- introduces no transitive libuv dependency.
+foreign import "async_signal_platform.h"
+local uv = import "uv"
+
+local function operation_error(code: integer, operation: string): OperationError
+  return OperationError(code, uv.err_name(code), uv.strerror(code), operation)
+end
+
+local function check_status(code: integer, operation: string)
+  if code < 0 then raise operation_error(code, operation) end
+end
+
+-- lua_close runs every finalizer, latest registration first, before freeing
+-- any object. This Runtime registers before its Receivers, external wake owner
+-- and Task coroutines exist, so those are already finalized here. A Runtime
+-- never driven to retirement (only bootstrapped, or left after its driver
+-- raised) still owns an initialized loop whose native state is not GC memory:
+-- retire every handle without resuming a Task, then close the loop. Close
+-- listeners belong to ordinary retirement and do not run here.
+local function runtime_finalize(candidate: value)
+  -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+  local runtime: Runtime = candidate
+  if active_runtime ~= runtime then return end
+  require_main_thread()
+  runtime.closing = true
+  runtime.driving = true
+  -- Keep shutdown admission and recursive driver entry closed throughout
+  -- native retirement, even though UV suppresses every user callback.
+  uv.unbind_transfer_loop(runtime.loop)
+  -- Task coroutines were unwound (their defers and cleanup ran inside their
+  -- finalizers) and destroyed. Retire every Task and the ready queue: a late
+  -- settlement finds no current Wait and raises, a resume finds no token, and
+  -- no queued continuation remains, so no callback can enter a Task. A
+  -- finalizer registered before this Runtime may still read a Task's status,
+  -- so publish a terminal state with the phase. A pending body outcome never
+  -- finished its cleanup or native retirement and is not published, and no
+  -- terminal listener runs. Terminal status follows native retirement, so a
+  -- Task whose retirement gate is still armed (the gate finish_task refuses
+  -- on) stays nonterminal.
+  local abandoned = CancellationReason.simple(ABANDONED_AT_CLOSE)
+  for index = 1, runtime.next_task - 1 do
+    local task? = runtime.tasks[index]
+    if task ~= nil then
+      task.wait = nil
+      clear_suspension(task)
+      local barrier? = task.cleanup_wait
+      if barrier == nil or barrier.native.ready ~= 0 then
+        task.phase = TASK_FINISHED
+        task.state = TaskStatus.cancelled(task.cancel_value or abandoned)
+      end
+    end
+  end
+  runtime.ready_head = nil
+  runtime.ready_tail = nil
+  runtime.ready_count = 0
+  runtime.wake_armed = false
+  check_status(uv.loop_abandon(runtime.loop), "runtime.loop.abandon")
+  active_runtime = nil
+  -- Every accepted job has returned. Release what abandoned run_foreign
+  -- waits handed over, here on the closing thread: such a release may itself
+  -- wait for the worker pool, which no abandoned job occupies any more.
+  local abandoned_work = runtime.abandoned_work
+  runtime.abandoned_work = {}
+  for index = 1, #abandoned_work do
+    abandoned_work[index]:release_abandoned()
+  end
+end
+
+--- Borrow the active Runtime loop without creating or driving a Runtime.
+-- @return Runtime-owned loop; valid from Tasks, registration, and loop callbacks.
+-- @usage async-io.md
+function current_loop(): uv.loop_t
+  local runtime? = active_runtime
+  if runtime == nil then raise "async Runtime is not active" end
+  return runtime.loop
+end
+
+local function arm_ready(runtime: Runtime)
+  if runtime.wake_armed then return end
+  check_status(uv.timer_start(runtime.wake, ready_tick, 0, 0), "runtime.timer.start")
+  runtime.wake_armed = true
+end
+
+local function ready_tick(timer: uv.timer_t)
+  local runtime: Runtime = uv.timer_get_data(timer)
+  runtime.wake_armed = false
+  local failed = false
+  do drain_ready(runtime)
+  catch
+    failed = true
+    fail_runtime(runtime, error, traceback)
+  end
+  -- Undispatched entries remain linked and rooted even after delivery fails.
+  -- Preserve the first error if the replacement wake also fails.
+  if runtime.ready_head ~= nil and not runtime.wake_armed then
+    do arm_ready(runtime)
+    catch
+      failed = true
+      fail_runtime(runtime, error, traceback)
+    end
+  end
+  if failed then rethrow_failure(runtime.failure) end
+end
+
+local function ready_closed(timer: uv.timer_t)
+  uv.timer_set_data(timer, nil)
+end
+
+--- Register a typed callback wait and defer cancellation until accepted work completes.
+-- @param context Typed context retained until operation retirement.
+-- @param start Nonyielding registrar receiving Completion and operation number; may return nil or an accepted request.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
+function await_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): Result<|T, E|>
+  return coroutine.yield(completion(context, start, WAIT_ORDINARY), ASYNC_TAG) as Result<|T, E|>
+end
+
+--- Register a typed ownership-cleanup wait despite pending cancellation or shutdown.
+-- @param context Typed context retained until operation retirement.
+-- @param start Nonyielding registrar receiving Completion and operation number; may return nil or an accepted request.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
+function await_cleanup_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): Result<|T, E|>
+  return coroutine.yield(completion(context, start, WAIT_CLEANUP), ASYNC_TAG) as Result<|T, E|>
+end
+
+--- Register a typed wait, request native cancellation, and still await terminal completion.
+-- @param context Typed context retained until operation retirement.
+-- @param start Nonyielding registrar receiving Completion and operation number; returns the accepted request or settles inline.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
+function await_cancellable_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): CancellableResult<|T, E|>
+  return coroutine.yield(completion(context, start, WAIT_CANCELLABLE), ASYNC_TAG) as CancellableResult<|T, E|>
+end
+
+local function old_start<|T, E|>(done: Completion<|function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?), T, E|>, number: integer): uv.req_t?
+  local op = done:context(number)
+  return op(function (result: T) legacy_settle(done as Wait, number, OUTCOME_SUCCESS, result) end,
+      function (error: E) legacy_settle(done as Wait, number, OUTCOME_ERROR, error) end,
+      function (error: value, trace: string) done:fatal(number, error, trace) end)
+end
+
+--- Request supported native cancellation but wait for the promised terminal callback.
+-- @param op Nonyielding registrar receiving resolve, reject, and fatal callbacks; settle exactly once.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
+function await_cancellable<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?)): CancellableResult<|T, E|>
+  return await_cancellable_with<|function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?), T, E|>(op, old_start)
+end
+
+local function close_handles(runtime: Runtime)
+  local external? = runtime.external
+  if external ~= nil then external:close() end
+  uv.walk(runtime.loop, function (handle: uv.handle_t, _: value)
+    if not uv.is_closing(handle) then
+      case handle
+      when timer(owner) then
+        if owner == runtime.wake then uv.timer_close(owner, ready_closed)
+        else uv.close(handle) end
+      when async() then
+        defer uv.close(handle)
+        local data = uv.handle_get_data(handle)
+        if data is Receiver then (data as Receiver):disable() end
+      else uv.close(handle)
+      end
+    end
+  end)
+end
+
+--- Drive the active Runtime on the Lua main thread until Tasks and native cleanup finish.
+-- @usage async-io.md
+function loop()
+  -- Implementation notes: doc/implementation/libuv-runtime.md#explicit-negative-status-retry
+  require_main_thread()
+  local runtime? = active_runtime
+  if runtime == nil then return end
+  if runtime.current_task ~= nil then raise "async.loop must be driven from the Lua main thread" end
+  if runtime.driving then raise "async.loop is already being driven" end
+  runtime.driving = true
+  defer runtime.driving = false
+  -- A negative native retirement result leaves this Runtime and every native
+  -- owner intact. Only an explicit new loop() invocation retries those calls.
+  runtime.retirement_error = nil
+  for index = 1, runtime.next_task - 1 do
+    local task? = runtime.tasks[index]
+    if task ~= nil then
+      local barrier? = task.cleanup_wait
+      if barrier ~= nil and barrier.native.status < 0 then barrier.native.status = 1 end
+    end
+  end
+  local recover_native = true
+  while true do
+    if recover_native or runtime.failure ~= nil then
+      recover_native = false
+      -- Emergency recovery uses the existing Task inventory, not a channel
+      -- registry. It runs before blocking even when a native wait refs UV.
+      for index = 1, runtime.next_task - 1 do
+        local task? = runtime.tasks[index]
+        if task ~= nil then
+          local barrier? = task.cleanup_wait
+          if barrier ~= nil and barrier.native.armed ~= 0 and barrier.native.ready == 0 then
+            local notified = uv.native_external_wake_is_notified(barrier.target) ~= 0
+            if notified or task.root_done or barrier.awaited then
+              local status = retirement_poll_native(barrier.native)
+              if status == 0 then
+                local target = barrier.target
+                barrier.target = nil
+                barrier.bridge.waits[barrier.identity] = nil
+                barrier.registered = false
+                if target ~= nil then barrier.bridge.wake:unregister(target) end
+              elseif status < 0 then
+                if runtime.retirement_error == nil then runtime.retirement_error = barrier end
+              end
+            end
+          end
+          if task.root_done and task.terminal_kind ~= TERMINAL_NONE and
+              (barrier == nil or barrier.native.ready ~= 0) then
+            if not task.ready_queued then
+              do enqueue_ready(task, READY_TERMINAL, nil)
+              catch recover_native = true; fail_runtime(runtime, error, traceback) end
+            end
+          elseif barrier ~= nil and barrier.native.ready ~= 0 and
+              barrier.done ~= nil and not barrier.notified then
+            do barrier:notify()
+            catch recover_native = true; fail_runtime(runtime, error, traceback) end
+          end
+          if runtime.failure ~= nil and not task.root_done and not task.ready_queued then
+            if task.phase == TASK_READY then
+              -- An entry allocation may have failed after dequeue but before
+              -- the startup trampoline ran. Preserve run_with_cleanup's entry.
+              do enqueue_ready(task, READY_START, nil)
+              catch recover_native = true; fail_runtime(runtime, error, traceback) end
+            else
+              local waiting? = task.wait
+              if waiting ~= nil and waiting.phase == WAIT_SETTLED then
+                do enqueue_ready(task, READY_DELIVER, waiting)
+                catch recover_native = true; fail_runtime(runtime, error, traceback) end
+              else
+                local registrar: value = start_native_retirement_wait
+                local unaccepted_native = waiting ~= nil and barrier ~= nil and
+                  waiting.phase == WAIT_REGISTERING and waiting.stored_context == barrier and
+                  waiting.register == registrar
+                if waiting == nil or waiting.phase == WAIT_RETIRED or unaccepted_native then
+                  -- These operations have no outstanding domain acceptance.
+                  -- A cleanup barrier itself remains preaccepted and retained.
+                  task.wait = nil
+                  task.suspended = false
+                  task.resume_token = nil
+                  task.resume_pending = false
+                  task.suspend_cancel = nil
+                  if barrier ~= nil and task.terminal_kind == TERMINAL_NONE then
+                    local failure = runtime.failure as Error
+                    task.terminal_kind = TERMINAL_FAILED
+                    task.terminal_value = failure.error
+                    task.terminal_trace = failure.traceback
+                  end
+                  do enqueue_ready(task, READY_UNWIND, nil)
+                  catch recover_native = true; fail_runtime(runtime, error, traceback) end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    local retirement_error? = runtime.retirement_error
+    if retirement_error ~= nil then
+      raise operation_error(retirement_error.native.status, "async.native_retirement.retire")
+    end
+    if runtime.failure ~= nil then cancel_shutdown_tasks(runtime, nil) end
+    if runtime.ready_head ~= nil and not runtime.wake_armed then
+      local wake_failed = false
+      do arm_ready(runtime)
+      catch
+        wake_failed = true
+        fail_runtime(runtime, error, traceback)
+      end
+      if wake_failed then
+        cancel_shutdown_tasks(runtime, nil)
+        -- An unrelated referenced handle may need one of these continuations
+        -- to close it. Recover ready work before a blocking uv.run, not only
+        -- once native liveness reaches zero. Pending native waits stay owned.
+        do drain_ready(runtime) catch fail_runtime(runtime, error, traceback) end
+      end
+    end
+    -- Task-owned cleanup may have accepted a handle-based wait. Leave its
+    -- completion and scheduler wakes intact until every Task has unwound.
+    if not has_tasks(runtime) and runtime.ready_head == nil then
+      uv.unbind_transfer_loop(runtime.loop)
+      runtime.closing = true
+      do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
+    end
+    local mode = uv.RUN_DEFAULT
+    if runtime.ready_head ~= nil and not runtime.wake_armed then mode = uv.RUN_NOWAIT end
+    if recover_native then mode = uv.RUN_NOWAIT end
+    do uv.run(runtime.loop, mode)
+    catch
+      fail_runtime(runtime, error, traceback)
+      recover_native = true
+    end
+    if not uv.loop_alive(runtime.loop) then
+      if runtime.ready_head ~= nil then
+        -- Accepted work remains in the ready queue. The next outer iteration
+        -- rearms it or recovers a bounded batch before classifying orphans.
+        runtime.wake_armed = false
+      elseif has_tasks(runtime) then
+        if runtime.failure == nil then fail_runtime(runtime, "libuv loop became idle while async Tasks were waiting", "") end
+        unwind_orphans(runtime)
+      else
+        -- Native liveness excludes initialized inactive handles. Last-Task
+        -- retirement can reach this branch before the next outer iteration.
+        do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
+        if not uv.loop_alive(runtime.loop) then
+          local status = uv.loop_close(runtime.loop)
+          if status == 0 then
+            uv.timer_set_data(runtime.wake, nil)
+            notify_runtime_closed(runtime)
+            active_runtime = nil
+            local failure? = runtime.failure
+            if failure ~= nil then rethrow_failure(failure) end
+            return
+          end
+          check_status(status, "runtime.loop.close")
+        end
+      end
+    end
+  end
+end
+
+--- Return the bundled libuv version string.
+-- @return Native libuv version.
+-- @usage async-io.md
+function version(): string
+  return uv.version_string()
+end

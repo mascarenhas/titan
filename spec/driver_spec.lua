@@ -13230,9 +13230,11 @@ describe("target-aware source resolver", function()
 
     local stdlib_root = paths.to_slash(lfs.currentdir())
     local excluded_stdlib = {
-        { "async", "async" }, { "timer", "timer" }, { "io", "io" },
+        { "timer", "timer" }, { "io", "io" },
         { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" }, { "os", "os" },
-        { "uv", "uv/uv", "tcp" }, { "http", "http/http", "client" },
+        -- A fourth field names a contributor that is itself a native variant.
+        { "uv", "uv/uv", "tcp" }, { "async", "async/async", "runtime", "runtime.native" },
+        { "http", "http/http", "client" },
         { "websocket", "websocket/websocket", "handshake" },
         { "sqlite3", "sqlite3/sqlite3", "bindings" },
         { "lua", "lua/lua", "worker" }, { "thread", "thread/thread", "channel" },
@@ -13280,12 +13282,18 @@ describe("target-aware source resolver", function()
             for _, entry in ipairs(excluded_stdlib) do
                 if entry[3] then
                     local name = "titan." .. entry[1] .. "." .. entry[3]
-                    local source = assert(driver.resolve_source(context(target), name, stdlib_root))
-                    assert.equal("blocked", source.kind, name)
-                    assert.equal(stdlib_root .. "/titan/" .. entry[2] .. ".native.titan",
-                        paths.to_slash(source.main), name)
-                    assert.equal(stdlib_root .. "/titan/" .. entry[1] .. "/" .. entry[3] .. ".titan",
-                        paths.to_slash(source.contributor), name)
+                    local source = driver.resolve_source(context(target), name, stdlib_root)
+                    if entry[4] and target == "browser" then
+                        -- Its family has no browser member: an ordinary miss.
+                        assert.is_nil(source, name)
+                    else
+                        assert.truthy(source, name)
+                        assert.equal("blocked", source.kind, name)
+                        assert.equal(stdlib_root .. "/titan/" .. entry[2] .. ".native.titan",
+                            paths.to_slash(source.main), name)
+                        assert.equal(stdlib_root .. "/titan/" .. entry[1] .. "/" ..
+                            (entry[4] or entry[3]) .. ".titan", paths.to_slash(source.contributor), name)
+                    end
                 end
             end
         end)

@@ -1,0 +1,430 @@
+-- Native external waits and retirement barriers: the Runtime's lazily created
+-- UV external wake bridge and the ExternalWait owners reserved on it.
+-- async_receiver_native.h also declares receiver.native.titan's native slot.
+foreign import "async_receiver_native.h"
+local iteration = import "iteration"
+
+local foreign function retirement_poll_native(state: *titan_async_retirement): int
+  if state.ready ~= 0 then return 0 end
+  if state.status < 0 then return state.status end
+  local status = state.retire(state.context)
+  state.status = status
+  if status == 0 then state.ready = 1 end
+  return status
+end
+
+local record ExternalBridge
+  runtime: Runtime
+  wake: uv.external_wake_t
+  waits: {integer: ExternalWait}
+  next_identity: integer
+  closed: boolean
+end
+
+record ExternalWait
+  local bridge: ExternalBridge
+  local identity: integer
+  local target: foreign *void
+  local register_fn: (function (foreign *void): boolean)?
+  local unregister_fn: (function (): ())?
+  local token: ResumeToken
+  local cancel_action: (function (): ())?
+  local done: Wait?
+  local number: integer
+  local used: boolean
+  local registered: boolean
+  local notified: boolean
+  local retired: boolean
+  local cleanup_task: Task?
+  local native: foreign titan_async_retirement
+  local native_owner: value
+  local awaited: boolean
+  local close_requested: boolean
+end
+
+local function ExternalWait:check_cleanup_binding(runtime: Runtime)
+  if self.bridge.runtime ~= runtime then
+    raise "cleanup external wait belongs to another async Runtime"
+  end
+  if self.cleanup_task ~= nil then
+    raise "cleanup external wait is already bound to a Task"
+  end
+  if self.used or self.retired then
+    raise "cleanup external wait is consumed or closed"
+  end
+  if self.native.retire == nil then
+    raise "cleanup external wait requires a native retirement capability"
+  end
+end
+
+local function ExternalWait:detach_domain()
+  if not self.registered then return end
+  self.registered = false
+  if self.native.unregister_wait ~= nil then
+    self.native.unregister_wait(self.native.context)
+  else
+    self.unregister_fn()
+  end
+end
+
+local function ExternalWait:retire()
+  if self.retired then return end
+  if self.native.armed ~= 0 and self.native.ready == 0 then
+    -- The owning Task keeps an accepted retirement barrier even when its
+    -- user-facing wait is closed or an ordinary cleanup entry failed.
+    self.close_requested = true
+    return
+  end
+  self.retired = true
+  local target = self.target
+  self.target = nil
+  self.bridge.waits[self.identity] = nil
+  -- No target borrow survives unregister: it consumes the registration ref.
+  -- The owner method, not the borrow-only native entry: at Lua-state close an
+  -- abandoned Task's cleanup can run after the wake owner's finalizer detached
+  -- the core and dropped this borrow, and then the owner returns EINVAL.
+  -- Implementation notes: doc/implementation/libuv-runtime.md#lua-state-close-of-an-unretired-runtime
+  if target ~= nil then self.bridge.wake:unregister(target) end
+  self.done = nil
+  self.cancel_action = nil
+  self.register_fn = nil
+  self.unregister_fn = nil
+  self.cleanup_task = nil
+  self.native_owner = nil
+  self.native.context = nil
+  self.native.register_wait = nil
+  self.native.unregister_wait = nil
+  self.native.retire = nil
+end
+
+local function ExternalWait:cancel_wait()
+  self:detach_domain()
+  self:retire()
+end
+
+function ExternalWait:close()
+  if self.retired then return end
+  local bound? = self.cleanup_task
+  if bound ~= nil and bound.phase ~= TASK_FINISHED then
+    if bound.runtime.current_task ~= bound or not bound.cleanup_active then
+      raise "external wait is reserved for its Task cleanup"
+    end
+  end
+  if self.done ~= nil then raise "cannot close an active external wait" end
+  if self.native.armed ~= 0 and self.native.ready == 0 then
+    self.close_requested = true
+    return
+  end
+  self:retire()
+end
+
+local function ExternalWait:notify()
+  if self.retired or self.notified then return end
+  if self.native.retire ~= nil and self.native.ready == 0 then return end
+  local bound? = self.cleanup_task
+  if bound ~= nil and bound.root_done and bound.terminal_kind ~= TERMINAL_NONE then
+    if not bound.ready_queued then enqueue_ready(bound, READY_TERMINAL, nil) end
+    self.notified = true
+    return
+  end
+  local done? = self.done
+  if done == nil then return end
+  local task = done.task
+  if done.epoch ~= self.number or task.epoch ~= self.number or
+      task.wait ~= done or done.phase ~= WAIT_PENDING then return end
+  if done.policy == WAIT_CLEANUP then
+    enqueue_ready(task, READY_RESUME, done)
+  else
+    task:resume(self.token)
+  end
+  self.notified = true
+end
+
+-- Implementation notes: doc/implementation/libuv-runtime.md#external-wake-bridge
+local function ExternalBridge:drain()
+  if self.closed then return end
+  local identities = foreign unsigned long long.new_array(64)
+  local status, count = self.wake:drain(identities, 64)
+  -- Count remains valid on an error. Schedule the consumed identities before
+  -- reporting status; valid live libuv async handles have no recoverable send failure.
+  local failed = false
+  for index = 0, (count as integer) - 1 do
+    local identity: integer = identities[index]
+    local owner? = self.waits[identity]
+    if owner ~= nil then
+      if owner.native.retire ~= nil then
+        -- The durable native receipt is retired/latching-ready before entering
+        -- any ordinary notification method which could grow the Lua stack.
+        local retired = retirement_poll_native(owner.native)
+        if retired == 0 then
+          local target = owner.target
+          owner.target = nil
+          self.waits[owner.identity] = nil
+          owner.registered = false
+          if target ~= nil then self.wake:unregister(target) end
+        elseif retired < 0 then
+          if self.runtime.retirement_error == nil then self.runtime.retirement_error = owner end
+          uv.stop(self.runtime.loop)
+        end
+      end
+      do owner:notify()
+      catch
+        failed = true
+        fail_runtime(self.runtime, error, traceback)
+        -- The scheduler preserves ready work after its first Runtime failure,
+        -- even when its timer can no longer be armed.
+        owner:notify()
+      end
+    end
+  end
+  check_status(status, "async.external_wait.drain")
+  if failed then rethrow_failure(self.runtime.failure) end
+end
+
+local function external_bridge(runtime: Runtime): ExternalBridge
+  local existing? = runtime.external
+  if existing ~= nil then return existing end
+  local bridge = ExternalBridge {
+    runtime = runtime, wake = uv.external_wake_t.new(), waits = {},
+    next_identity = 1, closed = false
+  }
+  local callback = function (_: uv.external_wake_t) bridge:drain() end
+  check_status(uv.external_wake_init(runtime.loop, bridge.wake, callback),
+    "async.external_wait.init")
+  runtime.external = bridge
+  return bridge
+end
+
+local function prepare_wait(
+    register_fn: (function (foreign *void): boolean)?,
+    unregister_fn: (function (): ())?,
+    native_owner: value, context: foreign *void,
+    native_register: foreign function (*void, *void): int,
+    native_unregister: foreign function (*void): void,
+    native_retire: foreign function (*void): int): ExternalWait
+  local runtime = ensure_runtime()
+  if runtime.closing or runtime.exit_code ~= nil then
+    raise "cannot prepare an external wait while async Runtime is shutting down"
+  end
+  local bridge = external_bridge(runtime)
+  local identity = bridge.next_identity
+  if identity == 0 then raise "async external wait identity exhausted" end
+  if identity == (ffi.LUA_MAXINTEGER as integer) then bridge.next_identity = 0
+  else bridge.next_identity = identity + 1 end
+  local owner = ExternalWait {
+    bridge = bridge, identity = identity, target = nil,
+    register_fn = register_fn, unregister_fn = unregister_fn,
+    token = ResumeToken("async.external_wait"), cancel_action = nil,
+    done = nil, number = 0, used = false, registered = false,
+    notified = false, retired = false, cleanup_task = nil,
+    native = foreign titan_async_retirement.new(), native_owner = native_owner,
+    awaited = false, close_requested = false
+  }
+  owner.native.context = context
+  owner.native.register_wait = native_register
+  owner.native.unregister_wait = native_unregister
+  owner.native.retire = native_retire
+  if native_retire == nil then
+    owner.cancel_action = function () owner:cancel_wait() end
+  end
+  bridge.waits[identity] = owner
+  do
+    local status, target = bridge.wake:reserve(identity)
+    owner.target = target
+    check_status(status, "async.external_wait.reserve")
+  catch
+    owner:close()
+    raise
+  end
+  return owner
+end
+
+--- Reserve a single-use external wait without keeping the Runtime loop alive.
+-- At await, register_fn rechecks readiness and retains/publishes the wake
+-- target only when returning true; false completes inline. unregister_fn must
+-- detach a published target before releasing its native reference.
+function prepare_external_wait(
+    register_fn: function (foreign *void): boolean,
+    unregister_fn: function (): ()): ExternalWait
+  return prepare_wait(register_fn, unregister_fn, nil, nil, nil, nil, nil)
+end
+
+--- Prepare a native terminal gate for run_with_cleanup; retain owner as a root.
+-- C-only register_fn returns 0 (ready), 1 (linked), or a negative native status
+-- without admission. retire_fn returns 0 (retired), 1 (pending), or a negative
+-- status (retryable through explicit loop entry after admission). unregister_fn
+-- rolls back admission.
+function prepare_native_retirement(
+    owner: value, context: foreign *void,
+    register_fn: foreign function (*void, *void): int,
+    unregister_fn: foreign function (*void): void,
+    retire_fn: foreign function (*void): int): ExternalWait
+  -- Implementation notes: doc/implementation/libuv-runtime.md#native-retirement-barriers
+  if register_fn == nil or unregister_fn == nil or retire_fn == nil then
+    raise "native retirement callbacks must not be NULL"
+  end
+  return prepare_wait(nil, nil, owner, context, register_fn, unregister_fn, retire_fn)
+end
+
+local function start_external_wait(
+    done: Completion<|ExternalWait, nil, value|>, number: integer): uv.req_t?
+  local owner = done:context(number)
+  local task = done.task
+  owner.done = done as Wait
+  owner.number = number
+  if done.policy ~= WAIT_CLEANUP then
+    task.suspended = true
+    task.resume_token = owner.token
+    task.resume_pending = false
+    task.suspend_cancel = owner.cancel_action
+  end
+  -- Preparation reserves native storage without keeping the loop alive.
+  -- Activation is allocation-free and precedes native waiter publication.
+  check_status(owner.bridge.wake:activate(owner.target), "async.external_wait.activate")
+  -- The registrar checks readiness and publishes its retained native target
+  -- under its domain mutex. An inline notification cannot run this loop.
+  owner.registered = true
+  local waiting = false
+  do
+    if owner.native.register_wait ~= nil then
+      local status = owner.native.register_wait(owner.native.context, owner.target)
+      if status < 0 then check_status(status, "async.external_wait.register") end
+      waiting = status ~= 0
+    else
+      waiting = owner.register_fn(owner.target)
+    end
+  catch
+    defer owner:retire()
+    owner:detach_domain()
+    raise
+  end
+  if not waiting then
+    owner.registered = false
+    owner:retire()
+    done:resolve(number, nil)
+  end
+  return nil
+end
+
+local function start_native_retirement_wait(
+    done: Completion<|ExternalWait, nil, value|>, number: integer): uv.req_t?
+  local owner = done:context(number)
+  owner.done = done as Wait
+  owner.number = number
+  if owner.native.ready ~= 0 then done:resolve(number, nil) end
+  return nil
+end
+
+local function ExternalWait:await(policy: integer)
+  local task = running()
+  if task.runtime ~= self.bridge.runtime then
+    raise "external wait belongs to another async Runtime"
+  end
+  if self.retired then raise "external wait is consumed or closed" end
+  local bound? = self.cleanup_task
+  if bound ~= nil and (bound ~= task or not task.cleanup_active or policy ~= WAIT_CLEANUP) then
+    raise "external wait is reserved for its Task cleanup"
+  end
+  if self.native.retire ~= nil then
+    if bound == nil then raise "native retirement is not bound to a cleanup Task" end
+    if self.awaited or self.close_requested then raise "external wait is consumed or closed" end
+    self.awaited = true
+    defer do
+      self.done = nil
+      clear_suspension(task)
+    end
+    -- This exact cleanup boundary follows the domain's ordinary forwarding
+    -- attempt. The native callback may begin approved reasonless retirement.
+    local status = retirement_poll_native(self.native)
+    if status == 0 then
+      local target = self.target
+      self.target = nil
+      self.bridge.waits[self.identity] = nil
+      self.registered = false
+      if target ~= nil then self.bridge.wake:unregister(target) end
+      return
+    end
+    if status < 0 then
+      if task.runtime.retirement_error == nil then task.runtime.retirement_error = self end
+      uv.stop(task.runtime.loop)
+    end
+    local result = coroutine.yield(
+      completion<|ExternalWait, nil, value|>(self, start_native_retirement_wait, WAIT_CLEANUP),
+      ASYNC_TAG) as Result<|nil, value|>
+    case result
+    when error(failure) then raise failure
+    else
+    end
+    return
+  end
+  if self.used then raise "external wait is consumed or closed" end
+  self.used = true
+  local completed = false
+  defer do
+    if not completed then self:detach_domain() end
+    self:retire()
+    clear_suspension(task)
+  end
+  local result = coroutine.yield(
+    completion<|ExternalWait, nil, value|>(self, start_external_wait, policy),
+    ASYNC_TAG) as Result<|nil, value|>
+  case result
+  when error(failure) then raise failure
+  else
+  end
+  completed = true
+end
+
+--- Await this single-use generic wait with ordinary Task cancellation.
+function ExternalWait:wait()
+  self:await(WAIT_ORDINARY)
+end
+
+--- Await with cancellation shielding; native waits require bound Task cleanup.
+function ExternalWait:wait_cleanup()
+  self:await(WAIT_CLEANUP)
+end
+
+--- Prepare, await and close one ordinary cancellable external wait.
+function wait_external(register_fn: function (foreign *void): boolean,
+                       unregister_fn: function (): ())
+  running()
+  local owner = prepare_external_wait(register_fn, unregister_fn)
+  defer owner:close()
+  owner:wait()
+end
+
+--- Await one ordinary external wait through C-only registrars, rooting owner.
+-- Context is borrowed until return, including synchronous cancellation unlink.
+-- unregister_fn also runs while the waiting Task unwinds at Lua-state close,
+-- possibly after owner was finalized: the linked registration must keep its
+-- native object alive (async-io.md, external waits, "State close").
+-- register_fn returns 0 (ready), 1 (linked), or a negative status with no link.
+-- This is not a native retirement capability and cannot gate Task publication.
+function wait_external_native(owner: value, context: foreign *void,
+    register_fn: foreign function (*void, *void): int,
+    unregister_fn: foreign function (*void): void)
+  running()
+  if register_fn == nil or unregister_fn == nil then
+    raise "native external wait callbacks must not be NULL"
+  end
+  local wait = prepare_wait(nil, nil, owner, context, register_fn, unregister_fn, nil)
+  defer wait:close()
+  wait:wait()
+end
+
+--- Prepare, await and close one cancellation-shielded external wait.
+function wait_external_cleanup(register_fn: function (foreign *void): boolean,
+                               unregister_fn: function (): ())
+  running()
+  local owner = prepare_external_wait(register_fn, unregister_fn)
+  defer owner:close()
+  owner:wait_cleanup()
+end
+
+local function ExternalBridge:close()
+  if self.closed then return end
+  for _, owner in iteration.pairs(self.waits) do owner:close() end
+  check_status(self.wake:close(), "async.external_wait.close")
+  self.closed = true
+end

@@ -295,6 +295,18 @@ companion. The `titan.peg` and `titan.string` mains instead own their complete
 public APIs, and their contributors have only module-local top-level
 declarations; neither needs a foreign companion.
 
+`titan.async` is also a native-only folder: its main `async.native.titan` keeps
+the public API and the scheduling core, and the contributors keep the libuv
+backend (`runtime.native.titan`), external waits and retirement barriers
+(`external.native.titan`), cross-state receivers (`receiver.native.titan`), and
+worker-pool offload (`foreign.native.titan`). Public declarations live with
+their contributors, so member order follows contributor order;
+`spec/fixtures/stdlib/titan_stdlib_types.lua` pins the resulting public
+interface. The one object owns the `titan/async/async.titan.h` companion. The
+private C headers `async_receiver_native.h` and `async_signal_platform.h` sit
+beside the main, because quoted headers resolve relative to the selected
+main's directory.
+
 See [Driver and toolchain](driver.md) for the complete search/build flow,
 [Lexer and parser](lexer-parser.md) for locations and non-reentrancy,
 [The type checker](checker.md) for the combined scope, and
