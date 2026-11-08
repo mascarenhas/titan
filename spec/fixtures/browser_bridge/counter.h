@@ -1,10 +1,8 @@
 #ifndef TITAN_COUNTER_H
 #define TITAN_COUNTER_H
-#include <titan/browser.h>
+#include <emscripten/html5.h>
 
-/* Registers a click callback on the element the selector names, with the
- * pinned handler's identity as its user data; counter_unlisten removes it.
- * Both return html5.h's EMSCRIPTEN_RESULT, 0 on success. */
-int counter_listen(const char *selector, const titan_browser_identity *identity);
-int counter_unlisten(const char *selector);
+/* The C callback needs a zero-initialized automatic result aggregate, which
+ * restricted foreign bodies cannot declare. Titan registers it directly. */
+bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity);
 #endif

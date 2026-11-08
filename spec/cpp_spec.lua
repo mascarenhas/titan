@@ -753,6 +753,21 @@ VEC(acos,, (double __x))
         it("qualifiers and storage-class specifiers", function()
             ok_decls("static const volatile int x;\n", 1)
         end)
+
+        for _, qualifier in ipairs({
+            "_Nonnull", "_Nullable", "_Null_unspecified", "_Nullable_result",
+        }) do
+            it("accepts Clang pointer annotation " .. qualifier .. " without recovery", function()
+                local source = [[
+typedef int * NULLABILITY pointer_type;
+typedef void (* NULLABILITY callback_type)(const char * NULLABILITY data);
+struct annotated { int * NULLABILITY field; };
+void * NULLABILITY annotated_function(
+    void * NULLABILITY, int * const NULLABILITY * volatile NULLABILITY);
+]]
+                ok_decls(source:gsub("NULLABILITY", qualifier), 4)
+            end)
+        end
         it("varargs and (void) parameter lists", function()
             ok_decls("int p(const char *f, ...); int q(void);\n", 2)
         end)
@@ -1153,8 +1168,214 @@ third
             assert.has_error(function() expand("#if 0\n#elifx\nwrong\n#endif\n") end)
         end)
 
-        it("ignores #pragma", function()
-            assert.equal("kept", expand("#pragma once\nkept\n"))
+        it("ignores #error and pragmas other than once", function()
+            assert.equal("kept", expand(
+                "#error deliberately ignored\n#pragma pack(1)\nkept\n"))
+        end)
+    end)
+
+    describe("include guards and depth", function()
+        local function context(strategy)
+            return {
+                io = strategy,
+                incdirs = { quote = {}, system = {} },
+                defines = {}, ifmode = { true }, output = {}, current_dir = {},
+            }
+        end
+
+        local function with_headers(sources, action)
+            local root = temporary.name()
+            assert(os.remove(root))
+            assert(lfs.mkdir(root))
+            local paths = {}
+            local function write_header(name, source)
+                local path = root .. "/" .. name
+                if not paths[path] then
+                    paths[path] = true
+                    paths[#paths + 1] = path
+                end
+                local file = assert(io.open(path, "wb"))
+                assert(file:write(source))
+                assert(file:close())
+                return path
+            end
+            local result = table.pack(xpcall(function()
+                for name, source in pairs(sources) do write_header(name, source) end
+                return action(root, write_header, function(name, symbolic)
+                    local alias = root .. "/" .. name
+                    local ok, err = lfs.link(root .. "/shared.h", alias, symbolic)
+                    assert(ok, err)
+                    paths[#paths + 1] = alias
+                end)
+            end, debug.traceback))
+            for _, path in ipairs(paths) do assert(os.remove(path)) end
+            assert(lfs.rmdir(root))
+            assert(result[1], result[2])
+            return table.unpack(result, 2, result.n)
+        end
+
+        local function preprocess(root, name, ctx)
+            ctx = ctx or context()
+            local previous_hook, previous_mask, previous_count = debug.gethook()
+            debug.sethook(function()
+                error("include preprocessing exceeded its instruction budget", 0)
+            end, "", 20000000)
+            local ok, parsed, err = pcall(cpp.parse_file, root .. "/" .. name, nil, ctx)
+            debug.sethook(previous_hook, previous_mask, previous_count)
+            assert(ok, parsed)
+            assert.same({}, ctx.current_dir)
+            return parsed, err
+        end
+
+        local function output(root, name, ctx)
+            local parsed, err = preprocess(root, name or "main.h", ctx)
+            assert(parsed, err)
+            return table.concat(parsed.output, " "):match("^%s*(.-)%s*$"):gsub("%s+", " ")
+        end
+
+        it("terminates a self-include after executing #pragma once", function()
+            with_headers({ ["main.h"] =
+                '#pragma once\nself_marker\n#include "main.h"\n' }, function(root)
+                assert.equal("self_marker", output(root))
+            end)
+        end)
+
+        it("honors #pragma once with trailing tokens in recursive and repeated includes", function()
+            with_headers({
+                ["main.h"] = '#include "shared.h"\n#include "shared.h"\n',
+                ["shared.h"] = '#pragma once extra_tokens\n#include "shared.h"\nmarker\n',
+            }, function(root)
+                assert.equal("marker", output(root))
+            end)
+        end)
+
+        it("terminates mutually-including #pragma once headers", function()
+            with_headers({
+                ["main.h"] = '#pragma once\nfirst\n#include "second.h"\n',
+                ["second.h"] = '#pragma once\n#include "main.h"\nsecond\n',
+            }, function(root)
+                assert.equal("first second", output(root))
+            end)
+        end)
+
+        it("keeps conventional #ifndef-guarded cycles working", function()
+            with_headers({
+                ["main.h"] = '#ifndef FIRST\n#define FIRST\nfirst\n#include "second.h"\n#endif\n',
+                ["second.h"] = '#ifndef SECOND\n#define SECOND\n#include "main.h"\nsecond\n#endif\n',
+            }, function(root)
+                assert.equal("first second", output(root))
+            end)
+        end)
+
+        it("enters one once header reached through two spellings only once", function()
+            with_headers({
+                ["main.h"] = '#include "shared.h"\n#include "./shared.h"\n',
+                ["shared.h"] = "#pragma once\nshared_marker\n",
+            }, function(root)
+                assert.equal("shared_marker", output(root))
+                assert.equal("shared_marker", output(root))
+            end)
+        end)
+
+        for _, symbolic in ipairs({ false, true }) do
+            it("recognizes " .. (symbolic and "symbolic" or "hard") ..
+                " links to a once header", function()
+                -- Windows' LFS fallback has no physical file identity.
+                if symbolic then
+                    local available, message = require("spec.support.filesystem").symlink_capability()
+                    if not available then pending(message); return end
+                end
+                local strategy = require("titan-compiler.io").new_sync()
+                with_headers({
+                    ["main.h"] = '#include "shared.h"\n#include "alias.h"\n',
+                    ["shared.h"] = "#pragma once\nshared_marker\n",
+                }, function(root, _, link)
+                    local stat = assert(strategy:stat(root .. "/shared.h"))
+                    if stat.device == nil or stat.inode == nil then
+                        pending("the I/O strategy has no physical file identity")
+                        return
+                    end
+                    link("alias.h", symbolic)
+                    assert.equal("shared_marker", output(root, nil, context(strategy)))
+                end)
+            end)
+        end
+
+        it("does not conflate distinct headers with identical contents", function()
+            with_headers({
+                ["main.h"] = '#include "first.h"\n#include "second.h"\n',
+                ["first.h"] = "#pragma once\nmarker\n",
+                ["second.h"] = "#pragma once\nmarker\n",
+            }, function(root)
+                assert.equal("marker marker", output(root))
+            end)
+        end)
+
+        it("falls back to resolved spelling without device/inode identity", function()
+            local strategy = require("titan-compiler.io").new_sync()
+            local stat = strategy.stat
+            function strategy:stat(path)
+                local attributes, err = stat(self, path)
+                if attributes then attributes.device, attributes.inode = nil, nil end
+                return attributes, err
+            end
+            with_headers({ ["main.h"] =
+                '#pragma once\nmarker\n#include "main.h"\n' }, function(root)
+                assert.equal("marker", output(root, nil, context(strategy)))
+            end)
+        end)
+
+        it("does not execute an inactive or macro-named pragma", function()
+            with_headers({
+                ["main.h"] = '#include "shared.h"\n#include "shared.h"\n',
+                ["shared.h"] = "#if 0\n#pragma once\n#endif\n#define ONCE once\n#pragma ONCE\nmarker\n",
+            }, function(root)
+                assert.equal("marker marker", output(root))
+            end)
+        end)
+
+        it("does not mark a header before reaching its pragma", function()
+            with_headers({ ["main.h"] = [[
+#ifndef ENTERED
+#define ENTERED
+#include "main.h"
+#endif
+#pragma once
+marker
+]] }, function(root)
+                assert.equal("marker marker", output(root))
+            end)
+        end)
+
+        it("diagnoses an unguarded cycle even when a pragma follows the include", function()
+            with_headers({ ["main.h"] =
+                '#include "main.h"\n#pragma once\n' }, function(root)
+                local parsed, err = preprocess(root, "main.h")
+                assert.is_nil(parsed)
+                assert.matches("maximum C include depth (200) exceeded", err, 1, true)
+                assert.matches(root .. "/main.h", err, 1, true)
+                assert.not_matches("sha256.lua:", err, 1, true)
+            end)
+        end)
+
+        it("accepts depth 200 and diagnoses depth 201 with the chain root", function()
+            local sources = { ["main.h"] = '#include "level1.h"\n' }
+            for depth = 1, 199 do
+                sources["level" .. depth .. ".h"] =
+                    '#include "level' .. (depth + 1) .. '.h"\n'
+            end
+            sources["level200.h"] = "boundary_marker\n"
+            with_headers(sources, function(root, write_header)
+                assert.equal("boundary_marker", output(root))
+                write_header("level200.h", '#include "level201.h"\n')
+                write_header("level201.h", "too_deep\n")
+                local parsed, err = preprocess(root, "main.h")
+                assert.is_nil(parsed)
+                assert.matches("maximum C include depth (200) exceeded", err, 1, true)
+                assert.matches("at '" .. root .. "/level201.h'", err, 1, true)
+                assert.matches("include chain starts at '" .. root .. "/main.h'", err, 1, true)
+                assert.not_matches("sha256.lua:", err, 1, true)
+            end)
         end)
     end)
 
@@ -1247,13 +1468,13 @@ describe("C preprocessor semantic digest adapters", function()
     local function fixture(callback, forced)
         local root = platform.windows and "C:/SDK 日本/include path" or "/SDK 日本/include path"
         local header = root .. "/forced.h"
-        local contents = "#define FORCED_VALUE 7\n"
+        local contents = "#pragma once\n#define FORCED_VALUE 7\nforced_marker\n"
         local strategy = {}
         function strategy:run(argv)
             local verbose, included = false, false
             for _, argument in ipairs(argv) do
                 if argument == "-v" then verbose = true end
-                if argument == "-include" then included = true end
+                if argument == "-include" or argument == "-imacros" then included = true end
             end
             local macros = '#define VENDOR_VERSION "fixture"\n#define VALUE (1 + 2)\n#define JOIN(a,b) a ## b\n'
             return { started = true, ok = true, why = "exit", status = 0,
@@ -1314,6 +1535,65 @@ describe("C preprocessor semantic digest adapters", function()
             assert.equal(native.preprocessor_configuration_key,
                 assert(cpp.new_context(options)).preprocessor_configuration_key)
             assert.equal(forced and 2 or 1, #native_inputs)
+        end)
+    end
+
+    for _, previous in ipairs({
+        { name = "pragma once", policy = "" },
+        { name = "Clang nullability", policy = "pragma-once=physical-file;include-depth=200" },
+    }) do
+        it("invalidates keys computed before " .. previous.name .. " support", function()
+            local current = assert(cpp.new_context(fixture(nil, false)))
+            local legacy_options = fixture(function(bytes)
+                -- Replace the length-prefixed policy field to reconstruct the
+                -- exact historical payload. This deliberately pins its framing
+                -- and policy spelling; update it with semantic-policy changes.
+                local policy = "pragma-once=physical-file;include-depth=200;pointer-nullability=clang"
+                local field = #policy .. ":" .. policy .. "|"
+                local replacement = previous.policy == "" and ""
+                    or #previous.policy .. ":" .. previous.policy .. "|"
+                local start = assert(bytes:find(field, 1, true))
+                return require("titan")._sha256_binary(
+                    bytes:sub(1, start - 1) .. replacement .. bytes:sub(start + #field))
+            end, false)
+            local legacy = assert(cpp.new_context(legacy_options))
+            assert.not_equal(legacy.preprocessor_configuration_key,
+                current.preprocessor_configuration_key)
+        end)
+    end
+
+    for _, kind in ipairs({ "-include", "-imacros" }) do
+        it("preserves once state from " .. kind .. " across cached contexts", function()
+            local options = fixture(nil, true)
+            options.cppflags[1] = kind
+            for _ = 1, 2 do
+                local ctx = assert(cpp.new_context(options))
+                local parsed, err = cpp.parse_contents("main.c",
+                    '#include <forced.h>\n#include <forced.h>\n', ctx)
+                assert(parsed, err)
+                assert.equal(kind == "-include" and "forced_marker" or "",
+                    table.concat(ctx.output, " "):match("^%s*(.-)%s*$"))
+            end
+        end)
+
+        it("refreshes once identity after byte-identical " .. kind .. " republishing", function()
+            local options = fixture(nil, true)
+            options.cppflags[1] = kind
+            local original = assert(cpp.new_context(options))
+            local stat = options.io.stat
+            function options.io:stat(path)
+                local attributes, err = stat(self, path)
+                if attributes then attributes.inode = 3 end
+                return attributes, err
+            end
+            options.io.lstat = options.io.stat
+            local ctx = assert(cpp.new_context(options))
+            assert.equal(original.preprocessor_configuration_key,
+                ctx.preprocessor_configuration_key)
+            local parsed, err = cpp.parse_contents("main.c", '#include <forced.h>\n', ctx)
+            assert(parsed, err)
+            assert.equal(kind == "-include" and "forced_marker" or "",
+                table.concat(ctx.output, " "):match("^%s*(.-)%s*$"))
         end)
     end
 

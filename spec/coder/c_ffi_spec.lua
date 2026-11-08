@@ -94,6 +94,23 @@ describe("C FFI code generation", function()
         os.execute("rm -rf test.so.dSYM")
     end)
 
+    it("compiles and uses a self-including pragma-once header", function()
+        with_header("", function(header)
+            local file = assert(io.open(header, "w"))
+            assert(file:write('#pragma once\n#include "' ..
+                header:gsub("\\", "/") .. '"\n#define CYCLE_MARKER 37\n'))
+            assert(file:close())
+            h.run_coder(string.format([[
+                foreign import "%s"
+                function marker(): integer
+                    return ffi.CYCLE_MARKER
+                end
+            ]], header:gsub("\\", "/")), [[
+                assert(test.marker() == 37)
+            ]])
+        end)
+    end)
+
     it("preserves literal format strings under hardened native warnings", function()
         h.with_extra_cflags({ "-O2", "-Wformat", "-Wformat-security", "-Werror" }, function()
             local output = h.compile_and_run([[

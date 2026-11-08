@@ -1,12 +1,13 @@
-#include <emscripten/html5.h>
+#include <titan/browser.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "counter.h"
 
-/* The html5 click callback: one synchronous call of the pinned handler whose
- * identity is the user data. The handler returns nil, so only a failure's
- * message and trace need freeing. */
-static bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity) {
+/* Keep this test-only callback in C: its zero-initialized automatic result
+ * aggregate cannot be declared in a restricted foreign-function body.
+ * The pinned handler returns nil, so only a failure's message and trace
+ * need freeing. Registration and unregistration live in Titan. */
+bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity) {
   (void)type;
   (void)event;
   titan_browser_sync_result result = {0};
@@ -15,12 +16,4 @@ static bool counter_click(int type, const EmscriptenMouseEvent *event, void *ide
   free((void *)result.message);
   free((void *)result.trace);
   return false;
-}
-
-int counter_listen(const char *selector, const titan_browser_identity *identity) {
-  return emscripten_set_click_callback(selector, (void *)identity, false, counter_click);
-}
-
-int counter_unlisten(const char *selector) {
-  return emscripten_set_click_callback(selector, NULL, false, NULL);
 }

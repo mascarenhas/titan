@@ -9,6 +9,7 @@ local platform = require("titan-compiler.platform")
 local cacheadapter = require("titan-compiler.cacheadapter")
 local version = require "titan-compiler.version"
 local parse_contents
+local MAX_INCLUDE_DEPTH = 200
 
 -- Standalone c-parser callers retain the ordinary synchronous behavior. The
 -- compiler driver passes its resolver-context strategy explicitly, so every
@@ -202,11 +203,20 @@ function cpp.same_header_observation(left, right)
         and rawget(left, "physical_identity") == rawget(right, "physical_identity")
 end
 
+local function header_once_identity(filename, followed)
+    -- Only the followed file identifies an include: a symlink's own inode
+    -- differs from its target, while hard links share the target's identity.
+    if followed and followed.device ~= nil and followed.inode ~= nil then
+        return "file:" .. tostring(followed.device) .. ":" .. tostring(followed.inode)
+    end
+    return "path:" .. filename
+end
+
 -- Certify only the timestamp surrounding the bytes actually consumed. A read
 -- racing with replacement or modification must not stamp older bytes with the
 -- newer metadata observed after the read.
 local function read_header_contents(filename, strategy)
-    local physical, observation, _, guard = physical_header(filename, strategy)
+    local physical, observation, followed, guard = physical_header(filename, strategy)
     local contents, err = read_file_contents(filename, strategy)
     if not contents then return nil, err end
     local after_physical, _, _, after_guard = physical_header(filename, strategy)
@@ -214,7 +224,10 @@ local function read_header_contents(filename, strategy)
        or not cpp.same_header_observation(guard, after_guard) then
         return nil, "C header changed while it was read: " .. filename, nil, true
     end
-    return contents, nil, { physical_identity = physical, observation = observation }
+    return contents, nil, {
+        physical_identity = physical, observation = observation,
+        once_identity = header_once_identity(filename, followed),
+    }
 end
 
 local function content_identity(contents, path, options)
@@ -836,8 +849,13 @@ end
 -- Include both what the configured compiler was asked and the authoritative
 -- include/macro world it reported. The latter makes cdriver's higher-level
 -- cache key describe C interpretation inputs, not merely an argv spelling.
+-- Parser policy belongs here too: the same key certifies extracted C graphs.
 local function preprocessor_semantic_digest(incdirs, defines, adapter)
-    local parts = { "titan-cpp-semantic-context-v1" }
+    local parts = {
+        "titan-cpp-semantic-context-v1",
+        "pragma-once=physical-file;include-depth=" .. MAX_INCLUDE_DEPTH ..
+            ";pointer-nullability=clang",
+    }
     append_canonical(parts, incdirs, {})
     append_canonical(parts, defines, {})
     return "sha256:" .. sha256.hex_via(adapter and adapter.sha256_binary, key_argv(parts))
@@ -1213,6 +1231,7 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
         output = ctx.output,
         output_origins = ctx.output_origins,
         macro_changes = ctx.macro_changes,
+        once_files = ctx.once_files,
         scanned_defines = ctx.defines,
     }
 end
@@ -1222,6 +1241,7 @@ local function empty_forced_configuration()
         dependencies = {}, search_inputs = {},
         manifest = key_argv({ "titan-forced-c-headers-v1", "none" }),
         output = {}, output_origins = {}, macro_changes = {},
+        once_files = {},
     }
 end
 
@@ -1368,12 +1388,19 @@ function cpp.new_context(options)
             semantic_digest = preprocessor_semantic_digest(incdirs, defines, config.cache_adapter) }
     end
     cache[key] = probed
+    local once_files = {}
+    -- Content validation can reuse forced output after byte-identical
+    -- republishing replaces an inode; once keys must name the current files.
+    for _, filename in pairs(forced.once_files) do
+        once_files[header_once_identity(filename, config.io:stat(filename))] = filename
+    end
     local ctx = {
         io = config.io,
         incdirs = copy_incdirs(probed.incdirs),
         defines = clone_graph(probed.defines),
         preprocessor_banner = probed.banner,
         macro_changes = copy_map(forced.macro_changes),
+        once_files = once_files,
         ifmode = { true },
         output = { table.unpack(forced.output) },
         output_origins = { table.unpack(forced.output_origins) },
@@ -2656,6 +2683,16 @@ parse_contents = function(filename, contents, ctx, read_state)
     -- therefore need later definitions, redefinitions, and undefinitions to
     -- replace the earlier state rather than accumulate forever.
     ctx.macro_changes = ctx.macro_changes or {}
+    ctx.once_files = ctx.once_files or {}
+    local once_identity = read_state and read_state.once_identity
+        or header_once_identity(filename, ctx.io:stat(filename))
+    local skipped = ctx.once_files[once_identity]
+    if not skipped and #ctx.current_dir > MAX_INCLUDE_DEPTH then
+        return nil, "maximum C include depth (" .. MAX_INCLUDE_DEPTH ..
+            ") exceeded at '" .. filename .. "'; include chain starts at '" ..
+            ctx.include_root .. "'"
+    end
+    if #ctx.current_dir == 0 then ctx.include_root = filename end
 
     local current_dir = platform.windows and (platform.parent(filename) or ".")
         or filename:gsub("/[^/]*$", "")
@@ -2669,6 +2706,10 @@ parse_contents = function(filename, contents, ctx, read_state)
             table.remove(ctx.current_dir)
             return nil, observe_err
         end
+    end
+    if skipped then
+        table.remove(ctx.current_dir)
+        return ctx
     end
     local linelist = initial_processing_contents(contents)
 
@@ -2718,7 +2759,13 @@ parse_contents = function(filename, contents, ctx, read_state)
                 ifmode[#ifmode] = not ifmode[#ifmode]
             elseif tk.directive == "endif" then
                 table.remove(ifmode, #ifmode)
-            elseif tk.directive == "error" or tk.directive == "pragma" then
+            elseif tk.directive == "pragma" then
+                if tk.pragma and tk.pragma[1] == "once" then
+                    -- Mark on execution, not entry: includes above the pragma
+                    -- must retain their ordinary behavior.
+                    ctx.once_files[once_identity] = filename
+                end
+            elseif tk.directive == "error" then
                 -- ignore
             elseif tk.directive == "include" or tk.directive == "include_next" then
                 local name = tk.exp[1]
