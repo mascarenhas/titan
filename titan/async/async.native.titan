@@ -1064,7 +1064,7 @@ local function advance_task(task: Task, failed: boolean, payload: value)
               wait.request = request
               wait.phase = WAIT_PENDING
               if policy == WAIT_CANCELLABLE and task.cancel_value ~= nil then
-                cancel_request(request as Request)
+                cancel_request(request)
               end
               return
             end
@@ -1152,7 +1152,7 @@ function Task:cancel(reason: CancellationReason<|B|>?)
   local wait? = self.wait
   if wait == nil or wait.phase ~= WAIT_PENDING then return end
   if wait.policy == WAIT_CANCELLABLE and wait.request ~= nil then
-    cancel_request(wait.request as Request)
+    cancel_request(wait.request)
   end
   if self.suspended then
     local action? = self.suspend_cancel

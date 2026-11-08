@@ -2894,8 +2894,10 @@ int main(void) {
                     end
                 end
             end
-            local object = stdlib_artifact(module == "sqlite3" and
-                "titan/sqlite3/sqlite3.o" or "titan/" .. module .. ".o")
+            -- Folder modules name their object after the main.
+            local folder = module == "async" or module == "sqlite3"
+            local object = stdlib_artifact(folder and
+                "titan/" .. module .. "/" .. module .. ".o" or "titan/" .. module .. ".o")
             local output = module_symbols.collect(object, run_argv).undefined_text
             for symbol in output:gmatch("[^\r\n]+") do
                 assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
