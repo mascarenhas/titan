@@ -515,7 +515,9 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
   - `TITAN_BROWSER_STATE`: refused without running Titan, with a `message`. The
     pin's state is closed or closing, the instance is disposing, exited or
     poisoned, or callbacks nest too deeply.
-  - `TITAN_BROWSER_MEMORY`: no message.
+  - `TITAN_BROWSER_MEMORY`: the callback could not start, or a C-heap copy of
+    its result, message or trace, or of a refusal's message, could not be
+    allocated. It carries no message, trace or value.
 
   After any status, the caller frees `message`, `trace` and a STRING or BYTES
   result's bytes with `free`.

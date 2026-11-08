@@ -1317,6 +1317,41 @@ function test_synchronous_callback_callable_results_follow_their_holders(_: test
               "an unpinned callable result kept a hold")
 end
 
+-- Fails the C-heap copy `after` more mallocs ahead and expects MEMORY with no
+-- message, trace or value.
+local function expect_memory(identity: foreign *titan_browser_identity, after: integer, label: string)
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  defer free_result(result)
+  ffi.titan_bridge_test_fail_malloc(after)
+  defer ffi.titan_bridge_test_fail_malloc(-1)
+  local status: integer = browser.call_sync(identity, 0, nil, result)
+  local kind: integer = result.value.kind
+  test.assert(status == ffi.TITAN_BROWSER_MEMORY and result.status == ffi.TITAN_BROWSER_MEMORY and
+              result.message == nil and result.trace == nil and kind == ffi.TITAN_BROWSER_NIL,
+              label .. " did not report MEMORY without data")
+end
+
+function test_synchronous_callback_copy_failures_report_memory(_: test.Context)
+  local text = browser.pin(function(...: Value): Value return Value.is_string("copied text") end)
+  defer text:close()
+  local raising = browser.pin(function(...: Value): Value raise "copy failure" end)
+  defer raising:close()
+  local identity: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  set_identity(identity, text)
+  expect_memory(identity, 0, "a failed result copy")
+  set_identity(identity, raising)
+  expect_memory(identity, 0, "a failed message copy")
+  expect_memory(identity, 1, "a failed trace copy")
+  local refused: foreign *titan_browser_identity = foreign titan_browser_identity.new()
+  expect_memory(refused, 0, "a failed refusal copy")
+  set_identity(identity, text)
+  local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  defer free_result(result)
+  test.assert(browser.call_sync(identity, 0, nil, result) == 0 and
+              same_bytes(result.value.bytes, result.value.length, "copied text"),
+              "a callback after the copy failures did not run")
+end
+
 local initializer_coroutine: coroutine.Coroutine?
 do
   ffi.gate_test_publish()

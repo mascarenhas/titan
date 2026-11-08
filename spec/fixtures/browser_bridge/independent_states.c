@@ -1,3 +1,4 @@
+#include <emscripten/heap.h>
 #include <assert.h>
 #include <limits.h>
 #include <string.h>
@@ -15,6 +16,23 @@ extern void __real_titan_browser_host_state_closed(uint32_t token);
 void __wrap_titan_browser_host_state_closed(uint32_t token) {
   gate_test_state_closed(token);
   __real_titan_browser_host_state_closed(token);
+}
+
+/* The dedicated bridge test image overrides Emscripten's weak malloc to fail
+ * one later call: the C-heap copies a synchronous callback makes for its
+ * result, message, trace and refusal message. Lua allocates through realloc,
+ * which stays Emscripten's own. Disarmed, it is emscripten_builtin_malloc. */
+static int malloc_failure_after = -1;
+void *malloc(size_t size) {
+  if (malloc_failure_after == 0) {
+    malloc_failure_after = -1;
+    return NULL;
+  }
+  if (malloc_failure_after > 0) malloc_failure_after--;
+  return emscripten_builtin_malloc(size);
+}
+void titan_bridge_test_fail_malloc(int after) {
+  malloc_failure_after = after;
 }
 
 /* Wrap titan_browser_host_identity_live in the dedicated bridge test image to

@@ -132,7 +132,8 @@ typedef struct titan_browser_identity {
  * trace and a STRING/BYTES value's bytes, all malloc-owned when present. A
  * HANDLE value stays valid while its Titan BrowserHandle is open, a CALLABLE
  * one while a BrowserPin or a live JavaScript wrapper holds the function.
- * MEMORY carries no message. */
+ * MEMORY, which also reports a result, message, trace or refusal copy that
+ * could not be allocated, carries no message, trace or value. */
 typedef struct titan_browser_sync_result {
   uint32_t status;
   uint32_t reserved;
