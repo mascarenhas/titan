@@ -551,13 +551,14 @@ refuses to create a Runtime; see
 `titan_no_switch` (`titan/ffi.h`) is true while a browser synchronous C
 callback runs: the bridge's callback depth is nonzero
 ([synchronous C callbacks](browser-bridge.md)). Natively it is the constant 0,
-so these checks fold away. Inside a callback:
+so these checks fold away. Each check is an inline `if` whose branch alone
+builds the error, so no helper call or string work remains natively. Inside a
+callback:
 
-- `check_switch` makes `Coroutine:resume`, `Coroutine:error`,
-  `Coroutine:transfer` and `coroutine.yield` raise `"coroutine.<operation> is
-  unavailable in a synchronous callback"`. The checks come after the
-  finalizer checks and before any state changes, so the coroutine stays as it
-  was.
+- `Coroutine:resume`, `Coroutine:error`, `Coroutine:transfer` and
+  `coroutine.yield` raise `"coroutine.<operation> is unavailable in a
+  synchronous callback"`. The checks come after the finalizer checks and
+  before any state changes, so the coroutine stays as it was.
 - `running()` returns nil and `is_yieldable(tag)` returns false, which hides
   the coroutine whose binding the callback interrupted.
 - `coro_gc` does not unwind a started suspended or stacked coroutine. It calls
