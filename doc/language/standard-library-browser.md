@@ -368,7 +368,7 @@ entry, and `create` rejects a `bindings` key with that prefix with
 | Name | Use | Behavior |
 | --- | --- | --- |
 | `titan:timeout` | `start(completion, failure, is_float(ms))` | A detachable one-shot timer: `completion` receives `is_nil()` after `ms` milliseconds. Delays beyond the host's 32-bit timer range are re-armed in chunks. `cancel` clears the host timer. A negative or non-`Number` delay makes `start` raise a `browser.BrowserError` holding a `TypeError`. |
-| `titan:interval` | `listen(tick, failure, is_float(ms))` | A listener: `tick` receives no arguments every `ms` milliseconds (at most 2³¹−1). Unregistering clears the host interval. A non-positive or non-`Number` period makes `listen` raise a `browser.BrowserError` holding a `TypeError`. |
+| `titan:interval` | `listen(tick, failure, is_float(ms))` | A listener: `tick` receives no arguments every `ms` milliseconds. A period beyond the host's 32-bit timer range repeats through chunked host timeouts, re-armed for the whole period at each tick. Unregistering clears the host timer. A non-positive or non-`Number` period makes `listen` raise a `browser.BrowserError` holding a `TypeError`. |
 | `titan:driver` | reserved | The registration point for the `async` runtime's Task entry points. Only the instance owner state's registration is used; others are ignored. |
 
 Their callbacks are ordinary queued notifications, delivered by `drain()` or

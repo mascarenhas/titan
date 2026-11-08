@@ -173,7 +173,7 @@ async function requests(context, image) {
     const observed = {};
     let end = await parkDrive(context, host);
     observed['request settlement (owner)'] = describe(await inDrive(host, host.task('nap', [5])));
-    observed['listener event (owner)'] = describe(await inDrive(host, host.task('ticks', [3n])));
+    observed['listener event (owner)'] = describe(await inDrive(host, host.task('ticks', [3n, 5])));
     await end();
     await host.call('child_wait', 20);
     end = await parkDrive(context, host);

@@ -370,7 +370,8 @@ local function timer_cancel(...: Value): Value
   return Value.is_nil()
 end
 
--- Counts titan:interval ticks, then settles; settle cancels the listener.
+-- Counts ticks of a titan:interval with the given period, then settles;
+-- settling cancels the listener.
 local function ticks(...: Value): Value
   local job = current
   local wanted = expect_integer(...[1])
@@ -380,7 +381,7 @@ local function ticks(...: Value): Value
     job.turns = job.turns + 1
     if job.turns >= wanted then job:finish("succeeded", Value.is_integer(job.turns), Value.is_nil()) end
     return Value.is_nil()
-  end, job:failure_handler(), Value.is_float(5.0))
+  end, job:failure_handler(), Value.is_float(expect_number(...[2])))
   job.waiting = true
   return Value.is_nil()
 end
