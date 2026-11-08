@@ -98,7 +98,7 @@ function receiver(): Receiver
     local callback = function (_: uv.async_t) owner:wake() end
     uv.handle_set_data(owner.handle_view, owner)
     owner.native.send = uv.async_send_function()
-    check_status(uv.async_init(runtime.loop, handle, callback), "async.receiver")
+    check_status(uv.async_init(runtime.backend.loop, handle, callback), "async.receiver")
     owner.native.handle = handle:borrow()
     owner.native.closed = 0
   catch

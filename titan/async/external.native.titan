@@ -57,6 +57,122 @@ local function ExternalWait:check_cleanup_binding(runtime: Runtime)
   end
 end
 
+-- The shared core reaches an ExternalWait (a Task's cleanup barrier or
+-- run_with_cleanup's final wait) only through check_cleanup_binding and the
+-- methods below.
+local function ExternalWait:bind_cleanup(runtime: Runtime, task: Task)
+  self:check_cleanup_binding(runtime)
+  self.cleanup_task = task
+end
+
+local function ExternalWait:unbind_cleanup(task: Task)
+  if self.cleanup_task == task then self.cleanup_task = nil end
+end
+
+local function ExternalWait:admit_cleanup()
+  check_status(self.bridge.wake:activate(self.target),
+    "async.native_retirement.activate")
+  -- All callbacks and their traced owner exist before native admission.
+  -- The register contract has no linked waiter/ref on a negative result.
+  local status = self.native.register_wait(
+    self.native.context, self.target)
+  if status < 0 then check_status(status, "async.native_retirement.register") end
+  self.native.armed = 1
+  self.used = true
+  self.registered = status ~= 0
+  if status == 0 then
+    local retired = retirement_poll_native(self.native)
+    if retired > 0 then raise "native retirement is not complete" end
+    check_status(retired, "async.native_retirement.retire")
+    local target = self.target
+    self.target = nil
+    self.bridge.waits[self.identity] = nil
+    self.bridge.wake:unregister(target)
+  end
+end
+
+-- Constructor rollback is native through release. It is not completion:
+-- the original domain owner still owns any running resource.
+local function ExternalWait:rollback_cleanup()
+  if self.registered then
+    self.registered = false
+    self.native.unregister_wait(self.native.context)
+  end
+  local target = self.target
+  self.target = nil
+  self.bridge.waits[self.identity] = nil
+  if target ~= nil then self.bridge.wake:unregister(target) end
+  self.native.armed = 0
+  self.retired = true
+  self.cleanup_task = nil
+  self.native_owner = nil
+  self.native.context = nil
+end
+
+-- Named function values are canonical module closures, so the registrar
+-- comparisons here and in unaccepted are identity-preserving and cannot
+-- allocate a callable adapter.
+local function ExternalWait:designates(task: Task, operation: Wait?): boolean
+  local registrar: value = start_native_retirement_wait
+  return task.cleanup_active and operation ~= nil and
+    operation.policy == WAIT_CLEANUP and operation.stored_context == self and
+    operation.register == registrar
+end
+
+local function ExternalWait:retired_natively(): boolean
+  return self.native.ready ~= 0
+end
+
+-- The bound Task's publication gate: false while native retirement is pending
+-- or has failed.
+local function ExternalWait:complete_retirement(task: Task): boolean
+  local status = retirement_poll_native(self.native)
+  if status > 0 then return false end
+  if status < 0 then
+    if task.runtime.retirement_error == nil then task.runtime.retirement_error = self end
+    uv.stop(task.runtime.backend.loop)
+    return false
+  end
+  -- Native retirement is complete before clearing the map/borrow and
+  -- consuming the registration. There is no ordinary entry in this interval.
+  local target = self.target
+  self.target = nil
+  self.bridge.waits[self.identity] = nil
+  self.registered = false
+  if target ~= nil then self.bridge.wake:unregister(target) end
+  self:retire()
+  return true
+end
+
+-- The driver's emergency poll of an armed barrier.
+local function ExternalWait:poll_retirement(task: Task)
+  if self.native.armed ~= 0 and self.native.ready == 0 then
+    local notified = uv.native_external_wake_is_notified(self.target) ~= 0
+    if notified or task.root_done or self.awaited then
+      local status = retirement_poll_native(self.native)
+      if status == 0 then
+        local target = self.target
+        self.target = nil
+        self.bridge.waits[self.identity] = nil
+        self.registered = false
+        if target ~= nil then self.bridge.wake:unregister(target) end
+      elseif status < 0 then
+        if task.runtime.retirement_error == nil then task.runtime.retirement_error = self end
+      end
+    end
+  end
+end
+
+local function ExternalWait:notify_if_ready()
+  if self.native.ready ~= 0 and self.done ~= nil and not self.notified then self:notify() end
+end
+
+local function ExternalWait:unaccepted(waiting: Wait): boolean
+  local registrar: value = start_native_retirement_wait
+  return waiting.phase == WAIT_REGISTERING and waiting.stored_context == self and
+    waiting.register == registrar
+end
+
 local function ExternalWait:detach_domain()
   if not self.registered then return end
   self.registered = false
@@ -164,7 +280,7 @@ local function ExternalBridge:drain()
           if target ~= nil then self.wake:unregister(target) end
         elseif retired < 0 then
           if self.runtime.retirement_error == nil then self.runtime.retirement_error = owner end
-          uv.stop(self.runtime.loop)
+          uv.stop(self.runtime.backend.loop)
         end
       end
       do owner:notify()
@@ -182,16 +298,16 @@ local function ExternalBridge:drain()
 end
 
 local function external_bridge(runtime: Runtime): ExternalBridge
-  local existing? = runtime.external
+  local existing? = runtime.backend.external
   if existing ~= nil then return existing end
   local bridge = ExternalBridge {
     runtime = runtime, wake = uv.external_wake_t.new(), waits = {},
     next_identity = 1, closed = false
   }
   local callback = function (_: uv.external_wake_t) bridge:drain() end
-  check_status(uv.external_wake_init(runtime.loop, bridge.wake, callback),
+  check_status(uv.external_wake_init(runtime.backend.loop, bridge.wake, callback),
     "async.external_wait.init")
-  runtime.external = bridge
+  runtime.backend.external = bridge
   return bridge
 end
 
@@ -346,7 +462,7 @@ local function ExternalWait:await(policy: integer)
     end
     if status < 0 then
       if task.runtime.retirement_error == nil then task.runtime.retirement_error = self end
-      uv.stop(task.runtime.loop)
+      uv.stop(task.runtime.backend.loop)
     end
     local result = coroutine.yield(
       completion<|ExternalWait, nil, value|>(self, start_native_retirement_wait, WAIT_CLEANUP),

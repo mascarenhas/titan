@@ -25,7 +25,7 @@ local function ForeignWork:abandon()
     self:release_abandoned()
     return
   end
-  runtime.abandoned_work[#runtime.abandoned_work + 1] = self
+  runtime.backend.abandoned_work[#runtime.backend.abandoned_work + 1] = self
 end
 
 local function foreign_work_completed(request: uv.work_t, status: integer)

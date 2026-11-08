@@ -1,10 +1,24 @@
--- Native libuv backend of the async Runtime: loop acquisition and Lua-state
--- close, the shared wake timer, the libuv-typed await helpers, the driver
--- loop and the bundled libuv version.
+-- Native libuv backend of the async Runtime: the Backend state and the seams
+-- the shared core calls, loop acquisition and Lua-state close, the shared wake
+-- timer, the libuv-typed await helpers, the driver loop, the bundled libuv
+-- version, and process setup.
 -- async already imports lua.h and titan/ffi.h; this header is OS-only and
 -- introduces no transitive libuv dependency.
 foreign import "async_signal_platform.h"
 local uv = import "uv"
+
+-- The Runtime's native state (Runtime.backend).
+local record Backend
+  loop: uv.loop_t
+  wake: uv.timer_t
+  external: ExternalBridge?
+  -- Releases of run_foreign jobs whose wait a Lua state close abandoned.
+  abandoned_work: {ForeignWork}
+end
+
+-- What a registrar returns to the shared trampoline: the accepted native
+-- request that cancelling a cancellable wait cancels.
+local type Request = uv.req_t
 
 local function operation_error(code: integer, operation: string): OperationError
   return OperationError(code, uv.err_name(code), uv.strerror(code), operation)
@@ -12,6 +26,37 @@ end
 
 local function check_status(code: integer, operation: string)
   if code < 0 then raise operation_error(code, operation) end
+end
+
+local function new_backend(): Backend
+  return Backend {loop = uv.loop_t.new(), wake = uv.timer_t.new(), external = nil,
+    abandoned_work = {}}
+end
+
+-- new_runtime registers the Runtime's finalizer before this native acquisition.
+local function start_backend(runtime: Runtime)
+  check_status(uv.loop_init(runtime.backend.loop), "runtime.loop.init")
+  do uv.bind_transfer_loop(runtime.backend.loop)
+  catch uv.loop_close(runtime.backend.loop); raise end
+  local status = uv.timer_init(runtime.backend.loop, runtime.backend.wake)
+  if status < 0 then
+    uv.unbind_transfer_loop(runtime.backend.loop)
+    uv.loop_close(runtime.backend.loop)
+    raise operation_error(status, "runtime.timer.init")
+  end
+  uv.timer_set_data(runtime.backend.wake, runtime)
+end
+
+local function unbind_backend(runtime: Runtime)
+  uv.unbind_transfer_loop(runtime.backend.loop)
+end
+
+local function stop_backend(runtime: Runtime)
+  uv.stop(runtime.backend.loop)
+end
+
+local function cancel_request(request: Request)
+  uv.cancel(request)
 end
 
 -- lua_close runs every finalizer, latest registration first, before freeing
@@ -30,41 +75,15 @@ local function runtime_finalize(candidate: value)
   runtime.driving = true
   -- Keep shutdown admission and recursive driver entry closed throughout
   -- native retirement, even though UV suppresses every user callback.
-  uv.unbind_transfer_loop(runtime.loop)
-  -- Task coroutines were unwound (their defers and cleanup ran inside their
-  -- finalizers) and destroyed. Retire every Task and the ready queue: a late
-  -- settlement finds no current Wait and raises, a resume finds no token, and
-  -- no queued continuation remains, so no callback can enter a Task. A
-  -- finalizer registered before this Runtime may still read a Task's status,
-  -- so publish a terminal state with the phase. A pending body outcome never
-  -- finished its cleanup or native retirement and is not published, and no
-  -- terminal listener runs. Terminal status follows native retirement, so a
-  -- Task whose retirement gate is still armed (the gate finish_task refuses
-  -- on) stays nonterminal.
-  local abandoned = CancellationReason.simple(ABANDONED_AT_CLOSE)
-  for index = 1, runtime.next_task - 1 do
-    local task? = runtime.tasks[index]
-    if task ~= nil then
-      task.wait = nil
-      clear_suspension(task)
-      local barrier? = task.cleanup_wait
-      if barrier == nil or barrier.native.ready ~= 0 then
-        task.phase = TASK_FINISHED
-        task.state = TaskStatus.cancelled(task.cancel_value or abandoned)
-      end
-    end
-  end
-  runtime.ready_head = nil
-  runtime.ready_tail = nil
-  runtime.ready_count = 0
-  runtime.wake_armed = false
-  check_status(uv.loop_abandon(runtime.loop), "runtime.loop.abandon")
+  uv.unbind_transfer_loop(runtime.backend.loop)
+  retire_tasks_at_close(runtime)
+  check_status(uv.loop_abandon(runtime.backend.loop), "runtime.loop.abandon")
   active_runtime = nil
   -- Every accepted job has returned. Release what abandoned run_foreign
   -- waits handed over, here on the closing thread: such a release may itself
   -- wait for the worker pool, which no abandoned job occupies any more.
-  local abandoned_work = runtime.abandoned_work
-  runtime.abandoned_work = {}
+  local abandoned_work = runtime.backend.abandoned_work
+  runtime.backend.abandoned_work = {}
   for index = 1, #abandoned_work do
     abandoned_work[index]:release_abandoned()
   end
@@ -76,12 +95,12 @@ end
 function current_loop(): uv.loop_t
   local runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
-  return runtime.loop
+  return runtime.backend.loop
 end
 
 local function arm_ready(runtime: Runtime)
   if runtime.wake_armed then return end
-  check_status(uv.timer_start(runtime.wake, ready_tick, 0, 0), "runtime.timer.start")
+  check_status(uv.timer_start(runtime.backend.wake, ready_tick, 0, 0), "runtime.timer.start")
   runtime.wake_armed = true
 end
 
@@ -89,7 +108,7 @@ local function ready_tick(timer: uv.timer_t)
   local runtime: Runtime = uv.timer_get_data(timer)
   runtime.wake_armed = false
   local failed = false
-  do drain_ready(runtime)
+  do drain_ready(runtime, runtime.ready_count)
   catch
     failed = true
     fail_runtime(runtime, error, traceback)
@@ -153,13 +172,13 @@ function await_cancellable<|T, E|>(op: function (function (T): (), function (E):
 end
 
 local function close_handles(runtime: Runtime)
-  local external? = runtime.external
+  local external? = runtime.backend.external
   if external ~= nil then external:close() end
-  uv.walk(runtime.loop, function (handle: uv.handle_t, _: value)
+  uv.walk(runtime.backend.loop, function (handle: uv.handle_t, _: value)
     if not uv.is_closing(handle) then
       case handle
       when timer(owner) then
-        if owner == runtime.wake then uv.timer_close(owner, ready_closed)
+        if owner == runtime.backend.wake then uv.timer_close(owner, ready_closed)
         else uv.close(handle) end
       when async() then
         defer uv.close(handle)
@@ -200,71 +219,7 @@ function loop()
       -- registry. It runs before blocking even when a native wait refs UV.
       for index = 1, runtime.next_task - 1 do
         local task? = runtime.tasks[index]
-        if task ~= nil then
-          local barrier? = task.cleanup_wait
-          if barrier ~= nil and barrier.native.armed ~= 0 and barrier.native.ready == 0 then
-            local notified = uv.native_external_wake_is_notified(barrier.target) ~= 0
-            if notified or task.root_done or barrier.awaited then
-              local status = retirement_poll_native(barrier.native)
-              if status == 0 then
-                local target = barrier.target
-                barrier.target = nil
-                barrier.bridge.waits[barrier.identity] = nil
-                barrier.registered = false
-                if target ~= nil then barrier.bridge.wake:unregister(target) end
-              elseif status < 0 then
-                if runtime.retirement_error == nil then runtime.retirement_error = barrier end
-              end
-            end
-          end
-          if task.root_done and task.terminal_kind ~= TERMINAL_NONE and
-              (barrier == nil or barrier.native.ready ~= 0) then
-            if not task.ready_queued then
-              do enqueue_ready(task, READY_TERMINAL, nil)
-              catch recover_native = true; fail_runtime(runtime, error, traceback) end
-            end
-          elseif barrier ~= nil and barrier.native.ready ~= 0 and
-              barrier.done ~= nil and not barrier.notified then
-            do barrier:notify()
-            catch recover_native = true; fail_runtime(runtime, error, traceback) end
-          end
-          if runtime.failure ~= nil and not task.root_done and not task.ready_queued then
-            if task.phase == TASK_READY then
-              -- An entry allocation may have failed after dequeue but before
-              -- the startup trampoline ran. Preserve run_with_cleanup's entry.
-              do enqueue_ready(task, READY_START, nil)
-              catch recover_native = true; fail_runtime(runtime, error, traceback) end
-            else
-              local waiting? = task.wait
-              if waiting ~= nil and waiting.phase == WAIT_SETTLED then
-                do enqueue_ready(task, READY_DELIVER, waiting)
-                catch recover_native = true; fail_runtime(runtime, error, traceback) end
-              else
-                local registrar: value = start_native_retirement_wait
-                local unaccepted_native = waiting ~= nil and barrier ~= nil and
-                  waiting.phase == WAIT_REGISTERING and waiting.stored_context == barrier and
-                  waiting.register == registrar
-                if waiting == nil or waiting.phase == WAIT_RETIRED or unaccepted_native then
-                  -- These operations have no outstanding domain acceptance.
-                  -- A cleanup barrier itself remains preaccepted and retained.
-                  task.wait = nil
-                  task.suspended = false
-                  task.resume_token = nil
-                  task.resume_pending = false
-                  task.suspend_cancel = nil
-                  if barrier ~= nil and task.terminal_kind == TERMINAL_NONE then
-                    local failure = runtime.failure as Error
-                    task.terminal_kind = TERMINAL_FAILED
-                    task.terminal_value = failure.error
-                    task.terminal_trace = failure.traceback
-                  end
-                  do enqueue_ready(task, READY_UNWIND, nil)
-                  catch recover_native = true; fail_runtime(runtime, error, traceback) end
-                end
-              end
-            end
-          end
-        end
+        if task ~= nil and recover_task(runtime, task) then recover_native = true end
       end
     end
     local retirement_error? = runtime.retirement_error
@@ -284,25 +239,25 @@ function loop()
         -- An unrelated referenced handle may need one of these continuations
         -- to close it. Recover ready work before a blocking uv.run, not only
         -- once native liveness reaches zero. Pending native waits stay owned.
-        do drain_ready(runtime) catch fail_runtime(runtime, error, traceback) end
+        do drain_ready(runtime, runtime.ready_count) catch fail_runtime(runtime, error, traceback) end
       end
     end
     -- Task-owned cleanup may have accepted a handle-based wait. Leave its
     -- completion and scheduler wakes intact until every Task has unwound.
     if not has_tasks(runtime) and runtime.ready_head == nil then
-      uv.unbind_transfer_loop(runtime.loop)
+      uv.unbind_transfer_loop(runtime.backend.loop)
       runtime.closing = true
       do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
     end
     local mode = uv.RUN_DEFAULT
     if runtime.ready_head ~= nil and not runtime.wake_armed then mode = uv.RUN_NOWAIT end
     if recover_native then mode = uv.RUN_NOWAIT end
-    do uv.run(runtime.loop, mode)
+    do uv.run(runtime.backend.loop, mode)
     catch
       fail_runtime(runtime, error, traceback)
       recover_native = true
     end
-    if not uv.loop_alive(runtime.loop) then
+    if not uv.loop_alive(runtime.backend.loop) then
       if runtime.ready_head ~= nil then
         -- Accepted work remains in the ready queue. The next outer iteration
         -- rearms it or recovers a bounded batch before classifying orphans.
@@ -314,10 +269,10 @@ function loop()
         -- Native liveness excludes initialized inactive handles. Last-Task
         -- retirement can reach this branch before the next outer iteration.
         do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
-        if not uv.loop_alive(runtime.loop) then
-          local status = uv.loop_close(runtime.loop)
+        if not uv.loop_alive(runtime.backend.loop) then
+          local status = uv.loop_close(runtime.backend.loop)
           if status == 0 then
-            uv.timer_set_data(runtime.wake, nil)
+            uv.timer_set_data(runtime.backend.wake, nil)
             notify_runtime_closed(runtime)
             active_runtime = nil
             local failure? = runtime.failure
@@ -336,4 +291,15 @@ end
 -- @usage async-io.md
 function version(): string
   return uv.version_string()
+end
+
+-- Process setup run by the root initializer before the bootstrap registration.
+local function initialize_backend()
+  local native_error = ffi.titan_async_ignore_sigpipe_if_default()
+  if native_error ~= 0 then
+    check_status(uv.translate_sys_error(native_error), "runtime.sigpipe")
+  end
+  -- The generated entrypoint has not yet built its Titan argument Array.
+  -- This still runs with --no-uv-bootstrap; only invoking bootstrap is skipped.
+  uv.setup_process_args()
 end
