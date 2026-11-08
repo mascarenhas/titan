@@ -1824,9 +1824,13 @@ trace gate's production program rows require the shown Titan frames to be an
 ordered subsequence of the row's exact frames, with the exact file and
 execution line (file only on WebKit), and each name to be the matched frame's
 or that of a later expected frame, the enclosing caller it was inlined into
-(D28, D32). At least one Titan frame must appear, and the outermost must be the
-entry, `trace_uncaught.main`: the entry is called from C and cannot be inlined
-away. Every other line must be a `[C]` frame, a Lua frame, or a documented
+(D28, D32). At least one of the program's own Titan frames must appear, and
+the outermost of them must be the entry: `trace_uncaught.main` is called from
+C, and `trace_async.main`, which runs as the async bootstrap Task (titan#334),
+through a function value, so neither can be inlined away. The uncaught row
+shows no other Titan frame; in the async row only the async runtime's frames
+(the bootstrap Task's root and the driver that resumed it) may follow the
+entry. Every other line must be a `[C]` frame, a Lua frame, or a documented
 marker, so an unparsed line fails the row. Lua frames, markers, fallbacks, and
 merge order stay exact, and no `titanentry` symbol or mangled C name may
 appear. Test-image and validation rows stay byte-exact. The gate takes the
@@ -1958,8 +1962,9 @@ while the production columns are ordinary installed-profile programs. The
 Chromium numbers are therefore recorded as measured, with no regression or
 speedup claimed against the harness.
 
-The trace gate's own images, as the gate builds them with its current 36
-native cases (maximum locals count parameters and declared locals):
+The trace gate's own images, as the gate built them with its 36 native cases
+before titan#334 added the post-suspension cases (maximum locals count
+parameters and declared locals):
 
 | Image | Production `.wasm` / `.wasm.map` bytes, maximum locals | Validation |
 | --- | ---: | ---: |
@@ -3583,8 +3588,9 @@ hosts`).
   independent-state C helper and the failed-initializer image, driven by
   `integration.mjs` through lifecycle, typed values, callbacks, notifications,
   requests, stdio, state close, and WeakRef collection, plus the
-  unhandled-rejection (74) and poisoned-retirement (70) diagnostics, and the
-  html5 click counter of synchronous C callbacks on Chromium
+  unhandled-rejection (74) and poisoned-retirement (70) diagnostics, and, on
+  Chromium, the html5 click counter of synchronous C callbacks and the async
+  driver's responsiveness page test (`responsive.mjs`, titan#334)
   ([browser bridge runtime](browser-bridge.md#test-layers)).
 * `spec/coder/browser_deployment_spec.lua` with
   `spec/fixtures/browser_bridge/deployment.mjs` — a real program loaded over
@@ -3616,20 +3622,27 @@ hosts`).
 * `spec/browser/build-trace.lua`, `spec/browser/trace.test.mjs`,
   `spec/browser/playwright-run.mjs`, `spec/browser/playwright-runner.test.mjs`,
   and `spec/fixtures/browser_trace/` — the
-  staged multi-engine browser trace gate (36 discovered native cases in
-  `trace_cases` plus `trace_uncaught`, staged into `assertions-2` and
-  `assertions-0` with 76 positive `cases` rows and 8 intentional
-  `degradedCases` rows in `manifest.json`, which also records the installation
-  `profile`) covering direct and `.browser.titan`
+  staged multi-engine browser trace gate (46 discovered native cases in
+  `trace_cases` plus the `trace_uncaught` and `trace_async` programs, staged
+  into `assertions-2` and `assertions-0` with 98 positive `cases` rows and 8
+  intentional `degradedCases` rows in `manifest.json`, which also records the
+  installation `profile`) covering direct and `.browser.titan`
   contributor locations, deep recursion and engine truncation, mixed
   `Lua -> Titan -> Lua -> Titan` merge order, mixed and `pcall` recursion past
   the [browser C-call limit](#the-regression), all wrapper families, fresh
   raise versus bare rethrow, coroutine append across yield/resume, adjacent
   unmapped helpers, immediate literal calls, held-storage nested capture, merge
-  `LUA_ERRMEM` recovery, and WebKit reduced-fidelity rendering across Node,
-  Chromium, Firefox, and WebKit. `build-trace.lua` links the test image with
-  the `test` purpose and the uncaught image with `program`; every row is exact
-  except a production program row, which follows the [ordered-subsequence
+  `LUA_ERRMEM` recovery, post-suspension traces in `async` Tasks
+  (`tasks.browser.titan`, titan#334: after turn and wait relinquishes, in a
+  delivered handler, through an `async.Error` handoff, rethrow and fresh raise
+  across an await, coroutine append in a Task, and a cleanup during
+  cancellation), entry traces (the `task_entries` row's failed Task-form call,
+  and a call and a notification failing where a drive delivers them), a failed
+  async bootstrap `main` Task, and WebKit reduced-fidelity rendering across
+  Node, Chromium, Firefox, and WebKit. `build-trace.lua` links the test image
+  with the `test` purpose and the uncaught and async images with `program`,
+  the async image without `--no-uv-bootstrap`; every row is exact except a
+  production program row, which follows the [ordered-subsequence
   contract](#test-images).
 
 The Busted files need emcc 6.0.13 and the installed browser Lua; the image,

@@ -651,19 +651,17 @@ local function stop(...: Value): Value
   return Value.is_nil()
 end
 
-function main(args: {string}): integer
-  do
-    listen("#increment", increment)
-    listen("#reset", reset)
-    show()
-    local ready = browser.binding("ready")
-    defer ready:close()
-    ready:call(Value.is_callable(stop))
-  catch
-    stop()
-    raise
-  end
+function main(_args: {string}): integer
+  listen("#increment", increment)
+  listen("#reset", reset)
+  show()
+  local ready = browser.binding("ready")
+  defer ready:close()
+  ready:call(Value.is_callable(stop))
   return 0
+catch
+  stop()
+  raise
 end
 ```
 

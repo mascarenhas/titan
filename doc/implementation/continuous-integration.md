@@ -432,23 +432,25 @@ runner with a 60-minute timeout after `build-compiler`:
 4. **Staged trace gate (`assertions-2` and `assertions-0`).** `lua -E
    spec/browser/build-trace.lua "$TITAN_TRACE_OUTPUT"`
    (`out/browser/trace-<profile>-<engine>`, logged to
-   `$RUNNER_TEMP/browser-playwright-build.log`) builds the test and uncaught
-   images for both assertion modes with the cell's installed `titanc` and stages
-   the degraded-map variants, `trace.test.mjs`, and `manifest.json`.
+   `$RUNNER_TEMP/browser-playwright-build.log`) builds the test image and the
+   uncaught and async-bootstrap program images for both assertion modes with
+   the cell's installed `titanc` and stages the degraded-map variants,
+   `trace.test.mjs`, and `manifest.json`.
 5. **Positive trace gate.** `"$TITAN_NODE" spec/browser/playwright-run.mjs --engine
    "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 --sdk
    "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT"
    "$TITAN_TRACE_OUTPUT/trace.test.mjs"`
    (`$RUNNER_TEMP/browser-playwright-trace.log`) runs the full file/line,
    contributor, wrapper-family, merge-order, descriptor-safety,
-   pin/rethrow/clear, coroutine-append, SpiderMonkey saved-parent cutoff and
-   128-frame ceiling, held-storage nested capture, and merge-OOM guard-recovery
-   checks on `chromium` and `firefox`, and the reduced-fidelity no-line
-   counterpart with the same 512-record capacity on `webkit`. The gate reads
-   the installation profile from
-   `manifest.json`: every row is exact except a `production` cell's uncaught
-   program rows, which use the [ordered-subsequence
-   contract](browser-target.md#test-images) for inlined frames.
+   pin/rethrow/clear, coroutine-append, post-suspension Task and entry
+   (titan#334), SpiderMonkey saved-parent cutoff and 128-frame ceiling,
+   held-storage nested capture, and merge-OOM guard-recovery checks on
+   `chromium` and `firefox`, and the reduced-fidelity no-line counterpart with
+   the same 512-record capacity on `webkit`. The gate reads the installation
+   profile from `manifest.json`: every row is exact except a `production`
+   cell's program rows (`uncaught` and `async_uncaught`), which use the
+   [ordered-subsequence contract](browser-target.md#test-images) for inlined
+   frames.
 6. **Degraded-mode policy and fallback checks.** Every row in
    `manifest.degradedCases` is first run with `playwright-run.mjs ... --image
    <row.image>` without `--allow-degraded-trace` and must fail with exit status
@@ -461,19 +463,23 @@ runner with a 60-minute timeout after `build-compiler`:
 7. **Persistent bridge gate (all six cells).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
    `browser.tests` image with its independent-state C helper, the failed
-   initializer image, and the html5 click counter of synchronous C callbacks
-   with its C helper, each with assertions 2 and 0. It stages those images and
-   the portable JavaScript fixtures in `out/browser/bridge-<profile>-<engine>`.
+   initializer image, the html5 click counter of synchronous C callbacks
+   with its C helper, and the async driver's responsiveness program
+   (`responsive.titan`), each with assertions 2 and 0. It stages those images
+   and the portable JavaScript fixtures in `out/browser/bridge-<profile>-<engine>`.
    The cell's managed engine runs the full lifecycle, typed values, callbacks,
-   notification, request, stdio, state-close and collection suite, and
+   notification, request, stdio, state-close and collection suite;
    `counter.mjs` clicks the counter's buttons on the page (`COUNTER
-   {"verdict":"PASS"`). Separate
+   {"verdict":"PASS"`), and `responsive.mjs` measures a 10 ms `setInterval`
+   and `requestAnimationFrame` while Tasks wait, yield continuously, resume
+   from requests that settle together, and while one call busy-waits
+   (`RESPONSIVE {"verdict":"PASS"`; titan#334). Separate
    processes require unhandled-rejection status74 for opaque imported and
    reverse-call Promise values, and abort status70 for the poisoned-owner
    retirement case. Each negative case must also emit its expected marker;
    an early failure with the same status cannot satisfy it. The production
-   Chromium cell repeats the same bridge cases on Node, except the counter,
-   which needs a page's DOM; validation Node is
+   Chromium cell repeats the same bridge cases on Node, except the two page
+   tests, which need a page's DOM; validation Node is
    covered by `browser-stdlib`. Logs are
    `$RUNNER_TEMP/browser-playwright-bridge-build.log` and
    `$RUNNER_TEMP/browser-playwright-bridge.log`.

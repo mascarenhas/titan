@@ -1,0 +1,283 @@
+-- Post-suspension traces (titan#334): errors raised or captured in async
+-- Tasks after the browser driver relinquished, through a turn (yield) or a
+-- wait (timer, JavaScript request, channel); in a handler the driver
+-- delivered; through async.Error handoff, rethrow and fresh raise across an
+-- await, coroutine append inside a Task and a cleanup during cancellation;
+-- and entry targets that the gate's JavaScript calls after the cases.
+local async = import "async"
+local browser = import "browser"
+local timer = import "timer"
+
+local type BrowserValue = browser.BrowserValue
+
+-- Runs `body` in a Task and drives the Runtime until every Task finished; a
+-- failed body raises its original error and trace here.
+local function drive(body: function ())
+  local task = async.run<|value, value|>(function (): value
+    body()
+    return nil
+  end)
+  async.loop()
+  case task:status()
+  when failed(failure) then failure:raise()
+  end
+end
+
+-- A trace captured in a resumed Task shows the raising frames and none of
+-- the saved resumer, driver or test-runner history.
+local function task_capture(label: string)
+  local trace = caught(direct_outer)
+  frame(trace, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  frame(trace, "trace_cases.titan", 84, "trace_cases.direct_middle")
+  frame(trace, "trace_cases.titan", 88, "trace_cases.direct_outer")
+  test.assert(not contains(trace, "in trace_cases.test_") and not contains(trace, "in titan.test."),
+              "Task trace included saved resumer/test-runner history\n" .. trace)
+  emit(label, trace)
+end
+
+local function raise_host_error(result: async.Result<|integer, string|>)
+  case result
+  when error(message) then raise message
+  end
+end
+
+-- Awaits a request on binding `name`, settled in JavaScript and delivered by
+-- the driver. A cleanup wait is shielded from cancellation.
+local function await_host(name: string, argument: BrowserValue, cleanup: boolean)
+  local source = browser.binding(name)
+  defer source:close()
+  local request: browser.BrowserRequest? = nil
+  defer do
+    local open? = request
+    if open ~= nil then open:close() end
+  end
+  local start = function (resolve: function (integer): (), reject: function (string): (),
+      _fatal: function (value, string): ())
+    request = source:start(function (...: BrowserValue): BrowserValue
+      resolve(0)
+      return BrowserValue.is_nil()
+    end, function (...: BrowserValue): BrowserValue
+      reject(name .. " failed")
+      return BrowserValue.is_nil()
+    end, argument)
+  end
+  if cleanup then
+    raise_host_error(async.await_cleanup<|integer, string|>(start))
+  else
+    raise_host_error(async.await<|integer, string|>(start))
+  end
+end
+
+function test_task_trace_after_turn(_context: test.Context)
+  local resumed = false
+  drive(function ()
+    timer.yield()
+    task_capture("task_after_turn")
+    resumed = true
+  end)
+  test.assert(resumed, "the yielding Task never resumed")
+end
+
+function test_task_trace_after_timer(_context: test.Context)
+  local resumed = false
+  drive(function ()
+    timer.sleep(5)
+    task_capture("task_after_timer")
+    resumed = true
+  end)
+  test.assert(resumed, "the sleeping Task never resumed")
+end
+
+function test_task_trace_after_request(_context: test.Context)
+  local resumed = false
+  drive(function ()
+    await_host("titan:timeout", BrowserValue.is_float(5.0), false)
+    task_capture("task_after_request")
+    resumed = true
+  end)
+  test.assert(resumed, "the waiting Task never resumed")
+end
+
+function test_task_trace_after_channel(_context: test.Context)
+  local resumed = false
+  drive(function ()
+    local send, receive, close = async.channel<|integer|>(1)
+    defer close()
+    async.run<|value, value|>(function (): value
+      timer.yield()
+      send(7)
+      return nil
+    end)
+    test.assert(receive() == 7, "the channel lost its value")
+    task_capture("task_after_channel")
+    resumed = true
+  end)
+  test.assert(resumed, "the receiving Task never resumed")
+end
+
+-- A request's completion handler runs in the driver's delivery, outside any
+-- Task; a trace captured there shows the raising frames.
+function test_delivered_handler_trace(_context: test.Context)
+  local captured = ""
+  drive(function ()
+    local task = async.running()
+    local token = async.ResumeToken("delivered handler")
+    local source = browser.binding("titan:timeout")
+    defer source:close()
+    local request = source:start(function (...: BrowserValue): BrowserValue
+      captured = caught(direct_outer)
+      task:resume(token)
+      return BrowserValue.is_nil()
+    end, function (...: BrowserValue): BrowserValue
+      task:resume(token)
+      return BrowserValue.is_nil()
+    end, BrowserValue.is_float(5.0))
+    defer request:close()
+    while captured == "" do async.suspend(token) end
+  end)
+  frame(captured, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  frame(captured, "trace_cases.titan", 84, "trace_cases.direct_middle")
+  frame(captured, "trace_cases.titan", 88, "trace_cases.direct_outer")
+  ordered(captured, "in trace_cases.direct_outer", "in trace_cases.test_delivered_handler_trace")
+  emit("delivered_handler", captured)
+end
+
+-- A failed Task's async.Error raised in its joiner keeps the failed Task's
+-- saved trace, not a new one from the joiner's raise.
+function test_task_error_raise_handoff(_context: test.Context)
+  local trace = ""
+  local saved = ""
+  drive(function ()
+    local failing = async.run<|value, value|>(function (): value
+      timer.yield()
+      direct_outer()
+      return nil
+    end)
+    case async.join(failing)
+    when failed(handoff) then
+      saved = handoff.traceback
+      do
+        handoff:raise()
+      catch
+        test.assert(error == "trace-original", "the handoff replaced the original payload")
+        trace = traceback
+      end
+    end
+  end)
+  test.assert(saved ~= "", "the failing Task did not fail")
+  test.assert(trace == saved, "the handoff replaced the saved trace\n" .. trace)
+  frame(trace, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  frame(trace, "trace_cases.titan", 84, "trace_cases.direct_middle")
+  frame(trace, "trace_cases.titan", 88, "trace_cases.direct_outer")
+  emit("task_handoff", trace)
+end
+
+local rethrown_trace = ""
+
+-- An await between the catch and a bare rethrow keeps the original trace.
+local function rethrow_after_await()
+  direct_outer()
+catch
+  rethrown_trace = traceback
+  timer.yield()
+  raise
+end
+
+-- An await between the catch and a fresh raise starts a new trace there.
+local function fresh_after_await()
+  direct_outer()
+catch
+  timer.yield()
+  raise error
+end
+
+function test_task_rethrow_and_fresh_raise_across_await(_context: test.Context)
+  local rethrown = ""
+  local fresh = ""
+  drive(function ()
+    rethrown = caught(rethrow_after_await)
+    fresh = caught(fresh_after_await)
+  end)
+  test.assert(rethrown == rethrown_trace, "a rethrow across an await changed the trace")
+  test.assert(count_frames(rethrown, ": in trace_cases.original_leaf") == 1, rethrown)
+  emit("task_rethrow", rethrown)
+  test.assert(not contains(fresh, "in trace_cases.original_leaf"), fresh)
+  frame(fresh, "tasks.browser.titan", 191, "trace_cases.fresh_after_await")
+  emit("task_fresh", fresh)
+end
+
+-- A coroutine inside a Task raises after the Task resumed it across a turn;
+-- the Task's trace appends the coroutine's frames to its own.
+function test_task_coroutine_append(_context: test.Context)
+  local trace = ""
+  drive(function ()
+    local child = coroutine.create(function (_: value): value
+      return resumed_leaf()
+    end, "append-outer")
+    test.assert(child:resume(nil) == "paused", "the coroutine did not pause")
+    timer.yield()
+    do
+      child:resume(nil)
+    catch
+      test.assert(error == "trace-original", "the coroutine replaced the original payload")
+      trace = traceback
+    end
+  end)
+  ordered(trace, "in trace_cases.original_leaf", "in trace_cases.resumed_leaf")
+  test.assert(count_frames(trace, ": in trace_cases.original_leaf") == 1, trace)
+  test.assert(count_frames(trace, ": in trace_cases.resumed_leaf") == 1, trace)
+  emit("task_append", trace)
+end
+
+-- A cleanup that runs because its Task was cancelled awaits host work
+-- shielded from that cancellation; an error it then raises carries its own
+-- trace. The case catches that error in the cleanup: it never becomes the
+-- Task's outcome, because the first sticky cancellation keeps precedence
+-- (async-io.md, "Terminal publication and retry").
+function test_task_cleanup_trace_during_cancellation(_context: test.Context)
+  local trace = ""
+  drive(function ()
+    local waiting = async.run_with_cleanup<|value, value|>(function (): value
+      timer.sleep(100000)
+      return nil
+    end, function (_: async.CancellationReason<|value|>?)
+      await_host("titan:timeout", BrowserValue.is_float(5.0), true)
+      trace = caught(direct_outer)
+    end, nil)
+    timer.yield()
+    waiting:cancel()
+    async.join(waiting)
+  end)
+  frame(trace, "trace_cases.titan", 80, "trace_cases.original_leaf")
+  frame(trace, "trace_cases.titan", 84, "trace_cases.direct_middle")
+  frame(trace, "trace_cases.titan", 88, "trace_cases.direct_outer")
+  emit("task_cleanup", trace)
+end
+
+-- Entry targets for the gate's task_entries row, which calls them from
+-- JavaScript after this case returns: a Task-form call that fails after a
+-- turn, a target that fails at once (as a call queued during a drive and as
+-- a notification the driver delivers), and a Task held on a JavaScript
+-- request that keeps that drive running.
+local function fail_after_turn(...: BrowserValue): BrowserValue
+  timer.yield()
+  direct_outer()
+  return BrowserValue.is_nil()
+end
+
+local function fail_direct(...: BrowserValue): BrowserValue
+  direct_outer()
+  return BrowserValue.is_nil()
+end
+
+local function hold(...: BrowserValue): BrowserValue
+  await_host("traceHold", BrowserValue.is_nil(), false)
+  return BrowserValue.is_nil()
+end
+
+function test_task_entry_targets(_context: test.Context)
+  local publish = browser.binding("traceTaskTargets")
+  defer publish:close()
+  publish:call(BrowserValue.is_callable(fail_after_turn), BrowserValue.is_callable(fail_direct),
+               BrowserValue.is_callable(hold))
+end

@@ -451,9 +451,11 @@ end
 
 local function sync_nested(...: Value): Value
   local result: foreign *titan_browser_sync_result = foreign titan_browser_sync_result.new()
+  defer do
+    ffi.free(ffi.lmacro_unconst(result.message))
+    ffi.free(ffi.lmacro_unconst(result.trace))
+  end
   local status: integer = browser.call_sync(nested_identity, 0, nil, result)
-  ffi.free(ffi.lmacro_unconst(result.message))
-  ffi.free(ffi.lmacro_unconst(result.trace))
   return Value.is_integer(status)
 end
 

@@ -58,7 +58,7 @@ describe("persistent core JavaScript bridge", function()
             if not info then pending(why) return end
             fixture = files.new()
             for _, name in ipairs({ "bindings.mjs", "integration.mjs", "unhandled.mjs",
-                    "unhandled-result.mjs", "poison-retirement.mjs", "counter.mjs" }) do
+                    "unhandled-result.mjs", "poison-retirement.mjs", "counter.mjs", "responsive.mjs" }) do
                 files.copy(repository .. "/spec/fixtures/browser_bridge/" .. name, fixture.source .. "/" .. name)
             end
             local native = build(info, assertions, repository .. "/spec/stdlib/titan", "browser.tests", "bridge", true,
@@ -67,6 +67,8 @@ describe("persistent core JavaScript bridge", function()
                 "initializer_failure", "initializer-failure", false)
             local counter = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "counter", "counter", false, repository .. "/spec/fixtures/browser_bridge/counter.c")
+            local responsive = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
+                "responsive", "responsive", false)
             for _, engine in ipairs({ "node", "chromium" }) do
                 local result = execute(info, engine, "integration.mjs", { native, failure })
                 io.stdout:write(string.format("\nBRIDGE assertions=%d engine=%s node=%s chrome=%s\n%s\n",
@@ -87,13 +89,17 @@ describe("persistent core JavaScript bridge", function()
                     assert.truthy(failed.output:find(negative[3], 1, true), failed.output)
                 end
                 if engine == "chromium" then
-                    -- The html5 click counter's synchronous C callbacks need a page's DOM.
-                    local counted = execute(info, engine, "counter.mjs", { counter })
-                    io.stdout:write(string.format("\nCOUNTER assertions=%d engine=%s\n%s\n",
-                        assertions, engine, counted.output))
-                    io.stdout:flush()
-                    assert.is_true(counted.ok, counted.output)
-                    assert.truthy(counted.output:find('COUNTER {"verdict":"PASS"', 1, true), counted.output)
+                    -- Page tests: the html5 click counter's synchronous C callbacks
+                    -- and the async driver's responsiveness (titan#334) need a page.
+                    for _, page in ipairs({ { "counter.mjs", counter, "COUNTER" },
+                                            { "responsive.mjs", responsive, "RESPONSIVE" } }) do
+                        local result = execute(info, engine, page[1], { page[2] })
+                        io.stdout:write(string.format("\n%s assertions=%d engine=%s\n%s\n",
+                            page[3], assertions, engine, result.output))
+                        io.stdout:flush()
+                        assert.is_true(result.ok, result.output)
+                        assert.truthy(result.output:find(page[3] .. ' {"verdict":"PASS"', 1, true), result.output)
+                    end
                 end
             end
         end)
