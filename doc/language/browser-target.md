@@ -550,12 +550,15 @@ The instance has the following methods:
   bytes and status 1, but no Titan trace because no Titan code ran.
 * `run(args = [])` initializes when needed, then invokes `main` once. Strings
   in `args` are UTF-8 encoded; `Uint8Array` arguments are copied byte for byte.
-  It resolves `{kind, status, bytes}`, with `"returned"`, `"failed"` or
-  `"exited"`, a signed 32-bit status, and copied error bytes (empty unless
-  failed). Ordinary initializer or main failure is a failed/status1 result,
-  not a fatal-engine rejection. A prior initializer failure is reused without
-  a second report. `"exited"` reports the status a drive latched with
-  [exit](#exit).
+  It resolves `{kind, status, bytes, trace}`, with `"returned"`, `"failed"` or
+  `"exited"`, a signed 32-bit status, and copied error and raw trace bytes
+  (empty unless failed). Ordinary initializer or main failure is a
+  failed/status1 result, not a fatal-engine rejection. A prior initializer
+  failure is reused without a second report. `"exited"` reports the status a
+  drive latched with [exit](#exit). An entry that failed stays `"failed"` even
+  when its drive latched an exit; otherwise the exit latch wins, then a main
+  Task failure the `async` bootstrap reported, which resolves `"failed"` with
+  status 1 and that Task's message and trace.
 * `call(callable, ...args)` invokes a callable wrapper that Titan exported
   through [`BrowserValue.is_callable`](standard-library-browser.md#callables-and-pinning)
   and passed to JavaScript. It requires successful initialization and remains

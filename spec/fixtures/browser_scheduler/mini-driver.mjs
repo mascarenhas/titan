@@ -313,6 +313,19 @@ async function exits(context, image) {
   context.assert(latched.status === 4, 'the latch after a failed exiting entry');
   await host.instance.dispose();
 
+  // browser.main_failed marks the run: failed, status 1, with its message and
+  // trace, unless a drive latched an exit, which wins.
+  host = await disposeHost(context, image);
+  const marked = await host.instance.run(['main-failed']);
+  context.assert(marked.kind === 'failed' && marked.status === 1 && decode(marked.bytes) === 'main task failed' &&
+    decode(marked.trace) === 'main task trace', `main-failed result ${marked.kind}/${marked.status}`);
+  await host.instance.dispose();
+  host = await disposeHost(context, image);
+  const latchWins = await host.instance.run(['main-failed-exit']);
+  context.assert(latchWins.kind === 'exited' && latchWins.status === 7,
+    `main-failed then exit gave ${latchWins.kind}/${latchWins.status}`);
+  await host.instance.dispose();
+
   // Both Task-form calls join one batch: hops queues a call between its
   // internal hops, then exit_with ends the drive before that call's turn.
   host = await disposeHost(context, image);

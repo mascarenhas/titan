@@ -1112,6 +1112,17 @@ function deliver()
       local message = fallback_message
       local completion: foreign *titan_browser_completion = fallback_completion
       completion.operation_id = item.id
+--- Report that the async bootstrap's main Task failed: run() resolves failed, status 1, with this message and trace.
+-- @usage standard-library-browser.md#driver-interface-low-level
+function main_failed(message: string, trace: string)
+  if not owner_state then raise "browser main_failed requires the instance owner state" end
+  local token = state_record.token
+  if token ~= 0 then
+    ffi.titan_browser_host_main_failed(token, message as foreign const *char, #message,
+                                       trace as foreign const *char, #trace)
+  end
+end
+
       completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
       completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
       completion.application_status = 1

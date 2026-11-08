@@ -547,3 +547,12 @@ do
     child_owner = ffi.mini_driver_new_child(L)
   end
 end
+  elseif mode == "main-failed" then
+    -- As the async bootstrap reports a failed main Task, then returns 1.
+    browser.main_failed("main task failed", "main task trace")
+    return 1
+  elseif mode == "main-failed-exit" then
+    browser.main_failed("main task failed", "main task trace")
+    Job(exit_with, {Value.is_integer(7)}, nil)
+    drive()
+    return 1

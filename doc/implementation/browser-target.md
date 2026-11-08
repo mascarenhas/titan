@@ -2930,6 +2930,14 @@ once and accepts a drive only from that state inside an active operation.
   call whose drive exited rejects `TITAN_BROWSER_EXITED`, as does every
   queued call the exiting drive never delivered and every Task-form call
   that joined it.
+- **Main failure.** `titan_browser_host_main_failed(state, message, length,
+  trace, length)`, the import behind `browser.main_failed`, copies both byte
+  ranges onto the active operation's token when that operation is `run` and
+  the state is the owner, and ignores the call otherwise. `runResult` then
+  resolves, in order: a failed completion as `failed`, the exit latch as
+  `exited`, the mark as `failed` with status 1 and the copied message and
+  trace, and otherwise `returned`. Every result carries `bytes` and `trace`,
+  empty unless failed.
 - **Disposal.** `dispose()` settles every unsettled queued call with
   `TITAN_BROWSER_DISPOSED` (an outcome that already failed keeps its failure)
   and drops application notifications. With a drive active, or a registered

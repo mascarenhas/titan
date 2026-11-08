@@ -390,6 +390,7 @@ function drive_end(exit_code: integer?)
 function relinquish(wait: boolean): integer
 function deliver()
 function wake()
+function main_failed(message: string, trace: string)
 ```
 
 - `is_owner()` is true only in the Lua state the generated launcher created
@@ -429,6 +430,12 @@ function wake()
   owner's main thread outside delivery"` otherwise.
 - `wake()` wakes a relinquished drive. It is harmless from any state, thread
   or handler, and without a drive.
+- `main_failed(message, trace)` is how the `async` bootstrap reports a failed
+  main Task, whose report the drive already wrote: `run()` resolves
+  `{kind: "failed", status: 1}` with these message and trace bytes, unless the
+  entry itself failed or a drive latched an exit. Only the owner state may call
+  it (`"browser main_failed requires the instance owner state"`), and only a
+  pending `run()` records it.
 
 A minimal drive that waits until a delivered callback reports completion:
 
