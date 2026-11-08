@@ -1223,7 +1223,8 @@ as an owner.
   outside that subset can fail during preprocessing or parsing.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
-  macros). `#error` and pragmas other than `#pragma once` are ignored.
+  macros, directives whose required token list is absent). `#error` and pragmas
+  other than `#pragma once` are ignored.
 * Function-like macros are invisible to general Titan FFI inference; the
   `lmacro_*` bridges in `titan/ffi.h` are ordinary C functions whose bodies
   evaluate selected Lua macros. An object-like macro is

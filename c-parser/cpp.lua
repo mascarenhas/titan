@@ -1387,7 +1387,9 @@ function cpp.new_context(options)
     end
     cache[key] = probed
     local once_files = {}
-    for _, filename in pairs(forced.once_files or {}) do
+    -- Content validation can reuse forced output after byte-identical
+    -- republishing replaces an inode; once keys must name the current files.
+    for _, filename in pairs(forced.once_files) do
         once_files[header_once_identity(filename, config.io:stat(filename))] = filename
     end
     local ctx = {
@@ -2756,7 +2758,7 @@ parse_contents = function(filename, contents, ctx, read_state)
             elseif tk.directive == "endif" then
                 table.remove(ifmode, #ifmode)
             elseif tk.directive == "pragma" then
-                if tk.pragma[1] == "once" and #tk.pragma == 1 then
+                if tk.pragma and tk.pragma[1] == "once" then
                     -- Mark on execution, not entry: includes above the pragma
                     -- must retain their ordinary behavior.
                     ctx.once_files[once_identity] = filename
