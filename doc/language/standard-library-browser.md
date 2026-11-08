@@ -557,24 +557,29 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
   Task's 256 KiB stack ([limits](browser-target.md#limits)). Deep recursion
   there fails Emscripten's stack check, which poisons the instance.
 
-For example, this program counts clicks on two buttons. A C helper, compiled
-with `--c-source counter.c`, registers each button's `html5.h` click callback
-with a pinned handler's identity as its user data:
+For example, this program counts clicks on two buttons. Titan imports
+`html5.h` directly and registers each button's callback with a pinned
+handler's identity as its user data. It calls
+`emscripten_set_click_callback_on_thread` because the shorter
+`emscripten_set_click_callback` spelling is a function-like macro.
+
+The small C helper, compiled with `--c-source counter.c`, supplies only the
+callback. Its automatic zero-initialized result aggregate cannot be declared
+in a restricted `foreign function` body:
 
 ```c
 /* counter.h */
-#include <titan/browser.h>
+#include <emscripten/html5.h>
 
-int counter_listen(const char *selector, const titan_browser_identity *identity);
-int counter_unlisten(const char *selector);
+bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity);
 
 /* counter.c */
-#include <emscripten/html5.h>
+#include <titan/browser.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "counter.h"
 
-static bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity) {
+bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity) {
   titan_browser_sync_result result = {0};
   if (titan_browser_call_sync(identity, 0, NULL, &result) != TITAN_BROWSER_OK && result.message)
     fprintf(stderr, "click handler failed: %.*s\n", (int)result.message_length, (const char *)result.message);
@@ -583,13 +588,6 @@ static bool counter_click(int type, const EmscriptenMouseEvent *event, void *ide
   return false;
 }
 
-int counter_listen(const char *selector, const titan_browser_identity *identity) {
-  return emscripten_set_click_callback(selector, (void *)identity, false, counter_click);
-}
-
-int counter_unlisten(const char *selector) {
-  return emscripten_set_click_callback(selector, NULL, false, NULL);
-}
 ```
 
 The Titan module keeps each listener's pin and identity until `stop`
@@ -600,6 +598,8 @@ after a registration unregisters what was registered:
 
 ```titan
 local browser = import "browser"
+foreign import "emscripten/html5.h"
+foreign import "titan/browser.h"
 foreign import "counter.h"
 
 local type Value = browser.BrowserValue
@@ -641,7 +641,9 @@ local function listen(selector: string, handler: function (...: Value): Value)
   identity.generation = generation
   local index = #listeners + 1
   listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
-  if ffi.counter_listen(selector, identity) ~= 0 then
+  if ffi.emscripten_set_click_callback_on_thread(
+      selector, identity, 0, ffi.counter_click,
+      ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD) ~= ffi.EMSCRIPTEN_RESULT_SUCCESS then
     listeners[index] = nil
     pin:close()
     raise "cannot listen for clicks on " .. selector
@@ -651,7 +653,8 @@ end
 local function stop(...: Value): Value
   for index = #listeners, 1, -1 do
     local listener = listeners[index]
-    ffi.counter_unlisten(listener.selector)
+    ffi.emscripten_set_click_callback_on_thread(
+      listener.selector, nil, 0, nil, ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD)
     listener.pin:close()
     listeners[index] = nil
   end

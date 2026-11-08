@@ -1,6 +1,8 @@
 -- A click counter: html5.h click callbacks call pinned Titan handlers
 -- synchronously, and each handler shows the count through a binding.
 local browser = import "browser"
+foreign import "emscripten/html5.h"
+foreign import "titan/browser.h"
 foreign import "counter.h"
 
 local type Value = browser.BrowserValue
@@ -47,7 +49,10 @@ local function listen(selector: string, handler: function (...: Value): Value)
   identity.generation = generation
   local index = #listeners + 1
   listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
-  if ffi.counter_listen(selector, identity) ~= 0 then
+  -- The short click-registration spelling is a function-like macro.
+  if ffi.emscripten_set_click_callback_on_thread(
+      selector, identity, 0, ffi.counter_click,
+      ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD) ~= ffi.EMSCRIPTEN_RESULT_SUCCESS then
     listeners[index] = nil
     pin:close()
     raise "cannot listen for clicks on " .. selector
@@ -58,7 +63,8 @@ end
 local function stop(...: Value): Value
   for index = #listeners, 1, -1 do
     local listener = listeners[index]
-    ffi.counter_unlisten(listener.selector)
+    ffi.emscripten_set_click_callback_on_thread(
+      listener.selector, nil, 0, nil, ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD)
     listener.pin:close()
     listeners[index] = nil
   end
