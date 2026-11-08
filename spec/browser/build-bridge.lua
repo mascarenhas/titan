@@ -41,8 +41,10 @@ for _, assertions in ipairs({2, 0}) do
       tree=path.join(repository, "spec/stdlib/titan"),
       source=path.join(fixture, "independent_states.c"), wrap=true},
     {name="initializer-failure", owner="initializer_failure", tree=fixture},
-    -- The html5 click counter of synchronous C callbacks; its page needs a DOM.
+    -- Page tests of their own images, which need a DOM: the html5 click
+    -- counter of synchronous C callbacks and the async driver's responsiveness.
     {name="counter", owner="counter", tree=fixture, source=path.join(fixture, "counter.c")},
+    {name="responsive", owner="responsive", tree=fixture},
   }) do
     -- Use the installed compiler and the existing assertion/profile controls,
     -- exactly as the portable trace builder does. No mock runtime is linked.
@@ -84,7 +86,7 @@ require("titan-compiler.driver").browser_link_options = {purpose=%q, assertions=
 end
 
 for _, name in ipairs({"bindings.mjs", "integration.mjs", "unhandled.mjs", "unhandled-result.mjs",
-    "poison-retirement.mjs", "counter.mjs"}) do
+    "poison-retirement.mjs", "counter.mjs", "responsive.mjs"}) do
   write(path.join(output, name), read(path.join(fixture, name)))
 end
-io.stdout:write(string.format("BRIDGE-GATE %s profile=%s assertionModes=2 images=6\n", output, profile))
+io.stdout:write(string.format("BRIDGE-GATE %s profile=%s assertionModes=2 images=8\n", output, profile))

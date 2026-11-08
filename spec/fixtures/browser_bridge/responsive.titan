@@ -1,0 +1,193 @@
+-- Responsiveness scenarios for the browser driver (titan#334). The page test
+-- responsive.mjs runs each one as a Task-form call and measures a 10 ms
+-- setInterval and requestAnimationFrame meanwhile.
+local async = import "async"
+local browser = import "browser"
+local timer = import "timer"
+
+local type Value = browser.BrowserValue
+
+local function call_binding(name: string, ...: Value): Value
+  local target = browser.binding(name)
+  defer target:close()
+  return target:call(...)
+end
+
+local function integer_of(item: Value): integer
+  case item
+  when is_integer(number) then return number
+  end
+  raise "expected BrowserValue.is_integer"
+end
+
+local function float_of(item: Value): float
+  case item
+  when is_float(number) then return number
+  end
+  raise "expected BrowserValue.is_float"
+end
+
+local function now(): float
+  return float_of(call_binding("now"))
+end
+
+local function report(key: string, item: integer)
+  call_binding("report", Value.is_string(key), Value.is_integer(item))
+end
+
+-- Task resumptions against the harness's macrotask counter, which advances
+-- once per macrotask of the page's own ticker. A yielded Task resumes in a
+-- later driver turn, so a Task that sees the same mark twice ran two turns in
+-- one macrotask (a repeat).
+local record Turns
+  per_macrotask: {integer: integer}
+  resumptions: integer
+  repeats: integer
+  macrotasks: integer
+  most: integer
+end
+
+local function Turns.new(): Turns
+  return { per_macrotask = {}, resumptions = 0, repeats = 0, macrotasks = 0, most = 0 }
+end
+
+-- Records one resumption of the Task whose previous mark is `last` and
+-- returns the new mark.
+local function Turns:record(last: integer): integer
+  local mark = integer_of(call_binding("macrotask"))
+  if mark <= last then self.repeats = self.repeats + 1 end
+  local seen = 0
+  local previous? = self.per_macrotask[mark]
+  if previous == nil then
+    self.macrotasks = self.macrotasks + 1
+  else
+    seen = previous
+  end
+  seen = seen + 1
+  self.per_macrotask[mark] = seen
+  if seen > self.most then self.most = seen end
+  self.resumptions = self.resumptions + 1
+  return mark
+end
+
+local function Turns:report(prefix: string)
+  report(prefix .. "Resumptions", self.resumptions)
+  report(prefix .. "Repeats", self.repeats)
+  report(prefix .. "Macrotasks", self.macrotasks)
+  report(prefix .. "MostPerMacrotask", self.most)
+end
+
+local function join_all(tasks: {async.Task<|integer, value|>})
+  for index = 1, #tasks do async.join(tasks[index]) end
+end
+
+-- `count` Tasks each sleep `ms`: the drive waits with nothing to run.
+local function wait_tasks(...: Value): Value
+  local count = integer_of(...[1])
+  local ms = integer_of(...[2])
+  local tasks: {async.Task<|integer, value|>} = {}
+  for index = 1, count do
+    tasks[index] = async.run<|integer, value|>(function (): integer
+      timer.sleep(ms)
+      return index
+    end)
+  end
+  join_all(tasks)
+  return Value.is_nil()
+end
+
+-- `count` Tasks yield continuously until a peer's `ms` sleep ends.
+local function yield_tasks(...: Value): Value
+  local count = integer_of(...[1])
+  local ms = integer_of(...[2])
+  local turns = Turns()
+  local done = false
+  local tasks: {async.Task<|integer, value|>} = {}
+  for index = 1, count do
+    tasks[index] = async.run<|integer, value|>(function (): integer
+      local last = -1
+      while not done do
+        last = turns:record(last)
+        timer.yield()
+      end
+      return index
+    end)
+  end
+  timer.sleep(ms)
+  done = true
+  join_all(tasks)
+  turns:report("yield")
+  return Value.is_nil()
+end
+
+-- Waits for the harness's held request, which settles when the harness
+-- releases every held request at once.
+local function await_held()
+  local source = browser.binding("held")
+  defer source:close()
+  local request: browser.BrowserRequest? = nil
+  defer do
+    local open? = request
+    if open ~= nil then open:close() end
+  end
+  local result = async.await<|integer, string|>(function (resolve: function (integer): (),
+      reject: function (string): (), _fatal: function (value, string): ())
+    request = source:start(function (...: Value): Value
+      resolve(0)
+      return Value.is_nil()
+    end, function (...: Value): Value
+      reject("held request failed")
+      return Value.is_nil()
+    end)
+  end)
+  case result
+  when error(message) then raise message
+  end
+end
+
+-- `count` Tasks wait on held requests that all settle in one macrotask, then
+-- each yields `yields` times. The settlements resume their Tasks inside one
+-- delivery, so only the repeats, not the per-macrotask count, are bounded.
+local function settle_all(...: Value): Value
+  local count = integer_of(...[1])
+  local yields = integer_of(...[2])
+  local turns = Turns()
+  local tasks: {async.Task<|integer, value|>} = {}
+  for index = 1, count do
+    tasks[index] = async.run<|integer, value|>(function (): integer
+      await_held()
+      local last = turns:record(-1)
+      for _ = 1, yields do
+        timer.yield()
+        last = turns:record(last)
+      end
+      return index
+    end)
+  end
+  join_all(tasks)
+  turns:report("settle")
+  return Value.is_nil()
+end
+
+-- Busy-waits `ms` without yielding: the page must see no timer ticks meanwhile.
+local function busy(...: Value): Value
+  local ms = integer_of(...[1])
+  call_binding("mark", Value.is_string("busyStart"))
+  local start = now()
+  while now() - start < ms do end
+  call_binding("mark", Value.is_string("busyEnd"))
+  return Value.is_nil()
+end
+
+function main(_args: {string}): integer
+  return 0
+end
+
+do
+  local publish = browser.binding("publish")
+  defer publish:close()
+  publish:call(Value.is_string("wait_tasks"), Value.is_callable(wait_tasks))
+  publish:call(Value.is_string("yield_tasks"), Value.is_callable(yield_tasks))
+  publish:call(Value.is_string("settle_all"), Value.is_callable(settle_all))
+  publish:call(Value.is_string("busy"), Value.is_callable(busy))
+end

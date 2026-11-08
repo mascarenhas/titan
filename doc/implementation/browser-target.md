@@ -3583,8 +3583,9 @@ hosts`).
   independent-state C helper and the failed-initializer image, driven by
   `integration.mjs` through lifecycle, typed values, callbacks, notifications,
   requests, stdio, state close, and WeakRef collection, plus the
-  unhandled-rejection (74) and poisoned-retirement (70) diagnostics, and the
-  html5 click counter of synchronous C callbacks on Chromium
+  unhandled-rejection (74) and poisoned-retirement (70) diagnostics, and, on
+  Chromium, the html5 click counter of synchronous C callbacks and the async
+  driver's responsiveness page test (`responsive.mjs`, titan#334)
   ([browser bridge runtime](browser-bridge.md#test-layers)).
 * `spec/coder/browser_deployment_spec.lua` with
   `spec/fixtures/browser_bridge/deployment.mjs` — a real program loaded over
