@@ -397,16 +397,18 @@ effect, and the extension adds no target setting.
 ## Make inventories and audits
 
 The standard library's native-only modules keep their canonical mains as
-target variants: the flat `titan/{timer,io,fs,net,ssl,os}.native.titan`
+target variants: the flat `titan/{io,fs,net,ssl,os}.native.titan`
 and the folder mains `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`.
-These twelve families have no default and no `browser` member, so for
+These eleven families have no default and no `browser` member, so for
 `browser` the resolver selects no main: the module is absent (an import
 reports `module 'titan.<name>' not found`), and the folder's contributors are
 neither composed nor resolvable as flat modules. Native selection, logical
 names, and canonical output stems (such as `titan/uv/uv.titan.h`) are
 unchanged; only the physical main is a variant. The other thirteen standard
 modules have no variants and form the shared part of the [browser standard
-library](browser-target.md#the-browser-standard-library). `titan.async` has
+library](browser-target.md#the-browser-standard-library). `titan.timer`'s
+flat family has a `native` and a `browser` member (`titan/timer.native.titan`,
+`titan/timer.browser.titan`) and no default. `titan.async` has
 the shared main `titan/async/async.titan`; its contributor families have
 `native` and `browser` members (`runtime`, `external`) or only `native` ones
 (`receiver`, `foreign`), so each target composes its own members and the
@@ -419,7 +421,8 @@ family has only a `browser` member, so native targets select no main for
   lists under `STDLIB_TITAN_SOURCES`) name every source of a native module
   explicitly. A variant follows its default when the family has one; a
   variant-only family lists just its variants, as each native-only main does,
-  and `ASYNC_TITAN_SOURCES` lists both members of each `async` family, so the
+  `STDLIB_TITAN_SOURCES` lists both `timer` variants, and `ASYNC_TITAN_SOURCES`
+  lists both members of each `async` family, so the
   list-versus-disk audit sees every folder file. There are no wildcards. The
   lists are audit inventories, not Make prerequisites: `titanc --incremental`
   certifies the module graph. The browser provider instead names logical

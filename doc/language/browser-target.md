@@ -1126,10 +1126,10 @@ bare `raise`.
 
 ## The browser standard library
 
-The browser SDK's `titan.a` holds fifteen standard modules that need no libuv
+The browser SDK's `titan.a` holds sixteen standard modules that need no libuv
 or other native-only library: thirteen shared modules compiled from the same
-sources as the native standard library, `async` with a browser driver, and the
-browser-only `titan.browser`:
+sources as the native standard library, `async` with a browser driver, `timer`
+on the SDK's JavaScript timers, and the browser-only `titan.browser`:
 
 | Module | Contents |
 | --- | --- |
@@ -1147,6 +1147,7 @@ browser-only `titan.browser`:
 | [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
 | [`test`](standard-library-test.md) | the test API and the native test runner |
 | [`async`](async-io.md#the-browser-target) | Tasks, cancellation, waits, channels, combinators, and subscriptions, driven between browser macrotasks |
+| [`timer`](standard-library-timer.md#on-the-browser) | Task delays, yields, and coalescing tickers on JavaScript timers |
 | [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
 
 Each of the thirteen shared modules is complete. Every public declaration, including the raw
@@ -1171,6 +1172,10 @@ of `run_with_cleanup` can only be `nil`. Its Tasks run only in the
 instance's owner state, under a drive that gives the page one macrotask
 between turns ([async on the browser target](async-io.md#the-browser-target)).
 
+`timer` keeps its complete interface. Its sleeps and tickers run on
+JavaScript timers, with the browser's clamping and throttling; `sleep(0)` is
+a yield that arms no timer ([timer on the browser](standard-library-timer.md#on-the-browser)).
+
 `titan.browser` is the reviewed target-only exception. It has no native
 placeholder and imports only the portable core. Its byte/scalar ABI is not the
 native transfer packet format, and schema copies are a separate feature. It
@@ -1181,7 +1186,7 @@ that the `async` driver uses but schedules nothing itself. See
 ### Modules that are not available
 
 The other standard modules are absent from the browser target: `uv`,
-`timer`, `io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
+`io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
 `sqlite3`, and `thread`. Each of them uses libuv, directly or through its
 imports. Their sources exist only as native variants (such as
 `titan/os.native.titan`; see [target source
@@ -1198,7 +1203,7 @@ There are no stand-in modules for them, and their folder contributors, such as
 of them cannot be built into a browser test image either; keep such cases in
 native-only test modules.
 
-Browser versions of `timer`, `io`, `os`, `lua`, and `http` are
+Browser versions of `io`, `os`, `lua`, and `http` are
 planned, and `fs` is planned together with a browser file system. Until then,
 a program writes its output through C's `stdio.h`, as in [the first web
 page](#a-first-web-page), and the test runner reports through it too. Either
@@ -1455,8 +1460,8 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 ## Current limits
 
-* The browser standard library has [fifteen of the standard
-  modules](#the-browser-standard-library). Timers, files, networking,
+* The browser standard library has [sixteen of the standard
+  modules](#the-browser-standard-library). Files, networking,
   `io`, `os`, `lua`, `thread`, and `sqlite3` are not available, so programs
   write output through C's `stdio.h`, as in [the first web
   page](#a-first-web-page).

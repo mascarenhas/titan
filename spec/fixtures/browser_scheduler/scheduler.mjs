@@ -9,9 +9,48 @@ function join(chunks) {
   return bytes;
 }
 
+// Pending JavaScript timers armed through the global setTimeout and
+// setInterval, with their delays; the SDK's titan:timeout and titan:interval
+// sources arm theirs there.
+const liveTimers = new Map();
+
+function watchTimers() {
+  const saved = {setTimeout, clearTimeout, setInterval, clearInterval};
+  // Browsers require the global object as the receiver.
+  const call = (name, ...args) => saved[name].apply(globalThis, args);
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    const id = call('setTimeout', (...values) => { liveTimers.delete(id); callback(...values); }, delay, ...args);
+    liveTimers.set(id, delay);
+    return id;
+  };
+  globalThis.clearTimeout = id => { liveTimers.delete(id); call('clearTimeout', id); };
+  globalThis.setInterval = (callback, delay, ...args) => {
+    const id = call('setInterval', callback, delay, ...args);
+    liveTimers.set(id, delay);
+    return id;
+  };
+  globalThis.clearInterval = id => { liveTimers.delete(id); call('clearInterval', id); };
+  return () => { Object.assign(globalThis, saved); liveTimers.clear(); };
+}
+
+function countTimers(delay) {
+  let count = 0;
+  for (const armed of liveTimers.values()) if (armed === delay) count++;
+  return count;
+}
+
+// One macrotask on the driver's turn source: setImmediate where the host has
+// it (Node), otherwise a MessageChannel message.
+function nextTurn(callback) {
+  if (typeof setImmediate === 'function') { setImmediate(callback); return; }
+  const channel = new MessageChannel();
+  channel.port1.onmessage = () => { channel.port1.close(); callback(); };
+  channel.port2.postMessage(null);
+}
+
 function makeHost(context, image) {
   const host = {callables: new Map(), notes: [], stdout: [], stderr: [], notificationErrors: [],
-    ticks: 0, disposing: undefined, cancels: [], settled: []};
+    ticks: 0, disposing: undefined, cancels: [], settled: [], marked: false};
   // Host work that records its cancellation and its settlement, which comes
   // after `ms` milliseconds even when cancelled.
   const work = (kind, name, ms) => ({kind,
@@ -49,6 +88,9 @@ function makeHost(context, image) {
       }};
     },
     dispose_now() { host.disposing = observe(host.instance.dispose()); },
+    host_timers(delay) { return BigInt(countTimers(Number(delay))); },
+    arm_marker() { host.marked = false; nextTurn(() => { host.marked = true; }); },
+    marked() { return host.marked; },
   };
   host.instance = image.create({locateFile: image.locateFile, bindings: host.bindings,
     stdout(bytes) { host.stdout.push(bytes.slice()); },
@@ -72,7 +114,8 @@ function makeHost(context, image) {
 
 function notes(host) { return host.notes.join('|'); }
 
-// The Titan cases: scheduler gate items 1-5, 7, 8 and ownership.
+// The Titan cases: scheduler gate items 1-5, 7, 8, ownership, and the timer
+// cases.
 async function gate(context, image) {
   const host = makeHost(context, image);
   try {
@@ -80,7 +123,7 @@ async function gate(context, image) {
     const out = decode(join(host.stdout)), err = decode(join(host.stderr));
     context.assert(result.kind === 'returned' && result.status === 0, `scheduler gate failed:\n${out}${err}`);
     const passed = out.match(/\[  PASSED  \] (\d+) tests?\./);
-    context.assert(passed && Number(passed[1]) === 8, `the gate did not pass its eight cases:\n${out}`);
+    context.assert(passed && Number(passed[1]) === 11, `the gate did not pass its eleven cases:\n${out}`);
     context.assert(err.includes('uncaught error in async Task: ordinary Task failure'),
       `an ordinary Task failure was not reported on stderr:\n${err}`);
     context.assert(host.notificationErrors.length === 0, 'a gate case reported a notification error');
@@ -136,7 +179,8 @@ async function disposal(context, image) {
     await disposing;
     summary.parkedMs = Date.now() - started;
     context.assert(notes(host) === 'park parked|park cleanup instance disposed|' +
-      'park new work: browser state is closing|park cleanup got 200', `park notes: ${notes(host)}`);
+      'park new work: browser state is closing|park sleep: cancelled|park cleanup got 200',
+      `park notes: ${notes(host)}`);
     context.assert(summary.parkedMs >= 150, `disposal did not wait for the cleanup's host request: ${summary.parkedMs} ms`);
   } finally { await host.close(); }
 
@@ -167,7 +211,8 @@ async function disposal(context, image) {
     await host.call('park_idle', 50n);
     await host.instance.dispose();
     context.assert(notes(host) === 'idle cleanup instance disposed|' +
-      'idle new work: browser state is closing|idle cleanup got 50', `shutdown notes: ${notes(host)}`);
+      'idle new work: browser state is closing|idle sleep: cancelled|idle cleanup got 50',
+      `shutdown notes: ${notes(host)}`);
   } finally { await host.close(); }
 
   // The retained request keeps dispose() pending until it settles; the
@@ -300,12 +345,15 @@ async function ownership(context, image) {
 export async function run(context) {
   context.assert(context.args.length === 1, 'pass the scheduler image');
   const image = await context.image(context.args[0]);
-  const report = {verdict: 'PASS'};
-  report.gate = await gate(context, image);
-  report.entries = await entries(context, image);
-  report.disposal = await disposal(context, image);
-  report.crowd = await crowd(context, image);
-  await exits(context, image);
-  await ownership(context, image);
-  context.stdout(encode('SCHEDULER ' + JSON.stringify(report) + '\n'));
+  const restoreTimers = watchTimers();
+  try {
+    const report = {verdict: 'PASS'};
+    report.gate = await gate(context, image);
+    report.entries = await entries(context, image);
+    report.disposal = await disposal(context, image);
+    report.crowd = await crowd(context, image);
+    await exits(context, image);
+    await ownership(context, image);
+    context.stdout(encode('SCHEDULER ' + JSON.stringify(report) + '\n'));
+  } finally { restoreTimers(); }
 }

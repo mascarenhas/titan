@@ -3048,7 +3048,7 @@ int main(void) {
                 "titan/async/external.native.titan", "titan/async/external.browser.titan",
                 "titan/async/foreign.native.titan", "titan/async/receiver.native.titan",
                 "titan/async/runtime.native.titan", "titan/async/runtime.browser.titan",
-                "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
+                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.native.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.native.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
@@ -4053,7 +4053,7 @@ esac
             end
             local sources = {
                 "titan/coroutine.titan",
-                "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
+                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.native.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.native.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",

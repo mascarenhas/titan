@@ -291,7 +291,7 @@ TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
 BROWSER_RUNTIME_SOURCES := $(TITAN_RUNTIME_SOURCES)
 BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
 	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser \
-	titan.async
+	titan.async titan.timer
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -402,7 +402,7 @@ STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer titan.thread
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
-	$(ASYNC_TITAN_SOURCES) titan/timer.native.titan titan/io.native.titan titan/fs.native.titan \
+	$(ASYNC_TITAN_SOURCES) titan/timer.native.titan titan/timer.browser.titan titan/io.native.titan titan/fs.native.titan \
 	titan/net.native.titan titan/ssl.native.titan titan/url.titan \
 	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.native.titan titan/path.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \

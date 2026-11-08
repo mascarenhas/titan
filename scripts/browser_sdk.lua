@@ -329,7 +329,7 @@ elseif action == "finalize" then
     local expected_modules = {
         "titan.async", "titan.browser", "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
         "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
-        "titan.test", "titan.transfer", "titan.url",
+        "titan.test", "titan.timer", "titan.transfer", "titan.url",
     }
     if #(scanned.key_order or {}) ~= #expected_modules then
         fail("browser provider titan.a has unexpected module count: " .. tostring(#(scanned.key_order or {})))
