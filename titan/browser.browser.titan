@@ -230,7 +230,11 @@ local function handle_finalize(candidate: value)
   self:close()
 end
 
-local function new_handle(slot: integer, generation: integer): BrowserHandle
+-- A Titan owner of a live handle slot. A transferred slot (a binding result,
+-- a thrown value, an invoke argument) is adopted; a borrowed one (a
+-- call_sync argument, whose slot C keeps) gets a unit of its own, so closing
+-- or collecting this owner never retires the caller's slot.
+local function new_handle(slot: integer, generation: integer, borrowed: boolean?): BrowserHandle
   if slot == 0 or generation == 0 then raise "browser handle identity is absent" end
   local state = current_state()
   local owner = BrowserHandle { state = state, slot = 0, generation = 0 }
@@ -241,7 +245,11 @@ local function new_handle(slot: integer, generation: integer): BrowserHandle
   end
   owner.slot = slot
   owner.generation = generation
-  ffi.titan_browser_host_adopt(state, owner.slot, owner.generation)
+  if borrowed == true then
+    ffi.titan_browser_host_retain(state, owner.slot, owner.generation)
+  else
+    ffi.titan_browser_host_adopt(state, owner.slot, owner.generation)
+  end
   return owner
 end
 
@@ -492,9 +500,12 @@ local function encode_value(item: BrowserValue, state: foreign uint32_t,
   end
 end
 
+-- `borrowed` marks a C caller's arguments (call_sync), whose handle slots
+-- the caller keeps.
 local function decode_value(raw: foreign const *titan_browser_value,
                             state: foreign uint32_t,
-                            from_response: boolean): BrowserValue
+                            from_response: boolean,
+                            borrowed: boolean?): BrowserValue
   local kind = raw.kind
   if kind == ffi.TITAN_BROWSER_NIL then
     return BrowserValue.is_nil()
@@ -527,7 +538,7 @@ local function decode_value(raw: foreign const *titan_browser_value,
     if raw.state ~= state or raw.slot == 0 or raw.generation == 0 then
       raise "browser handle belongs to another or retired state"
     end
-    return BrowserValue.is_handle(new_handle(raw.slot, raw.generation))
+    return BrowserValue.is_handle(new_handle(raw.slot, raw.generation, borrowed))
   elseif kind == ffi.TITAN_BROWSER_CALLABLE then
     if raw.state ~= state or raw.slot == 0 or raw.generation == 0 then
       raise "browser callable belongs to another or retired state"
@@ -1308,7 +1319,7 @@ local function call_sync_work(identity: foreign const *titan_browser_identity,
     if count > 0 and args == nil then raise "browser callback arguments have no storage" end
     local decoded: {BrowserValue} = {}
     for index = 0, count - 1 do
-      decoded[index + 1] = decode_value(args + index, state, false)
+      decoded[index + 1] = decode_value(args + index, state, false, true)
     end
     for index = 0, count - 1 do
       local item = args + index

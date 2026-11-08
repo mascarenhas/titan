@@ -249,6 +249,9 @@ int titan_browser_host_callable_closed(uint32_t state, uint32_t slot,
 void titan_browser_host_release(uint32_t state, uint32_t slot, uint32_t generation);
 /* Transfer a marshaling temporary to its fully constructed Titan owner. */
 void titan_browser_host_adopt(uint32_t state, uint32_t slot, uint32_t generation);
+/* One more unit of a live value slot, for a Titan owner of a borrowed slot (a
+ * call_sync HANDLE argument): its close releases only its own unit. */
+void titan_browser_host_retain(uint32_t state, uint32_t slot, uint32_t generation);
 /* Pure logical liveness: ordinary stale data returns false, never poisons.
  * No Lua, user callback or sink can run between final validation and copying. */
 int titan_browser_host_identity_live(uint32_t state, uint32_t slot,
@@ -299,9 +302,12 @@ int titan_browser_host_callback(uint32_t state, int32_t delta);
  * image (not JavaScript exports). call_sync runs a pinned callable on a
  * callback thread and returns the result status; it refuses with STATE
  * without entering Lua when the state is closed or closing, the instance is
- * disposing, exited or poisoned, or no callback thread can be prepared.
- * callback_enter/callback_leave bracket a hand-written trampoline that runs
- * on frame->L. Without titan.browser, call_sync and enter return STATE. */
+ * disposing, exited or poisoned, or no callback thread can be prepared. Its
+ * HANDLE arguments are borrowed: C keeps each slot it passes, and the
+ * callable receives its own reference, whose close or collection never
+ * retires C's slot. callback_enter/callback_leave bracket a hand-written
+ * trampoline that runs on frame->L. Without titan.browser, call_sync and
+ * enter return STATE. */
 int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t argc,
     const titan_browser_value *args, titan_browser_sync_result *result);
 int titan_browser_callback_enter(uint32_t state, titan_browser_callback_frame *frame);

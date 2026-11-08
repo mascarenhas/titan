@@ -502,8 +502,10 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
   come. An `async` Task waiting for something only a callback provides keeps
   its Runtime waiting while the pin is open.
 - `titan_browser_call_sync` runs the pinned function with `argc` arguments read
-  from `args` and decoded by runtime type, as for any call into Titan. It
-  stores the status it returns in `result->status`:
+  from `args` and decoded by runtime type, as for any call into Titan. HANDLE
+  arguments are borrowed: C keeps each slot it passes, and the function
+  receives its own `BrowserHandle`, whose `close()` or collection never
+  releases C's slot. It stores the status it returns in `result->status`:
   - `TITAN_BROWSER_OK`: `result->value` is the one result. A STRING or BYTES
     result has `malloc`'d bytes. A HANDLE result stays valid while its
     `BrowserHandle` is open, and a CALLABLE result while a `BrowserPin` or a

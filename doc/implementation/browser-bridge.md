@@ -320,7 +320,11 @@ learn about the callback only through `titan_no_switch`.
   preparation fails. `call_sync_work` looks the pin up by slot and
   generation (a stale identity raises `"browser callable is released"`),
   decodes the arguments with `decode_value`, checks handle and callable
-  arguments are live, and calls the function. `encode_sync_result` encodes
+  arguments are live, and calls the function. A HANDLE argument is borrowed
+  from C: its new `BrowserHandle` takes a unit of its own through
+  `titan_browser_host_retain` (the loader's `retainSlot`) instead of
+  adopting the slot, so closing or collecting it leaves C's unit in place.
+  `encode_sync_result` encodes
   the one result and copies STRING and BYTES bytes into `malloc`'d memory. A
   callable result's provisional JavaScript wrapper is rolled back at once,
   since no wrapper will hold it, so C's copy stays valid only while another
