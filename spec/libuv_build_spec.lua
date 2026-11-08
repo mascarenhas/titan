@@ -6375,6 +6375,8 @@ printf '%s\n' "${schedule[@]}"
                 "['unhandled.mjs', 74,",
                 "['unhandled-result.mjs', 74,",
                 "['poison-retirement.mjs', 70, 'poison-retirement-complete']",
+                "...(engine === 'node' ? [] : [['counter.mjs', 0, 'COUNTER {\"verdict\":\"PASS\"']])",
+                "script === 'counter.mjs' ? [`assertions-${assertions}/counter.mjs`]",
                 "!receipt.includes(marker)",
                 "process.env.TITAN_BUILD_PROFILE === 'production' && engines[0] === 'chromium'",
                 "engines.push('node')",

@@ -1254,9 +1254,12 @@ jobs:
                 ['integration.mjs', 0, '"verdict":"PASS"'],
                 ['unhandled.mjs', 74, 'bridge unhandled opaque promise'],
                 ['unhandled-result.mjs', 74, 'bridge unhandled reverse result'],
-                ['poison-retirement.mjs', 70, 'poison-retirement-complete']]) {
+                ['poison-retirement.mjs', 70, 'poison-retirement-complete'],
+                // The html5 click counter's synchronous C callbacks need a page's DOM.
+                ...(engine === 'node' ? [] : [['counter.mjs', 0, 'COUNTER {"verdict":"PASS"']])]) {
                 console.log(`BRIDGE-RUN engine=${engine} assertions=${assertions} script=${script}`);
-                const args = status === 0 ? images : images.slice(0, 1);
+                const args = script === 'counter.mjs' ? [`assertions-${assertions}/counter.mjs`]
+                  : status === 0 ? images : images.slice(0, 1);
                 const result = spawnSync(process.execPath,
                   [...runner, resolve(root, script), '--', ...args],
                   {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 320000});
