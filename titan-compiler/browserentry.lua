@@ -5,7 +5,7 @@ local M = {}
 
 M.error_helpers = [[
 /* Shared by native main, browser bootstrap/main and titan.browser's protected
- * formatter. Needs four available temporary slots and an indexed, rooted error.
+ * formatter. Needs two temporary API slots beyond the indexed, rooted error.
  * May raise; callers choose protection and stack cleanup for their context. */
 TValue titan_entry_error_message(lua_State *L, int idx) {
     int result;

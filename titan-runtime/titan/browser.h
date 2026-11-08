@@ -141,7 +141,7 @@ int titan_browser_invalid_entry(uint64_t operation_id, uint32_t operation,
     const char *message);
 
 /* The generated launcher owns this shared conversion, including native main.
- * Needs four available temporary slots and an indexed error rooted in this state.
+ * Needs two temporary API slots beyond an indexed error rooted in this state.
  * May allocate, invoke nonyieldable __tostring, or raise; protection and stack
  * cleanup depend on the caller. The returned string stays in its original slot
  * or a newly pushed slot, which must stay rooted until the result is retained. */
