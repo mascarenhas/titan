@@ -363,7 +363,7 @@ After step 7, `browser-stdlib` runs:
 9. **Strict gate.** With the same `TITAN_ROOT`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN`, and `TITAN_PROBE_CACHE_DISABLE` settings
    as the `browser-toolchain` gate, the prefix's installed `busted -c -o gtest
-   -v` runs the eleven real-toolchain files
+   -v` runs the twelve real-toolchain files
    `spec/coder/browser_providers_spec.lua`,
    `spec/coder/browser_incremental_spec.lua`,
    `spec/coder/browser_images_spec.lua`,
@@ -371,15 +371,17 @@ After step 7, `browser-stdlib` runs:
    `spec/coder/browser_stdlib_closure_spec.lua`,
    `spec/coder/browser_entry_gate_spec.lua`,
    `spec/coder/browser_bridge_spec.lua`,
+   `spec/coder/browser_scheduler_spec.lua`,
    `spec/coder/browser_stdlib_gate_spec.lua`,
    `spec/coder/browser_fixtures_spec.lua`, and `spec/minicoro_spec.lua` under
    LuaCov, with output copied to `$RUNNER_TEMP/browser-stdlib-gate.log`. A
    missing gate file fails with the same message before Busted starts. The
-   entry-gate and bridge specs build their own assertion-on and assertion-off
-   images, and the entry, bridge, stdlib gate, fixture, and minicoro specs run
-   both engines. The bridge uses its dedicated native Titan test owner with
-   explicit JavaScript bindings, rather than adding it to the ordinary core
-   aggregate.
+   entry-gate, bridge and scheduler specs build their own assertion-on and
+   assertion-off images, and the entry, bridge, scheduler, stdlib gate,
+   fixture, and minicoro specs run both engines. The bridge uses its dedicated
+   native Titan test owner with explicit JavaScript bindings, rather than
+   adding it to the ordinary core aggregate; the scheduler spec drives the
+   bridge's drive interface with a test-owned mini driver.
 10. **Browser SDK and stdlib compiler coverage.** The same report commands
     produce `luacov.codecov.out`, which uploads with `name: browser-stdlib`
     and otherwise the same options, so the real provider, image, SDK, and
