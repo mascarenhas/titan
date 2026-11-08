@@ -1225,6 +1225,15 @@ third
             end)
         end)
 
+        it("honors #pragma once with trailing tokens in recursive and repeated includes", function()
+            with_headers({
+                ["main.h"] = '#include "shared.h"\n#include "shared.h"\n',
+                ["shared.h"] = '#pragma once extra_tokens\n#include "shared.h"\nmarker\n',
+            }, function(root)
+                assert.equal("marker", output(root))
+            end)
+        end)
+
         it("terminates mutually-including #pragma once headers", function()
             with_headers({
                 ["main.h"] = '#pragma once\nfirst\n#include "second.h"\n',
@@ -1517,8 +1526,9 @@ describe("C preprocessor semantic digest adapters", function()
     it("invalidates keys computed under the old preprocessing semantics", function()
         local current = assert(cpp.new_context(fixture(nil, false)))
         local legacy_options = fixture(function(bytes)
-            -- Reconstruct the previous semantic payload at the digest boundary,
-            -- without pinning its canonical serialization or a generated key.
+            -- Strip the length-prefixed policy field to reconstruct the exact
+            -- pre-change payload. This fixture deliberately pins its framing
+            -- and policy spelling; update it with semantic-policy changes.
             local policy = "pragma-once=physical-file;include-depth=200"
             local field = #policy .. ":" .. policy .. "|"
             local start = assert(bytes:find(field, 1, true))
@@ -1542,6 +1552,26 @@ describe("C preprocessor semantic digest adapters", function()
                 assert.equal(kind == "-include" and "forced_marker" or "",
                     table.concat(ctx.output, " "):match("^%s*(.-)%s*$"))
             end
+        end)
+
+        it("refreshes once identity after byte-identical " .. kind .. " republishing", function()
+            local options = fixture(nil, true)
+            options.cppflags[1] = kind
+            local original = assert(cpp.new_context(options))
+            local stat = options.io.stat
+            function options.io:stat(path)
+                local attributes, err = stat(self, path)
+                if attributes then attributes.inode = 3 end
+                return attributes, err
+            end
+            options.io.lstat = options.io.stat
+            local ctx = assert(cpp.new_context(options))
+            assert.equal(original.preprocessor_configuration_key,
+                ctx.preprocessor_configuration_key)
+            local parsed, err = cpp.parse_contents("main.c", '#include <forced.h>\n', ctx)
+            assert(parsed, err)
+            assert.equal(kind == "-include" and "forced_marker" or "",
+                table.concat(ctx.output, " "):match("^%s*(.-)%s*$"))
         end)
     end
 
