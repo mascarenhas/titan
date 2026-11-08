@@ -141,9 +141,10 @@ int titan_browser_invalid_entry(uint64_t operation_id, uint32_t operation,
     const char *message);
 
 /* The generated launcher owns this shared conversion, including native main.
- * Requires four temporary slots and an indexed error rooted in this state.
- * May allocate, invoke nonyieldable __tostring, or raise. The returned string
- * stays in its original slot or in a newly pushed slot; caller restores top. */
+ * Needs four available temporary slots and an indexed error rooted in this state.
+ * May allocate, invoke nonyieldable __tostring, or raise; protection and stack
+ * cleanup depend on the caller. The returned string stays in its original slot
+ * or a newly pushed slot, which must stay rooted until the result is retained. */
 TValue titan_entry_error_message(lua_State *L, int index);
 
 /* JS imports. All host_* potentially throwing boundaries catch at the import

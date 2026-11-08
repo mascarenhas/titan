@@ -3446,11 +3446,13 @@ function codeforeignexp(ctx, node, target)
         -- happen from its actual type (not a premature lua_Integer/
         -- lua_Number cast).
         return codeforeignvar(ctx, node.var)
-    elseif tag == "Ast.ExpCast" and node.length then
-        return codeexp(ctx, node)
-    elseif tag == "Ast.ExpCast" and node.target._tag == "Type.String" then
-        local cstats, cexp = codeforeignexp(ctx, node.exp)
-        return cstats, foreigncast(cexp, node._type)
+    elseif tag == "Ast.ExpCast"
+           and (node.length or node.target._tag == "Type.String") then
+        -- Preserve the cast's copy/projection and NULL check before borrowing
+        -- its string bytes, including when a variadic sink has no target.
+        local cstats, cexp = codeexp(ctx, node)
+        local fstats, fexp = nativetoforeignexp(ctx, node, cexp, target)
+        return cstats .. fstats, fexp
     elseif tag == "Ast.ExpCast"
            and node._c_conversion
            and node._c_conversion.kind ==

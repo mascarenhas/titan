@@ -530,7 +530,8 @@ function check_explicit_cast_relation(node, st, errors)
     if node.length then checkexp(node.length, st, errors) end
     local source = node.exp._type
     local target = node.target
-    if source._tag == "Type.Invalid" or target._tag == "Type.Invalid" then
+    if source._tag == "Type.Invalid" or target._tag == "Type.Invalid"
+       or (node.length and node.length._type._tag == "Type.Invalid") then
         node._written_cast_failed = true
         node._written_cast = maybe3.none()
         return target

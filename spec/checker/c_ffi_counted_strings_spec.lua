@@ -101,6 +101,20 @@ describe("counted C pointer-to-string checking", function()
         ]])
         assert.falsy(ok)
         assert.truthy(err:find("missing_count", 1, true), err)
+        assert.falsy(err:find("counted string length", 1, true), err)
+    end)
+
+    it("does not cascade after an invalid native count type", function()
+        for _, operation in ipairs({ "as", "is" }) do
+            local ok, err = h.run_checker([[
+                local function copy(pointer: foreign *char, length: foreign MissingCount)
+                    local _ = pointer ]] .. operation .. [[ string(length)
+                end
+            ]])
+            assert.falsy(ok)
+            assert.truthy(err:find("MissingCount", 1, true), err)
+            assert.falsy(err:find("counted string length", 1, true), err)
+        end
     end)
 
     it("admits an otherwise valid counted module initializer", function()

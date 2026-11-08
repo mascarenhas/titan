@@ -557,7 +557,11 @@ The new `TString` is published into its scanned temporary before
 counted-string push, without a byte-copy stack transaction, and allows tight
 copy loops to service GC debt before their next Titan function entry. The
 result is then available to its ordinary destination. C-argument lowering
-must retain this operation too, rather than treating it as a raw C cast.
+retains this operation, then uses `nativetoforeignexp` to borrow `getstr`
+bytes rather than passing a `TString *`. Variadic arguments have no parameter
+target but require the same conversion, both for direct C calls and calls
+through C function pointers. An uncounted string cast likewise completes its
+normal copy, projection and NULL check before that byte borrow.
 
 The predicate uses the same native range predicate in boundary mode. A
 short-circuit expression tests the converted count against the Lua size bound

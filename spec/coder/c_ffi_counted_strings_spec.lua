@@ -273,6 +273,73 @@ describe("counted C pointer-to-string code generation", function()
         ]])
     end)
 
+    it("converts counted strings to bytes in direct C variadic arguments", function()
+        h.run_coder([[
+            foreign import "stdio.h"
+            function prefixes(): string
+                local pointer: foreign const *char = "abcdef"
+                local missing: foreign *char = nil
+                local output = foreign char.new_array(16)
+                ffi.snprintf(output, 16, "%s|%s|",
+                    pointer as string(3), missing as string(0))
+                return (output as foreign *char) as string
+            end
+        ]], [[
+            assert(test.prefixes() == "abc||")
+        ]])
+    end)
+
+    it("converts counted strings to bytes in variadic C function-pointer calls", function()
+        h.run_coder([[
+            foreign import "spec/fixtures/c_ffi_counted_strings.h"
+            function prefix(): string
+                local pointer: foreign const *void = "abcdef"
+                local output = foreign char.new_array(16)
+                local write = ffi.titan_test_counted_snprintf
+                write(output, 16, "%s|", pointer as string(4))
+                return (output as foreign *char) as string
+            end
+        ]], [[
+            assert(test.prefix() == "abcd|")
+        ]])
+    end)
+
+    it("keeps uncounted string conversions and NULL checks in C variadic arguments", function()
+        h.run_coder([[
+            foreign import "stdio.h"
+            function pointer_text(): string
+                local pointer: foreign const *char = "abcdef"
+                local output = foreign char.new_array(16)
+                ffi.snprintf(output, 16, "%s", pointer as string)
+                return (output as foreign *char) as string
+            end
+            function dynamic_text(candidate: value): string
+                local output = foreign char.new_array(16)
+                ffi.snprintf(output, 16, "%s", candidate as string)
+                return (output as foreign *char) as string
+            end
+            function owner_text(): string
+                local bytes: owned char[] = foreign char.new_array(3)
+                bytes[0] = 65
+                bytes[1] = 66
+                bytes[2] = 67
+                local output = foreign char.new_array(16)
+                ffi.snprintf(output, 16, "%s", bytes as string)
+                return (output as foreign *char) as string
+            end
+            function null_text()
+                local pointer: foreign *char = nil
+                local output = foreign char.new_array(16)
+                ffi.snprintf(output, 16, "%s", pointer as string)
+            end
+        ]], [[
+            assert(test.pointer_text() == "abcdef")
+            assert(test.dynamic_text("boxed") == "boxed")
+            assert(test.owner_text() == "ABC")
+            assert(not pcall(test.null_text))
+        ]])
+    end)
+
     it("keeps the result alive after native source disposal and collection", function()
         h.run_coder([[
             foreign import "stdlib.h"

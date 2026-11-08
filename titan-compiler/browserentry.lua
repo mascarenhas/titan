@@ -5,8 +5,8 @@ local M = {}
 
 M.error_helpers = [[
 /* Shared by native main, browser bootstrap/main and titan.browser's protected
- * formatter. The caller reserves four temporary slots and owns protection and
- * stack cleanup; the selected string remains rooted in its indexed slot. */
+ * formatter. Needs four available temporary slots and an indexed, rooted error.
+ * May raise; callers choose protection and stack cleanup for their context. */
 TValue titan_entry_error_message(lua_State *L, int idx) {
     int result;
     idx = lua_absindex(L, idx);
