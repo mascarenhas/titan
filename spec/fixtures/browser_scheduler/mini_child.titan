@@ -1,0 +1,33 @@
+-- Loaded by mini_driver.c in a C-created child state: never the instance owner.
+local browser = import "browser"
+
+local type Value = browser.BrowserValue
+
+local function publish(name: string, callback: function (...: Value): Value)
+  local target = browser.binding("publish")
+  defer target:close()
+  target:call(Value.is_string(name), Value.is_callable(callback))
+end
+
+local function child_echo(...: Value): Value
+  return ...[1]
+end
+
+-- Reports ownership and the drive interface's refusal in this state.
+local function child_probe(...: Value): Value
+  local refusal = "drive began"
+  do
+    browser.drive_begin()
+  catch
+    if error is string then refusal = error as string end
+  end
+  local role = "child"
+  if browser.is_owner() then role = "owner" end
+  browser.wake()
+  return Value.is_string(role .. ": " .. refusal)
+end
+
+function publication()
+  publish("child_echo", child_echo)
+  publish("child_probe", child_probe)
+end
