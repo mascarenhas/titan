@@ -344,7 +344,8 @@ learn about the callback only through `titan_no_switch`.
   `callbackDepth > 0`, and as the constant 0 natively. The flag is per
   instance because the engine stack that cannot suspend is the instance's
   one stack, whichever Lua state the callback entered. `coroutine` and
-  `async` consult it to refuse or defer switches ([coroutines](coroutines.md)).
+  `async` consult it to refuse or defer switches
+  ([coroutines](coroutines.md#synchronous-callbacks)).
 - **Switches that escape the check.** In the bridge library, `transfer`,
   the suspending path of `destroy` and `relinquish` refuse a switch when no
   promising entry holds the owner or a callback runs (`switchRefused`): they

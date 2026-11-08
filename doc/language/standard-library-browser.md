@@ -530,7 +530,8 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
 - A callback cannot suspend. Inside it, `coroutine.resume`, `coroutine.yield`
   and the other explicit switches raise, `coroutine.running()` is `nil`, every
   `async` operation behaves as outside a Task, and resumptions it causes wait
-  for the drive ([coroutines](coroutines.md), [async](async-io.md)).
+  for the drive ([coroutines](coroutines.md#in-a-synchronous-callback),
+  [async](async-io.md#synchronous-callbacks)).
 - JavaScript that a callback reaches follows the loader's
   [entry rules](browser-target.md#synchronous-c-callbacks). A binding that the
   callback's Titan code calls cannot start another entry: `call()`,

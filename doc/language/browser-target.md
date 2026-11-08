@@ -522,7 +522,8 @@ library's source, from the SDK directory or the browser Titan path described
 the same Emscripten settings. Emscripten's C APIs (`emscripten.h`,
 `emscripten/html5.h`, and the rest) and `EM_JS` or `EM_ASM` blocks belong in
 such helpers, behind a small header with ordinary C types that Titan imports.
-Titan's C importer does not handle `emscripten/html5.h` (#NNN). An API that
+Titan's C importer does not handle `emscripten/html5.h`
+([#380](https://github.com/mascarenhas/titan/issues/380)). An API that
 calls back into C runs the callback synchronously; to run Titan code there,
 pin a handler and call `titan_browser_call_sync`
 ([synchronous C callbacks](standard-library-browser.md#synchronous-c-callbacks)).
