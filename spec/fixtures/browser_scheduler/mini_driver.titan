@@ -46,7 +46,7 @@ local function publish(name: string, callback: Callable)
 end
 
 local function error_text(failure: value): string
-  if failure is string then return failure as string end
+  if failure is string then return failure end
   return "non-string error"
 end
 
@@ -83,12 +83,12 @@ local function ignore(...: Value): Value
   return Value.is_nil()
 end
 
-local function settle(job: Job, kind: string, first: Value, second: Value)
-  if job.done then return end
-  job.done = true
-  job.waiting = false
-  local request? = job.request
-  job.request = nil
+local function Job:finish(kind: string, first: Value, second: Value)
+  if self.done then return end
+  self.done = true
+  self.waiting = false
+  local request? = self.request
+  self.request = nil
   if request ~= nil then
     request:cancel()
     request:close()
@@ -96,19 +96,20 @@ local function settle(job: Job, kind: string, first: Value, second: Value)
   local remaining: {Job} = {}
   for index = 1, #open do
     local item = open[index]
-    if item ~= job then remaining[#remaining + 1] = item end
+    if item ~= self then remaining[#remaining + 1] = item end
   end
   open = remaining
-  local handle? = job.settle
-  job.settle = nil
+  local handle? = self.settle
+  self.settle = nil
   if handle ~= nil then
     defer handle:close()
     handle:call(Value.is_string(kind), first, second)
   end
 end
 
-local function new_job(target: Callable, args: {Value}, handle: browser.BrowserHandle?): Job
-  local job = Job {
+-- A new job is open and runs at the drive's next turn.
+local function Job.new(target: Callable, args: {Value}, handle: browser.BrowserHandle?): Job
+  local job: Job = {
     target = target, args = args, settle = handle, request = nil,
     waiting = false, again = false, done = false, cleanup = false,
     cancelling = nil, turns = 0,
@@ -118,22 +119,22 @@ local function new_job(target: Callable, args: {Value}, handle: browser.BrowserH
   return job
 end
 
-local function job_completion(job: Job): Callable
+local function Job:completion_handler(): Callable
   return function(...: Value): Value
-    local request? = job.request
-    job.request = nil
+    local request? = self.request
+    self.request = nil
     if request ~= nil then request:close() end
-    if job.cancelling ~= nil then
+    if self.cancelling ~= nil then
       binding_call("cleanup_note", Value.is_string("cleanup settled"))
-      settle(job, "cancelled", Value.is_string(job.cancelling), Value.is_nil())
+      self:finish("cancelled", Value.is_string(self.cancelling), Value.is_nil())
     else
-      settle(job, "succeeded", Value.is_string("woke"), Value.is_nil())
+      self:finish("succeeded", Value.is_string("woke"), Value.is_nil())
     end
     return Value.is_nil()
   end
 end
 
-local function job_failure(job: Job): Callable
+local function Job:failure_handler(): Callable
   return function(...: Value): Value
     local message = "host request failed"
     case ...[1]
@@ -142,7 +143,7 @@ local function job_failure(job: Job): Callable
     case ...[2]
     when is_handle(thrown) then thrown:close()
     end
-    settle(job, "failed", Value.is_bytes(message), Value.is_bytes(""))
+    self:finish("failed", Value.is_bytes(message), Value.is_bytes(""))
     return Value.is_nil()
   end
 end
@@ -164,39 +165,39 @@ catch
   return error_text(error)
 end
 
-local function cancel_job(job: Job, reason: string)
-  if job.done or job.cancelling ~= nil then return end
-  if job.cleanup then
-    job.cancelling = reason
+local function Job:cancel(reason: string)
+  if self.done or self.cancelling ~= nil then return end
+  if self.cleanup then
+    self.cancelling = reason
     binding_call("cleanup_note", Value.is_string("new work: " .. try_new_work()))
     return
   end
-  settle(job, "cancelled", Value.is_string(reason), Value.is_nil())
+  self:finish("cancelled", Value.is_string(reason), Value.is_nil())
 end
 
 local function cancel_all(reason: string)
   local snapshot = open
-  for index = 1, #snapshot do cancel_job(snapshot[index], reason) end
+  for index = 1, #snapshot do snapshot[index]:cancel(reason) end
 end
 
 local function fail_waiting(message: string)
   local snapshot = open
   for index = 1, #snapshot do
     local job = snapshot[index]
-    if job.waiting then settle(job, "failed", Value.is_bytes(message), Value.is_bytes("")) end
+    if job.waiting then job:finish("failed", Value.is_bytes(message), Value.is_bytes("")) end
   end
 end
 
-local function step(job: Job)
-  if job.done or job.waiting then return end
-  current = job
-  job.again = false
+local function Job:step()
+  if self.done or self.waiting then return end
+  current = self
+  self.again = false
   local result = Value.is_nil()
   local failed = false
   local message = ""
   local trace = ""
   do
-    result = job.target(...job.args)
+    result = self.target(...self.args)
   catch
     failed = true
     message = error_text(error)
@@ -204,11 +205,11 @@ local function step(job: Job)
   end
   current = nil
   if failed then
-    settle(job, "failed", Value.is_bytes(message), Value.is_bytes(trace))
-  elseif job.again then
-    ready[#ready + 1] = job
-  elseif not job.waiting then
-    settle(job, "succeeded", result, Value.is_nil())
+    self:finish("failed", Value.is_bytes(message), Value.is_bytes(trace))
+  elseif self.again then
+    ready[#ready + 1] = self
+  elseif not self.waiting then
+    self:finish("succeeded", result, Value.is_nil())
   end
 end
 
@@ -223,7 +224,7 @@ local function drive()
     browser.deliver()
     local batch = ready
     ready = {}
-    for index = 1, #batch do step(batch[index]) end
+    for index = 1, #batch do batch[index]:step() end
     if exit_code ~= nil then cancel_all("exit") end
     if #open == 0 then return end
     local status = browser.relinquish(#ready == 0)
@@ -239,10 +240,10 @@ end
 
 -- Waits on host work from inside the running job's target.
 local function wait_on(binding: string, ...: Value)
-  local job: Job = current
+  local job = current
   local source = browser.binding(binding)
   defer source:close()
-  job.request = source:start(job_completion(job), job_failure(job), ...)
+  job.request = source:start(job:completion_handler(), job:failure_handler(), ...)
   job.waiting = true
 end
 
@@ -270,28 +271,28 @@ end
 -- A job whose cancellation waits for its own pre-existing request.
 local function guarded(...: Value): Value
   wait_on("slow", Value.is_float(expect_number(...[1])))
-  local job: Job = current
+  local job = current
   job.cleanup = true
   return Value.is_nil()
 end
 
 -- A job waiting with no wake source; cancellation keeps it waiting.
 local function stubborn(...: Value): Value
-  local job: Job = current
+  local job = current
   job.waiting = true
   job.cleanup = true
   return Value.is_nil()
 end
 
 local function orphan(...: Value): Value
-  local job: Job = current
+  local job = current
   job.waiting = true
   return Value.is_nil()
 end
 
 -- Runs turn after turn until a JavaScript macrotask set the flag.
 local function spin(...: Value): Value
-  local job: Job = current
+  local job = current
   job.turns = job.turns + 1
   case binding_call("flag")
   when is_boolean(seen) then
@@ -304,7 +305,7 @@ end
 
 -- Writes a line per turn until the stdout sink has received output.
 local function chatter(...: Value): Value
-  local job: Job = current
+  local job = current
   job.turns = job.turns + 1
   ffi.fputs("chatter\n", ffi.stdout)
   case binding_call("sink_count")
@@ -371,15 +372,15 @@ end
 
 -- Counts titan:interval ticks, then settles; settle cancels the listener.
 local function ticks(...: Value): Value
-  local job: Job = current
+  local job = current
   local wanted = expect_integer(...[1])
   local interval = browser.binding("titan:interval")
   defer interval:close()
   job.request = interval:listen(function(...: Value): Value
     job.turns = job.turns + 1
-    if job.turns >= wanted then settle(job, "succeeded", Value.is_integer(job.turns), Value.is_nil()) end
+    if job.turns >= wanted then job:finish("succeeded", Value.is_integer(job.turns), Value.is_nil()) end
     return Value.is_nil()
-  end, job_failure(job), Value.is_float(5.0))
+  end, job:failure_handler(), Value.is_float(5.0))
   job.waiting = true
   return Value.is_nil()
 end
@@ -389,10 +390,10 @@ local function spawn(...: Value): Value
   local handle = expect_handle(...[2])
   local args: {Value} = {}
   for index = 3, #... do args[#args + 1] = ...[index] end
-  local job = new_job(target, args, handle)
+  local job = Job(target, args, handle)
   handle:call(Value.is_string("started"), Value.is_callable(function(...: Value): Value
     case ...[1]
-    when is_string(reason) then cancel_job(job, reason)
+    when is_string(reason) then job:cancel(reason)
     end
     return Value.is_nil()
   end))
@@ -416,7 +417,7 @@ end
 local function drive_job(...: Value): Value
   local args: {Value} = {}
   for index = 2, #... do args[#args + 1] = ...[index] end
-  new_job(expect_callable(...[1]), args, nil)
+  Job(expect_callable(...[1]), args, nil)
   drive()
   return Value.is_string("drove")
 end
@@ -426,7 +427,7 @@ local function owner_probe(...: Value): Value
   do
     browser.relinquish(false)
   catch
-    if error is string then refusal = error as string end
+    if error is string then refusal = error end
   end
   local role = "child"
   if browser.is_owner() then role = "owner" end
@@ -453,10 +454,10 @@ end
 -- Starts a job already waiting on host work, without driving: only a later
 -- drive (or disposal's shutdown drive) can deliver its settlement.
 local function park_idle(...: Value): Value
-  local job = new_job(ignore, {}, nil)
+  local job = Job(ignore, {}, nil)
   local source = browser.binding("slow")
   defer source:close()
-  job.request = source:start(job_completion(job), job_failure(job),
+  job.request = source:start(job:completion_handler(), job:failure_handler(),
                              Value.is_float(expect_number(...[1])))
   job.waiting = true
   job.cleanup = true
@@ -466,11 +467,11 @@ end
 function main(args: {string}): integer
   local mode = args[1] or "return"
   if mode == "exit" then
-    new_job(exit_with, {Value.is_integer(259)}, nil)
+    Job(exit_with, {Value.is_integer(259)}, nil)
     drive()
     return 0
   elseif mode == "exit-fail" then
-    new_job(exit_with, {Value.is_integer(4)}, nil)
+    Job(exit_with, {Value.is_integer(4)}, nil)
     drive()
     raise "main failed after its drive exited"
   end

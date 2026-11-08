@@ -22,7 +22,7 @@ local function child_probe(...: Value): Value
   do
     browser.drive_begin()
   catch
-    if error is string then refusal = error as string end
+    if error is string then refusal = error end
   end
   local role = "child"
   if browser.is_owner() then role = "owner" end
