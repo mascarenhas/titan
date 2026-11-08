@@ -320,12 +320,19 @@ learn about the callback only through `titan_no_switch`.
   preparation fails. `call_sync_work` looks the pin up by slot and
   generation (a stale identity raises `"browser callable is released"`),
   decodes the arguments with `decode_value`, checks handle and callable
-  arguments are live, and calls the function. `encode_sync_result` encodes
+  arguments are live, and calls the function. A HANDLE argument is borrowed
+  from C: its new `BrowserHandle` takes a unit of its own through
+  `titan_browser_host_retain` (the loader's `retainSlot`) instead of
+  adopting the slot, so closing or collecting it leaves C's unit in place.
+  `encode_sync_result` encodes
   the one result and copies STRING and BYTES bytes into `malloc`'d memory. A
   callable result's provisional JavaScript wrapper is rolled back at once,
   since no wrapper will hold it, so C's copy stays valid only while another
   holder pins the function. A raise fills `TITAN_BROWSER_TITAN_ERROR` with
-  `malloc`'d copies of the message and raw traceback.
+  `malloc`'d copies of the message and raw traceback. A copy that cannot be
+  allocated, of the result, the message, the trace or `sync_refuse`'s
+  refusal message, reports `TITAN_BROWSER_MEMORY` instead, with the other
+  copies freed and no value.
 - **Bracket.** `callback_enter(state, frame)` runs the same admission and
   thread selection for a standard library's hand-written trampoline and
   returns the thread in `frame->L`; `callback_leave(frame)` restores the depth
@@ -337,7 +344,8 @@ learn about the callback only through `titan_no_switch`.
   `callbackDepth > 0`, and as the constant 0 natively. The flag is per
   instance because the engine stack that cannot suspend is the instance's
   one stack, whichever Lua state the callback entered. `coroutine` and
-  `async` consult it to refuse or defer switches ([coroutines](coroutines.md)).
+  `async` consult it to refuse or defer switches
+  ([coroutines](coroutines.md#synchronous-callbacks)).
 - **Switches that escape the check.** In the bridge library, `transfer`,
   the suspending path of `destroy` and `relinquish` refuse a switch when no
   promising entry holds the owner or a callback runs (`switchRefused`): they
@@ -533,7 +541,9 @@ from a coroutine. Its synchronous-callback cases call `call_sync` and the
 bracket from inside an entry: arguments and results, Titan errors as a status,
 every refusal, callback threads reused per nesting depth (no main thread, so
 no drive), `titan_no_switch` set only inside a callback, pins held until
-closed or collected, and callable results that follow their holders.
+closed or collected, callable results that follow their holders, and
+`TITAN_BROWSER_MEMORY` for each C-heap copy that fails (the test image's C
+fixture wraps `malloc` to fail one call).
 Initializer failure has a separate real Titan image with a
 suspended cleanup coroutine and `main` error-conversion checks.
 

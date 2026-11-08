@@ -57,6 +57,11 @@ addToLibrary({
   titan_browser_host_adopt: (state, slot, generation) =>
     TitanBridge.trusted('adoptSlot', state >>> 0, slot >>> 0, generation >>> 0),
 
+  titan_browser_host_retain__deps: ['$TitanBridge'],
+  titan_browser_host_retain__sig: 'viii',
+  titan_browser_host_retain: (state, slot, generation) =>
+    TitanBridge.trusted('retainSlot', state >>> 0, slot >>> 0, generation >>> 0),
+
   titan_browser_host_identity_live__deps: ['$TitanBridge'],
   titan_browser_host_identity_live__sig: 'iiiii',
   titan_browser_host_identity_live: (state, slot, generation, kind) => {

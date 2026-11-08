@@ -502,8 +502,10 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
   come. An `async` Task waiting for something only a callback provides keeps
   its Runtime waiting while the pin is open.
 - `titan_browser_call_sync` runs the pinned function with `argc` arguments read
-  from `args` and decoded by runtime type, as for any call into Titan. It
-  stores the status it returns in `result->status`:
+  from `args` and decoded by runtime type, as for any call into Titan. HANDLE
+  arguments are borrowed: C keeps each slot it passes, and the function
+  receives its own `BrowserHandle`, whose `close()` or collection never
+  releases C's slot. It stores the status it returns in `result->status`:
   - `TITAN_BROWSER_OK`: `result->value` is the one result. A STRING or BYTES
     result has `malloc`'d bytes. A HANDLE result stays valid while its
     `BrowserHandle` is open, and a CALLABLE result while a `BrowserPin` or a
@@ -515,7 +517,9 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
   - `TITAN_BROWSER_STATE`: refused without running Titan, with a `message`. The
     pin's state is closed or closing, the instance is disposing, exited or
     poisoned, or callbacks nest too deeply.
-  - `TITAN_BROWSER_MEMORY`: no message.
+  - `TITAN_BROWSER_MEMORY`: the callback could not start, or a C-heap copy of
+    its result, message or trace, or of a refusal's message, could not be
+    allocated. It carries no message, trace or value.
 
   After any status, the caller frees `message`, `trace` and a STRING or BYTES
   result's bytes with `free`.
@@ -526,7 +530,8 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
 - A callback cannot suspend. Inside it, `coroutine.resume`, `coroutine.yield`
   and the other explicit switches raise, `coroutine.running()` is `nil`, every
   `async` operation behaves as outside a Task, and resumptions it causes wait
-  for the drive ([coroutines](coroutines.md), [async](async-io.md)).
+  for the drive ([coroutines](coroutines.md#in-a-synchronous-callback),
+  [async](async-io.md#synchronous-callbacks)).
 - JavaScript that a callback reaches follows the loader's
   [entry rules](browser-target.md#synchronous-c-callbacks). A binding that the
   callback's Titan code calls cannot start another entry: `call()`,
@@ -581,7 +586,10 @@ int counter_unlisten(const char *selector) {
 ```
 
 The Titan module keeps each listener's pin and identity until `stop`
-unregisters it, and shows the count through the page's `show` binding:
+unregisters it, and shows the count through the page's `show` binding. A
+listener is rooted in `listeners` before C receives its identity, so nothing
+can fail after the registration and leave C a dangling pointer, and a failure
+after a registration unregisters what was registered:
 
 ```titan
 local browser = import "browser"
@@ -624,11 +632,13 @@ local function listen(selector: string, handler: function (...: Value): Value)
   identity.state = state
   identity.slot = slot
   identity.generation = generation
+  local index = #listeners + 1
+  listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
   if ffi.counter_listen(selector, identity) ~= 0 then
+    listeners[index] = nil
     pin:close()
     raise "cannot listen for clicks on " .. selector
   end
-  listeners[#listeners + 1] = Listener { selector = selector, pin = pin, identity = identity }
 end
 
 local function stop(...: Value): Value
@@ -642,18 +652,24 @@ local function stop(...: Value): Value
 end
 
 function main(args: {string}): integer
-  listen("#increment", increment)
-  listen("#reset", reset)
-  show()
-  local ready = browser.binding("ready")
-  defer ready:close()
-  ready:call(Value.is_callable(stop))
+  do
+    listen("#increment", increment)
+    listen("#reset", reset)
+    show()
+    local ready = browser.binding("ready")
+    defer ready:close()
+    ready:call(Value.is_callable(stop))
+  catch
+    stop()
+    raise
+  end
   return 0
 end
 ```
 
 The page supplies `show` and `ready`. Each click runs its handler before
-`click()` returns, so the label is already updated:
+`click()` returns, so the label is already updated. The page calls `stop`
+before disposal, which frees what the callbacks reach:
 
 ```javascript
 import create from './counter.mjs';
@@ -668,8 +684,8 @@ try {
   await instance.run([]);
   document.querySelector('#increment').click();
   console.log(label.textContent); // "1"
-  await instance.call(stop);
 } finally {
+  if (stop) await instance.call(stop);
   await instance.dispose();
 }
 ```

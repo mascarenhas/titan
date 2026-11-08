@@ -230,7 +230,11 @@ local function handle_finalize(candidate: value)
   self:close()
 end
 
-local function new_handle(slot: integer, generation: integer): BrowserHandle
+-- A Titan owner of a live handle slot. A transferred slot (a binding result,
+-- a thrown value, an invoke argument) is adopted; a borrowed one (a
+-- call_sync argument, whose slot C keeps) gets a unit of its own, so closing
+-- or collecting this owner never retires the caller's slot.
+local function new_handle(slot: integer, generation: integer, borrowed: boolean?): BrowserHandle
   if slot == 0 or generation == 0 then raise "browser handle identity is absent" end
   local state = current_state()
   local owner = BrowserHandle { state = state, slot = 0, generation = 0 }
@@ -241,7 +245,11 @@ local function new_handle(slot: integer, generation: integer): BrowserHandle
   end
   owner.slot = slot
   owner.generation = generation
-  ffi.titan_browser_host_adopt(state, owner.slot, owner.generation)
+  if borrowed == true then
+    ffi.titan_browser_host_retain(state, owner.slot, owner.generation)
+  else
+    ffi.titan_browser_host_adopt(state, owner.slot, owner.generation)
+  end
   return owner
 end
 
@@ -492,9 +500,12 @@ local function encode_value(item: BrowserValue, state: foreign uint32_t,
   end
 end
 
+-- `borrowed` marks a C caller's arguments (call_sync), whose handle slots
+-- the caller keeps.
 local function decode_value(raw: foreign const *titan_browser_value,
                             state: foreign uint32_t,
-                            from_response: boolean): BrowserValue
+                            from_response: boolean,
+                            borrowed: boolean?): BrowserValue
   local kind = raw.kind
   if kind == ffi.TITAN_BROWSER_NIL then
     return BrowserValue.is_nil()
@@ -527,7 +538,7 @@ local function decode_value(raw: foreign const *titan_browser_value,
     if raw.state ~= state or raw.slot == 0 or raw.generation == 0 then
       raise "browser handle belongs to another or retired state"
     end
-    return BrowserValue.is_handle(new_handle(raw.slot, raw.generation))
+    return BrowserValue.is_handle(new_handle(raw.slot, raw.generation, borrowed))
   elseif kind == ffi.TITAN_BROWSER_CALLABLE then
     if raw.state ~= state or raw.slot == 0 or raw.generation == 0 then
       raise "browser callable belongs to another or retired state"
@@ -1193,7 +1204,7 @@ function pin(callback: Callable): BrowserPin
   local owner = BrowserPin { state = state, slot = 0, generation = 0 }
   gc.finalizable<|value|>(owner, pin_finalize)
   local existing? = pins_by_fn[callback]
-  local entry: Pin = existing or allocate_pin(callback)
+  local entry = existing or allocate_pin(callback)
   entry.holds = entry.holds + 1
   owner.slot = entry.slot
   owner.generation = entry.generation
@@ -1243,15 +1254,16 @@ end
 local function malloc_copy(text: string): foreign *unsigned char
   if #text == 0 then return nil end
   local buffer = ffi.malloc(#text) as foreign *unsigned char
-  if buffer ~= nil then ffi.memcpy(buffer, text as foreign const *unsigned char, #text) end
+  if buffer ~= nil then ffi.memcpy(buffer, text, #text) end
   return buffer
 end
 
 -- The callable's one result for the C caller; STRING and BYTES get a
--- malloc-owned copy of their bytes.
+-- malloc-owned copy of their bytes. Returns false, writing nothing, when that
+-- copy cannot be allocated.
 local function encode_sync_result(item: BrowserValue, state: foreign uint32_t,
                                   result: foreign *titan_browser_sync_result,
-                                  provisioned: {ProvisionalPin})
+                                  provisioned: {ProvisionalPin}): boolean
   local encoded = foreign titan_browser_value.new()
   encode_value(item, state, encoded, provisioned, nil)
   if (encoded.kind == ffi.TITAN_BROWSER_HANDLE or
@@ -1264,7 +1276,7 @@ local function encode_sync_result(item: BrowserValue, state: foreign uint32_t,
   if (encoded.kind == ffi.TITAN_BROWSER_STRING or encoded.kind == ffi.TITAN_BROWSER_BYTES) and
      length > 0 then
     local bytes = ffi.malloc(length) as foreign *unsigned char
-    if bytes == nil then raise "not enough memory for a browser callback result" end
+    if bytes == nil then return false end
     ffi.memcpy(bytes, encoded.bytes, length)
     result.value.bytes = bytes
     result.value.length = encoded.length
@@ -1274,6 +1286,21 @@ local function encode_sync_result(item: BrowserValue, state: foreign uint32_t,
   result.value.scalar.integer = encoded.scalar.integer
   result.value.slot = encoded.slot
   result.value.generation = encoded.generation
+  return true
+end
+
+-- Frees and clears a result value that an earlier step wrote.
+local function clear_sync_value(result: foreign *titan_browser_sync_result)
+  if result.value.kind == ffi.TITAN_BROWSER_STRING or result.value.kind == ffi.TITAN_BROWSER_BYTES then
+    ffi.free(ffi.lmacro_unconst(result.value.bytes))
+  end
+  result.value.kind = ffi.TITAN_BROWSER_NIL as foreign uint32_t
+  result.value.bytes = nil
+  result.value.length = 0
+  result.value.state = 0
+  result.value.slot = 0
+  result.value.generation = 0
+  result.value.scalar.integer = 0
 end
 
 local function call_sync_work(identity: foreign const *titan_browser_identity,
@@ -1291,7 +1318,7 @@ local function call_sync_work(identity: foreign const *titan_browser_identity,
     if count > 0 and args == nil then raise "browser callback arguments have no storage" end
     local decoded: {BrowserValue} = {}
     for index = 0, count - 1 do
-      decoded[index + 1] = decode_value(args + index, state, false)
+      decoded[index + 1] = decode_value(args + index, state, false, true)
     end
     for index = 0, count - 1 do
       local item = args + index
@@ -1303,20 +1330,34 @@ local function call_sync_work(identity: foreign const *titan_browser_identity,
       end
     end
     local value = pin.callback(...decoded)
-    encode_sync_result(value, state, result, provisioned)
+    local copied = encode_sync_result(value, state, result, provisioned)
     -- No JavaScript wrapper will hold a returned callable: C's copy stays
     -- valid only while a BrowserPin or a live wrapper holds the function.
     rollback_provisioned(state, provisioned)
-    result.status = ffi.TITAN_BROWSER_OK as foreign uint32_t
+    if copied then
+      result.status = ffi.TITAN_BROWSER_OK as foreign uint32_t
+    else
+      result.status = ffi.TITAN_BROWSER_MEMORY as foreign uint32_t
+    end
   catch
     local trace = traceback
     rollback_provisioned(state, provisioned)
+    clear_sync_value(result)
+    -- Both copies or MEMORY: never an error with its data missing.
     local message = error_message(error)
-    result.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
-    result.message = malloc_copy(message)
-    if result.message ~= nil then result.message_length = #message end
-    result.trace = malloc_copy(trace)
-    if result.trace ~= nil then result.trace_length = #trace end
+    local message_copy = malloc_copy(message)
+    local trace_copy: foreign *unsigned char = nil
+    if #message == 0 or message_copy ~= nil then trace_copy = malloc_copy(trace) end
+    if (#message > 0 and message_copy == nil) or (#trace > 0 and trace_copy == nil) then
+      ffi.free(message_copy)
+      result.status = ffi.TITAN_BROWSER_MEMORY as foreign uint32_t
+    else
+      result.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
+      result.message = message_copy
+      if message_copy ~= nil then result.message_length = #message end
+      result.trace = trace_copy
+      if trace_copy ~= nil then result.trace_length = #trace end
+    end
   end
 end
 
@@ -1369,16 +1410,19 @@ local foreign function callback_finish(state: *titan_browser_state_record, token
   ffi.titan_browser_host_callback(token, -1)
 end
 
--- Refuses a synchronous call without entering Lua, with a malloc-owned message.
+-- Refuses a synchronous call without entering Lua, with a malloc-owned
+-- message, or MEMORY when that copy cannot be allocated.
 local foreign function sync_refuse(result: *titan_browser_sync_result, message: const *char): int
-  result.status = ffi.TITAN_BROWSER_STATE as foreign uint32_t
   local length = ffi.strlen(message)
   local copy = ffi.malloc(length) as foreign *unsigned char
-  if copy ~= nil then
-    ffi.memcpy(copy, message, length)
-    result.message = copy
-    result.message_length = length as foreign uint32_t
+  if copy == nil then
+    result.status = ffi.TITAN_BROWSER_MEMORY as foreign uint32_t
+    return ffi.TITAN_BROWSER_MEMORY as foreign int
   end
+  ffi.memcpy(copy, message, length)
+  result.status = ffi.TITAN_BROWSER_STATE as foreign uint32_t
+  result.message = copy
+  result.message_length = length as foreign uint32_t
   return ffi.TITAN_BROWSER_STATE as foreign int
 end
 

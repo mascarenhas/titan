@@ -1754,6 +1754,14 @@ class BrowserOwner {
     entry.temporary = false;
   }
 
+  // titan_browser_host_retain: a Titan owner of a borrowed slot (a call_sync
+  // HANDLE argument) holds a unit of its own, so its release leaves the
+  // caller's unit in place.
+  retainSlot(state, slot, generation) {
+    const entry = this.getSlot(state, slot, generation, 'value');
+    entry.units++;
+  }
+
   binding(pointer, length, state) {
     const name = new TextDecoder('utf-8', {fatal: true}).decode(this.bytesAt(pointer, length));
     // Reserved `titan:` names resolve only to SDK sources, never to user bindings.
