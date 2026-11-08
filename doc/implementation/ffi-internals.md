@@ -998,8 +998,11 @@ proofs, so macro-heavy headers do not rebuild the same constants hundreds of
 times, larger powers remain exact without being retained, and profile-table
 mutation cannot bypass validation.
 C pointers/arrays/aggregates remain C values; C `char *` / `void *` to
-`string` is implemented by an explicit cast arm with a NULL guard and
-`luaS_new` copy.
+`string` without a count is implemented by an explicit cast arm with a NULL
+guard and `luaS_new` copy. The counted `pointer as string(length)` form uses
+the checked, length-aware path described in
+[counted pointer-to-string conversion](c-ffi-expressions.md#counted-pointer-to-string-conversion),
+without a Lua-stack byte-copy transaction.
 
 A written cast from a counted character owner takes a separate length-aware
 path. The coder materializes the `Udata *` in a scanned slot, then calls

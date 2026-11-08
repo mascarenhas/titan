@@ -413,6 +413,11 @@ async function values(context, host, completions) {
     [5n, 'converted after inner catch'],
     [6n, '(error object is a userdata value)'],
     [7n, 'error while reporting browser failure'],
+    [8n, '2.0'],
+    [9n, '-0.0'],
+    [10n, '42'],
+    [11n, '2.5'],
+    [12n, '(error object is a table value)'],
   ]) {
     const raisedError = await captureRejection(context, host.call('raise_error_kind', mode), 'TITAN');
     context.equalBytes(raisedError.bytes, encode(expectedMessage),
@@ -1554,6 +1559,10 @@ async function initializationFailure(context, image) {
     ['record', 1, '(error object is a userdata value)', 'initializer_raise_record'],
     ['false', 1, '(error object is a boolean value)', 'initializer_raise_record'],
     ['browser-error', 1, '(error object is a userdata value)', 'initializer_raise_record'],
+    ['float', 1, '2.0', 'initializer_raise_record'],
+    ['negative-zero', 1, '-0.0', 'initializer_raise_record'],
+    ['integer', 1, '42', 'initializer_raise_record'],
+    ['fractional', 1, '2.5', 'initializer_raise_record'],
   ]) {
     const stderr = [];
     const instance = image.create({locateFile: image.locateFile,

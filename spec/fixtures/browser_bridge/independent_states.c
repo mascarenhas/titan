@@ -241,6 +241,10 @@ static int error_tostring_oom(lua_State *L) {
   lua_pushfstring(L, "uninterned error formatting allocation %p %d", (void *)L, 12345);
   return 1;
 }
+static int error_tostring_number(lua_State *L) {
+  lua_pushinteger(L, 42);
+  return 1;
+}
 TValue titan_bridge_test_make_error_object(lua_State *L, int mode) {
   TValue result;
   int top = lua_gettop(L);
@@ -250,6 +254,7 @@ TValue titan_bridge_test_make_error_object(lua_State *L, int mode) {
   if (mode == 1) lua_pushcfunction(L, error_tostring_ok);
   else if (mode == 2) lua_pushcfunction(L, error_tostring_throw);
   else if (mode == 3) lua_pushcfunction(L, error_tostring_catch_then_ok);
+  else if (mode == 5) lua_pushcfunction(L, error_tostring_number);
   else lua_pushcfunction(L, error_tostring_oom);
   lua_setfield(L, -2, "__tostring");
   lua_setmetatable(L, -2);

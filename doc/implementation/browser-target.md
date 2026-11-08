@@ -30,7 +30,7 @@ The implementation is spread over:
   reader, validates the standard v3 `.wasm.map`, and rewrites it with Titan's
   `x_titan_*` trace extensions;
 * `titan-compiler/browserentry.lua`, the generated browser launcher (`initialize`,
-  `entry`, `close`, shared `errmsg_tostring` error conversion) and weak C
+  `entry`, `close`, shared `titan_entry_error_message` conversion) and weak C
   forwards to `titan.browser`'s foreign functions;
 * `titan-compiler/driver.lua`, which owns `installed_paths(root, target)`,
   context initialization and activation, the semantic-cache generation, the
@@ -2087,7 +2087,7 @@ maximum startup-memory guarantees.
 `browserentry.contents(worker, options)` renders the persistent browser
 launcher (`titan_browser_initialize`, `titan_browser_entry`,
 `titan_browser_close`, `titan_browser_protected_entry`, and the shared
-`errmsg_tostring` error-conversion helpers) and the one-line weak forwards
+`titan_entry_error_message` error-conversion helpers) and the one-line weak forwards
 (`titan_browser_invoke`, `titan_browser_release_callable`) to `titan.browser`'s
 public foreign functions. `driver.browser_c_image_contents` is the same
 boundary for protocol and test-owned C images. Options supply declarations, a

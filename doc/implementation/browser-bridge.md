@@ -41,8 +41,8 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    with plain `errorhandler` as the `lua_pcall` message handler. On failure,
    `titan_browser_complete_failure` snapshots `TITAN_BACKTRACE_KEY` on the
    stack, converts the final escaped error object once under `lua_pcall` using
-   the `errmsg_tostring` and `strip_bootstrap_prefix` implementation shared
-   with native `main`, restores the `TITAN_BACKTRACE_KEY` snapshot, writes
+   `titan_entry_error_message` and `strip_bootstrap_prefix`, shared with native
+   `main`, restores the `TITAN_BACKTRACE_KEY` snapshot, writes
    `<progname>: <message>` and `stack traceback:` to `stderr`, and flushes the
    completion. Caught raises inside module initializers are never converted,
    and stale traces never leak into `main`. The owner state keeps
@@ -85,10 +85,15 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    `state_record.fallback` via inline FFI
    struct writes, flushes `stdout`/`stderr`, and calls `titan_browser_complete`.
    That outer handler does not roll back wrappers or call Titan helpers, grow
-   the stack, or allocate Lua objects. Non-string error objects raised by
-   callables are formatted in Titan (`format_error_value` under `catch`) using
-   the same `__tostring` / `(error object is a <type> value)` rule as the
-   launcher while preserving `invoke_work`'s inner `catch`'s `traceback` local.
+   the stack, or allocate Lua objects. `error_message` formats non-string
+   callable errors under its existing Titan `catch`, using the launcher's
+   `titan_entry_error_message(L, index)` through the FFI. It reserves four
+   temporary slots, pushes the error for that indexed conversion, copies the
+   returned string into a traced local, and restores the saved top in `defer`.
+   The shared converter handles strings/numbers, a string-valued `__tostring`,
+   or `(error object is a <type> value)`; a numeric metamethod result is not a
+   string. The original `traceback` local stays authoritative even if conversion
+   runs user code or fails. No second protected C boundary is introduced.
 
 | Export | Operation kind | Role |
 | --- | --- | --- |

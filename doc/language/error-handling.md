@@ -175,6 +175,12 @@ frame lines through the Titan `main` frame, and exits non-zero. The
 synthetic Lua bootstrap used to call `main` is not shown. A successful
 `main` returns its integer result as the process exit status.
 
+The message is the raised string's bytes or Lua's formatting of a raised
+number. Integral floats retain their `.0` suffix, including `-0.0`. Other
+values use a string-valued `__tostring` result when available, or
+`(error object is a <type> value)` otherwise; a non-string metamethod result
+does not become message text.
+
 ## `titan.backtrace()`
 
 The Lua support module `titan` exposes the last uncaught or re-propagated

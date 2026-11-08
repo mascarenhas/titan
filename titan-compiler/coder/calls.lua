@@ -21,6 +21,7 @@ function expression_contains_call(node)
         or tag == "Ast.ExpUnop"
         or tag == "Ast.ExpAdjust" then
         return expression_contains_call(node.exp)
+            or (node.length and expression_contains_call(node.length))
     elseif tag == "Ast.ExpBinop" then
         return expression_contains_call(node.lhs)
             or expression_contains_call(node.rhs)

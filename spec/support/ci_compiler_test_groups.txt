@@ -31,6 +31,7 @@
 # real-toolchain closure fixtures pend outside the emsdk gate.
 # Issue 332 bridge and deployment rows use the same unmeasured 1.000 planning
 # weight; their real-toolchain cases pend outside the browser CI gates.
+# Counted-string conversion rows use an unmeasured 1.000 planning weight.
 compiler spec/abi_spec.lua 0.201 2.926
 retained spec/asan_generated_c_context_spec.lua 0.587 -
 compiler spec/binary_compatibility_spec.lua 0.017 0.107
@@ -43,6 +44,7 @@ compiler spec/cdeclarator_spec.lua 0.017 0.058
 compiler spec/cdefines_spec.lua 0.050 0.054
 compiler spec/cdriver_spec.lua 9.809 171.200
 compiler spec/checker/binary_compatibility_spec.lua 0.479 5.583
+compiler spec/checker/c_ffi_counted_strings_spec.lua 1.000 -
 compiler spec/checker/c_ffi_declaration_compatibility_spec.lua 8.160 76.898
 compiler spec/checker/c_ffi_operators_spec.lua 3.461 26.345
 compiler spec/checker/c_ffi_owned_types_spec.lua 4.482 38.600
@@ -110,6 +112,7 @@ compiler spec/coder/browser_toolchain_spec.lua 1.000 -
 compiler spec/coder/browser_trace_entries_spec.lua 1.000 -
 compiler spec/coder/build_scheduler_spec.lua 1.000 -
 compiler spec/coder/c_ffi_allocation_constructors_spec.lua 5.677 9.360
+compiler spec/coder/c_ffi_counted_strings_spec.lua 1.000 -
 compiler spec/coder/c_ffi_operators_spec.lua 3.534 12.153
 compiler spec/coder/c_ffi_owned_types_spec.lua 18.328 104.633
 compiler spec/coder/c_ffi_pointer_conversions_spec.lua 2.325 10.443

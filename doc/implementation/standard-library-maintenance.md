@@ -115,7 +115,7 @@ with compiled examples.
    launcher `protected_entry`, a C `states` linked list, and
    `titan_browser_root_callable` (validating the closure, copying its signature
    into a new userdata, and rooting it in C). Right: `titan-browser.c` is
-   gone; `browserentry.lua` generates the launcher (sharing `errmsg_tostring`
+   gone; `browserentry.lua` generates the launcher (sharing `titan_entry_error_message`
    with native `main`) and one-line weak forwards (`titan_browser_invoke`,
    `titan_browser_release_callable`) to public `foreign function`s in
    `titan/browser.browser.titan`. Its state record is Titan-owned module

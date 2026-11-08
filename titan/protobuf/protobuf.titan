@@ -357,15 +357,7 @@ local function slice_to_string(
     offset: integer,
     length: integer): string
   if length <= 0 then return "" end
-  local top = ffi.lua_gettop(L)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "protobuf: cannot reserve Lua stack" end
-  ffi.lua_pushlstring(
-      L,
-      ffi.titan_protobuf_offset_ptr(base, offset as foreign size_t),
-      length as foreign size_t)
-  local result: value = ffi.lua_totvalue(L, -1)
-  ffi.lua_settop(L, top)
-  return result as string
+  return ffi.titan_protobuf_offset_ptr(base, offset) as string(length)
 end
 
 local function buffer_to_string(buf: foreign *titan_protobuf_buffer): string
@@ -475,14 +467,6 @@ local function decode_generated(codec: foreign const *TitanTransferCodec,
   return ffi.lua_totvalue(L, -1) as value
 end
 
-local function c_text(text: foreign const *char): string
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "protobuf: cannot reserve Lua stack" end
-  ffi.lua_pushstring(L, text)
-  return ffi.lua_totvalue(L, -1) as value
-end
-
 -- The hydrated descriptor of one declared field or variant part.
 local function handoff_descriptor(owner: string, variant: integer,
     index: integer): reflect.Type
@@ -523,7 +507,7 @@ local function codec_handoff(request_value: value, item: value, context: value,
   -- Implementation notes: doc/implementation/protobuf-library.md#generated-nominal-codecs
   local request = request_value as foreign *TitanCodecHandoff
   local op: integer = request.op
-  local owner = c_text(request.owner)
+  local owner = request.owner as string
   local number: integer = request.number
   local depth: integer = request.depth
   local variant: integer = request.variant

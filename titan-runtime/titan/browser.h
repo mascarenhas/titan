@@ -140,6 +140,13 @@ int titan_browser_close(uint64_t operation_id);
 int titan_browser_invalid_entry(uint64_t operation_id, uint32_t operation,
     const char *message);
 
+/* The generated launcher owns this shared conversion, including native main.
+ * Needs two temporary API slots beyond an indexed error rooted in this state.
+ * May allocate, invoke nonyieldable __tostring, or raise; protection and stack
+ * cleanup depend on the caller. The returned string stays in its original slot
+ * or a newly pushed slot, which must stay rooted until the result is retained. */
+TValue titan_entry_error_message(lua_State *L, int index);
+
 /* JS imports. All host_* potentially throwing boundaries catch at the import
  * and fill response; C/Titan raises only after their normal return. Trusted
  * state/metadata/release imports are nonthrowing and never enter Lua or sinks.

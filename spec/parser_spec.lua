@@ -3561,6 +3561,52 @@ end]])
         end
     end)
 
+    it("parses counted string casts and their predicate at cast precedence", function()
+        for _, spelling in ipairs({ "as", "is" }) do
+            local tag = spelling == "as" and "Ast.ExpCast" or "Ast.ExpIs"
+            assert_expression_ast("pointer " .. spelling .. " string(length)", {
+                _tag = tag, target = { _tag = "Ast.TypeString" },
+                length = { _tag = "Ast.ExpVar",
+                    var = { _tag = "Ast.VarName", name = "length" } },
+            })
+            assert_expression_ast("pointer " .. spelling .. " Bytes(next_length() + 1)", {
+                _tag = tag, target = { _tag = "Ast.TypeName", name = "Bytes" },
+                length = { _tag = "Ast.ExpBinop", op = "+" },
+            })
+        end
+        assert_expression_ast("pointer as string(length) .. suffix", {
+            _tag = "Ast.ExpConcat", exps = {
+                { _tag = "Ast.ExpCast", length = { _tag = "Ast.ExpVar" } },
+            },
+        })
+        assert_expression_syntax_error("pointer as string()", "ExpSimpleExp")
+        assert_expression_syntax_error("pointer as string(1, 2)", "RParSimpleExp")
+        assert_expression_syntax_error("pointer is string(1", "RParSimpleExp")
+    end)
+
+    it("continues a counted cast across a newline unless a semicolon ends it", function()
+        local tree = assert_parses_successfuly([[
+            function copy(pointer: foreign *char, length: integer)
+                local bytes = pointer as string
+                (length)
+            end
+        ]])
+        local stats = tree[1].block.stats
+        assert.equal(1, #stats)
+        assert.equal("length", stats[1].exps[1].length.var.name)
+
+        tree = assert_parses_successfuly([[
+            function copy(pointer: foreign *char)
+                local bytes = pointer as string;
+                (consume)(bytes)
+            end
+        ]])
+        stats = tree[1].block.stats
+        assert.equal(2, #stats)
+        assert.is_nil(stats[1].exps[1].length)
+        assert.equal("Ast.ExpCall", stats[2].callexp._tag)
+    end)
+
     it('retains every assignment candidate and parenthesis boundary for the checker', function()
 
         local p=assert_parses_successfuly("function f() (x), f(), 1 = a,b,c end")

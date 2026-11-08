@@ -461,6 +461,16 @@ function test_export_callbacks(_: test.Context)
       fail_binding:call()
     elseif mode == 7 then
       raise ffi.titan_bridge_test_make_error_object(L, 4)
+    elseif mode == 8 then
+      raise 2.0
+    elseif mode == 9 then
+      raise -0.0
+    elseif mode == 10 then
+      raise 42
+    elseif mode == 11 then
+      raise 2.5
+    elseif mode == 12 then
+      raise ffi.titan_bridge_test_make_error_object(L, 5)
     end
     return Value.is_nil()
   end)

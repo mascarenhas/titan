@@ -2684,6 +2684,60 @@ function coder._code_maybe_array_cast(ctx, node)
     error("unexpected maybe_array_cast op " .. tostring(op))
 end
 
+-- The pointer is frozen before the count, including when validation fails.
+-- Both forms use the target's size_t conversion, never the compiler host's.
+function coder._code_counted_string(ctx, node, is_test)
+    local cast = coder._checked_written_cast_plan(
+        maybe3.get_checked(node._written_cast, "counted string cast"),
+        node.exp._type, node.target, "counted string conversion")
+    local conversion = assert(cast.conversion)
+    assert(cast.op == "explicit" and conversion.op == "counted_pointer_to_string"
+           and types.equals(conversion.length_type, node.length._type),
+        "counted string conversion lacks its length plan")
+    local pointer_stats, pointer = materialize(ctx, node.exp)
+    if is_test then
+        local length_stats, length = materialize(ctx, node.length)
+        local range_stats, range = coder._code_native_numeric_predicate(
+            ctx, conversion.length_type, conversion.size_type, length, "boundary")
+        local count = foreigncast(length, conversion.size_type)
+        return pointer_stats .. "\n" .. length_stats .. "\n" .. range_stats,
+            render("(($RANGE) && ($COUNT) < MAX_SIZE - sizeof(TString)"
+                .. " && (($COUNT) == 0 || $POINTER != NULL))", {
+                RANGE = range, COUNT = count, POINTER = pointer,
+            })
+    end
+    local length_stats, length = codeexp(ctx, node.length)
+    local count_stats, count = coder._code_checked_numeric_cast(
+        ctx, conversion.length_type, conversion.size_type, length, node.length.loc, "boundary")
+    local guards = render([[
+        if (TITAN_UNLIKELY($COUNT >= MAX_SIZE - sizeof(TString))) {
+            $LENGTH_ERROR
+        }
+        if (TITAN_UNLIKELY($COUNT != 0 && $POINTER == NULL)) {
+            $NULL_ERROR
+        }
+    ]], {
+        COUNT = count, POINTER = pointer,
+        LENGTH_ERROR = codethrow(node.loc, "%s", {
+            c_string_literal("foreign counted string length is too large"),
+        }),
+        NULL_ERROR = codethrow(node.loc, "%s", {
+            c_string_literal("foreign counted string pointer was NULL"),
+        }),
+    })
+    -- Even an empty C copy receives a valid address rather than a NULL buffer.
+    local bytes = render('($COUNT == 0 ? "" : (const char *)$POINTER)', {
+        COUNT = count, POINTER = pointer,
+    })
+    -- Publish before polling, as lua_pushlstring does, including in tight
+    -- byte-copy loops with no intervening Titan function entry.
+    local string_stats, result = makestring(ctx, bytes, nil, count)
+    return table.concat({
+        pointer_stats, length_stats, count_stats, guards, string_stats,
+        "luaC_checkGC(L);",
+    }, "\n"), result
+end
+
 -- Generate code for expression 'node'
 -- 'iscondition' is 'true' if expression is used not for value but for
 --    controlling conditinal execution
@@ -2778,6 +2832,8 @@ function codeexp_dispatch(ctx, node, iscondition, target)
         return code_spread_index(ctx, node)
     elseif tag == "Ast.ExpIs" then
         return coder._codeis(ctx, node)
+    elseif tag == "Ast.ExpCast" and node.length then
+        return coder._code_counted_string(ctx, node, false)
     elseif tag == "Ast.ExpCast" and node._interface_conversion then
         return coder._code_interface_conversion(ctx, node)
     elseif tag == "Ast.ExpCast" and node._interface_downcast then
@@ -3390,9 +3446,13 @@ function codeforeignexp(ctx, node, target)
         -- happen from its actual type (not a premature lua_Integer/
         -- lua_Number cast).
         return codeforeignvar(ctx, node.var)
-    elseif tag == "Ast.ExpCast" and node.target._tag == "Type.String" then
-        local cstats, cexp = codeforeignexp(ctx, node.exp)
-        return cstats, foreigncast(cexp, node._type)
+    elseif tag == "Ast.ExpCast"
+           and (node.length or node.target._tag == "Type.String") then
+        -- Preserve the cast's copy/projection and NULL check before borrowing
+        -- its string bytes, including when a variadic sink has no target.
+        local cstats, cexp = codeexp(ctx, node)
+        local fstats, fexp = nativetoforeignexp(ctx, node, cexp, target)
+        return cstats .. fstats, fexp
     elseif tag == "Ast.ExpCast"
            and node._c_conversion
            and node._c_conversion.kind ==

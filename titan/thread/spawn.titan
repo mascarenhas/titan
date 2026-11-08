@@ -750,7 +750,7 @@ local function Thread:reconstruct_terminal_status(): ThreadStatus<|R|>
   local trace_str = ""
   if trace_ptr ~= nil then
     if trace_len > (0 as foreign size_t) then
-      trace_str = copy_native_bytes(trace_ptr, trace_len)
+      trace_str = trace_ptr as string(trace_len)
     end
   end
 

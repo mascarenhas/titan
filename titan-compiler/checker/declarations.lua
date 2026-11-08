@@ -772,7 +772,12 @@ function initializer_error(root, modname)
         elseif tag == "Ast.ExpCast" or tag == "Ast.ExpIs" or tag == "Ast.ExpAdjust"
                or tag == "Ast.ExpExtra" or tag == "Ast.ExpDotsIndex" then
             err, child_callable = visit(node.exp, call_exposed)
+            if err then return err end
             has_callable = has_callable or child_callable
+            if node.length then
+                err, child_callable = visit(node.length, call_exposed)
+                has_callable = has_callable or child_callable
+            end
 
         elseif tag == "Ast.ExpFunction" then
             if call_exposed then

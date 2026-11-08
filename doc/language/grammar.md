@@ -317,7 +317,7 @@ e7 ::= e8 {('<<' | '>>') e8}
 e8 ::= e9 {'..' e9}
 e9 ::= e10 {('+' | '-') e10}
 e10 ::= e11 {('*' | '/' | '//' | '%') e11}
-e11 ::= e12 [(as | is) type]
+e11 ::= e12 [(as | is) type ['(' exp ')']]
 e12 ::= {unop} e13
 e13 ::= prefixexp {'^' {unop} prefixexp}
 unop ::= not | '#' | '-' | '~'
@@ -344,6 +344,23 @@ fieldlist ::= field {fieldsep field} [fieldsep]
 field ::= AnyName '=' exp | '[' exp ']' '=' exp | exp
 fieldsep ::= ',' | ';'
 ```
+
+The optional parenthesized operand after a cast or type test is a byte count
+for the [counted pointer-to-string conversion](ffi.md#counted-byte-copies).
+Semantic checking requires a character/`void` pointer, a target resolving to
+`string`, and an integer count; the parentheses are not a call of the cast's
+result. Like Lua suffix syntax, this form is not newline-sensitive:
+
+```text
+local bytes = pointer as string
+(length)                         -- continues the counted cast
+
+local text = pointer as string;
+(consume)(text)                  -- a separate call statement
+```
+
+Use a semicolon when a statement ending in an uncounted cast must be followed
+by a parenthesized-call statement.
 
 The foreign pseudo-expression selects an operation on its entire foreign type;
 the first dot ends that type. `foreign T.new(count)` is valid specifically for

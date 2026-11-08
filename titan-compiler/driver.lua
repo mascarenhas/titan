@@ -10276,14 +10276,15 @@ int main(int argc, char** argv) {
      * Lua-style presentation: "<progname>: <message>", "stack traceback:", and
      * the raw trace with a tab prepended to each frame line. */
     if (lua_pcall(L, 2, 1, -4) != 0) {
-        const char *report;
+        TValue message;
         if (lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY) == LUA_TSTRING) {
             const char *trace = lua_tostring(L, -1);
-            report_titan_error(errmsg_tostring(L, -2, NULL), trace);
+            message = titan_entry_error_message(L, -2);
+            report_titan_error(getstr(tsvalue(&message)), trace);
         }
         lua_pop(L, 1);                     /* nil/non-string trace slot */
-        report = errmsg_tostring(L, -1, NULL);
-        fatal(report);
+        message = titan_entry_error_message(L, -1);
+        fatal(getstr(tsvalue(&message)));
     }
     ret = lua_tointeger(L, -1);
     $COVERAGE_FINISH

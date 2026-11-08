@@ -939,7 +939,7 @@ function generic_finalize_contextual_value_callee(
         -- unreifiable raw-pointer tail) has already been diagnosed. Retain the
         -- contextual call shape without claiming that an assignment plan
         -- exists, so later checker passes can report each source error once.
-        cast = ast.ExpCast(original.loc, original, synthesized)
+        cast = ast.ExpCast(original.loc, original, synthesized, nil)
         cast._type = synthesized
         cast._implicit_coercion = true
         cast._adjustment_failed = true

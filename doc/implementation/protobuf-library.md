@@ -335,11 +335,12 @@ field's hooks and resource claims run first, as on the reflective path.
 
 Native string decoding publishes the new `TString` into the rooted record or
 union and applies its backward barrier before `luaC_checkGC`. The scalar
-string arm of `value` likewise pushes the result before polling. This matches
-the reflective decoder's `lua_pushlstring` allocation and poll order without an
-extra copy or transient root. Deferring the poll to the next entry would let a
-trimming allocator such as glibc's return its free tail before each large
-string allocation, repeatedly releasing and faulting the same pages.
+string arm of `value` likewise pushes the result before polling. The
+reflective decoder's counted pointer-to-string conversion also publishes its
+new string before polling, without an extra byte copy. Deferring the poll to
+the next entry would let a trimming allocator such as glibc's return its free
+tail before each large string allocation, repeatedly releasing and faulting
+the same pages.
 
 Generated codecs serve `serialize_to_buffer` (before `reflect.inspect`), the
 inspected-root entries, `deserialize`, `deserialize_nominal*`, transfer

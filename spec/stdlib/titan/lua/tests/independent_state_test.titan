@@ -163,6 +163,16 @@ function test_lua_independent_transfer_scalars_and_binary_strings(
   assert_transfer_nil(values[7])
 end
 
+function test_lua_independent_empty_string_copy(_: test.Context)
+  local state = tlua.new()
+  defer state:close()
+  local result: async.TransferValue = state:run("return ''")
+  state:close()
+  gclib.collect()
+  test.assert(transfer_string(result) == "",
+              "empty result did not survive independent-state disposal")
+end
+
 function test_lua_independent_binary_chunks_and_embedded_zero_source(
     _context: test.Context)
   local state = tlua.new()

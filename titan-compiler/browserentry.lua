@@ -4,23 +4,21 @@ local util = require "titan-compiler.util"
 local M = {}
 
 M.error_helpers = [[
-/* Same message conversion policy as lua.c's msghandler: strings/numbers through
- * lua_tolstring, then __tostring if present and string-valued, otherwise a typed
- * placeholder. */
-static const char *errmsg_tostring(lua_State *L, int idx, size_t *len) {
-    const char *msg;
+/* Shared by native main, browser bootstrap/main and titan.browser's protected
+ * formatter. Needs two temporary API slots beyond the indexed, rooted error.
+ * May raise; callers choose protection and stack cleanup for their context. */
+TValue titan_entry_error_message(lua_State *L, int idx) {
+    int result;
     idx = lua_absindex(L, idx);
-    msg = lua_tolstring(L, idx, len);
-    if (msg == NULL) {
-        if (luaL_callmeta(L, idx, "__tostring") && lua_type(L, -1) == LUA_TSTRING) {
-            msg = lua_tolstring(L, -1, len);
-        } else {
-            msg = lua_pushfstring(L, "(error object is a %s value)",
-                                  luaL_typename(L, idx));
-            if (len) *len = strlen(msg);
+    result = idx;
+    if (lua_tolstring(L, idx, NULL) == NULL) {
+        if (!luaL_callmeta(L, idx, "__tostring") || lua_type(L, -1) != LUA_TSTRING) {
+            lua_pushfstring(L, "(error object is a %s value)",
+                           luaL_typename(L, idx));
         }
+        result = -1;
     }
-    return msg;
+    return lua_totvalue(L, result);
 }
 
 static const char *strip_bootstrap_prefix(const char *message, size_t *len) {
@@ -101,8 +99,9 @@ int titan_browser_invalid_entry(uint64_t id, uint32_t operation, const char *mes
 }
 
 static int titan_browser_error_worker(lua_State *L) {
-    size_t len = 0;
-    const char *msg = strip_bootstrap_prefix(errmsg_tostring(L, 1, &len), &len);
+    TValue message = titan_entry_error_message(L, 1);
+    size_t len = tsslen(tsvalue(&message));
+    const char *msg = strip_bootstrap_prefix(getstr(tsvalue(&message)), &len);
     lua_pushlstring(L, msg, len);
     return 1;
 }

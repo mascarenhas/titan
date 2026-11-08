@@ -267,6 +267,13 @@ call on an intact instance can succeed. Traps, aborts, backend transfer
 failures, and completion protocol corruption instead poison the instance;
 they are not catchable `browser.BrowserError` values.
 
+The message follows Lua's standalone error-reporting rule: strings keep their
+bytes and numbers use Lua's numeric formatting (`2.0` and `-0.0` retain their
+float spelling). Other values use `__tostring` only when it returns a string;
+otherwise the message is `(error object is a <type> value)`. If conversion
+itself fails, the message is `error while reporting browser failure`; the
+original error's trace is retained.
+
 An immediate `instance.call()` or `drain()` attempted inside an active import
 returns a rejected `TITAN_BROWSER_REENTRY` promise. It does not throw
 synchronously into the import, and is not automatically propagated into

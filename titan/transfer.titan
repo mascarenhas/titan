@@ -297,11 +297,7 @@ function attach_resource(resource: foreign *void,
   local index = scope:attach(resource, retain, release) as foreign unsigned int
   local bytes = foreign unsigned char.new_array(4)
   protobuf.write_resource_index_bytes(bytes as foreign *void, index)
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "transfer: cannot reserve attachment index stack" end
-  ffi.lua_pushlstring(L, bytes as foreign const *char, 4 as foreign size_t)
-  return ffi.lua_totvalue(L, -1) as value
+  return (bytes as foreign const *char) as string(4)
 end
 
 -- Implementation notes: doc/implementation/transfer-library.md#registration-attachment-and-claim
@@ -617,15 +613,6 @@ local function nominal_module(candidate: value): string
   return ffi.lua_totvalue(L, -1) as value
 end
 
--- The qualified nominal name published by a generated codec's manifest entry.
-local function generated_codec_name(codec: foreign const *TitanTransferCodec): string
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve nominal transfer stack" end
-  ffi.lua_pushstring(L, codec.name)
-  return ffi.lua_totvalue(L, -1) as value
-end
-
 -- Implementation notes: doc/implementation/transfer-library.md#closure-snapshots
 local function project_closure_captures(
     candidate: value): (string, foreign const *void, {TransferValue}, {boolean})
@@ -758,7 +745,7 @@ local function snapshot_record(candidate: reflect.RecordValue): string
   ffi.titan_protobuf_buf_init_heap(buf, 0)
   defer ffi.titan_protobuf_buf_free_heap(buf)
   protobuf.serialize_inspected_record_to_buffer(buf as foreign *void, candidate)
-  return copy_native_bytes(buf.data as foreign const *char, buf.length)
+  return buf.data as string(buf.length)
 end
 
 local function snapshot_union(candidate: reflect.UnionValue): string
@@ -766,7 +753,7 @@ local function snapshot_union(candidate: reflect.UnionValue): string
   ffi.titan_protobuf_buf_init_heap(buf, 0)
   defer ffi.titan_protobuf_buf_free_heap(buf)
   protobuf.serialize_inspected_union_to_buffer(buf as foreign *void, candidate)
-  return copy_native_bytes(buf.data as foreign const *char, buf.length)
+  return buf.data as string(buf.length)
 end
 
 --- Select the copy or borrow policy for a value, preserving an explicit TransferValue.
@@ -812,7 +799,7 @@ function TransferValue.from_value(candidate: value): TransferValue
           local bytes = foreign unsigned char.new_array(4)
           protobuf.write_resource_index_bytes(bytes as foreign *void, index as foreign unsigned int)
           return TransferValue.is_record_payload(module, codec.descriptor.name,
-              copy_native_bytes(bytes as foreign const *char, 4 as foreign size_t))
+              (bytes as foreign const *char) as string(4))
         end
       end
     end
@@ -1248,7 +1235,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
   if generated ~= nil then
     local codec = generated as foreign const *TitanTransferCodec
     local module = nominal_module(candidate)
-    local name = generated_codec_name(codec)
+    local name = codec.name as string
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
     if init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) == 0 then
       raise "transfer: out of memory copying message"
@@ -1335,19 +1322,6 @@ function encode_message(candidate: value): foreign *void
   return encode_packet(candidate, scope)
 end
 
-
-local function copy_native_bytes(bytes: foreign const *char, length: foreign size_t): string
-  if length == 0 then return "" end
-  local top = ffi.lua_gettop(L)
-  if ffi.lua_checkstack(L, 1) == 0 then
-    raise "cannot reserve Lua stack for transfer message bytes"
-  end
-  ffi.lua_pushlstring(L, bytes, length)
-  local result: value = ffi.lua_totvalue(L, -1)
-  ffi.lua_settop(L, top)
-  return result as string
-end
-
 -- The caller's slot keeps owning the packet through worker preparation and
 -- primitive allocation, so decode_message's catch can consume any residual
 -- owner. Only nominal reconstruction needs a scope and moves that owner after
@@ -1358,7 +1332,7 @@ local function decode_message_worker(slot: foreign *(*void)): value
   local kind = message.kind
   if kind == ffi.TITAN_ASYNC_MESSAGE_STRING then
     -- Lua allocates and roots the copy while the slot still owns the packet.
-    local text = copy_native_bytes(message.bytes, message.length)
+    local text = message.bytes as string(message.length)
     slot[0] = nil
     discard_message(message as foreign *void)
     return text
@@ -1388,7 +1362,7 @@ local function decode_message_worker(slot: foreign *(*void)): value
   -- A single native move commits both sides after all allocating preparation.
   move_slot_to_scope(scope.native, slot)
   if kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then
-    local name = copy_native_bytes(message.name, message.name_length)
+    local name = message.name as string(message.name_length)
     local nominal? = initialize_nominal_raw(message.module, message.module_length, name)
     return protobuf.deserialize_nominal_buffer_with_context(
         message.bytes as foreign const *void,
@@ -1396,7 +1370,7 @@ local function decode_message_worker(slot: foreign *(*void)): value
         nominal, name,
         false, scope)
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_UNION then
-    local name = copy_native_bytes(message.name, message.name_length)
+    local name = message.name as string(message.name_length)
     local nominal? = initialize_nominal_raw(message.module, message.module_length, name)
     return protobuf.deserialize_nominal_buffer_with_context(
         message.bytes as foreign const *void,
@@ -1411,14 +1385,14 @@ local function decode_message_worker(slot: foreign *(*void)): value
         message.bytes as foreign const *void,
         message.length as integer, scope)
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then
-    local name = copy_native_bytes(message.name, message.name_length)
+    local name = message.name as string(message.name_length)
     initialize_nominal_raw(message.module, message.module_length, name)
     local codec? = protobuf.find_resource_codec_by_name(name)
     if codec ~= nil then
       return codec.decode(scope, message.bytes as foreign const *void,
           message.length as integer)
     end
-    local payload = copy_native_bytes(message.bytes, message.length)
+    local payload = message.bytes as string(message.length)
     return decode_initialized_record_payload(name, payload)
   end
   raise "invalid transfer message kind"

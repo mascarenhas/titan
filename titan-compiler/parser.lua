@@ -315,12 +315,12 @@ end
 
 
 
-function defs.cast_type_tail(target)
-    return { kind = "as", target = target }
+function defs.cast_type_tail(target, length)
+    return { kind = "as", target = target, length = length }
 end
 
-function defs.test_type_tail(target)
-    return { kind = "is", target = target }
+function defs.test_type_tail(target, length)
+    return { kind = "is", target = target, length = length }
 end
 
 function defs.map_type_tail(valuestype)
@@ -1050,8 +1050,10 @@ end
 
 function defs.cast_or_test(exp, tail)
     if not tail then return exp end
-    if tail.kind == "as" then return ast.ExpCast(exp.loc, exp, tail.target) end
-    return ast.ExpIs(exp.loc, exp, tail.target)
+    if tail.kind == "as" then
+        return ast.ExpCast(exp.loc, exp, tail.target, tail.length)
+    end
+    return ast.ExpIs(exp.loc, exp, tail.target, tail.length)
 end
 
 function defs.check_expression_list(list, loc)
@@ -1322,8 +1324,9 @@ local grammar_source = [[
     multiply <- MUL -> '*' / IDIV -> '//' / DIV -> '/' / MOD -> '%%'
     unop <- NOT -> 'not' / (LEN !(DOTS !LBRACKET)) -> '#'
            / SUB -> '-' / BXOR -> '~'
-    casttesttail <- (AS type^CastMissingType) -> cast_type_tail
-                   / (IS type^IsMissingType) -> test_type_tail
+    casttesttail <- (AS type^CastMissingType castlengthopt) -> cast_type_tail
+                   / (IS type^IsMissingType castlengthopt) -> test_type_tail
+    castlengthopt <- ((LPAREN exp^ExpSimpleExp RPAREN^RParSimpleExp)? -> opt)
 
     basestart <- NAME / NIL / TRUE / FALSE / FUNCTION / FOREIGN / LPAREN / LCURLY
                 / DOTS / %LITERALSTART / (LEN DOTS !LBRACKET)
