@@ -731,11 +731,21 @@ class BrowserOwner {
   }
 
   // A failed completion stays failed even when its drive latched an exit, as
-  // native bootstrap reports a failure that loop() re-raises.
+  // native bootstrap reports a failure that loop() re-raises. Otherwise the
+  // exit latch wins over a main Task failure that titan.browser marked.
   runResult(result) {
-    const kind = result.failed ? 'failed' : this.exited ? 'exited' : 'returned';
-    const status = kind === 'exited' ? this.exited.status : result.status;
-    return Object.freeze({kind, status, bytes: result.bytes});
+    let kind = 'returned', status = result.status, bytes = result.bytes, trace = result.trace ?? new Uint8Array();
+    if (result.failed) {
+      kind = 'failed';
+    } else if (this.exited) {
+      kind = 'exited';
+      status = this.exited.status;
+    } else if (this.active?.mainFailure) {
+      ({bytes, trace} = this.active.mainFailure);
+      kind = 'failed';
+      status = 1;
+    }
+    return Object.freeze({kind, status, bytes, trace});
   }
 
   titanError(result) {
@@ -1462,6 +1472,14 @@ class BrowserOwner {
       this.finishCall(item, {error: failure('STATE', 'browser drive ended before the Task-form call finished')});
     }
     this.settling = [];
+  }
+
+  // titan_browser_host_main_failed: the async bootstrap's main Task failed.
+  // Only the owner's pending run entry takes the mark (runResult).
+  mainFailed(state, message, length, trace, traceLength) {
+    const token = this.active;
+    if (this.terminal || token?.operation !== 'run' || state !== this.ownerState) return;
+    token.mainFailure = {bytes: this.bytesAt(message, length), trace: this.bytesAt(trace, traceLength)};
   }
 
   wakeDriver(state = this.drive?.state) {

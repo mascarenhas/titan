@@ -234,3 +234,8 @@ int titan_browser_host_release_next(uint32_t state, titan_browser_delivery *out)
 void titan_browser_host_settle(const titan_browser_completion *record);
 
 #endif
+/* The async bootstrap's main Task failed: run() resolves failed, status 1,
+ * with this message and raw trace, unless the entry failed or a drive latched
+ * an exit. The loader copies the bytes; it marks only a pending run entry. */
+void titan_browser_host_main_failed(uint32_t state, const char *message, size_t message_len,
+    const char *trace, size_t trace_len);

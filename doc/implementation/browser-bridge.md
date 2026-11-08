@@ -234,6 +234,10 @@ drives, and `titan.browser` never learns about Tasks.
   `titan_browser_host_drive_end(state, status, exited)`, which latches an exit
   status (the low 32 bits as a signed value) so the driver can call it from a
   `defer`.
+- **Main failure.** `main_failed(message, trace)`, owner state only, passes
+  both strings to the nonthrowing `titan_browser_host_main_failed`, which
+  marks the pending `run()` ([loader drives](browser-target.md#drives-the-call-queue-and-wake-sources)).
+  Titan keeps no record of it.
 - **Relinquish.** `relinquish(wait)` flushes C `stdout` and `stderr`, then
   calls the suspending import `titan_browser_relinquish(state, mode)`
   ([relinquish import](browser-target.md#the-relinquish-import)). The
