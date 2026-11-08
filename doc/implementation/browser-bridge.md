@@ -457,7 +457,13 @@ binding the drive invoked. It also covers owner and other-state request
 settlements, `dispose()` from each of those contexts, and the idle-instance
 rows (entries start after the calling method returns; `notify()` waits for a
 later `drain()` or drive). The rows that need a synchronous C callback are
-reported as pending until that entry exists.
+reported as pending until that entry exists. `measure.mjs` is run by hand,
+never by the spec (`titan-browser-run --js-test measure.mjs -- <image>`): it
+prints a `MEASURE` line with macrotask chain costs (`setImmediate`,
+`MessageChannel`, `setTimeout(0)`), the per-turn cost of drives with 1 and 64
+jobs, the wake latency from `notify()` to delivery in a parked drive, and
+`call()` round trips on an idle instance and into a parked drive, in
+microseconds.
 
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The
