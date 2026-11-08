@@ -584,11 +584,20 @@ test owner `spec/stdlib/titan/async/browser_tests/`, with a C helper
 Titan cases (Tasks over host requests across hundreds of turns, inline
 registrations, cleanup under cancellation, fatal and ordinary failures,
 combinators, channels and a listener-fed subscription, nested coroutines,
-child-state refusals, and the `timer` cases). The timer cases are sleeps mixed
-with host requests, zero delays and yields resuming in a later browser task
-(a marker armed on the driver's turn source must have run), and sleeps,
-tickers and a ticker left open past its Runtime that leave no JavaScript
-timer armed (the harness wraps the global timer functions to count them).
+child-state refusals, the `timer` cases, and the synchronous-callback cases).
+- **Timer cases:** sleeps mixed with host requests, and zero delays and yields
+  that resume in a later browser task, shown by a marker armed on the driver's
+  turn source having run. Sleeps, tickers and a ticker left open past its
+  Runtime leave no JavaScript timer armed; the harness wraps the global timer
+  functions to count them.
+- **Synchronous-callback cases:** they run in `browser.call_sync`.
+  - Coroutine switches raise, also from inside a coroutine, and the current
+    coroutine and Task are hidden.
+  - A coroutine collected in a callback unwinds, in order, at the next
+    collection.
+  - A settlement, `async.run` and the yield refusal show that `async` acts
+    outside any Task.
+
 It then drives the owner's published entries:
 Task-form calls, disposal while relinquished (where the cleanup shows that new
 host work raises the closing error and a sleep raises the Task's
