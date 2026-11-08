@@ -444,8 +444,10 @@ delivery, queued and refused calls (including one made between internal
 coroutine hops), Task-form calls with `AbortSignal`, the SDK timer sources,
 output at relinquish points (on both streams, a sink call still pending when
 the next gate publishes output and released at swept points around the pump
-runner's retirement, and no sink during the coroutine switches that follow an
-`IDLE` relinquish), disposal with a running, cleanup and shutdown drive, and
+runner's retirement, no sink call started by a held call that settles during
+a later turn's coroutine switches, including over full 1024-byte chunks, and
+no sink during the coroutine switches that follow an `IDLE` relinquish),
+disposal with a running, cleanup and shutdown drive, and
 the exit latch, under Node and Chromium in both assertion builds.
 `mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
 `admission.mjs` runs the admission matrix of the loader: every application

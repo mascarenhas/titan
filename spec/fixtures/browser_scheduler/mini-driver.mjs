@@ -166,6 +166,69 @@ async function delayedSinks(context, image) {
   return report;
 }
 
+// A held sink call that settles while the drive runs a later turn's
+// coroutine switches starts no further sink call: output already published
+// behind it, and full 1024-byte chunks that turn sealed before switching,
+// wait for the next parked gate. Each case parks a drive on `hang` and holds
+// the sink call for a first line; `release()` arms the next `kick` to settle
+// it from a microtask, which runs at the turn's first internal handoff.
+const heldSinkCases = {
+  async published(host, stream, release) {
+    await host.task('hop_write', ['second\n', stream, 0n]);
+    release();
+    await host.task('hops');
+    return 'second\n';
+  },
+  async chunks(host, stream, release) {
+    const big = 'x'.repeat(4096) + '\n';
+    release();
+    await Promise.all([host.task('hop_write', [big, stream, 0n]), host.task('hops')]);
+    return big;
+  },
+};
+
+async function heldSinkHandoffs(context, image) {
+  const report = {};
+  for (const stream of ['stdout', 'stderr']) {
+    for (const [name, exercise] of Object.entries(heldSinkCases)) {
+      const host = makeHost(context, image);
+      const lines = [];
+      let held = true, settle;
+      host.hooks[stream] = bytes => {
+        lines.push(decode(bytes));
+        if (!held) return undefined;
+        held = false;
+        return new Promise(resolve => { settle = resolve; });
+      };
+      const release = () => {
+        host.hooks.kick = () => {
+          host.hooks.kick = undefined;
+          queueMicrotask(settle);
+        };
+      };
+      const parkedWith = text => () => lines.join('').includes(text) && host.snapshot().parked;
+      const label = `${stream} ${name}`;
+      try {
+        await host.instance.initialize();
+        await host.call('register');
+        const controller = new AbortController();
+        const hanging = host.task('hang', [], {signal: controller.signal});
+        await until(context, () => host.snapshot().parked, 'hang did not park its drive');
+        await host.task('hop_write', ['first\n', stream, 0n]);
+        await until(context, parkedWith('first\n'), `${label}: the held line never reached its sink`);
+        const expected = await exercise(host, stream, release);
+        await until(context, parkedWith(expected), `${label}: output waiting behind a held sink call was lost`);
+        context.assert(host.unparkedSinks === 0, `${label}: a sink call started while the drive ran`);
+        controller.abort('done');
+        await rejection(context, hanging, 'CANCELLED');
+        await host.instance.dispose();
+        report[label] = lines.length;
+      } finally { await host.instance.dispose().catch(() => {}); }
+    }
+  }
+  return report;
+}
+
 // Calls and notifications made during a drive, and the rows that refuse.
 async function queue(context, image) {
   const host = makeHost(context, image);
@@ -432,6 +495,7 @@ export async function run(context) {
   report.pendingSink = await pendingSink(context, image);
   report.idleOutput = await idleOutput(context, image);
   report.delayedSinks = await delayedSinks(context, image);
+  report.heldSinkHandoffs = await heldSinkHandoffs(context, image);
   report.notes = await queue(context, image);
   report.disposal = await disposal(context, image);
   await exits(context, image);

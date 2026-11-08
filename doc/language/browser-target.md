@@ -647,9 +647,11 @@ otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 flight. The loader flushes after all entries in the containing operation,
 including unterminated C-stdio tails, and during a drive also whenever the
 drive relinquishes the event loop, without waiting there for a pending sink
-call: output queued behind that call reaches the sink once it resolves, even
-while the drive stays relinquished. Later chunks continue after a sink
-throws or rejects. An otherwise successful operation rejects with its first
+call: output queued behind that call reaches the sink once the call settles,
+if the drive is still relinquished, and otherwise at its next relinquish or
+the operation's end. A sink call starts only then, never while the drive
+runs. Later chunks continue after a sink throws or rejects. An otherwise
+successful operation rejects with its first
 cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
 message and trace remain primary while deliverable output and deferred
