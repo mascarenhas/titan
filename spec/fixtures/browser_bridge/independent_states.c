@@ -4,13 +4,18 @@
 #include <lauxlib.h>
 #include <lualib.h>
 #include <titan.h>
-#include <titan/browser.titan.h>
 #include "../../stdlib/titan/browser/native.h"
 #include "../browser_runtime/fixture_controls.h"
 
 extern int luaopen_titan(lua_State *L);
 extern int luaopen_browser_independent(lua_State *L);
 typedef struct independent_owner { lua_State *child; } independent_owner;
+
+extern void __real_titan_browser_host_state_closed(uint32_t token);
+void __wrap_titan_browser_host_state_closed(uint32_t token) {
+  gate_test_state_closed(token);
+  __real_titan_browser_host_state_closed(token);
+}
 
 /* Wrap titan_browser_host_identity_live in the dedicated bridge test image to
  * inject deterministic GC, liveness failure, or outer-handler OOM between
@@ -32,7 +37,8 @@ void titan_bridge_test_arm_identity_gc(lua_State *L, int after) {
 
 void titan_bridge_test_arm_admission_failure(lua_State *L) {
   assert(admission_failure_record == NULL);
-  admission_failure_record = (titan_browser_state_record *)titan_browser_\u2133_attach_titan(L);
+  admission_failure_record = gate_test_state_record(mainthread(G(L)));
+  assert(admission_failure_record != NULL);
   admission_failure_saved_token = admission_failure_record->token;
   admission_failure_record->token = 0;
   admission_failure_observed = 1;
@@ -258,13 +264,12 @@ static int owner_gc(lua_State *L) {
   if (owner->child) {
     lua_State *child = owner->child;
     owner->child = NULL;
-    titan_browser_\u2133_close_state_titan(child);
+    lua_close(child);
   }
   return 0;
 }
 static int bootstrap(lua_State *L) {
   int index = (int)lua_tointeger(L, 1);
-  titan_browser_\u2133_attach_titan(L); /* earliest finalized object, before openlibs */
   luaL_openlibs(L);
   titan_install_searcher(L);
   luaL_requiref(L, "titan", luaopen_titan, 0); lua_pop(L, 1);
@@ -326,7 +331,7 @@ void *titan_bridge_test_detach_state(lua_State *L, TValue value) {
   return child;
 }
 void titan_bridge_test_close_detached(void *state) {
-  if (state) titan_browser_\u2133_close_state_titan((lua_State *)state);
+  if (state) lua_close((lua_State *)state);
 }
 static int check_worker(lua_State *L) {
   lua_getfield(L, LUA_REGISTRYINDEX, LUA_LOADED_TABLE);

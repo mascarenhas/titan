@@ -84,7 +84,8 @@ local invoke_provisioned: {ProvisionalPin} = { ProvisionalPin { pin = nil, wrapp
 local fallback_completion: owned *titan_browser_completion =
     foreign titan_browser_completion.new()
 local fallback_message = "not enough memory"
-local state_record: foreign *titan_browser_state_record = nil
+local state_record: owned *titan_browser_state_record =
+    foreign titan_browser_state_record.new()
 local invoke_handler: (function (foreign uint64_t, foreign uint32_t, foreign uint32_t,
     foreign uint32_t, foreign uint32_t, foreign const *titan_browser_value): ())?
 local release_handler: (function (foreign uint64_t, foreign uint32_t, foreign uint32_t,
@@ -102,68 +103,20 @@ local foreign function mark_closing(state: *titan_browser_state_record)
   end
 end
 
-local foreign function state_gc(L: *lua_State): int
-  local state = ffi.lua_touserdata(L, 1) as foreign *titan_browser_state_record
+local function state_finalize(candidate: value)
+  local state: owned *titan_browser_state_record = candidate
   if state.token == 0 then
-    return 0
+    return
   end
   local token = state.token
   mark_closing(state)
   state.token = 0
   ffi.titan_browser_host_state_closed(token)
-  return 0
-end
-
--- Rule 1 & 4 pre-module lifecycle exception: anchors the earliest-registered
--- finalizer userdata in the Lua registry under the private lightuserdata key
--- of state_gc so it finalizes last on lua_close.
-foreign function attach(raw_L: *void): *void
-  local L = raw_L as foreign *lua_State
-  local key = ffi.lmacro_cfunc_key(state_gc)
-  if ffi.lua_rawgetp(L, ffi.LUA_REGISTRYINDEX, key) == ffi.LUA_TUSERDATA then
-    local existing = ffi.lua_touserdata(L, -1)
-    ffi.lua_settop(L, -2)
-    return existing
-  end
-  ffi.lua_settop(L, -2)
-  ffi.luaL_checkstack(L, 3, "browser state registry")
-  local raw = ffi.lua_newuserdatauv(
-      L, foreign titan_browser_state_record.sizeof as foreign size_t, 0)
-  local state = raw as foreign *titan_browser_state_record
-  state.L = ffi.lmacro_mainthread(L)
-  state.token = 0
-  state.closing = 0
-  state.is_owner = 0
-  state.configured = 0
-  state.fallback = nil
-  ffi.lua_createtable(L, 0, 1)
-  ffi.lua_pushcclosure(L, state_gc, 0)
-  ffi.lua_setfield(L, -2, "__gc")
-  ffi.lua_setmetatable(L, -2)
-  ffi.lua_rawsetp(L, ffi.LUA_REGISTRYINDEX, key)
-  local token = ffi.titan_browser_host_state_open(state)
-  if token == 0 then
-    ffi.luaL_error(L, "browser state identity exhausted")
-  end
-  state.token = token
-  return raw
-end
-
-foreign function close_state(raw_L: *void)
-  local L = raw_L as foreign *lua_State
-  local key = ffi.lmacro_cfunc_key(state_gc)
-  if ffi.lua_rawgetp(L, ffi.LUA_REGISTRYINDEX, key) == ffi.LUA_TUSERDATA then
-    local state =
-        ffi.lua_touserdata(L, -1) as foreign *titan_browser_state_record
-    mark_closing(state)
-  end
-  ffi.lua_settop(L, -2)
-  ffi.lua_close(L)
 end
 
 local function state_closing(): boolean
-  local current = state_record
-  if current == nil or current.token == 0 then
+  local current: foreign *titan_browser_state_record = state_record
+  if current.token == 0 then
     return true
   end
   if current.closing == 0 and ffi.titan_state_closing(L) ~= 0 then
@@ -173,8 +126,8 @@ local function state_closing(): boolean
 end
 
 local function current_state(): foreign uint32_t
-  local current = state_record
-  if current == nil or current.token == 0 then
+  local current: foreign *titan_browser_state_record = state_record
+  if current.token == 0 then
     raise "browser state is not attached"
   end
   if current.closing == 0 and ffi.titan_state_closing(L) ~= 0 then
@@ -218,6 +171,10 @@ end
 function BrowserHandle:close()
   local slot = self.slot
   if slot ~= 0 then
+    if state_record.token == 0 and state_record.closing ~= 0 then
+      self.slot = 0
+      return
+    end
     -- Detect an independent state's close phase before its first import too.
     current_state()
     self.slot = 0
@@ -248,6 +205,10 @@ end
 function BrowserRequest:close()
   local slot = self.slot
   if slot ~= 0 then
+    if state_record.token == 0 and state_record.closing ~= 0 then
+      self.slot = 0
+      return
+    end
     current_state()
     self.slot = 0
     ffi.titan_browser_host_release(self.state, slot, self.generation)
@@ -714,8 +675,9 @@ local function release_work(
     wrapper: foreign uint32_t)
   do
     -- Stay helper-free and non-raising so pin retirement cannot escape half-done.
-    local current = state_record
-    local closing = current == nil or current.token == 0
+    -- The module owns this stable storage; the native transaction only borrows it.
+    local current: foreign *titan_browser_state_record = state_record
+    local closing = current.token == 0
     if not closing then
       if current.closing == 0 and ffi.titan_state_closing(L) ~= 0 then
         mark_closing(current)
@@ -814,10 +776,6 @@ foreign function invoke(
         "browser state is closed, closing or uninitialized")
   end
   if state.configured == 0 then
-    return ffi.titan_browser_invalid_entry(id, op,
-        "browser state is closed, closing or uninitialized")
-  end
-  if state.is_owner < 0 then
     return ffi.titan_browser_invalid_entry(id, op,
         "browser state is closed, closing or uninitialized")
   end
@@ -1039,13 +997,14 @@ function BrowserHandle:listen(
 end
 
 do
+  local current = state_record
+  gc.finalizable<|value|>(current, state_finalize)
+  current.L = ffi.lmacro_mainthread(L)
   -- Clear the reservation sentinels without shrinking rollback storage.
   for index = #free_slots, 1, -1 do
     free_slots[index] = nil
   end
   invoke_provisioned[1] = nil
-  local current = attach(L as foreign *void) as foreign *titan_browser_state_record
-  state_record = current
   local inv = invoke_entry
   local rel = release_entry
   invoke_handler = inv
@@ -1054,4 +1013,7 @@ do
   current.release_handler = rel
   current.fallback = fallback_completion
   current.configured = 1
+  local token = ffi.titan_browser_host_state_open(current)
+  if token == 0 then raise "browser state identity exhausted" end
+  current.token = token
 end

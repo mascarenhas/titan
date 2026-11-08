@@ -5,7 +5,6 @@
 #include <lauxlib.h>
 #include <lualib.h>
 #include <titan.h>
-#include <titan/browser.titan.h>
 #include "gate.h"
 #include "fixture_controls.h"
 
@@ -18,7 +17,6 @@ static int phase;
 static int entry_operation(lua_State *L) {
   static const char *const operations[] = {"prepare", "resume", "finish"};
   if (phase == 0) {
-    titan_browser_\u2133_attach_titan(L);
     luaL_openlibs(L);
     luaL_requiref(L, "titan", luaopen_titan, 0); lua_pop(L, 1);
     titan_install_searcher(L);
@@ -37,7 +35,7 @@ static int close_owned(lua_State *L) {
   if (owned_state) {
     lua_State *child = owned_state;
     owned_state = NULL;
-    titan_browser_\u2133_close_state_titan(child);
+    lua_close(child);
   }
   return 0;
 }
@@ -45,7 +43,7 @@ int gate_lifetime_is_child(lua_State *L) { return L == owned_state; }
 
 /* These workers are reached through original Titan callable wrappers and the
  * production protected invoke gateway. The separate state is owned between
- * entry lifetimes, with its own earliest/last bridge registry. */
+ * entry lifetimes, with a module-owned browser state record. */
 void gate_lifetime_operation(lua_State *parent, int requested_phase) {
   int top, status;
   assert(phase >= 0 && phase < 3 && requested_phase == phase);

@@ -39,19 +39,6 @@ local function build(info, assertions, module, name, is_test, c_source)
         "--target", "browser", "-q", "--incremental", "--no-uv-bootstrap",
         "--tree", fixture, "--output", output, "--exe", output .. "/" .. name .. ".mjs",
         "--c-source", fixture .. "/" .. (c_source or "gate.c") }
-    if c_source then
-        -- Keep this separate from the image root until its target marker exists.
-        local headers = workspace .. "/foreign-headers-" .. assertions
-        local ok, log = run({ "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
-            "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-            "TITAN_PATH_0_6=", "TITAN_PROBE_CACHE_DISABLE=1",
-            info.prefix .. "/bin/lua", "-E", "-e", code, repository .. "/titanc",
-            "--target", "browser", "-q", "--incremental", "--tree", repository,
-            "--output", headers, "-c", "titan.browser" })
-        assert.is_true(ok, log)
-        argv[#argv + 1] = "-I"
-        argv[#argv + 1] = headers
-    end
     if is_test then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = module
     local ok, log = run(argv)

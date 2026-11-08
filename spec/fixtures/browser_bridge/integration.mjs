@@ -19,6 +19,18 @@ function captureRejection(context, promise, code) {
   return expectRejection(context, promise, code, true);
 }
 
+function finalizedState(context, host, index) {
+  const observed = host.stateCloseObservations.filter(entry => entry.index === index);
+  context.assert(observed.length === 1 && host.earlierCloses.filter(tag => tag === index).length === 1,
+    'user finalizer or earlier-object cleanup was lost or duplicated');
+  context.assert(host.stateInvalidations.filter(token => token === observed[0].token).length === 1,
+    'browser state did not invalidate exactly once after its user finalizer');
+  const warnings = decode(join(host.stderr)).split('\n').filter(line =>
+    line.startsWith('Lua warning: ') && line.includes('browser state is not attached'));
+  context.assert(warnings.length === host.earlierCloses.length,
+    'an earlier-object binding call did not produce its expected Lua finalizer warning');
+}
+
 function markSettled(marker) { marker.settled = true; }
 function watch(promise) {
   const marker = {settled: false};
@@ -492,8 +504,9 @@ async function values(context, host, completions) {
   await host.call('close_detached');
   await rejected(context, host.instance.call(host.callbacks.get('independent_3'), 4n), 'HANDLE');
   context.assert(host.independentCloses.length === 6 && host.forbiddenRequests === 0,
-    'explicit/GC/detach close did not run each registry-last finalizer exactly once');
+    'explicit/GC/detach close did not run each coroutine finalizer exactly once');
   for (const index of [1n, 2n, 3n]) {
+    finalizedState(context, host, index);
     const closed = host.independentCloses.filter(entry => entry.index === index);
     context.assert(closed.length === 2 && closed.some(entry => entry.value === host.bindings.close_value) &&
       closed.some(entry => entry.value === host.thrown.throw_value), 'independent close lost close-phase JS values');
@@ -1224,6 +1237,7 @@ async function prepareRetainedDisposal(context, host) {
     'retirement admitted an application callback or skipped close');
   context.assert(host.controls.snapshot().units === 0 && host.controls.snapshot().requests === 0,
     'retained disposal leaked state-owned units');
+  finalizedState(context, host, 0n);
   host.releaseObservations();
   return references;
 }
@@ -1251,6 +1265,7 @@ async function prepareDetachableDisposal(context, host) {
   context.assert(decode(join(host.stdout)).endsWith('bridge-finalizer\n'), 'ordinary disposal omitted finalizer output');
   context.assert(host.controls.snapshot().units === 0 && host.controls.snapshot().requests === 0,
     'close-phase-created units survived statewide retirement');
+  finalizedState(context, host, 0n);
   const successes = host.successes.length;
   for (const emit of emitters) emit(98n, binary());
   pending.resolve(binary());
@@ -1722,7 +1737,8 @@ export async function run(context) {
     context.stdout(encode('BRIDGE ' + JSON.stringify({verdict: 'PASS', nativeCases: counts,
       instances: 2, interleavedSwitches: switches, operations: completions.length, requestDrain: announcements,
       notifications: first.notifications.length, requests: first.successes.length + first.failures.length,
-      io, repairs, cleanup, identities, materialization, listenerCancellation, sinkValues, collectedTargets, finalizerDrains: 2}) + '\n'));
+      io, repairs, cleanup, identities, materialization, listenerCancellation, sinkValues, collectedTargets,
+      stateFinalizers: first.earlierCloses.length + second.earlierCloses.length, finalizerDrains: 2}) + '\n'));
   } finally {
     unwatchFirst?.(); unwatchSecond?.(); unwatchCompletions?.();
     await Promise.all([first, second].map(host => host.instance?.dispose().catch(() => {})));

@@ -92,7 +92,6 @@ typedef struct titan_browser_state_record {
   lua_State *L;
   uint32_t token;
   int closing;
-  int is_owner;
   int configured;
   TValue invoke_handler;
   TValue release_handler;

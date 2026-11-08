@@ -32,10 +32,10 @@ launcher next to native `main`, following the [Titan-first native-binding
 rules](../style-guide.md#write-native-bindings-titan-first):
 
 1. **Shared launcher and error conversion (`browserentry.lua`):** Initialization
-   creates the owner `lua_State *`, attaches its state record (or opens a bare
-   host state token in C-only images that do not link `titan.browser`), opens
-   the Lua libraries, installs the Titan searcher and preloads, and requires
-   the root module without calling `main`. `titan_browser_entry` retrieves the
+   creates the owner `lua_State *`, opens the Lua libraries, installs the Titan
+   searcher and preloads, and requires the root module without calling `main`.
+   `titan.browser` initializes in ordinary dependency order; images without it
+   use a bare host state token. `titan_browser_entry` retrieves the
    initialized module from `LUA_LOADED_TABLE`, constructs its counted string
    Array, and runs `main` once. Both run under `titan_browser_protected_entry`
    with plain `errorhandler` as the `lua_pcall` message handler. On failure,
@@ -47,14 +47,12 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    completion. Caught raises inside module initializers are never converted,
    and stale traces never leak into `main`. The owner state keeps
    `luaL_newstate`'s warning handler, including its prefix, warning controls,
-   and multipart messages; its stderr output enters the byte queue. Attaching
-   an independent state preserves the warning handler its creator chose.
+   and multipart messages; its stderr output enters the byte queue. Loading
+   `titan.browser` in an independent state preserves its creator's warning handler.
 2. **One-line weak forwards (`titan_browser_invoke`,
    `titan_browser_release_callable`):** `browserentry.lua` declares
-   `titan_browser_\u2133_invoke_titan`,
-   `titan_browser_\u2133_release_callable_titan`,
-   `titan_browser_\u2133_attach_titan`, and
-   `titan_browser_\u2133_close_state_titan` as `__attribute__((weak))`. When
+   `titan_browser_\u2133_invoke_titan` and
+   `titan_browser_\u2133_release_callable_titan` as `__attribute__((weak))`. When
    `titan.browser` is linked into the image, `titan_browser_invoke` and
    `titan_browser_release_callable` forward in one line to those public
    `foreign function`s in `titan/browser.browser.titan`; in C-only protocol or
@@ -98,7 +96,7 @@ rules](../style-guide.md#write-native-bindings-titan-first):
 | `titan_browser_entry(uint64_t, int, argv, lengths)` | MAIN2 | Generated protected main, once |
 | `titan_browser_invoke(uint64_t, state, slot, generation, argc, args)` | INVOKE3 | 1-line weak forward to `titan.browser` `invoke` |
 | `titan_browser_release_callable(uint64_t, state, slot, generation, wrapper)` | RELEASE4 | 1-line weak forward to `titan.browser` `release_callable` |
-| `titan_browser_close(uint64_t)` | CLOSE5 | Generated owner-held state close (`close_state` or fallback) |
+| `titan_browser_close(uint64_t)` | CLOSE5 | Generated owner-held `lua_close` |
 
 `operation_id` is an instance-local never-reused unsigned 64-bit identity.
 JavaScript uses a BigInt counter; exhaustion rejects instead of wrapping to
@@ -108,54 +106,54 @@ settles only after both completion and promised-export/context retirement.
 A private engine entry is not an application gateway. The loader uses
 Emscripten's exported `_malloc` and `_free` for temporary argument buffers.
 
-Close is deliberately different. `close_state` (a public `foreign function` in
-`titan/browser.browser.titan`) marks the state closing, clears `configured = 0`,
-and invokes `lua_close` directly while the JSPI execution owner is held. It is
-never a `lua_pcall` on the Lua state being freed. Lua's own per-finalizer
-protection remains authoritative. Warnings alone do not convert successful
-close into an invented application failure. Both libc streams are flushed,
-preserving the first error while attempting both; the loader then handles
-copied stream queues and disposal outcomes.
+Close is deliberately different. The generated launcher clears its owner-state
+pointer and invokes `lua_close` directly while the JSPI execution owner is
+held, never a `lua_pcall` on the state being freed. The browser record's Titan
+finalizer handles invalidation; C-only images close their bare host token
+around `lua_close`. Lua's per-finalizer protection remains authoritative.
+Warnings alone do not convert successful close into an application failure.
+Both libc streams are flushed, preserving the first error while attempting
+both; the loader then handles copied stream queues and disposal outcomes.
 
 ## State records and the Titan pin table
 
-`attach` (a public `foreign function` in `titan/browser.browser.titan`) runs
-before `luaL_openlibs`, preloads, or any user initializer, and is idempotent.
-Its 0-uservalue `titan_browser_state_record` userdata is the first finalizable
-object in that state and is anchored in the Lua registry under the private
-lightuserdata key `ffi.lmacro_cfunc_key(state_gc)` (the pre-module lifecycle
-exception to rule 4: no module variable exists yet when `attach` runs, and the
-userdata must survive until `lua_close` finalizes it last). `attach` passes the
-record pointer to `titan_browser_host_state_open(state)`, which allocates the
-opaque host state token and maps `token -> record` in the JS owner's
-`stateRecords` table; no JavaScript application API exposes a `lua_State *`,
-and no C static state list exists.
+The `titan.browser` module initializer allocates an
+`owned *titan_browser_state_record` in its `state_record` module variable.
+The userdata owns stable inline C storage. It is finalized through
+`gc.finalizable<|value|>(state_record, state_finalize)`, using an ordinary Titan
+function, not a foreign `__gc` callback. No bridge registry anchor, metatable
+construction, or record lookup in the Lua registry is needed.
 
-When `titan.browser` initializes in a state, its `do ... end` block calls
-`attach(L)`, caches the `titan_browser_state_record *` in its module variable
-`state_record`, roots `invoke_entry` and `release_entry` in module variables,
-and writes their `TValue` closures into `state_record` (`configured = 1`).
+The initializer roots `invoke_entry` and `release_entry` in module variables,
+writes their `TValue` closures and the module-owned fallback completion pointer
+into the record, then publishes its address with
+`titan_browser_host_state_open`. That import assigns the opaque token and maps
+`token -> record` in the JS owner's `stateRecords` table. No JavaScript
+application API exposes a `lua_State *`, and there is no C static state list.
 
-Lua closes latest-finalized-first. The earliest `titan_browser_state_record`
-finalizes after every application userdata, table, or retained-coroutine
-finalizer. Its `state_gc` finalizer (a `local foreign function` in
-`titan/browser.browser.titan`) calls `mark_closing`, clears `state.token = 0`,
-and notifies `titan_browser_host_state_closed(token)`, which removes the state's
+Finalization follows Lua's natural registration order. The record finalizer
+runs after finalizers registered for values created after `titan.browser`
+initialized, including its handles, callables, requests, and modules that
+import it. It calls `mark_closing`, clears `state.token = 0`, and notifies
+`titan_browser_host_state_closed(token)` exactly once, removing the state's
 record, callable targets, notifications, requests, and JavaScript slot units.
-If `attach` fails before assigning a token, collecting its token-zero userdata
-does not invalidate anything or close the state. The creator of that Lua state
-remains responsible for calling `close_state` or `lua_close`.
 
-An independent state created in a C test fixture calls
-`titan_browser_\u2133_attach_titan(L)` at construction. `state_closing()` and
-`current_state()` in `titan/browser.browser.titan` read `state_record` from the
-module variable and check `titan_state_closing(L)` (`G(L)->gcstp & GCSTPCLS`), so
-a direct independent `lua_close` closes asynchronous/reverse admission before a
-finalizer's first binding call, even when the whole instance is not disposing.
-Synchronous binding lookup/call, copied output admission, and nonthrowing
-release remain valid until final invalidation. Every new JS slot is charged to
-the state, including slots allocated during close when Lua suppresses new
-reachability finalizers.
+An object's earlier-registered finalizer can run after the browser record.
+At that point `BrowserHandle:close`, `BrowserRequest:close`, and JavaScript
+callable release are no-ops, while binding lookup and calls raise. An uncaught
+raise becomes a Lua finalizer warning on stderr. A zero token in a record that
+has not finalized remains an admission failure, not a successful close.
+
+The launcher does not initialize `titan.browser` specially. C-created
+independent states load modules normally too: no `attach` operation or
+pre-`luaL_openlibs` bootstrap is required. `titan.lua` is native-only, so no
+standard-library API creates independent browser states.
+`state_closing()` and `current_state()` check `titan_state_closing(L)`
+(`G(L)->gcstp & GCSTPCLS`) before imports, so direct independent `lua_close`
+refuses new requests and reverse calls before a finalizer's first binding call.
+Synchronous calls, copied output, and release remain valid until the browser
+record finalizes. Every JS slot is charged to the state, including slots
+created during close when Lua suppresses new reachability finalizers.
 
 `BrowserHandle` registers the allocation-free
 `gc.finalizable<|value|>(owner, finalizer)` callback shape, initially with an
@@ -354,10 +352,12 @@ copied bytes, original captures, wrapper identity and round-tripping, GC
 finalizers, cross-entry/STACKED resumption, hidden allocation cleanup,
 provisional pin rollback (including allocation failures and host-retained
 wrappers), requests, and C stdio output. A test-owned C fixture constructs
-truly independent Lua states with the same earliest registry (`attach` /
-`close_state`) and exercises explicit, GC, and detach-then-later close.
-Initializer failure has a separate real Titan image with a suspended cleanup
-coroutine and `main` error-conversion checks.
+independent Lua states, loads their modules normally, and exercises explicit,
+GC, and detach-then-later close. User-module finalizers close handles before
+record invalidation; an earlier object's finalizer verifies inert close and
+release, followed by the expected binding-error warning. Initializer failure
+has a separate real Titan image with a suspended cleanup coroutine and `main`
+error-conversion checks.
 
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The

@@ -1,3 +1,4 @@
+local early_close = import "browser.early_close"
 local browser = import "browser"
 local test = import "test"
 local gc = import "gc"
@@ -300,6 +301,38 @@ function test_unreachable_handle_finalizers(_: test.Context)
   gc.collect()
   gc.collect()
   test.assert(expect_integer(counter:call()) == before, "unreachable BrowserHandle units survived collection")
+end
+
+local state_close_marker: ({string: integer})?
+function test_user_state_close_finalizer(_: test.Context)
+  local pending: browser.BrowserHandle?
+  local source = browser.binding("state_close_request")
+  defer source:close()
+  local notify = function(...: browser.BrowserValue): browser.BrowserValue
+    return Value.is_nil()
+  end
+  local request = source:start(notify, notify)
+  request:cancel()
+  -- Keep the cancelled request's owning slot for the earlier finalizer too.
+  early_close.set_finalizer(function()
+    local handle = pending
+    handle:close()
+    handle:close()
+    request:close()
+    request:close()
+    ffi.titan_bridge_test_earlier_cleanup(0)
+    browser.binding("state_close_handle") -- Must raise after record invalidation.
+  end)
+  local marker: {string: integer} = {}
+  gc.finalizable<|value|>(marker, function(_: value)
+    local handle = browser.binding("state_close_handle")
+    handle:close()
+    pending = browser.binding("state_close_handle")
+    local observer = browser.binding("state_close_observe")
+    defer observer:close()
+    observer:call(Value.is_integer(0))
+  end)
+  state_close_marker = marker
 end
 
 function test_callable_wrapper_identity_and_roundtrip(_: test.Context)
@@ -1011,7 +1044,7 @@ do
   initializer_coroutine = coroutine.create(function(_: value): value
     defer do
       -- These owners are created while GCSTPCLS suppresses their finalizers.
-      -- The earliest registry must release them at state-wide retirement.
+      -- The browser state record releases them at state-wide retirement.
       local item = browser.binding("close_value")
       local observer = browser.binding("close_observe")
       observer:call(Value.is_handle(item))

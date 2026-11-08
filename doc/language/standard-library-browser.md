@@ -342,26 +342,35 @@ admission, then permits only physical retirement, then closes the state.
 
 ## State close
 
-Closing a Lua state invalidates its handles, callables, and queued
-notifications exactly once, after coroutine unwinding and the state's other
-finalizers have run. This holds for explicit close, reachability close, and a
-later close of a detached state; detaching a state does not close it. Handles
-from a closed state never become valid again, even if a new state reuses its
-memory.
+`titan.browser` registers its state record for finalization when the module
+initializes. A state's handles, callables, and queued notifications are
+invalidated exactly once when that record is finalized. This is after the
+finalizers of values created after `titan.browser` initialized, including its
+handles, callables, requests, and modules that import it.
+
+This holds for explicit close, reachability close, and a later close of a
+detached state; detaching a state does not close it. Handles from a closed state
+never become valid again, even if a new state reuses its memory.
 
 During close, synchronous binding calls, copied output admission, and
-idempotent release remain valid until that final invalidation. New requests,
+idempotent release remain valid until that invalidation. New requests,
 listeners, and reverse application calls are refused, including for an
 independent state closing while its containing instance is not disposing.
-Warnings from Lua finalizers are stderr bytes, not an invented failed call.
+
+An object's earlier-registered finalizer runs after the browser record. Its
+`close()` and callable release operations are no-ops; binding lookup and calls
+raise. An uncaught raise is reported as a Lua finalizer warning on stderr, not
+an invented failed application call.
 
 ## C SDK
 
 The installed `titan/browser.h` declares the checked wasm32 scalar/slot,
 response, completion, and state-registry boundary. Its API requires the same
 instance execution owner as the generated gateway; it is not a raw
-`lua_State *` application gateway. See
-[the bridge implementation](../implementation/browser-bridge.md) for exact
-layout, ownership, initialization, and close rules. Native SDKs may install the
-header, but native providers do not contain `titan.browser` or a fake bridge
-runtime.
+`lua_State *` application gateway. C-created states load `titan.browser`
+normally; there is no attachment operation or special bootstrap order.
+`titan.lua` is native-only, so no standard-library API creates independent
+browser states. See [the bridge implementation](../implementation/browser-bridge.md)
+for layout, ownership, initialization, and close rules. Native SDKs may
+install the header, but native providers contain no `titan.browser` or fake
+bridge runtime.

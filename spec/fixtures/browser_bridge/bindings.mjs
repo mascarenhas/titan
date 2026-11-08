@@ -41,6 +41,7 @@ export function makeHost(context) {
     callbacks: new Map(), controls: undefined, instance: undefined,
     stdout: [], stderr: [], notificationErrors: [], notifications: [], checks: [],
     successes: [], failures: [], closes: [], independentCloses: [], cleanup: 0,
+    stateCloseObservations: [], stateInvalidations: [], earlierCloses: [],
     r1Responses: [], r1Thrown: undefined,
     r1CloseCount: 0n,
     listeners: new Set(), retainedListeners: [], unregisters: 0, forbiddenRequests: 0,
@@ -48,6 +49,32 @@ export function makeHost(context) {
   };
   const bindings = host.bindings = {
     __titanTest(controls) { host.controls = controls; },
+    __titanStateClosed(token) {
+      context.assert(!host.stateInvalidations.includes(token), 'browser record invalidated its state twice');
+      host.stateInvalidations.push(token);
+      const observed = host.stateCloseObservations.find(entry => entry.token === token);
+      if (observed) {
+        const unwound = observed.index === 0n ? host.closes :
+          host.independentCloses.filter(entry => entry.index === observed.index);
+        context.assert(unwound.length === 2, 'record invalidation preceded coroutine unwinding');
+      }
+    },
+    __titanEarlierCleanup(index) {
+      const tag = BigInt(index);
+      const observed = host.stateCloseObservations.find(entry => entry.index === tag);
+      context.assert(observed && host.stateInvalidations.includes(observed.token) &&
+        host.controls.snapshot().states.some(state => state.token === observed.token && state.closed),
+        'earlier-object cleanup did not follow record invalidation');
+      const before = host.controls.snapshot();
+      const wrapper = host.callbacks.get(tag === 0n ? 'increment' : `independent_${tag}`);
+      context.assert(wrapper, 'earlier-object test lost its released callable wrapper');
+      wrapper.release();
+      wrapper.release();
+      const after = host.controls.snapshot();
+      context.assert(after.operationId === before.operationId && after.units === before.units,
+        'release on an invalidated state entered native code or changed slots');
+      host.earlierCloses.push(tag);
+    },
     echo_boolean(value) { context.assert(typeof value === 'boolean'); return value; },
     echo_integer(value) { context.assert(typeof value === 'bigint'); return value; },
     overflow_bigint() { return 1n << 63n; },
@@ -103,6 +130,13 @@ export function makeHost(context) {
     },
     close_value: Object.freeze({close: 'owner'}),
     close_observe(value) { host.closes.push(value); host.hooks.close?.(value); },
+    state_close_handle: Object.freeze({close: 'user-finalizer'}),
+    state_close_request() { return {kind: 'detachable', promise: Promise.resolve(0n)}; },
+    state_close_observe(index) {
+      const closing = host.controls.snapshot().states.filter(state => state.closing && !state.closed);
+      context.assert(closing.length === 1, 'user finalizer did not see exactly one live closing state');
+      host.stateCloseObservations.push({index, token: closing[0].token});
+    },
     independent_close(index, asyncRejected, value) {
       context.assert(asyncRejected === true, 'independent close admitted new async work');
       const closing = host.controls.snapshot().states.filter(state => state.closing && !state.closed);

@@ -60,10 +60,6 @@ struct titan_browser_arguments {
     const size_t *lengths;
 };
 
-extern void *$ATTACH_FN(
-    void *L) __attribute__((weak));
-extern void $CLOSE_STATE_FN(
-    void *L) __attribute__((weak));
 extern int $INVOKE_FN(
     unsigned long long operation_id, unsigned int state, unsigned int slot,
     unsigned int generation, unsigned int argc,
@@ -73,7 +69,7 @@ extern int $RELEASE_FN(
     unsigned int generation, unsigned int wrapper) __attribute__((weak));
 
 static lua_State *titan_browser_owner;
-static titan_browser_state_record *titan_browser_owner_record;
+/* Images without titan.browser use a launcher-owned bare token. */
 static uint32_t titan_browser_owner_token;
 static int titan_browser_initialized, titan_browser_owner_ready, titan_browser_main_started;
 
@@ -118,11 +114,10 @@ static void titan_browser_complete_failure(lua_State *L,
     size_t length = 0, trace_length = 0;
     const char *raw = NULL, *trace = NULL;
     const unsigned char *message;
-    int error_index = lua_gettop(L), trace_index;
+    int error_index = lua_gettop(L), trace_index = error_index + 1;
     completion->status = TITAN_BROWSER_TITAN_ERROR;
     completion->application_status = 1;
     lua_getfield(L, LUA_REGISTRYINDEX, TITAN_BACKTRACE_KEY);
-    trace_index = lua_gettop(L);
     lua_pushcfunction(L, titan_browser_error_worker);
     lua_pushvalue(L, error_index);
     if (lua_pcall(L, 1, 1, 0) == LUA_OK)
@@ -195,18 +190,13 @@ $INITIALIZER
 $WORKER
 
 static int titan_browser_initialize_entry(lua_State *L) {
-    if ($ATTACH_FN) {
-        titan_browser_owner_record = (titan_browser_state_record *)$ATTACH_FN(L);
-        titan_browser_owner_token = titan_browser_owner_record->token;
-        titan_browser_owner_record->is_owner = -1;
-    } else {
+    if (!$INVOKE_FN) {
         titan_browser_owner_token = titan_browser_host_state_open(NULL);
         if (!titan_browser_owner_token)
             luaL_error(L, "browser state identity exhausted");
     }
     lua_settop(L, 0);
     titan_browser_initialize_worker(L);
-    if (titan_browser_owner_record) titan_browser_owner_record->is_owner = 1;
     titan_browser_owner_ready = 1;
     return 0;
 }
@@ -276,15 +266,10 @@ int titan_browser_close(uint64_t operation_id) {
         lua_State *L = titan_browser_owner;
         uint32_t token = titan_browser_owner_token;
         titan_browser_owner = NULL;
-        titan_browser_owner_record = NULL;
         titan_browser_owner_token = 0;
-        if ($CLOSE_STATE_FN) {
-            $CLOSE_STATE_FN(L);
-        } else {
-            if (token) titan_browser_host_state_closing(token);
-            lua_close(L);
-            if (token) titan_browser_host_state_closed(token);
-        }
+        if (token) titan_browser_host_state_closing(token);
+        lua_close(L);
+        if (token) titan_browser_host_state_closed(token);
     }
     titan_browser_flush_completion(&completion);
     return 0;
@@ -295,8 +280,6 @@ function M.contents(worker, options)
     options = options or {}
     return util.render(template, {
         ERROR_HELPERS = M.error_helpers,
-        ATTACH_FN = coder._foreign_func_name("titan.browser", "attach"),
-        CLOSE_STATE_FN = coder._foreign_func_name("titan.browser", "close_state"),
         INVOKE_FN = coder._foreign_func_name("titan.browser", "invoke"),
         RELEASE_FN = coder._foreign_func_name("titan.browser", "release_callable"),
         DECLARATIONS = options.declarations or "",

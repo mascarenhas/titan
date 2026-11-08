@@ -654,9 +654,9 @@ pairs each rule with a wrong and a right example.
    the stack top.
 4. **Pinning.** Per-state roots live in a module variable (a Map or Array) or
    in an owner record's field, as `loop.handles` does in `titan.uv`, never in
-   `luaL_ref` slots, registry tables, or userdata uservalue tables (except a
-   justified pre-module lifecycle anchor such as `attach`'s `state_gc`
-   userdata).
+   `luaL_ref` slots, registry tables, or userdata uservalue tables. The browser
+   state record uses owned module storage and `gc.finalizable`, not a registry
+   anchor; a genuinely pre-module lifecycle anchor needs separate justification.
 5. **Rooting.** A Titan parameter is rooted by its caller's provenance, and a
    local by its frame slot, which is refreshed at its declaration and at every
    assignment and is reused by sibling scopes once its block ends ([the

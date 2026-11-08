@@ -118,10 +118,11 @@ with compiled examples.
    gone; `browserentry.lua` generates the launcher (sharing `errmsg_tostring`
    with native `main`) and one-line weak forwards (`titan_browser_invoke`,
    `titan_browser_release_callable`) to public `foreign function`s in
-   `titan/browser.browser.titan`; `attach`, `close_state`, `state_gc` (`__gc`
-   pointer), and `mark_closing` are foreign functions in `titan.browser`; the
-   cross-state token map lives in the JavaScript registry; and the libuv
-   callbacks are local `foreign function`s whose one C helper,
+   `titan/browser.browser.titan`. Its state record is Titan-owned module
+   storage finalized by an ordinary function through `gc.finalizable`;
+   `mark_closing` and the entry trampolines remain foreign functions. The
+   cross-state token map lives in the JavaScript registry. The libuv callbacks
+   are local `foreign function`s whose one C helper,
    `titan_uv_push_owner` in `titan/uv/callback.h`, wraps the `setuvalue` macro
    that the FFI cannot spell ([standard-library foreign
    callbacks](foreign-functions.md#standard-library-foreign-callbacks)).
@@ -143,9 +144,9 @@ with compiled examples.
    registry userdata's uservalues. Right: `loop.handles`, which `timer_init`
    sets and `timer_closed` clears ([public native
    owners](libuv-extension-guide.md#public-native-owners)), and the per-state
-   `pins_by_slot` Array and `pins_by_fn` Map in `titan/browser.browser.titan`
-   (with the Lua registry used only in `attach` to anchor the earliest
-   `state_gc` userdata before any module variable exists).
+   `pins_by_slot` Array, `pins_by_fn` Map, and owned state record in
+   `titan/browser.browser.titan`. Its state record uses `gc.finalizable`, with
+   no bridge root in the Lua registry.
 5. **Rooting.** Wrong (`browser.browser.titan` at `843b446e`): `invoke`,
    `request` and `callable` push their parameters, and `invoke` and `request`
    push an `extra` buffer declared inside an `if`. Right: an owner local

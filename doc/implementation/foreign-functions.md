@@ -461,11 +461,11 @@ foreign functions compiled into the owning module objects:
 * `titan/transfer.titan` and `titan/thread/*.titan` define the C-ABI packet and
   channel callbacks.
 * `titan/browser.browser.titan` defines the browser bridge's public foreign
-  functions (`attach`, `close_state`, `invoke`, `release_callable`) and local
-  foreign functions (`state_gc` for `__gc`, `mark_closing`); `browserentry.lua`
-  emits one-line weak C forwards (`titan_browser_invoke`,
-  `titan_browser_release_callable`) to those public foreign functions, so the
-  browser runtime needs no hand-written C file.
+  functions (`invoke`, `release_callable`) and local foreign `mark_closing`.
+  Its module-owned state record uses `gc.finalizable` with an ordinary Titan
+  finalizer. `browserentry.lua` emits one-line weak C forwards
+  (`titan_browser_invoke`, `titan_browser_release_callable`) to the public
+  foreign functions, so the browser runtime needs no hand-written C file.
 
 The runtime SDK archive therefore contains only the four portable runtime
 objects (`titan.o`, `minicoro.o`, `titan_path.o`, and `ltitanlib.o`); no adapter

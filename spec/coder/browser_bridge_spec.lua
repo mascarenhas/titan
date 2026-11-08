@@ -21,19 +21,9 @@ local function build(info, assertions, tree, module, name, is_test, c_source)
         "-q", "--target", "browser", "--incremental", "--no-uv-bootstrap",
         "--tree", tree, "--output", output, "--exe", image }
     if c_source then
-        -- Keep this separate from the image root until its target marker exists.
-        local headers = fixture.output .. "/foreign-headers-" .. assertions
-        local interface = fixture:run({info.prefix .. "/bin/lua", "-E", "-e", init,
-            fixture.frontend .. "/titanc", "-q", "--target", "browser", "--incremental",
-            "--tree", repository, "--output", headers, "-c", "titan.browser"},
-            { TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
-        fixture.collector:collect()
-        assert.is_true(interface.ok, interface.output)
-        argv[#argv + 1] = "-I"
-        argv[#argv + 1] = headers
         argv[#argv + 1] = "--c-source"
         argv[#argv + 1] = c_source
-        argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live"
+        argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live,--wrap=titan_browser_host_state_closed"
     end
     if is_test then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = module

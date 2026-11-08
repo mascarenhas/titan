@@ -1,3 +1,4 @@
+local early_close = import "browser.early_close"
 local browser = import "browser"
 local coroutine = import "coroutine"
 local test = import "test"
@@ -10,6 +11,7 @@ local index = 0
 local parked: coroutine.Coroutine?
 local success: (function (...: browser.BrowserValue): browser.BrowserValue)?
 local failure: (function (...: browser.BrowserValue): browser.BrowserValue)?
+local state_close_marker: ({string: integer})?
 
 local record PublicationCapture
   local marker: integer
@@ -200,6 +202,30 @@ function prepare(number: integer)
     end
     return Value.is_nil()
   end
+  local pending: browser.BrowserHandle?
+  local source = browser.binding("state_close_request")
+  defer source:close()
+  local request = source:start(success, failure)
+  request:cancel()
+  early_close.set_finalizer(function()
+    local handle = pending
+    handle:close()
+    handle:close()
+    request:close()
+    request:close()
+    ffi.titan_bridge_test_earlier_cleanup(index)
+    browser.binding("state_close_handle") -- Must raise after record invalidation.
+  end)
+  local marker: {string: integer} = {}
+  gc.finalizable<|value|>(marker, function(_: value)
+    local handle = browser.binding("state_close_handle")
+    handle:close()
+    pending = browser.binding("state_close_handle")
+    local observer = browser.binding("state_close_observe")
+    defer observer:close()
+    observer:call(Value.is_integer(index))
+  end)
+  state_close_marker = marker
   local target = browser.binding("publish")
   defer target:close()
   target:call(Value.is_string("independent_" .. number),
@@ -221,8 +247,8 @@ function prepare(number: integer)
         rejected = true
       end
       test.assert(rejected, "independent close admitted an asynchronous request")
-      -- Intentionally leave newly created close-phase slots to the earliest
-      -- registry, because Lua suppresses their reachability finalizers here.
+      -- Leave close-phase slots to the state record; Lua suppresses their
+      -- reachability finalizers here.
       observer:call(Value.is_integer(index),
                     Value.is_boolean(rejected),
                     Value.is_handle(item))

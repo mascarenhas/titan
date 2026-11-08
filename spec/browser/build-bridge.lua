@@ -33,16 +33,6 @@ local function write(file, bytes)
   assert(handle:close())
 end
 
--- The C fixture consumes the compiler-owned foreign interface, not hand-written
--- mangled declarations or a header assumed to exist in another build tree.
-local headers = path.join(output, "foreign-headers")
-local interface = process.capture({prefix .. "/bin/titanc", "-q", "--incremental",
-  "--target", "browser", "--tree", repository, "--output", headers,
-  "-c", "titan.browser"}, {env = {TITAN_ROOT=prefix, TITAN_TARGET="", TITAN_PATH_0_6="",
-    TITAN_EXTRA_CPPFLAGS="", TITAN_EXTRA_CFLAGS="", TITAN_EXTRA_LDFLAGS=""}})
-io.stdout:write(interface.output or interface.diagnostic or ""); io.stdout:flush()
-assert(interface.ok, "bridge foreign interface build failed: " .. tostring(interface.status))
-
 for _, assertions in ipairs({2, 0}) do
   local root = path.join(output, "assertions-" .. assertions)
   mkdir(root)
@@ -65,13 +55,11 @@ require("titan-compiler.driver").browser_link_options = {purpose=%q, assertions=
       "--no-uv-bootstrap", "--tree", target.tree,
       "--output", path.join(root, "objects", target.name), "--exe", image}
     if target.source then
-      argv[#argv + 1] = "-I"
-      argv[#argv + 1] = headers
       argv[#argv + 1] = "--c-source"
       argv[#argv + 1] = target.source
-      -- The native fixture wraps titan_browser_host_identity_live to inject GC.
+      -- The native fixture injects GC and observes final state invalidation.
       -- Initializer-failure images have no C helper and stay unwrapped.
-      argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live"
+      argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live,--wrap=titan_browser_host_state_closed"
     end
     if target.testing then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = target.owner

@@ -3,6 +3,24 @@
 #include <emscripten.h>
 #include <titan/browser.h>
 
+/* Fault injection and close-order observers are fixture-only JS boundaries. */
+EM_JS(void *, gate_test_state_record, (void *state), {
+  for (var record of Module['titanBrowserBridge'].stateRecords.values()) {
+    if (HEAPU32[record >>> 2] === state) return record;
+  }
+  return 0;
+});
+
+EM_JS(void, titan_bridge_test_earlier_cleanup, (int index), {
+  var observe = Module['titanBrowserBridge'].options.bindings.__titanEarlierCleanup;
+  if (observe) observe(index);
+});
+
+EM_JS(void, gate_test_state_closed, (uint32_t token), {
+  var observe = Module['titanBrowserBridge'].options.bindings.__titanStateClosed;
+  if (observe) observe(token);
+});
+
 /* Test-owned controls deliberately go only to an explicit fixture binding;
  * generated images never expose the raw Module/factory in their public API. */
 EM_JS(void, gate_test_publish, (), {

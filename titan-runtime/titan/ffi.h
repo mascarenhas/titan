@@ -282,6 +282,5 @@ static inline ptrdiff_t lmacro_get_errfunc(lua_State *L) { return L->errfunc; }
 static inline void lmacro_set_errfunc(lua_State *L, ptrdiff_t old) { L->errfunc = old; }
 static inline ptrdiff_t lmacro_savestack_top(lua_State *L) { return savestack(L, L->top.p - 1); }
 static inline void *lmacro_unconst(const void *p) { return (void *)p; }
-static inline void *lmacro_cfunc_key(lua_CFunction f) { return titan_cast_func(void *, f); }
 
 #endif

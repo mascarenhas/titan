@@ -288,10 +288,9 @@ tests (`lmacro_ttype`, `lmacro_ttypetag`, `lmacro_ttisLclosure`,
 `lmacro_luaC_barrierback`, whose untyped object casts to `GCObject *` rather
 than through `obj2gco`, which reads the object's tag under `-DLUAI_ASSERT`).
 Other bridges access internal fields of incomplete structs
-(`lmacro_get_errfunc`, `lmacro_set_errfunc`), remove `const` for native
-deallocation (`lmacro_unconst`), or convert a function pointer to a private
-lightuserdata registry key (`lmacro_cfunc_key`). These are narrow support for
-trusted standard-library foreign functions, not general function-like-macro
+(`lmacro_get_errfunc`, `lmacro_set_errfunc`) or remove `const` for native
+deallocation (`lmacro_unconst`). These are narrow support for trusted
+standard-library foreign functions, not general function-like-macro
 inference. Add a one-expression bridge here for such an unsupported operation
 rather than inferring a function-like macro.
 

@@ -2096,10 +2096,10 @@ state-allocation status. The installed
 [`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout) defines the five
 promised export signatures, the shared struct layouts, and the JS imports.
 
-Initialization creates the owner Lua state and attaches its state record (when
-`titan.browser` is linked), then enters the image initializer under the shared
-protected gateway. Main
-runs once on that initialized state and leaves it live. Each contained C entry
+Initialization creates the owner Lua state and enters the image initializer
+under the shared protected gateway. `titan.browser` initializes and publishes
+its module-owned state record in ordinary dependency order, when linked.
+Main runs once on that initialized state and leaves it live. Each contained C entry
 receives a nonzero unsigned 64-bit operation id, echoes it with its expected
 operation kind in exactly one completion, and returns only an admission code.
 The loader waits for both completion and physical promised-entry retirement.
@@ -2110,19 +2110,23 @@ worker constructs the normal string Array and calls `main(args)`, or the
 existing registered bootstrap hook when enabled. Its low 32 result bits have
 the documented signed application-status interpretation.
 
-Lua-running workers reserve stack space nonraisingly, save/restore the exact
-top, install `errorhandler`, and run under `lua_pcall`. Error conversion has a
+The launcher uses the fresh owner's preallocated stack; Lua C-function worker
+entries receive `LUA_MINSTACK` slots. Saved stack heights bracket the pushed
+handler, worker, context and results under `lua_pcall`. Error conversion has a
 separate protected report without recapturing the original trace. Completion
 copies rooted byte results, messages, and traces before the stack is restored,
 so no separate native copy has to outlive the state.
 
 Disposal holds the same execution owner while closing the state directly,
-never by a pcall on the state being freed. The registry invalidates last,
-after coroutine cleanup and finalizers. A warning callback installed before
-user initialization sends finalizer warnings to stderr. Both libc streams are
-flushed, preserving an earlier application error; the loader owns final copied
-stream drainage. Scope defers run when main returns or raises; state
-finalizers run at explicit disposal.
+never by a pcall on the state being freed. The module-owned browser record
+invalidates its state exactly once at its natural finalization point, after
+finalizers of values created after `titan.browser` initialized. An earlier
+finalizer can therefore see an invalidated state: close and release are inert,
+and binding calls raise a Lua finalizer warning on stderr. The state keeps
+`luaL_newstate`'s warning callback. Both libc streams are flushed, preserving
+an earlier application error; the loader owns final copied stream drainage.
+Scope defers run when main returns or raises; state finalizers run at explicit
+disposal.
 
 `driver.browser_entrypoint_contents` supplies the separate initializer and
 main workers: open libraries, install the Titan searcher/preloads and require

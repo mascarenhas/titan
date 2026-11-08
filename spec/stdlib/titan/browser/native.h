@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <titan/browser.h>
 void gate_test_publish(void);
+void titan_bridge_test_earlier_cleanup(int index);
 TValue titan_bridge_test_new_state(lua_State *L, int index);
 void titan_bridge_test_close_state(lua_State *L, TValue owner);
 void *titan_bridge_test_detach_state(lua_State *L, TValue owner);
