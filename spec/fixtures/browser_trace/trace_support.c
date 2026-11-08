@@ -374,8 +374,8 @@ int trace_fixture_allocation(lua_State *parent, int nested) {
     valid = valid && outer && strlen(outer) > (size_t)LUAL_BUFFERSIZE &&
       trace_fixture_count_frame_lines(outer, ": in trace_cases.buffer_capture") == 1 &&
       trace_fixture_count_frame_lines(outer, ": in trace_cases.buffer_outer") == 1 &&
-      parent_runner_frame(outer, 109, ": in titan_test_runner_ℳ_run_test_27_titan") &&
-      parent_runner_frame(outer, 189, ": in titan_test_runner_ℳ_main_titan") &&
+      parent_runner_frame(outer, 113, ": in titan_test_runner_ℳ_run_test_28_titan") &&
+      parent_runner_frame(outer, 239, ": in titan_test_runner_ℳ_main_titan") &&
       !strstr(outer, "(native Titan frames unavailable:");
     if (outer) trace_fixture_emit("nested_outer", outer);
     lua_pop(state, 1);

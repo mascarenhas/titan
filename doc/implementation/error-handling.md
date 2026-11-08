@@ -966,13 +966,15 @@ from silently loading stale build artifacts.
   byte-identical native codegen, Node unit tests for the V8/SpiderMonkey/JSC
   stack parsers, `Error` descriptor preservation, lookup validation, and
   compiled `lifecycle.c`/`filter.c` C-merge boundaries, and the end-to-end
-  browser trace gate (36 native cases in `trace_cases` plus `trace_uncaught`,
-  staged as 76 positive and 8 `degradedCases` manifest rows across
-  `assertions-2` and `assertions-0`: direct and `.browser.titan` contributor
-  locations, mixed Lua/Titan merge order, catchable `C stack overflow` past the
-  browser C-call limit, pin/rethrow/clear, coroutine append
-  across yield/resume, degraded/capture-failed/truncated markers, held-storage
-  nested capture, and merge `LUA_ERRMEM` guard recovery) across Node, Chromium,
+  browser trace gate (46 native cases in `trace_cases` plus the
+  `trace_uncaught` and `trace_async` programs, staged as 98 positive and 8
+  `degradedCases` manifest rows across `assertions-2` and `assertions-0`:
+  direct and `.browser.titan` contributor locations, mixed Lua/Titan merge
+  order, catchable `C stack overflow` past the browser C-call limit,
+  pin/rethrow/clear, coroutine append across yield/resume, post-suspension
+  traces in `async` Tasks and across entries, a failed async bootstrap `main`
+  Task, degraded/capture-failed/truncated markers, held-storage nested
+  capture, and merge `LUA_ERRMEM` guard recovery) across Node, Chromium,
   Firefox, and WebKit. `spec/coder/browser_images_spec.lua` also builds
   `titan.c` natively with `TITAN_NO_LIBBACKTRACE` and checks the fallback's
   capture depth, frame order, count, and 255-frame truncation against an

@@ -1009,7 +1009,13 @@ unified Titan/Lua contract as native builds:
 * `titan.backtrace()`, the `traceback` local in a `catch` block, bare `raise`
   re-throwing, caught-trace clearing, and coroutine trace propagation and
   append behave as on native hosts, including across coroutine yields and
-  resumptions.
+  resumptions. The same holds for `async` Tasks that the driver resumes after
+  it hands control back to the page (a turn, or a wait for a timer, a
+  JavaScript request or a channel), for handlers and calls that the driver
+  delivers, for `async.Error:raise()` handoffs and for cleanups during
+  cancellation. The `trace` that JavaScript receives for a failed Task-form
+  call, a failed call or notification that a drive delivered, or a failed
+  `main` Task has these same frames.
 
 **Optimized frames.** As in a native production build, a `production` image
 has no frame for a function that the optimizer inlined into its caller. A
