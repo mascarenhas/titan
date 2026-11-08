@@ -633,7 +633,11 @@ function running(): Task<|value, value|>
   local runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
   local task? = runtime.current_task
-  if task == nil then raise "asynchronous operation must be called from an async Task" end
+  -- A synchronous callback sees no current Task, even when it runs inside a
+  -- binding that a Task called: it cannot wait or switch.
+  if task == nil or ffi.titan_no_switch(L) ~= 0 then
+    raise "asynchronous operation must be called from an async Task"
+  end
   return task
 end
 
@@ -867,9 +871,10 @@ local function settle(wait: Wait, kind: integer, payload: value)
     raise "stale async operation settlement"
   end
   local registering = wait.phase == WAIT_REGISTERING
-  -- A finalizer cannot resume the waiting Task either: queue its delivery.
+  -- A finalizer cannot resume the waiting Task either, nor can a synchronous
+  -- callback: queue its delivery.
   local deferred = not registering and (wait.task.runtime.current_task ~= nil or
-    ffi.titan_in_finalizer(L) ~= 0)
+    ffi.titan_in_finalizer(L) ~= 0 or ffi.titan_no_switch(L) ~= 0)
   -- A peer Task cannot advance this Task inline. Accept its deferred wake
   -- before committing settlement: synchronous scheduling failure leaves the
   -- exact pending wait available for retry or shutdown. The wake cannot run
@@ -901,11 +906,12 @@ local function fatal(wait: Wait, error: value, trace: string)
     fail_runtime(runtime, error, trace)
     return
   end
-  -- A finalizer cannot resume the Task (coroutine resumes raise there).
+  -- A finalizer cannot resume the Task (coroutine resumes raise there), nor
+  -- can a synchronous callback outside a Task.
   -- Queue delivery of this exact operation's fatal outcome, like a peer
   -- Task's settlement: the wake is accepted before the nonallocating commit,
   -- and the Wait is retired and released at delivery.
-  if ffi.titan_in_finalizer(L) ~= 0 then
+  if ffi.titan_in_finalizer(L) ~= 0 or ffi.titan_no_switch(L) ~= 0 then
     fail_runtime(runtime, error, trace)
     enqueue_ready(task, READY_DELIVER, wait)
     wait.request = nil

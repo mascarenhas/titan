@@ -244,6 +244,14 @@ local function resume_from_finalizer()
   raise "cannot resume a coroutine from a finalizer"
 end
 
+-- A synchronous C callback runs where no stack can suspend (a browser
+-- callback under JSPI), so an explicit switch raises instead of switching.
+local function check_switch(operation: string)
+  if ffi.titan_no_switch(L) ~= 0 then
+    raise "coroutine." .. operation .. " is unavailable in a synchronous callback"
+  end
+end
+
 --- Resume a suspended coroutine and return its yielded or final value.
 -- @param arg Value delivered to the coroutine.
 -- @param tag Resumer tag; nil uses the stored default tag.
@@ -251,6 +259,7 @@ end
 -- @usage coroutines.md
 function Coroutine:resume(arg: value, tag: value): value
   if ffi.titan_in_finalizer(L) ~= 0 then resume_from_finalizer() end
+  check_switch("resume")
   local effective = effective_tag(self.default_tag, tag)
   -- Implementation notes: doc/implementation/coroutines.md#reachability-of-a-stacked-chain
   -- `self` is an unanchored formal: this frame roots the resumed coroutine
@@ -271,6 +280,7 @@ end
 -- @usage coroutines.md
 function Coroutine:error(err: value, tag: value): value
   if ffi.titan_in_finalizer(L) ~= 0 then resume_from_finalizer() end
+  check_switch("error")
   local effective = effective_tag(self.default_tag, tag)
   local resumed: Coroutine? = self -- see Coroutine:resume
   local co = self.handle
@@ -290,6 +300,7 @@ end
 function Coroutine:transfer(payload: value, tag: value,
                             inject_error: boolean): (boolean, value, string?)
   if ffi.titan_in_finalizer(L) ~= 0 then resume_from_finalizer() end
+  check_switch("transfer")
   local effective = effective_tag(self.default_tag, tag)
   local resumed: Coroutine? = self -- see Coroutine:resume
   local co = self.handle
@@ -338,6 +349,7 @@ function yield(arg: value, tag: value): value
   if ffi.titan_in_finalizer(L) ~= 0 then
     raise "cannot yield from a finalizer"
   end
+  check_switch("yield")
   local co = runtime.current_co
   push_transfer(co, TRANSFER_VALUE, arg)
   return yield_result_or_raise(co, tag)
@@ -351,7 +363,7 @@ function is_yieldable(tag: value): boolean
   if tag == nil then
     missing_yield_tag()
   end
-  if ffi.titan_in_finalizer(L) ~= 0 then
+  if ffi.titan_in_finalizer(L) ~= 0 or ffi.titan_no_switch(L) ~= 0 then
     return false
   end
   local ctag: foreign TValue = tag
@@ -404,6 +416,14 @@ local function coro_gc(handle: value)
     end
     if handler and ffi.mco_status(handler) == ffi.MCO_SUSPENDED and
         coroutine_started(handler) then
+      if ffi.titan_no_switch(L) ~= 0 then
+        -- Unwinding would switch stacks, which a synchronous callback cannot.
+        -- Setting the metatable again marks the owner for finalization once
+        -- more: the next collection outside a callback, or lua_close, unwinds
+        -- the chain.
+        ffi.luaL_setmetatable(L, "titan.coroutine")
+        return
+      end
       unwind_chain(handler)
     end
     status = ffi.mco_status(co)
@@ -483,6 +503,9 @@ end
 -- @return Exact public Coroutine handle, or nil outside Titan coroutine execution.
 -- @usage coroutines.md
 function running(): Coroutine?
+  -- A synchronous callback sees no current coroutine, even when it runs
+  -- inside a binding that a coroutine called.
+  if ffi.titan_no_switch(L) ~= 0 then return nil end
   local coro = ffi.mco_get_user_data(runtime.current_co) as foreign *Udata
   if coro then
     local top = ffi.lua_gettop(L)
