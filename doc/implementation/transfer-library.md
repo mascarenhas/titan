@@ -7,7 +7,7 @@ copying and disposal (`encode_message`, `decode_message`, `copy_message`,
 `transfer_load_module`, custom-record hook selection, closure capture conversion,
 and destination reconstruction. The packet and resource-table layouts are in
 `titan/transfer_native.h`; the `async.Receiver` slot header
-(`titan/async_receiver_native.h`) is separate. `titan.transfer` imports
+(`titan/async/async_receiver_native.h`) is separate. `titan.transfer` imports
 `reflect`, `protobuf` and `gc`, and does not depend on `uv`, `async` or
 `thread`. `async.TransferValue` is a transparent alias.
 
@@ -457,8 +457,8 @@ library](browser-target.md#the-browser-standard-library) because its imports
 `iteration`) reach no native-only module. It is delivered for same-instance
 data behavior: encoding, decoding, copying, and discarding packets, the scoped
 resource table, and `transfer_load_module` through the image's static preload
-table. The packet consumers (`thread`, `async`, and `lua`) are not available
-there, so no packet leaves the instance. Nominal encoding and decoding use
+table. The packet consumers (`thread`, `lua`, and `async`'s Receivers) are not
+available there, so no packet leaves the instance. Nominal encoding and decoding use
 protobuf's shared [nesting limit](protobuf-library.md#nesting-limit): 127
 accepted record levels on both native and browser targets.
 
@@ -478,5 +478,5 @@ paths, that the accepted chain round-trips, that encoding and decoding one
 level deeper raise the protobuf nesting error, and that a rejected packet is
 still consumed; the same 127/128 boundary holds on both targets. The Task,
 thread, and independent-state transfer cases stay native,
-in the `async.tests` contributors `transfer_payload_test.titan` and
-`transfer_scope_reuse_test.titan` and in `thread.tests`.
+in the `async.tests` contributors `transfer_payload_test.native.titan` and
+`transfer_scope_reuse_test.native.titan` and in `thread.tests`.

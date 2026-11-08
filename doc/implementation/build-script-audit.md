@@ -249,8 +249,10 @@ browser SDK, emsdk, Node 26+ with JSPI and a JSPI-capable headless Chromium.
 Its root check rejects an empty or duplicate `TITAN_STDLIB_BROWSER_TEST_ROOTS`
 inventory before build setup. Under `BROWSER_SDK_ENV`, with `TITAN_PATH_0_6`
 pointing at the installed browser SDK, one installed
-`titanc -q --target browser --test --incremental` invocation compiles every
-root with `--c-source spec/fixtures/browser_runtime/close.c`.
+`titanc -q --target browser --test --incremental --no-uv-bootstrap`
+invocation compiles every root with
+`--c-source spec/fixtures/browser_runtime/close.c`; like the native
+aggregate, the owners drive their own `async` Runtimes.
 
 The image is `images/stdlib.mjs` with its `.wasm` and `.wasm.map`, below
 `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`); compiler
@@ -381,7 +383,7 @@ with `+` and `RECURSIVE_WRAPPER_GUARD`, and delegates native parallelism to
 | `install` (no `INST_PREFIX`) | `install-compiler`, `publish-titan-sdk`, `publish-stdlib`. |
 | `install` (LuaRocks pass) | `install-compiler`, `install-rock-tools`, `stage-rock-payload`. |
 | `binary-rock` | `luarocks pack titan`, renaming the `.all.rock` result to the suffix from `luarocks config arch`. |
-| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, publish the browser standard provider `titan.a` (the thirteen [core stdlib](browser-target.md#the-browser-standard-library) roots with LPegLabel as the only `-X` payload and include path) through ordinary library mode, certify its dependency closure, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; with `make lua-browser` and `make titan-stdlib-browser-test`, one of the three Titan targets that need emsdk. |
+| `browser-sdk` | After the compiler is installed, build the browser runtime and LPegLabel archives through the installed `titanc --target browser -c --incremental --print-c-objects`, stage the loader and runner assets, publish the browser standard provider `titan.a` (the [browser stdlib](browser-target.md#the-browser-standard-library) roots in `BROWSER_STDLIB_ROOTS`, with LPegLabel as the only `-X` payload and include path) through ordinary library mode, certify its dependency closure, and write `sdk-digests` last, all into `$(TITAN_INSTALL_TREE)/lib/titan-browser/<ver>/` ([The browser SDK](browser-target.md#the-browser-sdk)). Unix only; with `make lua-browser` and `make titan-stdlib-browser-test`, one of the three Titan targets that need emsdk. |
 
 Standard-library installation copies the built provider pair, licenses, and
 optional symbols. SDK installation also publishes Titan's own `LICENSE` at

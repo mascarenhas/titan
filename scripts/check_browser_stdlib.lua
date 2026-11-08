@@ -24,11 +24,12 @@ elseif action == "inventory" then
     assert(first and second, "inventory requires native and browser providers")
     local native = need(staticmetadata.scan_archive(first))
     local browser = need(staticmetadata.scan_archive(second))
-    local rows, modules = checks.inventory(native, browser)
+    local rows, modules, recorded = checks.inventory(native, browser)
     need(rows, modules)
-    local text = checks.member_table(rows)
+    local text = checks.member_table(rows, recorded)
     if third then need(strategy:write_file(third, text)) else io.write(text) end
-    print(string.format("Browser stdlib inventory: %d modules, %d public members, no differences.", modules, #rows))
+    print(string.format("Browser stdlib inventory: %d modules, %d public members, %d recorded differences, no others.",
+        modules, #rows, #recorded))
 elseif action == "output" then
     assert(first and second and third and #arguments == 4,
         "output requires roots file, filter and stdout log")

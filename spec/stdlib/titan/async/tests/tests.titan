@@ -1,8 +1,10 @@
--- Native channel, combinator, Task, and foreign-work behavior for titan.async.
+-- Channel, combinator, Task, subscription and Runtime behavior for
+-- titan.async. Plain contributors run on every target; *.native.titan
+-- contributors hold the cases that need libuv, Receivers, foreign work,
+-- external waits or other native-only facilities.
 local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"
-local uv = import "uv"
 local timer = import "timer"
 local support = import "async.test_support.titan"
 local task_support = import "support.async.titan"

@@ -22,9 +22,17 @@ local cases = {
   "test_recursion_beyond_ten", "test_recursion_near_capacity",
   "test_recursion_capacity_truncation", "test_mixed_recursion_headroom",
   "test_mixed_recursion_overflow", "test_pcall_recursion_overflow",
+  -- Post-suspension traces in async Tasks (titan#334, tasks.browser.titan).
+  "test_task_trace_after_turn", "test_task_trace_after_timer",
+  "test_task_trace_after_request", "test_task_trace_after_channel",
+  "test_delivered_handler_trace", "test_task_error_raise_handoff",
+  "test_task_rethrow_and_fresh_raise_across_await", "test_task_coroutine_append",
+  "test_task_cleanup_trace_during_cancellation",
 }
+-- Cases with their own rows rather than one row per case; the gate's
+-- JavaScript calls the targets test_task_entry_targets publishes.
 local special = { "test_host_capture_ready", "test_host_capture_failed", "test_host_lua_fallback_capacity",
-  "test_degraded_map", "test_degraded_lua_capacity", "test_missing_symbols" }
+  "test_degraded_map", "test_degraded_lua_capacity", "test_missing_symbols", "test_task_entry_targets" }
 local function mkdir(directory)
   if lfs.attributes(directory, "mode") == "directory" then return end
   local parent = path.dirname(directory)
@@ -64,7 +72,10 @@ for _, assertions in ipairs({2, 0}) do
   local root = path.join(output, "assertions-" .. assertions)
   mkdir(root)
   for _, target in ipairs({{name="runtime", owner="trace_cases", testing=true},
-                           {name="uncaught", owner="trace_uncaught"}}) do
+                           {name="uncaught", owner="trace_uncaught"},
+                           -- Without --no-uv-bootstrap: main runs as the async
+                           -- bootstrap Task (titan#334, D14).
+                           {name="async", owner="trace_async", bootstrap=true}}) do
     -- LUA_INIT runs the *installed* compiler's ordinary CLI. The profile is
     -- the existing test-profile control; the link purpose distinguishes a
     -- test image from a program image. Discovery checks checked cases, never
@@ -91,8 +102,9 @@ end
       target.testing and "test" or "program", assertions, table.concat(expected, ",")))
     local image = path.join(root, target.name .. ".mjs")
     local argv = {prefix .. "/bin/titanc", "-q", "--incremental", "--target", "browser",
-      "--no-uv-bootstrap", "--tree", fixture, "--output", path.join(root, "objects"),
+      "--tree", fixture, "--output", path.join(root, "objects"),
       "--exe", image, "--c-source", path.join(fixture, "trace_support.c")}
+    if not target.bootstrap then argv[#argv + 1] = "--no-uv-bootstrap" end
     if target.testing then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = target.owner
     local result = process.capture(argv, {env = {
@@ -137,6 +149,15 @@ for _, assertions in ipairs({2, 0}) do
     table.insert(uncaught, 2, "trace_uncaught.uncaught_leaf")
   end
   row(manifest.cases, mode .. ".uncaught", mode .. "/uncaught.mjs", nil, 0, "failed", 1, uncaught, true)
+  -- A main Task that fails after a resume: stderr has only the uncaught-Task
+  -- report, whose trace run() also returns (D14).
+  local async_report = {"uncaught error in async Task: trace-async-original\nstack traceback:\n"}
+  if profile == "validation" then
+    async_report[#async_report + 1] = "trace_async.async_middle"
+    async_report[#async_report + 1] = "trace_async.async_leaf"
+  end
+  row(manifest.cases, mode .. ".async_uncaught", mode .. "/async.mjs", nil, 0, "failed", 1, async_report, true)
+  row(manifest.cases, mode .. ".task_entries", mode .. "/runtime.mjs", "test_task_entry_targets", 1)
   local map = read(path.join(base, "runtime.wasm.map"))
   assert(map:find('"x_titan_image"%s*:%s*"%x%x'), "runtime map lacks Titan image identity")
   for _, variant in ipairs({"missing", "malformed", "wrong_image", "extension_free", "missing_symbols"}) do

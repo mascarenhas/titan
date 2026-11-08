@@ -1,0 +1,5 @@
+-- The browser has no native timers. Its JavaScript timers are counted by the
+-- async scheduler gate, whose harness observes them.
+local function native_timers(): integer?
+  return nil
+end

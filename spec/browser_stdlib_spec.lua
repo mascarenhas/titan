@@ -28,7 +28,7 @@ plan:
         return strategy:run(argv, {stderr_to_stdout = true})
     end
 
-    it("keeps all fifteen portable owners in the single-image root inventory", function()
+    it("keeps all seventeen portable owners in the single-image root inventory", function()
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local result = root_plan()
         assert.is_true(result.ok, result.output)
@@ -37,9 +37,11 @@ plan:
             assert.is_nil(roots[root], root)
             roots[root], count = true, count + 1
         end
-        assert.equal(15, count, "the audited browser inventory has 15 owners; change this deliberately")
+        assert.equal(17, count, "the audited browser inventory has 17 owners; change this deliberately")
         assert.is_true(roots["transfer.tests"])
         assert.is_true(roots["protobuf.tests"])
+        assert.is_true(roots["async.tests"])
+        assert.is_true(roots["timer.tests"])
     end)
 
     it("rejects empty and duplicate owner inventories before build setup", function()
@@ -246,6 +248,51 @@ plan:
         local rows, err = checks.inventory(provider("left"), provider("right"))
         assert.is_nil(rows)
         assert.truthy(err:find("semantic declaration differs", 1, true), err)
+    end)
+
+    it("accepts exactly the recorded omissions and opaque records", function()
+        local function provider(browser)
+            local members = {
+                types.ModuleMember("fixture", "shared", types.Function({}, {}, false, nil, nil), {}),
+                types.ModuleMember("fixture", "Opaque", types.Record("fixture.Opaque", {}, {},
+                    browser and {} or { close = types.Method("fixture.Opaque", "close", {}, {}, nil, nil, {}) },
+                    browser and 1 or 3), nil),
+            }
+            if not browser then
+                members[#members + 1] = types.ModuleMember("fixture", "gone", types.Function({}, {}, false, nil, nil), {})
+                members[#members + 1] = types.ModuleMember("fixture", "Gone", types.Record("fixture.Gone", {}, {},
+                    { run = types.Method("fixture.Gone", "run", {}, {}, nil, nil, {}) }, 1), nil)
+            end
+            return { key_order = { "fixture" },
+                entries = { fixture = { types = types.serialize(types.Module("fixture", members, {})) } } }
+        end
+        local function recorded(omitted, opaque)
+            return { fixture = { omitted = omitted, opaque = opaque } }
+        end
+        local rows, modules, differences = checks.inventory(provider(false), provider(true),
+            recorded({ "gone", "Gone", "Opaque:close" }, { "Opaque" }))
+        assert.equal(1, modules)
+        assert.same({ "shared" }, { rows[1].name, rows[2] })
+        local kinds = {}
+        for _, row in ipairs(differences) do kinds[#kinds + 1] = row.name .. "=" .. row.difference end
+        assert.same({ "gone=omitted", "Gone=omitted", "Opaque:close=omitted", "Opaque=opaque" }, kinds)
+        local text = checks.member_table(rows, differences)
+        assert.truthy(text:find("## Recorded browser differences", 1, true), text)
+        assert.truthy(text:find("| `fixture` | `Opaque` | opaque | record |", 1, true), text)
+        for _, case in ipairs({
+            { recorded({ "Gone", "Opaque:close" }, { "Opaque" }), "fixture.gone: native=" },
+            { recorded({ "gone", "Gone", "Opaque:close", "shared" }, { "Opaque" }),
+                "fixture.shared: recorded omission is in the browser interface" },
+            { recorded({ "gone", "Gone", "Opaque:close", "absent" }, { "Opaque" }),
+                "fixture.absent: recorded omission is not a native member" },
+            { recorded({ "gone", "Gone", "Opaque:close" }, { "shared" }),
+                "fixture.shared: recorded opaque record is not the same record in both interfaces" },
+            { recorded({ "gone", "Gone", "Opaque:close" }, {}), "(semantic declaration differs)" },
+        }) do
+            local ok, err = checks.inventory(provider(false), provider(true), case[1])
+            assert.is_nil(ok)
+            assert.truthy(err:find(case[2], 1, true), err)
+        end
     end)
 
     it("prints the per-owner audit and failure counts before rejecting a failed run", function()

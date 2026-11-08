@@ -18,5 +18,6 @@ int titan_bridge_test_finish_response_failure(lua_State *L);
 void titan_bridge_test_arm_alloc_failure(lua_State *L, int after);
 void titan_bridge_test_arm_alloc_failure_count(lua_State *L, int after, int max_failures);
 int titan_bridge_test_finish_alloc_failure(lua_State *L);
+void titan_bridge_test_fail_malloc(int after);
 TValue titan_bridge_test_make_error_object(lua_State *L, int mode);
 #endif

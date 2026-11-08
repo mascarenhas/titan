@@ -974,6 +974,7 @@ jobs:
             spec/coder/browser_stdlib_closure_spec.lua
             spec/coder/browser_entry_gate_spec.lua
             spec/coder/browser_bridge_spec.lua
+            spec/coder/browser_scheduler_spec.lua
             spec/coder/browser_stdlib_gate_spec.lua
             spec/coder/browser_fixtures_spec.lua
             spec/minicoro_spec.lua
@@ -1249,13 +1250,21 @@ jobs:
             for (const assertions of [2, 0]) {
               const images = [`assertions-${assertions}/bridge.mjs`,
                 `assertions-${assertions}/initializer-failure.mjs`];
+              // Page tests run their own image and need a page's DOM: the html5
+              // click counter's synchronous C callbacks and the driver's
+              // responsiveness while Tasks wait and yield.
+              const pages = engine === 'node' ? [] : [
+                ['counter.mjs', 0, 'COUNTER {"verdict":"PASS"'],
+                ['responsive.mjs', 0, 'RESPONSIVE {"verdict":"PASS"']];
               for (const [script, status, marker] of [
                 ['integration.mjs', 0, '"verdict":"PASS"'],
                 ['unhandled.mjs', 74, 'bridge unhandled opaque promise'],
                 ['unhandled-result.mjs', 74, 'bridge unhandled reverse result'],
-                ['poison-retirement.mjs', 70, 'poison-retirement-complete']]) {
+                ['poison-retirement.mjs', 70, 'poison-retirement-complete'],
+                ...pages]) {
                 console.log(`BRIDGE-RUN engine=${engine} assertions=${assertions} script=${script}`);
-                const args = status === 0 ? images : images.slice(0, 1);
+                const args = pages.some(([page]) => page === script) ? [`assertions-${assertions}/${script}`]
+                  : status === 0 ? images : images.slice(0, 1);
                 const result = spawnSync(process.execPath,
                   [...runner, resolve(root, script), '--', ...args],
                   {encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 320000});

@@ -147,7 +147,7 @@ export class Monitor {
             } else this.fail(message.category, message.reason, originalTrap);
         } else if (message.type === "complete") {
             if (this.completion) return this.fail("harness", "duplicate completion");
-            if (!["returned", "failed", "host-test"].includes(message.kind) || !Number.isInteger(message.status) ||
+            if (!["returned", "failed", "exited", "host-test"].includes(message.kind) || !Number.isInteger(message.status) ||
                 message.status < -2147483648 || message.status > 2147483647 ||
                 (message.kind === "host-test" && ![0, 1].includes(message.status))) {
                 return this.fail("harness", "malformed completion control");

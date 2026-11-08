@@ -1,0 +1,3 @@
+-- Imports that only the native contributors of async.tests use. The folder is
+-- one module, so each import is declared once for all of them.
+local uv = import "uv"

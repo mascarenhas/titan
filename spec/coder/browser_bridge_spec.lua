@@ -5,7 +5,7 @@ local toolchain = require "spec.support.browser_toolchain"
 local repository = assert(lfs.currentdir())
 local fixture
 
-local function build(info, assertions, tree, module, name, is_test, c_source)
+local function build(info, assertions, tree, module, name, is_test, c_source, wrap)
     local output = fixture.output .. "/assertions-" .. assertions
     files.mkdir(output)
     -- The ordinary fixture collector instruments the copied compiler child;
@@ -23,6 +23,8 @@ local function build(info, assertions, tree, module, name, is_test, c_source)
     if c_source then
         argv[#argv + 1] = "--c-source"
         argv[#argv + 1] = c_source
+    end
+    if wrap then
         argv[#argv + 1] = "--ldflag=-Wl,--wrap=titan_browser_host_identity_live,--wrap=titan_browser_host_state_closed"
     end
     if is_test then argv[#argv + 1] = "--test" end
@@ -56,13 +58,17 @@ describe("persistent core JavaScript bridge", function()
             if not info then pending(why) return end
             fixture = files.new()
             for _, name in ipairs({ "bindings.mjs", "integration.mjs", "unhandled.mjs",
-                    "unhandled-result.mjs", "poison-retirement.mjs" }) do
+                    "unhandled-result.mjs", "poison-retirement.mjs", "counter.mjs", "responsive.mjs" }) do
                 files.copy(repository .. "/spec/fixtures/browser_bridge/" .. name, fixture.source .. "/" .. name)
             end
             local native = build(info, assertions, repository .. "/spec/stdlib/titan", "browser.tests", "bridge", true,
-                repository .. "/spec/fixtures/browser_bridge/independent_states.c")
+                repository .. "/spec/fixtures/browser_bridge/independent_states.c", true)
             local failure = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "initializer_failure", "initializer-failure", false)
+            local counter = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
+                "counter", "counter", false, repository .. "/spec/fixtures/browser_bridge/counter.c")
+            local responsive = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
+                "responsive", "responsive", false)
             for _, engine in ipairs({ "node", "chromium" }) do
                 local result = execute(info, engine, "integration.mjs", { native, failure })
                 io.stdout:write(string.format("\nBRIDGE assertions=%d engine=%s node=%s chrome=%s\n%s\n",
@@ -81,6 +87,19 @@ describe("persistent core JavaScript bridge", function()
                     assert.is_false(failed.ok, failed.output)
                     assert.equal(negative[2], failed.status, failed.output)
                     assert.truthy(failed.output:find(negative[3], 1, true), failed.output)
+                end
+                if engine == "chromium" then
+                    -- Page tests: the html5 click counter's synchronous C callbacks
+                    -- and the async driver's responsiveness (titan#334) need a page.
+                    for _, page in ipairs({ { "counter.mjs", counter, "COUNTER" },
+                                            { "responsive.mjs", responsive, "RESPONSIVE" } }) do
+                        local result = execute(info, engine, page[1], { page[2] })
+                        io.stdout:write(string.format("\n%s assertions=%d engine=%s\n%s\n",
+                            page[3], assertions, engine, result.output))
+                        io.stdout:flush()
+                        assert.is_true(result.ok, result.output)
+                        assert.truthy(result.output:find(page[3] .. ' {"verdict":"PASS"', 1, true), result.output)
+                    end
                 end
             end
         end)

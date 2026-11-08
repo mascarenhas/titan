@@ -1,0 +1,102 @@
+-- Scheduler gate for the browser async driver (titan#334): Tasks across real
+-- relinquish points, host requests, timers and listeners, failure and cleanup
+-- order, nested coroutines, child-state ownership, and the entries that the
+-- JavaScript harness drives. spec/coder/browser_scheduler_spec.lua builds this
+-- owner with spec/fixtures/browser_scheduler/scheduler_child.c and runs it
+-- through spec/fixtures/browser_scheduler/scheduler.mjs, which supplies the
+-- bindings used here.
+local test = import "test"
+local async = import "async"
+local browser = import "browser"
+local coroutine = import "coroutine"
+local gc = import "gc"
+local runtime_test = import "support.runtime.titan"
+local string = import "string"
+local task_support = import "support.async.titan"
+local timer = import "timer"
+local _ = import "async.browser_child"
+foreign import "child.h"
+
+local type Value = browser.BrowserValue
+
+local function call_binding(name: string, ...: Value): Value
+  local target = browser.binding(name)
+  defer target:close()
+  return target:call(...)
+end
+
+local function note(text: string)
+  call_binding("note", Value.is_string(text))
+end
+
+local function integer_of(item: Value): integer
+  case item
+  when is_integer(number) then return number
+  end
+  raise "expected BrowserValue.is_integer"
+end
+
+local function reason_text(reason: async.CancellationReason<|value|>?): string
+  if reason == nil then return "no reason" end
+  case reason
+  when simple(text) then return text
+  end
+  return "complex reason"
+end
+
+-- Macrotasks run by the harness's own ticker; it advances only while the drive
+-- has given the event loop back.
+local function macrotasks(): integer
+  return integer_of(call_binding("macrotasks"))
+end
+
+local function delay_value(result: async.Result<|integer, string|>): integer
+  case result
+  when success(item) then return item
+  when error(message) then raise message
+  end
+end
+
+-- Await the harness's `delay(ms, value)` request, which resolves `value` after
+-- `ms` milliseconds. A cleanup wait is shielded from cancellation.
+local function await_delay(ms: integer, value: integer, cleanup: boolean): integer
+  local source = browser.binding("delay")
+  defer source:close()
+  local request: browser.BrowserRequest? = nil
+  defer do
+    local open? = request
+    if open ~= nil then open:close() end
+  end
+  local start = function (resolve: function (integer): (), reject: function (string): (),
+      _fatal: function (value, string): ())
+    request = source:start(function (...: Value): Value
+      resolve(integer_of(...[1]))
+      return Value.is_nil()
+    end, function (...: Value): Value
+      reject("delay request failed")
+      return Value.is_nil()
+    end, Value.is_integer(ms), Value.is_integer(value))
+  end
+  if cleanup then return delay_value(async.await_cleanup<|integer, string|>(start)) end
+  return delay_value(async.await<|integer, string|>(start))
+end
+
+-- Suspend on one host request: its settlement resumes this Task, and
+-- cancelling the Task cancels the request, as browser timer sleeps do.
+local function suspend_on(name: string, ...: Value)
+  local task = async.running()
+  local token = async.ResumeToken(name)
+  local source = browser.binding(name)
+  defer source:close()
+  local wake = function (...: Value): Value
+    task:resume(token)
+    return Value.is_nil()
+  end
+  local request = source:start(wake, wake, ...)
+  defer request:close()
+  async.suspend(token, function () request:cancel() catch end)
+end
+
+do
+  publish_entries()
+end

@@ -772,7 +772,11 @@ then `luarocks.exe` on `PATH`.
 validates an existing stage: an isolated copy and a fresh Lua process check
 exact PE exports (the generated module protocols only), permitted imports,
 callable metadata against source objects, and the installed support module's
-`_executable_dir`, `_compiler_root`, and `_expand_titan_path` members. Compiler
+`_executable_dir`, `_compiler_root`, and `_expand_titan_path` members. It finds
+each module's source object through the compiler's own source selection
+(`spec/support/stdlib_objects.lua`): a folder module's object is
+`titan/<name>/<name>.o` and a flat module's `titan/<name>.o`, so splitting a
+module into a folder needs no change to the gate. Compiler
 provider publication retains its own ABI and transactional behavior;
 `compiler-publication-check` exercises that contract independently of stdlib
 installation.

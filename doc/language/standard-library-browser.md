@@ -54,6 +54,10 @@ function BrowserRequest:close()
 function BrowserError:close()
 ```
 
+The low-level [drive interface](#driver-interface-low-level) that `async`
+uses to run Tasks has its own section, and so do `BrowserPin` and the C entry
+for [synchronous C callbacks](#synchronous-c-callbacks).
+
 Values cross the boundary as `BrowserValue` in both directions, marshalled by
 runtime type without separate signature descriptors:
 
@@ -274,11 +278,13 @@ otherwise the message is `(error object is a <type> value)`. If conversion
 itself fails, the message is `error while reporting browser failure`; the
 original error's trace is retained.
 
-An immediate `instance.call()` or `drain()` attempted inside an active import
-returns a rejected `TITAN_BROWSER_REENTRY` promise. It does not throw
-synchronously into the import, and is not automatically propagated into
+An immediate `instance.call()`, `callTask()` or `drain()` attempted inside an
+active import returns a rejected `TITAN_BROWSER_REENTRY` promise. It does not
+throw synchronously into the import, and is not automatically propagated into
 Titan. Observe the rejection, enqueue a notification, or use a tracked request
-instead.
+instead. While a drive is active, a call made outside any import is queued
+for the driver rather than rejected
+([calls during a drive](browser-target.md#calls-during-a-drive)).
 
 ## Requests and listeners
 
@@ -314,9 +320,10 @@ Both methods invoke the host binding synchronously with the supplied
 
 Because callables are not signature-checked at registration time, type errors
 move from registration to call time: if `completion` or `failure` raises when
-delivered in `drain()`, that callback failure is reported through
-`onNotificationError` (`kind: "callback", operation: "drain"`). Host promise
-rejection itself is delivered to `failure`, not `onNotificationError`.
+delivered, that callback failure is reported through `onNotificationError`
+(`kind: "callback"`, with `operation: "drain"`, or the operation that contains
+the drive). Host promise rejection itself is delivered to `failure`, not
+`onNotificationError`.
 
 A start binding returns one of two explicit forms:
 
@@ -340,12 +347,353 @@ Cancelling or closing a listener from one of its callbacks also suppresses its
 remaining events in the current detached batch. A normally settled one-shot
 request still delivers its queued success or failure notification.
 
-The host explicitly calls `drain()` to deliver one detached FIFO batch.
-Imports which enqueue more work add it to the next batch. No implicit timer,
-fairness policy, async scheduler, or nested synchronous callback is supplied
-here. A released target is retired without delivery; a released queued
-argument is reported without entering Lua. Disposal first closes application
-admission, then permits only physical retirement, then closes the state.
+On an idle instance the host calls `drain()` to deliver one detached FIFO
+batch. While a drive is active, the driver delivers the owner state's queued
+notifications and request events between its turns instead, in the same FIFO
+order and at most once each; `drain()` then rejects with
+`TITAN_BROWSER_REENTRY`. Imports which enqueue more work add it to the next
+batch. A released target is retired without delivery; a released queued
+argument is reported without entering Lua.
+
+Disposal first closes application admission, then permits only physical
+retirement, then closes the state. With an active drive or an `async` Runtime
+to clean up, the owner state's settlements and listener events keep flowing
+to the cleanup until that drive ends, so cleanup that awaits host work
+started before `dispose()` receives its outcome. Cleanup cannot start new
+host work: after `dispose()`, `start` and `listen` raise a
+`browser.BrowserError` whose message is `"browser state is closing"`.
+Requests still open when the cleanup ends are cancelled then: listeners
+unregister, detachable requests retire at once, and retained requests keep
+their owner until they settle.
+
+## Reserved SDK bindings
+
+Binding names that start with `titan:` belong to the SDK: `binding(name)`
+resolves them to sources the loader owns, never to a `create({bindings})`
+entry, and `create` rejects a `bindings` key with that prefix with
+`TypeError`. An unknown `titan:` name raises like any unknown binding.
+
+| Name | Use | Behavior |
+| --- | --- | --- |
+| `titan:timeout` | `start(completion, failure, is_float(ms))` | A detachable one-shot timer: `completion` receives `is_nil()` after `ms` milliseconds. Delays beyond the host's 32-bit timer range are re-armed in chunks. `cancel` clears the host timer. A negative or non-`Number` delay makes `start` raise a `browser.BrowserError` holding a `TypeError`. |
+| `titan:interval` | `listen(tick, failure, is_float(ms))` | A listener: `tick` receives no arguments every `ms` milliseconds. A period beyond the host's 32-bit timer range repeats through chunked host timeouts, re-armed for the whole period at each tick. Unregistering clears the host timer. A non-positive or non-`Number` period makes `listen` raise a `browser.BrowserError` holding a `TypeError`. |
+| `titan:driver` | reserved | The registration point for the `async` runtime's Task entry points. Only the instance owner state's registration is used; others are ignored. |
+
+Their callbacks are ordinary queued notifications, delivered by `drain()` or
+a drive.
+
+## Driver interface (low-level)
+
+These members are the primitives of a browser drive, which the `async`
+runtime's driver uses to run Tasks. Applications use `async`; a program that
+drives the instance itself takes over the same contract.
+
+```text
+const RELINQUISH_RESUMED = 0
+const RELINQUISH_IDLE = 1
+const RELINQUISH_DISPOSING = 2
+function is_owner(): boolean
+function drive_begin()
+function drive_end(exit_code: integer?)
+function relinquish(wait: boolean): integer
+function deliver()
+function wake()
+function main_failed(message: string, trace: string)
+```
+
+- `is_owner()` is true only in the Lua state the generated launcher created
+  for the instance. A state created by C code never owns the instance.
+- `drive_begin()` starts the instance's drive. Only the owner state's main
+  thread (not a coroutine or Task) may drive, and only one drive runs at a
+  time; otherwise it raises `"browser drive requires the instance owner's main
+  thread"` or `"browser drive is already active"`. While the drive runs,
+  JavaScript calls made outside any binding or sink are queued for it.
+- `deliver()` runs the owner state's host items queued when it starts:
+  notifications, request settlements and listener events, and queued calls.
+  Each runs once, in FIFO order, outside any Task; a failure is reported
+  through `onNotificationError` (a notification) or rejects that call's
+  promise. Items queued while it runs wait for the next `deliver()`. It then
+  performs the callable releases the bridge deferred to a safe point.
+- `relinquish(wait)` gives the event loop back. It first settles the queued
+  calls whose results arrived. With `wait = false` it resumes after one host
+  macrotask (`setImmediate` in Node, a `MessageChannel` message in browsers,
+  never a clamped timer) and returns `RELINQUISH_RESUMED`. With `wait = true`
+  it returns `RELINQUISH_IDLE` at once when the state has no wake source (no
+  queued item, open request or listener, or pending wake); otherwise it
+  resumes after a wake source fires, from a macrotask, with
+  `RELINQUISH_RESUMED`. While the drive is relinquished, buffered output,
+  including C standard I/O, goes to the sinks; an immediate `RELINQUISH_IDLE`
+  leaves it buffered for the next relinquish or the end of the operation.
+  Once `dispose()` has begun, the first relinquish returns
+  `RELINQUISH_DISPOSING` after one macrotask and every later resumed
+  relinquish returns `RELINQUISH_DISPOSING`; a wait with no wake source still
+  returns `RELINQUISH_IDLE`.
+- `drive_end(exit_code)` ends the drive. A present `exit_code` latches the
+  instance as exited with its low 32 bits as a signed status: `run()`
+  reports `exited` and later entries reject `TITAN_BROWSER_EXITED`
+  ([loader exit](browser-target.md#exit)).
+- `deliver()`, `relinquish()` and `drive_end()` require the driving owner's
+  main thread outside a delivered handler and raise `"browser delivery …"`,
+  `"browser relinquish …"` or `"browser drive_end requires the driving
+  owner's main thread outside delivery"` otherwise.
+- `wake()` wakes a relinquished drive. It is harmless from any state, thread
+  or handler, and without a drive.
+- `main_failed(message, trace)` is how the `async` bootstrap reports a failed
+  main Task, whose report the drive already wrote: `run()` resolves
+  `{kind: "failed", status: 1}` with these message and trace bytes, unless the
+  entry itself failed or a drive latched an exit. Only the owner state may call
+  it (`"browser main_failed requires the instance owner state"`), and only a
+  pending `run()` records it.
+
+A minimal drive that waits until a delivered callback reports completion:
+
+```titan
+local browser = import "browser"
+
+function drive_until(done: function (): boolean)
+  browser.drive_begin()
+  defer browser.drive_end(nil)
+  while not done() do
+    browser.deliver()
+    if done() or browser.relinquish(true) ~= browser.RELINQUISH_RESUMED then return end
+  end
+end
+```
+
+## Synchronous C callbacks
+
+An Emscripten API that calls C from JavaScript, such as an
+`emscripten/html5.h` event callback, runs that C function synchronously, with
+JavaScript frames between it and any promising entry. Titan code runs in such
+a callback through a pin and the C entry `titan_browser_call_sync`:
+
+```text
+record BrowserPin
+function pin(callback: function (...: BrowserValue): BrowserValue): BrowserPin
+function BrowserPin:identity(): (integer, integer, integer)
+function BrowserPin:close()
+```
+
+```c
+/* titan/browser.h */
+typedef struct titan_browser_identity {
+  uint32_t state, slot, generation;
+} titan_browser_identity;
+
+typedef struct titan_browser_sync_result {   /* the caller zero-initializes it */
+  uint32_t status;                           /* the returned titan_browser_status */
+  uint32_t reserved;
+  titan_browser_value value;                 /* TITAN_BROWSER_OK: the one result */
+  const unsigned char *message;              /* a failure's message, malloc-owned */
+  uint32_t message_length;
+  const unsigned char *trace;                /* TITAN_BROWSER_TITAN_ERROR: raw trace, malloc-owned */
+  uint32_t trace_length;
+} titan_browser_sync_result;
+
+int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t argc,
+    const titan_browser_value *args, titan_browser_sync_result *result);
+```
+
+- `pin(fn)` holds `fn` for C: it adds one hold to the function's callable pin,
+  the slot its JavaScript wrapper also uses. `identity()` returns the
+  `(state, slot, generation)` that C copies into a `titan_browser_identity`
+  for the callback's user data. `close()` drops the hold; closing again does
+  nothing, and an unreachable pin closes itself. `pin` raises `"browser state
+  is closing"` while its state closes.
+- Keep the pin and the identity's storage reachable, for example an `owned
+  *titan_browser_identity` in a module variable, until the C callback is
+  unregistered. Unregister it before closing the pin or releasing anything else
+  the callback reaches.
+- While a `BrowserPin` of the owner state is open, a drive's `relinquish(true)`
+  waits instead of returning `RELINQUISH_IDLE`, because a callback may still
+  come. An `async` Task waiting for something only a callback provides keeps
+  its Runtime waiting while the pin is open.
+- `titan_browser_call_sync` runs the pinned function with `argc` arguments read
+  from `args` and decoded by runtime type, as for any call into Titan. HANDLE
+  arguments are borrowed: C keeps each slot it passes, and the function
+  receives its own `BrowserHandle`, whose `close()` or collection never
+  releases C's slot. It stores the status it returns in `result->status`:
+  - `TITAN_BROWSER_OK`: `result->value` is the one result. A STRING or BYTES
+    result has `malloc`'d bytes. A HANDLE result stays valid while its
+    `BrowserHandle` is open, and a CALLABLE result while a `BrowserPin` or a
+    live JavaScript wrapper holds the function.
+  - `TITAN_BROWSER_TITAN_ERROR`: the function raised; `message` and `trace`
+    hold its message and raw traceback. The instance stays usable. A stale
+    identity, whose function no pin or wrapper holds any longer, fails this
+    way with `"browser callable is released"`.
+  - `TITAN_BROWSER_STATE`: refused without running Titan, with a `message`. The
+    pin's state is closed or closing, the instance is disposing, exited or
+    poisoned, or callbacks nest too deeply.
+  - `TITAN_BROWSER_MEMORY`: the callback could not start, or a C-heap copy of
+    its result, message or trace, or of a refusal's message, could not be
+    allocated. It carries no message, trace or value.
+
+  After any status, the caller frees `message`, `trace` and a STRING or BYTES
+  result's bytes with `free`.
+- A callback may run whenever the instance is open: idle, while a drive waits
+  or between its turns, and nested in a binding that Titan code called,
+  including from a Task. It runs on a Lua thread of its own (one per nesting
+  depth, reused), so a parked drive's frames stay untouched.
+- A callback cannot suspend. Inside it, `coroutine.resume`, `coroutine.yield`
+  and the other explicit switches raise, `coroutine.running()` is `nil`, every
+  `async` operation behaves as outside a Task, and resumptions it causes wait
+  for the drive ([coroutines](coroutines.md#in-a-synchronous-callback),
+  [async](async-io.md#synchronous-callbacks)).
+- JavaScript that a callback reaches follows the loader's
+  [entry rules](browser-target.md#synchronous-c-callbacks). A binding that the
+  callback's Titan code calls cannot start another entry: `call()`,
+  `callTask()`, `drain()` and `run()` reject `TITAN_BROWSER_REENTRY` there.
+  JavaScript outside any binding, such as the code that dispatched the event,
+  can, and the entry starts after the callback returns. `notify()` queues, and
+  `dispose()` finishes closing after the callback returns.
+- A callback whose frames an exception unwinds, so that
+  `titan_browser_call_sync` never returns, poisons the instance with
+  `TITAN_BROWSER_PROTOCOL`, `"a synchronous C callback ended by an
+  exception"`. Authored C that switches stacks inside the callback by calling a
+  suspending import does that: the engine throws to the callback's JavaScript
+  caller (V8 throws `WebAssembly.SuspendError`).
+- A callback's C frames use the linear stack of the code it interrupted: the
+  main C stack or, for a callback nested in a binding that a Task called, that
+  Task's 256 KiB stack ([limits](browser-target.md#limits)). Deep recursion
+  there fails Emscripten's stack check, which poisons the instance.
+
+For example, this program counts clicks on two buttons. A C helper, compiled
+with `--c-source counter.c`, registers each button's `html5.h` click callback
+with a pinned handler's identity as its user data:
+
+```c
+/* counter.h */
+#include <titan/browser.h>
+
+int counter_listen(const char *selector, const titan_browser_identity *identity);
+int counter_unlisten(const char *selector);
+
+/* counter.c */
+#include <emscripten/html5.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "counter.h"
+
+static bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity) {
+  titan_browser_sync_result result = {0};
+  if (titan_browser_call_sync(identity, 0, NULL, &result) != TITAN_BROWSER_OK && result.message)
+    fprintf(stderr, "click handler failed: %.*s\n", (int)result.message_length, (const char *)result.message);
+  free((void *)result.message);
+  free((void *)result.trace);
+  return false;
+}
+
+int counter_listen(const char *selector, const titan_browser_identity *identity) {
+  return emscripten_set_click_callback(selector, (void *)identity, false, counter_click);
+}
+
+int counter_unlisten(const char *selector) {
+  return emscripten_set_click_callback(selector, NULL, false, NULL);
+}
+```
+
+The Titan module keeps each listener's pin and identity until `stop`
+unregisters it, and shows the count through the page's `show` binding. A
+listener is rooted in `listeners` before C receives its identity, so nothing
+can fail after the registration and leave C a dangling pointer, and a failure
+after a registration unregisters what was registered:
+
+```titan
+local browser = import "browser"
+foreign import "counter.h"
+
+local type Value = browser.BrowserValue
+
+local count = 0
+
+local function show()
+  local label = browser.binding("show")
+  defer label:close()
+  label:call(Value.is_integer(count))
+end
+
+local function increment(...: Value): Value
+  count = count + 1
+  show()
+  return Value.is_nil()
+end
+
+local function reset(...: Value): Value
+  count = 0
+  show()
+  return Value.is_nil()
+end
+
+local record Listener
+  selector: string
+  pin: browser.BrowserPin
+  identity: owned *titan_browser_identity
+end
+
+local listeners: {Listener} = {}
+
+local function listen(selector: string, handler: function (...: Value): Value)
+  local pin = browser.pin(handler)
+  local identity: owned *titan_browser_identity = foreign titan_browser_identity.new()
+  local state, slot, generation = pin:identity()
+  identity.state = state
+  identity.slot = slot
+  identity.generation = generation
+  local index = #listeners + 1
+  listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
+  if ffi.counter_listen(selector, identity) ~= 0 then
+    listeners[index] = nil
+    pin:close()
+    raise "cannot listen for clicks on " .. selector
+  end
+end
+
+local function stop(...: Value): Value
+  for index = #listeners, 1, -1 do
+    local listener = listeners[index]
+    ffi.counter_unlisten(listener.selector)
+    listener.pin:close()
+    listeners[index] = nil
+  end
+  return Value.is_nil()
+end
+
+function main(_args: {string}): integer
+  listen("#increment", increment)
+  listen("#reset", reset)
+  show()
+  local ready = browser.binding("ready")
+  defer ready:close()
+  ready:call(Value.is_callable(stop))
+  return 0
+catch
+  stop()
+  raise
+end
+```
+
+The page supplies `show` and `ready`. Each click runs its handler before
+`click()` returns, so the label is already updated. The page calls `stop`
+before disposal, which frees what the callbacks reach:
+
+```javascript
+import create from './counter.mjs';
+
+const label = document.querySelector('#count');
+let stop;
+const instance = create({bindings: {
+  show: count => { label.textContent = String(count); },
+  ready: callable => { stop = callable; },
+}});
+try {
+  await instance.run([]);
+  document.querySelector('#increment').click();
+  console.log(label.textContent); // "1"
+} finally {
+  if (stop) await instance.call(stop);
+  await instance.dispose();
+}
+```
 
 ## State close
 
@@ -372,9 +720,13 @@ an invented failed application call.
 ## C SDK
 
 The installed `titan/browser.h` declares the checked wasm32 scalar/slot,
-response, completion, and state-registry boundary. Its API requires the same
-instance execution owner as the generated gateway; it is not a raw
-`lua_State *` application gateway. C-created states load `titan.browser`
+response, completion, and state-registry boundary. Apart from
+`titan_browser_call_sync`, which runs whenever the instance is open
+([synchronous C callbacks](#synchronous-c-callbacks)), its API requires the
+same instance execution owner as the generated gateway; it is not a raw
+`lua_State *` application gateway. `titan_browser_callback_enter` and
+`titan_browser_callback_leave` bracket a standard library's hand-written
+trampolines and are not an application API. C-created states load `titan.browser`
 normally; there is no attachment operation or special bootstrap order.
 `titan.lua` is native-only, so no standard-library API creates independent
 browser states. See [the bridge implementation](../implementation/browser-bridge.md)

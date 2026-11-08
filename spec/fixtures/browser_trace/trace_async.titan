@@ -1,0 +1,18 @@
+-- A program whose main runs as the async bootstrap Task (titan#334): it
+-- relinquishes a turn and then fails, so its trace is taken after a resume.
+-- run() reports the Task's message and trace; stderr has the uncaught-Task report.
+local timer = import "timer"
+
+local function async_leaf()
+  raise "trace-async-original"
+end
+
+local function async_middle()
+  async_leaf()
+end
+
+function main(_args: {string}): integer
+  timer.yield()
+  async_middle()
+  return 0
+end

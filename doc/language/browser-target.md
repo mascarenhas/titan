@@ -258,7 +258,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | --- | --- |
 | `libtitan.a` | the browser runtime archive |
 | `libtitan-lpeglabel.a` | the PEG engine, built for the browser; `make browser-sdk` links it into `titan.a` |
-| `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen shared modules, browser-only `titan.browser`, and the PEG engine |
+| `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen shared modules, `async` with a browser driver, `timer` on JavaScript timers, browser-only `titan.browser`, and the PEG engine |
 | `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
@@ -516,6 +516,18 @@ library's source, from the SDK directory or the browser Titan path described
 `--c-source FILE` compiles C helpers with the same Emscripten settings.
 `--incremental` reuses unchanged objects exactly as for native builds.
 
+### C helpers and Emscripten APIs
+
+`--c-source FILE` adds a C helper to a program or test image, compiled with
+the same Emscripten settings. Emscripten's C APIs (`emscripten.h`,
+`emscripten/html5.h`, and the rest) and `EM_JS` or `EM_ASM` blocks belong in
+such helpers, behind a small header with ordinary C types that Titan imports.
+Titan's C importer does not handle `emscripten/html5.h`
+([#380](https://github.com/mascarenhas/titan/issues/380)). An API that
+calls back into C runs the callback synchronously; to run Titan code there,
+pin a handler and call `titan_browser_call_sync`
+([synchronous C callbacks](standard-library-browser.md#synchronous-c-callbacks)).
+
 ## The loader API
 
 Every generated program or test ES module exports one default
@@ -550,11 +562,22 @@ The instance has the following methods:
   bytes and status 1, but no Titan trace because no Titan code ran.
 * `run(args = [])` initializes when needed, then invokes `main` once. Strings
   in `args` are UTF-8 encoded; `Uint8Array` arguments are copied byte for byte.
-  It resolves `{kind, status, bytes}`, with `"returned"` or `"failed"`, a
-  signed 32-bit status, and copied error bytes (empty for a returned run).
-  Ordinary initializer or main failure is a failed/status1 result, not a
-  fatal-engine rejection. A prior initializer failure is reused without a
-  second report.
+  It resolves `{kind, status, bytes, trace}`, with `"returned"`, `"failed"` or
+  `"exited"`, a signed 32-bit status, and copied error and raw trace bytes
+  (empty unless failed). An ordinary initializer or main failure is a
+  failed/status1 result, not a fatal-engine rejection. A program that links
+  `async` runs `main` as a Task through the async bootstrap: a failed main
+  Task prints its uncaught Task report on stderr, as natively, and `run()`
+  resolves `"failed"` with status 1 and that Task's message and trace. The
+  standalone report (the program name, the message and a traceback on stderr)
+  is printed only for initializer failures, failures of a `main` called
+  directly (without `async`, or built with `--no-uv-bootstrap`), and fatal
+  Runtime failures that `async.loop()` re-raises. A cancelled main Task
+  resolves `"returned"` with status 1, the status a native program exits
+  with. A prior initializer failure is reused without a second report.
+  `"exited"` reports the status a drive latched with [exit](#exit). An entry
+  that failed stays `"failed"` even when its drive latched an exit; otherwise
+  the exit latch wins over a main Task failure that the bootstrap reported.
 * `call(callable, ...args)` invokes a callable wrapper that Titan exported
   through [`BrowserValue.is_callable`](standard-library-browser.md#callables-and-pinning)
   and passed to JavaScript. It requires successful initialization and remains
@@ -567,7 +590,13 @@ The instance has the following methods:
   adopt it, while internal operation admission and `dispose()` depend only on
   the Wasm entry's completion.
   Byte and string arguments are snapshotted synchronously before either method
-  returns its promise; later mutations do not change that call.
+  returns its promise; later mutations do not change that call. During a
+  drive, a call made outside any binding or sink is queued
+  ([calls during a drive](#calls-during-a-drive)).
+* `callTask(callable, args = [], {signal} = {})` runs the callable as an
+  `async` Task and resolves to its single decoded result
+  ([Task-form calls](#task-form-calls)). `callable.callTask(args, options)` is
+  the wrapper form.
 * `notify(callable, ...args)` synchronously snapshots and enqueues one
   notification without entering Wasm. It copies byte arrays, UTF-8-encodes
   well-formed strings, and keeps raw JavaScript values by reference. It does
@@ -575,23 +604,31 @@ The instance has the following methods:
   instance state, a foreign or released wrapper, an out-of-range `BigInt`, or
   an ill-formed UTF-16 string throws immediately; after disposal begins,
   `notify` does nothing. Logically released arguments are rejected again before
-  delivery; released or closed targets retire without delivery.
+  delivery; released or closed targets retire without delivery. During a drive
+  the driver delivers the owner state's notifications; a notification for
+  another Lua state throws `TITAN_BROWSER_REENTRY` then.
 * `drain()` requires successful initialization and delivers one detached FIFO
   batch. A handler error is reported as a `"callback"` event through
   `onNotificationError`, with its captured Titan data, and later
   notifications still run. Notifications enqueued by handlers belong to the
-  next batch. There is no implicit loop or scheduling policy.
+  next batch. `drain()` itself installs no loop or scheduling policy; while a
+  drive runs it rejects with `TITAN_BROWSER_REENTRY`.
 * `dispose()` closes application admission immediately and returns one stable
   promise. An accepted native entry physically retires before Lua closes.
   Requests and queued work are retired according to their ownership contract.
   Main's lexical defers have already run at return; state finalizers run here.
   All state-owned handles become invalid. A disposed instance never revives.
+  With an `async` Runtime, Task cleanup runs first
+  ([disposal with a running Runtime](#disposal-with-a-running-runtime)).
 
-`initialize`, `run`, `call`, `drain`, and `dispose` always return promises,
-including admission errors. Calling `call` or `drain` before initialization
-does not initialize implicitly. A callable wrapper also has `call(...args)`
-and idempotent, synchronous logical `release()`. Wrappers belong to one
-instance and one Lua state; another instance cannot use them.
+`initialize`, `run`, `call`, `callTask`, `drain`, and `dispose` always return
+promises, including admission errors. Calling `call` or `drain` before
+initialization does not initialize implicitly. A callable wrapper also has
+`call(...args)`, `callTask(args, options)` and idempotent, synchronous logical
+`release()`. Wrappers belong to one instance and one Lua state; another
+instance cannot use them. After an exit, `call`, `callTask`, `drain` and
+`run` reject and `notify` throws `TITAN_BROWSER_EXITED`; `dispose` stays
+available.
 
 **Exclusive entry.** One logical operation owns the instance from argument
 validation through all protected C entries and output flush. Promise
@@ -600,7 +637,9 @@ admission. Immediate reverse calls during a binding or output sink reject
 with `TITAN_BROWSER_REENTRY`; they do not synchronously throw into the
 binding's `try/catch`. Observe the rejected promise, or use `notify`. A sink
 never runs from a Wasm import or an internal JSPI handoff. Independent
-instances can progress concurrently.
+instances can progress concurrently. A general entry never starts
+synchronously inside the method that requested it: the operation begins in a
+later microtask, after the caller's synchronous code returns.
 
 Options are:
 
@@ -609,16 +648,17 @@ Options are:
 | `stdout`, `stderr` | Functions receiving copied `Uint8Array` chunks, which they may keep. A sink returns `undefined` or a promise; anything else is a sink failure. An absent sink discards its stream. |
 | `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
 | `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
-| `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. |
+| `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. Names starting with `titan:` are [reserved for the SDK](standard-library-browser.md#reserved-sdk-bindings) and rejected with `TypeError`. |
 | `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks and secondary or callerless cleanup failures. A host Promise rejection instead goes to its mandatory failure callable. |
 | `requestDrain()` | A coalesced announcement of queued work at a complete logical safe point; the application chooses when to call and await `drain()`. |
 | `onEngineFailure({kind, cause})` | Observes a terminal engine failure after the instance has been poisoned; `kind` is `"abort"`, `"trap"`, or `"protocol"`. Observer exceptions cannot replace that failure. |
 
 The notification-error event's `kind` is `"callback"` or `"cleanup"`.
-`operation` identifies `initialize`, `run`, `call`, `drain`, `dispose`, or
-`notify`; a failed work announcement uses `requestDrain`, and callerless
-physical callable retirement uses `release_callable`. In-operation cleanup
-uses the containing public operation's name. Each failure is reported once,
+`operation` identifies `initialize`, `run`, `call`, `callTask`, `drain`,
+`dispose`, or `notify`; a failed work announcement uses `requestDrain`, and
+callerless physical callable retirement uses `release_callable`. In-operation
+cleanup, and a notification delivered by a drive, use the containing public
+operation's name. Each failure is reported once,
 and a physical release failure is not retried: state close remains its
 retirement fallback. Without an observer, the loader logs each event with
 `console.error`. An observer that throws cannot replace a captured or
@@ -626,9 +666,14 @@ terminal failure; the current operation, or else the next one that would
 otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 
 **Output.** Each stream has one FIFO and at most one actual sink invocation in
-flight. The loader flushes only after all entries in the containing operation,
-including unterminated C-stdio tails. Later chunks continue after a sink
-throws or rejects. An otherwise successful operation rejects with its first
+flight. The loader flushes after all entries in the containing operation,
+including unterminated C-stdio tails, and during a drive also whenever the
+drive relinquishes the event loop, without waiting there for a pending sink
+call: output queued behind that call reaches the sink once the call settles,
+if the drive is still relinquished, and otherwise at its next relinquish or
+the operation's end. A sink call starts only then, never while the drive
+runs. Later chunks continue after a sink throws or rejects. An otherwise
+successful operation rejects with its first
 cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
 message and trace remain primary while deliverable output and deferred
@@ -687,8 +732,10 @@ where there is one, the original error as `cause`:
 | `code` | When |
 | --- | --- |
 | `TITAN_BROWSER_TITAN` | An ordinary Titan error from initialization or a call. `message` decodes the error text; `bytes` holds the exact copied message bytes, `trace` the original raw trace bytes (absent for a required-trace refusal), and `status` the completion status. A later valid call on the intact instance still works. |
-| `TITAN_BROWSER_REENTRY` | A general operation while another is active, including an immediate call from a binding or sink. |
-| `TITAN_BROWSER_STATE` | `call`, `drain`, or `notify` before successful initialization, a second `run`, or an exhausted operation identity. |
+| `TITAN_BROWSER_REENTRY` | A general operation while another is active, including an immediate call from a binding or sink, and work for another Lua state while the owner drives. |
+| `TITAN_BROWSER_STATE` | `call`, `drain`, or `notify` before successful initialization, a second `run`, an exhausted operation identity, or a Task-form call without an `async` Runtime or for another Lua state. |
+| `TITAN_BROWSER_CANCELLED` | A Task-form call whose Task was cancelled; `reason` holds the `AbortSignal`'s reason when the signal cancelled it, otherwise the cancellation reason text. |
+| `TITAN_BROWSER_EXITED` | Work after a drive exited, or an entry whose drive exited; `status` holds the latched exit status. |
 | `TITAN_BROWSER_DISPOSED` | Work after disposal began, an operation that disposal interrupted before it failed, or buffered output that disposal could not deliver. |
 | `TITAN_BROWSER_HANDLE` | A released or foreign callable wrapper, or a handle of a closed Lua state. |
 | `TITAN_BROWSER_SINK` | An output sink threw, rejected, or returned something other than `undefined` or a promise; `stream` names the stream. |
@@ -715,6 +762,106 @@ The test runner reports observed aborts and traps even if a test catches their
 operation rejection. A completion-protocol error that the test explicitly
 handles stays local to its poisoned instance; if the operation rejection
 escapes, the runner reports a harness failure.
+
+### Calls during a drive
+
+While a drive runs (an `async` Runtime driving its Tasks), the instance keeps
+its execution owner for the whole drive, and JavaScript runs either
+synchronously inside a binding or sink that Titan invoked, or anywhere else:
+in other browser tasks while the driver is relinquished, and in microtasks
+between its internal coroutine hops. Admission depends only on that
+distinction:
+
+| JavaScript action during a drive | Inside a binding or sink | Anywhere else |
+| --- | --- | --- |
+| `call()` | rejects `TITAN_BROWSER_REENTRY` | queued; the driver invokes it at its next turn, outside any Task, and its promise settles at the following relinquish point |
+| `callTask()` | rejects `TITAN_BROWSER_REENTRY` | queued Task start |
+| `notify()` | queued for the driver | queued for the driver |
+| `drain()`, `run()` | reject `TITAN_BROWSER_REENTRY` | reject `TITAN_BROWSER_REENTRY` |
+| `dispose()` | closes admission and wakes the drive | closes admission and wakes the drive |
+
+Calls and notifications for a Lua state other than the instance owner are
+refused during a drive with `TITAN_BROWSER_REENTRY` (`"calls for another Lua
+state are not admitted while the owner drives"`). A queued call behaves like
+an idle call, except that starting another drive inside it fails. A call
+queued too late for the drive's last turn runs on its own once the drive's
+operation ends. Request settlements, listener events and notifications for
+the owner state wake a relinquished drive; they never enter Wasm themselves.
+Buffered output reaches the sinks while the drive is relinquished, before the
+drive ends, and a slow or forever-pending sink never stalls the drive.
+
+### Task-form calls
+
+`instance.callTask(callable, args = [], {signal} = {})` and
+`callable.callTask(args = [], {signal} = {})` start the callable as an `async`
+Task with the marshalled arguments and resolve to its single decoded result,
+boxed like `call` so a returned thenable never holds admission. On an idle
+instance the call drives the Runtime until its Tasks finish; during a drive it
+is queued and joins that drive. Admission is as for `call`.
+
+- An image whose owner state has no `async` Runtime rejects with
+  `TITAN_BROWSER_STATE` (`"browser image has no async Runtime"`), and a
+  callable of another Lua state with `TITAN_BROWSER_STATE` too.
+- A Task that fails rejects with `TITAN_BROWSER_TITAN` carrying its `bytes`,
+  `trace` and `status: 1`.
+- An `AbortSignal` that is already aborted rejects with
+  `TITAN_BROWSER_CANCELLED` (`reason`: the signal's reason) without starting a
+  Task. Aborting it later cancels the Task with `String(signal.reason)` as
+  the cancellation reason; the promise then rejects with
+  `TITAN_BROWSER_CANCELLED` and the signal's original `reason`. A Task
+  cancelled any other way rejects `TITAN_BROWSER_CANCELLED` with the reason
+  text, or `TITAN_BROWSER_DISPOSED` during disposal.
+- A Task-form call that started or joined a drive that exits rejects with
+  `TITAN_BROWSER_EXITED`.
+
+### Exit
+
+A drive that ends with an exit status (Titan's `request_exit`) latches the
+instance as exited. The entry that drove reports it: `run()` resolves
+`{kind: "exited", status, bytes}` with empty bytes, and a `call()` or
+`callTask()` whose drive exited rejects with `TITAN_BROWSER_EXITED` (`status`
+holds the latched status). An entry that failed reports its failure even
+when the latch was set during its drive. In every case the latch stands:
+later `call`, `callTask`, `drain` and `run` reject and `notify` throws
+`TITAN_BROWSER_EXITED`. `dispose()` stays available and still runs the
+state's finalizers. Exiting never touches the page or the Node process.
+
+### Disposal with a running Runtime
+
+`dispose()` closes application admission at once: queued calls and Task-form
+calls reject with `TITAN_BROWSER_DISPOSED` (a failure they already captured
+stays primary), and queued application notifications are dropped. A drive
+that is running is woken and cancels its Tasks with `"instance disposed"`;
+with no drive, the `async` Runtime's own shutdown runs that cleanup. While it
+runs, settlements and events of host work started before `dispose()` keep
+reaching the owner state, so cleanup that awaits that work completes; new
+host work fails with `"browser state is closing"`. Requests still open when
+the cleanup ends are then cancelled, retained ones settle, and the state
+closes. An exited instance has no Runtime left to clean up.
+
+### Synchronous C callbacks
+
+An Emscripten API that calls a C callback, such as an `html5.h` event
+handler, calls it synchronously. A callback that runs Titan code through
+`titan_browser_call_sync` is not an entry and does not wait for one: it runs
+whenever the instance is open, during a drive or not, and is refused once
+`dispose()` has begun, after an exit, or after an engine failure. JavaScript
+reached from a callback follows the usual rules: a binding that the callback's
+Titan code calls counts as inside a binding, and the JavaScript that dispatched
+the callback does not. On an idle instance:
+
+| JavaScript during a synchronous callback | Result |
+| --- | --- |
+| `call()`, `callTask()`, `drain()` or `run()` in a binding the callback's Titan code called | rejects `TITAN_BROWSER_REENTRY` |
+| the same outside any binding, for example in the code that dispatched the event | admitted; the entry starts after the callback returns |
+| `notify()` | queued for a later `drain()` or drive |
+| `dispose()` | closes admission at once; the state closes after the callback returns |
+
+A callback that ends by an exception instead of returning, including
+authored C that suspends inside it, poisons the instance (`onEngineFailure`
+kind `"protocol"`). The [JavaScript bindings
+chapter](standard-library-browser.md#synchronous-c-callbacks) describes the
+Titan and C side.
 
 ## Testing with `titan-browser-run`
 
@@ -777,7 +924,7 @@ honors only for the root user.
 
 | Exit | Meaning |
 | --- | --- |
-| `status & 255` | The program completed with `status`: the value `main` returned, or 1 after an uncaught error. A test image exits 0 when every selected case passed, 1 when a case failed, and 2 for invalid test options. |
+| `status & 255` | The program completed with `status`: the value `main` returned, 1 after an uncaught error, or the status of an [exit](#exit). A test image exits 0 when every selected case passed, 1 when a case failed, and 2 for invalid test options. |
 | 2 | Invalid `titan-browser-run` options; usage is printed. |
 | 70 | The engine aborted before the program completed. |
 | 71 | WebAssembly trapped before the program completed. |
@@ -803,7 +950,7 @@ titan-browser-run: headless Chromium not found; set TITAN_CHROME to a Chrome exe
 
 ## Status and output semantics
 
-A browser program completes in one of two ways:
+A browser program completes in one of three ways:
 
 * **Returned.** `main` returned an integer. The status is its low 32 bits read
   as a signed 32-bit integer, so `-1` stays `-1` and `4294967297` becomes `1`.
@@ -816,6 +963,11 @@ A browser program completes in one of two ways:
   required trace map that is missing or invalid also fails initialization
   with status 1: stderr receives `degraded browser trace: <reason>`, without
   a traceback because no Titan code ran.
+* **Exited.** A drive ended with an exit status (`request_exit` in an `async`
+  Task) and `main` then completed without an error. The status is the exit
+  status's low 32 bits read as a signed 32-bit integer, and the runner exits
+  with `status & 255`. An error that escapes `main` after the exit still
+  makes the program failed.
 
 Main completes when it returns or fails, and its output (including an
 unterminated last line) is delivered then. The state and callable handles
@@ -857,13 +1009,22 @@ unified Titan/Lua contract as native builds:
 * `titan.backtrace()`, the `traceback` local in a `catch` block, bare `raise`
   re-throwing, caught-trace clearing, and coroutine trace propagation and
   append behave as on native hosts, including across coroutine yields and
-  resumptions.
+  resumptions. The same holds for `async` Tasks that the driver resumes after
+  it hands control back to the page (a turn, or a wait for a timer, a
+  JavaScript request or a channel), for handlers and calls that the driver
+  delivers, for `async.Error:raise()` handoffs and for cleanups during
+  cancellation. The `trace` that JavaScript receives for a failed Task-form
+  call, a failed call or notification that a drive delivered, or a failed
+  `main` Task has these same frames.
 
 **Optimized frames.** As in a native production build, a `production` image
 has no frame for a function that the optimizer inlined into its caller. A
 frame that does appear is still exact, and an inlined function's line is
-reported under the name of the function that absorbed it. Titan's own trace
-fixture `trace_uncaught.titan` shows the difference:
+reported under the name of the function that absorbed it, even when the
+inlined code is the runtime's own C: a production `async` program's traces
+can show `minicoro.c:66: in titan.coroutine.coro_entry_trampoline` where
+`validation` shows `coroutine.titan:44`. Titan's own trace fixture
+`trace_uncaught.titan` shows the difference:
 
 ```titan
 foreign import "stdio.h"
@@ -975,9 +1136,10 @@ bare `raise`.
 
 ## The browser standard library
 
-The browser SDK's `titan.a` holds fourteen standard modules that need no libuv
+The browser SDK's `titan.a` holds sixteen standard modules that need no libuv
 or other native-only library: thirteen shared modules compiled from the same
-sources as the native standard library, plus the browser-only `titan.browser`:
+sources as the native standard library, `async` with a browser driver, `timer`
+on the SDK's JavaScript timers, and the browser-only `titan.browser`:
 
 | Module | Contents |
 | --- | --- |
@@ -994,6 +1156,8 @@ sources as the native standard library, plus the browser-only `titan.browser`:
 | [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
 | [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
 | [`test`](standard-library-test.md) | the test API and the native test runner |
+| [`async`](async-io.md#the-browser-target) | Tasks, cancellation, waits, channels, combinators, and subscriptions, driven between browser macrotasks |
+| [`timer`](standard-library-timer.md#on-the-browser) | Task delays, yields, and coalescing tickers on JavaScript timers |
 | [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
 
 Each of the thirteen shared modules is complete. Every public declaration, including the raw
@@ -1006,15 +1170,33 @@ raises an "unavailable" error or returns a stand-in value. `transfer` encodes
 and decodes packets within one instance; the modules that carry packets to
 another Lua state or thread are not available.
 
+`async` shares its scheduling core with the native module and keeps its
+public signatures, except for the members that the browser cannot provide:
+the libuv-typed `current_loop`, `await_with`, `await_cleanup_with`,
+`await_cancellable_with`, and `await_cancellable`; the native-only
+`run_foreign`, `prepare_native_retirement`, `wait_external_native`,
+`prepare_external_wait`, `wait_external`, `wait_external_cleanup`,
+`version`, `receiver`, `send`, and `Receiver`. `ExternalWait` remains only
+as an opaque type with no constructor and no methods, so the `final_wait`
+of `run_with_cleanup` can only be `nil`. Its Tasks run only in the
+instance's owner state, under a drive that gives the page one macrotask
+between turns ([async on the browser target](async-io.md#the-browser-target)).
+
+`timer` keeps its complete interface. Its sleeps and tickers run on
+JavaScript timers, with the browser's clamping and throttling; `sleep(0)` is
+a yield that arms no timer ([timer on the browser](standard-library-timer.md#on-the-browser)).
+
 `titan.browser` is the reviewed target-only exception. It has no native
 placeholder and imports only the portable core. Its byte/scalar ABI is not the
-native transfer packet format; schema copies and a browser async scheduler are
-separate features. See [JavaScript bindings](standard-library-browser.md).
+native transfer packet format, and schema copies are a separate feature. It
+provides the [drive primitives](standard-library-browser.md#driver-interface-low-level)
+that the `async` driver uses but schedules nothing itself. See
+[JavaScript bindings](standard-library-browser.md).
 
 ### Modules that are not available
 
-The other standard modules are absent from the browser target: `uv`, `async`,
-`timer`, `io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
+The other standard modules are absent from the browser target: `uv`,
+`io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
 `sqlite3`, and `thread`. Each of them uses libuv, directly or through its
 imports. Their sources exist only as native variants (such as
 `titan/os.native.titan`; see [target source
@@ -1031,7 +1213,7 @@ There are no stand-in modules for them, and their folder contributors, such as
 of them cannot be built into a browser test image either; keep such cases in
 native-only test modules.
 
-Browser versions of `async`, `timer`, `io`, `os`, `lua`, and `http` are
+Browser versions of `io`, `os`, `lua`, and `http` are
 planned, and `fs` is planned together with a browser file system. Until then,
 a program writes its output through C's `stdio.h`, as in [the first web
 page](#a-first-web-page), and the test runner reports through it too. Either
@@ -1202,14 +1384,14 @@ record observed startup memory for a large-function program and a complete
 standard-library test image on Linux and macOS; they are measurements, not a
 startup-memory guarantee.
 
-A browser program runs with these fixed sizes:
+A browser program runs with these sizes:
 
 | Resource | Size | When it runs out |
 | --- | --- | --- |
 | Main linear C stack | 1 MiB | Checked C-stack overflow aborts rather than silently overwriting memory. Lua's ordinary C-call limit can reject mixed recursion first. |
 | Coroutine linear C stack | 256 KiB per coroutine (2 MiB natively) | The same checks and bounds follow each continuation across suspension and memory growth. |
 | Engine continuation stack | Managed by the JSPI implementation | Engine stack exhaustion is fatal; the linear-stack budget does not bound engine memory. |
-| Linear memory | 16 MiB initially, growing to at most 2 GiB | A failed native allocation produces the ordinary Lua/Titan allocation error when the state still has enough memory to report it. Engine allocation failures are fatal. |
+| Linear memory | The program's static data and main stack plus a 15 MiB heap initially (about 16 MiB for a small program), growing to at most 2 GiB | A failed native allocation produces the ordinary Lua/Titan allocation error when the state still has enough memory to report it. Engine allocation failures are fatal. |
 
 Linear coroutine stacks are allocated when a coroutine is created. A finished
 engine invocation retires before its native allocation can be freed or reused.
@@ -1288,11 +1470,15 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 ## Current limits
 
-* The browser standard library has [fourteen of the standard
-  modules](#the-browser-standard-library). `async`, timers, files, networking,
+* The browser standard library has [sixteen of the standard
+  modules](#the-browser-standard-library). Files, networking,
   `io`, `os`, `lua`, `thread`, and `sqlite3` are not available, so programs
   write output through C's `stdio.h`, as in [the first web
   page](#a-first-web-page).
+* `async` Tasks run only in the instance's owner state and only while a drive
+  runs: the program's `main`, a call that calls `async.loop()`, or a
+  Task-form call. Receivers, `run_foreign`, and external waits are
+  native-only ([async on the browser target](async-io.md#the-browser-target)).
 * Browser images require JSPI-capable Chrome/Chromium, Firefox, Safari/WebKit,
   or Node 26+. `titan-browser-run` drives Node and headless Chrome/Chromium.
 * On WebKit and Safari, traces have reduced, function-level fidelity
