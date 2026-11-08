@@ -1194,7 +1194,7 @@ function pin(callback: Callable): BrowserPin
   local owner = BrowserPin { state = state, slot = 0, generation = 0 }
   gc.finalizable<|value|>(owner, pin_finalize)
   local existing? = pins_by_fn[callback]
-  local entry: Pin = existing or allocate_pin(callback)
+  local entry = existing or allocate_pin(callback)
   entry.holds = entry.holds + 1
   owner.slot = entry.slot
   owner.generation = entry.generation
@@ -1244,7 +1244,7 @@ end
 local function malloc_copy(text: string): foreign *unsigned char
   if #text == 0 then return nil end
   local buffer = ffi.malloc(#text) as foreign *unsigned char
-  if buffer ~= nil then ffi.memcpy(buffer, text as foreign const *unsigned char, #text) end
+  if buffer ~= nil then ffi.memcpy(buffer, text, #text) end
   return buffer
 end
 
