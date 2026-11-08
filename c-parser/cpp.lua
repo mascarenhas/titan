@@ -849,10 +849,12 @@ end
 -- Include both what the configured compiler was asked and the authoritative
 -- include/macro world it reported. The latter makes cdriver's higher-level
 -- cache key describe C interpretation inputs, not merely an argv spelling.
+-- Parser policy belongs here too: the same key certifies extracted C graphs.
 local function preprocessor_semantic_digest(incdirs, defines, adapter)
     local parts = {
         "titan-cpp-semantic-context-v1",
-        "pragma-once=physical-file;include-depth=" .. MAX_INCLUDE_DEPTH,
+        "pragma-once=physical-file;include-depth=" .. MAX_INCLUDE_DEPTH ..
+            ";pointer-nullability=clang",
     }
     append_canonical(parts, incdirs, {})
     append_canonical(parts, defines, {})

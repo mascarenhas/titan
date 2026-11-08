@@ -92,10 +92,11 @@ naming the offending header and the input at the top of its include chain,
 rather than exhausting the Lua stack. This also bounds unguarded cycles and
 cycles whose only pragma occurs after the recursive include.
 
-`preprocessor_semantic_digest` includes the once policy and the include-depth
-limit alongside the configured include paths and predefined macros. The changed
-digest invalidates header graphs produced under different preprocessing
-semantics without changing a cache format version.
+`preprocessor_semantic_digest` includes the once policy, include-depth limit
+and Clang pointer-nullability parser policy alongside the configured include
+paths and predefined macros. The changed digest invalidates header graphs
+produced under different C interpretation semantics without changing a cache
+format version.
 Certified reuse does not observe every byte-identical once-header alias
 retarget; see the [incremental cache limit](incremental-compilation.md#semantic-c-header-identity-summary).
 
@@ -1219,8 +1220,10 @@ as an owner.
   `-v` modes, `/dev/null`, and `LANG=C`/`LC_ALL=C`. Ambient `CPATH` remains in
   force; explicit include paths and feature macros belong in
   `TITAN_EXTRA_CPPFLAGS` so checking and generated compilation agree.
-* The built-in C parser accepts common GNU/Clang/macOS extensions, but headers
-  outside that subset can fail during preprocessing or parsing.
+* The built-in C parser accepts common GNU/Clang/macOS extensions, including
+  Clang's `_Nonnull`, `_Nullable`, `_Null_unspecified` and `_Nullable_result`
+  pointer annotations, which carry no imported type meaning. Headers outside
+  that subset can fail during preprocessing or parsing.
 * Some preprocessor paths still raise raw Lua errors instead of diagnostics
   (`#if` operators outside the implemented set, unterminated function-like
   macros, directives whose required token list is absent). `#error` and pragmas

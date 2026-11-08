@@ -529,6 +529,37 @@ describe("C FFI ctype registration", function()
         end
     end)
 
+    for _, qualifier in ipairs({
+        "_Nonnull", "_Nullable", "_Null_unspecified", "_Nullable_result",
+    }) do
+        it("ignores Clang pointer annotation " .. qualifier .. " in imported types", function()
+            local source = [[
+extern const char * plain(void *, int (*)(void *), int **);
+extern const char * NULLABILITY annotated(
+    void * NULLABILITY, int (* NULLABILITY)(void * NULLABILITY),
+    int * NULLABILITY * NULLABILITY);
+extern int * const volatile plain_pointer;
+extern int * const NULLABILITY volatile annotated_pointer;
+]]
+            local ftypes = parse_header((source:gsub("NULLABILITY", qualifier)))
+            assert.equal(0, c99.recoveries)
+            assert.equal(0, ctypes.skipped)
+            local plain, annotated = assert(ftypes.plain), assert(ftypes.annotated)
+            assert.equal(plain.type, annotated.type)
+            assert.same(plain.ret.type, annotated.ret.type)
+            assert.same(plain.ret._declarator_ops, annotated.ret._declarator_ops)
+            for index = 1, #plain.params do
+                assert.same(plain.params[index].type, annotated.params[index].type)
+                assert.same(plain.params[index]._declarator_ops,
+                    annotated.params[index]._declarator_ops)
+            end
+            assert.same(plain.params[2].params[1].type, annotated.params[2].params[1].type)
+            assert.same(ftypes.plain_pointer.type, ftypes.annotated_pointer.type)
+            assert.same(ftypes.plain_pointer._declarator_ops,
+                ftypes.annotated_pointer._declarator_ops)
+        end)
+    end
+
     it("forms declaration-owned composites through array typedefs",
     function()
         local ftypes = parse_header([[

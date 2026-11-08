@@ -753,6 +753,21 @@ VEC(acos,, (double __x))
         it("qualifiers and storage-class specifiers", function()
             ok_decls("static const volatile int x;\n", 1)
         end)
+
+        for _, qualifier in ipairs({
+            "_Nonnull", "_Nullable", "_Null_unspecified", "_Nullable_result",
+        }) do
+            it("accepts Clang pointer annotation " .. qualifier .. " without recovery", function()
+                local source = [[
+typedef int * NULLABILITY pointer_type;
+typedef void (* NULLABILITY callback_type)(const char * NULLABILITY data);
+struct annotated { int * NULLABILITY field; };
+void * NULLABILITY annotated_function(
+    void * NULLABILITY, int * const NULLABILITY * volatile NULLABILITY);
+]]
+                ok_decls(source:gsub("NULLABILITY", qualifier), 4)
+            end)
+        end
         it("varargs and (void) parameter lists", function()
             ok_decls("int p(const char *f, ...); int q(void);\n", 2)
         end)
@@ -1523,22 +1538,29 @@ describe("C preprocessor semantic digest adapters", function()
         end)
     end
 
-    it("invalidates keys computed under the old preprocessing semantics", function()
-        local current = assert(cpp.new_context(fixture(nil, false)))
-        local legacy_options = fixture(function(bytes)
-            -- Strip the length-prefixed policy field to reconstruct the exact
-            -- pre-change payload. This fixture deliberately pins its framing
-            -- and policy spelling; update it with semantic-policy changes.
-            local policy = "pragma-once=physical-file;include-depth=200"
-            local field = #policy .. ":" .. policy .. "|"
-            local start = assert(bytes:find(field, 1, true))
-            return require("titan")._sha256_binary(
-                bytes:sub(1, start - 1) .. bytes:sub(start + #field))
-        end, false)
-        local legacy = assert(cpp.new_context(legacy_options))
-        assert.not_equal(legacy.preprocessor_configuration_key,
-            current.preprocessor_configuration_key)
-    end)
+    for _, previous in ipairs({
+        { name = "pragma once", policy = "" },
+        { name = "Clang nullability", policy = "pragma-once=physical-file;include-depth=200" },
+    }) do
+        it("invalidates keys computed before " .. previous.name .. " support", function()
+            local current = assert(cpp.new_context(fixture(nil, false)))
+            local legacy_options = fixture(function(bytes)
+                -- Replace the length-prefixed policy field to reconstruct the
+                -- exact historical payload. This deliberately pins its framing
+                -- and policy spelling; update it with semantic-policy changes.
+                local policy = "pragma-once=physical-file;include-depth=200;pointer-nullability=clang"
+                local field = #policy .. ":" .. policy .. "|"
+                local replacement = previous.policy == "" and ""
+                    or #previous.policy .. ":" .. previous.policy .. "|"
+                local start = assert(bytes:find(field, 1, true))
+                return require("titan")._sha256_binary(
+                    bytes:sub(1, start - 1) .. replacement .. bytes:sub(start + #field))
+            end, false)
+            local legacy = assert(cpp.new_context(legacy_options))
+            assert.not_equal(legacy.preprocessor_configuration_key,
+                current.preprocessor_configuration_key)
+        end)
+    end
 
     for _, kind in ipairs({ "-include", "-imacros" }) do
         it("preserves once state from " .. kind .. " across cached contexts", function()

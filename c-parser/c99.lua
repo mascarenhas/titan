@@ -592,7 +592,9 @@ arrayDeclaratorContents <-
        / {| arrayDeclaratorQualifiers? ({:idx: assignmentExpression :} / {:idx: "" -> "" :}) |}
 arrayDeclaratorQualifiers <- {:array_qualifiers: {| typeQualifier+ |} :}
 
-pointer <- {| ({ "*"/"^" } _ typeQualifier*)+ |}
+-- Clang's nullability annotations do not change the imported pointer type.
+pointerNullability <- ("_Nonnull" / "_Nullable_result" / "_Nullable" / "_Null_unspecified") _
+pointer <- {| ({ "*"/"^" } _ (typeQualifier / pointerNullability)*)+ |}
 
 parameterTypeList <- {| parameterList ("," _ {| { "..." } |} _)? |} => join
 
