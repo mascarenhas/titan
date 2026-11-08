@@ -357,15 +357,7 @@ local function slice_to_string(
     offset: integer,
     length: integer): string
   if length <= 0 then return "" end
-  local top = ffi.lua_gettop(L)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "protobuf: cannot reserve Lua stack" end
-  ffi.lua_pushlstring(
-      L,
-      ffi.titan_protobuf_offset_ptr(base, offset as foreign size_t),
-      length as foreign size_t)
-  local result: value = ffi.lua_totvalue(L, -1)
-  ffi.lua_settop(L, top)
-  return result as string
+  return ffi.titan_protobuf_offset_ptr(base, offset) as string(length)
 end
 
 local function buffer_to_string(buf: foreign *titan_protobuf_buffer): string
@@ -472,14 +464,6 @@ local function decode_generated(codec: foreign const *TitanTransferCodec,
   defer ffi.lua_settop(L, top)
   ffi.titan_codec_decode_nominal(L, resources, carried, handoff, held, codec, nominal,
       base as foreign const *void, length as foreign size_t, depth)
-  return ffi.lua_totvalue(L, -1) as value
-end
-
-local function c_text(text: foreign const *char): string
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "protobuf: cannot reserve Lua stack" end
-  ffi.lua_pushstring(L, text)
   return ffi.lua_totvalue(L, -1) as value
 end
 

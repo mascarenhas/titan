@@ -1359,12 +1359,7 @@ function buf_t:to_string(length: integer): string
   if length < 0 or length > self.native.len as integer then
     raise "buffer string length is out of bounds"
   end
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve buffer copy stack" end
-  ffi.lua_pushlstring(L, self.native.base, length as foreign size_t)
-  local result: value = ffi.lua_totvalue(L, -1)
-  return result as string
+  return self.native.base as string(length)
 end
 
 local function fs_buffer_snapshot(buffers: {buf_t}, writable: boolean):

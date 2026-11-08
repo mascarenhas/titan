@@ -219,18 +219,6 @@ function BrowserError:close()
   self.thrown:close()
 end
 
--- Audited stack transaction: copies counted C bytes into a Titan string.
-local function copied_bytes(bytes: foreign const *unsigned char, length: foreign uint32_t): string
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve browser byte result" end
-  local ptr: foreign const *char = ""
-  if length ~= 0 then ptr = bytes as foreign const *char end
-  ffi.lua_pushlstring(L, ptr, length as foreign size_t)
-  local result: value = ffi.lua_totvalue(L, -1)
-  return result
-end
-
 local function check_utf8(text: string)
   local input = text as foreign const *unsigned char
   local remaining = 0
@@ -377,7 +365,7 @@ end
 
 local function check_response(response: foreign *titan_browser_response)
   if response.status ~= ffi.TITAN_BROWSER_OK then
-    local message = copied_bytes(response.message, response.message_length)
+    local message = response.message as string(response.message_length)
     if response.thrown_slot == 0 or response.thrown_generation == 0 then
       if message == "" then
         if response.status == ffi.TITAN_BROWSER_MEMORY then
@@ -475,7 +463,7 @@ local function decode_value(raw: foreign const *titan_browser_value,
         raise "browser byte argument has no storage"
       end
     end
-    local bytes = copied_bytes(raw.bytes, raw.length)
+    local bytes = raw.bytes as string(raw.length)
     if kind == ffi.TITAN_BROWSER_STRING then
       return BrowserValue.is_string(bytes)
     end

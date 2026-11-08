@@ -412,6 +412,19 @@ function test_coverage_mc_random_rejection_does_not_accept_owners(_context: test
   test.assert(calls == 1, "rejected random request could not be reused")
 end
 
+function test_byte_buffer_to_string_zero_length(_: test.Context)
+  local empty = uv.buf_t.allocate(0)
+  test.assert(empty:to_string(0) == "", "zero-capacity buffer was not empty")
+  local readonly = uv.buf_t.from_string("A\0B")
+  test.assert(readonly:to_string(0) == "", "zero-length prefix was not empty")
+end
+
+function test_byte_buffer_to_string_rejects_negative_length(_: test.Context)
+  local buffer = uv.buf_t.allocate(4)
+  expect_error(function() buffer:to_string(-1) end,
+               "buffer string length is out of bounds")
+end
+
 function test_coverage_mc_byte_buffer_views_preserve_ownership_and_bounds(_context: test.Context)
   local buffer = uv.buf_t.allocate(4)
   test.assert(buffer:is_writable())

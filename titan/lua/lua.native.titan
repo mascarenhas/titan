@@ -310,18 +310,6 @@ local record LuaCall
   local pending: boolean
 end
 
-local function copy_state_bytes(bytes: foreign const *char,
-                                length: foreign size_t): string
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then
-    raise "cannot reserve Lua stack for independent-state string"
-  end
-  ffi.lua_pushlstring(L, bytes, length)
-  local result: value = ffi.lua_totvalue(L, -1)
-  return result
-end
-
 --- Close an independent state; subsequent closes are harmless.
 -- @usage standard-library-lua.md#independent-lua-states
 function Lua:close()
@@ -403,7 +391,7 @@ local function Lua:initialize()
     if ffi.lua_gettop(self.handle) > 0 then
       local length = foreign size_t.new_array(1)
       local bytes = ffi.lua_tolstring(self.handle, -1, length)
-      if bytes then raise copy_state_bytes(bytes, length[0]) end
+      if bytes then raise bytes as string(length[0]) end
     end
     raise "cannot initialize independent Lua standard libraries"
   end
@@ -540,7 +528,7 @@ end
 
 local function LuaCall:values(): {async.TransferValue}
   if self.packet.status ~= ffi.LUA_OK then
-    raise copy_state_bytes(self.packet.message, self.packet.message_length)
+    raise self.packet.message as string(self.packet.message_length)
   end
   local results: {async.TransferValue} = {}
   for index = 1, self.packet.nresults as integer do
@@ -554,7 +542,7 @@ local function LuaCall:values(): {async.TransferValue}
     elseif item.kind == ffi.TITAN_LUA_FLOAT then
       results[index] = async.TransferValue.is_float(item.number)
     elseif item.kind == ffi.TITAN_LUA_STRING then
-      results[index] = async.TransferValue.is_string(copy_state_bytes(item.bytes, item.length))
+      results[index] = async.TransferValue.is_string(item.bytes as string(item.length))
     elseif item.kind == ffi.TITAN_LUA_STATE then
       results[index] = async.TransferValue.is_lua_state(item.state)
     elseif item.kind == ffi.TITAN_LUA_FUNCTION then
@@ -563,23 +551,23 @@ local function LuaCall:values(): {async.TransferValue}
       results[index] = async.TransferValue.is_pointer(item.pointer)
     elseif item.kind == ffi.TITAN_LUA_RECORD then
       results[index] = async.TransferValue.is_record(
-        copy_state_bytes(item.module, item.module_length),
-        copy_state_bytes(item.name, item.name_length),
-        copy_state_bytes(item.bytes, item.length))
+        item.module as string(item.module_length),
+        item.name as string(item.name_length),
+        item.bytes as string(item.length))
     elseif item.kind == ffi.TITAN_LUA_UNION then
       results[index] = async.TransferValue.is_union(
-        copy_state_bytes(item.module, item.module_length),
-        copy_state_bytes(item.name, item.name_length),
-        copy_state_bytes(item.bytes, item.length))
+        item.module as string(item.module_length),
+        item.name as string(item.name_length),
+        item.bytes as string(item.length))
     elseif item.kind == ffi.TITAN_LUA_CLOSURE then
       results[index] = async.TransferValue.is_closure(
-        copy_state_bytes(item.module, item.module_length), item.entry,
-        copy_state_bytes(item.bytes, item.length))
+        item.module as string(item.module_length), item.entry,
+        item.bytes as string(item.length))
     elseif item.kind == ffi.TITAN_LUA_RECORD_PAYLOAD then
       results[index] = async.TransferValue.is_record_payload(
-        copy_state_bytes(item.module, item.module_length),
-        copy_state_bytes(item.name, item.name_length),
-        copy_state_bytes(item.bytes, item.length))
+        item.module as string(item.module_length),
+        item.name as string(item.name_length),
+        item.bytes as string(item.length))
     else
       raise "invalid independent Lua result kind"
     end

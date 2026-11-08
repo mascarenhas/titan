@@ -301,7 +301,7 @@ local function Encoder:dynamic_nominal(
   local module = ffi.titan_codec_nominal_module(raw)
   if module == nil then raise "protobuf: unsupported dynamic value" end
   local mark = begin_nested(buf, 5)
-  write_bytes(buf, 1, c_text(module))
+  write_bytes(buf, 1, module as string)
   write_bytes(buf, 2, name)
   self:field(buf, 3, candidate, descriptor, depth)
   end_nested(buf, mark)

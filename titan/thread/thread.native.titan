@@ -363,18 +363,6 @@ local function value_to_thread_message(item: value): foreign *titan_thread_messa
   return transfer.encode_message(item) as foreign *titan_thread_message
 end
 
-local function copy_native_bytes(bytes: foreign const *char, length: foreign size_t): string
-  if length == 0 then return "" end
-  local top = ffi.lua_gettop(L)
-  if ffi.lua_checkstack(L, 1) == 0 then
-    raise "cannot reserve Lua stack for thread message bytes"
-  end
-  ffi.lua_pushlstring(L, bytes, length)
-  local result: value = ffi.lua_totvalue(L, -1)
-  ffi.lua_settop(L, top)
-  return result as string
-end
-
 local foreign function write_stderr_bytes(bytes: const *char, length: size_t)
   if bytes == nil then return end
   if length == (0 as foreign size_t) then return end
