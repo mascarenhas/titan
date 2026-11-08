@@ -146,7 +146,7 @@ async function gate(context, image) {
     const out = decode(join(host.stdout)), err = decode(join(host.stderr));
     context.assert(result.kind === 'returned' && result.status === 0, `scheduler gate failed:\n${out}${err}`);
     const passed = out.match(/\[  PASSED  \] (\d+) tests?\./);
-    context.assert(passed && Number(passed[1]) === 14, `the gate did not pass its fourteen cases:\n${out}`);
+    context.assert(passed && Number(passed[1]) === 16, `the gate did not pass its sixteen cases:\n${out}`);
     context.assert(err.includes('uncaught error in async Task: ordinary Task failure'),
       `an ordinary Task failure was not reported on stderr:\n${err}`);
     context.assert(host.notificationErrors.length === 0, 'a gate case reported a notification error');

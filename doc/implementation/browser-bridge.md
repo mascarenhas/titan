@@ -606,7 +606,12 @@ child-state refusals, the `timer` cases, and the synchronous-callback cases).
   - A coroutine collected in a callback unwinds, in order, at the next
     collection.
   - A settlement, `async.run` and the yield refusal show that `async` acts
-    outside any Task.
+    outside any Task, and `fatal` still refuses there, because the Task that
+    called the binding is current.
+  - Inside a request's settlement callback, where no Task is current, a
+    callback's settlement and its fatal failure are both queued. The Task
+    continues, or raises its operation's error, in a later turn. `async.loop`
+    then rethrows the fatal error with its trace, and a new Runtime runs.
 
 It then drives the owner's published entries:
 - Task-form calls.
