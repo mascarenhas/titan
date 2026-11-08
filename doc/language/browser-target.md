@@ -645,9 +645,10 @@ otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 
 **Output.** Each stream has one FIFO and at most one actual sink invocation in
 flight. The loader flushes after all entries in the containing operation,
-including unterminated C-stdio tails, and during a drive also at each
-relinquish point, without waiting there for a pending sink call. Later chunks
-continue after a sink
+including unterminated C-stdio tails, and during a drive also whenever the
+drive relinquishes the event loop, without waiting there for a pending sink
+call: output queued behind that call reaches the sink once it resolves, even
+while the drive stays relinquished. Later chunks continue after a sink
 throws or rejects. An otherwise successful operation rejects with its first
 cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
@@ -762,8 +763,8 @@ an idle call, except that starting another drive inside it fails. A call
 queued too late for the drive's last turn runs on its own once the drive's
 operation ends. Request settlements, listener events and notifications for
 the owner state wake a relinquished drive; they never enter Wasm themselves.
-Buffered output reaches the sinks at the drive's relinquish points, before
-the drive ends, and a slow or forever-pending sink never stalls the drive.
+Buffered output reaches the sinks while the drive is relinquished, before the
+drive ends, and a slow or forever-pending sink never stalls the drive.
 
 ### Task-form calls
 

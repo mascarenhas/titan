@@ -12,7 +12,13 @@ export function observe(promise) {
 
 export function makeHost(context, image, extra = {}) {
   const host = {callables: new Map(), probes: [], notes: [], cleanup: [], stdout: [], stderr: [],
-    notificationErrors: [], shutdowns: 0, flag: false, sinkChunks: 0, controls: undefined, hooks: {}};
+    notificationErrors: [], shutdowns: 0, flag: false, sinkChunks: 0, unparkedSinks: 0, controls: undefined,
+    hooks: {}};
+  // A sink may run only after the operation or from a parked drive gate.
+  const sinkCalled = () => {
+    const snapshot = host.controls?.snapshot();
+    if (snapshot?.driving && !snapshot.parked) host.unparkedSinks++;
+  };
   host.bindings = {
     __miniDriver(controls) { host.controls = controls; },
     publish(name, callable) { host.callables.set(name, callable); },
@@ -33,11 +39,16 @@ export function makeHost(context, image, extra = {}) {
   };
   host.instance = image.create({locateFile: image.locateFile, bindings: host.bindings,
     stdout(bytes) {
+      sinkCalled();
       host.stdout.push(bytes.slice());
       host.sinkChunks++;
       return host.hooks.stdout?.(bytes);
     },
-    stderr(bytes) { host.stderr.push(bytes.slice()); },
+    stderr(bytes) {
+      sinkCalled();
+      host.stderr.push(bytes.slice());
+      return host.hooks.stderr?.(bytes);
+    },
     onNotificationError(event) { host.notificationErrors.push(event); },
     ...extra});
   host.fn = name => {

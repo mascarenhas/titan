@@ -2638,8 +2638,8 @@ flush notifications. C `stdin` returns null, which is end of file. No user
 sink or unrelated notification runs during an internal coroutine transfer,
 including a collector finalizer's cleanup. `safe()` means that the contained
 C entry has released its owner; the loader delivers buffered streams after
-its whole logical operation retires, and during a drive also at each
-relinquish point, once the drive has suspended ([output, disposal, and
+its whole logical operation retires, and during a drive also from each parked
+relinquish gate, once the drive has suspended ([output, disposal, and
 observation](#output-disposal-and-observation)).
 
 ### JSPI coroutine contexts
@@ -2717,11 +2717,14 @@ main context is current (`TitanBrowser.current === 0`), then hands the call to
 the loader owner, which also requires the state's active drive with no gate
 parked and no item in delivery.
 
-A relinquish point settles the queued calls whose outcomes arrived and
-schedules both output pumps on a microtask, so sinks run once the drive has
-suspended, never inside the import. Disposal is signalled once: the first
-relinquish after `dispose()` began (or a gate parked when it began) resolves
-`DISPOSING` after one turn. A turn (`mode` 0), or a wait with a queued owner
+A relinquish point settles the queued calls whose outcomes arrived. Outside
+disposal, every branch that parks a gate also schedules both output pumps on
+a microtask, so sinks run once the drive has suspended, never inside the
+import, and only while that gate is still parked; a numeric `IDLE` schedules
+none, so the coroutine switches of orphan unwinding that may follow it never
+meet a sink. Disposal is signalled once: the first relinquish after
+`dispose()` began (or a gate parked when it began) resolves `DISPOSING` after
+one turn. A turn (`mode` 0), or a wait with a queued owner
 item, parks a gate and schedules one turn-source macrotask. A wait with no
 wake source returns `IDLE` as a plain number, so JSPI does not suspend; the
 terminal `titan_mco_transfer` path already relies on that. Otherwise the wait
@@ -2798,7 +2801,7 @@ kind and copies all result/error/trace data while C owns it. Duplicate,
 mismatched, or missing completion poisons the image. The export promise
 acknowledges physical context retirement only; its numeric value is never
 application status. Neither completion arrival nor an intermediate safe point
-reopens public admission. Only a drive's relinquish points start sinks
+reopens public admission. Only a drive's parked relinquish gates start sinks
 inside an operation ([drives](#drives-the-call-queue-and-wake-sources)).
 
 `invokeTarget` boxes the single decoded result as `{value}` inside `operate` so
@@ -2940,8 +2943,13 @@ Each `OutputChannel` has a copied-byte FIFO, a coalesced C-byte tail, and at
 most one actual sink invocation. C hooks append synchronously and never invoke
 the sink. A logical operation flushes both streams after all its C entries
 retire; later entries still run after a throw/rejection. During a drive, each
-relinquish point also starts a single-runner pump on both streams without
-awaiting it, so a slow or forever-pending sink never stalls the drive; the
+parked relinquish gate also publishes both streams' C-byte tails into their
+FIFOs and starts a single-runner pump without awaiting it, so a slow or
+forever-pending sink never stalls the drive. A runner still waiting on a sink
+call takes the newly published entries when that call resolves, and it
+retires in the same step that finds its FIFO empty, so the next gate either
+feeds it or starts another runner. Bytes written after a gate wait for the
+next gate or the final flush, never for a sink call to resolve. The
 operation's final flush awaits a running pump, then flushes again, and the
 pump's failures join that flush's. A sink call increments `inHost`.
 Titan failure remains primary while both deliverable stream flushes and

@@ -82,6 +82,90 @@ async function pendingSink(context, image) {
   } finally { await host.instance.dispose().catch(() => {}); }
 }
 
+// A wait relinquish with no wake source returns IDLE without parking: output
+// written before it stays buffered through the coroutine switches the idle
+// drive then makes, and reaches the sinks at the operation's final flush.
+async function idleOutput(context, image) {
+  const host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    await host.call('register');
+    const idle = await rejection(context, host.task('idle_output'), 'TITAN');
+    context.assert(decode(idle.bytes) === 'mini driver became idle while jobs were waiting' &&
+      host.probes.some(probe => probe.status === 1), 'idle_output did not end in an IDLE relinquish');
+    await until(context, () => host.stdout.length > 0 && host.stderr.length > 0,
+      'output written before an IDLE relinquish was lost');
+    context.assert(decode(host.stdout[0]) === 'before idle\n' && decode(host.stderr[0]) === 'before idle\n',
+      'output written before an IDLE relinquish changed');
+    context.assert(host.unparkedSinks === 0, 'a sink ran while the idle drive switched coroutines');
+    await host.instance.dispose();
+    return host.stdout.length + host.stderr.length;
+  } finally { await host.instance.dispose().catch(() => {}); }
+}
+
+// Output a parked gate publishes while an earlier sink call is pending
+// reaches its sink when that call resolves, with the drive still parked and
+// no new wake. The sweep releases the pending call from inside the turn that
+// writes the next line, a few microtasks deep and across a few coroutine
+// round trips, so the runner retires on every side of the next gate.
+async function delayedSinks(context, image) {
+  const report = {};
+  for (const stream of ['stdout', 'stderr']) {
+    const host = makeHost(context, image);
+    const lines = [];
+    let hold = false, release;
+    host.hooks[stream] = bytes => {
+      lines.push(decode(bytes));
+      if (!hold) return undefined;
+      hold = false;
+      return new Promise(resolve => { release = resolve; });
+    };
+    const reached = text => () => lines.includes(text) && host.snapshot().parked;
+    try {
+      await host.instance.initialize();
+      await host.call('register');
+      const controller = new AbortController();
+      const hanging = host.task('hang', [], {signal: controller.signal});
+      await until(context, () => host.snapshot().parked, 'hang did not park its drive');
+      hold = true;
+      await host.task('hop_write', ['first\n', stream, 0n]);
+      await until(context, reached('first\n'), `the first ${stream} line never reached its sink`);
+      await host.task('hop_write', ['second\n', stream, 0n]);
+      for (let tick = 0; tick < 5; tick++) await context.tick();
+      context.assert(lines.length === 1, `a second ${stream} sink call overlapped a pending one`);
+      const wakes = host.probes.length;
+      release();
+      await until(context, reached('second\n'), `${stream} output published during a pending sink call was stranded`);
+      context.assert(host.probes.length === wakes, `delivering pending ${stream} output woke the drive`);
+      let rounds = 0;
+      for (let hops = 0n; hops <= 4n; hops++) {
+        for (let depth = 0; depth <= 4; depth++) {
+          const before = `before ${hops}/${depth}\n`, after = `after ${hops}/${depth}\n`;
+          hold = true;
+          await host.task('hop_write', [before, stream, 0n]);
+          await until(context, reached(before), `${stream} line ${before.trim()} never reached its sink`);
+          host.hooks.kick = () => {
+            let chain = Promise.resolve();
+            for (let step = 0; step < depth; step++) chain = chain.then();
+            chain.then(release);
+          };
+          await host.task('hop_write', [after, stream, hops]);
+          host.hooks.kick = undefined;
+          await until(context, reached(after),
+            `${stream} output after ${hops} hops and a release ${depth} microtasks deep was stranded`);
+          rounds++;
+        }
+      }
+      context.assert(host.unparkedSinks === 0, `a ${stream} sink ran while the drive was not parked`);
+      controller.abort('done');
+      await rejection(context, hanging, 'CANCELLED');
+      await host.instance.dispose();
+      report[stream] = rounds;
+    } finally { await host.instance.dispose().catch(() => {}); }
+  }
+  return report;
+}
+
 // Calls and notifications made during a drive, and the rows that refuse.
 async function queue(context, image) {
   const host = makeHost(context, image);
@@ -346,6 +430,8 @@ export async function run(context) {
   report.surfaceProbes = await surface(context, image);
   report.turns = await turns(context, image);
   report.pendingSink = await pendingSink(context, image);
+  report.idleOutput = await idleOutput(context, image);
+  report.delayedSinks = await delayedSinks(context, image);
   report.notes = await queue(context, image);
   report.disposal = await disposal(context, image);
   await exits(context, image);

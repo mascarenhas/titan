@@ -254,13 +254,27 @@ class OutputChannel {
     }
   }
 
-  // A relinquish point starts one flush without awaiting it, so a slow sink
-  // never stalls the drive. Its failures wait for the operation's final flush.
+  // A relinquish point publishes the buffered tail and starts at most one
+  // runner without awaiting it, so a slow sink never stalls the drive. Bytes
+  // written after that point wait for the next one, not for a sink call to
+  // resolve. Pump failures wait for the operation's final flush.
   pump(token) {
-    if (this.running || this.terminal) return;
-    this.running = this.flushQueue(token).then(failures => {
-      if (failures) (this.pumped ||= []).push(...failures);
-    }).finally(() => { this.running = undefined; });
+    if (this.terminal) return;
+    this.seal();
+    if (!this.running && this.queue.length) this.running = this.runPump(token);
+  }
+
+  // The runner retires in the same step that finds the queue empty, so the
+  // next relinquish point either feeds it or starts another one.
+  async runPump(token) {
+    try {
+      do {
+        const current = await this.send(token, this.queue.shift());
+        if (current) (this.pumped ||= []).push(current);
+      } while (this.queue.length && !this.terminal);
+    } finally {
+      this.running = undefined;
+    }
   }
 
   async flush(token) {
@@ -277,38 +291,43 @@ class OutputChannel {
     this.seal();
     let failures;
     while (this.queue.length && !this.terminal) {
-      const entry = this.queue.shift();
-      let current;
-      try {
-        if (this.sink) {
-          // A separate gate lets disposal detach a forever-pending host sink.
-          // The stream then becomes terminal: it can never overlap that call.
-          const gate = deferred();
-          const cell = {target: gate};
-          this.inflight = cell;
-          try {
-            // A sink is host code: an immediate reverse call from it rejects.
-            let result;
-            this.host.inHost++;
-            try { result = this.sink(entry.bytes); }
-            finally { this.host.inHost--; }
-            relayPromise(sinkResult(result, this.stream), cell);
-            await gate.promise;
-          } finally {
-            cell.target = undefined;
-            this.inflight = undefined;
-          }
-        }
-      } catch (cause) {
-        const error = ownFailure(cause, 'DISPOSED') || ownFailure(cause, 'SINK') ? cause :
-          failure('SINK', `browser ${this.stream} sink failed`, cause, this.stream);
-        current = error === token.interrupted?.error ? token.interrupted : {error};
-        (failures ||= []).push(current);
-        captureFailure(token, error, current);
-      }
-      if (current && current !== token.primaryFault) this.firstFailure ||= current;
+      const current = await this.send(token, this.queue.shift());
+      if (current) (failures ||= []).push(current);
     }
     return failures;
+  }
+
+  // One sink call. Its failure is captured for the operation and returned.
+  async send(token, entry) {
+    let current;
+    try {
+      if (this.sink) {
+        // A separate gate lets disposal detach a forever-pending host sink.
+        // The stream then becomes terminal: it can never overlap that call.
+        const gate = deferred();
+        const cell = {target: gate};
+        this.inflight = cell;
+        try {
+          // A sink is host code: an immediate reverse call from it rejects.
+          let result;
+          this.host.inHost++;
+          try { result = this.sink(entry.bytes); }
+          finally { this.host.inHost--; }
+          relayPromise(sinkResult(result, this.stream), cell);
+          await gate.promise;
+        } finally {
+          cell.target = undefined;
+          this.inflight = undefined;
+        }
+      }
+    } catch (cause) {
+      const error = ownFailure(cause, 'DISPOSED') || ownFailure(cause, 'SINK') ? cause :
+        failure('SINK', `browser ${this.stream} sink failed`, cause, this.stream);
+      current = error === token.interrupted?.error ? token.interrupted : {error};
+      captureFailure(token, error, current);
+    }
+    if (current && current !== token.primaryFault) this.firstFailure ||= current;
+    return current;
   }
 
   interrupt(error, fault) {
@@ -1467,10 +1486,8 @@ class BrowserOwner {
       this.poison(failure('PROTOCOL', 'browser relinquish outside its drive'));
       return new Promise(() => {});
     }
-    // A relinquish point: queued calls settle now, and output reaches the
-    // sinks once the drive has suspended, never from inside this import.
+    // A relinquish point: queued calls settle now; output waits for a gate.
     this.settleOutcomes();
-    if (!this.closing) queueMicrotask(() => this.pumpStreams());
     // Disposal is signalled once, after one macrotask, before idle detection.
     if (this.closing && !drive.disposalSignalled) {
       drive.disposalSignalled = true;
@@ -1481,16 +1498,21 @@ class BrowserOwner {
     return this.parkDrive(drive, false);
   }
 
+  // A parked gate is the drive's output safe point: the pump runs on a
+  // microtask once the drive has suspended, never inside this import, and
+  // only while that gate is still parked. A numeric IDLE parks nothing and
+  // starts no sink, even if the drive then switches coroutines.
   parkDrive(drive, turn) {
     const gate = deferred();
     drive.gate = gate;
     if (turn) this.scheduleTurn();
+    if (!this.closing) queueMicrotask(() => this.pumpStreams(gate));
     return gate.promise;
   }
 
-  pumpStreams() {
+  pumpStreams(gate) {
     const token = this.active;
-    if (!token || token.interrupted || this.closing || this.terminal) return;
+    if (this.drive?.gate !== gate || !token || token.interrupted || this.closing || this.terminal) return;
     this.out.pump(token);
     this.err.pump(token);
   }

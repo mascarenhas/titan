@@ -79,6 +79,13 @@ local function expect_integer(item: Value?): integer
   raise "expected an integer BrowserValue"
 end
 
+local function expect_string(item: Value?): string
+  case item
+  when is_string(text) then return text
+  end
+  raise "expected a string BrowserValue"
+end
+
 local function ignore(...: Value): Value
   return Value.is_nil()
 end
@@ -213,6 +220,17 @@ local function Job:step()
   end
 end
 
+-- Resumes a coroutine `count` times. Each round trip is an internal handoff
+-- that lets JavaScript microtasks run, as Task switches do.
+local function hop(count: integer)
+  if count == 0 then return end
+  local hopper = coroutine.create(function(_: value): value
+    for index = 2, count do coroutine.yield(index, "mini-hops") end
+    return nil
+  end, "mini-hops")
+  for _ = 1, count do hopper:resume(nil) end
+end
+
 local function drive()
   browser.drive_begin()
   driving = true
@@ -233,6 +251,8 @@ local function drive()
     if status == browser.RELINQUISH_DISPOSING then
       cancel_all("instance disposed")
     elseif status == browser.RELINQUISH_IDLE then
+      -- Switch coroutines first, as async's orphan unwinding does.
+      hop(2)
       fail_waiting("mini driver became idle while jobs were waiting")
     end
   end
@@ -290,6 +310,16 @@ local function orphan(...: Value): Value
   return Value.is_nil()
 end
 
+-- Writes a line to each stream, then waits with no wake source: the drive's
+-- wait relinquish returns IDLE without parking.
+local function idle_output(...: Value): Value
+  ffi.fputs("before idle\n", ffi.stdout)
+  ffi.fputs("before idle\n", ffi.stderr)
+  local job = current
+  job.waiting = true
+  return Value.is_nil()
+end
+
 -- Runs turn after turn until a JavaScript macrotask set the flag.
 local function spin(...: Value): Value
   local job = current
@@ -320,11 +350,18 @@ end
 -- Internal coroutine hops inside one turn; `kick` queues JS work between them.
 local function hops(...: Value): Value
   binding_call("kick")
-  local hopper = coroutine.create(function(_: value): value
-    for index = 1, 8 do coroutine.yield(index, "mini-hops") end
-    return nil
-  end, "mini-hops")
-  for _ = 1, 9 do hopper:resume(nil) end
+  hop(9)
+  return Value.is_nil()
+end
+
+-- Calls `kick`, makes the given number of coroutine round trips, then writes
+-- the text to "stdout" or "stderr".
+local function hop_write(...: Value): Value
+  local text = expect_string(...[1])
+  local to_stderr = expect_string(...[2]) == "stderr"
+  binding_call("kick")
+  hop(expect_integer(...[3]))
+  if to_stderr then ffi.fputs(text, ffi.stderr) else ffi.fputs(text, ffi.stdout) end
   return Value.is_nil()
 end
 
@@ -490,9 +527,11 @@ do
     publish("guarded", guarded)
     publish("stubborn", stubborn)
     publish("orphan", orphan)
+    publish("idle_output", idle_output)
     publish("spin", spin)
     publish("chatter", chatter)
     publish("hops", hops)
+    publish("hop_write", hop_write)
     publish("reenter", reenter)
     publish("note", note)
     publish("exit_with", exit_with)

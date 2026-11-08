@@ -442,8 +442,11 @@ settle protocol, a test-only C helper creates a child state
 `mini-driver.mjs` checks turn and wait relinquishes, idle detection,
 delivery, queued and refused calls (including one made between internal
 coroutine hops), Task-form calls with `AbortSignal`, the SDK timer sources,
-output at relinquish points, disposal with a running, cleanup and shutdown
-drive, and the exit latch, under Node and Chromium in both assertion builds.
+output at relinquish points (on both streams, a sink call still pending when
+the next gate publishes output and released at swept points around the pump
+runner's retirement, and no sink during the coroutine switches that follow an
+`IDLE` relinquish), disposal with a running, cleanup and shutdown drive, and
+the exit latch, under Node and Chromium in both assertion builds.
 `mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
 `admission.mjs` runs the admission matrix of the loader: every application
 method, `_malloc`/`_free` and the trace view, each from a parked wait, a
