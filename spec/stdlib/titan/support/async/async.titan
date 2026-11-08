@@ -1,10 +1,9 @@
--- Shared Task ownership protocol for native standard-library tests.
+-- Shared Task ownership protocol for standard-library tests on both targets;
+-- the native-only Lua-state close driver is in drive.native.titan.
 local async = import "async"
-local uv = import "uv"
 local gc = import "gc"
 local string = import "string"
 local test = import "test"
-local timer = import "timer"
 local runtime_test = import "support.runtime.titan"
 
 local function active(task: async.Task): boolean
@@ -22,23 +21,6 @@ local function cleanup_task(task: async.Task, reason: string)
   runtime_test.cleanup(function ()
     cancel_and_join_task(task, reason)
   end)
-end
-
--- Lua-state close fixtures: drive the current Runtime's loop without
--- retiring it until `ready` holds, so the state can then close with `task`
--- still parked. RUN_NOWAIT never waits for the work the Task just submitted.
--- Raises the Task's failure if it finishes first.
-local function drive_until(task: async.Task, ready: function (): boolean)
-  while not ready() do
-    case task:status()
-    when failed(failure) then failure:raise()
-    when succeeded() then raise "the state-close fixture Task returned early"
-    when cancelled() then raise "the state-close fixture Task was cancelled"
-    else
-    end
-    uv.run(async.current_loop(), uv.RUN_NOWAIT)
-    if not ready() then uv.sleep(1) end
-  end
 end
 
 -- Wake windows: a wake from a finalizer between a waiter's registration in its
@@ -125,12 +107,12 @@ local function run_wake_case(driver: boolean, phase: string?, offset: integer,
   if drive ~= nil then
     drive(window, target)
   else
-    timer.yield()
+    async.yield()
     if driver then window.open = false end
   end
   for _ = 1, 50 do
     if target:status():has_finished() then break end
-    timer.yield()
+    async.yield()
   end
   return target, window
 end

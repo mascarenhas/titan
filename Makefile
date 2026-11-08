@@ -1335,7 +1335,7 @@ titan-stdlib-browser-test: ## Build one complete browser stdlib image, audit all
 	echo "Browser stdlib building image: stdlib"; \
 	started=$$(date +%s); \
 	$(BROWSER_SDK_ENV) TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(TITAN_BROWSER_TEST_SDK)) \
-	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc) -q --target browser --test --incremental \
+	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)/bin/titanc) -q --target browser --test --incremental --no-uv-bootstrap \
 	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
 	  --output "$$compiler_dir" --exe "$$build_dir/images/stdlib.mjs" -j$(TITAN_JOBS) \
 	  --c-source $(call make_shell_quote,$(abspath spec/fixtures/browser_runtime/close.c)) "$$@"; \

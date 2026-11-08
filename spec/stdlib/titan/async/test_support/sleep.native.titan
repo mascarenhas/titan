@@ -1,0 +1,17 @@
+-- Timer-backed Task helpers. They are native-only until the browser target
+-- has titan.timer.
+local timer = import "timer"
+
+local function sleeping(milliseconds: integer,
+                        result: value): async.Task
+  return async.run<|value, value|>(function (): value
+    timer.sleep(milliseconds)
+    return result
+  end)
+end
+
+local function cancelled(reason: string): async.Task
+  local task = sleeping(60000, "unexpected cancellation return")
+  task:cancel(async.CancellationReason.simple(reason))
+  return task
+end

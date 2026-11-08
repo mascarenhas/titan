@@ -1,0 +1,132 @@
+-- Task cases that need libuv callbacks or native work.
+-- Task identity, explicit suspension, synchronous resume scheduling, and
+-- terminal notification are the primitives beneath every combinator.
+function test_ready_queue_preserves_fifo_and_services_native_work(context: test.Context)
+  local order: {integer} = {}
+  local tasks: {async.Task<|nil, nil|>} = {}
+  for index = 1, 130 do
+    local id = index
+    tasks[index] = async.run<|nil, nil|>(function (): nil
+      for round = 1, 4 do
+        order[#order + 1] = id
+        if round < 4 then async.yield() end
+      end
+      return nil
+    end)
+  end
+  local observed = 0
+  local observer = uv.timer_t.new()
+  test.assert(uv.timer_init(async.current_loop(), observer) == 0,
+      "queue observer timer initialization failed")
+  local fired = function (owner: uv.timer_t)
+    observed = #order
+    uv.timer_close(owner)
+  end
+  test.assert(uv.timer_start(observer, fired, 0, 0) == 0,
+      "queue observer timer submission failed")
+  async.loop()
+  test.assert(observed > 0 and observed < 130,
+      "ready queue did not bound its initial batch before native work")
+  test.assert(#order == 520, "ready queue lost a requeued Task")
+  for round = 0, 3 do
+    for index = 1, 130 do
+      test.assert(order[round * 130 + index] == index,
+          "ready queue changed FIFO order during same-Task requeue")
+    end
+  end
+  for index = 1, #tasks do
+    test.assert(tasks[index]:status():has_succeeded(), "queued Task failed")
+  end
+end
+
+-- Keep this fixture a one-shot callback wait. timer.sleep intentionally uses
+-- a subscription now, whose explicit suspension has its own token source.
+local function wait_for_native_callback(milliseconds: integer)
+  async.await<|nil, nil|>(function (resolve, _reject, fatal)
+    local timer = uv.timer_t.new()
+    local handle = timer:as_handle_t()
+    local closed = function (_: uv.handle_t)
+      do resolve(nil)
+      catch fatal(error, traceback); raise end
+    end
+    local fired = function (_: uv.timer_t) uv.close(handle, closed) end
+    test.assert(uv.timer_init(async.current_loop(), timer) == 0,
+        "native-wait timer initialization failed")
+    local status = uv.timer_start(timer, fired, milliseconds, 0)
+    if status < 0 then uv.close(handle); raise "native-wait timer start failed" end
+  end)
+end
+
+function test_resume_token_cannot_wake_native_callback_wait(
+    context: test.Context)
+  runtime_test.run(function ()
+    local completed = false
+    local target = async.run<|nil, value|>(function (): nil
+      wait_for_native_callback(50)
+      completed = true
+      return nil
+    end)
+    task_support.cleanup_task(target, "native-wait token target cleanup")
+    support.wait_until_waiting(target)
+
+    local mismatch = ""
+    do
+      target:resume(async.ResumeToken.new("native wait outsider"))
+    catch
+      mismatch = error as string
+    end
+    test.assert(mismatch ==
+          "Task resume token mismatch (expected source: unknown source)" and
+          target:status():as_string() == "waiting" and not completed,
+          "Task:resume woke or changed a native callback wait")
+
+    test.assert(async.join(target):has_succeeded() and completed,
+          "ordinary native callback did not complete its guarded wait")
+  end)
+end
+
+function test_retired_resume_token_cannot_wake_next_native_wait(
+    context: test.Context)
+  runtime_test.run(function ()
+    local token = async.ResumeToken.new("completed explicit suspension")
+    local resumed_mismatch = ""
+    local phase = 0
+    local target = async.run<|nil, value|>(function (): nil
+      phase = 1
+      async.suspend(token)
+      do
+        async.running():resume(token)
+      catch
+        resumed_mismatch = error as string
+      end
+      phase = 2
+      wait_for_native_callback(50)
+      phase = 3
+      return nil
+    end)
+    task_support.cleanup_task(target, "retired-token native wait cleanup")
+    support.wait_until_waiting(target)
+    target:resume(token)
+    while phase < 2 do timer.yield() end
+    -- A running Task latches the resume; its next wait is native, which
+    -- discards the latch instead of being woken by it.
+    test.assert(resumed_mismatch == "",
+          "a running Task's resume raised instead of latching: " .. resumed_mismatch)
+    test.assert(target:status():as_string() == "waiting",
+          "resumed Task did not enter its native wait")
+
+    local mismatch = ""
+    do
+      target:resume(token)
+    catch
+      mismatch = error as string
+    end
+    test.assert(mismatch ==
+          "Task resume token mismatch (expected source: unknown source)" and
+          target:status():as_string() == "waiting" and phase == 2,
+          "retired token survived into or woke the next native wait")
+    target:cancel()
+    test.assert(async.join(target):has_cancelled() and phase == 2,
+          "native wait did not cancel after retired-token rejection")
+  end)
+end

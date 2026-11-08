@@ -3113,8 +3113,8 @@ int main(void) {
         end
     end)
 
-    -- Scheduling and sleep ownership are executable native contracts in
-    -- async/tests/task_test.titan, async/tests/fatal_test.titan and timer/tests.
+    -- Scheduling and sleep ownership are executable native contracts in the
+    -- async.tests task and fatal contributors and timer/tests.
     -- The old source-string test required one timer/close callback per wake;
     -- the Runtime now owns one shared wake and an intrusive FIFO.
 

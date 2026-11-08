@@ -478,5 +478,5 @@ paths, that the accepted chain round-trips, that encoding and decoding one
 level deeper raise the protobuf nesting error, and that a rejected packet is
 still consumed; the same 127/128 boundary holds on both targets. The Task,
 thread, and independent-state transfer cases stay native,
-in the `async.tests` contributors `transfer_payload_test.titan` and
-`transfer_scope_reuse_test.titan` and in `thread.tests`.
+in the `async.tests` contributors `transfer_payload_test.native.titan` and
+`transfer_scope_reuse_test.native.titan` and in `thread.tests`.

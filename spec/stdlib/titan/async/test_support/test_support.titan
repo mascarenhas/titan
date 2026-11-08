@@ -1,13 +1,14 @@
+-- Task helpers for async.tests on both targets; the timer-backed helpers are
+-- native-only until the browser target has titan.timer (sleep.native.titan).
 local test = import "test"
 local async = import "async"
-local timer = import "timer"
 local transfer = import "transfer"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 foreign import "string.h"
 
 local function wait_until_waiting(task: async.Task)
-  while task:status():as_string() == "ready" do timer.yield() end
+  while task:status():as_string() == "ready" do async.yield() end
   test.assert(task:status():as_string() == "waiting", "Task did not suspend")
 end
 
@@ -28,23 +29,9 @@ local function successful(result: value): async.Task
   end)
 end
 
-local function sleeping(milliseconds: integer,
-                        result: value): async.Task
-  return async.run<|value, value|>(function (): value
-    timer.sleep(milliseconds)
-    return result
-  end)
-end
-
-local function cancelled(reason: string): async.Task
-  local task = sleeping(60000, "unexpected cancellation return")
-  task:cancel(async.CancellationReason.simple(reason))
-  return task
-end
-
 local function failing(reason: value): async.Task
   return async.run<|value, value|>(function (): value
-    timer.yield()
+    async.yield()
     raise reason
     return nil
   end)

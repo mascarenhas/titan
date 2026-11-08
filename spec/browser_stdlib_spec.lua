@@ -28,7 +28,7 @@ plan:
         return strategy:run(argv, {stderr_to_stdout = true})
     end
 
-    it("keeps all fifteen portable owners in the single-image root inventory", function()
+    it("keeps all sixteen portable owners in the single-image root inventory", function()
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local result = root_plan()
         assert.is_true(result.ok, result.output)
@@ -37,9 +37,10 @@ plan:
             assert.is_nil(roots[root], root)
             roots[root], count = true, count + 1
         end
-        assert.equal(15, count, "the audited browser inventory has 15 owners; change this deliberately")
+        assert.equal(16, count, "the audited browser inventory has 16 owners; change this deliberately")
         assert.is_true(roots["transfer.tests"])
         assert.is_true(roots["protobuf.tests"])
+        assert.is_true(roots["async.tests"])
     end)
 
     it("rejects empty and duplicate owner inventories before build setup", function()
