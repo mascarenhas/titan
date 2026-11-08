@@ -1,0 +1,253 @@
+-- Callables that the scheduler harness invokes as calls and Task-form calls:
+-- drives that it disposes or that exit, while relinquished and mid-turn.
+
+foreign import "stdio.h"
+
+local child_state: value = nil
+-- Kept until the state closes, so its finalizer runs in dispose().
+local exit_witness: {string}? = nil
+
+local function ignore(...: Value): Value
+  return Value.is_nil()
+end
+
+local function echo(...: Value): Value
+  return ...[1]
+end
+
+local function fail(...: Value): Value
+  case ...[1]
+  when is_string(message) then raise message
+  end
+  raise "fail expects a message"
+end
+
+-- A Task-form target that waits on a host request.
+local function nap(...: Value): Value
+  note("napping")
+  await_delay(integer_of(...[1]), 0, false)
+  return Value.is_string("woke")
+end
+
+-- A Task-form target that waits until it is cancelled.
+local function hold(...: Value): Value
+  note("holding")
+  suspend_on("never")
+  return Value.is_nil()
+end
+
+local function exit_task(...: Value): Value
+  async.request_exit(integer_of(...[1]))
+  return Value.is_nil()
+end
+
+-- Starting host work after dispose() raises the host's closing error.
+local function try_new_work(): string
+  local source = browser.binding("delay")
+  defer source:close()
+  local request = source:start(ignore, ignore, Value.is_integer(1), Value.is_integer(0))
+  request:close()
+  return "started"
+catch
+  if error is browser.BrowserError then
+    local failure: browser.BrowserError = error
+    defer failure:close()
+    return failure.message
+  end
+  raise
+end
+
+-- A Runtime whose Task waits until it is cancelled; its cleanup awaits host
+-- work started before dispose(). With `drive`, the call drives until disposal
+-- retires the Task; without it, dispose() drives the cleanup itself.
+local function parked_runtime(prefix: string, ms: integer, drive: boolean)
+  local settled: integer? = nil
+  local resolve_settled: (function (integer): ())? = nil
+  local slow = browser.binding("delay")
+  defer slow:close()
+  local slow_request = slow:start(function (...: Value): Value
+    local item = integer_of(...[1])
+    local resolve? = resolve_settled
+    if resolve ~= nil then resolve(item) else settled = item end
+    return Value.is_nil()
+  end, ignore, Value.is_integer(ms), Value.is_integer(ms))
+  async.run_with_cleanup<|nil, value|>(function (): nil
+    note(prefix .. " parked")
+    suspend_on("never")
+    return nil
+  end, function (reason: async.CancellationReason<|value|>?)
+    defer slow_request:close()
+    note(prefix .. " cleanup " .. reason_text(reason))
+    note(prefix .. " new work: " .. try_new_work())
+    local result = async.await_cleanup<|integer, string|>(function (resolve, _reject, _fatal)
+      local item? = settled
+      if item ~= nil then resolve(item) else resolve_settled = resolve end
+    end)
+    note(prefix .. " cleanup got " .. delay_value(result))
+  end)
+  if drive then async.loop() end
+end
+
+local function park(...: Value): Value
+  parked_runtime("park", integer_of(...[1]), true)
+  return Value.is_nil()
+end
+
+local function park_idle(...: Value): Value
+  parked_runtime("idle", integer_of(...[1]), false)
+  return Value.is_nil()
+end
+
+-- dispose() from inside a binding during a turn: the turn finishes, and the
+-- next relinquish cancels the waiting peer.
+local function dispose_mid_turn(...: Value): Value
+  async.run_with_cleanup<|nil, value|>(function (): nil
+    note("peer parked")
+    suspend_on("never")
+    return nil
+  end, function (reason: async.CancellationReason<|value|>?)
+    note("peer cleanup " .. reason_text(reason))
+  end)
+  async.run<|nil, value|>(function (): nil
+    async.yield()
+    call_binding("dispose_now")
+    note("after dispose request")
+    return nil
+  end)
+  async.loop()
+  return Value.is_nil()
+end
+
+-- A cleanup wait that nothing settles and no host source can wake: disposal
+-- still ends through idle detection.
+local function orphan(...: Value): Value
+  async.run_with_cleanup<|nil, value|>(function (): nil
+    note("orphan parked")
+    suspend_on("never")
+    return nil
+  end, function (_: async.CancellationReason<|value|>?)
+    note("orphan cleanup")
+    async.await_cleanup<|nil, nil|>(function (_resolve, _reject, _fatal) end)
+    note("orphan cleanup returned")
+  end)
+  async.loop()
+  return Value.is_nil()
+end
+
+-- Thousands of Tasks parked on host requests until disposal cancels them.
+-- The last Task to park and the last cleanup each leave one note.
+local function crowd(...: Value): Value
+  local count = integer_of(...[1])
+  local parked = 0
+  local cleaned = 0
+  for _ = 1, count do
+    async.run_with_cleanup<|nil, value|>(function (): nil
+      parked = parked + 1
+      if parked == count then note("crowd parked " .. count) end
+      suspend_on("never")
+      return nil
+    end, function (reason: async.CancellationReason<|value|>?)
+      local text = reason_text(reason)
+      if text ~= "instance disposed" then note("crowd cleanup " .. text) end
+      cleaned = cleaned + 1
+      if cleaned == count then note("crowd cleaned " .. count) end
+    end)
+  end
+  async.loop()
+  return Value.is_nil()
+end
+
+-- A Task parked on the host request `name(ms)`; disposal cancels it.
+local function park_on(name: string, ms: Value)
+  async.run_with_cleanup<|nil, value|>(function (): nil
+    note(name .. " parked")
+    suspend_on(name, ms)
+    return nil
+  end, function (reason: async.CancellationReason<|value|>?)
+    note(name .. " cleanup " .. reason_text(reason))
+  end)
+end
+
+-- Host work that outlives disposal's cancellation: a retained request and a
+-- detachable one, each settling after its own delay.
+local function retire(...: Value): Value
+  park_on("held", ...[1])
+  park_on("late", ...[2])
+  async.loop()
+  return Value.is_nil()
+end
+
+local function exit_drive(...: Value): Value
+  local code = integer_of(...[1])
+  async.run_with_cleanup<|nil, value|>(function (): nil
+    note("exit peer parked")
+    suspend_on("never")
+    return nil
+  end, function (reason: async.CancellationReason<|value|>?)
+    note("exit peer cleanup " .. reason_text(reason))
+  end)
+  async.run<|nil, value|>(function (): nil
+    await_delay(5, 0, false)
+    async.request_exit(code)
+    return nil
+  end)
+  local witness: {string} = {}
+  gc.finalizable(witness, function (_: {string})
+    ffi.fputs("exit finalizer\n", ffi.stdout)
+  end)
+  exit_witness = witness
+  async.loop()
+  return Value.is_nil()
+end
+
+-- One drive both requests exit and fails through a fatal host callback.
+local function exit_and_fail(...: Value): Value
+  local source = browser.binding("delay")
+  defer source:close()
+  local request: browser.BrowserRequest? = nil
+  async.run<|nil, value|>(function (): nil
+    async.await<|nil, value|>(function (_resolve, _reject, fatal)
+      request = source:start(function (...: Value): Value
+        fatal("exit and fail", "")
+        return Value.is_nil()
+      end, ignore, Value.is_integer(5), Value.is_integer(0))
+    end)
+    return nil
+  end)
+  async.run<|nil, value|>(function (): nil
+    async.request_exit(5)
+    return nil
+  end)
+  defer request:close()
+  async.loop()
+  return Value.is_nil()
+end
+
+local function make_child(...: Value): Value
+  child_state = ffi.scheduler_new_child(L)
+  return Value.is_nil()
+end
+
+local function publish(target: browser.BrowserHandle, name: string,
+    callable: function (...: Value): Value)
+  target:call(Value.is_string(name), Value.is_callable(callable))
+end
+
+local function publish_entries()
+  local target = browser.binding("publish")
+  defer target:close()
+  publish(target, "echo", echo)
+  publish(target, "fail", fail)
+  publish(target, "nap", nap)
+  publish(target, "hold", hold)
+  publish(target, "exit_task", exit_task)
+  publish(target, "park", park)
+  publish(target, "park_idle", park_idle)
+  publish(target, "dispose_mid_turn", dispose_mid_turn)
+  publish(target, "orphan", orphan)
+  publish(target, "crowd", crowd)
+  publish(target, "retire", retire)
+  publish(target, "exit_drive", exit_drive)
+  publish(target, "exit_and_fail", exit_and_fail)
+  publish(target, "make_child", make_child)
+end

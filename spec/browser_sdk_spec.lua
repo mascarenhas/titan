@@ -42,7 +42,7 @@ local EXPECTED_LPEGLABEL_SYMBOLS = {
 }
 
 local EXPECTED_PROVIDER_MODULES = {
-    "titan.browser", "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
+    "titan.async", "titan.browser", "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
     "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
     "titan.test", "titan.transfer", "titan.url",
 }

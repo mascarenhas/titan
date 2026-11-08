@@ -4,8 +4,9 @@ assert(package.config:sub(1, 1) == "\\", "native Windows Lua is required")
 local modules = { "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "peg", "string", "path", "math", "lua", "iteration", "gc",
     "test", "reflect", "sqlite3", "json", "protobuf", "transfer", "thread" }
-local folders = { uv = true, http = true, websocket = true, peg = true, string = true,
-    sqlite3 = true, json = true, lua = true, protobuf = true, thread = true }
+-- Each object path follows the module's selected source layout (see
+-- spec/support/stdlib_objects.lua), never a hand-kept flat/folder list.
+package.path = source .. "/?.lua;" .. package.path
 local names = {}
 for _, name in ipairs(modules) do names[#names + 1] = "titan." .. name end
 local function read(path)
@@ -33,6 +34,7 @@ local support = open_support(assert(bootstrap))
 package.loaded.titan = support
 local driver = require "titan-compiler.driver"
 local objectmetadata = require "titan-compiler.objectmetadata"
+local stdlib_objects = require "spec.support.stdlib_objects"
 local function exported(path)
     local report, found = read(path), {}
     assert(report:match("Format: COFF%-x86%-64"), "provider is not x64 PE/COFF")
@@ -67,9 +69,9 @@ local function valid_imports(path)
     assert(count > 0, "missing PE import inventory")
 end
 local objects, interfaces = {}, {}
+local resolver = driver.new_resolver_context({ target = "windows" })
 for _, name in ipairs(modules) do
-    local stem = assert(generated) .. "/titan/" .. name .. (folders[name] and ("/" .. name) or "")
-    local filename = stem .. ".o"
+    local filename = stdlib_objects.object(resolver, "titan." .. name, source, assert(generated))
     objects[#objects + 1] = { filename = filename, modname = "titan." .. name }
     -- The provider link reads these same generated-object interfaces, so the
     -- expected export inventory is the producer's, including public raw
@@ -82,6 +84,7 @@ for _, name in ipairs(modules) do
         " instead of titan." .. name)
     interfaces[entry.type.name] = entry.type
 end
+assert(driver.close_resolver_context(resolver))
 local target = assert(driver.derive_target_fingerprint(objects[1].filename, names[1]))
 local expected = {}
 assert(driver.validate_generated_objects(objects, target, expected))

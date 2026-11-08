@@ -295,11 +295,37 @@ end
 -- Every other delivered module must match its native interface exactly.
 local browser_only_modules = { ["titan.browser"] = true }
 
--- No member omissions or semantic signature differences are recorded. Machine
--- layouts live in separate provider metadata and are deliberately not compared.
--- Returns the member rows and the number of compared shared modules.
-function M.inventory(native, browser)
-    local rows, differences, modules = {}, {}, 0
+-- Differences a browser composition records on purpose (titan#334); #336 owns
+-- their classification. `omitted` names members the browser interface lacks:
+-- a top-level member, or a method of a record the browser keeps (omitting a
+-- record omits its fields, variants and methods). `opaque` names records the
+-- browser keeps under the native name with its own private fields and no
+-- constructor, so their semantic declarations differ in private layout and in
+-- the methods recorded as omitted.
+M.browser_differences = {
+    ["titan.async"] = {
+        omitted = {
+            -- Typed by uv.
+            "current_loop", "await_with", "await_cleanup_with", "await_cancellable_with",
+            "await_cancellable",
+            -- Native-only facilities.
+            "run_foreign", "prepare_native_retirement", "wait_external_native",
+            "prepare_external_wait", "wait_external", "wait_external_cleanup", "version",
+            "receiver", "send", "Receiver",
+            -- ExternalWait keeps no methods on the browser.
+            "ExternalWait:close", "ExternalWait:wait", "ExternalWait:wait_cleanup",
+        },
+        opaque = { "ExternalWait" },
+    },
+}
+
+-- Every other member must keep its native kind, rendered signature and
+-- semantic declaration. Machine layouts live in separate provider metadata
+-- and are deliberately not compared. Returns the shared member rows, the
+-- number of compared shared modules and the recorded difference rows.
+function M.inventory(native, browser, recorded_differences)
+    recorded_differences = recorded_differences or M.browser_differences
+    local rows, recorded_rows, differences, modules = {}, {}, {}, 0
     for _, modname in ipairs(browser.key_order) do
         if not browser_only_modules[modname] then
             local browser_entry, native_entry = browser.entries[modname], native.entries[modname]
@@ -307,13 +333,39 @@ function M.inventory(native, browser)
             modules = modules + 1
             local b = M.members(assert(driver.decode_module_interface(browser_entry.types, modname, "browser interface")))
             local n = M.members(assert(driver.decode_module_interface(native_entry.types, modname, "native interface")))
+            local recorded = recorded_differences[modname] or {}
+            local omitted, opaque = {}, {}
+            for _, name in ipairs(recorded.omitted or {}) do
+                omitted[name] = true
+                if not n[name] then
+                    differences[#differences + 1] = modname .. "." .. name .. ": recorded omission is not a native member"
+                elseif b[name] then
+                    differences[#differences + 1] = modname .. "." .. name .. ": recorded omission is in the browser interface"
+                else
+                    recorded_rows[#recorded_rows + 1] = { module = modname, name = name, difference = "omitted",
+                        kind = n[name].kind, signature = n[name].signature }
+                end
+            end
+            for _, name in ipairs(recorded.opaque or {}) do
+                opaque[name] = true
+                local bm, nm = b[name], n[name]
+                if not bm or not nm or bm.kind ~= "record" or nm.kind ~= "record" or bm.signature ~= nm.signature then
+                    differences[#differences + 1] = modname .. "." .. name .. ": recorded opaque record is not the same record in both interfaces"
+                else
+                    recorded_rows[#recorded_rows + 1] = { module = modname, name = name, difference = "opaque",
+                        kind = nm.kind, signature = nm.signature }
+                end
+            end
             local names, seen = {}, {}
             for name in pairs(b) do names[#names + 1], seen[name] = name, true end
             for name in pairs(n) do if not seen[name] then names[#names + 1] = name end end
             table.sort(names, util.bytewise_less)
             for _, name in ipairs(names) do
                 local bm, nm = b[name], n[name]
-                if not bm or not nm or bm.kind ~= nm.kind or bm.signature ~= nm.signature or bm.semantic ~= nm.semantic then
+                local owner = name:match("^([^.:]+)[.:]")
+                if opaque[name] or (nm and not bm and (omitted[name] or (owner and omitted[owner] and not b[owner]))) then
+                    -- Recorded above, or a member of an omitted record.
+                elseif not bm or not nm or bm.kind ~= nm.kind or bm.signature ~= nm.signature or bm.semantic ~= nm.semantic then
                     differences[#differences + 1] = modname .. "." .. name .. ": native=" ..
                         (nm and nm.signature or "<absent>") .. "; browser=" .. (bm and bm.signature or "<absent>") ..
                         (bm and nm and bm.semantic ~= nm.semantic and " (semantic declaration differs)" or "")
@@ -324,19 +376,31 @@ function M.inventory(native, browser)
         end
     end
     if #differences > 0 then return nil, "unrecorded public interface differences:\n" .. table.concat(differences, "\n") end
-    return rows, modules
+    return rows, modules, recorded_rows
 end
 
-function M.member_table(rows)
+function M.member_table(rows, recorded_rows)
     local out = {
         "# Browser core stdlib public-member inventory (generated)", "",
-        "Derived from native and browser provider interfaces. No member omissions or signature differences.",
+        "Derived from native and browser provider interfaces. Shared members keep their native signatures; " ..
+            "the browser differs only in the recorded members listed last.",
         "Semantic interface types are compared with documentation excluded; machine layouts are separate metadata.", "",
         "| Module | Member | Kind | Native and browser signature |", "| --- | --- | --- | --- |",
     }
     local function escape(text) return text:gsub("|", "&#124;"):gsub("`", "&#96;") end
     for _, row in ipairs(rows) do
         out[#out + 1] = "| `" .. row.module .. "` | `" .. row.name .. "` | " .. row.kind .. " | `" .. escape(row.signature) .. "` |"
+    end
+    if recorded_rows and #recorded_rows > 0 then
+        out[#out + 1] = ""
+        out[#out + 1] = "## Recorded browser differences"
+        out[#out + 1] = ""
+        out[#out + 1] = "| Module | Member | Difference | Kind | Native signature |"
+        out[#out + 1] = "| --- | --- | --- | --- | --- |"
+        for _, row in ipairs(recorded_rows) do
+            out[#out + 1] = "| `" .. row.module .. "` | `" .. row.name .. "` | " .. row.difference .. " | " ..
+                row.kind .. " | `" .. escape(row.signature) .. "` |"
+        end
     end
     return table.concat(out, "\n") .. "\n"
 end

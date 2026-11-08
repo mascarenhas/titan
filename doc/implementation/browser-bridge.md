@@ -577,6 +577,28 @@ prints a `MEASURE` line with macrotask chain costs (`setImmediate`,
 jobs, the wake latency from `notify()` to delivery in a parked drive, and
 `call()` round trips on an idle instance and into a parked drive, in
 microseconds.
+The same spec builds the real `async` driver's scheduler gate, the browser-only
+test owner `spec/stdlib/titan/async/browser_tests/`, with a C helper
+(`scheduler_child.c`) that creates child states loading
+`spec/stdlib/titan/async/browser_child.browser.titan`. `scheduler.mjs` runs its
+Titan cases (Tasks over host requests across hundreds of turns, inline
+registrations, cleanup under cancellation, fatal and ordinary failures,
+combinators, channels and a listener-fed subscription, nested coroutines, and
+child-state refusals) and then drives the owner's published entries:
+Task-form calls, disposal while relinquished, mid-turn, with an orphaned
+cleanup and with no drive, disposal of Tasks parked on a retained request
+(`dispose()` settles only after that request does) and on a detachable one
+(its late settlement is dropped), disposal of 2,000 parked Tasks after which
+the harness's acknowledged collection must clear a `WeakRef` to the instance,
+the exit latch with a `dispose()` afterwards that still runs the state's
+finalizers, and refused child-state calls during a drive. The spec also
+builds `bootstrap.titan`, a program whose `main` runs as the async bootstrap
+Task, without `--no-uv-bootstrap`. `bootstrap.mjs` then checks `run()`'s
+`returned` result, `failed` for a failed main Task (its uncaught report as the
+only stderr report, with its message and trace in the result), `returned`/1
+for a cancelled main, and `exited`, including after main failed. It also
+checks that output reaches stdout while the drive waits. Plain runs check the
+runner's exit statuses.
 
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The

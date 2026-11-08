@@ -89,7 +89,7 @@ use the chapters below for the normative language reference.
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, explicit non-raising transfer outcomes with owned traces, current coroutine identity, status, Lua interop, and unwinding of abandoned coroutines (`defer`, generic-`for` close functions, and Lua `<close>` run at collection and state close), cleanup that needs asynchronous I/O, and unwinding limits. |
 | [Public libuv binding](standard-library-uv.md) | Event loops, handles, requests, streams, filesystem, processes, threads and synchronization (including direct C-callable lock entries and a cross-thread wake bridge), and utilities; exact signatures, native status, callbacks, ownership, loop abandonment at final state teardown, and API coverage. |
-| [Asynchronous I/O and tasks](async-io.md) | Tasks, their status, errors, and cancellation; scheduling and driving a Runtime; adapting callbacks with `await`; persistent subscriptions; waits on other OS threads and retirement gates for Tasks that own native resources; coalescing cross-state receivers; bounded same-state channels and Reader/Writer adapters; terminal listeners and combinators; exact-token resume; resources and shutdown, including Lua-state close with an active Runtime. |
+| [Asynchronous I/O and tasks](async-io.md) | Tasks, their status, errors, and cancellation; scheduling and driving a Runtime; adapting callbacks with `await`; persistent subscriptions; waits on other OS threads and retirement gates for Tasks that own native resources; coalescing cross-state receivers; bounded same-state channels and Reader/Writer adapters; terminal listeners and combinators; exact-token resume; resources and shutdown, including Lua-state close with an active Runtime; and the browser target's driver, entries, ownership, exit and disposal. |
 | [Thread standard library](standard-library-thread.md) | Bounded cross-thread FIFO channels (`Sender`, `Receiver`) with nil-preserving iteration, transferable endpoints, and the state-close rule for blocked channel operations; standalone OS worker threads (`Thread`, `ThreadStatus`, `Error`) with `join()`, cooperative cancellation, finalized handles, and an `async.Task` proxy that becomes terminal only after the OS thread is joined and cancels its thread when its state closes; and bounded `Group` execution with first-error cancellation and explicit retry boundaries. |
 | [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, and ownership-safe line iteration. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
@@ -246,8 +246,9 @@ remains rejected.
   applications, with unified Titan/Lua tracebacks backed by `.wasm.map` (full
   file/line attribution on Chromium, Firefox, and Node; function-level reduced
   fidelity on WebKit and Safari), but its standard library currently provides
-  only the thirteen modules that need no libuv plus typed
-  [JavaScript bindings](standard-library-browser.md), without `async`, `io`,
+  the thirteen modules that need no libuv, [`async`](async-io.md#the-browser-target)
+  with a browser driver, and typed
+  [JavaScript bindings](standard-library-browser.md), without `timer`, `io`,
   `os`, files, or networking
   ([browser target](browser-target.md#the-browser-standard-library)).
 

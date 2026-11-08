@@ -1,0 +1,20 @@
+-- Ownership: a C-created child state never drives the instance. Its
+-- async.loop() and Runtime creation raise at once, with no owner Runtime and
+-- with owner waits pending when an owner Task calls into it, and the owner's
+-- drive progresses after each refusal.
+function test_child_state_refuses_to_drive(_: test.Context)
+  local child: value = ffi.scheduler_new_child(L)
+  defer ffi.scheduler_close_child(L, child)
+  ffi.scheduler_child_check(L, child)
+  runtime_test.run(function ()
+    local waiter = async.run<|integer, value|>(function (): integer
+      return await_delay(10, 5, false)
+    end)
+    task_support.cleanup_task(waiter, "owner waiter cleanup")
+    async.yield()
+    test.assert(waiter:status():as_string() == "waiting", "the owner wait was not pending")
+    ffi.scheduler_child_check(L, child)
+    local ok, item? = async.join(waiter):has_succeeded()
+    test.assert(ok and item == 5, "the owner drive did not progress after the child's refusal")
+  end)
+end

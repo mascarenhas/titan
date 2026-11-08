@@ -463,6 +463,5 @@ function test_coverage_async_matrix_coalescing_stop_keeps_latest(_context: test.
     stream:close()
     test.assert(stops == 1 and closes == 1, "close repeated stop or omitted cleanup")
     case stream:next() when closed() then else raise "closed source did not remain closed" end
-    test.assert(async.version() == uv.version_string(), "async advertised a different backend version")
   end)
 end

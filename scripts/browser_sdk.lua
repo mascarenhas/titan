@@ -327,7 +327,7 @@ elseif action == "finalize" then
     if not closed then fail(closure_err) end
     io.stderr:write("browser-sdk: core stdlib closure passed (archive symbols and certified headers)\n")
     local expected_modules = {
-        "titan.browser", "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
+        "titan.async", "titan.browser", "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
         "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
         "titan.test", "titan.transfer", "titan.url",
     }

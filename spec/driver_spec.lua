@@ -13230,9 +13230,10 @@ describe("target-aware source resolver", function()
 
     local stdlib_root = paths.to_slash(lfs.currentdir())
     local excluded_stdlib = {
-        { "async", "async" }, { "timer", "timer" }, { "io", "io" },
+        { "timer", "timer" }, { "io", "io" },
         { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" }, { "os", "os" },
-        { "uv", "uv/uv", "tcp" }, { "http", "http/http", "client" },
+        { "uv", "uv/uv", "tcp" },
+        { "http", "http/http", "client" },
         { "websocket", "websocket/websocket", "handshake" },
         { "sqlite3", "sqlite3/sqlite3", "bindings" },
         { "lua", "lua/lua", "worker" }, { "thread", "thread/thread", "channel" },
@@ -13274,13 +13275,39 @@ describe("target-aware source resolver", function()
         assert.equal("titan.browser", require("titan-compiler.parser").normalize_import("browser"))
     end)
 
+    it("composes titan.async from its shared main and the target's contributor members", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local member = target == "browser" and "browser" or "native"
+            local selected = assert(driver.resolve_source(context(target), "titan.async", stdlib_root))
+            assert.equal("folder", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/async/async.titan", paths.to_slash(selected.main), target)
+            local files = {}
+            for index, filename in ipairs(selected.files) do files[index] = paths.basename(filename) end
+            assert.same(target == "browser" and
+                { "async.titan", "external.browser.titan", "runtime.browser.titan" } or
+                { "async.titan", "external.native.titan", "foreign.native.titan",
+                  "receiver.native.titan", "runtime.native.titan" }, files, target)
+            for _, part in ipairs({ "runtime", "external", "receiver", "foreign" }) do
+                local blocked = driver.resolve_source(context(target), "titan.async." .. part, stdlib_root)
+                if member == "browser" and (part == "receiver" or part == "foreign") then
+                    -- These families have no browser member: an ordinary miss.
+                    assert.is_nil(blocked, part)
+                else
+                    assert.equal("blocked", assert(blocked, part).kind, part)
+                    assert.equal(stdlib_root .. "/titan/async/" .. part .. "." .. member .. ".titan",
+                        paths.to_slash(blocked.contributor), target .. " " .. part)
+                end
+            end
+        end
+    end)
 
     for _, target in ipairs(driver.SOURCE_LABELS) do
         it("blocks native-only stdlib folder contributors on " .. target, function()
             for _, entry in ipairs(excluded_stdlib) do
                 if entry[3] then
                     local name = "titan." .. entry[1] .. "." .. entry[3]
-                    local source = assert(driver.resolve_source(context(target), name, stdlib_root))
+                    local source = driver.resolve_source(context(target), name, stdlib_root)
+                    assert.truthy(source, name)
                     assert.equal("blocked", source.kind, name)
                     assert.equal(stdlib_root .. "/titan/" .. entry[2] .. ".native.titan",
                         paths.to_slash(source.main), name)

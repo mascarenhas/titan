@@ -350,10 +350,10 @@ After step 7, `browser-stdlib` runs:
 8. **Complete browser core stdlib suite.** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
    unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
-   builds all fifteen browser-portable owners into one validation-profile
+   builds all sixteen browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
    checks dependency closure and the native/browser member inventory of the
-   thirteen shared modules, then
+   thirteen shared modules and `async` (with its recorded omissions), then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
    `TITAN_CHROME`. Each engine must execute every owner with complete nonzero
    status/count/timing accounting
@@ -381,7 +381,9 @@ After step 7, `browser-stdlib` runs:
    fixture, and minicoro specs run both engines. The bridge uses its dedicated
    native Titan test owner with explicit JavaScript bindings, rather than
    adding it to the ordinary core aggregate; the scheduler spec drives the
-   bridge's drive interface with a test-owned mini driver.
+   bridge's drive interface with a test-owned mini driver and runs the real
+   `async` driver's scheduler gate owner and an async bootstrap program with
+   their own harnesses.
 10. **Browser SDK and stdlib compiler coverage.** The same report commands
     produce `luacov.codecov.out`, which uploads with `name: browser-stdlib`
     and otherwise the same options, so the real provider, image, SDK, and

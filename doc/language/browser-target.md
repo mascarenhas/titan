@@ -563,13 +563,20 @@ The instance has the following methods:
   in `args` are UTF-8 encoded; `Uint8Array` arguments are copied byte for byte.
   It resolves `{kind, status, bytes, trace}`, with `"returned"`, `"failed"` or
   `"exited"`, a signed 32-bit status, and copied error and raw trace bytes
-  (empty unless failed). Ordinary initializer or main failure is a
-  failed/status1 result, not a fatal-engine rejection. A prior initializer
-  failure is reused without a second report. `"exited"` reports the status a
-  drive latched with [exit](#exit). An entry that failed stays `"failed"` even
-  when its drive latched an exit; otherwise the exit latch wins, then a main
-  Task failure the `async` bootstrap reported, which resolves `"failed"` with
-  status 1 and that Task's message and trace.
+  (empty unless failed). An ordinary initializer or main failure is a
+  failed/status1 result, not a fatal-engine rejection. A program that links
+  `async` runs `main` as a Task through the async bootstrap: a failed main
+  Task prints its uncaught Task report on stderr, as natively, and `run()`
+  resolves `"failed"` with status 1 and that Task's message and trace. The
+  standalone report (the program name, the message and a traceback on stderr)
+  is printed only for initializer failures, failures of a `main` called
+  directly (without `async`, or built with `--no-uv-bootstrap`), and fatal
+  Runtime failures that `async.loop()` re-raises. A cancelled main Task
+  resolves `"returned"` with status 1, the status a native program exits
+  with. A prior initializer failure is reused without a second report.
+  `"exited"` reports the status a drive latched with [exit](#exit). An entry
+  that failed stays `"failed"` even when its drive latched an exit; otherwise
+  the exit latch wins over a main Task failure that the bootstrap reported.
 * `call(callable, ...args)` invokes a callable wrapper that Titan exported
   through [`BrowserValue.is_callable`](standard-library-browser.md#callables-and-pinning)
   and passed to JavaScript. It requires successful initialization and remains
@@ -1119,9 +1126,10 @@ bare `raise`.
 
 ## The browser standard library
 
-The browser SDK's `titan.a` holds fourteen standard modules that need no libuv
+The browser SDK's `titan.a` holds fifteen standard modules that need no libuv
 or other native-only library: thirteen shared modules compiled from the same
-sources as the native standard library, plus the browser-only `titan.browser`:
+sources as the native standard library, `async` with a browser driver, and the
+browser-only `titan.browser`:
 
 | Module | Contents |
 | --- | --- |
@@ -1138,6 +1146,7 @@ sources as the native standard library, plus the browser-only `titan.browser`:
 | [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
 | [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
 | [`test`](standard-library-test.md) | the test API and the native test runner |
+| [`async`](async-io.md#the-browser-target) | Tasks, cancellation, waits, channels, combinators, and subscriptions, driven between browser macrotasks |
 | [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
 
 Each of the thirteen shared modules is complete. Every public declaration, including the raw
@@ -1150,16 +1159,28 @@ raises an "unavailable" error or returns a stand-in value. `transfer` encodes
 and decodes packets within one instance; the modules that carry packets to
 another Lua state or thread are not available.
 
+`async` shares its scheduling core with the native module and keeps its
+public signatures, except for the members that the browser cannot provide:
+the libuv-typed `current_loop`, `await_with`, `await_cleanup_with`,
+`await_cancellable_with`, and `await_cancellable`; the native-only
+`run_foreign`, `prepare_native_retirement`, `wait_external_native`,
+`prepare_external_wait`, `wait_external`, `wait_external_cleanup`,
+`version`, `receiver`, `send`, and `Receiver`. `ExternalWait` remains only
+as an opaque type with no constructor and no methods, so the `final_wait`
+of `run_with_cleanup` can only be `nil`. Its Tasks run only in the
+instance's owner state, under a drive that gives the page one macrotask
+between turns ([async on the browser target](async-io.md#the-browser-target)).
+
 `titan.browser` is the reviewed target-only exception. It has no native
 placeholder and imports only the portable core. Its byte/scalar ABI is not the
 native transfer packet format, and schema copies are a separate feature. It
 provides the [drive primitives](standard-library-browser.md#driver-interface-low-level)
-that a browser scheduler uses but schedules nothing itself. See
+that the `async` driver uses but schedules nothing itself. See
 [JavaScript bindings](standard-library-browser.md).
 
 ### Modules that are not available
 
-The other standard modules are absent from the browser target: `uv`, `async`,
+The other standard modules are absent from the browser target: `uv`,
 `timer`, `io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
 `sqlite3`, and `thread`. Each of them uses libuv, directly or through its
 imports. Their sources exist only as native variants (such as
@@ -1177,7 +1198,7 @@ There are no stand-in modules for them, and their folder contributors, such as
 of them cannot be built into a browser test image either; keep such cases in
 native-only test modules.
 
-Browser versions of `async`, `timer`, `io`, `os`, `lua`, and `http` are
+Browser versions of `timer`, `io`, `os`, `lua`, and `http` are
 planned, and `fs` is planned together with a browser file system. Until then,
 a program writes its output through C's `stdio.h`, as in [the first web
 page](#a-first-web-page), and the test runner reports through it too. Either
@@ -1434,11 +1455,15 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 ## Current limits
 
-* The browser standard library has [fourteen of the standard
-  modules](#the-browser-standard-library). `async`, timers, files, networking,
+* The browser standard library has [fifteen of the standard
+  modules](#the-browser-standard-library). Timers, files, networking,
   `io`, `os`, `lua`, `thread`, and `sqlite3` are not available, so programs
   write output through C's `stdio.h`, as in [the first web
   page](#a-first-web-page).
+* `async` Tasks run only in the instance's owner state and only while a drive
+  runs: the program's `main`, a call that calls `async.loop()`, or a
+  Task-form call. Receivers, `run_foreign`, and external waits are
+  native-only ([async on the browser target](async-io.md#the-browser-target)).
 * Browser images require JSPI-capable Chrome/Chromium, Firefox, Safari/WebKit,
   or Node 26+. `titan-browser-run` drives Node and headless Chrome/Chromium.
 * On WebKit and Safari, traces have reduced, function-level fidelity
