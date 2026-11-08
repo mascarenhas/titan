@@ -15,6 +15,9 @@ addToLibrary({
     blocked: false,
     poisoned: false,
     queued: false,
+    // Synchronous C callbacks running now: the one engine stack below them
+    // cannot suspend, whichever Lua state they entered.
+    callbackDepth: 0,
 
     safe() {
       return !TitanBrowser.owner;
@@ -79,6 +82,43 @@ addToLibrary({
         context.gate = null;
       }
       Module['titanBrowserBridge']?.poison(cause);
+    },
+
+    // titan_browser_host_callback: the loader admits a callback unless the
+    // instance is closing, exited or poisoned.
+    callback(state, delta) {
+      if (delta < 0) {
+        if (TitanBrowser.callbackDepth > 0) TitanBrowser.callbackDepth--;
+        return 1;
+      }
+      if (TitanBrowser.poisoned || !Module['titanBrowserBridge']?.callbackAdmit(state)) return 0;
+      if (TitanBrowser.callbackDepth++ === 0) queueMicrotask(() => TitanBrowser.callbacksLeft());
+      return 1;
+    },
+
+    // No microtask runs while a synchronous callback is on the stack, so a
+    // depth still above zero here means a callback ended by an exception (an
+    // engine SuspendError, a JavaScript exception) that unwound its C frames
+    // without the leave, leaving the Lua state it ran on inconsistent.
+    callbacksLeft() {
+      if (TitanBrowser.callbackDepth === 0 || TitanBrowser.poisoned) return;
+      TitanBrowser.poison(TitanBrowser.error('PROTOCOL', 'a synchronous C callback ended by an exception'));
+    },
+
+    // A stack switch below a JavaScript frame cannot suspend: outside a
+    // promising entry, or inside a synchronous callback. V8 throws its
+    // SuspendError before calling the import (callbacksLeft then poisons); an
+    // engine that calls it first gets this named failure, thrown to the
+    // callback's JavaScript caller.
+    switchRefused() {
+      return !TitanBrowser.owner || TitanBrowser.callbackDepth > 0;
+    },
+
+    refuseSwitch() {
+      var error = TitanBrowser.error('PROTOCOL',
+        'Titan stack switch outside a promising entry or inside a synchronous callback');
+      TitanBrowser.poison(error);
+      throw TitanBrowser.terminalFailure;
     },
 
     save(context) {
@@ -148,6 +188,7 @@ addToLibrary({
     },
 
     transfer(from, fromBack, to, toBack, terminal) {
+      if (TitanBrowser.switchRefused()) TitanBrowser.refuseSwitch();
       var source = TitanBrowser.context(TitanBrowser.current);
       var fromContext = TitanBrowser.context(from);
       var toContext = TitanBrowser.context(to);
@@ -174,6 +215,9 @@ addToLibrary({
         TitanBrowser.contexts.delete(id);
         return;
       }
+      // Retiring a parked context suspends; dead and never-started ones above
+      // are destroyed at once, which a synchronous callback may do.
+      if (TitanBrowser.switchRefused()) TitanBrowser.refuseSwitch();
       if (!context.gate || context.retiring) throw new Error('cannot retire a running Titan coroutine');
       var caller = TitanBrowser.context(TitanBrowser.current);
       TitanBrowser.save(caller);
@@ -193,7 +237,8 @@ addToLibrary({
     // whether the drive suspends (a promise) or reports IDLE (a number).
     // A poisoned drive never resumes: disposal drops its suspended stack.
     relinquish(state, mode) {
-      if (!TitanBrowser.owner || TitanBrowser.current !== 0) {
+      if (TitanBrowser.switchRefused()) TitanBrowser.refuseSwitch();
+      if (TitanBrowser.current !== 0) {
         TitanBrowser.poison(TitanBrowser.error('PROTOCOL',
           'Titan stack switch outside a promising entry or inside a synchronous callback'));
         return new Promise(() => {});
@@ -267,4 +312,13 @@ addToLibrary({
     TitanBrowser.entered = true;
     return 1;
   },
+
+  titan_browser_host_callback__deps: ['$TitanBrowser'],
+  titan_browser_host_callback__sig: 'iii',
+  titan_browser_host_callback: (state, delta) => TitanBrowser.callback(state >>> 0, delta | 0),
+
+  // titan_no_switch's import: true while any synchronous callback runs.
+  titan_browser_in_callback__deps: ['$TitanBrowser'],
+  titan_browser_in_callback__sig: 'i',
+  titan_browser_in_callback: () => TitanBrowser.callbackDepth > 0 ? 1 : 0,
 });

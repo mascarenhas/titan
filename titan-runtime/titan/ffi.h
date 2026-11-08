@@ -283,4 +283,18 @@ static inline void lmacro_set_errfunc(lua_State *L, ptrdiff_t old) { L->errfunc 
 static inline ptrdiff_t lmacro_savestack_top(lua_State *L) { return savestack(L, L->top.p - 1); }
 static inline void *lmacro_unconst(const void *p) { return (void *)p; }
 
+/* A synchronous C callback on the browser target runs below a JavaScript frame
+** that cannot suspend, so coroutine and async code must not switch stacks
+** there. The browser bridge library's import reports whether any callback of
+** the instance is running; native builds fold the check to 0. */
+#if defined(__wasm__)
+int titan_browser_in_callback(void);
+static inline int titan_no_switch(lua_State *L) {
+  (void)L;
+  return titan_browser_in_callback() != 0;
+}
+#else
+static inline int titan_no_switch(lua_State *L) { (void)L; return 0; }
+#endif
+
 #endif
