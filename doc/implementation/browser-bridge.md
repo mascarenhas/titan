@@ -599,15 +599,26 @@ child-state refusals, the `timer` cases, and the synchronous-callback cases).
     outside any Task.
 
 It then drives the owner's published entries:
-Task-form calls, disposal while relinquished (where the cleanup shows that new
-host work raises the closing error and a sleep raises the Task's
-cancellation), mid-turn, with an orphaned
-cleanup and with no drive, disposal of Tasks parked on a retained request
-(`dispose()` settles only after that request does) and on a detachable one
-(its late settlement is dropped), disposal of 2,000 parked Tasks after which
-the harness's acknowledged collection must clear a `WeakRef` to the instance,
-the exit latch with a `dispose()` afterwards that still runs the state's
-finalizers, and refused child-state calls during a drive. The spec also
+- Task-form calls.
+- Disposal while relinquished. The cleanup shows that new host work raises
+  the closing error and that a sleep raises the Task's cancellation. While the
+  cleanup awaits a 200 ms host request, the drive takes at most three turns.
+  The harness counts the loader's turn-source macrotasks: `setImmediate` calls
+  that pass the turn cell, otherwise `postMessage(undefined)` on the
+  instance's channel. Elapsed time alone would not show that the drive parked.
+- Disposal mid-turn, with an orphaned cleanup, and with no drive. The cleanup
+  drive that `dispose()` starts when nothing drives has the same three-turn
+  bound.
+- Disposal of Tasks parked on a retained request (`dispose()` settles only
+  after that request does) and on a detachable one (its late settlement is
+  dropped).
+- Disposal of 2,000 parked Tasks, after which the harness's acknowledged
+  collection must clear a `WeakRef` to the instance.
+- The exit latch, with a `dispose()` afterwards that still runs the state's
+  finalizers.
+- Refused child-state calls during a drive.
+
+The spec also
 builds `bootstrap.titan`, a program whose `main` runs as the async bootstrap
 Task, without `--no-uv-bootstrap`. `bootstrap.mjs` then checks `run()`'s
 `returned` result, `failed` for a failed main Task (its uncaught report as the

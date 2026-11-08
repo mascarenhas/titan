@@ -27,12 +27,11 @@ local function in_callback(body: function ())
 end
 
 local function raised(action: function ()): string
-  do action()
-  catch
-    if error is string then return error as string end
-    return "non-string error"
-  end
+  action()
   return "returned"
+catch
+  if error is string then return error end
+  return "non-string error"
 end
 
 function test_synchronous_callbacks_cannot_switch_coroutines(_: test.Context)
@@ -115,8 +114,7 @@ function test_async_in_a_synchronous_callback_runs_outside_any_task(_: test.Cont
         "a callback called from a Task saw that Task")
       test.assert(raised(function () async.yield() end) ==
         "asynchronous operation must be called from an async Task", "a callback could yield its Task")
-      local resolve = resolve_later as function (integer): ()
-      resolve(42)
+      resolve_later(42)
       test.assert(waiter:status():as_string() == "waiting",
         "a settlement in a callback resumed its Task inline")
       async.run<|nil, value|>(function (): nil

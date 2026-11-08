@@ -48,6 +48,29 @@ function nextTurn(callback) {
   channel.port2.postMessage(null);
 }
 
+// The driver's turns. The loader schedules each one on its turn source:
+// setImmediate(turnFired, cell) where the host has setImmediate (Node),
+// otherwise postMessage(undefined) on its instance's MessageChannel. The
+// harness's own macrotasks pass no cell and post null, so they never count.
+let driverTurns = 0;
+
+function watchTurns() {
+  if (typeof setImmediate === 'function') {
+    const saved = setImmediate;
+    globalThis.setImmediate = (callback, ...args) => {
+      if (args.length !== 0) driverTurns++;
+      return saved(callback, ...args);
+    };
+    return () => { globalThis.setImmediate = saved; };
+  }
+  const saved = MessagePort.prototype.postMessage;
+  MessagePort.prototype.postMessage = function (message, ...args) {
+    if (message === undefined) driverTurns++;
+    return saved.call(this, message, ...args);
+  };
+  return () => { MessagePort.prototype.postMessage = saved; };
+}
+
 function makeHost(context, image) {
   const host = {callables: new Map(), notes: [], stdout: [], stderr: [], notificationErrors: [],
     ticks: 0, disposing: undefined, cancels: [], settled: [], marked: false};
@@ -169,6 +192,9 @@ async function disposal(context, image) {
     await host.instance.initialize();
     const parked = host.call('park', 200n);
     await until(context, () => host.notes.includes('park parked'), 'park did not park');
+    // From here the drive takes the queued entries' wake, then the
+    // settlement's.
+    const turns = driverTurns;
     const queuedCall = host.call('echo', 1n);
     const queuedTask = host.task('hold');
     const started = Date.now();
@@ -178,10 +204,15 @@ async function disposal(context, image) {
     await rejection(context, parked, 'DISPOSED');
     await disposing;
     summary.parkedMs = Date.now() - started;
+    summary.parkedTurns = driverTurns - turns;
     context.assert(notes(host) === 'park parked|park cleanup instance disposed|' +
       'park new work: browser state is closing|park sleep: cancelled|park cleanup got 200',
       `park notes: ${notes(host)}`);
     context.assert(summary.parkedMs >= 150, `disposal did not wait for the cleanup's host request: ${summary.parkedMs} ms`);
+    // Design 10.1 (FD-H1): the drive parks on the cleanup's request instead
+    // of taking turns until it settles.
+    context.assert(summary.parkedTurns <= 3,
+      `disposal took ${summary.parkedTurns} driver turns while its cleanup waited`);
   } finally { await host.close(); }
 
   host = makeHost(context, image);
@@ -209,10 +240,15 @@ async function disposal(context, image) {
   try {
     await host.instance.initialize();
     await host.call('park_idle', 50n);
+    const turns = driverTurns;
     await host.instance.dispose();
+    summary.idleTurns = driverTurns - turns;
     context.assert(notes(host) === 'idle cleanup instance disposed|' +
       'idle new work: browser state is closing|idle sleep: cancelled|idle cleanup got 50',
       `shutdown notes: ${notes(host)}`);
+    // The cleanup drive that dispose() starts parks the same way.
+    context.assert(summary.idleTurns <= 3,
+      `the cleanup drive took ${summary.idleTurns} driver turns while its cleanup waited`);
   } finally { await host.close(); }
 
   // The retained request keeps dispose() pending until it settles; the
@@ -346,6 +382,7 @@ export async function run(context) {
   context.assert(context.args.length === 1, 'pass the scheduler image');
   const image = await context.image(context.args[0]);
   const restoreTimers = watchTimers();
+  const restoreTurns = watchTurns();
   try {
     const report = {verdict: 'PASS'};
     report.gate = await gate(context, image);
@@ -355,5 +392,5 @@ export async function run(context) {
     await exits(context, image);
     await ownership(context, image);
     context.stdout(encode('SCHEDULER ' + JSON.stringify(report) + '\n'));
-  } finally { restoreTimers(); }
+  } finally { restoreTurns(); restoreTimers(); }
 }

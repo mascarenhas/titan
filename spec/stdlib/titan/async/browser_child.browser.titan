@@ -8,12 +8,11 @@ local test = import "test"
 local type Value = browser.BrowserValue
 
 local function refusal(action: function (): ()): string
-  do action()
-  catch
-    if error is string then return error as string end
-    return "non-string refusal"
-  end
+  action()
   return "accepted"
+catch
+  if error is string then return error end
+  return "non-string refusal"
 end
 
 function publication()

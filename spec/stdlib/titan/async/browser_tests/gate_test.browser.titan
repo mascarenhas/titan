@@ -118,11 +118,10 @@ function test_fatal_host_callback_stops_the_runtime_in_order(context: test.Conte
   async.run<|nil, value|>(function (): nil
     async.await<|nil, value|>(function (_resolve, _reject, fatal)
       request = source:start(function (...: Value): Value
-        do raise marker
-        catch
-          origin_trace = traceback
-          fatal(error, traceback)
-        end
+        raise marker
+      catch
+        origin_trace = traceback
+        fatal(error, traceback)
         return Value.is_nil()
       end, function (...: Value): Value return Value.is_nil() end,
         Value.is_integer(5), Value.is_integer(0))
@@ -218,7 +217,7 @@ function test_structures_across_relinquishes(_: test.Context)
           return Value.is_nil()
         end, Value.is_integer(5))
         return async.SubscriptionActions<|integer|>(
-          function () do request:cancel() catch end end,
+          function () request:cancel() catch end,
           function (drain: function (): (async.SubscriptionBatch<|integer|>))
             drain()
             request:close()
@@ -262,7 +261,7 @@ function test_coroutines_inside_tasks_across_turns(context: test.Context)
       end, "outer")
       local last = 0
       for _ = 1, 3 do
-        last = outer:resume(nil) as integer
+        last = outer:resume(nil)
         gc.collect()
         async.yield()
         await_delay(1, 0, false)
