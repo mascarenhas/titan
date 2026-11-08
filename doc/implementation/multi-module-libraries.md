@@ -276,7 +276,7 @@ invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):
 `titan.websocket`, `titan.os`, `titan.path`, `titan.peg`, `titan.string`,
 `titan.math`, `titan.lua`, `titan.iteration`, `titan.gc`, `titan.test`,
 `titan.reflect`, `titan.sqlite3`, `titan.json`, `titan.protobuf`,
-`titan.transfer`, and `titan.thread`. `titan.uv`, `titan.http`,
+`titan.transfer`, and `titan.thread`. `titan.uv`, `titan.async`, `titan.http`,
 `titan.websocket`, `titan.peg`, `titan.string`, `titan.sqlite3`,
 `titan.json`, `titan.lua`, `titan.protobuf`, and `titan.thread` are folder
 ensembles; the others are flat sources. The mains of `titan.async`,

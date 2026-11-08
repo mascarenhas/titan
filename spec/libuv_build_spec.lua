@@ -627,6 +627,7 @@ local function stdlib_source_files(filename)
     local sources = {}
     local source_ensembles = {
         ["$(UV_TITAN_SOURCES)"] = "UV_TITAN_SOURCES",
+        ["$(ASYNC_TITAN_SOURCES)"] = "ASYNC_TITAN_SOURCES",
         ["$(STDLIB_HTTP_SOURCES)"] = "STDLIB_HTTP_SOURCES",
         ["$(WEBSOCKET_TITAN_SOURCES)"] = "WEBSOCKET_TITAN_SOURCES",
         ["$(SQLITE3_TITAN_SOURCES)"] = "SQLITE3_TITAN_SOURCES",
@@ -743,6 +744,20 @@ end
 
 local function discovered_http_sources()
     return titan_sources_in("titan/http", "titan/http/")
+end
+
+local function discovered_async_sources()
+    return titan_sources_in("titan/async", "titan/async/")
+end
+
+-- Every titan.async folder file, concatenated: a source contract may live in
+-- the main or in any contributor.
+local function async_sources_text()
+    local texts = {}
+    for _, source in ipairs(discovered_async_sources()) do
+        texts[#texts + 1] = read_file(source)
+    end
+    return table.concat(texts, "\n")
 end
 
 local function file_exists(path)
@@ -1175,14 +1190,23 @@ esac
             local root = make_temp_dir()
             local tested, failure = xpcall(function()
                 assert(lfs.mkdir(root .. "/titan"))
-                write_file(root .. "/titan/" .. consumer .. ".native.titan",
-                    read_file("titan/" .. consumer .. ".native.titan"))
+                -- The consumer's selected sources and the headers they import,
+                -- at their checkout-relative paths; async is a folder module.
+                local inputs = { "titan/" .. consumer .. ".native.titan" }
                 if consumer == "async" then
+                    assert(lfs.mkdir(root .. "/titan/async"))
+                    inputs = discovered_async_sources()
                     for _, header in ipairs({
-                        "async_receiver_native.h", "async_signal_platform.h", "transfer_native.h",
+                        "titan/async/async_receiver_native.h",
+                        "titan/async/async_signal_platform.h", "titan/transfer_native.h",
                     }) do
-                        write_file(root .. "/titan/" .. header, read_file("titan/" .. header))
+                        inputs[#inputs + 1] = header
                     end
+                end
+                for _, input in ipairs(inputs) do
+                    write_file(root .. "/" .. input, read_file(input))
+                end
+                if consumer == "async" then
                     write_file(root .. "/producer_composition_app.titan", [[
 local async = import "async"
 function main(_args: {string}): integer
@@ -1236,7 +1260,8 @@ end
                 argv[#argv + 1] = "producer_composition_app"
                 local compiled, output = run_argv(argv)
                 assert.truthy(compiled, output)
-                assert.truthy(file_exists(root .. "/out/titan/" .. consumer .. ".c"))
+                local generated = consumer == "async" and "titan/async/async.c" or "titan/io.c"
+                assert.truthy(file_exists(root .. "/out/" .. generated), generated)
                 assert.falsy(file_exists(root .. "/out/titan/" .. producer .. ".c"),
                     "producer was compiled from source instead of its public provider")
                 local program = root .. "/out/" ..
@@ -2360,7 +2385,7 @@ printf '%s/%s\n' "$directory" "$object"
         end)
 
     it("keeps inherited SIGPIPE policy in async and argc/argv setup in public UV", function()
-        local async = read_file("titan/async.native.titan")
+        local async = async_sources_text()
         for _, contract in ipairs({
             'foreign import "async_signal_platform.h"',
             "local native_error = ffi.titan_async_ignore_sigpipe_if_default()",
@@ -2368,7 +2393,7 @@ printf '%s/%s\n' "$directory" "$object"
             'check_status(uv.translate_sys_error(native_error), "runtime.sigpipe")',
             "uv.setup_process_args()",
         }) do assert.truthy(async:find(contract, 1, true), contract) end
-        local platform = read_file("titan/async_signal_platform.h")
+        local platform = read_file("titan/async/async_signal_platform.h")
         assert_ordered(platform, "#else", "struct sigaction current;",
             "if (sigaction(SIGPIPE, NULL, &current) != 0)", "return errno;",
             "if (current.sa_handler != SIG_DFL)", "return 0;",
@@ -2391,7 +2416,9 @@ printf '%s/%s\n' "$directory" "$object"
 
     it("keeps public UV independent of Task policy and owns nominal async types in async", function()
         local async_exports = {}
-        for _, name in ipairs(public_declarations("titan/async.native.titan")) do async_exports[name] = true end
+        for _, source in ipairs(discovered_async_sources()) do
+            for _, name in ipairs(public_declarations(source)) do async_exports[name] = true end
+        end
         for _, name in ipairs({"Error", "OperationError", "ResumeToken", "CancellationReason",
                 "TaskStatus", "Task", "Completion", "TransferValue", "checkpoint",
                 "await_with", "await_cancellable_with", "await_cleanup_with",
@@ -2422,7 +2449,7 @@ printf '%s/%s\n' "$directory" "$object"
     end)
 
     it("keeps generic Tasks and ordinary, cancellable and cleanup waits in async", function()
-        local async = read_file("titan/async.native.titan")
+        local async = async_sources_text()
         for _, contract in ipairs({
             "record ResumeToken", "const source: string?", "union CancellationReason<|B|>",
             "union TaskStatus<|A, B|>", "record Task<|A, B|>", "local record Runtime",
@@ -2463,9 +2490,10 @@ printf '%s/%s\n' "$directory" "$object"
         }) do
             assert.truthy(async:find(contract, 1, true), contract)
         end
-        local foreign_start = assert(async:find("function run_foreign(", 1, true))
-        local foreign_stop = assert(async:find("\nfunction channel", foreign_start, true))
-        local work = async:sub(foreign_start, foreign_stop - 1)
+        -- run_foreign is the last declaration of its native contributor.
+        local foreign = read_file("titan/async/foreign.native.titan")
+        local foreign_start = assert(foreign:find("function run_foreign(", 1, true))
+        local work = foreign:sub(foreign_start)
         assert_ordered(work, 'if not f then raise "async.run_foreign callback must not be NULL" end',
             "uv.work_t.new()", "await_with<|ForeignWork, value, OperationError|>")
         assert.truthy(async:find("uv.queue_work(current_loop()", 1, true))
@@ -2804,7 +2832,7 @@ int main(void) {
                     logical_object .. ": " .. function_name)
             end
             local async_output = module_symbols.collect(
-                stdlib_artifact("titan/async.o"), run_argv).undefined_text
+                stdlib_artifact("titan/async/async.o"), run_argv).undefined_text
             for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
                 assert.equal(not platform.windows,
                     nm_has_symbol(async_output, function_name), function_name)
@@ -2866,8 +2894,10 @@ int main(void) {
                     end
                 end
             end
-            local object = stdlib_artifact(module == "sqlite3" and
-                "titan/sqlite3/sqlite3.o" or "titan/" .. module .. ".o")
+            -- Folder modules name their object after the main.
+            local folder = module == "async" or module == "sqlite3"
+            local object = stdlib_artifact(folder and
+                "titan/" .. module .. "/" .. module .. ".o" or "titan/" .. module .. ".o")
             local output = module_symbols.collect(object, run_argv).undefined_text
             for symbol in output:gmatch("[^\r\n]+") do
                 assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
@@ -2935,6 +2965,17 @@ int main(void) {
             assert.same({ "titan/thread/native.h" },
                 makefile_words("THREAD_TITAN_HEADERS"))
             assert.same({
+                "titan/async/async.native.titan", "titan/async/external.native.titan",
+                "titan/async/foreign.native.titan", "titan/async/receiver.native.titan",
+                "titan/async/runtime.native.titan",
+            }, makefile_words("ASYNC_TITAN_SOURCES"))
+            assert.same({}, undeclared_folder_sources(
+                makefile_words("ASYNC_TITAN_SOURCES"), "titan/async", "titan/async/"))
+            assert.same({
+                "titan/async/async_receiver_native.h",
+                "titan/async/async_signal_platform.h",
+            }, makefile_words("ASYNC_TITAN_HEADERS"))
+            assert.same({
                 "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
                 "$(SQLITE3_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
@@ -2985,7 +3026,9 @@ int main(void) {
                 "titan/uv/transfer.titan",
                 "titan/uv/udp.titan",
                 "titan/uv/utilities.titan",
-                "titan/async.native.titan",
+                "titan/async/async.native.titan", "titan/async/external.native.titan",
+                "titan/async/foreign.native.titan", "titan/async/receiver.native.titan",
+                "titan/async/runtime.native.titan",
                 "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.native.titan", "titan/http/client.titan",
@@ -3041,7 +3084,7 @@ int main(void) {
                 end
             end
         end
-        for _, source in ipairs({"titan/async.native.titan", "titan/timer.native.titan", "titan/fs.native.titan",
+        for _, source in ipairs({"titan/async/runtime.native.titan", "titan/timer.native.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/os.native.titan"}) do
             local imports = {}
             for _, node in ipairs(parsed_source(source)) do
@@ -3057,7 +3100,7 @@ int main(void) {
     -- the Runtime now owns one shared wake and an intrusive FIFO.
 
     it("retires explicit suspension and the exact Wait before terminal listeners", function()
-        local task = read_file("titan/async.native.titan")
+        local task = read_file("titan/async/async.native.titan")
         local first = assert(task:find("local function clear_suspension(task: Task)", 1, true))
         local last = assert(task:find("\nend", first, true))
         local clear = task:sub(first, last - 1)
@@ -3184,7 +3227,7 @@ int main(void) {
         end
         for _, header in ipairs({
             "titan/coroutine.titan.h", "titan/transfer.titan.h",
-            "titan/uv/uv.titan.h", "titan/async.titan.h", "titan/http/http.titan.h",
+            "titan/uv/uv.titan.h", "titan/async/async.titan.h", "titan/http/http.titan.h",
             "titan/sqlite3/sqlite3.titan.h", "titan/lua/lua.titan.h",
             "titan/protobuf/protobuf.titan.h", "titan/thread/thread.titan.h",
         }) do
@@ -3990,7 +4033,7 @@ esac
                 return
             end
             local sources = {
-                "titan/coroutine.titan", "titan/async.native.titan",
+                "titan/coroutine.titan",
                 "titan/timer.native.titan", "titan/io.native.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.native.titan", "titan/http/client.titan",
@@ -4010,10 +4053,10 @@ esac
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, ensemble in ipairs({
-                "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES", "PROTOBUF_TITAN_SOURCES",
-                "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES", "THREAD_TITAN_SOURCES",
-                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS",
-                "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
+                "UV_TITAN_SOURCES", "ASYNC_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
+                "PROTOBUF_TITAN_SOURCES", "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
+                "THREAD_TITAN_SOURCES", "ASYNC_TITAN_HEADERS", "SQLITE3_TITAN_HEADERS",
+                "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
                     sources[#sources + 1] = source

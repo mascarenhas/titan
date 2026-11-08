@@ -397,13 +397,13 @@ effect, and the extension adds no target setting.
 ## Make inventories and audits
 
 The standard library's native-only modules keep their canonical mains as
-target variants: the flat `titan/{async,timer,io,fs,net,ssl,os}.native.titan`
-and the folder mains `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`.
+target variants: the flat `titan/{timer,io,fs,net,ssl,os}.native.titan`
+and the folder mains `titan/{uv,async,http,websocket,sqlite3,lua,thread}/<name>.native.titan`.
 These thirteen families have no default and no `browser` member, so for
 `browser` the resolver selects no main: the module is absent (an import
-reports `module 'titan.<name>' not found`), and the folder's contributors,
-which keep their plain names, are neither composed nor resolvable as flat
-modules. Native selection, logical names, and canonical output stems (such as
+reports `module 'titan.<name>' not found`), and the folder's contributors
+(plain names, or `native` variants in `titan/async/`) are neither composed nor
+resolvable as flat modules. Native selection, logical names, and canonical output stems (such as
 `titan/uv/uv.titan.h`) are unchanged; only the physical main is a variant.
 The other thirteen standard modules have no variants and form the shared part
 of the [browser standard library](browser-target.md#the-browser-standard-library).

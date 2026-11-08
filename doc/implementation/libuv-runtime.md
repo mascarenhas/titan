@@ -1,7 +1,7 @@
 # The async continuation runtime
 
-`titan.async` (`titan/async.native.titan`) implements Tasks, generic waits,
-cancellation, subscriptions, cross-thread external waits, coalescing
+`titan.async` (the `titan/async/` folder module) implements Tasks, generic
+waits, cancellation, subscriptions, cross-thread external waits, coalescing
 cross-state receivers, and shutdown. It uses only the public `titan.uv` module
 interface. UV owns native allocations, callback roots, borrowed native data, and
 the native loop boundary; extending it is covered in the
@@ -15,13 +15,43 @@ operation number.
 ## Module and type ownership
 
 `Error`, `OperationError`, `ResumeToken`, `CancellationReason<|B|>`,
-`TaskStatus<|A,B|>`, and `Task<|A,B|>` are declared in `titan/async.native.titan`; UV
+`TaskStatus<|A,B|>`, and `Task<|A,B|>` are declared in `titan/async/async.native.titan`; UV
 declares none of them. `titan.transfer` owns `TransferValue` and the native
 packet format ([transfer policy](transfer-library.md)). Async re-exports
 `TransferValue` as a transparent alias and owns `Receiver` and `ExternalWait`.
 `async.send` and `Receiver:wait` move `titan_async_message` packets; `titan.lua`
 uses its own `titan_lua_value` carrier
 ([Lua chapter](lua-library.md#cross-state-transfer)).
+
+The folder's main, `async.native.titan`, holds the public Task, wait,
+combinator, channel, and subscription surface and the scheduling core.
+Contributors hold the native-only parts: `runtime.native.titan` the libuv
+backend (loop acquisition and Lua-state close, the shared wake timer, the
+libuv-typed await helpers, the driver `loop`, and `version`),
+`external.native.titan` the external wake bridge and `ExternalWait`,
+`receiver.native.titan` the cross-state `Receiver`, and `foreign.native.titan`
+`run_foreign`. The main has only a `native` member, so the browser target has
+no `titan.async` ([folder modules](folder-modules.md#titanuv-dogfooding)).
+
+The scheduling core reaches libuv and native retirement only through seams that
+the native contributors define. Natively, `Runtime.backend` is a `Backend`
+record holding the loop, the wake timer, the lazily created external bridge, and
+the releases of abandoned `run_foreign` jobs; `new_backend` creates it and
+`start_backend` acquires the loop after `new_runtime` registers the Runtime's
+finalizer. `unbind_backend`, `stop_backend`, and `cancel_request` hold the
+transfer-loop unbinding, `uv.stop`, and the `uv.cancel` of a cancellable wait;
+`Request` is the registrar result type (`uv.req_t`); `arm_ready` arms the shared
+wake; and `initialize_backend` performs the root initializer's process setup
+([startup policy](#startup-policy)). A cleanup barrier is reached through
+`ExternalWait` methods (`check_cleanup_binding`, `bind_cleanup`,
+`unbind_cleanup`, `admit_cleanup`, `rollback_cleanup`, `designates`,
+`retired_natively`, `complete_retirement`, `poll_retirement`,
+`notify_if_ready`, and `unaccepted`), so the core reads no `ExternalWait` field.
+`await`, `await_cleanup`, and `suspend` yield through `await_registered`; the
+libuv-typed `await_with`, `await_cleanup_with`, and `await_cancellable_with`
+yield directly. The driver's per-Task emergency recovery is the shared
+`recover_task`, and `drain_ready(runtime, available)` dispatches at most the
+first `available` queued entries, which natively is the current `ready_count`.
 
 Tasks use tagged `coroutine.Coroutine` control transfer. Async routes its yields
 with one private tag (`ASYNC_TAG`); Coroutine keeps its own public and native
@@ -32,7 +62,7 @@ The private layers are:
 
 | Owner | Responsibility |
 | --- | --- |
-| `Runtime` | One `uv.loop_t`; the zero-delay `wake` timer; the intrusive ready FIFO (`ready_head`/`ready_tail`/`ready_count`, linked through `Task.ready_next`); sparse `tasks`; `current_task`; `driving`/`closing`; the first `failure`; `exit_code`; close listeners; the lazily created `external` bridge; and `retirement_error`, the native capability whose negative status awaits an explicit retry. |
+| `Runtime` | The per-target `backend` (natively one `uv.loop_t`, the zero-delay `wake` timer, the lazily created `external` bridge, and `abandoned_work`); the intrusive ready FIFO (`ready_head`/`ready_tail`/`ready_count`, linked through `Task.ready_next`); sparse `tasks`; `current_task`; `driving`/`closing`; the first `failure`; `exit_code`; close listeners; and `retirement_error`, the native capability whose negative status awaits an explicit retry. |
 | `Task` | Coroutine `root`; scalar `phase` and cached `state` snapshot; checked `epoch`; queued-continuation fields; sticky `cancel_value`; current `wait` and reusable `completion`; terminal listeners; explicit-suspension state; cleanup binding (`cleanup_start`, `cleanup_active`, `cleanup_wait`); and the pending terminal outcome (`terminal_kind`/`terminal_value`/`terminal_trace`, `root_done`). Terminal admission is separate from root and cleanup execution. |
 | `Completion<\|C,T,E\|>` | One reusable cell per Task: context, registrar, Task, captured epoch, policy, phase, outcome kind and payload, and the optional accepted request. `Wait` is the all-`value` type alias for the same record. |
 | `ExternalBridge` | The per-Runtime `uv.external_wake_t`, the `waits` Map from 64-bit identity to `ExternalWait`, the monotonic `next_identity`, and `closed`. |
@@ -495,7 +525,7 @@ callbacks and owners are described in the
 `prepare_native_retirement(owner, context, register_fn, unregister_fn,
 retire_fn)` constructs an `ExternalWait` with a traced `native_owner` and an
 embedded, loop-thread-only `titan_async_retirement` cell
-(`titan/async_receiver_native.h`). The cell holds the raw context, the three C
+(`titan/async/async_receiver_native.h`). The cell holds the raw context, the three C
 callback pointers, and `armed`, `ready`, and `status`. Native producers retain
 only independent UV wake targets and cores, never pointers into this GC-owned
 cell. The traced owner stays alive through callback return and committed native
@@ -622,7 +652,7 @@ occurs.
 `Receiver` owns the public
 [lossy cross-state notification](../language/async-io.md#cross-state-receivers)
 boundary over the native `titan_async_receiver` struct
-(`titan/async_receiver_native.h`): a borrowed `uv_async_t` address, the C send
+(`titan/async/async_receiver_native.h`): a borrowed `uv_async_t` address, the C send
 function from `uv.async_send_function()`, an atomic `titan_async_message *`
 slot (`titan_async_receiver_exchange`, `__atomic_exchange_n` with
 `__ATOMIC_ACQ_REL`), and a `closed` flag. There is no mode discriminator,
@@ -873,7 +903,8 @@ lives in GC memory, but libuv's loop internals and watcher arrays are C-heap
 allocations that only `uv_loop_close` frees, and registered handles still sit in
 the loop's queues.
 
-`new_runtime` therefore registers `runtime_finalize` before `uv.loop_init`.
+`new_runtime` therefore registers `runtime_finalize` before `start_backend`
+calls `uv.loop_init`.
 `lua_close` runs every finalizer before freeing any object, latest registration
 first, so this finalizer runs after those of the Runtime's later Receivers
 (which disposed of unread packets natively), its external wake owner (which
@@ -884,8 +915,9 @@ finalizer returns immediately for a retired or never-activated Runtime, even
 while a newer Runtime is active, before checking the thread or touching libuv.
 For the active
 Runtime it requires the main thread, sets `closing` and `driving`, unbinds the
-transfer loop, detaches every Task from its Wait and explicit suspension, and
-empties the ready queue. Each Task without an armed native-retirement gate is
+transfer loop, and then `retire_tasks_at_close` detaches every Task from its
+Wait and explicit suspension and empties the ready queue. Each Task without an
+armed native-retirement gate is
 marked finished with a terminal `state` together with its `phase`, so
 `Task:status()` stays consistent for a finalizer that runs later and still
 holds the Task: `cancelled` with its
@@ -1048,7 +1080,7 @@ calls process-wide C exit.
 ## Startup policy
 
 Async initialization owns the Unix SIGPIPE policy through the native helper
-`titan_async_ignore_sigpipe_if_default` (`titan/async_signal_platform.h`): it
+`titan_async_ignore_sigpipe_if_default` (`titan/async/async_signal_platform.h`): it
 changes only a default disposition to ignored, preserves ignored and custom
 handlers, and translates a native error through the public UV API. UV is a
 general low-level binding and installs no process policy.

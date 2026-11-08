@@ -363,8 +363,10 @@ function M.prepare_async_core(workspace, layout, facades)
         M.write_source(workspace, "titan.uv." .. name,
             M.read("titan/uv/" .. name .. (name == "uv" and ".native" or "") .. ".titan"))
     end
-    M.write_source(workspace, "titan.async",
-        M.read("titan/async.native.titan"))
+    for _, name in ipairs({ "async", "external", "foreign", "receiver", "runtime" }) do
+        M.write_source(workspace, "titan.async." .. name,
+            M.read("titan/async/" .. name .. ".native.titan"))
+    end
 
     for _, name in ipairs(facades) do
         assert.truthy(allowed[name],

@@ -1,7 +1,7 @@
 #ifndef TITAN_ASYNC_RECEIVER_NATIVE_H
 #define TITAN_ASYNC_RECEIVER_NATIVE_H
 
-#include "transfer_native.h"
+#include "../transfer_native.h"
 
 /* Only native bytes cross a state/thread boundary. The public UV binding owns
  * the async handle; its borrowed C-only send capability never enters Lua.
