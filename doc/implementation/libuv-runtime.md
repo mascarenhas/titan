@@ -185,9 +185,10 @@ operation's error rather than `runtime.failure`. A browser synchronous C
 callback (`ffi.titan_no_switch(L)`, the constant 0 natively) takes both
 deferred paths too, since no stack can switch there. Its `fatal` still first
 raises `"async fatal callback must run outside an async Task"` while a Task is
-current. `running()` raises `"asynchronous operation must be called from an
-async Task"` inside such a callback even when a Task called the binding the
-callback interrupted, so no Task-only operation runs there. Delivery
+current. With a Runtime active, `running()` raises `"asynchronous operation
+must be called from an async Task"` inside such a callback even when a Task
+called the binding the callback interrupted, so no Task-only operation runs
+there; with none it raises `"async Runtime is not active"` first. Delivery
 checks that the Wait is SETTLED, is still exactly `task.wait`, and has the
 current epoch; it clears the request, Wait, token, and explicit-suspension
 state before entering the continuation. Duplicate settlement raises rather than

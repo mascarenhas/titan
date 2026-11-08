@@ -2179,19 +2179,32 @@ they enter WebAssembly.
 
 A [synchronous C callback](standard-library-browser.md#synchronous-c-callbacks)
 runs outside every Task, even when it runs inside a binding that a Task
-called. `async.running()` raises `"asynchronous operation must be called from
-an async Task"`, so every operation that needs a Task, such as `await`,
-`yield` or `suspend`, raises that error too.
+called. While a Runtime is active, `async.running()` raises `"asynchronous
+operation must be called from an async Task"` there, so every operation that
+needs a Task, such as `await`, `yield` or `suspend`, raises that error too.
+With no active Runtime it raises `"async Runtime is not active"`, as it does
+anywhere else.
 
 What a callback starts takes effect in a later turn of the drive:
 
-- resolving, rejecting or failing a `Completion`;
+- resolving or rejecting a `Completion` or an `await` operation;
 - `Task:resume` and `Task:cancel`;
 - publishing to a subscription;
 - `async.run`.
 
 The waiting Task does not resume inside the callback. A callback that runs
 while the drive waits for host work wakes the drive.
+
+Reporting a fatal failure, through the `fatal` capability of `await` or
+`Completion:fatal`, still depends on the Task that is really current. Inside
+a binding that a Task called, that Task is current even though
+`async.running()` hides it, so `fatal` raises `"async fatal callback must run
+outside an async Task"` as it would in the Task itself. A callback that no
+Task called, such as one that runs while the drive waits for host work or
+inside a request's settlement callback, can report it: the Runtime failure is
+recorded at once, the waiting Task raises its own operation's error at its
+`await` in a later turn, and `async.loop()` then rethrows the Runtime's first
+error.
 
 ### Exit and disposal
 
