@@ -394,3 +394,26 @@ this.
   run when a coroutine is abandoned, and their `catch` blocks are skipped as
   well. A coroutine library built without unwinding support never unwinds; see
   [mixed builds](../implementation/codegen-overview.md#compiled-module-abi).
+
+## In a synchronous callback
+
+On the browser target, C code can call Titan synchronously from a JavaScript
+event, through
+[`titan_browser_call_sync`](standard-library-browser.md#synchronous-c-callbacks).
+No stack can suspend inside such a callback, so coroutines change behavior
+there:
+
+- `Coroutine:resume`, `Coroutine:error`, `Coroutine:transfer` and
+  `coroutine.yield` raise `"coroutine.resume is unavailable in a synchronous
+  callback"` (with `error`, `transfer` or `yield` in place of `resume`). The
+  error can be caught in the callback, and the coroutine is left unchanged.
+- `coroutine.running()` returns `nil` and `coroutine.is_yieldable(tag)` returns
+  `false`, even when the callback runs inside a binding that a coroutine
+  called.
+- `coroutine.create` works. A coroutine created in a callback can be resumed
+  after the callback returns.
+- An abandoned coroutine that the collector finds during a callback is not
+  unwound there. Unwinding would switch stacks, so the collector marks it to be
+  finalized again instead. The next collection outside a callback unwinds it as
+  described above, or the state close does. Until then the coroutine keeps its
+  stack.

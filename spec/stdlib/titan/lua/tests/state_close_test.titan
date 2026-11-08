@@ -144,3 +144,37 @@ function test_lua_close_releases_run_async_states_with_an_exhausted_pool(
   test.assert(why == "exit" and code == 0 and output == "LUA_CLOSE_POOL_OK\n",
               "worker-pool close child ended by " .. why .. " " .. code .. ": " .. output)
 end
+
+-- Cell 0 counts the runs of a finalizer that re-arms itself on every run.
+local function lua_close_rearmed(candidate: value)
+  local watch: LuaCloseWatch = candidate
+  lua_close_record(watch.cells, 0, lua_close_code(watch.cells, 0) + 1)
+  lua_close_gc.finalizable<|value|>(watch, lua_close_rearmed)
+end
+
+-- Public only so a fresh independent state can call it; test infrastructure.
+function lua_close_rearm_state(cells_raw: value)
+  lua_close_gc.finalizable<|value|>(LuaCloseWatch(cells_raw as foreign *void), lua_close_rearmed)
+end
+
+-- A finalizer that marks its object for finalization again runs once per
+-- collection, and lua_close runs it once more without honoring the re-arm, so
+-- closing the state ends. A coroutine owner that a synchronous browser
+-- callback re-armed relies on that last run to unwind at state close.
+function test_lua_close_runs_a_rearmed_finalizer_once(_: test.Context)
+  local cells: owned int[] = foreign int.new_array(1)
+  cells[0] = 0
+  local state = tlua.new()
+  defer state:close()
+  state:run([[
+    package.path, package.cpath = '', ''
+    require('lua.tests').lua_close_rearm_state(...)
+    collectgarbage()
+    collectgarbage()
+  ]], "=lua-close-rearm", async.TransferValue.is_pointer(cells as foreign *void))
+  test.assert((cells[0] as integer) == 2, "two collections ran the re-armed finalizer " ..
+              (cells[0] as integer) .. " times")
+  state:close()
+  test.assert((cells[0] as integer) == 3, "closing the state ran the re-armed finalizer " ..
+              ((cells[0] as integer) - 2) .. " more times")
+end

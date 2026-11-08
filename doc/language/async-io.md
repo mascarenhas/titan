@@ -2175,6 +2175,24 @@ drive continues, and synchronous work in other states runs as usual. While the
 owner drives, calls and notifications for other states are refused before
 they enter WebAssembly.
 
+### Synchronous callbacks
+
+A [synchronous C callback](standard-library-browser.md#synchronous-c-callbacks)
+runs outside every Task, even when it runs inside a binding that a Task
+called. `async.running()` raises `"asynchronous operation must be called from
+an async Task"`, so every operation that needs a Task, such as `await`,
+`yield` or `suspend`, raises that error too.
+
+What a callback starts takes effect in a later turn of the drive:
+
+- resolving, rejecting or failing a `Completion`;
+- `Task:resume` and `Task:cancel`;
+- publishing to a subscription;
+- `async.run`.
+
+The waiting Task does not resume inside the callback. A callback that runs
+while the drive waits for host work wakes the drive.
+
 ### Exit and disposal
 
 `request_exit(code)` keeps its meaning inside a Task: the first code wins,

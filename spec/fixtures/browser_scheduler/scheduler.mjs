@@ -114,8 +114,8 @@ function makeHost(context, image) {
 
 function notes(host) { return host.notes.join('|'); }
 
-// The Titan cases: scheduler gate items 1-5, 7, 8, ownership, and the timer
-// cases.
+// The Titan cases: scheduler gate items 1-5, 7, 8, ownership, the timer
+// cases and the synchronous-callback cases.
 async function gate(context, image) {
   const host = makeHost(context, image);
   try {
@@ -123,7 +123,7 @@ async function gate(context, image) {
     const out = decode(join(host.stdout)), err = decode(join(host.stderr));
     context.assert(result.kind === 'returned' && result.status === 0, `scheduler gate failed:\n${out}${err}`);
     const passed = out.match(/\[  PASSED  \] (\d+) tests?\./);
-    context.assert(passed && Number(passed[1]) === 11, `the gate did not pass its eleven cases:\n${out}`);
+    context.assert(passed && Number(passed[1]) === 14, `the gate did not pass its fourteen cases:\n${out}`);
     context.assert(err.includes('uncaught error in async Task: ordinary Task failure'),
       `an ordinary Task failure was not reported on stderr:\n${err}`);
     context.assert(host.notificationErrors.length === 0, 'a gate case reported a notification error');

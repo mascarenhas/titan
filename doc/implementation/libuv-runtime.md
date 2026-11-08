@@ -181,7 +181,13 @@ as failed with its root still suspended. `fatal` from a finalizer records the
 Runtime failure, accepts a `READY_DELIVER` wake for the exact Wait, and then
 commits `OUTCOME_FATAL` with the supplied error, detaching the consumed
 request; delivery retires and releases the Wait, so the Task gets its own
-operation's error rather than `runtime.failure`. Delivery
+operation's error rather than `runtime.failure`. A browser synchronous C
+callback (`ffi.titan_no_switch(L)`, the constant 0 natively) takes both
+deferred paths too, since no stack can switch there. Its `fatal` still first
+raises `"async fatal callback must run outside an async Task"` while a Task is
+current. `running()` raises `"asynchronous operation must be called from an
+async Task"` inside such a callback even when a Task called the binding the
+callback interrupted, so no Task-only operation runs there. Delivery
 checks that the Wait is SETTLED, is still exactly `task.wait`, and has the
 current epoch; it clears the request, Wait, token, and explicit-suspension
 state before entering the continuation. Duplicate settlement raises rather than

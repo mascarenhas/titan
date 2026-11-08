@@ -546,6 +546,40 @@ finalizer queues delivery instead of resuming the waiting Task (see
 refuses to create a Runtime; see
 [Lua-state close](libuv-runtime.md#lua-state-close-of-an-unretired-runtime).
 
+### Synchronous callbacks
+
+`titan_no_switch` (`titan/ffi.h`) is true while a browser synchronous C
+callback runs: the bridge's callback depth is nonzero
+([synchronous C callbacks](browser-bridge.md)). Natively it is the constant 0,
+so these checks fold away. Inside a callback:
+
+- `check_switch` makes `Coroutine:resume`, `Coroutine:error`,
+  `Coroutine:transfer` and `coroutine.yield` raise `"coroutine.<operation> is
+  unavailable in a synchronous callback"`. The checks come after the
+  finalizer checks and before any state changes, so the coroutine stays as it
+  was.
+- `running()` returns nil and `is_yieldable(tag)` returns false, which hides
+  the coroutine whose binding the callback interrupted.
+- `coro_gc` does not unwind a started suspended or stacked coroutine. It calls
+  `luaL_setmetatable(L, "titan.coroutine")` on the owner it already pushed and
+  returns. Setting the metatable inside `__gc` marks the owner for
+  finalization again, because `udata2finalize` clears `FINALIZEDBIT` and
+  `luaC_checkfinalizer` moves the object back to `finobj`. The next collection
+  outside a callback calls `coro_gc` again, and it unwinds then. During
+  `lua_close`, `GCSTPCLS` makes `luaC_checkfinalizer` ignore a re-arm, so the
+  state close runs a re-armed finalizer once and ends. Finalizers run in
+  reverse marking order, so it runs before `titan.browser`'s state-record
+  finalizer. Dead and never-started coroutines are destroyed at once, as
+  before; `mco_destroy` does not switch for them.
+
+`gc.tests` checks the re-arm under the incremental and the generational
+collector. `lua.tests` checks that a closed independent state runs a re-armed
+finalizer exactly once. The browser scheduler gate (`async.browser_tests`,
+`callback_test.browser.titan`) runs callbacks through `browser.call_sync`:
+the refused switches and the masking, inside a coroutine as well, and a
+coroutine collected inside a callback whose defers run in order at the next
+collection.
+
 ## Tests
 
 Coroutine behavior tests run against the canonical combined standard provider.
