@@ -581,7 +581,10 @@ int counter_unlisten(const char *selector) {
 ```
 
 The Titan module keeps each listener's pin and identity until `stop`
-unregisters it, and shows the count through the page's `show` binding:
+unregisters it, and shows the count through the page's `show` binding. A
+listener is rooted in `listeners` before C receives its identity, so nothing
+can fail after the registration and leave C a dangling pointer, and a failure
+after a registration unregisters what was registered:
 
 ```titan
 local browser = import "browser"
@@ -624,11 +627,13 @@ local function listen(selector: string, handler: function (...: Value): Value)
   identity.state = state
   identity.slot = slot
   identity.generation = generation
+  local index = #listeners + 1
+  listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
   if ffi.counter_listen(selector, identity) ~= 0 then
+    listeners[index] = nil
     pin:close()
     raise "cannot listen for clicks on " .. selector
   end
-  listeners[#listeners + 1] = Listener { selector = selector, pin = pin, identity = identity }
 end
 
 local function stop(...: Value): Value
@@ -642,18 +647,24 @@ local function stop(...: Value): Value
 end
 
 function main(args: {string}): integer
-  listen("#increment", increment)
-  listen("#reset", reset)
-  show()
-  local ready = browser.binding("ready")
-  defer ready:close()
-  ready:call(Value.is_callable(stop))
+  do
+    listen("#increment", increment)
+    listen("#reset", reset)
+    show()
+    local ready = browser.binding("ready")
+    defer ready:close()
+    ready:call(Value.is_callable(stop))
+  catch
+    stop()
+    raise
+  end
   return 0
 end
 ```
 
 The page supplies `show` and `ready`. Each click runs its handler before
-`click()` returns, so the label is already updated:
+`click()` returns, so the label is already updated. The page calls `stop`
+before disposal, which frees what the callbacks reach:
 
 ```javascript
 import create from './counter.mjs';
@@ -668,8 +679,8 @@ try {
   await instance.run([]);
   document.querySelector('#increment').click();
   console.log(label.textContent); // "1"
-  await instance.call(stop);
 } finally {
+  if (stop) await instance.call(stop);
   await instance.dispose();
 }
 ```

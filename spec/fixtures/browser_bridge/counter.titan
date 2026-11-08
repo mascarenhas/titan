@@ -36,6 +36,8 @@ end
 
 local listeners: {Listener} = {}
 
+-- The listener is rooted in `listeners` before C receives the identity, so no
+-- allocation can fail after the registration and leave C a dangling pointer.
 local function listen(selector: string, handler: function (...: Value): Value)
   local pin = browser.pin(handler)
   local identity: owned *titan_browser_identity = foreign titan_browser_identity.new()
@@ -43,11 +45,13 @@ local function listen(selector: string, handler: function (...: Value): Value)
   identity.state = state
   identity.slot = slot
   identity.generation = generation
+  local index = #listeners + 1
+  listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
   if ffi.counter_listen(selector, identity) ~= 0 then
+    listeners[index] = nil
     pin:close()
     raise "cannot listen for clicks on " .. selector
   end
-  listeners[#listeners + 1] = Listener { selector = selector, pin = pin, identity = identity }
 end
 
 -- Unregisters each callback before closing its pin.
@@ -61,12 +65,19 @@ local function stop(...: Value): Value
   return Value.is_nil()
 end
 
+-- args[1] names the reset button, so a test can make the second registration
+-- fail. A failure after a registration unregisters what was registered.
 function main(args: {string}): integer
-  listen("#increment", increment)
-  listen("#reset", reset)
-  show()
-  local ready = browser.binding("ready")
-  defer ready:close()
-  ready:call(Value.is_callable(stop))
+  do
+    listen("#increment", increment)
+    listen(args[1] or "#reset", reset)
+    show()
+    local ready = browser.binding("ready")
+    defer ready:close()
+    ready:call(Value.is_callable(stop))
+  catch
+    stop()
+    raise
+  end
   return 0
 end
