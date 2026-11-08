@@ -24,6 +24,7 @@ function test_timer_ticker_is_an_io_closer(_context: test.Context)
   runtime_test.run(function ()
     local baseline? = native_timers()
     local ticker = timer.ticker(1)
+    defer ticker:close()
     local closer: stream.Closer = ticker
     closer:close()
     closer:close()

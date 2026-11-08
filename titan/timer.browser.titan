@@ -81,7 +81,7 @@ function sleep(milliseconds: integer)
   defer request:close()
   -- Cancellation clears the host timer and ends the wait at once; the loader
   -- drops a settlement that arrives later.
-  async.suspend(token, function () do request:cancel() catch end end)
+  async.suspend(token, function () request:cancel() catch end)
   local failed? = failure
   if failed ~= nil then raise failed end
 end
@@ -95,11 +95,11 @@ end
 -- Close the ticker's listener request. The Runtime's close listener calls
 -- this too: tickers are Runtime-bound, and close listeners run outside Tasks,
 -- where the subscription itself cannot close.
-local function retire_request(ticker: Ticker)
-  ticker.closed = true
-  local open? = ticker.request
+local function Ticker:retire_request()
+  self.closed = true
+  local open? = self.request
   if open ~= nil then
-    ticker.request = nil
+    self.request = nil
     open:close()
   end
 end
@@ -112,7 +112,7 @@ function ticker(milliseconds: integer): Ticker
   if milliseconds <= 0 then raise "ticker interval must be positive" end
   async.checkpoint()
   local recurring: Ticker = {request = nil, subscription = nil, closed = false, remove_close_listener = nil}
-  local remove = async.add_close_listener(function () retire_request(recurring) end)
+  local remove = async.add_close_listener(function () recurring:retire_request() end)
   recurring.remove_close_listener = remove
   local accepted = false
   defer do
@@ -125,7 +125,7 @@ function ticker(milliseconds: integer): Ticker
         if open ~= nil then open:cancel() end
       end
       local close = function (_drain: function (): (async.SubscriptionBatch<|boolean|>))
-        retire_request(recurring)
+        recurring:retire_request()
       end
       local actions = async.SubscriptionActions<|boolean|>(stop, close)
       recurring.request = interval_source():listen(function (...: Value): Value

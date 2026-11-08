@@ -84,6 +84,7 @@ function test_cancelled_sleeps_and_closed_tickers_clear_host_timers(_: test.Cont
     test.assert(host_timers(60000) == 0, "a cancelled sleep left its JavaScript timer armed")
 
     local ticker = timer.ticker(55000)
+    defer ticker:close()
     test.assert(host_timers(55000) == 1, "a ticker armed no JavaScript timer")
     ticker:close()
     test.assert(host_timers(55000) == 0, "a closed ticker left its JavaScript timer armed")

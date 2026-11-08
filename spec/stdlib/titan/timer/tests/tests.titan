@@ -243,7 +243,7 @@ function test_timer_ticker_from_an_earlier_runtime(_context: test.Context)
     leftover = timer.ticker(60000)
   end)
   runtime_test.run(function ()
-    local ticker = leftover as timer.Ticker
+    local ticker = leftover
     test.assert(not ticker:tick(), "a Ticker from an earlier Runtime ticked")
     ticker:close()
     test.assert(not ticker:tick(), "closing an earlier Runtime's Ticker revived it")
