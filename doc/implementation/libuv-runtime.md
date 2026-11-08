@@ -44,8 +44,10 @@ the releases of abandoned `run_foreign` jobs; `new_backend` creates it and
 finalizer. `unbind_backend`, `stop_backend`, and `cancel_request` hold the
 transfer-loop unbinding, `uv.stop`, and the `uv.cancel` of a cancellable wait;
 `Request` is the registrar result type (`uv.req_t`); `arm_ready` arms the shared
-wake; and `initialize_backend` performs the root initializer's process setup
-([startup policy](#startup-policy)). A cleanup barrier is reached through
+wake; `initialize_backend` performs the root initializer's process setup
+([startup policy](#startup-policy)); and `report_bootstrap_failure` does
+nothing, since a failed main Task has already printed its uncaught report and
+the bootstrap's status 1 is the process status. A cleanup barrier is reached through
 `ExternalWait` methods (`check_cleanup_binding`, `bind_cleanup`,
 `unbind_cleanup`, `admit_cleanup`, `rollback_cleanup`, `designates`,
 `retired_natively`, `complete_retirement`, `poll_retirement`,
@@ -227,6 +229,7 @@ The seams have browser bodies:
 | `cancel_request` | `request:cancel()`; unreachable, because no browser member creates a cancellable wait |
 | `runtime_finalize` | the native guards, `retire_tasks_at_close`, and `active_runtime = nil` |
 | `initialize_backend` | in the owner state only, registers `spawn_call` and `shutdown_call` through the reserved `titan:driver` binding |
+| `report_bootstrap_failure` | for a failed main Task, `browser.main_failed(error_text(failure.error), failure.traceback)`, the message and trace of its uncaught report, so that `run()` resolves `failed`; a cancelled main reports nothing |
 | `ExternalWait` methods | raise `"internal error: ExternalWait has no browser constructor"`: no browser value of the type exists, so every `cleanup_wait` and `final_wait` is nil |
 
 `loop()` keeps the native entry rules (main thread, no current Task, no
@@ -1159,7 +1162,9 @@ creates nor drives a Runtime.
 Async registers its private main bootstrap hook under
 `TITAN_MAIN_BOOTSTRAP_KEY`. The hook schedules main as an ordinary Task, drives
 the Runtime until every Task and native cleanup has retired, and returns the
-first requested exit code, main's successful integer, or a failure status.
+first requested exit code, main's successful integer, or status 1. Before it
+returns 1 for a main Task that did not succeed, it calls the backend's
+`report_bootstrap_failure(task)`.
 Explicit-drive clients use `--no-uv-bootstrap` and pair `run` with `loop`
 themselves.
 

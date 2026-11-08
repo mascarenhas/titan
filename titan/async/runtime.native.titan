@@ -303,3 +303,8 @@ local function initialize_backend()
   -- This still runs with --no-uv-bootstrap; only invoking bootstrap is skipped.
   uv.setup_process_args()
 end
+
+-- A failed main Task has already reported itself on stderr, and the
+-- bootstrap's status 1 is the process status: nothing else reports it.
+local function report_bootstrap_failure(_: Task)
+end

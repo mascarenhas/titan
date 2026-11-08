@@ -2149,6 +2149,13 @@ A drive starts inside a JavaScript entry and ends with it:
 - `instance.callTask(callable, args)` runs the callable as a Task and drives
   the Runtime ([Task-form calls](browser-target.md#task-form-calls)).
 
+`run()` resolves `returned` with `main`'s integer. A failed `main` Task prints
+its uncaught report on stderr, as natively, and `run()` resolves `failed` with
+status 1 and the Task's message and trace. A cancelled `main` resolves
+`returned` with status 1, and an exit that any Task requests resolves `exited`
+with its code, even after `main` failed
+([the loader's `run()`](browser-target.md#the-loader-api)).
+
 A call or notification handler on an idle instance may start Tasks with
 `async.run`; they run at the next drive. While a drive runs, JavaScript calls
 and Task-form calls made outside any binding are queued and delivered between

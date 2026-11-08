@@ -482,7 +482,14 @@ cleanup and with no drive, disposal of Tasks parked on a retained request
 (its late settlement is dropped), disposal of 2,000 parked Tasks after which
 the harness's acknowledged collection must clear a `WeakRef` to the instance,
 the exit latch with a `dispose()` afterwards that still runs the state's
-finalizers, and refused child-state calls during a drive.
+finalizers, and refused child-state calls during a drive. The spec also
+builds `bootstrap.titan`, a program whose `main` runs as the async bootstrap
+Task, without `--no-uv-bootstrap`. `bootstrap.mjs` then checks `run()`'s
+`returned` result, `failed` for a failed main Task (its uncaught report as the
+only stderr report, with its message and trace in the result), `returned`/1
+for a cancelled main, and `exited`, including after main failed. It also
+checks that output reaches stdout while the drive waits. Plain runs check the
+runner's exit statuses.
 
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The

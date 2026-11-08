@@ -3647,6 +3647,7 @@ local function bootstrap(main_callable: function ({string}): (integer),
   if exit_code ~= nil then return exit_code end
   local succeeded = task:status():has_succeeded()
   if succeeded then return result end
+  report_bootstrap_failure(task)
   return 1
 end
 

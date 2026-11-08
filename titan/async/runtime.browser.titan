@@ -197,6 +197,15 @@ local function shutdown_call(...: Value): Value
   return Value.is_nil()
 end
 
+-- run() resolves a failed main Task as `failed`, with the message and trace
+-- of its uncaught report on stderr. A cancelled main stays a returned 1, as
+-- natively.
+local function report_bootstrap_failure(task: Task)
+  case task:status()
+  when failed(failure) then browser.main_failed(error_text(failure.error), failure.traceback)
+  end
+end
+
 -- The owner state registers the Task-form and disposal entries with the
 -- loader; other states keep their own, unused, module state.
 local function initialize_backend()

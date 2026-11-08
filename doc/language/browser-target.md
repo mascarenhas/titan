@@ -552,13 +552,20 @@ The instance has the following methods:
   in `args` are UTF-8 encoded; `Uint8Array` arguments are copied byte for byte.
   It resolves `{kind, status, bytes, trace}`, with `"returned"`, `"failed"` or
   `"exited"`, a signed 32-bit status, and copied error and raw trace bytes
-  (empty unless failed). Ordinary initializer or main failure is a
-  failed/status1 result, not a fatal-engine rejection. A prior initializer
-  failure is reused without a second report. `"exited"` reports the status a
-  drive latched with [exit](#exit). An entry that failed stays `"failed"` even
-  when its drive latched an exit; otherwise the exit latch wins, then a main
-  Task failure the `async` bootstrap reported, which resolves `"failed"` with
-  status 1 and that Task's message and trace.
+  (empty unless failed). An ordinary initializer or main failure is a
+  failed/status1 result, not a fatal-engine rejection. A program that links
+  `async` runs `main` as a Task through the async bootstrap: a failed main
+  Task prints its uncaught Task report on stderr, as natively, and `run()`
+  resolves `"failed"` with status 1 and that Task's message and trace. The
+  standalone report (the program name, the message and a traceback on stderr)
+  is printed only for initializer failures, failures of a `main` called
+  directly (without `async`, or built with `--no-uv-bootstrap`), and fatal
+  Runtime failures that `async.loop()` re-raises. A cancelled main Task
+  resolves `"returned"` with status 1, the status a native program exits
+  with. A prior initializer failure is reused without a second report.
+  `"exited"` reports the status a drive latched with [exit](#exit). An entry
+  that failed stays `"failed"` even when its drive latched an exit; otherwise
+  the exit latch wins over a main Task failure that the bootstrap reported.
 * `call(callable, ...args)` invokes a callable wrapper that Titan exported
   through [`BrowserValue.is_callable`](standard-library-browser.md#callables-and-pinning)
   and passed to JavaScript. It requires successful initialization and remains
