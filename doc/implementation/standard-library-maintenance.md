@@ -109,10 +109,11 @@ exclusive independent-state execution used by `titan.lua`.
 
 ## Keep C and the Lua C API to what Titan cannot do
 
-The style guide states six [rules for standard-library and runtime
-C](../style-guide.md#write-native-bindings-titan-first);
-a review justifies every new `lua_*`/`luaL_*` call and authored C line against
-them. This maintainer contract pairs each rule with its counterexample from the
+The style guide states six [rules for standard-library and runtime C and
+JavaScript](../style-guide.md#write-native-bindings-titan-first);
+a review justifies every new `lua_*`/`luaL_*` call, authored C line, and
+authored JavaScript line against them. This maintainer contract pairs each
+rule with its counterexample from the
 initial browser bridge (`titan-runtime/browser/titan-browser.c`,
 `titan/browser.browser.titan`, and `titan-runtime/browser/titan-browser.mjs` at
 commit `843b446e`, PR #364, before #371's rewrite), and with existing
@@ -120,7 +121,8 @@ code that follows it. [Foreign functions](foreign-functions.md) and the
 [libuv extension rules](libuv-extension-guide.md) describe the mechanisms. The
 [`titan-ffi` cartridge](../../.agents/skills/titan-ffi/SKILL.md) carries the
 same pairs for agents under "Guard-rails for standard-library and runtime C",
-with compiled examples.
+with compiled examples. [The same rules for browser
+JavaScript](#the-same-rules-for-browser-javascript) follow the six pairs.
 
 1. **Layering.** Wrong (`titan-browser.c` at `843b446e`): a 600-line runtime C
    file (`titan-browser.c`) hand-writing the Emscripten exports, the image
@@ -170,6 +172,73 @@ with compiled examples.
    again. Right: one tagged union (`BrowserValue`) marshalled by runtime type
    at the boundary, with a callee that cases on it and raises for a variant it
    rejects (the cartridge's `twice` example).
+
+### The same rules for browser JavaScript
+
+Authored JavaScript is the embedded loader
+(`titan-runtime/browser/titan-browser.mjs`), the `--js-library` files beside it
+(`titan-browser-library.js`, `titan-browser-bridge.js`, and
+`titan-browser-trace.js`), an `EM_JS` or `EM_ASM` block in a C helper, and
+JavaScript text that the compiler emits. [Source
+ownership](browser-bridge.md#javascript-files) records what each shipped file
+owns. The runner (`titan-browser-run.mjs` with its page and worker scripts) is
+host tooling outside the image, reviewed as an ordinary Node program.
+
+A review counts the authored JavaScript lines that a diff adds and names, for
+each added function or block, the host capability that requires it:
+
+- suspending or resuming Wasm (JSPI), or handling an engine failure;
+- holding or converting JavaScript values and host objects;
+- a host scheduling or event API (`setTimeout`, `MessageChannel`,
+  `AbortSignal`, a listener, a promise continuation);
+- the embedder-facing promise API (admission, settlement, `Error` objects,
+  option callbacks);
+- engine stack capture.
+
+A function or block with none of these is a finding of the same class as an
+avoidable C line: its state, policy, validation, or bookkeeping belongs in
+Titan. The counterexamples below come from the loader at commit `843b446e`
+and at commit `48b26b75`; rules 2 and 5 have no JavaScript reading.
+
+1. **Layering.** Wrong (`titan-browser.mjs` at `843b446e`): `signatureAt`
+   decoded each exported callable's parameter and result descriptors,
+   `wrapCallable` stored them on the wrapper, and `completionTarget` rejected
+   a request whose completion had "an incompatible signature". That is
+   validation of Titan functions, written in JavaScript. Right:
+   `registerCallable` creates one wrapper object for a pin identity and
+   nothing else. Every import in `titan-browser-bridge.js` is one line that
+   forwards to the loader owner (`titan_browser_host_adopt` to `adoptSlot`),
+   and its two helpers hold the only shared logic: a trusted import that
+   throws poisons the instance (`trusted`), and a host import that throws
+   fills the response (`response`). A Task-form call is Titan too:
+   `spawn_call` and `shutdown_call` in `titan/async/runtime.browser.titan`
+   start, cancel, and settle the Task, while the loader keeps the promise,
+   the `AbortSignal` listener (`taskAborted`), and the `Error` objects.
+3. **Protected work belongs in Titan.** Right: `importResponse` catches a
+   binding's exception at the import, keeps the thrown value in a slot, and
+   fills `titan_browser_response`; `check_response` in
+   `titan/browser.browser.titan` raises `BrowserError` after the import
+   returns. A trusted import never throws into Wasm. The bridge library
+   treats the opposite as corruption: a synchronous callback that a
+   JavaScript exception ends poisons the instance (`callbacksLeft`).
+4. **Pinning and data placement.** Wrong (`titan-browser.mjs` at
+   `48b26b75`): the `holds` map, a per-state copy of Titan's count of open
+   `BrowserPin`s, kept current by a dedicated import
+   (`titan_browser_host_hold`) only so that `hasWakeSources` can read it.
+   Right: the pin table and its hold counts are module variables of
+   `titan/browser.browser.titan` (`pins_by_slot`, `Pin.holds`), and the
+   loader holds one wrapper object per pin and the slot table of JavaScript
+   values. Where the loader needs a Titan fact, Titan passes it with the
+   call: the driver decides between a turn and a wait
+   (`browser.relinquish(runtime.ready_head == nil)`) and the loader keeps no
+   copy of the ready queue.
+6. **Don't duplicate checks the receiver makes.** Wrong (`titan-browser.mjs`
+   at `48b26b75`): `driveBegin` poisons when a drive is already active, after
+   `drive_begin` has refused the same call with `"browser drive is already
+   active"`. Right: each side tests the fact it owns. `validateCallable`
+   tests what only JavaScript knows (the wrapper's brand, its instance, and
+   its logical release, which is synchronous in JavaScript), and
+   `invoke_work` tests the pin generation that Titan owns.
 
 ## Model actual call and result protocols
 

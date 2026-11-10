@@ -17,7 +17,7 @@ loader, the runner, deployment, and fatal engine classifications.
 | Installed C layout and JS import contract | `titan-runtime/titan/browser.h` |
 | Browser-only Titan API, pin table, foreign trampolines, and protected entries | `titan/browser.browser.titan` |
 | Generated image launcher and weak C export forwards | `titan-compiler/browserentry.lua` and `driver.browser_entrypoint_contents` |
-| JSPI owner, bridge imports and loader | `titan-runtime/browser/titan-browser-library.js`, `titan-browser-bridge.js`, and `titan-browser.mjs` |
+| JSPI owner, bridge imports, loader, and trace adapter | the four [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
 | Browser runtime/provider staging | `Makefile` and `scripts/browser_sdk.lua` |
 
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
@@ -27,6 +27,37 @@ has no `titan.browser`, while the browser provider adds `titan.browser` beside
 the thirteen shared modules. It imports only `gc`, and the [member
 inventory](browser-target.md#interface-derived-member-inventory) skips it
 because it has no native interface to compare.
+
+### JavaScript files
+
+JavaScript does only what the host alone can do ([Write native bindings
+Titan-first](../style-guide.md#write-native-bindings-titan-first)). Each
+shipped file is justified by the capability in its last column.
+
+| File | Owns | Host capability |
+| --- | --- | --- |
+| `titan-browser-library.js` (`--js-library`) | The execution owner of one Module: the pending entry, the promising wrappers of the state-entering exports, one promise per coroutine context with its saved linear stack, the suspending imports (`titan_mco_transfer`, `titan_mco_destroy`, `titan_browser_relinquish`), the synchronous-callback depth, and poison | JSPI suspension and resumption; engine failure |
+| `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner. It keeps no state | Emscripten import glue |
+| `titan-browser.mjs` (embedded in each image) | The loader: `create` and `BrowserOwner`, in the parts listed below | See below |
+| `titan-browser-trace.js` (`--js-library`) | The index built from the fetched `.wasm.map`, stack capture into C-owned records, and symbolization ([trace metadata](browser-target.md#eager-map-loader-and-trace-metadata)) | Engine stack capture; fetching and parsing the map outside the Wasm heap |
+
+The loader's parts:
+
+| Part | Holds | Host capability |
+| --- | --- | --- |
+| Public object, admission, `operate`, `entry`, `initialize`, `run`, `dispose` | One promise per operation, the lifecycle state, the pending completion, which failure an operation reports, and the references that disposal must drop | The embedder-facing promise API; entering Wasm through a promising export |
+| Slot table and `CallableView` wrappers | JavaScript values with their state, generation, and units; one wrapper per pin with its logical-release flag | Holding JavaScript values and host objects |
+| Marshalling (`snapshotArguments`, `writeValue`, `valuesAt`, `completionAt`, `importResponse`) | Nothing between calls | Converting JavaScript values to and from the records of `titan/browser.h` |
+| Queue (`queue`, `batch`, `settling`) | Notifications, request events, and calls that wait for `drain()` or a drive, with each queued call's promise | JavaScript values that have no slot yet; items that wait for a point where Wasm can be entered |
+| Requests | The detachable cell of each promise or listener continuation, the host cancel function, the ownership form, and the terminal promise that disposal awaits. The loader also keeps each request's completion and failure targets and the count of its queued events, and reports the request's two hold drops once those have been delivered | Promise and listener continuations |
+| Deferred releases (`releases`) | Wrapper releases and request-hold drops, applied by a release entry at a safe point or handed to `deliver` | A release requested where Wasm cannot be entered |
+| Drive | The gate promise of the suspending import, the turn source, the owner token, the exit latch, and a per-state count of open `BrowserPin`s (`holds`) | JSPI resumption; macrotask scheduling |
+| `OutputChannel` and `drainOutput` | One FIFO of copied chunks per stream, at most one sink call in flight, and the drains that run after the image is released | The embedder's sinks and their promises |
+| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | Host timers, re-armed in chunks beyond the 32-bit range, and the two driver callables | Host timer APIs |
+
+`titan-browser-run.mjs`, `titan-browser-page.mjs`, and
+`titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
+host tooling outside the image.
 
 ## Generated launcher and foreign-function trampolines
 
