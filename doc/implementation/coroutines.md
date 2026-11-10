@@ -515,8 +515,10 @@ slot that the next close method reuses.
 ### Finalizer context
 
 `titan_in_finalizer` (`titan/ffi.h`) tests `G(L)->gcstp & GCSTPGC`. That bit is
-set exactly while GCTM runs a `__gc`, during ordinary collections and during
-`lua_close`. Inside a finalizer, including every cleanup an unwind runs:
+set while GCTM runs a `__gc`, during ordinary collections and during
+`lua_close`, and around the browser's synchronous wrapper-release entry.
+That entry runs no program code; its no-switch body cannot reach these checks.
+Inside a finalizer, including every cleanup an unwind runs:
 
 - `coroutine.yield` raises `cannot yield from a finalizer`;
 - `Coroutine:resume` and `Coroutine:error` raise

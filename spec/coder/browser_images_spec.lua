@@ -249,7 +249,7 @@ describe("browser image profile and SDK readiness", function()
             "-sJSPI=1",
             '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"]',
             '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
-                '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"]',
+                '"titan_browser_close","titan_mco_entry"]',
             "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
             "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
@@ -279,7 +279,7 @@ describe("browser image profile and SDK readiness", function()
             "-sJSPI=1",
             '-sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"]',
             '-sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
-                '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"]',
+                '"titan_browser_close","titan_mco_entry"]',
             "-sSUPPORT_LONGJMP=wasm", "-sWASM_LEGACY_EXCEPTIONS=1", "-sSTACK_SIZE=1048576",
             "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",

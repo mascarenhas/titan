@@ -262,7 +262,7 @@ addToLibrary({
       // synchronous. Static wasmExports accesses survive export minification.
       for (var [name, kind] of [
         ['titan_browser_initialize', 1], ['titan_browser_entry', 2],
-        ['titan_browser_invoke', 3], ['titan_browser_release_callable', 4],
+        ['titan_browser_invoke', 3],
         ['titan_browser_close', 5], ['titan_browser_gate_guarded', 3],
       ]) {
         var entry = wasmExports[name];

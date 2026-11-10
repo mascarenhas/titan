@@ -27,15 +27,11 @@ export async function run(context) {
       if (name === 'entry-close') {
         context.assert(absentProbe !== undefined, 'entry-close did not publish absentProbe');
         context.assert((await absentProbe.unadmittedInvoke()) === -1, 'absent invoke did not reject unadmitted entry');
-        context.assert((await absentProbe.unadmittedRelease()) === -1, 'absent release did not reject unadmitted entry');
+        context.assert(absentProbe.releaseUnknown() === 3, 'absent synchronous release did not return STATE');
         const invokeResult = await absentProbe.admittedInvoke();
         context.assert(invokeResult.failed && invokeResult.status === 1 &&
           new TextDecoder().decode(invokeResult.bytes) === 'browser state is closed, closing or uninitialized',
           'absent invoke fallback did not emit state failure completion');
-        const releaseResult = await absentProbe.admittedRelease();
-        context.assert(releaseResult.failed && releaseResult.status === 1 &&
-          new TextDecoder().decode(releaseResult.bytes) === 'browser state is closed',
-          'absent release fallback did not emit state failure completion');
       }
       await instance.dispose();
       context.assert(result.kind === expected.kind && result.status === expected.status,

@@ -179,7 +179,7 @@ export function makeHost(context) {
       return {kind: 'detachable', promise: pending.promise, cancel() { host.r1CloseCount++; }};
     },
     r1_close_count() { return host.r1CloseCount; },
-    r1_release_result(position) { host.hooks.r1Release(position); },
+    r1_release_result(position) { return host.hooks.r1Release(position); },
     r1_response_throw() { host.hooks.r1Throw?.(); throw host.r1Thrown; },
     r1_response_observe(message, value, hasThrown) {
       host.r1Responses.push({message: asBytes(message), value, hasThrown,
