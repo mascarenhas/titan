@@ -105,8 +105,8 @@ addToLibrary({
 
   titan_browser_host_drive_end__deps: ['$TitanBridge'],
   titan_browser_host_drive_end__sig: 'viii',
-  titan_browser_host_drive_end: (state, status, exited) =>
-    TitanBridge.trusted('driveEnd', state >>> 0, status | 0, exited !== 0),
+  titan_browser_host_drive_end: (_state, status, exited) =>
+    TitanBridge.trusted('driveEnd', status | 0, exited !== 0),
 
   titan_browser_host_main_failed__deps: ['$TitanBridge'],
   titan_browser_host_main_failed__sig: 'vipppp',
@@ -123,7 +123,7 @@ addToLibrary({
 
   titan_browser_host_item__deps: ['$TitanBridge'],
   titan_browser_host_item__sig: 'iip',
-  titan_browser_host_item: (state, out) => TitanBridge.trusted('nextItem', state >>> 0, out >>> 0),
+  titan_browser_host_item: (_state, out) => TitanBridge.trusted('nextItem', out >>> 0),
 
   titan_browser_host_item_done__deps: ['$TitanBridge'],
   titan_browser_host_item_done__sig: 'vij',

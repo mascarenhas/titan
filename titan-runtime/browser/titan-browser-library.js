@@ -86,12 +86,12 @@ addToLibrary({
 
     // titan_browser_host_callback: the loader admits a callback unless the
     // instance is closing, exited or poisoned.
-    callback(state, delta) {
+    callback(delta) {
       if (delta < 0) {
         if (TitanBrowser.callbackDepth > 0) TitanBrowser.callbackDepth--;
         return 1;
       }
-      if (TitanBrowser.poisoned || !Module['titanBrowserBridge']?.callbackAdmit(state)) return 0;
+      if (TitanBrowser.poisoned || !Module['titanBrowserBridge']?.callbackAdmit()) return 0;
       if (TitanBrowser.callbackDepth++ === 0) queueMicrotask(() => TitanBrowser.callbacksLeft());
       return 1;
     },
@@ -315,7 +315,7 @@ addToLibrary({
 
   titan_browser_host_callback__deps: ['$TitanBrowser'],
   titan_browser_host_callback__sig: 'iii',
-  titan_browser_host_callback: (state, delta) => TitanBrowser.callback(state >>> 0, delta | 0),
+  titan_browser_host_callback: (_state, delta) => TitanBrowser.callback(delta | 0),
 
   // titan_no_switch's import: true while any synchronous callback runs.
   titan_browser_in_callback__deps: ['$TitanBrowser'],

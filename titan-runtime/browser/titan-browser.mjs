@@ -1037,7 +1037,7 @@ class BrowserOwner {
             await this.invokeTarget(target.state, target.slot, target.generation, args);
           } catch (cause) {
             if (this.terminal) throw this.terminal;
-            // No entry identity means argument marshalling failed, not the callback.
+            // No entry identity means marshalling or identity allocation failed before the callback.
             if (this.operationId === operationId && this.failRequestEvent(notification, cause)) continue;
             this.reportNotification('callback', 'drain', cause);
           } finally {
@@ -1226,7 +1226,7 @@ class BrowserOwner {
     if (type === kind.string || type === kind.bytes) {
       if (this.terminal) throw this.terminal;
       length = item.bytes.length;
-      if (length > 0xffffffff) throw new TypeError('browser byte result has an invalid length or capacity');
+      if (length > 0xffffffff) throw new TypeError('browser byte result has an invalid length');
       bytes = this.allocate(length, allocations);
       if (length) this.module.HEAPU8.set(item.bytes, bytes);
     } else if (type === kind.handle) {
@@ -1344,7 +1344,7 @@ class BrowserOwner {
     if (this.closing) this.disposalDriven = true;
   }
 
-  driveEnd(state, status, exited) {
+  driveEnd(status, exited) {
     if (this.terminal) return;
     this.drive = undefined;
     if (this.batch.length) {
@@ -1457,7 +1457,7 @@ class BrowserOwner {
 
   // titan_browser_host_callback(state, 1): a synchronous C callback runs
   // unless the instance is closing, exited or poisoned. Titan checked the state.
-  callbackAdmit(state) {
+  callbackAdmit() {
     return !this.closing && !this.exited && !this.terminal;
   }
 
@@ -1474,7 +1474,7 @@ class BrowserOwner {
     return this.batch.length;
   }
 
-  nextItem(state, pointer) {
+  nextItem(pointer) {
     if (this.terminal) return 0;
     while (this.batch.length) {
       const item = this.batch.shift();

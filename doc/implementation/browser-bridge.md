@@ -350,7 +350,7 @@ learn about the callback only through `titan_no_switch`.
   `titan_browser_host_state_record`, then the closing and configured checks)
   or when `titan_browser_host_callback(state, 1)` refuses. That import admits
   unless the bridge library is poisoned or the loader's `callbackAdmit`
-  refuses (closing, exited, terminal, or the state no longer open), and it
+  refuses (closing, exited or terminal), and it
   increments `$TitanBrowser.callbackDepth` on admission.
 - **Callback threads.** The state record gains `callback_handler` and
   `call_sync_handler` (`TValue` entries like `invoke_handler`),
