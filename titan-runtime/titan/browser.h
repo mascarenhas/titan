@@ -57,7 +57,8 @@ enum titan_browser_delivery_kind {
   TITAN_BROWSER_DELIVER_NONE = 0,
   TITAN_BROWSER_DELIVER_NOTIFY = 1,
   TITAN_BROWSER_DELIVER_CALL = 2,
-  TITAN_BROWSER_DELIVER_RELEASE = 3
+  TITAN_BROWSER_DELIVER_RELEASE = 3,
+  TITAN_BROWSER_DELIVER_UNDELIVERED = 4
 };
 
 typedef union titan_browser_scalar {
@@ -110,9 +111,9 @@ typedef struct titan_browser_completion {
 } titan_browser_completion;
 
 /* One host item that deliver() runs inside a drive, or one deferred physical
- * release. id names the item for item_done and settle; args stay host-owned
- * until titan_browser_host_item_done. wrapper is the RELEASE kind's flag:
- * 1 for a wrapper release, 0 for a request-hold drop. */
+ * wrapper release. id names the item for item_done and settle; args stay
+ * host-owned until titan_browser_host_item_done. UNDELIVERED has identity zero,
+ * no arguments, settlement or item_done. wrapper is the RELEASE kind's flag. */
 typedef struct titan_browser_delivery {
   uint64_t id;
   uint32_t kind;
@@ -282,10 +283,12 @@ void titan_browser_host_cancel(uint32_t state, uint32_t slot, uint32_t generatio
  * import: it returns a titan_browser_relinquish_status after one turn-source
  * macrotask (TURN), or after a wake (WAIT or WAIT_HELD); a WAIT with no wake
  * source returns IDLE at once. The others are trusted and nonthrowing.
- * host_item marshals arguments into host allocations; it reports a
- * marshalling failure (a callback error or a call rejection), skips that item,
- * and returns 0 once the batch is exhausted. host_settle receives the
- * delivered item's completion. */
+ * host_item marshals arguments into host allocations. A request's
+ * unmarshallable success event becomes its failure event, appended to the live
+ * queue; an unmarshallable failure event returns UNDELIVERED with its target
+ * identity and no arguments, settlement or item_done. Other unmarshallable
+ * items are reported and skipped. It returns 0 once the batch is exhausted.
+ * host_settle receives the delivered item's completion. */
 uint32_t titan_browser_relinquish(uint32_t state, uint32_t mode);
 void titan_browser_host_owner(uint32_t state);
 void titan_browser_host_drive_begin(uint32_t state);

@@ -18,7 +18,7 @@ const operationKinds = Object.freeze({initialize: 1, entry: 2, invoke: 3,
   release_callable: 4, close: 5, gate_guarded: 3});
 const relinquishMode = Object.freeze({turn: 0, wait: 1, held: 2});
 const relinquishStatus = Object.freeze({resumed: 0, idle: 1, disposing: 2});
-const deliveryKind = Object.freeze({notify: 1, call: 2, release: 3});
+const deliveryKind = Object.freeze({notify: 1, call: 2, release: 3, undelivered: 4});
 const deliverySize = 32;
 const anotherStateMessage = 'calls for another Lua state are not admitted while the owner drives';
 
@@ -1070,6 +1070,7 @@ class BrowserOwner {
     return this.operate('drain', async () => {
       try {
         for (const notification of batch) {
+          const operationId = this.operationId;
           try {
             if (this.closing) continue;
             const {record, target, args, request} = notification;
@@ -1079,12 +1080,10 @@ class BrowserOwner {
             await this.invokeTarget(target.state, target.slot, target.generation, args);
           } catch (cause) {
             if (this.terminal) throw this.terminal;
+            // No entry identity means argument marshalling failed, not the callback.
+            if (this.operationId === operationId && this.failRequestEvent(notification, cause)) continue;
             this.reportNotification('callback', 'drain', cause);
           } finally {
-            if (notification.request) {
-              notification.request.pendingNotifications--;
-              this.releaseRequestHolds(notification.request);
-            }
             notification.record = notification.target = notification.args = notification.request = undefined;
           }
         }
@@ -1138,7 +1137,6 @@ class BrowserOwner {
     this.releases = this.releases.filter(entry => entry.state !== state);
     for (const request of this.requests) {
       if (request.state === state) {
-        request.holdsReleased = true;
         try { this.cancelRequest(request); }
         catch (cause) { this.retirementFailure ||= failure('HOST', 'browser host cancellation failed', cause); }
       }
@@ -1224,8 +1222,7 @@ class BrowserOwner {
   }
 
   registerCallable(state, slot, generation) {
-    // Re-exporting a callable cancels any queued, undelivered wrapper release,
-    // while preserving any queued request-hold drops for the same pin.
+    // Re-exporting cancels the pin's queued, undelivered wrapper release.
     const index = this.releases.findIndex(entry =>
       entry.wrapper && entry.state === state && entry.slot === slot && entry.generation === generation);
     if (index !== -1) this.releases.splice(index, 1);
@@ -1576,7 +1573,7 @@ class BrowserOwner {
       if (request?.cancelled || record?.released || this.states.get(target.state) === 'closed') {
         if (item.kind === 'call') {
           this.finishCall(item, {error: failure('HANDLE', 'browser callable is foreign, released, or belongs to a closed state')});
-        } else this.finishNotification(item);
+        }
         continue;
       }
       const allocations = [], temporary = [];
@@ -1585,37 +1582,47 @@ class BrowserOwner {
         if (this.operationId >= maximumApplicationOperationId) throw failure('STATE', 'browser operation identity exhausted');
         argv = this.marshalValues(target.state, item.args, allocations, temporary);
       } catch (cause) {
+        // Poisoned marshalling must not enqueue or hand back delivery work.
         if (this.terminal) return 0;
         this.releaseMarshalled(allocations, temporary);
         if (item.kind === 'call') this.finishCall(item, {error: cause});
         else {
+          if (this.failRequestEvent(item, cause)) continue;
           this.reportNotification('callback', this.operationName(), cause);
-          this.finishNotification(item);
+          if (request) {
+            this.writeDelivery(pointer, 0n, deliveryKind.undelivered, target, 0, 0);
+            return 1;
+          }
         }
         continue;
       }
       const id = ++this.operationId;
       this.delivering = {id, item, allocations, temporary, settled: false};
-      const view = this.heapView(pointer, deliverySize);
-      view.setBigUint64(0, id, true);
-      view.setUint32(8, item.kind === 'call' ? deliveryKind.call : deliveryKind.notify, true);
-      view.setUint32(12, target.slot, true);
-      view.setUint32(16, target.generation, true);
-      view.setUint32(20, item.args.length, true);
-      view.setUint32(24, argv, true);
-      view.setUint32(28, 0, true);
+      this.writeDelivery(pointer, id, item.kind === 'call' ? deliveryKind.call : deliveryKind.notify,
+        target, item.args.length, argv);
       return 1;
     }
     return 0;
   }
 
-  finishNotification(item) {
+  writeDelivery(pointer, id, kind, target, argc, argv, wrapper = 0) {
+    const view = this.heapView(pointer, deliverySize);
+    view.setBigUint64(0, id, true);
+    view.setUint32(8, kind, true);
+    view.setUint32(12, target.slot, true);
+    view.setUint32(16, target.generation, true);
+    view.setUint32(20, argc, true);
+    view.setUint32(24, argv, true);
+    view.setUint32(28, wrapper, true);
+  }
+
+  // A request's unmarshallable success event becomes a failure in the live queue.
+  failRequestEvent(item, cause) {
     const request = item.request;
-    if (request) {
-      request.pendingNotifications--;
-      this.releaseRequestHolds(request);
-    }
-    item.record = item.target = item.args = item.request = undefined;
+    if (!request || item.target === request.rejected) return false;
+    this.queue.push({kind: 'notify', target: request.rejected,
+      args: this.snapshotFailureArguments(messageBytes(cause), cause), request});
+    return true;
   }
 
   settleQueued(pointer) {
@@ -1660,7 +1667,6 @@ class BrowserOwner {
       this.poison(failure('PROTOCOL', 'browser delivery returned without settlement'));
       return;
     }
-    if (delivering.item.kind !== 'call') this.finishNotification(delivering.item);
   }
 
   // Deferred physical releases of the driving state, applied between turns.
@@ -1669,14 +1675,7 @@ class BrowserOwner {
     const index = this.releases.findIndex(entry => entry.state === state);
     if (index === -1) return 0;
     const [release] = this.releases.splice(index, 1);
-    const view = this.heapView(pointer, deliverySize);
-    view.setBigUint64(0, 0n, true);
-    view.setUint32(8, deliveryKind.release, true);
-    view.setUint32(12, release.slot, true);
-    view.setUint32(16, release.generation, true);
-    view.setUint32(20, 0, true);
-    view.setUint32(24, 0, true);
-    view.setUint32(28, release.wrapper ? 1 : 0, true);
+    this.writeDelivery(pointer, 0n, deliveryKind.release, release, 0, 0, release.wrapper ? 1 : 0);
     return 1;
   }
 
@@ -1760,7 +1759,6 @@ class BrowserOwner {
       success: {state, slot: successSlot, generation: successGeneration},
       rejected: {state, slot: failureSlot, generation: failureGeneration},
       kind: 'starting', cancelled: false, cancelSignalled: false, retired: false,
-      holdsReleased: false, pendingNotifications: 0,
       cancel: undefined, terminal: deferred(), cell: undefined};
     request.cell = {target: {owner: this, request}};
     // Reserve the native owner before host acceptance or output publication.
@@ -1769,22 +1767,13 @@ class BrowserOwner {
     return request;
   }
 
-  releaseRequestHolds(request) {
-    if (request.holdsReleased || !request.retired || request.pendingNotifications > 0) return;
-    request.holdsReleased = true;
-    if (request.success) this.queueCallableRelease(request.state, request.success.slot, request.success.generation);
-    if (request.rejected) this.queueCallableRelease(request.state, request.rejected.slot, request.rejected.generation);
-    request.success = request.rejected = undefined;
-  }
-
   abortRequest(request) {
-    request.holdsReleased = true;
     this.retireRequest(request, true);
     this.releaseSlot(request.identity.slot, request.identity.generation);
   }
 
   dropQueuedRequest(request) {
-    this.queue = this.queue.filter(entry => entry.request !== request || (--request.pendingNotifications, false));
+    this.queue = this.queue.filter(entry => entry.request !== request);
   }
 
   startRequest(request, target, args, listener) {
@@ -1823,7 +1812,6 @@ class BrowserOwner {
       try { this.cancelRequest(request); }
       catch (cause) {
         if (this.closing) this.retirementFailure ||= failure('HOST', 'browser host cancellation failed', cause);
-        request.holdsReleased = true;
         this.releaseSlot(request.identity.slot, request.identity.generation);
         throw cause;
       }
@@ -1842,7 +1830,6 @@ class BrowserOwner {
     try {
       const copied = rejected ? this.snapshotFailureArguments(args[0], args[1]) :
         this.snapshotArguments(request.state, args);
-      request.pendingNotifications++;
       this.queue.push({kind: 'notify', target, args: copied, request});
       if (owner && this.drive) this.wakeDriver();
       else this.scheduleSafePoint();
@@ -1869,12 +1856,12 @@ class BrowserOwner {
     request.terminal.resolve();
     this.requests.delete(request);
     request.cancel = undefined;
-    this.releaseRequestHolds(request);
   }
 
   cancelRequest(request) {
-    if (request.retired) return;
     request.cancelled = true;
+    this.dropQueuedRequest(request);
+    if (request.retired) return;
     if (request.kind === 'starting') return;
     let error;
     if (!request.cancelSignalled) {
@@ -1884,7 +1871,7 @@ class BrowserOwner {
       request.cancel = undefined;
     }
     if (request.kind !== 'retained') this.retireRequest(request, true);
-    else this.dropQueuedRequest(request);
+    // Retained work stays owned until its host promise settles.
     if (error) throw error;
   }
 
@@ -2018,21 +2005,12 @@ class BrowserOwner {
 
   // Keeps the owner state's request events while its cleanup drive needs them.
   dropNotifications(entries) {
-    const kept = [];
-    for (const entry of entries) {
-      const request = entry.request;
-      if (request && this.retainOwnerWork && request.state === this.ownerState) kept.push(entry);
-      else if (request) {
-        request.pendingNotifications = 0;
-        request.holdsReleased = true;
-      }
-    }
-    return kept;
+    return entries.filter(entry =>
+      entry.request && this.retainOwnerWork && entry.request.state === this.ownerState);
   }
 
   cancelRequests() {
     for (const request of this.requests) {
-      request.holdsReleased = true;
       try { this.cancelRequest(request); }
       catch (cause) { this.retirementFailure ||= failure('HOST', 'browser host cancellation failed', cause); }
     }

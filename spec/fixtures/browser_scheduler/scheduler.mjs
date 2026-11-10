@@ -69,6 +69,13 @@ function makeHost(context, image) {
     delay(ms, value) {
       return {kind: 'detachable', promise: new Promise(resolve => { setTimeout(() => resolve(value), Number(ms)); })};
     },
+    released_settlement(value) {
+      const promise = Promise.resolve(value);
+      // The first microtask queues release after requestFulfilled snapshots it,
+      // but before the driver can enter its next host turn.
+      queueMicrotask(() => queueMicrotask(() => value.release()));
+      return {kind: 'detachable', promise};
+    },
     never() { return {kind: 'detachable', promise: new Promise(() => {})}; },
     held(ms) { return work('retained', 'held', ms); },
     late(ms) { return work('detachable', 'late', ms); },
@@ -120,10 +127,14 @@ async function gate(context, image) {
     const out = decode(join(host.stdout)), err = decode(join(host.stderr));
     context.assert(result.kind === 'returned' && result.status === 0, `scheduler gate failed:\n${out}${err}`);
     const passed = out.match(/\[  PASSED  \] (\d+) tests?\./);
-    context.assert(passed && Number(passed[1]) === 18, `the gate did not pass its eighteen cases:\n${out}`);
+    context.assert(passed && Number(passed[1]) === 21, `the gate did not pass its twenty-one cases:\n${out}`);
     context.assert(err.includes('uncaught error in async Task: ordinary Task failure'),
       `an ordinary Task failure was not reported on stderr:\n${err}`);
-    context.assert(host.notificationErrors.length === 0, 'a gate case reported a notification error');
+    context.assert(host.notificationErrors.length === 1 &&
+      host.notificationErrors[0].kind === 'callback' &&
+      host.notificationErrors[0].operation === 'run' &&
+      host.notificationErrors[0].error.message === 'injected delivery allocation failure',
+      'the drive double fault did not report exactly one callback error');
     return Number(passed[1]);
   } finally { await host.close(); }
 }

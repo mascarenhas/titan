@@ -2,6 +2,21 @@
 #include <lualib.h>
 #include <titan.h>
 #include "../../stdlib/titan/async/browser_tests/child.h"
+#include <emscripten.h>
+
+/* Fixture-only injection into the JavaScript allocator, not Titan allocation. */
+EM_JS(void, scheduler_fail_deliveries, (int count), {
+  const owner = Module['titanBrowserBridge'], allocate = owner.allocate;
+  Module['remainingDeliveryFailures'] = count;
+  owner.allocate = function() {
+    if (--Module['remainingDeliveryFailures'] === 0) owner.allocate = allocate;
+    throw new Error('injected delivery allocation failure');
+  };
+});
+
+EM_JS(int, scheduler_delivery_failures, (), {
+  return Module['remainingDeliveryFailures'] || 0;
+});
 
 extern int luaopen_titan(lua_State *L);
 extern int luaopen_async_browser_child(lua_State *L);

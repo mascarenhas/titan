@@ -139,12 +139,14 @@ A callable stays pinned while any holder needs it:
 - an active request or listener (including a settled request whose notification
   is still queued for `drain()`).
 
-Wrapper `release()`, request retirement, and state close drop their holds. A
-JavaScript wrapper's `release()` is synchronous and logically invalidates that
-wrapper immediately; physical unpinning in Titan occurs at a safe point once no
-holder remains. Re-exporting the same callable before a queued wrapper release
-is delivered cancels that queued release and issues a fresh live wrapper. If a
-crossing fails before JavaScript receives the callable wrapper (for example, a
+Wrapper `release()`, request cancellation or close, a one-shot callback's return
+or raise, and state close drop their holds. A one-shot whose outcome cannot be
+delivered at all can retain its callables until request close or state close;
+close requests you keep. A JavaScript wrapper's `release()` is synchronous and
+logically invalidates that wrapper immediately; physical unpinning occurs at
+a safe point once no holder remains. Re-exporting the same callable before a
+queued wrapper release is delivered cancels that release and issues a fresh live
+wrapper. If a crossing fails before JavaScript receives the callable wrapper (for example, a
 later argument raises during marshalling, or a host `call` or `start` target is
 not callable), any provisional pin created for that crossing is rolled back in
 the same operation. Once a wrapper has been passed into a host binding
@@ -316,13 +318,16 @@ Both methods invoke the host binding synchronously with the supplied
   `start` settlement value or `listen` emission argument cannot be marshalled
   (for example, an out-of-range `BigInt`, an ill-formed UTF-16 string with a
   lone surrogate, or a foreign/released callable wrapper), that marshalling
-  `TypeError` or bridge handle error is delivered to `failure` in the same way.
+  error is delivered to `failure` in the same way. This applies both when the
+  event is queued and at delivery. A delivery-time failure joins the next batch,
+  after events already waiting, rather than retrying in place.
 
 Because callables are not signature-checked at registration time, type errors
 move from registration to call time: if `completion` or `failure` raises when
 delivered, that callback failure is reported through `onNotificationError`
 (`kind: "callback"`, with `operation: "drain"`, or the operation that contains
-the drive). Host promise rejection itself is delivered to `failure`, not
+the drive). A failure event that cannot itself be marshalled is also reported
+there. Host promise rejection itself is delivered to `failure`, not
 `onNotificationError`.
 
 A start binding returns one of two explicit forms:
@@ -345,7 +350,8 @@ ordered until the request is closed. Unregister is idempotent and stops new
 admission before captured owners retire.
 Cancelling or closing a listener from one of its callbacks also suppresses its
 remaining events in the current detached batch. A normally settled one-shot
-request still delivers its queued success or failure notification.
+request still delivers its queued success or failure notification unless it is
+cancelled or closed before delivery.
 
 On an idle instance the host calls `drain()` to deliver one detached FIFO
 batch. While a drive is active, the driver delivers the owner state's queued
@@ -353,7 +359,8 @@ notifications and request events between its turns instead, in the same FIFO
 order and at most once each; `drain()` then rejects with
 `TITAN_BROWSER_REENTRY`. Imports which enqueue more work add it to the next
 batch. A released target is retired without delivery; a released queued
-argument is reported without entering Lua.
+argument of a plain notification is reported without entering Titan. A request
+event instead follows the failure rule above.
 
 Disposal first closes application admission, then permits only physical
 retirement, then closes the state. With an active drive or an `async` Runtime
