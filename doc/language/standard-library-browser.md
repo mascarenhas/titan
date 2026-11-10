@@ -143,10 +143,12 @@ Wrapper `release()`, request cancellation or close, a one-shot callback's return
 or raise, and state close drop their holds. A one-shot whose outcome cannot be
 delivered at all can retain its callables until request close or state close;
 close requests you keep. A JavaScript wrapper's `release()` is synchronous and
-logically invalidates that wrapper immediately; physical unpinning occurs at
-a safe point once no holder remains. Re-exporting the same callable before a
-queued wrapper release is delivered cancels that release and issues a fresh live
-wrapper. If a crossing fails before JavaScript receives the callable wrapper (for example, a
+logically invalidates that wrapper immediately. Its native wrapper hold is
+dropped in the same call when the instance can be entered; otherwise state
+close retires the pin. Request and listener holds remain. Re-exporting the
+callable after release issues a fresh wrapper, reusing a pin still kept by
+another hold or a refused release. If a crossing fails before JavaScript receives
+the callable wrapper (for example, a
 later argument raises during marshalling, or a host `call` or `start` target is
 not callable), any provisional pin created for that crossing is rolled back in
 the same operation. Once a wrapper has been passed into a host binding
@@ -419,8 +421,7 @@ function main_failed(message: string, trace: string)
   notifications, request settlements and listener events, and queued calls.
   Each runs once, in FIFO order, outside any Task; a failure is reported
   through `onNotificationError` (a notification) or rejects that call's
-  promise. Items queued while it runs wait for the next `deliver()`. It then
-  performs the callable releases the bridge deferred to a safe point.
+  promise. Items queued while it runs wait for the next `deliver()`.
 - `relinquish(wait)` gives the event loop back. It first settles the queued
   calls whose results arrived. With `wait = false` it resumes after one host
   macrotask (`setImmediate` in Node, a `MessageChannel` message in browsers,

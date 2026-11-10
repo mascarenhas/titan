@@ -248,7 +248,7 @@ remain:
    `cancel_shutdown_tasks`.
 2. `available = ready_count`, then `browser.deliver()` (request settlements,
    listener events, notifications and queued calls present when it starts,
-   each outside any Task, then the deferred releases), then
+   each outside any Task), then
    `drain_ready(runtime, available)`. Taking `available` before delivery puts
    a Task that a delivered completion resumed and that then yields in a later
    turn. Delivery or drain failures go to `fail_runtime`.

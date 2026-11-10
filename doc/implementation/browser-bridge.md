@@ -702,7 +702,7 @@ Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The
 JavaScript integration driver exercises public promises, two instances,
 runtime-type marshalling, variant rejections, non-string callable errors, pin
-hold lifetimes, re-export cancelling a queued release, notification batches,
+hold lifetimes, re-export after synchronous release, notification batches,
 disposal, sinks, requests, and WeakRef ownership with real linked images.
 Test-only C instrumentation may hand explicit frozen controls to a supplied
 fixture binding; the generated application API never exposes the raw Emscripten

@@ -2151,13 +2151,14 @@ public foreign functions. `driver.browser_c_image_contents` is the same
 boundary for protocol and test-owned C images. Options supply declarations, a
 protected initializer (empty for C-only controls), a program name, and the
 state-allocation status. The installed
-[`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout) defines the five
-promised export signatures, the shared struct layouts, and the JS imports.
+[`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout) defines the four
+promised export signatures, synchronous wrapper release, shared struct layouts,
+and JS imports.
 
 Initialization creates the owner Lua state and enters the image initializer
 under the shared protected gateway. `titan.browser` initializes and publishes
 its module-owned state record in ordinary dependency order, when linked.
-Main runs once on that initialized state and leaves it live. Each contained C entry
+Main runs once on that initialized state and leaves it live. Each promised C entry
 receives a nonzero unsigned 64-bit operation id, echoes it with its expected
 operation kind in exactly one completion, and returns only an admission code.
 The loader waits for both completion and physical promised-entry retirement.
