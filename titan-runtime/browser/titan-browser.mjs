@@ -16,6 +16,7 @@ const kind = Object.freeze({nil: 0, boolean: 1, integer: 2, float: 3,
 const responseStatus = Object.freeze({ok: 0, titanError: 1, jsError: 2, state: 3, memory: 4});
 const operationKinds = Object.freeze({initialize: 1, entry: 2, invoke: 3,
   release_callable: 4, close: 5, gate_guarded: 3});
+const relinquishMode = Object.freeze({turn: 0, wait: 1, held: 2});
 const relinquishStatus = Object.freeze({resumed: 0, idle: 1, disposing: 2});
 const deliveryKind = Object.freeze({notify: 1, call: 2, release: 3});
 const deliverySize = 32;
@@ -498,8 +499,6 @@ class BrowserOwner {
     this.drive = undefined;
     this.exited = undefined;
     this.driver = undefined;
-    // Open BrowserPins per state; the owner's count is a wake source.
-    this.holds = new Map();
     this.inHost = 0;
     this.batch = [];
     this.delivering = undefined;
@@ -1166,7 +1165,6 @@ class BrowserOwner {
     const closed = failure('HANDLE', 'browser callable belongs to a closed state');
     for (const entry of dropped) if (entry.kind === 'call') this.finishCall(entry, {error: closed});
     if (state === this.ownerState) this.driver = undefined;
-    this.holds.delete(state);
     this.releases = this.releases.filter(entry => entry.state !== state);
     for (const request of this.requests) {
       if (request.state === state) {
@@ -1527,8 +1525,10 @@ class BrowserOwner {
       drive.disposalSignalled = true;
       return this.parkDrive(drive, true);
     }
-    if (mode === 0 || this.queue.some(entry => entry.target.state === state)) return this.parkDrive(drive, true);
-    if (!this.hasWakeSources()) return relinquishStatus.idle;
+    if (mode === relinquishMode.turn || this.queue.some(entry => entry.target.state === state)) {
+      return this.parkDrive(drive, true);
+    }
+    if (mode !== relinquishMode.held && !this.hasWakeSources()) return relinquishStatus.idle;
     return this.parkDrive(drive, false);
   }
 
@@ -1559,27 +1559,15 @@ class BrowserOwner {
   }
 
   // A later JS call is not a wake source: only queued owner work, an open
-  // owner request, listener or BrowserPin, or an already scheduled wake.
+  // owner request or listener, or an already scheduled wake. Titan passes
+  // its BrowserPin wake source with the relinquish mode.
   hasWakeSources() {
     const owner = this.ownerState;
-    if (this.turnScheduled || this.holds.has(owner) || this.queue.some(entry => entry.target.state === owner)) {
+    if (this.turnScheduled || this.queue.some(entry => entry.target.state === owner)) {
       return true;
     }
     for (const request of this.requests) if (request.state === owner) return true;
     return false;
-  }
-
-  // titan_browser_host_hold: BrowserPin open (+1) or closed (-1). When the
-  // last one closes, a parked wait re-checks whether it still has a wake
-  // source.
-  hold(state, delta) {
-    const count = (this.holds.get(state) ?? 0) + delta;
-    if (count > 0) {
-      this.holds.set(state, count);
-      return;
-    }
-    this.holds.delete(state);
-    this.wakeDriver(state);
   }
 
   // titan_browser_host_callback(state, 1): a synchronous C callback runs
@@ -2147,7 +2135,6 @@ async function retireOwner(owner) {
   }
   owner.slots.clear();
   owner.stateRecords.clear();
-  owner.holds.clear();
   owner.callables.clear();
   owner.requests.clear();
   owner.state = 'disposed';

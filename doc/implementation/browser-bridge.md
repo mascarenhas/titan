@@ -51,7 +51,7 @@ The loader's parts:
 | Queue (`queue`, `batch`, `settling`) | Notifications, request events, and calls that wait for `drain()` or a drive, with each queued call's promise | JavaScript values that have no slot yet; items that wait for a point where Wasm can be entered |
 | Requests | The detachable cell of each promise or listener continuation, the host cancel function, the ownership form, and the terminal promise that disposal awaits. The loader also keeps each request's completion and failure targets and the count of its queued events, and reports the request's two hold drops once those have been delivered | Promise and listener continuations |
 | Deferred releases (`releases`) | Wrapper releases and request-hold drops, applied by a release entry at a safe point or handed to `deliver` | A release requested where Wasm cannot be entered |
-| Drive | The gate promise of the suspending import, the turn source, the owner token, the exit latch, and a per-state count of open `BrowserPin`s (`holds`) | JSPI resumption; macrotask scheduling |
+| Drive | The gate promise of the suspending import, the turn source, the owner token, and the exit latch | JSPI resumption; macrotask scheduling |
 | `OutputChannel` and `drainOutput` | One FIFO of copied chunks per stream, at most one sink call in flight, and the drains that run after the image is released | The embedder's sinks and their promises |
 | SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | Host timers, re-armed in chunks beyond the 32-bit range, and the two driver callables | Host timer APIs |
 
@@ -280,8 +280,9 @@ drives, and `titan.browser` never learns about Tasks.
   Titan keeps no record of it.
 - **Relinquish.** `relinquish(wait)` flushes C `stdout` and `stderr`, then
   calls the suspending import `titan_browser_relinquish(state, mode)`
-  ([relinquish import](browser-target.md#the-relinquish-import)). The
-  import's resolved value is the status.
+  ([relinquish import](browser-target.md#the-relinquish-import)). A turn passes
+  `TURN`; a wait passes `WAIT_HELD` while the state has open `BrowserPin`s,
+  otherwise `WAIT`. The import's resolved value is the status.
 - **Delivery.** `deliver` sets `delivering` for its extent, asks
   `titan_browser_host_batch` to snapshot the owner's queued items, and for
   each one lets `titan_browser_host_item` marshal it into a
@@ -314,12 +315,13 @@ learn about the callback only through `titan_no_switch`.
   (`holds`, as a request hold does, allocating the pin when the function has
   none) and returns a `BrowserPin` record with the state token, slot and
   generation. The record registers the allocation-free `gc.finalizable`
-  shape, so an unreachable pin closes. `BrowserPin:close` is idempotent: it
-  drops the hold, calls `retire_if_unused`, and reports the change with the
-  trusted `titan_browser_host_hold(state, -1)`. The loader counts open pins
-  per state in `holds`, a [wake source](browser-target.md#drives-the-call-queue-and-wake-sources)
-  for the owner, and wakes the drive when the owner's last pin closes, so a
-  parked wait re-checks its wake sources.
+  shape, so an unreachable pin closes. `titan.browser` counts open pins in
+  the per-state module variable `open_pins`, a
+  [wake source](browser-target.md#drives-the-call-queue-and-wake-sources)
+  for the owner. `BrowserPin:close` is idempotent: it drops the hold, calls
+  `retire_if_unused`, and decrements `open_pins`. Closing the last pin calls
+  `wake`, so a parked wait re-checks its wake sources. A wait with an open
+  pin passes `WAIT_HELD`; the loader keeps no copy of the count.
 - **C entries.** `browserentry.lua` declares `call_sync`, `callback_enter`
   and `callback_leave` as weak, like the invoke and release forwards, and
   defines the C functions `titan_browser_call_sync`,
@@ -437,8 +439,8 @@ import result kind for `host_start`. Statuses are `OK = 0`, `TITAN_ERROR = 1`,
 | 24 | `args` | Host-owned `titan_browser_value` array, valid until `item_done` |
 | 28 | `wrapper` | `RELEASE` only: 1 for a wrapper release, 0 for a request-hold drop |
 
-Relinquish modes are `TURN = 0` and `WAIT = 1`; statuses are `RESUMED = 0`,
-`IDLE = 1`, and `DISPOSING = 2`.
+Relinquish modes are `TURN = 0`, `WAIT = 1`, and `WAIT_HELD = 2`; statuses
+are `RESUMED = 0`, `IDLE = 1`, and `DISPOSING = 2`.
 
 ### `titan_browser_response` — 56 bytes, alignment 8
 

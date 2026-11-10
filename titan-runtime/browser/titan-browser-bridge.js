@@ -137,9 +137,4 @@ addToLibrary({
   titan_browser_host_settle__deps: ['$TitanBridge'],
   titan_browser_host_settle__sig: 'vp',
   titan_browser_host_settle: record => TitanBridge.trusted('settleQueued', record >>> 0),
-
-  // Open BrowserPins per state: a wake source for the owner's drive.
-  titan_browser_host_hold__deps: ['$TitanBridge'],
-  titan_browser_host_hold__sig: 'vii',
-  titan_browser_host_hold: (state, delta) => TitanBridge.trusted('hold', state >>> 0, delta | 0),
 });

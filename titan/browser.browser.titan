@@ -125,6 +125,7 @@ local callback_threads: {CallbackThread} = {}
 -- at a time, and deliver() never nests or relinquishes.
 local owner_state = false
 local drive_active = false
+local open_pins = 0
 local delivering = false
 
 local foreign function mark_closing(state: *titan_browser_state_record)
@@ -1114,7 +1115,10 @@ function relinquish(wait: boolean): integer
   ffi.fflush(ffi.stdout)
   ffi.fflush(ffi.stderr)
   local mode = ffi.TITAN_BROWSER_TURN as foreign uint32_t
-  if wait then mode = ffi.TITAN_BROWSER_WAIT as foreign uint32_t end
+  if wait then
+    mode = ffi.TITAN_BROWSER_WAIT as foreign uint32_t
+    if open_pins > 0 then mode = ffi.TITAN_BROWSER_WAIT_HELD as foreign uint32_t end
+  end
   return ffi.titan_browser_relinquish(state_record.token, mode)
 end
 
@@ -1181,7 +1185,7 @@ function pin(callback: Callable): BrowserPin
   entry.holds = entry.holds + 1
   owner.slot = entry.slot
   owner.generation = entry.generation
-  ffi.titan_browser_host_hold(state, 1)
+  open_pins = open_pins + 1
   return owner
 end
 
@@ -1202,7 +1206,8 @@ function BrowserPin:close()
     if entry.holds > 0 then entry.holds = entry.holds - 1 end
     entry:retire_if_unused()
   end
-  if state_record.token ~= 0 then ffi.titan_browser_host_hold(self.state, -1) end
+  open_pins = open_pins - 1
+  if open_pins == 0 then wake() end
 end
 
 -- Audited stack transaction: makes the next nesting level's callback thread,

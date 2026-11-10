@@ -2806,14 +2806,16 @@ import, and only while that gate is still parked; a numeric `IDLE` schedules
 none, so the coroutine switches of orphan unwinding that may follow it never
 meet a sink. Disposal is signalled once: the first relinquish after
 `dispose()` began (or a gate parked when it began) resolves `DISPOSING` after
-one turn. A turn (`mode` 0), or a wait with a queued owner
-item, parks a gate and schedules one turn-source macrotask. A wait with no
-wake source returns `IDLE` as a plain number, so JSPI does not suspend; the
-terminal `titan_mco_transfer` path already relies on that. Otherwise the wait
-parks its gate, created synchronously inside the import so a wake can never
-fire before it exists. Every resumption resolves the gate from the turn
-source, never directly from a microtask, with `DISPOSING` once disposal began
-and `RESUMED` otherwise.
+one turn. A turn (`TURN = 0`), or a wait with a queued owner item, parks a
+gate and schedules one turn-source macrotask. `titan.browser` passes
+`WAIT_HELD = 2` while the state has an open `BrowserPin`, otherwise
+`WAIT = 1`. A plain `WAIT` with no loader wake source returns `IDLE` as a
+number, so JSPI does not suspend; the terminal `titan_mco_transfer` path
+already relies on that. `WAIT_HELD` parks even when the loader has no wake
+source. A parked gate is created synchronously inside the import so a wake
+can never fire before it exists. Every resumption resolves the gate from the
+turn source, never directly from a microtask, with `DISPOSING` once disposal
+began and `RESUMED` otherwise.
 
 The turn source is `setImmediate` where the host defines it (Node) and
 otherwise one `MessageChannel` per instance, created on first use; neither
@@ -2943,13 +2945,13 @@ once and accepts a drive only from that state inside an active operation.
   relinquish point, or when the drive ends; a call queued too late for the
   drive's last batch runs at the next safe point as an ordinary call.
 - **Wake sources.** A queued owner item, an open owner request or listener,
-  an open owner `BrowserPin` (the loader's `holds` count, kept by
-  `titan_browser_host_hold`), or an already scheduled wake keeps a waiting
-  relinquish parked; a JS call that might come later does not. Every enqueue
-  of an owner item, `dispose()`, `titan_browser_host_wake`, and the close of
-  the owner's last pin schedule the one coalesced turn-source macrotask that
-  resolves the parked gate ([relinquish import](#the-relinquish-import)), so
-  a parked wait re-checks its wake sources.
+  an open owner `BrowserPin`, or an already scheduled wake keeps a waiting
+  relinquish parked; a JS call that might come later does not. `titan.browser`
+  counts open pins per state and passes that wake source as `WAIT_HELD`.
+  Every enqueue of an owner item, `dispose()`, and `titan_browser_host_wake`
+  schedule the one coalesced turn-source macrotask that resolves the parked
+  gate ([relinquish import](#the-relinquish-import)). Closing the owner's last
+  pin calls `wake`, so a parked wait re-checks its wake sources.
 - **Synchronous C callbacks.** A C callback that enters Titan through
   `titan_browser_call_sync` is not an operation and takes no admission.
   `callbackAdmit(state)`, behind `titan_browser_host_callback`, admits it

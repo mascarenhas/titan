@@ -40,7 +40,10 @@ enum titan_browser_request_mode {
 };
 enum titan_browser_relinquish_mode {
   TITAN_BROWSER_TURN = 0,
-  TITAN_BROWSER_WAIT = 1
+  TITAN_BROWSER_WAIT = 1,
+  /* The state holds its own wake source (an open BrowserPin); park even when
+   * the loader has none. */
+  TITAN_BROWSER_WAIT_HELD = 2
 };
 /* A wait with no wake source returns IDLE without suspending. The first
  * relinquish after dispose() began resolves DISPOSING once; afterwards every
@@ -277,11 +280,12 @@ void titan_browser_host_cancel(uint32_t state, uint32_t slot, uint32_t generatio
 
 /* Driver imports. titan_browser_relinquish is the bridge's only suspending
  * import: it returns a titan_browser_relinquish_status after one turn-source
- * macrotask (TURN), or after a wake (WAIT); a WAIT with no wake source returns
- * IDLE at once. The others are trusted and nonthrowing. host_item marshals
- * arguments into host allocations; it reports a marshalling failure (a
- * callback error or a call rejection), skips that item, and returns 0 once the
- * batch is exhausted. host_settle receives the delivered item's completion. */
+ * macrotask (TURN), or after a wake (WAIT or WAIT_HELD); a WAIT with no wake
+ * source returns IDLE at once. The others are trusted and nonthrowing.
+ * host_item marshals arguments into host allocations; it reports a
+ * marshalling failure (a callback error or a call rejection), skips that item,
+ * and returns 0 once the batch is exhausted. host_settle receives the
+ * delivered item's completion. */
 uint32_t titan_browser_relinquish(uint32_t state, uint32_t mode);
 void titan_browser_host_owner(uint32_t state);
 void titan_browser_host_drive_begin(uint32_t state);
@@ -298,11 +302,9 @@ void titan_browser_host_item_done(uint32_t state, uint64_t id);
 int titan_browser_host_release_next(uint32_t state, titan_browser_delivery *out);
 void titan_browser_host_settle(const titan_browser_completion *record);
 
-/* Synchronous C callbacks. host_hold counts open BrowserPins per state (a
- * wake source for the owner's drive). host_callback(state, 1) admits a
- * callback unless the instance is closing, exited or poisoned and returns 0
- * when it refuses; host_callback(state, -1) ends it. Both are trusted. */
-void titan_browser_host_hold(uint32_t state, int32_t delta);
+/* Synchronous C callbacks. host_callback(state, 1) admits a callback unless
+ * the instance is closing, exited or poisoned and returns 0 when it refuses;
+ * host_callback(state, -1) ends it. The import is trusted. */
 int titan_browser_host_callback(uint32_t state, int32_t delta);
 
 /* Generated forwards to titan.browser's public foreign functions, for C in the
