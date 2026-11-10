@@ -418,6 +418,9 @@ async function timers(context, image) {
     await host.task('timer_cancel', [2147483647]);
     context.assert(spy.delays.filter(delay => delay === 2147483647).length === 1 && spy.held.size === 0,
       'the maximum titan:timeout was not armed once or survived its cancellation');
+    context.assert(await host.call('timer_range', 'titan:interval', 2147483647) === 'accepted' &&
+      spy.periods.filter(period => period === 2147483647).length === 1 && spy.intervals.size === 0,
+      'the maximum titan:interval was not armed once or survived its request close');
     for (const source of ['titan:timeout', 'titan:interval']) {
       const arms = spy.delays.length + spy.periods.length;
       context.assert(await host.call('timer_range', source, 2147483648) ===

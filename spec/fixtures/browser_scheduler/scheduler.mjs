@@ -244,20 +244,25 @@ async function disposal(context, image) {
     context.assert([...host.notes].sort().join('|') === 'held cleanup instance disposed|held parked|' +
       'late cleanup instance disposed|late parked', `retire notes: ${notes(host)}`);
   } finally { await host.close(); }
-  host = makeHost(context, image);
-  try {
-    await host.instance.initialize();
-    const ticking = host.task('long_ticker_wait');
-    await until(context, () => timers.count(2147483647) === 1, 'the long ticker never armed before disposal');
-    context.assert(timers.fire(2147483647), 'the first long ticker chunk was not held');
-    // 3000000000 - 2147483647: the long period's final chunk.
-    await until(context, () => timers.count(852516353) === 1, 'the long ticker never armed its last chunk');
-    const disposing = host.instance.dispose();
-    await rejection(context, ticking, 'DISPOSED');
-    await disposing;
-    context.assert(timers.held.size === 0, 'disposing a long ticker left its chunk armed');
-    context.assert(host.notificationErrors.length === 0, 'disposing a long ticker reported a notification error');
-  } finally { await host.close(); }
+  for (const settleChunk of [false, true]) {
+    host = makeHost(context, image);
+    try {
+      await host.instance.initialize();
+      const ticking = host.task('long_ticker_wait');
+      await until(context, () => timers.count(2147483647) === 1, 'the long ticker never armed before disposal');
+      context.assert(timers.fire(2147483647), 'the first long ticker chunk was not held');
+      const lastChunk = 852516353; // 3000000000 - 2147483647
+      await until(context, () => timers.count(lastChunk) === 1, 'the long ticker never armed its last chunk');
+      // A settled chunk survives retainOwnerWork and fails to re-arm during
+      // disposal delivery; its Titan callback must catch that failure.
+      if (settleChunk) context.assert(timers.fire(lastChunk), 'the final long ticker chunk was not held');
+      const disposing = host.instance.dispose();
+      await rejection(context, ticking, 'DISPOSED');
+      await disposing;
+      context.assert(timers.held.size === 0, 'disposing a long ticker left its chunk armed');
+      context.assert(host.notificationErrors.length === 0, 'disposing a long ticker reported a notification error');
+    } finally { await host.close(); }
+  }
   return summary;
 }
 
