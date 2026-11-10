@@ -42,6 +42,7 @@ record BrowserRequest
   local state: foreign uint32_t
   local slot: foreign uint32_t
   local generation: foreign uint32_t
+  local holds: RequestHolds
 end
 
 --- An open hold on a pinned callable, whose identity C keeps as callback user data.
@@ -82,6 +83,14 @@ local record Pin
   callback: Callable
   wrapper_live: boolean
   holds: integer
+  request: RequestHolds?
+end
+
+-- The completion and failure holds of one request, dropped once, when the
+-- request can deliver nothing more.
+local record RequestHolds
+  completion: Pin?
+  failure: Pin?
 end
 
 local record ProvisionalPin
@@ -263,6 +272,7 @@ function BrowserRequest:close()
     current_state()
     self.slot = 0
     ffi.titan_browser_host_release(self.state, slot, self.generation)
+    self.holds:drop()
   end
 end
 
@@ -327,6 +337,7 @@ local function allocate_pin(callback: Callable): Pin
     callback = callback,
     wrapper_live = false,
     holds = 0,
+    request = nil,
   }
   pins_by_fn[callback] = pin
   do
@@ -358,6 +369,21 @@ local function Pin:retire_if_unused()
       pins_by_fn[self.callback] = nil
       free_slots[#free_slots + 1] = self.slot
     end
+  end
+end
+
+local function RequestHolds:drop()
+  local completion? = self.completion
+  self.completion = nil
+  if completion ~= nil then
+    completion.holds = completion.holds - 1
+    completion:retire_if_unused()
+  end
+  local failure? = self.failure
+  self.failure = nil
+  if failure ~= nil then
+    failure.holds = failure.holds - 1
+    failure:retire_if_unused()
   end
 end
 
@@ -973,6 +999,7 @@ function BrowserRequest:cancel()
   defer response_dispose(response)
   current_state()
   ffi.titan_browser_host_cancel(self.state, self.slot, self.generation, response)
+  self.holds:drop()
   check_response(response)
 end
 
@@ -983,6 +1010,10 @@ local function BrowserHandle:request(
     ...: BrowserValue): BrowserRequest
   local state = self:checked_state()
   if state_closing() then raise "browser state is closing" end
+  local holds = RequestHolds { completion = nil, failure = nil }
+  local owner = BrowserRequest {
+    state = state, slot = 0, generation = 0, holds = holds,
+  }
   local count = #...
   local small = foreign titan_browser_value.new_array(8)
   local slots: foreign *titan_browser_value = small
@@ -997,8 +1028,19 @@ local function BrowserHandle:request(
   local completion_pin: Pin?
   local failure_pin: Pin?
   do
-    completion_pin = pin_request_hold(completion, provisioned)
-    failure_pin = pin_request_hold(failure, provisioned)
+    if mode == ffi.TITAN_BROWSER_START then
+      completion_pin = pin_request_hold(function (...: BrowserValue): BrowserValue
+        defer holds:drop()
+        return completion(...)
+      end, provisioned)
+      failure_pin = pin_request_hold(function (...: BrowserValue): BrowserValue
+        defer holds:drop()
+        return failure(...)
+      end, provisioned)
+    else
+      completion_pin = pin_request_hold(completion, provisioned)
+      failure_pin = pin_request_hold(failure, provisioned)
+    end
     for index = 1, count do
       encode_value(...[index], state, slots + (index - 1), provisioned, nil)
     end
@@ -1019,11 +1061,14 @@ local function BrowserHandle:request(
     rollback_provisioned(state, provisioned)
     check_response(response)
   end
-  local owner = BrowserRequest {
-    state = state,
-    slot = response.value.slot,
-    generation = response.value.generation,
-  }
+  holds.completion = completion_pin
+  holds.failure = failure_pin
+  if mode == ffi.TITAN_BROWSER_START then
+    completion_pin.request = holds
+    failure_pin.request = holds
+  end
+  owner.slot = response.value.slot
+  owner.generation = response.value.generation
   response.value.slot = 0
   return owner
 end
@@ -1118,6 +1163,16 @@ function relinquish(wait: boolean): integer
   return ffi.titan_browser_relinquish(state_record.token, mode)
 end
 
+-- A request's failure event that the loader could not marshal: a one-shot
+-- can deliver nothing more.
+local function drop_undelivered(slot: foreign uint32_t, generation: foreign uint32_t)
+  local pin? = pins_by_slot[slot]
+  if pin ~= nil and pin.generation == generation then
+    local request? = pin.request
+    if request ~= nil then request:drop() end
+  end
+end
+
 --- Run the host items queued for this state when the call begins, then its deferred releases.
 -- @usage standard-library-browser.md#driver-interface-low-level
 function deliver()
@@ -1129,28 +1184,36 @@ function deliver()
   local count: integer = ffi.titan_browser_host_batch(token)
   for _ = 1, count do
     if ffi.titan_browser_host_item(token, item) == 0 then break end
-    do
-      invoke_work(item.id, token, item.slot, item.generation, item.argc, item.args, true)
-    catch
-      -- No allocating Titan helper entry may run outside this catch boundary.
-      local trace = traceback
-      local message = fallback_message
-      local completion: foreign *titan_browser_completion = fallback_completion
-      completion.operation_id = item.id
-      completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
-      completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
-      completion.application_status = 1
-      completion.result_count = 0
-      completion.results = nil
-      completion.message = message as foreign const *unsigned char
-      completion.message_length = #message
-      completion.trace = trace as foreign const *unsigned char
-      completion.trace_length = #trace
-      ffi.fflush(ffi.stdout)
-      ffi.fflush(ffi.stderr)
-      ffi.titan_browser_host_settle(completion)
+    if item.kind == ffi.TITAN_BROWSER_DELIVER_UNDELIVERED then
+      do
+        drop_undelivered(item.slot, item.generation)
+      catch
+        -- No callback ran and there is no settlement or item_done.
+      end
+    else
+      do
+        invoke_work(item.id, token, item.slot, item.generation, item.argc, item.args, true)
+      catch
+        -- No allocating Titan helper entry may run outside this catch boundary.
+        local trace = traceback
+        local message = fallback_message
+        local completion: foreign *titan_browser_completion = fallback_completion
+        completion.operation_id = item.id
+        completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
+        completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
+        completion.application_status = 1
+        completion.result_count = 0
+        completion.results = nil
+        completion.message = message as foreign const *unsigned char
+        completion.message_length = #message
+        completion.trace = trace as foreign const *unsigned char
+        completion.trace_length = #trace
+        ffi.fflush(ffi.stdout)
+        ffi.fflush(ffi.stderr)
+        ffi.titan_browser_host_settle(completion)
+      end
+      ffi.titan_browser_host_item_done(token, item.id)
     end
-    ffi.titan_browser_host_item_done(token, item.id)
   end
   while ffi.titan_browser_host_release_next(token, item) ~= 0 do
     apply_release(item.slot, item.generation, item.wrapper)

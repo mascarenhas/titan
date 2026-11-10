@@ -66,6 +66,14 @@ EM_JS(void, gate_test_publish, (), {
         get slotsAtFailure() { return slotsAtFailure; },
       });
     },
+    failNextAllocations(count) {
+      const allocate = owner.allocate;
+      owner.allocate = function() {
+        if (--count === 0) owner.allocate = allocate;
+        throw new Error('injected delivery allocation failure');
+      };
+      return () => { owner.allocate = allocate; };
+    },
     failNextEntryStack(kind, freeSlots, maxFailures) {
       var entry = owner.entry;
       owner.entry = function(entryKind, ...args) {
