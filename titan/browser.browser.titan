@@ -81,6 +81,7 @@ local record Pin
   callback: Callable
   wrapper_live: boolean
   holds: integer
+  -- A one-shot request's closure pin names the request's holds.
   request: RequestHolds?
 end
 
@@ -133,8 +134,9 @@ local owner_state = false
 local drive_active = false
 local delivering = false
 
--- Open BrowserPins per Lua state: count only after owner.slot is set, wake
--- when the count reaches zero, and keep the count across drive boundaries.
+-- Open BrowserPins of this Lua state, a wake source for its drive: relinquish
+-- passes WAIT_HELD while the count is above zero, and closing the last pin
+-- wakes a parked drive. A pin counts once its slot is set, drive or no drive.
 local open_pins = 0
 
 local foreign function mark_closing(state: *titan_browser_state_record)
@@ -715,12 +717,14 @@ catch
   ffi.titan_browser_complete(completion)
 end
 
--- Allocation-free wrapper retirement; allocate_pin reserves free_slots capacity.
+-- Drops the JavaScript wrapper's hold and retires the pin when nothing else
+-- holds it. It allocates nothing (allocate_pin reserved free_slots' capacity)
+-- and inlines Pin:retire_if_unused, so no helper entry can raise half way.
 local function apply_release(slot: foreign uint32_t, generation: foreign uint32_t)
   local pin? = pins_by_slot[slot]
   if pin ~= nil and pin.generation == generation then
     pin.wrapper_live = false
-    if not pin.wrapper_live and pin.holds <= 0 then
+    if pin.holds <= 0 then
       if pins_by_slot[pin.slot] == pin then
         pins_by_slot[pin.slot] = nil
         pins_by_fn[pin.callback] = nil
@@ -730,7 +734,9 @@ local function apply_release(slot: foreign uint32_t, generation: foreign uint32_
   end
 end
 
--- Runs on a callback thread. An unapplied release leaves the pin for state close.
+-- The protected entry of a wrapper release: it runs on a callback thread with
+-- the collector stopped. A raise leaves the release unapplied, and the pin
+-- then stays until state close.
 local function release_entry(slot: foreign uint32_t, generation: foreign uint32_t)
   apply_release(slot, generation)
 catch
@@ -803,7 +809,7 @@ foreign function invoke(
   return 0
 end
 
---- The synchronous entry of a wrapper release: no entry identity or completion.
+--- The synchronous entry of a wrapper release, a callback trampoline with no entry identity or completion.
 foreign function release_callable(raw_token: unsigned int, raw_slot: unsigned int,
                                   raw_generation: unsigned int): int
   local token = raw_token as foreign uint32_t
@@ -835,9 +841,11 @@ foreign function release_callable(raw_token: unsigned int, raw_slot: unsigned in
   local old_gcstp = ffi.lmacro_get_gcstp(thread)
   ffi.lua_pushcclosure(thread, ffi.errorhandler, 0)
   ffi.lmacro_set_errfunc(thread, ffi.lmacro_savestack_top(thread))
-  -- Entry polls must not run a finalizer inside the embedder's release().
-  -- Keep release_entry's pre-catch frame below LUA_MINSTACK: the pushed
-  -- error handler uses one reserved slot, and a pre-catch raise skips restore.
+  -- Stop the collector as GCTM does around a finalizer: a compiled function
+  -- polls it on entry, and no finalizer may run inside the embedder's
+  -- release(). The restore below is exact only if nothing raises before
+  -- release_entry's catch, so that function's own frame must fit in the
+  -- LUA_MINSTACK reservation less the error handler's slot.
   ffi.lmacro_set_gcstp(thread, old_gcstp | ffi.GCSTPGC)
   entry(thread, module, handler, slot, generation)
   ffi.lmacro_set_gcstp(thread, old_gcstp)
@@ -930,6 +938,8 @@ local function BrowserHandle:request(
   local completion_pin: Pin?
   local failure_pin: Pin?
   do
+    -- A one-shot pins closures of its own, so that its holds drop as soon as
+    -- the caller's callback returns or raises.
     if mode == ffi.TITAN_BROWSER_START then
       completion_pin = pin_request_hold(function (...: BrowserValue): BrowserValue
         defer holds:drop()
@@ -1071,8 +1081,9 @@ function relinquish(wait: boolean): integer
   return ffi.titan_browser_relinquish(state_record.token, mode)
 end
 
--- A request's failure event that the loader could not marshal: a one-shot
--- can deliver nothing more.
+-- An UNDELIVERED item: the loader could not marshal a request's failure
+-- event. A one-shot can deliver nothing more, so its holds drop. A listener's
+-- pin names no RequestHolds, so its holds stay.
 local function drop_undelivered(slot: foreign uint32_t, generation: foreign uint32_t)
   local pin? = pins_by_slot[slot]
   if pin ~= nil and pin.generation == generation then

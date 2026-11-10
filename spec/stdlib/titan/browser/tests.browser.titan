@@ -776,7 +776,7 @@ function test_export_requests_and_listeners(_: test.Context)
   end)
   publish("exit_for_release", function(...: browser.BrowserValue): browser.BrowserValue
     browser.drive_begin()
-    browser.drive_end(0, true)
+    browser.drive_end(0)
     return Value.is_nil()
   end)
   local nested_finalizer_ran = false

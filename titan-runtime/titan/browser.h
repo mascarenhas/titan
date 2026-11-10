@@ -296,11 +296,14 @@ int titan_browser_host_item(uint32_t state, titan_browser_delivery *out);
 void titan_browser_host_item_done(uint32_t state, uint64_t id);
 void titan_browser_host_settle(const titan_browser_completion *record);
 
-/* Synchronous entries. host_callback(state, 1) admits unless the instance is
- * closing, exited or poisoned and returns 0 when it refuses;
- * host_callback(state, -1) ends it. The import is trusted.
- * release_callable retires only the wrapper hold, with no completion; a refused
- * release leaves the pin until state close. */
+/* Synchronous entries. titan_browser_release_callable is an export, not an
+ * import: the loader calls it from wrapper.release(), with no operation id
+ * and no completion. It drops only the wrapper's hold. It returns STATE when
+ * the entry is refused and MEMORY when the callback thread's stack cannot be
+ * reserved; an unapplied release leaves the pin until state close.
+ * host_callback(state, 1) is the trusted import that admits a synchronous
+ * entry unless the instance is closing, exited or poisoned, returning 0 when
+ * it refuses; host_callback(state, -1) ends the entry. */
 int titan_browser_release_callable(uint32_t state, uint32_t slot, uint32_t generation);
 int titan_browser_host_callback(uint32_t state, int32_t delta);
 

@@ -1490,9 +1490,9 @@ async function cleanupFailures(context, image) {
       background.release();
       await context.tick();
       context.assert(host.notificationErrors.length === beforeBackground,
-        'refused physical release reported a notification error');
+        'refused wrapper release reported a notification error');
       context.assert((await host.call('valid_after_failure')) === 42n,
-        'callerless release failure poisoned later valid entry');
+        'refused wrapper release poisoned a later valid entry');
       backgroundReleases++;
 
       const causes = {stdout: new Error('secondary stdout failure'), stderr: new Error('secondary stderr failure')};

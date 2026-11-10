@@ -758,6 +758,8 @@ class BrowserOwner {
     return record;
   }
 
+  // The wrapper is invalid from here on. The synchronous export then drops
+  // its hold in Titan; a refused release leaves the pin for state close.
   releaseCallable(record) {
     if (record.released) return;
     record.released = true;
