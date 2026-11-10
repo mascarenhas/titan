@@ -310,6 +310,9 @@ learn about the callback only through `titan_no_switch`.
   protected `release_entry` -> `apply_release` path in no-switch mode, with no
   operation identity or completion. Around that call it saves `G(L)->gcstp`,
   adds `GCSTPGC` as Lua's `GCTM` does, and restores the saved bits exactly.
+  Its pre-catch frame must stay below `LUA_MINSTACK`, leaving room for the
+  pushed error handler without raising before the entry's catch is active.
+  Such a raise would skip the collector-stop restore.
   Entry polls must not collect: a finalizer could otherwise re-export the
   function after logical release and before its pin is retired. The body
   clears `wrapper_live`, removes an unused pin, and appends its slot to

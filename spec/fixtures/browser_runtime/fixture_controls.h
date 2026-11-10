@@ -80,14 +80,15 @@ EM_JS(void, gate_test_publish, (), {
     },
     failNextEntryStack(kind, freeSlots, maxFailures) {
       if (kind === 'release_callable') {
+        var attempt = {};
         var release = Module['_titan_browser_release_callable'];
         Module['_titan_browser_release_callable'] = function(state, slot, generation) {
           Module['_titan_browser_release_callable'] = release;
           Module['_titan_bridge_test_enter_with_free_stack'](freeSlots, maxFailures, state);
-          try { return release(state, slot, generation); }
+          try { return attempt.status = release(state, slot, generation); }
           finally { Module['_titan_bridge_test_reset_entry_stack'](); }
         };
-        return;
+        return attempt;
       }
       var entry = owner.entry;
       owner.entry = function(entryKind, ...args) {
@@ -103,7 +104,7 @@ EM_JS(void, gate_test_publish, (), {
         return entry.call(owner, entryKind, ...args);
       };
     },
-    failNextRelease() {
+    refuseNextRelease() {
       var release = Module['_titan_browser_release_callable'];
       Module['_titan_browser_release_callable'] = function() {
         Module['_titan_browser_release_callable'] = release;

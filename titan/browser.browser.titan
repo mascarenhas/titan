@@ -847,6 +847,8 @@ foreign function release_callable(raw_token: unsigned int, raw_slot: unsigned in
   ffi.lua_pushcclosure(thread, ffi.errorhandler, 0)
   ffi.lmacro_set_errfunc(thread, ffi.lmacro_savestack_top(thread))
   -- Entry polls must not run a finalizer inside the embedder's release().
+  -- Keep release_entry's pre-catch frame below LUA_MINSTACK: the pushed
+  -- error handler uses one reserved slot, and a pre-catch raise skips restore.
   ffi.lmacro_set_gcstp(thread, old_gcstp | ffi.GCSTPGC)
   entry(thread, module, handler, slot, generation)
   ffi.lmacro_set_gcstp(thread, old_gcstp)

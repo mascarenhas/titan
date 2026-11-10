@@ -569,6 +569,12 @@ async function resultRepairs(context, host, engineFailures) {
     await rejected(context, dueRelease.call(), 'DISPOSED');
     freshAfterGc.release();
 
+    const pausedRelease = await host.call('make_callable');
+    host.hooks.r1Release = () => pausedRelease.release();
+    context.assert((await host.call('release_with_gc_paused')) === true,
+      'synchronous release cleared a user GC pause');
+    await rejected(context, pausedRelease.call(), 'DISPOSED');
+
     // 3. Handle or callable invalidated by a GC finalizer after encoding and before completion rejects under protection.
     for (const position of [1n, 2n]) {
       const prepared = await host.call(position === 1n ? 'r1_prepare_handle' : 'r1_prepare_callable');
@@ -658,26 +664,33 @@ async function resultRepairs(context, host, engineFailures) {
       'outer invoke OOM leaked provisional callable capture');
     context.assert((await host.call('valid_after_failure')) === 42n, 'outer invoke OOM poisoned the instance');
 
-    // Synchronous release refuses on callback-stack exhaustion, without a completion.
-    for (const [freeSlots, weight] of [[19, 55n], [20, 66n], [21, 77n]]) {
+    // The input includes the base-function slot: 21 refuses admission.
+    // At 22, the handler and 2-slot entry leave 18 slots, so apply_release
+    // must grow its 18-slot frame under catch; 23 leaves 19 and retires.
+    for (const [freeSlots, weight, status, retired] of [
+      [21, 55n, 4, false], [22, 66n, 0, false], [23, 77n, 0, true],
+    ]) {
       const wrapper = await host.call('make_pinned_wrapper', weight);
       const records = [], beforeErrors = host.notificationErrors.length;
       const beforeId = host.controls.snapshot().operationId;
       const unwatch = host.controls.watchCompletions(record => records.push(record));
       try {
-        host.controls.failNextEntryStack('release_callable', freeSlots, 2);
-        context.assert(wrapper.release() === undefined, 'refused release did not return normally');
+        const attempt = host.controls.failNextEntryStack('release_callable', freeSlots, 2);
+        context.assert(wrapper.release() === undefined, 'synchronous release did not return normally');
+        context.assert(attempt.status === status,
+          `release with stack input ${freeSlots} reached the wrong admission branch`);
         context.assert(records.length === 0 && host.controls.snapshot().operationId === beforeId,
           'synchronous release emitted a completion or consumed an entry identity');
       } finally { unwatch(); }
       await host.instance.drain();
-      context.assert((await host.call('finish_invoke_oom')) > 0n,
-        `release with ${freeSlots} free slots did not fail stack growth`);
-      context.assert((await host.call('pin_holders_collected')) === 0n,
-        'refused release retired a pin before state close');
+      const failures = await host.call('finish_invoke_oom');
+      context.assert(retired ? failures === 0n : failures > 0n,
+        `release with stack input ${freeSlots} had the wrong allocation outcome`);
+      context.assert((await host.call('pin_holders_collected')) === (retired ? weight : 0n),
+        `release with stack input ${freeSlots} had the wrong pin retirement outcome`);
       context.assert(host.notificationErrors.length === beforeErrors &&
         (await host.call('valid_after_failure')) === 42n,
-        `release with ${freeSlots} free slots poisoned the instance or reported an error`);
+        `release with stack input ${freeSlots} poisoned the instance or reported an error`);
     }
   } finally {
     host.hooks.r1Release = undefined;
@@ -1473,7 +1486,7 @@ async function cleanupFailures(context, image) {
 
       const background = await host.call('make_callable');
       const beforeBackground = host.notificationErrors.length;
-      host.controls.failNextRelease();
+      host.controls.refuseNextRelease();
       background.release();
       await context.tick();
       context.assert(host.notificationErrors.length === beforeBackground,
@@ -1499,7 +1512,7 @@ async function cleanupFailures(context, image) {
       const deferred = await host.call('make_callable');
       const beforeErrors = host.notificationErrors.length;
       const beforeOut = host.stdout.length, beforeErr = host.stderr.length;
-      host.controls.failNextRelease();
+      host.controls.refuseNextRelease();
       deferred.release();
       const error = await captureRejection(context, host.call('cleanup_failure', binary()), 'TITAN');
       context.equalBytes(error.bytes, original.bytes, 'cleanup replaced the primary Titan message');

@@ -863,6 +863,12 @@ function test_export_callable_reuse(_: test.Context)
     if not incremental then gc.generational() end
     return Value.is_boolean(deferred)
   end)
+  publish("release_with_gc_paused", function(...: browser.BrowserValue): browser.BrowserValue
+    gc.pause()
+    defer gc.resume()
+    ffi.titan_bridge_test_release_due_gc()
+    return Value.is_boolean(gc.paused())
+  end)
 end
 
 local function expect_drive_refusal(action: function (): (), expected: string)
