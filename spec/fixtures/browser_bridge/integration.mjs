@@ -1526,7 +1526,7 @@ async function cleanupFailures(context, image) {
       context.assert(events.every(event => event.kind === 'cleanup' && event.operation === 'call') &&
         events.length === calls.stdout + calls.stderr, 'secondary cleanup failures were lost, duplicated or mistagged');
       context.assert(events.every(event => event.error.code !== 'TITAN_BROWSER_TITAN'),
-        'refused physical release reported a secondary cleanup failure');
+        'refused wrapper release reported a secondary cleanup failure');
       secondaryReleases++;
       for (const stream of ['stdout', 'stderr']) {
         const failures = events.filter(event => event.error.stream === stream);
