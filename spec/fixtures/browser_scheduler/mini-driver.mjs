@@ -39,7 +39,7 @@ async function surface(context, image) {
     const result = await host.instance.run(['return']);
     context.assert(result.kind === 'returned' && result.status === 7, 'a run without a drive');
     const snapshot = host.snapshot();
-    context.assert(!snapshot.driving && snapshot.settling === 0 && snapshot.queue === 0, 'drive state leaked');
+    context.assert(!snapshot.driving && snapshot.openTasks === 0 && snapshot.queue === 0, 'drive state leaked');
     return host.probes.length;
   } finally { await host.instance.dispose(); }
 }
@@ -275,6 +275,40 @@ async function queue(context, image) {
   } finally { await host.instance.dispose(); }
 }
 
+// A queued call settles before the turn's jobs finish hopping. Its
+// continuation keeps ordinary between-hops admission, not a new entry.
+async function midTurnCalls(context, image) {
+  const report = {};
+  for (const form of ['call', 'callTask']) {
+    const host = await disposeHost(context, image);
+    try {
+      const controller = new AbortController();
+      const hanging = host.task('hang', [], {signal: controller.signal});
+      await until(context, () => host.snapshot().parked, `${form}: hang did not park`);
+      let hoppingTurn;
+      host.hooks.kick = () => { hoppingTurn = host.probes.length; };
+      const first = form === 'call' ? host.call('echo', 21n) : host.task('echo', [21n]);
+      const hopping = host.task('hops');
+      context.assert(await first === 21n, `${form}: queued result changed`);
+      const snapshot = host.snapshot();
+      const settledTurn = host.probes.length;
+      context.assert(snapshot.driving && snapshot.active && !snapshot.parked &&
+        hoppingTurn === settledTurn, `${form}: continuation did not run between this turn's hops`);
+      const following = host.call('echo', 22n).then(value => {
+        context.assert(host.probes.length > settledTurn, `${form}: continuation's call ran in the same turn`);
+        return value;
+      });
+      await rejection(context, observe(host.instance.drain()), 'REENTRY');
+      context.assert(await following === 22n, `${form}: continuation's queued call changed`);
+      await hopping;
+      report[form] = 'mid-turn; follow-on call in later turn; drain refused';
+      controller.abort('done');
+      await rejection(context, hanging, 'CANCELLED');
+    } finally { await host.instance.dispose(); }
+  }
+  return report;
+}
+
 async function disposeHost(context, image) {
   const host = makeHost(context, image);
   await host.instance.initialize();
@@ -397,10 +431,10 @@ async function exits(context, image) {
   host.hooks.kick = () => queueMicrotask(() => { host.leftCall = host.call('echo', 9n); });
   const hopping = host.task('hops');
   const joined = host.task('exit_with', [6n]);
-  for (const promise of [hanging, hopping, joined]) {
-    const error = await rejection(context, promise, 'EXITED');
-    context.assert(error.status === 6, 'a Task-form call in the exiting drive');
-  }
+  context.assert(await hopping === null && await joined === null,
+    'completed Task-form calls lost their results when the drive exited');
+  const unfinished = await rejection(context, hanging, 'EXITED');
+  context.assert(unfinished.status === 6, 'an unfinished Task-form call in the exiting drive');
   const undelivered = await rejection(context, host.leftCall, 'EXITED');
   context.assert(undelivered.status === 6, 'a call the exiting drive never delivered');
   await host.instance.dispose();
@@ -583,6 +617,7 @@ export async function run(context) {
   report.delayedSinks = await delayedSinks(context, image);
   report.heldSinkHandoffs = await heldSinkHandoffs(context, image);
   report.notes = await queue(context, image);
+  report.midTurnCalls = await midTurnCalls(context, image);
   report.disposal = await disposal(context, image);
   await exits(context, image);
   report.timers = await timers(context, image);

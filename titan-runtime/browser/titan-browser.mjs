@@ -502,7 +502,7 @@ class BrowserOwner {
     this.inHost = 0;
     this.batch = [];
     this.delivering = undefined;
-    this.settling = [];
+    this.openTasks = new Set();
     this.turnCell = {target: this};
     this.turnScheduled = false;
     this.turnChannel = undefined;
@@ -962,6 +962,7 @@ class BrowserOwner {
     else throw new TypeError('browser Task-form settlement has an unknown kind');
     task.done = true;
     this.detachTask(item);
+    if (this.openTasks.delete(item)) this.finishCall(item);
   }
 
   taskFailure(message, trace) {
@@ -1047,27 +1048,16 @@ class BrowserOwner {
     item.record = item.target = item.args = undefined;
   }
 
-  // Relinquish points settle the queued calls whose outcomes arrived.
-  settleOutcomes() {
-    const waiting = [];
-    for (const item of this.settling) {
-      if (item.settled) continue;
-      if (item.outcome) this.finishCall(item);
-      else waiting.push(item);
-    }
-    this.settling = waiting;
-  }
-
   // Settle every admitted, unsettled queued call: queued, in the current
   // batch, in delivery, or waiting for its outcome.
   settleQueuedCalls(outcomeFor) {
     const items = [...this.queue, ...this.batch].filter(entry => entry.kind === 'call');
     const current = this.delivering?.item;
     if (current?.kind === 'call') items.push(current);
-    items.push(...this.settling);
+    items.push(...this.openTasks);
     this.queue = this.queue.filter(entry => entry.kind !== 'call');
     this.batch = this.batch.filter(entry => entry.kind !== 'call');
-    this.settling = [];
+    this.openTasks.clear();
     for (const item of items) if (!item.settled) this.finishCall(item, outcomeFor(item));
   }
 
@@ -1462,17 +1452,16 @@ class BrowserOwner {
     }
     if (exited) {
       this.exited = Object.freeze({status});
-      // A Task-form call that joined the drive, and a call it never
-      // delivered, report the exit; a delivered call keeps its result.
+      // Calls that already settled keep their results; unfinished Task-form
+      // calls and calls the drive never delivered report the exit.
       const error = this.exitedError();
-      this.settleQueuedCalls(item => !item.task && item.outcome ? item.outcome : {error});
+      this.settleQueuedCalls(() => ({error}));
       return;
     }
-    this.settleOutcomes();
-    for (const item of this.settling) {
+    for (const item of this.openTasks) {
       this.finishCall(item, {error: failure('STATE', 'browser drive ended before the Task-form call finished')});
     }
-    this.settling = [];
+    this.openTasks.clear();
   }
 
   // titan_browser_host_main_failed: the async bootstrap's main Task failed.
@@ -1518,8 +1507,7 @@ class BrowserOwner {
       this.poison(failure('PROTOCOL', 'browser relinquish outside its drive'));
       return new Promise(() => {});
     }
-    // A relinquish point: queued calls settle now; output waits for a gate.
-    this.settleOutcomes();
+    // Output waits for a parked gate.
     // Disposal is signalled once, after one macrotask, before idle detection.
     if (this.closing && !drive.disposalSignalled) {
       drive.disposalSignalled = true;
@@ -1666,12 +1654,13 @@ class BrowserOwner {
       return;
     }
     if (item.settled) return;
-    if (record.failed) item.outcome = {error: this.titanError(record)};
+    if (record.failed) this.finishCall(item, {error: this.titanError(record)});
     else if (record.values.length !== 1) {
       this.poison(failure('PROTOCOL', 'browser invoke must return one value'));
       return;
-    } else if (!item.task) item.outcome = {value: record.values[0]};
-    this.settling.push(item);
+    } else if (!item.task) this.finishCall(item, {value: record.values[0]});
+    else if (item.outcome) this.finishCall(item);
+    else this.openTasks.add(item);
   }
 
   itemDone(state, id) {
@@ -2025,14 +2014,14 @@ class BrowserOwner {
     if (this.active) this.active.interrupted = fault;
     this.out.interrupt(error, fault);
     this.err.interrupt(error, fault);
-    // Close-admission: queued application calls reject (an already captured
-    // failure stays primary) and application notifications drop. With a
-    // Runtime to clean up, the owner state's request events keep flowing and
-    // request cancellation waits until that cleanup drive ends.
+    // Close-admission: unsettled queued application calls reject and
+    // application notifications drop. With a Runtime to clean up, the owner
+    // state's request events keep flowing and request cancellation waits
+    // until that cleanup drive ends.
     this.retainOwnerWork = !this.terminal && !this.exited &&
       (this.drive !== undefined || this.driver !== undefined);
     this.disposalDriven = this.drive !== undefined;
-    this.settleQueuedCalls(item => item.outcome?.error ? {error: item.outcome.error} : {error});
+    this.settleQueuedCalls(() => ({error}));
     this.queue = this.dropNotifications(this.queue);
     this.batch = this.dropNotifications(this.batch);
     if (!this.retainOwnerWork) this.cancelRequests();
@@ -2123,7 +2112,7 @@ async function retireOwner(owner) {
   owner.pending = undefined;
   owner.queue = owner.releases = owner.freeSlots = [];
   owner.batch = [];
-  owner.settling = [];
+  owner.openTasks.clear();
   owner.drive = owner.driver = owner.delivering = undefined;
   // Pending turn macrotasks keep only the detached cell.
   owner.turnCell.target = undefined;

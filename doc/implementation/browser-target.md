@@ -2799,9 +2799,8 @@ not current (`TitanBrowser.current !== 0`). Otherwise it hands the call to
 the loader owner, which also requires the state's active drive with no gate
 parked and no item in delivery.
 
-A relinquish point settles the queued calls whose outcomes arrived. Outside
-disposal, every branch that parks a gate also schedules both output pumps on
-a microtask, so sinks run once the drive has suspended, never inside the
+Outside disposal, every branch that parks a gate also schedules both output
+pumps on a microtask, so sinks run once the drive has suspended, never inside the
 import, and only while that gate is still parked; a numeric `IDLE` schedules
 none, so the coroutine switches of orphan unwinding that may follow it never
 meet a sink. Disposal is signalled once: the first relinquish after
@@ -2939,11 +2938,13 @@ once and accepts a drive only from that state inside an active operation.
   its arguments, assigns it a fresh identity from the operation counter and
   writes the delivery record; `host_settle` validates that identity, copies
   the completion as `receiveCompletion` does, reports a notification's
-  failure as a callback error and stores a call's outcome; `host_item_done`
-  frees the item's allocations and unadopted temporaries and finishes a
-  request event's hold accounting. A call's promise settles at the next
-  relinquish point, or when the drive ends; a call queued too late for the
-  drive's last batch runs at the next safe point as an ordinary call.
+  failure as a callback error and settles a plain call's promise immediately;
+  `host_item_done` frees the item's allocations and unadopted temporaries and
+  finishes a request event's hold accounting. Promise continuations run at the
+  next microtask checkpoint, which can fall between internal coroutine hops
+  of the same turn, never under a Wasm frame. Calls made there wait for a later
+  turn. A call queued too late for the drive's last batch runs at the next
+  safe point as an ordinary call.
 - **Wake sources.** A queued owner item, an open owner request or listener,
   an open owner `BrowserPin`, or an already scheduled wake keeps a waiting
   relinquish parked; a JS call that might come later does not. `titan.browser`
@@ -2971,13 +2972,17 @@ once and accepts a drive only from that state inside an active operation.
   notification of `cancel` with `String(signal.reason)`; settlement removes
   it and releases the cancel wrapper. On an idle instance the spawn entry
   itself drives and its failure wins over a stored outcome; during a drive
-  the spawn call is queued and the promise settles at the relinquish point
-  after the outcome arrives.
+  the spawn call is queued. A failed spawn entry rejects immediately; otherwise
+  the loader keeps the call in `openTasks` until the Task's outcome arrives
+  and settles its promise then. An outcome that arrived before the spawn
+  entry returned is settled when that entry returns. Plain calls never enter
+  this set, and there is no outcome sweep at relinquish.
 - **Exit.** `host_drive_end` with an exit status latches `exited`. `run()`
   then reports `exited` unless its completion failed; a call or Task-form
-  call whose drive exited rejects `TITAN_BROWSER_EXITED`, as does every
-  queued call the exiting drive never delivered and every Task-form call
-  that joined it.
+  call whose entry hosted the exiting drive rejects `TITAN_BROWSER_EXITED`.
+  Queued calls the drive never delivered and unfinished Task-form calls that
+  joined it reject too. Calls that already settled keep their results,
+  including Task-form calls whose Tasks finished before the exit.
 - **Main failure.** `titan_browser_host_main_failed(state, message, length,
   trace, length)`, the import behind `browser.main_failed`, copies both byte
   ranges onto the active operation's token when that operation is `run` and
@@ -2986,11 +2991,11 @@ once and accepts a drive only from that state inside an active operation.
   `exited`, the mark as `failed` with status 1 and the copied message and
   trace, and otherwise `returned`. Every result carries `bytes` and `trace`,
   empty unless failed.
-- **Disposal.** `dispose()` settles every unsettled queued call with
-  `TITAN_BROWSER_DISPOSED` (an outcome that already failed keeps its failure)
-  and drops application notifications. With a drive active, or a registered
-  `titan:driver` to clean up and no exit, it keeps the owner state's request
-  events and lets new owner settlements keep queueing until the cleanup
+- **Disposal.** `dispose()` settles every unsettled queued call, including
+  `openTasks`, with `TITAN_BROWSER_DISPOSED` and drops application notifications.
+  A call that already settled keeps its result. With a drive active, or a
+  registered `titan:driver` to clean up and no exit, it keeps the owner state's
+  request events and lets new owner settlements keep queueing until the cleanup
   drive ends, deferring request cancellation to that point; `newRequest`
   still refuses new host work with `DISPOSED`. A parked drive is woken with
   the one-shot `DISPOSING`. `retireOwner` awaits the active operation; when

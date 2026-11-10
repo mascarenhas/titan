@@ -37,7 +37,7 @@ EM_JS(void, mini_driver_controls, (int fire), {
   publish(Object.freeze({
     snapshot: () => Object.freeze({driving: !!owner.drive, parked: !!owner.drive?.gate,
       queue: owner.queue.length, batch: owner.batch.length, releases: owner.releases.length,
-      settling: owner.settling.length, requests: owner.requests.size, inHost: owner.inHost,
+      openTasks: owner.openTasks.size, requests: owner.requests.size, inHost: owner.inHost,
       ownerState: owner.ownerState, exited: owner.exited ? owner.exited.status : null,
       operationId: owner.operationId, active: !!owner.active, turnScheduled: !!owner.turnScheduled}),
     allocate: () => {

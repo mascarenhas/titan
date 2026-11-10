@@ -779,11 +779,16 @@ distinction:
 
 | JavaScript action during a drive | Inside a binding or sink | Anywhere else |
 | --- | --- | --- |
-| `call()` | rejects `TITAN_BROWSER_REENTRY` | queued; the driver invokes it at its next turn, outside any Task, and its promise settles at the following relinquish point |
-| `callTask()` | rejects `TITAN_BROWSER_REENTRY` | queued Task start |
+| `call()` | rejects `TITAN_BROWSER_REENTRY` | queued; the driver invokes it at its next turn, outside any Task, and its promise settles when the call returns |
+| `callTask()` | rejects `TITAN_BROWSER_REENTRY` | queued Task start; its promise settles when the Task's outcome arrives |
 | `notify()` | queued for the driver | queued for the driver |
 | `drain()`, `run()` | reject `TITAN_BROWSER_REENTRY` | reject `TITAN_BROWSER_REENTRY` |
 | `dispose()` | closes admission and wakes the drive | closes admission and wakes the drive |
+
+Code awaiting a queued call can run before that turn ends, between the
+driver's internal steps. A `call()` or `callTask()` made from that continuation
+is queued for a later turn; `drain()` and `run()` still reject
+`TITAN_BROWSER_REENTRY`.
 
 Calls and notifications for a Lua state other than the instance owner are
 refused during a drive with `TITAN_BROWSER_REENTRY` (`"calls for another Lua
@@ -816,8 +821,9 @@ is queued and joins that drive. Admission is as for `call`.
   `TITAN_BROWSER_CANCELLED` and the signal's original `reason`. A Task
   cancelled any other way rejects `TITAN_BROWSER_CANCELLED` with the reason
   text, or `TITAN_BROWSER_DISPOSED` during disposal.
-- A Task-form call that started or joined a drive that exits rejects with
-  `TITAN_BROWSER_EXITED`.
+- A Task-form call still running when its drive exits rejects with
+  `TITAN_BROWSER_EXITED`. A queued call whose Task already finished keeps
+  its result.
 
 ### Exit
 
@@ -831,12 +837,16 @@ later `call`, `callTask`, `drain` and `run` reject and `notify` throws
 `TITAN_BROWSER_EXITED`. `dispose()` stays available and still runs the
 state's finalizers. Exiting never touches the page or the Node process.
 
+A queued call that already settled keeps its result, including a Task-form
+call whose Task finished before the exit. Calls still running or never
+delivered when the drive ends reject with `TITAN_BROWSER_EXITED`.
+
 ### Disposal with a running Runtime
 
-`dispose()` closes application admission at once: queued calls and Task-form
-calls reject with `TITAN_BROWSER_DISPOSED` (a failure they already captured
-stays primary), and queued application notifications are dropped. A drive
-that is running is woken and cancels its Tasks with `"instance disposed"`;
+`dispose()` closes application admission at once: unsettled queued calls and
+Task-form calls reject with `TITAN_BROWSER_DISPOSED`, and queued application
+notifications are dropped. A call that already settled keeps its result. A
+drive that is running is woken and cancels its Tasks with `"instance disposed"`;
 with no drive, the `async` Runtime's own shutdown runs that cleanup. While it
 runs, settlements and events of host work started before `dispose()` keep
 reaching the owner state, so cleanup that awaits that work completes; new

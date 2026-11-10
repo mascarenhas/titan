@@ -414,11 +414,10 @@ function main_failed(message: string, trace: string)
   through `onNotificationError` (a notification) or rejects that call's
   promise. Items queued while it runs wait for the next `deliver()`. It then
   performs the callable releases the bridge deferred to a safe point.
-- `relinquish(wait)` gives the event loop back. It first settles the queued
-  calls whose results arrived. With `wait = false` it resumes after one host
-  macrotask (`setImmediate` in Node, a `MessageChannel` message in browsers,
-  never a clamped timer) and returns `RELINQUISH_RESUMED`. With `wait = true`
-  it returns `RELINQUISH_IDLE` at once when the state has no wake source (no
+- `relinquish(wait)` gives the event loop back. With `wait = false` it resumes
+  after one host macrotask (`setImmediate` in Node, a `MessageChannel` message
+  in browsers, never a clamped timer) and returns `RELINQUISH_RESUMED`. With
+  `wait = true` it returns `RELINQUISH_IDLE` at once when the state has no wake source (no
   queued item, open request or listener, or pending wake); otherwise it
   resumes after a wake source fires, from a macrotask, with
   `RELINQUISH_RESUMED`. While the drive is relinquished, buffered output,
@@ -430,8 +429,10 @@ function main_failed(message: string, trace: string)
   returns `RELINQUISH_IDLE`.
 - `drive_end(exit_code)` ends the drive. A present `exit_code` latches the
   instance as exited with its low 32 bits as a signed status: `run()`
-  reports `exited` and later entries reject `TITAN_BROWSER_EXITED`
-  ([loader exit](browser-target.md#exit)).
+  reports `exited` and later entries reject `TITAN_BROWSER_EXITED`. Queued
+  calls still running or never delivered reject too; a call that already
+  settled keeps its result, including a Task-form call whose Task finished
+  before the exit ([loader exit](browser-target.md#exit)).
 - `deliver()`, `relinquish()` and `drive_end()` require the driving owner's
   main thread outside a delivered handler and raise `"browser delivery …"`,
   `"browser relinquish …"` or `"browser drive_end requires the driving
