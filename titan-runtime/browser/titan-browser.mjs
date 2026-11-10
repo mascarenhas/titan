@@ -1254,8 +1254,7 @@ class BrowserOwner {
   }
 
   registerCallable(state, slot, generation) {
-    // Re-exporting a callable cancels any queued, undelivered wrapper release,
-    // while preserving any queued request-hold drops for the same pin.
+    // Re-exporting cancels the pin's queued, undelivered wrapper release.
     const index = this.releases.findIndex(entry =>
       entry.wrapper && entry.state === state && entry.slot === slot && entry.generation === generation);
     if (index !== -1) this.releases.splice(index, 1);
@@ -1625,6 +1624,7 @@ class BrowserOwner {
         if (this.operationId >= maximumApplicationOperationId) throw failure('STATE', 'browser operation identity exhausted');
         argv = this.marshalValues(target.state, item.args, allocations, temporary);
       } catch (cause) {
+        // Poisoned marshalling must not enqueue or hand back delivery work.
         if (this.terminal) return 0;
         this.releaseMarshalled(allocations, temporary);
         if (item.kind === 'call') this.finishCall(item, {error: cause});

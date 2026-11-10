@@ -2898,10 +2898,11 @@ Callable wrappers have module-private WeakMap brands and state/slot/generation
 records. Logical release invalidates immediately, while physical pin retirement
 uses the release entry at a complete safe point. A detached FIFO batch
 revalidates both its target and every branded argument before any Wasm
-allocation. A released target drops the notification; a released argument
-reports an error without Lua entry. State-close notification invalidates every
-callable, notification, request, and JS slot charged to that state, including
-close-phase slots created without Lua finalizer registration.
+allocation. A released target drops the notification; a released argument of a
+plain notification reports an error without Lua entry. A request event with an
+unmarshallable argument instead queues its failure event. State-close notification
+invalidates every callable, notification, request, and JS slot charged to that
+state, including close-phase slots created without Lua finalizer registration.
 
 `drain()` detaches one FIFO batch of notifications under one logical
 admission; queued calls stay behind. Each callback has a unique protected

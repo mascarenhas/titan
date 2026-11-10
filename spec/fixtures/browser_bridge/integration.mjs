@@ -592,7 +592,7 @@ async function resultRepairs(context, host, engineFailures) {
     await context.tick();
     await host.instance.drain();
     context.assert(host.successes.at(-1)[0] === 51n && (await host.call('pin_holders_collected')) === 0n,
-      'request retirement dropped a pin still held by an active listener');
+      'the one-shot callback dropped a pin still held by an active listener');
     holdEmit(60n);
     await host.instance.drain();
     context.assert(host.successes.at(-1)[0] === 61n);
@@ -601,12 +601,12 @@ async function resultRepairs(context, host, engineFailures) {
     context.assert((await host.call('pin_holders_collected')) === 3n,
       'closing the last holder did not drop the completion and failure pins');
     host.successes.length = 0;
-    // 5. Queued request-hold drop survives a failed wrapper re-export in the same operation (R-H4).
+    // 5. Listener close drops its holds before a failed wrapper re-export (R-H4).
     host.hooks.pinHoldListener = () => ({kind: 'listener', subscribe() { return () => {}; }});
     await host.call('lost_release_regression');
     await host.instance.drain();
     context.assert((await host.call('pin_holders_collected')) === 64n,
-      'provisional wrapper rollback deleted a queued request-hold drop');
+      'failed wrapper re-export retained a closed listener callback');
 
     // 6. Wrapper exposed to host JS before the host throws, returns an unmarshallable value, or refuses start stays live (R-H5).
     for (const mode of [1n, 2n, 3n]) {
