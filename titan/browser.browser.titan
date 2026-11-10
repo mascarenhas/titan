@@ -519,7 +519,6 @@ end
 -- the caller keeps.
 local function decode_value(raw: foreign const *titan_browser_value,
                             state: foreign uint32_t,
-                            from_response: boolean,
                             borrowed: boolean?): BrowserValue
   local kind = raw.kind
   if kind == ffi.TITAN_BROWSER_NIL then
@@ -534,15 +533,8 @@ local function decode_value(raw: foreign const *titan_browser_value,
   elseif kind == ffi.TITAN_BROWSER_FLOAT then
     return BrowserValue.is_float(raw.scalar.number)
   elseif kind == ffi.TITAN_BROWSER_STRING or kind == ffi.TITAN_BROWSER_BYTES then
-    if from_response then
-      local capacity: integer = raw.scalar.integer
-      if capacity < 0 or raw.length > capacity then
-        raise "invalid browser byte result length or capacity"
-      end
-    else
-      if raw.length ~= 0 and raw.bytes == nil then
-        raise "browser byte argument has no storage"
-      end
+    if raw.length ~= 0 and raw.bytes == nil then
+      raise "browser byte argument has no storage"
     end
     local bytes = raw.bytes as string(raw.length)
     if kind == ffi.TITAN_BROWSER_STRING then
@@ -620,7 +612,7 @@ local function invoke_work(
     local count: integer = argc
     local decoded: {BrowserValue} = {}
     for index = 0, count - 1 do
-      decoded[index + 1] = decode_value(args + index, state, false)
+      decoded[index + 1] = decode_value(args + index, state)
     end
     for index = 0, count - 1 do
       local item = args + index
@@ -758,9 +750,6 @@ foreign function invoke(
   local argc = raw_argc as foreign uint32_t
   local args = raw_args as foreign const *titan_browser_value
   local op = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
-  if id == 0 then
-    return -1
-  end
   if ffi.titan_browser_entry_allowed(id, op) == 0 then
     return -1
   end
@@ -899,7 +888,7 @@ function BrowserHandle:call(...: BrowserValue): BrowserValue
     rollback_provisioned(state, provisioned)
     check_response(response)
   end
-  local result = decode_value(response.value, state, true)
+  local result = decode_value(response.value, state)
   if response.value.kind == ffi.TITAN_BROWSER_HANDLE then
     response.value.slot = 0
   end
@@ -1273,7 +1262,7 @@ local function call_sync_work(identity: foreign const *titan_browser_identity,
     if count > 0 and args == nil then raise "browser callback arguments have no storage" end
     local decoded: {BrowserValue} = {}
     for index = 0, count - 1 do
-      decoded[index + 1] = decode_value(args + index, state, false, true)
+      decoded[index + 1] = decode_value(args + index, state, true)
     end
     for index = 0, count - 1 do
       local item = args + index

@@ -480,7 +480,6 @@ class BrowserOwner {
     if (this.closing) return failure('DISPOSED', 'browser instance is disposed');
     if (this.active || this.inHost > 0) return failure('REENTRY', reentryMessage);
     if (requireReady && this.state !== 'ready') return failure('STATE', stateMessage);
-    if (this.operationId >= maximumApplicationOperationId) return failure('STATE', 'browser operation identity exhausted');
   }
 
   poison(cause, kind) {
@@ -515,12 +514,17 @@ class BrowserOwner {
     pending.completion = record;
   }
 
-  async entry(kind, ...args) {
-    if (this.terminal) throw this.terminal;
-    if (this.operationId >= (kind === 'close' ? maximumOperationId : maximumApplicationOperationId)) {
+  // Allocate each entry/item identity once; the final one is reserved for close.
+  nextOperationId(close = false) {
+    if (this.operationId >= (close ? maximumOperationId : maximumApplicationOperationId)) {
       throw failure('STATE', 'browser operation identity exhausted');
     }
-    const id = ++this.operationId;
+    return ++this.operationId;
+  }
+
+  async entry(kind, ...args) {
+    if (this.terminal) throw this.terminal;
+    const id = this.nextOperationId(kind === 'close');
     const pending = {id, kind: operationKinds[kind], completion: undefined};
     this.pending = pending;
     try {
@@ -747,8 +751,8 @@ class BrowserOwner {
 
   validateCallable(value, state) {
     const record = wrapperRecords.get(value);
-    if (!record || record.owner !== this || record.released || !this.states.has(record.state) ||
-        this.states.get(record.state) === 'closed' || state !== undefined && state !== record.state) {
+    if (!record || record.owner !== this || record.released ||
+        state !== undefined && state !== record.state) {
       throw failure('HANDLE', 'browser callable is foreign, released, or belongs to a closed state');
     }
     return record;
@@ -958,9 +962,6 @@ class BrowserOwner {
 
   queueCall(item) {
     if (item.record.state !== this.ownerState) return Promise.reject(failure('REENTRY', anotherStateMessage));
-    if (this.operationId >= maximumApplicationOperationId) {
-      return Promise.reject(failure('STATE', 'browser operation identity exhausted'));
-    }
     item.deferred = deferred();
     this.queue.push(item);
     this.wakeDriver();
@@ -1064,12 +1065,6 @@ class BrowserOwner {
     }
   }
 
-  registerState(state, record = 0) {
-    if (this.states.has(state)) throw failure('PROTOCOL', 'duplicate browser state identity');
-    this.states.set(state, 'open');
-    if (record) this.stateRecords.set(state, record >>> 0);
-  }
-
   closeState(state) {
     this.states.set(state, 'closed');
     this.stateRecords.delete(state);
@@ -1101,9 +1096,6 @@ class BrowserOwner {
   }
 
   newSlot(state, value, kind = 'value', temporary = false) {
-    if (this.states.get(state) === 'closed' || !this.states.has(state)) {
-      throw failure('HANDLE', 'browser handle belongs to a closed state');
-    }
     let slot, generation;
     while (this.freeSlots.length) {
       const free = this.freeSlots.pop();
@@ -1125,15 +1117,14 @@ class BrowserOwner {
   getSlot(state, slot, generation, kind) {
     const entry = this.slots.get(slot);
     if (!entry || entry.state !== state || entry.generation !== generation ||
-        kind && entry.kind !== kind || this.states.get(state) === 'closed') {
+        kind && entry.kind !== kind) {
       throw failure('HANDLE', 'browser handle is foreign, released, or belongs to a closed state');
     }
     return entry;
   }
 
   identityLive(state, slot, generation, type) {
-    if (this.terminal || !state || !slot || !generation || !this.states.has(state) ||
-        this.states.get(state) === 'closed') return 0;
+    if (this.terminal) return 0;
     if (type === kind.handle) {
       const entry = this.slots.get(slot);
       return entry && entry.kind === 'value' && entry.state === state &&
@@ -1252,7 +1243,6 @@ class BrowserOwner {
     else if (type === kind.integer) view.setBigInt64(8, item.value, true);
     else if (type === kind.float) view.setFloat64(8, item.value, true);
     else if (type === kind.string || type === kind.bytes) {
-      view.setBigInt64(8, BigInt(length), true);
       view.setUint32(16, bytes, true);
       view.setUint32(20, length, true);
     } else if (handle) {
@@ -1270,7 +1260,7 @@ class BrowserOwner {
     return pointer;
   }
 
-  valuesAt(pointer, count, state) {
+  valuesAt(pointer, count) {
     const view = this.heapView(pointer, count * valueSize);
     const values = [], callables = [];
     for (let index = 0; index < count; ++index) {
@@ -1296,7 +1286,6 @@ class BrowserOwner {
         case kind.handle:
         case kind.callable: {
           const ownerState = view.getUint32(address + 4, true);
-          if (state !== undefined && ownerState !== state) throw failure('HANDLE', 'browser argument belongs to another state');
           const slot = view.getUint32(address + 24, true), generation = view.getUint32(address + 28, true);
           if (type === kind.handle) {
             values.push(this.getSlot(ownerState, slot, generation).value);
@@ -1339,10 +1328,6 @@ class BrowserOwner {
   }
 
   setOwnerState(state) {
-    if (this.ownerState !== undefined && this.ownerState !== state) {
-      this.poison(failure('PROTOCOL', 'browser instance reported a second owner state'));
-      return;
-    }
     this.ownerState = state;
   }
 
@@ -1355,20 +1340,12 @@ class BrowserOwner {
 
   driveBegin(state) {
     if (this.terminal) return;
-    if (state !== this.ownerState || !this.active || this.drive) {
-      this.poison(failure('PROTOCOL', 'browser drive began outside an owner operation'));
-      return;
-    }
     this.drive = {state, gate: undefined, disposalSignalled: false};
     if (this.closing) this.disposalDriven = true;
   }
 
   driveEnd(state, status, exited) {
     if (this.terminal) return;
-    if (this.drive?.state !== state || this.delivering) {
-      this.poison(failure('PROTOCOL', 'browser drive ended outside its drive'));
-      return;
-    }
     this.drive = undefined;
     if (this.batch.length) {
       this.queue.unshift(...this.batch);
@@ -1427,10 +1404,6 @@ class BrowserOwner {
   relinquish(state, mode) {
     const drive = this.drive;
     if (this.terminal) return new Promise(() => {});
-    if (drive?.state !== state || drive.gate || this.delivering) {
-      this.poison(failure('PROTOCOL', 'browser relinquish outside its drive'));
-      return new Promise(() => {});
-    }
     // Output waits for a parked gate.
     // Disposal is signalled once, after one macrotask, before idle detection.
     if (this.closing && !drive.disposalSignalled) {
@@ -1483,24 +1456,18 @@ class BrowserOwner {
   }
 
   // titan_browser_host_callback(state, 1): a synchronous C callback runs
-  // unless the instance is closing, exited or poisoned, or its state closed.
+  // unless the instance is closing, exited or poisoned. Titan checked the state.
   callbackAdmit(state) {
-    return !this.closing && !this.exited && !this.terminal && this.states.get(state) === 'open';
+    return !this.closing && !this.exited && !this.terminal;
   }
 
   operationName() {
     return this.active?.operation ?? 'drive';
   }
 
-  requireDelivery(state) {
-    if (this.drive?.state === state && !this.delivering) return true;
-    this.poison(failure('PROTOCOL', 'browser delivery outside its drive'));
-    return false;
-  }
-
   // The owner's items queued now form the turn's batch, in FIFO order.
   batchItems(state) {
-    if (this.terminal || !this.requireDelivery(state)) return 0;
+    if (this.terminal) return 0;
     const keep = [];
     for (const entry of this.queue) (entry.target.state === state ? this.batch : keep).push(entry);
     this.queue = keep;
@@ -1508,7 +1475,7 @@ class BrowserOwner {
   }
 
   nextItem(state, pointer) {
-    if (this.terminal || !this.requireDelivery(state)) return 0;
+    if (this.terminal) return 0;
     while (this.batch.length) {
       const item = this.batch.shift();
       if (item.settled) continue;
@@ -1522,9 +1489,9 @@ class BrowserOwner {
         continue;
       }
       const allocations = [], temporary = [];
-      let argv;
+      let id, argv;
       try {
-        if (this.operationId >= maximumApplicationOperationId) throw failure('STATE', 'browser operation identity exhausted');
+        id = this.nextOperationId();
         argv = this.marshalValues(target.state, item.args, allocations, temporary);
       } catch (cause) {
         // Poisoned marshalling must not enqueue or hand back delivery work.
@@ -1541,7 +1508,6 @@ class BrowserOwner {
         }
         continue;
       }
-      const id = ++this.operationId;
       this.delivering = {id, item, allocations, temporary, settled: false};
       this.writeDelivery(pointer, id, item.kind === 'call' ? deliveryKind.call : deliveryKind.notify,
         target, item.args.length, argv);
@@ -1617,12 +1583,13 @@ class BrowserOwner {
   openState(record = 0) {
     this.nextState = (this.nextState ?? 0) + 1;
     if (this.nextState > 0xffffffff) throw failure('STATE', 'browser state identity exhausted');
-    this.registerState(this.nextState, record >>> 0);
+    this.states.set(this.nextState, 'open');
+    if (record) this.stateRecords.set(this.nextState, record >>> 0);
     return this.nextState;
   }
 
   stateRecord(state) {
-    if (this.terminal || !state || this.states.get(state) === 'closed') return 0;
+    if (this.terminal) return 0;
     return this.stateRecords.get(state) ?? 0;
   }
 
@@ -1678,16 +1645,12 @@ class BrowserOwner {
   hostCall(state, slot, generation, count, pointer) {
     const target = this.getSlot(state, slot, generation).value;
     if (typeof target !== 'function') throw new TypeError('browser binding is not callable');
-    const args = this.valuesAt(pointer, count, state);
+    const args = this.valuesAt(pointer, count);
     return {value: this.hostInvoke(target, undefined, args), state};
   }
 
   newRequest(state, successSlot, successGeneration, failureSlot, failureGeneration) {
-    if (!state || !successSlot || !successGeneration || !failureSlot || !failureGeneration ||
-        !this.states.has(state) || this.states.get(state) === 'closed') {
-      throw failure('HANDLE', 'browser callable is foreign, released, or belongs to a closed state');
-    }
-    if (this.closing || this.states.get(state) !== 'open') {
+    if (this.closing) {
       throw failure('DISPOSED', 'browser state is closing');
     }
     const request = {state,
@@ -1816,7 +1779,7 @@ class BrowserOwner {
     if (typeof target !== 'function') throw new TypeError('browser request binding is not callable');
     const request = this.newRequest(state, successSlot, successGeneration, failureSlot, failureGeneration);
     let args;
-    try { args = this.valuesAt(pointer, count, state); }
+    try { args = this.valuesAt(pointer, count); }
     catch (cause) { this.abortRequest(request); throw cause; }
     this.startRequest(request, target, args, listener);
     return {kind: kind.request, value: request};

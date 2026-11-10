@@ -69,10 +69,12 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    creates the owner `lua_State *`, opens the Lua libraries, installs the Titan
    searcher and preloads, and requires the root module without calling `main`.
    `titan.browser` initializes in ordinary dependency order; images without it
-   use a bare host state token. `titan_browser_entry` retrieves the
-   initialized module from `LUA_LOADED_TABLE`, constructs its counted string
-   Array, and runs `main` once. Both run under `titan_browser_protected_entry`
-   with plain `errorhandler` as the `lua_pcall` message handler. On failure,
+   use a bare host state token. The loader memoizes initialization and admits
+   `run()` once. `titan_browser_entry` requires the launcher's ready owner,
+   retrieves the initialized module from `LUA_LOADED_TABLE`, constructs its
+   counted string Array, and runs `main`. Both entries run under
+   `titan_browser_protected_entry` with plain `errorhandler` as the `lua_pcall`
+   message handler. On failure,
    `titan_browser_complete_failure` snapshots `TITAN_BACKTRACE_KEY` on the
    stack, converts the final escaped error object once under `lua_pcall` using
    `titan_entry_error_message` and `strip_bootstrap_prefix`, shared with native
@@ -135,8 +137,9 @@ rules](../style-guide.md#write-native-bindings-titan-first):
 | `titan_browser_close(uint64_t)` | CLOSE5 | Generated owner-held `lua_close` |
 
 `operation_id` is an instance-local never-reused unsigned 64-bit identity.
-JavaScript uses a BigInt counter; exhaustion rejects instead of wrapping to
-zero. Export return values are admission only. Exactly one completion with
+JavaScript uses a BigInt counter; an operation that needs an identity rejects
+at allocation instead of wrapping to zero. Export return values are admission
+only. Exactly one completion with
 the same id/kind carries application values/status/errors, and the loader
 settles only after both completion and promised-export/context retirement.
 A private engine entry is not an application gateway. The loader uses
@@ -258,8 +261,8 @@ drives, and `titan.browser` never learns about Tasks.
   once, comparing `titan_browser_owner_thread()` with the state's main thread,
   and, when true, reports its token with `titan_browser_host_owner`. A
   C-created state compares a different main `lua_State *` and is never the
-  owner, whatever order states load `titan.browser` in. The loader poisons on
-  a second distinct owner token.
+  owner, whatever order states load `titan.browser` in. The loader records
+  the reported owner token.
 - **Drive state.** Two more module variables, `drive_active` and
   `delivering`, make the refusals structural: `drive_begin` requires
   `owner_state` and `L == lmacro_mainthread(L)` (not a coroutine thread);
@@ -433,7 +436,7 @@ import result kind for `host_start`. Statuses are `OK = 0`, `TITAN_ERROR = 1`,
 | --- | --- | --- |
 | 0 | `kind` | Exact discriminant |
 | 4 | `state` | Handle/callable owner token |
-| 8 | `scalar` | Union: signed i64 integer/boolean, f64 number; allocated capacity for returned `STRING`/`BYTES` |
+| 8 | `scalar` | Union: signed i64 integer/boolean, f64 number; unused for other kinds |
 | 16 | `bytes` | wasm32 byte pointer |
 | 20 | `length` | Exact byte count |
 | 24 | `slot` | State-local handle/callable slot |

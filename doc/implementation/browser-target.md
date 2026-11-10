@@ -2799,8 +2799,8 @@ inside a synchronous callback"`) when no promising entry holds the execution
 owner, when a [synchronous C callback](browser-bridge.md#synchronous-c-callbacks)
 runs (it then throws to the callback's caller), or when the main context is
 not current (`TitanBrowser.current !== 0`). Otherwise it hands the call to
-the loader owner, which also requires the state's active drive with no gate
-parked and no item in delivery.
+the loader owner. `titan.browser` requires the owner's main thread, an active
+drive and no delivery in progress before calling the import.
 
 Outside disposal, every branch that parks a gate also schedules both output
 pumps on a microtask, so sinks run once the drive has suspended, never
@@ -2878,8 +2878,9 @@ contained entry; no lifetime completion counter blocks later entries.
 
 Every promising C entry receives the next nonzero instance-local uint64 BigInt
 identity. The admission import normalizes Wasm's signed i64 presentation back
-to unsigned before comparison. The final identity is reserved for close:
-exhausted application admission rejects before marshaling.
+to unsigned before comparison. The final identity is reserved for close.
+Exhaustion is refused at the identity allocation site, before incrementing
+the counter; a delivered item takes its identity before marshaling.
 The pending record has that identity, the expected operation kind, and one
 completion slot. The non-suspending completion import validates identity and
 kind and copies all result/error/trace data while C owns it. Duplicate,
@@ -2932,8 +2933,10 @@ the requesting method returns, never synchronously inside it.
 
 A drive is a span of one logical operation (its entry hosts the driver)
 between `titan_browser_host_drive_begin` and `titan_browser_host_drive_end`.
-The loader records the owner state token from `titan_browser_host_owner`
-once and accepts a drive only from that state inside an active operation.
+The loader records the owner state token from `titan_browser_host_owner`.
+`titan.browser` enforces drive ownership and order before reporting each
+transition; the loader holds the drive's host gate without repeating those
+checks.
 
 - **Admission.** While a drive is active, `call()` and `callTask()` made with
   no host invocation in flight are queued as `{kind: 'call'}` items in the
@@ -2943,8 +2946,8 @@ once and accepts a drive only from that state inside an active operation.
   exit, every application method rejects (`notify` throws)
   `TITAN_BROWSER_EXITED`.
 - **Delivery.** `host_batch` moves the owner's items present now into the
-  current batch; `host_item` revalidates each item as `drain()` does, marshals
-  its arguments, assigns it a fresh identity from the operation counter and
+  current batch; `host_item` revalidates each item as `drain()` does, assigns
+  it a fresh identity from the operation counter, marshals its arguments and
   writes the delivery record; `host_settle` validates that identity, copies
   the completion as `receiveCompletion` does, reports a notification's
   failure as a callback error and settles a plain call's promise immediately;
@@ -2969,9 +2972,10 @@ once and accepts a drive only from that state inside an active operation.
   next wait re-checks its wake sources.
 - **Synchronous C callbacks.** A C callback that enters Titan through
   `titan_browser_call_sync` is not an operation and takes no admission.
-  `callbackAdmit(state)`, behind `titan_browser_host_callback`, admits it
-  unless the instance is closing, exited or poisoned or the state is no
-  longer open, during a drive or not. JavaScript reached from the callback
+  `callbackAdmit`, behind `titan_browser_host_callback`, admits it unless the
+  instance is closing, exited or poisoned, during a drive or not.
+  `callback_state` has already required an open, configured state.
+  JavaScript reached from the callback
   gets ordinary admission: a binding the callback's Titan code calls counts
   in `inHost`, so reverse entries there reject `TITAN_BROWSER_REENTRY`, and an
   entry requested anywhere else starts in a microtask after the callback's

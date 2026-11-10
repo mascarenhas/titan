@@ -739,7 +739,7 @@ where there is one, the original error as `cause`:
 | --- | --- |
 | `TITAN_BROWSER_TITAN` | An ordinary Titan error from initialization or a call. `message` decodes the error text; `bytes` holds the exact copied message bytes, `trace` the original raw trace bytes (absent for a required-trace refusal), and `status` the completion status. A later valid call on the intact instance still works. |
 | `TITAN_BROWSER_REENTRY` | A general operation while another is active, including an immediate call from a binding or sink, and work for another Lua state while the owner drives. |
-| `TITAN_BROWSER_STATE` | `call`, `drain`, or `notify` before successful initialization, a second `run`, an exhausted operation identity, or a Task-form call without an `async` Runtime or for another Lua state. |
+| `TITAN_BROWSER_STATE` | `call`, `drain`, or `notify` before successful initialization, a second `run`, an operation that needs a new identity after identities are exhausted, or a Task-form call without an `async` Runtime or for another Lua state. |
 | `TITAN_BROWSER_CANCELLED` | A Task-form call whose Task was cancelled; `reason` holds the `AbortSignal`'s reason when the signal cancelled it, otherwise the cancellation reason text. |
 | `TITAN_BROWSER_EXITED` | Work after a drive exited, or an entry whose drive exited; `status` holds the latched exit status. |
 | `TITAN_BROWSER_DISPOSED` | Work after disposal began, an operation that disposal interrupted before it failed, or buffered output that disposal could not deliver. |
@@ -755,6 +755,13 @@ a lone surrogate, where `str.isWellFormed()` is `false`) reject `call` or throw
 from `notify` with `TypeError`, as do invalid `run` arguments. Other argument
 values cross by runtime type as `BrowserValue`, and a Titan callable that
 rejects a variant raises an ordinary Titan error (`TITAN_BROWSER_TITAN`).
+
+Operation identities are never reused. Exhaustion refuses an operation that
+needs a new identity, not a method that allocates none: `notify` can still
+enqueue, and an empty `drain` succeeds. A queued notification that cannot get
+an identity at delivery reports `TITAN_BROWSER_STATE` through
+`onNotificationError`, like other notification failures. The final identity
+is reserved for disposal.
 
 Byte argument snapshots for `call`, `callable.call`, `notify` and `run` read
 native `Uint8Array` storage, including subarrays, subclasses and Node Buffers.

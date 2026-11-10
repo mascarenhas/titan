@@ -66,7 +66,7 @@ typedef union titan_browser_scalar {
 typedef struct titan_browser_value {
   uint32_t kind;
   uint32_t state;
-  /* For STRING and BYTES results scalar.integer is the allocated byte capacity. */
+  /* Scalar payload for BOOLEAN, INTEGER and FLOAT; unused for other kinds. */
   titan_browser_scalar scalar;
   const unsigned char *bytes;
   uint32_t length;
@@ -80,8 +80,8 @@ typedef struct titan_browser_value {
  * false. The caller clears adopted slots; dispose releases remaining units.
  * Nonempty message and STRING/BYTES result
  * buffers are malloc-owned; dispose frees them even on a failed import.
- * JS must use current memory views after allocating. Capacity is validated
- * before copying and length is the exact returned byte count, not capacity. */
+ * JS must use current memory views after allocating. length is the exact
+ * returned byte count. */
 typedef struct titan_browser_response {
   uint32_t status;
   uint32_t state;

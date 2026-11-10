@@ -1753,8 +1753,20 @@ async function operationIdentities(context, image) {
     context.assert(records.at(-1).id === maximum - 1n, 'last application entry used the reserved close identity');
     const before = records.length;
     await rejected(context, host.call('valid_after_failure'), 'STATE');
-    await rejected(context, host.instance.drain(), 'STATE');
-    context.assert(records.length === before, 'exhausted admission entered Wasm or reused an identity');
+    await host.instance.drain();
+    context.assert(records.length === before && host.controls.snapshot().operationId === maximum - 1n,
+      'empty drain allocated an exhausted identity or emitted a completion');
+    const beforeErrors = host.notificationErrors.length;
+    host.instance.notify(host.callbacks.get('valid_after_failure'));
+    await host.instance.drain();
+    const failure = host.notificationErrors[beforeErrors];
+    context.assert(host.notificationErrors.length === beforeErrors + 1 &&
+      failure.kind === 'callback' && failure.operation === 'drain' &&
+      failure.error.code === 'TITAN_BROWSER_STATE' &&
+      failure.error.message === 'browser operation identity exhausted',
+      'notification delivery did not report identity exhaustion at allocation');
+    context.assert(records.length === before && host.controls.snapshot().operationId === maximum - 1n,
+      'exhausted identity allocation entered Wasm or reused an identity');
     await host.instance.dispose();
     context.assert(records.at(-1).id === maximum && records.at(-1).kind === 5 && host.closes.length === 2 &&
       host.controls.snapshot().units === 0, 'uint64 exhaustion prevented intact-state close/root retirement');
