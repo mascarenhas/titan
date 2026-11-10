@@ -99,7 +99,7 @@ end
 -- The spy holds these delays, so every chunk boundary is driven explicitly.
 local const LONG_PERIOD = 3000000000
 local const FIRST_CHUNK = 2147483647
-local const LAST_CHUNK = 852516353
+local const LAST_CHUNK = 852516353 -- 3000000000 - 2147483647
 
 local function wait_for_host_timer(milliseconds: integer)
   while host_timers(milliseconds) == 0 do timer.yield() end

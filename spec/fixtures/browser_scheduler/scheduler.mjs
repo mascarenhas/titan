@@ -250,6 +250,7 @@ async function disposal(context, image) {
     const ticking = host.task('long_ticker_wait');
     await until(context, () => timers.count(2147483647) === 1, 'the long ticker never armed before disposal');
     context.assert(timers.fire(2147483647), 'the first long ticker chunk was not held');
+    // 3000000000 - 2147483647: the long period's final chunk.
     await until(context, () => timers.count(852516353) === 1, 'the long ticker never armed its last chunk');
     const disposing = host.instance.dispose();
     await rejection(context, ticking, 'DISPOSED');
