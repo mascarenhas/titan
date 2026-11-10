@@ -95,3 +95,107 @@ function test_cancelled_sleeps_and_closed_tickers_clear_host_timers(_: test.Cont
   end)
   test.assert(host_timers(50000) == 0, "a ticker left open past its Runtime kept its JavaScript timer")
 end
+
+-- The spy holds these delays, so every chunk boundary is driven explicitly.
+local const LONG_PERIOD = 3000000000
+local const FIRST_CHUNK = 2147483647
+local const LAST_CHUNK = 852516353
+
+local function wait_for_host_timer(milliseconds: integer)
+  while host_timers(milliseconds) == 0 do timer.yield() end
+  test.assert(host_timers(milliseconds) == 1, "expected exactly one host timer chunk")
+end
+
+local function fire_host_timer(milliseconds: integer)
+  case call_binding("fire_host_timer", Value.is_integer(milliseconds))
+  when is_boolean(fired) then
+    test.assert(fired, "the expected long timer chunk was not held")
+    return
+  end
+  raise "fire_host_timer returned a non-boolean"
+end
+
+local function long_sleep(): async.Task<|nil, value|>
+  local sleeper = async.run<|nil, value|>(function (): nil
+    timer.sleep(LONG_PERIOD)
+    return nil
+  end)
+  task_support.cleanup_task(sleeper, "long sleeper cleanup")
+  return sleeper
+end
+
+function test_long_sleeps_chain_chunks_and_cancel(_: test.Context)
+  runtime_test.run(function ()
+    local sleeper = long_sleep()
+    wait_for_host_timer(FIRST_CHUNK)
+    test.assert(host_timers(LONG_PERIOD) == 0, "a long sleep reached the host without chunking")
+    fire_host_timer(FIRST_CHUNK)
+    wait_for_host_timer(LAST_CHUNK)
+    test.assert(sleeper:status():as_string() == "waiting", "a long sleep finished before its final chunk")
+    fire_host_timer(LAST_CHUNK)
+    test.assert(async.join(sleeper):has_succeeded(), "a long sleep did not finish after its final chunk")
+    test.assert(host_timers(FIRST_CHUNK) == 0 and host_timers(LAST_CHUNK) == 0,
+      "a completed long sleep left a host timer")
+
+    sleeper = long_sleep()
+    wait_for_host_timer(FIRST_CHUNK)
+    fire_host_timer(FIRST_CHUNK)
+    wait_for_host_timer(LAST_CHUNK)
+    sleeper:cancel(async.CancellationReason<|value|>.simple("cancel a long sleep"))
+    test.assert(async.join(sleeper):has_cancelled(), "a long sleep ignored cancellation")
+    test.assert(host_timers(FIRST_CHUNK) == 0 and host_timers(LAST_CHUNK) == 0,
+      "a cancelled long sleep left its current chunk armed")
+  end)
+end
+
+local function long_ticker_wait(...: Value): Value
+  -- Intentionally left open: disposal must retire it through Runtime close.
+  local ticker = timer.ticker(LONG_PERIOD)
+  ticker:tick()
+  return Value.is_nil()
+end
+
+function test_long_tickers_rearm_whole_periods_and_close(_: test.Context)
+  runtime_test.run(function ()
+    local ticks = 0
+    local ticking = async.run<|nil, value|>(function (): nil
+      local ticker = timer.ticker(LONG_PERIOD)
+      defer ticker:close()
+      for _ = 1, 2 do
+        test.assert(ticker:tick(), "a long ticker closed before its tick")
+        test.assert(host_timers(FIRST_CHUNK) == 1 and host_timers(LAST_CHUNK) == 0,
+          "a long ticker published before re-arming its whole period")
+        ticks = ticks + 1
+      end
+      return nil
+    end)
+    task_support.cleanup_task(ticking, "long ticker cleanup")
+    for tick = 1, 2 do
+      wait_for_host_timer(FIRST_CHUNK)
+      fire_host_timer(FIRST_CHUNK)
+      wait_for_host_timer(LAST_CHUNK)
+      test.assert(ticks == tick - 1, "a long ticker fired before its final chunk")
+      fire_host_timer(LAST_CHUNK)
+      while ticks < tick and not ticking:status():has_finished() do timer.yield() end
+      test.assert(ticks == tick, "a whole long period never ticked")
+    end
+    test.assert(async.join(ticking):has_succeeded(), "a long ticker did not tick twice")
+    test.assert(host_timers(FIRST_CHUNK) == 0 and host_timers(LAST_CHUNK) == 0,
+      "a closed long ticker left a host timer")
+
+    ticking = async.run<|nil, value|>(function (): nil
+      local ticker = timer.ticker(LONG_PERIOD)
+      defer ticker:close()
+      ticker:tick()
+      return nil
+    end)
+    task_support.cleanup_task(ticking, "cancelled long ticker cleanup")
+    wait_for_host_timer(FIRST_CHUNK)
+    fire_host_timer(FIRST_CHUNK)
+    wait_for_host_timer(LAST_CHUNK)
+    ticking:cancel(async.CancellationReason<|value|>.simple("cancel a long ticker"))
+    test.assert(async.join(ticking):has_cancelled(), "a long ticker waiter ignored cancellation")
+    test.assert(host_timers(FIRST_CHUNK) == 0 and host_timers(LAST_CHUNK) == 0,
+      "cancelling and closing a long ticker left its current chunk armed")
+  end)
+end

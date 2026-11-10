@@ -415,7 +415,8 @@ native and browser providers.
 The sixteenth root is `titan.timer`, whose flat variant `titan/timer.browser.titan`
 sits beside `titan/timer.native.titan` with the same public interface. It
 imports `async`, `titan.browser` and `errno.h`, and builds one-shot sleeps on
-the SDK's `titan:timeout` source and tickers on `titan:interval`
+the SDK's `titan:timeout` source. Tickers use `titan:interval` for bounded
+periods and chain `titan:timeout` requests for longer ones
 ([browser timers](libuv-runtime.md#browser-timers)). Its `Ticker` keeps its
 methods but holds a host request instead of a uv timer, so the member
 inventory records it as an opaque record.

@@ -410,6 +410,28 @@ local function timer_cancel(...: Value): Value
   return Value.is_nil()
 end
 
+-- The SDK source owns range validation and retains the exact host TypeError.
+local function timer_range(...: Value): Value
+  local source = browser.binding(expect_string(...[1]))
+  defer source:close()
+  if expect_string(...[1]) == "titan:timeout" then
+    local request = source:start(ignore, ignore, ...[2])
+    request:close()
+  else
+    local request = source:listen(ignore, ignore, ...[2])
+    request:close()
+  end
+  return Value.is_string("accepted")
+catch
+  if error is browser.BrowserError then
+    local failure: browser.BrowserError = error
+    defer failure:close()
+    binding_call("timer_type_error", Value.is_handle(failure.thrown))
+    return Value.is_string(failure.message)
+  end
+  raise
+end
+
 -- Counts ticks of a titan:interval with the given period, then settles;
 -- settling cancels the listener.
 local function ticks(...: Value): Value
@@ -666,6 +688,7 @@ do
     publish("overflow", overflow)
     publish("sdk_unknown", sdk_unknown)
     publish("timer_cancel", timer_cancel)
+    publish("timer_range", timer_range)
     publish("ticks", ticks)
     publish("register", register)
     publish("drive_job", drive_job)

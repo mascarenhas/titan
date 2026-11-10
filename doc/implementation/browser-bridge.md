@@ -53,7 +53,7 @@ The loader's parts:
 | Deferred releases (`releases`) | Wrapper releases and request-hold drops, applied by a release entry at a safe point or handed to `deliver` | A release requested where Wasm cannot be entered |
 | Drive | The gate promise of the suspending import, the turn source, the owner token, the exit latch, and a per-state count of open `BrowserPin`s (`holds`) | JSPI resumption; macrotask scheduling |
 | `OutputChannel` and `drainOutput` | One FIFO of copied chunks per stream, at most one sink call in flight, and the drains that run after the image is released | The embedder's sinks and their promises |
-| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | Host timers, re-armed in chunks beyond the 32-bit range, and the two driver callables | Host timer APIs |
+| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | One bounded host timer per arm, and the two driver callables; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs |
 
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
 `titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
@@ -634,8 +634,11 @@ child-state refusals, the `timer` cases, and the synchronous-callback cases).
 - **Timer cases:** sleeps mixed with host requests, and zero delays and yields
   that resume in a later browser task, shown by a marker armed on the driver's
   turn source having run. Sleeps, tickers and a ticker left open past its
-  Runtime leave no JavaScript timer armed; the harness wraps the global timer
-  functions to count them.
+  Runtime leave no JavaScript timer armed. Long sleeps and ticker periods
+  chain bounded chunks, never fire early, and clear the current chunk on
+  cancellation or close; each long ticker re-arms its whole period before
+  publishing. The shared harness spy holds long delays for manual firing and
+  counts pending timers.
 - **Synchronous-callback cases:** they run in `browser.call_sync`.
   - Coroutine switches raise, also from inside a coroutine, and the current
     coroutine and Task are hidden.
