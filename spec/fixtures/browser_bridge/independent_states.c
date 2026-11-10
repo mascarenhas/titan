@@ -202,8 +202,9 @@ static void titan_bridge_test_arm_inner_catch_oom(lua_State *L) {
   main_L->stack_last.p = main_L->top.p + 2;
 }
 __attribute__((used, visibility("default")))
-void titan_bridge_test_enter_with_free_stack(int free_slots, int max_failures) {
-  lua_State *L = alloc_failure.L;
+void titan_bridge_test_enter_with_free_stack(int free_slots, int max_failures, uint32_t token) {
+  titan_browser_state_record *state = token ? titan_browser_host_state_record(token) : NULL;
+  lua_State *L = token ? (state ? state->callback_next : NULL) : alloc_failure.L;
   assert(L != NULL);
   int size = stacksize(L);
   int target_top = size - free_slots;
@@ -213,6 +214,8 @@ void titan_bridge_test_enter_with_free_stack(int free_slots, int max_failures) {
     L->ci->top.p = L->stack.p + target_top + 1;
   lua_settop(L, target_top);
   titan_bridge_test_arm_alloc_failure_count(L, 0, max_failures);
+  /* The allocator is state-wide, but the stack under test may be a callback's. */
+  alloc_failure.L = L;
   alloc_failure.saved_ci_top = saved_ci_top;
 }
 __attribute__((used, visibility("default")))

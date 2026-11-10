@@ -2,8 +2,8 @@
 
 The core JavaScript bridge uses the browser JSPI backend and the single
 persistent image lifecycle. It does not add another coroutine driver, native
-message format, or synchronous JavaScript-to-Titan call (C reaches Titan
-synchronously only through [synchronous callbacks](#synchronous-c-callbacks)),
+message format, or general synchronous JavaScript-to-Titan call. Synchronous
+callbacks and allocation-free wrapper release use the same no-switch bracket,
 and it supplies the [drive interface](#drive-interface-and-delivery) a
 scheduler uses rather than a scheduler. The
 public Titan API is [JavaScript bindings](../language/standard-library-browser.md);
@@ -50,7 +50,6 @@ The loader's parts:
 | Marshalling (`snapshotArguments`, `writeValue`, `valuesAt`, `completionAt`, `importResponse`) | Nothing between calls | Converting JavaScript values to and from the records of `titan/browser.h` |
 | Queue (`queue`, `batch`, `settling`) | Notifications, request events, and calls that wait for `drain()` or a drive, with each queued call's promise | JavaScript values that have no slot yet; items that wait for a point where Wasm can be entered |
 | Requests | The detachable cell of each promise or listener continuation, the host cancel function, the ownership form, the completion and failure targets, and the terminal promise that disposal awaits; no callable hold accounting | Promise and listener continuations |
-| Deferred releases (`releases`) | Wrapper releases, applied by a release entry at a safe point or handed to `deliver` | A wrapper release requested where Wasm cannot be entered |
 | Drive | The gate promise of the suspending import, the turn source, the owner token, and the exit latch | JSPI resumption; macrotask scheduling |
 | `OutputChannel` and `drainOutput` | One FIFO of copied chunks per stream, at most one sink call in flight, and the drains that run after the image is released | The embedder's sinks and their promises |
 | SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | One bounded host timer per arm, and the two driver callables; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs |
@@ -90,38 +89,34 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    `titan.browser` is linked into the image, `titan_browser_invoke` and
    `titan_browser_release_callable` forward in one line to those public
    `foreign function`s in `titan/browser.browser.titan`; in C-only protocol or
-   probe images without `titan.browser`, the weak pointers are `NULL` and the
-   exports reject cleanly with `titan_browser_invalid_entry` (`TITAN_BROWSER_STATE`).
+   probe images without `titan.browser`, the weak pointers are `NULL`. Invoke
+   reports an admitted failure through `titan_browser_invalid_entry`; synchronous
+   release returns `TITAN_BROWSER_STATE` without a completion.
    The C entries for [synchronous callbacks](#synchronous-c-callbacks) forward
    the same way.
-3. **Foreign trampolines (`invoke`, `release_callable`) and protected Titan
-   entries (`invoke_entry`, `release_entry`):** The public foreign functions in
-   `titan/browser.browser.titan` use header-free C primitive parameter types so
-   consumers of `"browser"` need no `foreign import`. Each trampoline checks
-   `titan_browser_entry_allowed`, recovers the `titan_browser_state_record *`
-   from the JS registry via `titan_browser_host_state_record(token)`, checks
-   close admission and `lua_checkstack(L, LUA_MINSTACK)` (writing an immediate
-   `TITAN_BROWSER_TITAN_ERROR` `"not enough memory"` completion if that stack
-   check fails), recovers `module` (`upvalue[0]`) and the native entry pointer
-   (`upvalue[2]`) from the handler closure stored in the state record, installs
-   `errorhandler` as `L->errfunc`, calls `invoke_entry` or `release_entry`, and
-   restores `L->errfunc` and the stack top.
-4. **Minimal protected entries (`invoke_entry` -> `invoke_work`, `release_entry` -> `release_work`):**
-   `invoke_entry` and `release_entry` are minimal function-scope `catch`
-   wrappers whose own preambles fit inside the trampoline's `LUA_MINSTACK`
-   reservation and call `invoke_work` / `release_work` inside their installed
-   `errorJmp`. All argument decoding, execution, rollback, and formatted error
-   reporting run inside `invoke_work` / `release_work`. In `invoke_work`, a
-   failed completion flush rolls back the provisional wrapper inline into
+3. **Foreign trampoline (`invoke`) and protected Titan entry (`invoke_entry`):**
+   The public foreign function in `titan/browser.browser.titan` uses
+   header-free C primitive parameter types so consumers of `"browser"` need no
+   `foreign import`. The trampoline checks `titan_browser_entry_allowed`,
+   recovers the `titan_browser_state_record *` through
+   `titan_browser_host_state_record(token)`, checks admission and
+   `lua_checkstack(L, LUA_MINSTACK)`, and writes a `"not enough memory"`
+   completion if the stack check fails. It recovers the module (`upvalue[0]`)
+   and entry pointer (`upvalue[2]`) from the handler closure, installs
+   `errorhandler` as `L->errfunc`, calls `invoke_entry`, and restores the
+   error handler and stack top.
+4. **Minimal protected entry (`invoke_entry` -> `invoke_work`):**
+   `invoke_entry` is a function-scope `catch` wrapper whose preamble fits
+   inside the trampoline's `LUA_MINSTACK` reservation. Argument decoding,
+   execution, rollback, and formatted error reporting run in `invoke_work`.
+   A failed completion flush rolls back the provisional wrapper inline into
    `free_slots`, pre-grown during `allocate_pin`. The inner `catch` performs
-   the same rollback before calling `complete_titan_failure`. If a work
-   function raises at its own preamble (`titan_ensure_stack`) or while
-   reporting an error from its inner `catch`, the outer function-scope `catch`
-   in `invoke_entry` / `release_entry` writes `"not enough memory"` into
-   `state_record.fallback` via inline FFI
-   struct writes, flushes `stdout`/`stderr`, and calls `titan_browser_complete`.
-   That outer handler does not roll back wrappers or call Titan helpers, grow
-   the stack, or allocate Lua objects. `error_message` formats non-string
+   the same rollback before calling `complete_titan_failure`. If work raises
+   at its own preamble or while reporting an error, the outer `catch` writes
+   `"not enough memory"` into `state_record.fallback` through inline FFI
+   writes, flushes both streams, and calls `titan_browser_complete`, without
+   calling Titan helpers or allocating Lua objects.
+   `error_message` formats non-string
    callable errors under its existing Titan `catch`, using the launcher's
    `titan_entry_error_message(L, index)` through the FFI. It reserves four
    temporary slots, pushes the error for that indexed conversion, copies the
@@ -136,7 +131,6 @@ rules](../style-guide.md#write-native-bindings-titan-first):
 | `titan_browser_initialize(uint64_t)` | INITIALIZE1 | Generated protected bootstrap, once |
 | `titan_browser_entry(uint64_t, int, argv, lengths)` | MAIN2 | Generated protected main, once |
 | `titan_browser_invoke(uint64_t, state, slot, generation, argc, args)` | INVOKE3 | 1-line weak forward to `titan.browser` `invoke` |
-| `titan_browser_release_callable(uint64_t, state, slot, generation, wrapper)` | RELEASE4 | 1-line weak forward to `titan.browser` `release_callable` |
 | `titan_browser_close(uint64_t)` | CLOSE5 | Generated owner-held `lua_close` |
 
 `operation_id` is an instance-local never-reused unsigned 64-bit identity.
@@ -200,8 +194,10 @@ standard-library API creates independent browser states.
 `state_closing()` and `current_state()` check `titan_state_closing(L)`
 (`G(L)->gcstp & GCSTPCLS`) before imports, so direct independent `lua_close`
 refuses new requests and reverse calls before a finalizer's first binding call.
-Synchronous calls, copied output, and release remain valid until the browser
-record finalizes. Every JS slot is charged to the state, including slots
+Synchronous binding calls, copied output, and handle release remain valid until
+the browser record finalizes. Wrapper release instead follows callback
+admission and leaves closing-state pins for state close. Every JS slot is
+charged to the state, including slots
 created during close when Lua suppresses new reachability finalizers.
 
 `BrowserHandle` registers the allocation-free
@@ -221,8 +217,8 @@ module variables (`pins_by_slot: {Pin}`, `pins_by_fn: {value: Pin}`,
     and no live wrapper exists in JavaScript).
   - `holds: integer` counts active request and listener holds (incremented for
     `completion` and `failure` at `BrowserHandle:start` / `BrowserHandle:listen`).
-- JavaScript reports only wrapper releases through `release_callable(id, state,
-  slot, generation, wrapper = 1)`, setting `wrapper_live = false`. Titan's
+- JavaScript reports wrapper releases synchronously through
+  `release_callable(state, slot, generation)`, setting `wrapper_live = false`. Titan's
   `RequestHolds` drops the completion and failure holds once: after a one-shot's
   callback returns or raises, after cancel, after close, or on an `UNDELIVERED`
   drive item. Listener holds remain until cancel, close or state close.
@@ -232,9 +228,9 @@ module variables (`pins_by_slot: {Pin}`, `pins_by_fn: {value: Pin}`,
   undoes partial table insertions on raise before mutating `free_slots` or
   `next_slot`, and `pin_wrapper` / `pin_request_hold` allocate and append their
   `ProvisionalPin` rollback record before `allocate_pin` or mutating `Pin`.
-- Re-exporting a callable while its wrapper release is queued in JavaScript
-  cancels that queued release and issues a fresh `CallableView` wrapper for the
-  existing pin.
+- Re-export after release creates a fresh wrapper. An applied release with no
+  other holder retired the pin, so export allocates another; a refused release
+  leaves the old pin available for the fresh wrapper.
 - A newly registered callable wrapper starts with `exposed = false` in
   JavaScript and is marked `exposed = true` only when `valuesAt` finishes
   decoding that crossing's own arguments in `hostCall` or `hostStart` (right
@@ -297,11 +293,6 @@ drives, and `titan.browser` never learns about Tasks.
   allocation-free fallback, settling through the same import, so one item can
   never leave the delivery half done. `titan_browser_host_item_done` then
   frees the item's host allocations and releases unadopted temporaries.
-- **Deferred releases.** After the batch, `titan_browser_host_release_next`
-  hands back the owner's queued wrapper releases, and `apply_release` (the pin
-  block shared with `release_work`) retires them, so a
-  long drive does not accumulate pinned callables. Other states' releases
-  wait for the loader's next safe point after the drive.
 - **Wake.** `wake` calls `titan_browser_host_wake(state)`; the loader ignores
   it unless that state is driving.
 
@@ -312,6 +303,20 @@ a callback runs below a JavaScript frame and cannot suspend ([language
 contract](../language/standard-library-browser.md#synchronous-c-callbacks)).
 `titan.browser` provides the pin, the C entry and its bracket; core modules
 learn about the callback only through `titan_no_switch`.
+
+- **Synchronous release.** `titan_browser_release_callable` forwards to
+  `release_callable`, which follows callback admission, stack reservation and
+  error-handler restoration on the state's callback thread. It invokes the
+  protected `release_entry` -> `apply_release` path in no-switch mode, with no
+  operation identity or completion. Around that call it saves `G(L)->gcstp`,
+  adds `GCSTPGC` as Lua's `GCTM` does, and restores the saved bits exactly.
+  Entry polls must not collect: a finalizer could otherwise re-export the
+  function after logical release and before its pin is retired. The body
+  clears `wrapper_live`, removes an unused pin, and appends its slot to
+  pre-grown `free_slots`; it allocates nothing and calls no imports. It does
+  not prepare another callback thread because it cannot nest a callback.
+  A refused entry or stack reservation leaves the pin until state close.
+  Disposal, exit and poison use the same refusal rule as callbacks.
 
 - **Pins.** `pin(fn)` adds one hold to the function's existing `Pin`
   (`holds`, as a request hold does, allocating the pin when the function has
@@ -435,12 +440,11 @@ import result kind for `host_start`. Statuses are `OK = 0`, `TITAN_ERROR = 1`,
 | Offset | Field | Meaning |
 | --- | --- | --- |
 | 0 | `id` | Unsigned 64-bit item identity for `item_done` and settlement; zero for `UNDELIVERED` |
-| 8 | `kind` | `NOTIFY = 1`, `CALL = 2`, `RELEASE = 3`, or `UNDELIVERED = 4` |
-| 12 | `slot` | Target callable slot, or the released pin's slot |
+| 8 | `kind` | `NOTIFY = 1`, `CALL = 2`, or `UNDELIVERED = 4` |
+| 12 | `slot` | Target callable slot |
 | 16 | `generation` | Its generation |
 | 20 | `argc` | Argument count; zero for `UNDELIVERED` |
 | 24 | `args` | Host-owned array valid until `item_done`; absent for `UNDELIVERED` |
-| 28 | `wrapper` | `RELEASE` only: 1 for a wrapper release |
 
 Relinquish modes are `TURN = 0`, `WAIT = 1`, and `WAIT_HELD = 2`; statuses
 are `RESUMED = 0`, `IDLE = 1`, and `DISPOSING = 2`.
@@ -616,9 +620,11 @@ builds. The fixture's C helper fires callbacks through its Wasm table entry,
 as an Emscripten API does.
 `mini-driver-abort.mjs` forces a checked C-stack overflow during a drive.
 `admission.mjs` runs the admission matrix of the loader: every application
-method, `_malloc`/`_free` and the trace view, each from a parked wait, a
-macrotask between turns, a microtask between internal coroutine hops, and a
-binding the drive invoked. It also covers owner and other-state request
+method, wrapper release, `_malloc`/`_free` and the trace view, each from a
+parked wait, a macrotask between turns, a microtask between internal coroutine
+hops, and a binding the drive invoked. Release also runs from a synchronous
+callback's binding, with capture collection checked in each context.
+It also covers owner and other-state request
 settlements (the harness settles the child state's request only after the
 owner parked, and the owner takes no turn for it), `dispose()` from each of
 those contexts, and the idle-instance

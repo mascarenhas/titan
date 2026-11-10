@@ -19,6 +19,7 @@ const actions = [
   ['run()', host => host.instance.run([])],
   ['trace', host => host.instance.trace.state],
   ['_malloc/_free', host => host.controls.allocate()],
+  ['release()', host => host.releasable.release()],
 ];
 
 const elsewhere = Object.freeze({
@@ -26,7 +27,7 @@ const elsewhere = Object.freeze({
   'callTask(owner)': 'value 6 in drive', 'callTask(other state)': 'STATE',
   'notify(owner)': 'delivered in drive', 'notify(other state)': 'throws REENTRY',
   'drain()': 'REENTRY', 'initialize()': 'resolved', 'run()': 'REENTRY',
-  'trace': 'value ready', '_malloc/_free': 'value true',
+  'trace': 'value ready', '_malloc/_free': 'value true', 'release()': 'value undefined',
 });
 const inHost = Object.freeze({...elsewhere, 'call(owner)': 'REENTRY', 'callTask(owner)': 'REENTRY',
   'callTask(other state)': 'REENTRY'});
@@ -86,6 +87,7 @@ async function driverHost(context, image) {
   const host = makeHost(context, image);
   await host.instance.initialize();
   await host.call('register');
+  host.releasable = await host.call('make_releasable');
   return host;
 }
 
@@ -155,6 +157,8 @@ async function matrix(context, image) {
         context.assert(observed[action] === outcome,
           `${name}: ${action} gave ${observed[action]}, expected ${outcome}`);
       }
+      context.assert(await host.call('released_captures') === 1n,
+        `${name}: synchronous release retained the callable's capture`);
       report[name] = observed;
     } finally { await host.instance.dispose(); }
   }
@@ -347,12 +351,14 @@ async function callbacks(context, image) {
     observed['drive: nested in a binding'] = nested;
 
     let attempts;
-    host.hooks.reenter = () => { attempts = entries(host); };
+    host.hooks.reenter = () => { host.releasable.release(); attempts = entries(host); };
     observed['idle: callback status'] = host.fire('reenter') === 0 ? 'ran' : 'refused';
     host.hooks.reenter = undefined;
     for (const [name, outcome] of Object.entries(await codes(attempts))) {
       observed[`idle: ${name} from the callback's binding`] = outcome;
     }
+    context.assert(await host.call('released_captures') === 1n,
+      "release from a synchronous callback's binding retained the capture");
 
     let started;
     host.poke(() => {

@@ -1612,7 +1612,7 @@ flag list.
 | --- | --- |
 | `<level>`, then `-fno-inline -fno-optimize-sibling-calls` except for a production `program`, then `-gsource-map -g2` | the level is the `optimization` override or else the descriptor's last `-O` flag (`-O1` for validation, `-O3` for production), so the link optimizes like its objects; a production program accepts the frames that inlining costs, while every other profile and purpose keeps the frame flags ([Link flags per purpose](#link-flags-per-purpose)); `-gsource-map -g2` writes the source map and keeps the Wasm `name` section in every profile |
 | `-sBINARYEN_EXTRA_PASSES=--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` only for a production `test` image | retain distinct physical functions for test traces; JSPI needs no instrumentation-local cleanup passes |
-| `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"] -sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke","titan_browser_release_callable","titan_browser_close","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports for the five Lua-running bridge entries and the private coroutine entry. The bridge library's [relinquish import](#the-relinquish-import) is the third suspending import of a `titan` entry; the interpreter baseline (`lua-main`) keeps only the coroutine pair and promises `main`. The `gate` purpose adds its guarded export and `emscripten_sleep`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
+| `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"] -sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke","titan_browser_close","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports for the four promised bridge entries and the private coroutine entry. The bridge library's [relinquish import](#the-relinquish-import) is the third suspending import of a `titan` entry; the interpreter baseline (`lua-main`) keeps only the coroutine pair and promises `main`. The `gate` purpose adds its guarded export and `emscripten_sleep`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
 | `-sSUPPORT_LONGJMP=<sjlj> -sWASM_LEGACY_EXCEPTIONS=1` | the record's verified longjmp mode, `wasm`, with Emscripten 6.0.13's legacy EH encoding, matching every object and `liblua.a` |
 | `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
 | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | initial memory is the image's static data and main stack plus a 15 MiB heap, so static data never outgrows a fixed initial size (15 MiB is the heap a data-free image had under the former fixed 16 MiB; [measured sizes](#budgets)); coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
@@ -1620,7 +1620,7 @@ flag list.
 | `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
 | `-sFORCE_FILESYSTEM=1` | keeps Emscripten's filesystem and TTY layer in every image (see below) |
 | `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
-| `-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke","_titan_browser_release_callable","_titan_browser_close","_malloc","_free","_titan_browser_trace_identity"]` | the five promised bridge entries, the C buffer allocation and release used for argument marshalling, and the 64-hex image identity export; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
+| `-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke","_titan_browser_release_callable","_titan_browser_close","_malloc","_free","_titan_browser_trace_identity"]` | the four promised bridge entries, synchronous wrapper release, the C buffer allocation and release used for argument marshalling, and the 64-hex image identity export; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
 | `-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]` | the current heap view used by the loader, which calls the owner-wrapped exports directly rather than through `ccall` |
 | `-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]` | the only Emscripten module options the loader passes; the owner callbacks read by Titan's own JavaScript libraries are private Module properties |
 | `--js-library <sdk>/titan-browser-library.js`, `--js-library <sdk>/titan-browser-bridge.js`, `--js-library <sdk>/titan-browser-trace.js` | the completion/admission owner, the typed bridge imports, and the eager trace-map/stack-capture imports (all omitted for `lua-main`) |
@@ -2770,16 +2770,17 @@ public method contains. `titan_browser_entry_allowed(id, kind)` normalizes the
 unsigned identity and admits the C preamble once, only for the pending
 identity and kind; JSPI continuation wakes do not re-enter that preamble.
 
-Initialization wraps the five state-entering exports
+Initialization wraps the four promised state-entering exports
 (`titan_browser_initialize`, `titan_browser_entry`, `titan_browser_invoke`,
-`titan_browser_release_callable`, and `titan_browser_close`) and the gate's
+and `titan_browser_close`) and the gate's
 `titan_browser_gate_guarded` with this hook. Static `wasmExports[...]`
 accesses retain the explicit identity. Emscripten 6.0.13 disables
 import/export minification for JSPI, including O2/shrink controls; the
 optimized guard fixture asserts that pinned naming contract. The driver's
 lexical engine-entry export remains private; its published Module alias
 always rejects outside use. C-only state-neutral exports (`malloc`, `free`,
-the trace identity, and the gate observer) remain synchronous.
+the trace identity, and the gate observer) remain synchronous, as does the
+no-switch wrapper-release export.
 
 `poison(cause)` permanently blocks admission, rejects known parked engine
 gates, and poisons the loader owner after a fatal error. It never calls C to
@@ -2870,16 +2871,15 @@ adds another asynchronous admission boundary.
 ### Logical operations and protected entries
 
 The loader holds one logical operation from validation and marshaling through
-all contained C entries, physical callable retirement, and stream flush.
+all contained C entries and stream flush.
 `TitanBrowser.enter` owns each promising C entry, including all private JSPI
 and collector transfers. Its per-entry `entered` flag resets for the next
 contained entry; no lifetime completion counter blocks later entries.
 
-Every C entry receives the next nonzero instance-local uint64 BigInt identity.
-The admission import normalizes Wasm's signed i64 presentation back to unsigned
-before comparison. The final identity is reserved for close: exhausted
-application admission rejects before marshaling, while remaining pinned
-callables retire with state close rather than consuming that last identity.
+Every promising C entry receives the next nonzero instance-local uint64 BigInt
+identity. The admission import normalizes Wasm's signed i64 presentation back
+to unsigned before comparison. The final identity is reserved for close:
+exhausted application admission rejects before marshaling.
 The pending record has that identity, the expected operation kind, and one
 completion slot. The non-suspending completion import validates identity and
 kind and copies all result/error/trace data while C owns it. Duplicate,
@@ -2898,8 +2898,14 @@ bare value (`null` for `is_nil()`, `BigInt` for `is_integer`, string for
 `is_handle`).
 
 Callable wrappers have module-private WeakMap brands and state/slot/generation
-records. Logical release invalidates immediately, while physical pin retirement
-uses the release entry at a complete safe point. A detached FIFO batch
+records. Logical release invalidates immediately and calls the synchronous
+no-switch release entry on a callback thread. Its allocation-free body is
+bracketed by saving `gcstp`, adding `GCSTPGC` and restoring the exact bits:
+entry polls must not run a finalizer between logical release and pin retirement.
+The bracket leaves ordinary collector pacing unchanged and preserves a user
+pause. Refusal leaves the pin for state close. Release has no completion or
+notification error.
+A detached FIFO batch
 revalidates both its target and every branded argument before any Wasm
 allocation. A released target drops the notification; a released argument of a
 plain notification reports an error without Lua entry. A request event with an
@@ -3050,11 +3056,8 @@ whether at settlement or delivery, queues the same failure notification.
 `onNotificationError` is not a substitute for the request's outcome. It receives
 `{kind: 'callback' | 'cleanup', operation, error}` for errors without another
 caller: an unmarshallable failure event, callback failures, secondary cleanup
-failures, and callerless physical release failure. Public operation labels are
-`initialize`, `run`, `call`,
-`drain`, `dispose`, and `notify`; work-announcement failure uses `requestDrain`
-and background physical release uses `release_callable`. Failed physical
-release is not retried; state close remains the retirement fallback.
+failures. Public operation labels are `initialize`, `run`, `call`, `callTask`,
+`drain`, `dispose`, and `notify`; work-announcement failure uses `requestDrain`.
 
 ### Output, disposal, and observation
 
@@ -3076,8 +3079,8 @@ sealed after a gate therefore wait for the next gate or the final flush, never
 only for a sink call to resolve. The operation's final flush awaits a running
 pump, then flushes again and drains everything left, and the pump's failures
 join that flush's. A sink call increments `inHost`.
-Titan failure remains primary while both deliverable stream flushes and
-deferred retirement are attempted. An otherwise successful operation returns
+Titan failure remains primary while both deliverable stream flushes are
+attempted. An otherwise successful operation returns
 its first cleanup failure; every secondary failure is reported once through
 the tagged observer. A secondary sink failure during a failed operation stays
 pending for disposal, while an unrelated or empty flush does not return it
@@ -3089,7 +3092,7 @@ sink through a detachable gate, and makes that stream terminal so it can never
 overlap the pending sink. Accepted C work retires, retained host work settles,
 and close runs as the last legitimate owner-held promised entry. The backend's
 permanent block is installed only after close, or immediately on poison.
-Capture the first failure where the action, retirement, or sink fails, not
+Capture the first failure where the action or sink fails, not
 after awaiting both streams. Disposal cannot replace an already captured
 failure while interrupting its flush. One shared interruption record is
 reported once as cleanup even if both streams are interrupted. Only an

@@ -31,7 +31,6 @@ enum titan_browser_operation {
   TITAN_BROWSER_INITIALIZE = 1,
   TITAN_BROWSER_MAIN = 2,
   TITAN_BROWSER_INVOKE = 3,
-  TITAN_BROWSER_RELEASE = 4,
   TITAN_BROWSER_CLOSE = 5
 };
 enum titan_browser_request_mode {
@@ -57,7 +56,6 @@ enum titan_browser_delivery_kind {
   TITAN_BROWSER_DELIVER_NONE = 0,
   TITAN_BROWSER_DELIVER_NOTIFY = 1,
   TITAN_BROWSER_DELIVER_CALL = 2,
-  TITAN_BROWSER_DELIVER_RELEASE = 3,
   TITAN_BROWSER_DELIVER_UNDELIVERED = 4
 };
 
@@ -110,10 +108,9 @@ typedef struct titan_browser_completion {
   uint32_t trace_length;
 } titan_browser_completion;
 
-/* One host item that deliver() runs inside a drive, or one deferred physical
- * wrapper release. id names the item for item_done and settle; args stay
- * host-owned until titan_browser_host_item_done. UNDELIVERED has identity zero,
- * no arguments, settlement or item_done. wrapper is the RELEASE kind's flag. */
+/* One host item that deliver() runs inside a drive. id names the item for
+ * item_done and settle; args stay host-owned until titan_browser_host_item_done.
+ * UNDELIVERED has identity zero, no arguments, settlement or item_done. */
 typedef struct titan_browser_delivery {
   uint64_t id;
   uint32_t kind;
@@ -121,7 +118,6 @@ typedef struct titan_browser_delivery {
   uint32_t generation;
   uint32_t argc;
   const titan_browser_value *args;
-  uint32_t wrapper;
 } titan_browser_delivery;
 
 /* A pinned callable's identity, which C keeps as callback user data. Copy it
@@ -205,7 +201,6 @@ _Static_assert(offsetof(titan_browser_delivery, slot) == 12, "browser delivery s
 _Static_assert(offsetof(titan_browser_delivery, generation) == 16, "browser delivery generation offset");
 _Static_assert(offsetof(titan_browser_delivery, argc) == 20, "browser delivery count offset");
 _Static_assert(offsetof(titan_browser_delivery, args) == 24, "browser delivery arguments offset");
-_Static_assert(offsetof(titan_browser_delivery, wrapper) == 28, "browser delivery wrapper offset");
 _Static_assert(sizeof(titan_browser_identity) == 12, "browser identity layout");
 _Static_assert(offsetof(titan_browser_identity, slot) == 4, "browser identity slot offset");
 _Static_assert(offsetof(titan_browser_identity, generation) == 8, "browser identity generation offset");
@@ -220,15 +215,12 @@ _Static_assert(offsetof(titan_browser_callback_frame, state) == 4, "browser call
 _Static_assert(offsetof(titan_browser_callback_frame, depth) == 8, "browser callback frame depth offset");
 #endif
 
-/* Stateful promised exports. Only _malloc/_free and the backend stack metadata
- * helpers bypass the JSPI owner. The private engine entry is not a gateway. */
+/* Stateful promised exports. The private engine entry is not a gateway. */
 int titan_browser_initialize(uint64_t operation_id);
 int titan_browser_entry(uint64_t operation_id, int argc,
     const unsigned char *const *argv, const size_t *lengths);
 int titan_browser_invoke(uint64_t operation_id, uint32_t state, uint32_t slot,
     uint32_t generation, uint32_t argc, const titan_browser_value *args);
-int titan_browser_release_callable(uint64_t operation_id, uint32_t state,
-    uint32_t slot, uint32_t generation, uint32_t wrapper);
 int titan_browser_close(uint64_t operation_id);
 int titan_browser_invalid_entry(uint64_t operation_id, uint32_t operation,
     const char *message);
@@ -302,12 +294,14 @@ void titan_browser_host_wake(uint32_t state);
 uint32_t titan_browser_host_batch(uint32_t state);
 int titan_browser_host_item(uint32_t state, titan_browser_delivery *out);
 void titan_browser_host_item_done(uint32_t state, uint64_t id);
-int titan_browser_host_release_next(uint32_t state, titan_browser_delivery *out);
 void titan_browser_host_settle(const titan_browser_completion *record);
 
-/* Synchronous C callbacks. host_callback(state, 1) admits a callback unless
- * the instance is closing, exited or poisoned and returns 0 when it refuses;
- * host_callback(state, -1) ends it. The import is trusted. */
+/* Synchronous entries. host_callback(state, 1) admits unless the instance is
+ * closing, exited or poisoned and returns 0 when it refuses;
+ * host_callback(state, -1) ends it. The import is trusted.
+ * release_callable retires only the wrapper hold, with no completion; a refused
+ * release leaves the pin until state close. */
+int titan_browser_release_callable(uint32_t state, uint32_t slot, uint32_t generation);
 int titan_browser_host_callback(uint32_t state, int32_t delta);
 
 /* Generated forwards to titan.browser's public foreign functions, for C in the

@@ -62,9 +62,8 @@ extern int $INVOKE_FN(
     unsigned long long operation_id, unsigned int state, unsigned int slot,
     unsigned int generation, unsigned int argc,
     const void *args) __attribute__((weak));
-extern int $RELEASE_FN(
-    unsigned long long operation_id, unsigned int state, unsigned int slot,
-    unsigned int generation, unsigned int wrapper) __attribute__((weak));
+extern int $RELEASE_FN(unsigned int state, unsigned int slot,
+    unsigned int generation) __attribute__((weak));
 extern int $CALL_SYNC_FN(const void *identity, unsigned int argc, const void *args,
     void *result) __attribute__((weak));
 extern int $CALLBACK_ENTER_FN(unsigned int state, void *frame) __attribute__((weak));
@@ -254,13 +253,8 @@ int titan_browser_invoke(uint64_t operation_id, uint32_t state, uint32_t slot,
                   "browser state is closed, closing or uninitialized"));
 }
 
-int titan_browser_release_callable(uint64_t operation_id, uint32_t state,
-        uint32_t slot, uint32_t generation, uint32_t wrapper) {
-    return $RELEASE_FN
-        ? $RELEASE_FN(operation_id, state, slot, generation, wrapper)
-        : (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_RELEASE) ? -1
-            : titan_browser_invalid_entry(operation_id, TITAN_BROWSER_RELEASE,
-                  "browser state is closed"));
+int titan_browser_release_callable(uint32_t state, uint32_t slot, uint32_t generation) {
+    return $RELEASE_FN ? $RELEASE_FN(state, slot, generation) : TITAN_BROWSER_STATE;
 }
 
 /* C-callable synchronous callback entries for authored C in the image. */

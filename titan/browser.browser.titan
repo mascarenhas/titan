@@ -15,9 +15,7 @@ foreign type InvokeEntry =
         const *titan_browser_value): void
 
 foreign type ReleaseEntry =
-    function(
-        *lua_State, *Udata, *CClosure,
-        uint64_t, uint32_t, uint32_t, uint32_t, uint32_t): void
+    function(*lua_State, *Udata, *CClosure, uint32_t, uint32_t): void
 
 foreign type CallbackEntry =
     function(*lua_State, *Udata, *CClosure, *titan_browser_callback_frame): void
@@ -115,8 +113,7 @@ local state_record: owned *titan_browser_state_record =
     foreign titan_browser_state_record.new()
 local invoke_handler: (function (foreign uint64_t, foreign uint32_t, foreign uint32_t,
     foreign uint32_t, foreign uint32_t, foreign const *titan_browser_value): ())?
-local release_handler: (function (foreign uint64_t, foreign uint32_t, foreign uint32_t,
-    foreign uint32_t, foreign uint32_t): ())?
+local release_handler: (function (foreign uint32_t, foreign uint32_t): ())?
 local callback_handler: (function (foreign *titan_browser_callback_frame): ())?
 local call_sync_handler: (function (foreign const *titan_browser_identity, foreign uint32_t,
     foreign const *titan_browser_value, foreign *titan_browser_sync_result): ())?
@@ -726,19 +723,11 @@ catch
   ffi.titan_browser_complete(completion)
 end
 
--- deliver()'s physical release of one wrapper (wrapper ~= 0) or request hold:
--- release_work's pin block, retiring the pin when no holder remains. Only the
--- helper's entry can raise, before any change; free_slots is pre-grown by
--- allocate_pin. release_work keeps its own copy inline (helper-free).
-local function apply_release(slot: foreign uint32_t, generation: foreign uint32_t,
-                              wrapper: foreign uint32_t)
+-- Allocation-free wrapper retirement; allocate_pin reserves free_slots capacity.
+local function apply_release(slot: foreign uint32_t, generation: foreign uint32_t)
   local pin? = pins_by_slot[slot]
   if pin ~= nil and pin.generation == generation then
-    if wrapper ~= 0 then
-      pin.wrapper_live = false
-    elseif pin.holds > 0 then
-      pin.holds = pin.holds - 1
-    end
+    pin.wrapper_live = false
     if not pin.wrapper_live and pin.holds <= 0 then
       if pins_by_slot[pin.slot] == pin then
         pins_by_slot[pin.slot] = nil
@@ -749,77 +738,10 @@ local function apply_release(slot: foreign uint32_t, generation: foreign uint32_
   end
 end
 
-local function release_work(
-    operation_id: foreign uint64_t,
-    state: foreign uint32_t,
-    slot: foreign uint32_t,
-    generation: foreign uint32_t,
-    wrapper: foreign uint32_t)
-  do
-    -- Stay helper-free and non-raising so pin retirement cannot escape half-done.
-    -- The module owns this stable storage; the native transaction only borrows it.
-    local current: foreign *titan_browser_state_record = state_record
-    local closing = current.token == 0
-    if not closing then
-      if current.closing == 0 and ffi.titan_state_closing(L) ~= 0 then
-        mark_closing(current)
-      end
-      closing = current.closing ~= 0
-    end
-    if not closing then
-      local pin? = pins_by_slot[slot]
-      if pin ~= nil and pin.generation == generation then
-        if wrapper ~= 0 then
-          pin.wrapper_live = false
-        elseif pin.holds > 0 then
-          pin.holds = pin.holds - 1
-        end
-        if not pin.wrapper_live and pin.holds <= 0 then
-          if pins_by_slot[pin.slot] == pin then
-            pins_by_slot[pin.slot] = nil
-            pins_by_fn[pin.callback] = nil
-            free_slots[#free_slots + 1] = pin.slot
-          end
-        end
-      end
-    end
-    local completion = foreign titan_browser_completion.new()
-    completion.operation_id = operation_id
-    completion.operation = ffi.TITAN_BROWSER_RELEASE as foreign uint32_t
-    flush_completion(completion, false)
-  catch
-    local trace = traceback
-    complete_titan_failure(
-        operation_id, ffi.TITAN_BROWSER_RELEASE as foreign uint32_t,
-        error, trace, false)
-  end
-end
-
-local function release_entry(
-    operation_id: foreign uint64_t,
-    state: foreign uint32_t,
-    slot: foreign uint32_t,
-    generation: foreign uint32_t,
-    wrapper: foreign uint32_t)
-  release_work(operation_id, state, slot, generation, wrapper)
+-- Runs on a callback thread. An unapplied release leaves the pin for state close.
+local function release_entry(slot: foreign uint32_t, generation: foreign uint32_t)
+  apply_release(slot, generation)
 catch
-  -- No allocating Titan helper entry may run outside this catch boundary.
-  local trace = traceback
-  local message = fallback_message
-  local completion: foreign *titan_browser_completion = fallback_completion
-  completion.operation_id = operation_id
-  completion.operation = ffi.TITAN_BROWSER_RELEASE as foreign uint32_t
-  completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
-  completion.application_status = 1
-  completion.result_count = 0
-  completion.results = nil
-  completion.message = message as foreign const *unsigned char
-  completion.message_length = #message
-  completion.trace = trace as foreign const *unsigned char
-  completion.trace_length = #trace
-  ffi.fflush(ffi.stdout)
-  ffi.fflush(ffi.stderr)
-  ffi.titan_browser_complete(completion)
 end
 
 foreign function invoke(
@@ -892,61 +814,46 @@ foreign function invoke(
   return 0
 end
 
-foreign function release_callable(
-    raw_id: unsigned long long,
-    raw_token: unsigned int,
-    raw_slot: unsigned int,
-    raw_generation: unsigned int,
-    raw_wrapper: unsigned int): int
-  local id = raw_id as foreign uint64_t
+--- The synchronous entry of a wrapper release: no entry identity or completion.
+foreign function release_callable(raw_token: unsigned int, raw_slot: unsigned int,
+                                  raw_generation: unsigned int): int
   local token = raw_token as foreign uint32_t
   local slot = raw_slot as foreign uint32_t
   local generation = raw_generation as foreign uint32_t
-  local wrapper = raw_wrapper as foreign uint32_t
-  local op = ffi.TITAN_BROWSER_RELEASE as foreign uint32_t
-  if id == 0 then
-    return -1
-  end
-  if ffi.titan_browser_entry_allowed(id, op) == 0 then
-    return -1
-  end
-  local state = ffi.titan_browser_host_state_record(token)
+  local state = callback_state(token)
   if state == nil then
-    return ffi.titan_browser_invalid_entry(id, op, "browser state is closed")
+    return ffi.TITAN_BROWSER_STATE as foreign int
   end
-  if state.configured == 0 then
-    return ffi.titan_browser_invalid_entry(id, op, "browser state is closed")
+  if ffi.titan_browser_host_callback(token, 1) == 0 then
+    return ffi.TITAN_BROWSER_STATE as foreign int
   end
-  local state_L = state.L
-  if ffi.lua_checkstack(state_L, ffi.LUA_MINSTACK) == 0 then
-    local message = "not enough memory"
-    local completion = state.fallback
-    completion.operation_id = id
-    completion.operation = op
-    completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
-    completion.application_status = 1
-    completion.result_count = 0
-    completion.results = nil
-    completion.message = message as foreign const *unsigned char
-    completion.message_length = 17
-    completion.trace = nil
-    completion.trace_length = 0
-    ffi.fflush(ffi.stdout)
-    ffi.fflush(ffi.stderr)
-    ffi.titan_browser_complete(completion)
-    return 0
+  local thread = state.callback_next
+  if thread == nil then
+    ffi.titan_browser_host_callback(token, -1)
+    return ffi.TITAN_BROWSER_STATE as foreign int
   end
+  if ffi.lua_checkstack(thread, ffi.LUA_MINSTACK) == 0 then
+    ffi.titan_browser_host_callback(token, -1)
+    return ffi.TITAN_BROWSER_MEMORY as foreign int
+  end
+  state.callback_depth = state.callback_depth + 1
+  state.callback_next = nil
   local handler = ffi.lmacro_clCvalue(state.release_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign ReleaseEntry
-  local top = ffi.lua_gettop(state_L)
-  local old_errfunc = ffi.lmacro_get_errfunc(state_L)
-  ffi.lua_pushcclosure(state_L, ffi.errorhandler, 0)
-  ffi.lmacro_set_errfunc(state_L, ffi.lmacro_savestack_top(state_L))
-  entry(state_L, module, handler, id, token, slot, generation, wrapper)
-  ffi.lmacro_set_errfunc(state_L, old_errfunc)
-  ffi.lua_settop(state_L, top)
-  return 0
+  local top = ffi.lua_gettop(thread)
+  local old_errfunc = ffi.lmacro_get_errfunc(thread)
+  local old_gcstp = ffi.lmacro_get_gcstp(thread)
+  ffi.lua_pushcclosure(thread, ffi.errorhandler, 0)
+  ffi.lmacro_set_errfunc(thread, ffi.lmacro_savestack_top(thread))
+  -- Entry polls must not run a finalizer inside the embedder's release().
+  ffi.lmacro_set_gcstp(thread, old_gcstp | ffi.GCSTPGC)
+  entry(thread, module, handler, slot, generation)
+  ffi.lmacro_set_gcstp(thread, old_gcstp)
+  ffi.lmacro_set_errfunc(thread, old_errfunc)
+  ffi.lua_settop(thread, top)
+  callback_finish(state, token, thread)
+  return ffi.TITAN_BROWSER_OK as foreign int
 end
 
 --- Look up an explicitly supplied create({bindings}) name, never a global or eval expression.
@@ -1183,7 +1090,7 @@ local function drop_undelivered(slot: foreign uint32_t, generation: foreign uint
   end
 end
 
---- Run the host items queued for this state when the call begins, then its deferred releases.
+--- Run the host items queued for this state when the call begins.
 -- @usage standard-library-browser.md#driver-interface-low-level
 function deliver()
   require_drive("browser delivery requires the driving owner's main thread outside delivery")
@@ -1224,9 +1131,6 @@ function deliver()
       end
       ffi.titan_browser_host_item_done(token, item.id)
     end
-  end
-  while ffi.titan_browser_host_release_next(token, item) ~= 0 do
-    apply_release(item.slot, item.generation, item.wrapper)
   end
 end
 

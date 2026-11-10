@@ -130,10 +130,6 @@ addToLibrary({
   titan_browser_host_item_done: (state, id) =>
     TitanBridge.trusted('itemDone', state >>> 0, BigInt.asUintN(64, id)),
 
-  titan_browser_host_release_next__deps: ['$TitanBridge'],
-  titan_browser_host_release_next__sig: 'iip',
-  titan_browser_host_release_next: (state, out) => TitanBridge.trusted('nextRelease', state >>> 0, out >>> 0),
-
   titan_browser_host_settle__deps: ['$TitanBridge'],
   titan_browser_host_settle__sig: 'vp',
   titan_browser_host_settle: record => TitanBridge.trusted('settleQueued', record >>> 0),

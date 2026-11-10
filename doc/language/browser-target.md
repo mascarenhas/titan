@@ -630,10 +630,12 @@ The instance has the following methods:
 promises, including admission errors. Calling `call` or `drain` before
 initialization does not initialize implicitly. A callable wrapper also has
 `call(...args)`, `callTask(args, options)` and idempotent, synchronous logical
-`release()`. Wrappers belong to one instance and one Lua state; another
-instance cannot use them. After an exit, `call`, `callTask`, `drain` and
-`run` reject and `notify` throws `TITAN_BROWSER_EXITED`; `dispose` stays
-available.
+`release()`. Physical pin release is immediate when the instance can be
+entered; otherwise state close retires the pin. `release()` runs no finalizer
+and no Titan code of the program. Wrappers belong to one instance and one Lua
+state; another instance cannot use them. After an exit,
+`call`, `callTask`, `drain` and `run` reject and `notify` throws
+`TITAN_BROWSER_EXITED`; `dispose` stays available and `release()` is inert.
 
 **Exclusive entry.** One logical operation owns the instance from argument
 validation through all protected C entries and output flush. Promise
@@ -660,13 +662,11 @@ Options are:
 
 The notification-error event's `kind` is `"callback"` or `"cleanup"`.
 `operation` identifies `initialize`, `run`, `call`, `callTask`, `drain`,
-`dispose`, or `notify`; a failed work announcement uses `requestDrain`, and
-callerless physical callable retirement uses `release_callable`. In-operation
-cleanup, and a notification delivered by a drive, use the containing public
-operation's name. Each failure is reported once,
-and a physical release failure is not retried: state close remains its
-retirement fallback. Without an observer, the loader logs each event with
-`console.error`. An observer that throws cannot replace a captured or
+`dispose`, or `notify`; a failed work announcement uses `requestDrain`.
+In-operation cleanup, and a notification delivered by a drive, use the
+containing public operation's name. Each failure is reported once. Without an
+observer, the loader logs each event with `console.error`. An observer that
+throws cannot replace a captured or
 terminal failure; the current operation, or else the next one that would
 otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 

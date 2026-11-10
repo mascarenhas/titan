@@ -314,8 +314,10 @@ tests (`lmacro_ttype`, `lmacro_ttypetag`, `lmacro_ttisLclosure`,
 `lmacro_luaC_barrierback`, whose untyped object casts to `GCObject *` rather
 than through `obj2gco`, which reads the object's tag under `-DLUAI_ASSERT`).
 Other bridges access internal fields of incomplete structs
-(`lmacro_get_errfunc`, `lmacro_set_errfunc`) or remove `const` for native
-deallocation (`lmacro_unconst`). These are narrow support for trusted
+(`lmacro_get_errfunc`, `lmacro_set_errfunc`, `lmacro_get_gcstp`,
+`lmacro_set_gcstp`) or remove `const` for native deallocation (`lmacro_unconst`).
+The `gcstp` pair brackets browser wrapper release without changing collector
+pacing. These are narrow support for trusted
 standard-library foreign functions, not general function-like-macro
 inference. Add a one-expression bridge here for such an unsupported operation
 rather than inferring a function-like macro.

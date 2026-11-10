@@ -4,6 +4,7 @@
 -- `titan:driver` callables follow the async backend's spawn/settle protocol.
 local browser = import "browser"
 local coroutine = import "coroutine"
+local gc = import "gc"
 local _ = import "mini_child"
 foreign import "stdio.h"
 foreign import "stdlib.h"
@@ -572,6 +573,29 @@ local function shutdown(...: Value): Value
   return Value.is_nil()
 end
 
+local record ReleaseCapture
+  number: integer
+end
+local released_captures = 0
+
+local function release_capture_finalize(_: value)
+  released_captures = released_captures + 1
+end
+
+local function make_releasable(...: Value): Value
+  local captured = ReleaseCapture(42)
+  gc.finalizable<|value|>(captured, release_capture_finalize)
+  return Value.is_callable(function(...: Value): Value
+    return Value.is_integer(captured.number)
+  end)
+end
+
+local function count_released_captures(...: Value): Value
+  gc.collect()
+  gc.collect()
+  return Value.is_integer(released_captures)
+end
+
 local function register(...: Value): Value
   binding_call("titan:driver", Value.is_callable(spawn), Value.is_callable(shutdown))
   return Value.is_nil()
@@ -711,6 +735,8 @@ do
     publish("park_idle", park_idle)
     publish("owner_probe", owner_probe)
     publish("spare", spare)
+    publish("make_releasable", make_releasable)
+    publish("released_captures", count_released_captures)
     publish("pin_callbacks", pin_callbacks)
     publish("unpin_callbacks", unpin_callbacks)
     publish("pin_last_close", pin_last_close)

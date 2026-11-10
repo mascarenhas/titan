@@ -255,13 +255,11 @@ async function queue(context, image) {
     host.hooks.kick = () => queueMicrotask(() => { host.hopCall = host.call('echo', 7n); });
     await host.task('hops');
     context.assert(await host.hopCall === 7n, 'a call from a microtask between internal hops');
-    const releases = host.snapshot().releases;
     host.fn('spare').release();
-    context.assert(host.snapshot().releases === releases + 1, 'a wrapper release was not deferred');
+    await rejection(context, host.fn('spare').call(), 'DISPOSED');
     host.instance.notify(host.fn('note'), 'n2');
     await until(context, () => host.notes.length === 2, 'the second notification');
-    context.assert(host.snapshot().releases === 0 && host.snapshot().driving,
-      'the driver did not apply deferred releases between turns');
+    context.assert(host.snapshot().driving, 'wrapper release interrupted the drive');
     const reason = {why: 'aborted while waiting'};
     controller.abort(reason);
     const cancelled = await rejection(context, hanging, 'CANCELLED');

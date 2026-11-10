@@ -774,6 +774,11 @@ function test_export_requests_and_listeners(_: test.Context)
     end
     return Value.is_callable(fn)
   end)
+  publish("exit_for_release", function(...: browser.BrowserValue): browser.BrowserValue
+    browser.drive_begin()
+    browser.drive_end(0, true)
+    return Value.is_nil()
+  end)
   local nested_finalizer_ran = false
   local arm_nested_finalizer = function()
     local finalizer_obj: {string: integer} = {}
@@ -827,6 +832,14 @@ function test_export_stdio(_: test.Context)
 end
 
 local stored_callable: Callable?
+local function arm_release_gc()
+  local marker: {string: integer} = {}
+  gc.finalizable<|value|>(marker, function(_: value)
+    local target = browser.binding("r1_release_result")
+    defer target:close()
+    target:call(Value.is_callable(stored_callable))
+  end)
+end
 function test_export_callable_reuse(_: test.Context)
   publish("make_callable", function(...: browser.BrowserValue): browser.BrowserValue
     stored_callable = function(...: browser.BrowserValue): browser.BrowserValue
@@ -836,6 +849,19 @@ function test_export_callable_reuse(_: test.Context)
   end)
   publish("reexport_callable", function(...: browser.BrowserValue): browser.BrowserValue
     return Value.is_callable(stored_callable)
+  end)
+  publish("release_with_gc_due", function(...: browser.BrowserValue): browser.BrowserValue
+    local incremental = gc.incremental()
+    local stepmul = gc.stepmul(0)
+    gc.collect()
+    gc.pause()
+    arm_release_gc()
+    -- No Titan call may poll between making debt due and the raw release import.
+    ffi.lua_gc(L, ffi.LUA_GCRESTART)
+    local deferred = ffi.titan_bridge_test_release_due_gc() ~= 0
+    gc.stepmul(stepmul)
+    if not incremental then gc.generational() end
+    return Value.is_boolean(deferred)
   end)
 end
 
