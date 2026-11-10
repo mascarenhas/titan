@@ -320,8 +320,9 @@ learn about the callback only through `titan_no_switch`.
   [wake source](browser-target.md#drives-the-call-queue-and-wake-sources)
   for the owner. `BrowserPin:close` is idempotent: it drops the hold, calls
   `retire_if_unused`, and decrements `open_pins`. Closing the last pin calls
-  `wake`, so a parked wait re-checks its wake sources. A wait with an open
-  pin passes `WAIT_HELD`; the loader keeps no copy of the count.
+  `wake`, so a parked gate resumes with `RESUMED` and the drive's next wait
+  re-checks its wake sources. A wait with an open pin passes `WAIT_HELD`;
+  the loader keeps no copy of the count.
 - **C entries.** `browserentry.lua` declares `call_sync`, `callback_enter`
   and `callback_leave` as weak, like the invoke and release forwards, and
   defines the C functions `titan_browser_call_sync`,

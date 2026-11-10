@@ -505,6 +505,20 @@ local function unpin_callbacks(...: Value): Value
   return Value.is_nil()
 end
 
+-- Closing the only open pin must wake the parked drive without an explicit wake.
+local function sync_last_close(...: Value): Value
+  unpin_callbacks()
+  local job? = awaiting
+  awaiting = nil
+  if job ~= nil then job:finish("succeeded", Value.is_string("pins closed"), Value.is_nil()) end
+  return Value.is_nil()
+end
+
+local function pin_last_close(...: Value): Value
+  publish_pin("last_close", sync_last_close)
+  return Value.is_nil()
+end
+
 -- Waits with no request: only an open pin keeps the drive from going idle.
 local function await_callback(...: Value): Value
   local job = current
@@ -676,6 +690,7 @@ do
     publish("spare", spare)
     publish("pin_callbacks", pin_callbacks)
     publish("unpin_callbacks", unpin_callbacks)
+    publish("pin_last_close", pin_last_close)
     publish("await_callback", await_callback)
     child_owner = ffi.mini_driver_new_child(L)
   end

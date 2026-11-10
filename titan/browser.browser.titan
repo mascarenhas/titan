@@ -125,8 +125,11 @@ local callback_threads: {CallbackThread} = {}
 -- at a time, and deliver() never nests or relinquishes.
 local owner_state = false
 local drive_active = false
-local open_pins = 0
 local delivering = false
+
+-- Open BrowserPins per Lua state: count only after owner.slot is set, wake
+-- when the count reaches zero, and keep the count across drive boundaries.
+local open_pins = 0
 
 local foreign function mark_closing(state: *titan_browser_state_record)
   if state ~= nil then
@@ -1116,8 +1119,11 @@ function relinquish(wait: boolean): integer
   ffi.fflush(ffi.stderr)
   local mode = ffi.TITAN_BROWSER_TURN as foreign uint32_t
   if wait then
-    mode = ffi.TITAN_BROWSER_WAIT as foreign uint32_t
-    if open_pins > 0 then mode = ffi.TITAN_BROWSER_WAIT_HELD as foreign uint32_t end
+    if open_pins > 0 then
+      mode = ffi.TITAN_BROWSER_WAIT_HELD as foreign uint32_t
+    else
+      mode = ffi.TITAN_BROWSER_WAIT as foreign uint32_t
+    end
   end
   return ffi.titan_browser_relinquish(state_record.token, mode)
 end

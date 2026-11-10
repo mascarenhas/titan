@@ -2951,7 +2951,8 @@ once and accepts a drive only from that state inside an active operation.
   Every enqueue of an owner item, `dispose()`, and `titan_browser_host_wake`
   schedule the one coalesced turn-source macrotask that resolves the parked
   gate ([relinquish import](#the-relinquish-import)). Closing the owner's last
-  pin calls `wake`, so a parked wait re-checks its wake sources.
+  pin calls `wake`, so a parked gate resumes with `RESUMED` and the drive's
+  next wait re-checks its wake sources.
 - **Synchronous C callbacks.** A C callback that enters Titan through
   `titan_browser_call_sync` is not an operation and takes no admission.
   `callbackAdmit(state)`, behind `titan_browser_host_callback`, admits it

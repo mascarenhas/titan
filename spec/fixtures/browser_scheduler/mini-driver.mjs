@@ -523,6 +523,34 @@ async function pinWakeSource(context, image) {
   } finally { await host.instance.dispose(); }
 }
 
+// Only closing the last pin wakes this held wait: the callback neither calls
+// browser.wake() nor queues a loader call, and no host request can wake it.
+async function lastPinCloseWake(context, image) {
+  const host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    await host.call('register');
+    await host.call('pin_last_close');
+    const waiting = host.task('await_callback');
+    await until(context, () => host.snapshot().parked, 'the last-pin job did not park');
+    for (let tick = 0; tick < 5; tick++) await context.tick();
+    const parked = host.snapshot();
+    context.assert(parked.parked && !parked.turnScheduled && parked.queue === 0 && parked.requests === 0,
+      'the last-pin wait had another scheduled wake source');
+    const before = host.probes.length;
+    context.assert(host.fire('last_close') === 0, 'the last-pin callback failed');
+    await until(context, () => host.probes.length > before, 'closing the last pin did not wake the parked drive');
+    const resumed = host.probes[before].status;
+    context.assert(resumed === 0, 'closing the last pin did not resume the held wait with RESUMED');
+    context.assert(await waiting === 'pins closed', 'the last-pin callback did not finish its waiting job');
+    const idleBefore = host.probes.length;
+    const orphaned = await rejection(context, host.task('await_callback'), 'TITAN');
+    context.assert(decode(orphaned.bytes) === 'mini driver became idle while jobs were waiting' &&
+      host.probes[idleBefore]?.status === 1, 'the next wait after the last-pin wake did not report IDLE');
+    return {resumed, idle: host.probes[idleBefore].status};
+  } finally { await host.instance.dispose(); }
+}
+
 // Authored C that switches stacks inside a synchronous callback poisons the
 // instance, whether the callback ran idle, from a parked drive, or nested in a
 // binding of an entry. V8 refuses the suspending import before calling it, so
@@ -587,6 +615,7 @@ export async function run(context) {
   await exits(context, image);
   report.timers = await timers(context, image);
   report.pinWakeSource = await pinWakeSource(context, image);
+  report.lastPinCloseWake = await lastPinCloseWake(context, image);
   report.callbackSwitch = await callbackSwitch(context, image);
   context.stdout(encode('MINI-DRIVER ' + JSON.stringify(report) + '\n'));
 }
