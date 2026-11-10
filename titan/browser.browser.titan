@@ -815,24 +815,13 @@ foreign function release_callable(raw_token: unsigned int, raw_slot: unsigned in
   local token = raw_token as foreign uint32_t
   local slot = raw_slot as foreign uint32_t
   local generation = raw_generation as foreign uint32_t
-  local state = callback_state(token)
-  if state == nil then
-    return ffi.TITAN_BROWSER_STATE as foreign int
+  local state: foreign *titan_browser_state_record = nil
+  local thread: foreign *lua_State = nil
+  local refusal: foreign const *char = nil
+  local status = callback_begin(token, state, thread, refusal)
+  if status ~= ffi.TITAN_BROWSER_OK then
+    return status
   end
-  if ffi.titan_browser_host_callback(token, 1) == 0 then
-    return ffi.TITAN_BROWSER_STATE as foreign int
-  end
-  local thread = state.callback_next
-  if thread == nil then
-    ffi.titan_browser_host_callback(token, -1)
-    return ffi.TITAN_BROWSER_STATE as foreign int
-  end
-  if ffi.lua_checkstack(thread, ffi.LUA_MINSTACK) == 0 then
-    ffi.titan_browser_host_callback(token, -1)
-    return ffi.TITAN_BROWSER_MEMORY as foreign int
-  end
-  state.callback_depth = state.callback_depth + 1
-  state.callback_next = nil
   local handler = ffi.lmacro_clCvalue(state.release_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign ReleaseEntry
@@ -1357,6 +1346,44 @@ local foreign function callback_state(token: uint32_t): *titan_browser_state_rec
   return state
 end
 
+-- The shared start of every synchronous entry: call_sync, the callback
+-- bracket and wrapper release. It finds the open state, asks the loader to
+-- admit the entry, and takes the state's next callback thread with
+-- LUA_MINSTACK reserved on it. On TITAN_BROWSER_OK the callback level is
+-- taken and `state_out` and `thread_out` are set; callback_finish ends it.
+-- A refusal holds nothing. TITAN_BROWSER_STATE sets `refusal` to the reason,
+-- for a caller that reports one; TITAN_BROWSER_MEMORY means that the stack
+-- could not be reserved.
+local foreign function callback_begin(token: uint32_t,
+                                      state_out: *(*titan_browser_state_record),
+                                      thread_out: *(*lua_State),
+                                      refusal: *(const *char)): int
+  local state = callback_state(token)
+  if state == nil then
+    refusal[0] = "browser state is closed, closing or uninitialized"
+    return ffi.TITAN_BROWSER_STATE as foreign int
+  end
+  if ffi.titan_browser_host_callback(token, 1) == 0 then
+    refusal[0] = "browser instance is disposing, exited or poisoned"
+    return ffi.TITAN_BROWSER_STATE as foreign int
+  end
+  local thread = state.callback_next
+  if thread == nil then
+    ffi.titan_browser_host_callback(token, -1)
+    refusal[0] = "synchronous callback nesting is too deep"
+    return ffi.TITAN_BROWSER_STATE as foreign int
+  end
+  if ffi.lua_checkstack(thread, ffi.LUA_MINSTACK) == 0 then
+    ffi.titan_browser_host_callback(token, -1)
+    return ffi.TITAN_BROWSER_MEMORY as foreign int
+  end
+  state.callback_depth = state.callback_depth + 1
+  state.callback_next = nil
+  state_out[0] = state
+  thread_out[0] = thread
+  return ffi.TITAN_BROWSER_OK as foreign int
+end
+
 -- Ends a callback level: its thread is free for the next callback.
 local foreign function callback_finish(state: *titan_browser_state_record, token: uint32_t,
                                        thread: *lua_State)
@@ -1396,25 +1423,17 @@ foreign function call_sync(raw_identity: const *void, raw_argc: unsigned int,
     return sync_refuse(result, "browser callback identity is absent")
   end
   local token = identity.state
-  local state = callback_state(token)
-  if state == nil then
-    return sync_refuse(result, "browser state is closed, closing or uninitialized")
+  local state: foreign *titan_browser_state_record = nil
+  local thread: foreign *lua_State = nil
+  local refusal: foreign const *char = nil
+  local status = callback_begin(token, state, thread, refusal)
+  if status == ffi.TITAN_BROWSER_STATE then
+    return sync_refuse(result, refusal)
   end
-  if ffi.titan_browser_host_callback(token, 1) == 0 then
-    return sync_refuse(result, "browser instance is disposing, exited or poisoned")
+  if status ~= ffi.TITAN_BROWSER_OK then
+    result.status = status as foreign uint32_t
+    return status
   end
-  local thread = state.callback_next
-  if thread == nil then
-    ffi.titan_browser_host_callback(token, -1)
-    return sync_refuse(result, "synchronous callback nesting is too deep")
-  end
-  if ffi.lua_checkstack(thread, ffi.LUA_MINSTACK) == 0 then
-    ffi.titan_browser_host_callback(token, -1)
-    result.status = ffi.TITAN_BROWSER_MEMORY as foreign uint32_t
-    return ffi.TITAN_BROWSER_MEMORY as foreign int
-  end
-  state.callback_depth = state.callback_depth + 1
-  state.callback_next = nil
   local handler = ffi.lmacro_clCvalue(state.call_sync_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallSyncEntry
@@ -1441,24 +1460,13 @@ foreign function callback_enter(raw_state: unsigned int, raw_frame: *void): int
   frame.L = nil
   frame.state = token
   frame.depth = 0
-  local state = callback_state(token)
-  if state == nil then
-    return ffi.TITAN_BROWSER_STATE as foreign int
+  local state: foreign *titan_browser_state_record = nil
+  local thread: foreign *lua_State = nil
+  local refusal: foreign const *char = nil
+  local status = callback_begin(token, state, thread, refusal)
+  if status ~= ffi.TITAN_BROWSER_OK then
+    return status
   end
-  if ffi.titan_browser_host_callback(token, 1) == 0 then
-    return ffi.TITAN_BROWSER_STATE as foreign int
-  end
-  local thread = state.callback_next
-  if thread == nil then
-    ffi.titan_browser_host_callback(token, -1)
-    return ffi.TITAN_BROWSER_STATE as foreign int
-  end
-  if ffi.lua_checkstack(thread, ffi.LUA_MINSTACK) == 0 then
-    ffi.titan_browser_host_callback(token, -1)
-    return ffi.TITAN_BROWSER_MEMORY as foreign int
-  end
-  state.callback_depth = state.callback_depth + 1
-  state.callback_next = nil
   local handler = ffi.lmacro_clCvalue(state.callback_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry

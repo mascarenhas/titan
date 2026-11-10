@@ -360,14 +360,27 @@ learn about the callback only through `titan_no_switch`.
   forward to them. They are C entry points for authored C in the image, not
   JavaScript exports. Without `titan.browser`, the first two return
   `TITAN_BROWSER_STATE` and the third does nothing.
-- **Admission.** `call_sync` refuses without entering Lua, with a
-  `malloc`'d message and `TITAN_BROWSER_STATE`, when its identity names no
-  open, configured state record (`callback_state`: record lookup through
-  `titan_browser_host_state_record`, then the closing and configured checks)
-  or when `titan_browser_host_callback(state, 1)` refuses. That import admits
-  unless the bridge library is poisoned or the loader's `callbackAdmit`
-  refuses (closing, exited or terminal), and it
-  increments `$TitanBrowser.callbackDepth` on admission.
+- **Admission.** The three synchronous entries (`call_sync`,
+  `callback_enter`, and the [release
+  trampoline](#synchronous-wrapper-release)) start with one helper,
+  `callback_begin`. It refuses without entering Lua in four cases, tested in
+  this order:
+  1. The token names no open, configured state record (`callback_state`:
+     record lookup through `titan_browser_host_state_record`, then the
+     closing and configured checks).
+  2. `titan_browser_host_callback(state, 1)` refuses. That import admits
+     unless the bridge library is poisoned or the loader's `callbackAdmit`
+     refuses (closing, exited or terminal), and it increments
+     `$TitanBrowser.callbackDepth` on admission.
+  3. The state has no callback thread to give, because callbacks nest too
+     deeply.
+  4. `LUA_MINSTACK` cannot be reserved on that thread.
+
+  The first three return `TITAN_BROWSER_STATE` with the reason as text, and
+  the fourth returns `TITAN_BROWSER_MEMORY`. A refusal after the import
+  admitted the entry ends that admission. Each entry answers a refusal in its
+  own way: `call_sync` copies the reason into a `malloc`'d message of its
+  result, and the bracket and the release trampoline return the status alone.
 - **Callback threads.** The state record gains `callback_handler` and
   `call_sync_handler` (`TValue` entries like `invoke_handler`),
   `callback_next` and `callback_depth`. A callback runs on its own Lua thread,
@@ -375,10 +388,10 @@ learn about the callback only through `titan_no_switch`.
   drive and coroutine frames. `callback_threads` (a module variable of
   `CallbackThread` records holding each thread and its `lua_State *`) keeps
   one thread per nesting level. The initializer creates level 1 and publishes
-  it as `callback_next`. An entry takes `callback_next` (none means
-  `"synchronous callback nesting is too deep"`), reserves `LUA_MINSTACK`
-  on it, increments `callback_depth`, clears `callback_next`, installs
-  `errorhandler` and runs the handler on that thread. The handler's first
+  it as `callback_next`. `callback_begin` takes `callback_next`, reserves
+  `LUA_MINSTACK` on it, increments `callback_depth` and clears
+  `callback_next`; the entry then installs `errorhandler` and runs its
+  handler on that thread. The handler's first
   step, `prepare_callback_thread`, publishes the next level's thread,
   creating it once (`titan_newthread` in a stack transaction) on first use.
   `callback_finish` then restores the depth, republishes the thread and
@@ -449,13 +462,14 @@ releases](#refused-releases)).
 
 The export forwards to the `foreign function` `release_callable`, which is a
 callback trampoline like `call_sync` ([synchronous C
-callbacks](#synchronous-c-callbacks)). It finds the open, configured state
-record (`callback_state`), asks `titan_browser_host_callback(state, 1)` for
-admission, takes the state's next callback thread, and reserves
-`LUA_MINSTACK` on it. It then installs `errorhandler`, calls `release_entry`,
-restores the error handler and the stack top, and ends the callback with
-`callback_finish`. The body therefore runs in no-switch mode, apart from the
-frames of a parked drive or coroutine.
+callbacks](#synchronous-c-callbacks)). It starts with the shared
+`callback_begin`: find the open, configured state record, ask
+`titan_browser_host_callback(state, 1)` for admission, take the state's next
+callback thread, and reserve `LUA_MINSTACK` on it. It then installs
+`errorhandler`, calls `release_entry`, restores the error handler and the
+stack top, and ends the callback with `callback_finish`. The body therefore
+runs in no-switch mode, apart from the frames of a parked drive or
+coroutine.
 
 `release_entry` is a function-scope `catch` around `apply_release`.
 `apply_release` finds the pin by slot and generation, clears `wrapper_live`,
