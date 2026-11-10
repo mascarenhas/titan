@@ -226,23 +226,31 @@ and at commit `48b26b75`; rules 2 and 5 have no JavaScript reading.
    treats the opposite as corruption: a synchronous callback that a
    JavaScript exception ends poisons the instance (`callbacksLeft`).
 4. **Pinning and data placement.** Wrong (`titan-browser.mjs` at
-   `48b26b75`): the `holds` map, a per-state copy of Titan's count of open
-   `BrowserPin`s, kept current by a dedicated import
-   (`titan_browser_host_hold`) only so that `hasWakeSources` can read it.
-   Right: the pin table and its hold counts are module variables of
-   `titan/browser.browser.titan` (`pins_by_slot`, `Pin.holds`), and the
-   loader holds one wrapper object per pin and the slot table of JavaScript
-   values. Where the loader needs a Titan fact, Titan passes it with the
-   call: the driver decides between a turn and a wait
-   (`browser.relinquish(runtime.ready_head == nil)`) and the loader keeps no
-   copy of the ready queue.
+   `48b26b75`), twice. The `holds` map was a per-state copy of Titan's count
+   of open `BrowserPin`s, kept current by a dedicated import
+   (`titan_browser_host_hold`) only so that `hasWakeSources` could read it.
+   And each request record counted its queued notifications
+   (`pendingNotifications`, `holdsReleased`) to decide when Titan's holds on
+   `completion` and `failure` could drop. Right: the pin table and its hold
+   counts are module variables of `titan/browser.browser.titan`
+   (`pins_by_slot`, `Pin.holds`, `RequestHolds`), and the loader holds one
+   wrapper object per pin and the slot table of JavaScript values. Where the
+   loader needs a Titan fact, Titan passes it with the call that needs it.
+   `titan.browser` counts its open pins (`open_pins`), and `relinquish`
+   passes `WAIT_HELD` instead of `WAIT` while one is open. The driver's
+   choice between a turn and a wait crosses the same way
+   (`browser.relinquish(runtime.ready_head == nil)`), so the loader keeps no
+   copy of the ready queue either.
 6. **Don't duplicate checks the receiver makes.** Wrong (`titan-browser.mjs`
-   at `48b26b75`): `driveBegin` poisons when a drive is already active, after
-   `drive_begin` has refused the same call with `"browser drive is already
-   active"`. Right: each side tests the fact it owns. `validateCallable`
-   tests what only JavaScript knows (the wrapper's brand, its instance, and
-   its logical release, which is synchronous in JavaScript), and
-   `invoke_work` tests the pin generation that Titan owns.
+   at `48b26b75`), twice. `driveBegin` poisoned when a drive was already
+   active, after `drive_begin` had refused the same call with `"browser drive
+   is already active"`. And the loader tested for an exhausted operation
+   identity at seven sites, though it allocates an identity at two. Right:
+   each side tests the fact it owns, once. `nextOperationId` is the one
+   place that refuses an exhausted identity. `validateCallable` tests what
+   only JavaScript knows (the wrapper's brand, its instance, and its logical
+   release, which is synchronous in JavaScript), and `invoke_work` tests the
+   pin generation that Titan owns.
 
 ## Model actual call and result protocols
 

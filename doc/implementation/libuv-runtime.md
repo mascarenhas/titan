@@ -896,29 +896,34 @@ state.
   - A zero delay is `async.yield()`: no host request, and the Task resumes in
     a later turn, after the driver's one-macrotask relinquish, without the
     clamp that HTML puts on nested `setTimeout`.
-  - Any other delay chains detachable `titan:timeout` requests, each at most
-    2,147,483,647 ms. Each completion resumes the Task's `ResumeToken`; the
-    Task starts the next chunk only after the previous chunk has elapsed.
-    Each suspension has a cancel action that cancels its request, clearing
-    the current host timer and ending the chain at once. The loader drops a
-    settlement that arrives later. Native `sleep` passes no cancel action
-    and retires its uv timer in a deferred close instead.
+  - Any other delay waits on detachable `titan:timeout` requests, one at a
+    time. A host timer takes at most 2,147,483,647 ms, so `sleep` splits a
+    longer delay into chunks of at most that size and starts each chunk's
+    request only after the previous one has elapsed. Each completion resumes
+    the Task's `ResumeToken`. Each suspension's cancel action cancels the
+    current request, which clears the host timer and ends the whole sleep at
+    once; the loader drops a settlement that arrives later. Native `sleep`
+    passes no cancel action and retires its uv timer in a deferred close
+    instead.
   - A host failure resumes the Task, which then raises
     `OperationError(-EIO, "EIO", <host message>, "timer.sleep")`.
   - After `dispose()` the request cannot start (`browser.BrowserError`,
     `"browser state is closing"`). A disposal cleanup never gets that far,
     because its checkpoint raises the Task's cancellation first.
 - **`ticker(ms)`** registers a close listener with the Runtime, then a
-  `CoalescingSubscription`. For periods up to 2,147,483,647 ms its producer
-  opens a `titan:interval` listener. Longer periods chain one-shot
-  `titan:timeout` requests in `Ticker:arm`, each bounded by that same limit.
-  The whole period is re-armed before each tick is published.
+  `CoalescingSubscription` whose producer arms the host timer.
+  - A period of at most 2,147,483,647 ms opens one `titan:interval` listener.
+  - A longer period has no host interval to run on, so `Ticker:arm` chains
+    one-shot `titan:timeout` requests of at most that size. The completion
+    of a period's last chunk arms the next period's first chunk before it
+    publishes the tick, as a host interval re-arms before it calls back.
+    Each completion closes the request that it replaces.
+  - Arming the next chunk can fail, for example while the state is closing.
+    The completion catches that error, closes a thrown `BrowserError`, and
+    fails the subscription, so the error reaches the waiting `tick()`
+    instead of `onNotificationError`.
   - Each event publishes `true`, so missed firings, including throttled ones,
     coalesce into one pending tick.
-  - Arming a later chunk can fail during delivery when the state is closing.
-    The completion callback catches that error, closes a thrown
-    `BrowserError`, and fails the subscription rather than reporting an
-    unhandled notification error.
   - `stop` cancels the current request, and `close` marks the ticker closed
     and closes its request.
   - The close listener does the same when the Runtime closes, so a ticker

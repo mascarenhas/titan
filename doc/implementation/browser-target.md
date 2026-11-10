@@ -2799,25 +2799,34 @@ inside a synchronous callback"`) when no promising entry holds the execution
 owner, when a [synchronous C callback](browser-bridge.md#synchronous-c-callbacks)
 runs (it then throws to the callback's caller), or when the main context is
 not current (`TitanBrowser.current !== 0`). Otherwise it hands the call to
-the loader owner. `titan.browser` requires the owner's main thread, an active
-drive and no delivery in progress before calling the import.
+the loader owner. `titan.browser` has already required the owner's main
+thread, an active drive and no delivery in progress, and the loader does not
+test those again.
+
+The loader owner decides in this order:
+
+1. **Disposal.** Disposal is signalled once: the first relinquish after
+   `dispose()` began (or a gate parked when it began) resolves `DISPOSING`
+   after one turn.
+2. **A turn.** `TURN = 0`, or any wait while an owner item is queued, parks a
+   gate and schedules one turn-source macrotask.
+3. **Nothing to wait for.** `WAIT = 1` with no loader wake source returns
+   `IDLE` as a plain number, so JSPI does not suspend; the terminal
+   `titan_mco_transfer` path already relies on that.
+4. **A wait.** Any other wait parks a gate until a wake. `WAIT_HELD = 2`
+   never returns `IDLE`: `titan.browser` passes it while the state has an
+   open `BrowserPin`, a wake source that only Titan knows about.
+
+A gate is created synchronously inside the import, so a wake can never fire
+before it exists. Every resumption resolves the gate from the turn source,
+never directly from a microtask, with `DISPOSING` once disposal began and
+`RESUMED` otherwise.
 
 Outside disposal, every branch that parks a gate also schedules both output
 pumps on a microtask, so sinks run once the drive has suspended, never
 inside the import, and only while that gate is still parked. A numeric
 `IDLE` schedules none, so the coroutine switches of orphan unwinding that
-may follow it never meet a sink. Disposal is signalled once: the first
-relinquish after `dispose()` began (or a gate parked when it began) resolves
-`DISPOSING` after one turn. A turn (`TURN = 0`), or a wait with a queued
-owner item, parks a gate and schedules one turn-source macrotask.
-`titan.browser` passes `WAIT_HELD = 2` while the state has an open
-`BrowserPin`, otherwise `WAIT = 1`. A plain `WAIT` with no loader wake source
-returns `IDLE` as a number, so JSPI does not suspend; the terminal
-`titan_mco_transfer` path already relies on that. `WAIT_HELD` parks even
-when the loader has no wake source. A parked gate is created synchronously
-inside the import so a wake can never fire before it exists. Every
-resumption resolves the gate from the turn source, never directly from a
-microtask, with `DISPOSING` once disposal began and `RESUMED` otherwise.
+may follow it never meet a sink.
 
 The turn source is `setImmediate` where the host defines it (Node) and
 otherwise one `MessageChannel` per instance, created on first use; neither
@@ -2877,10 +2886,14 @@ and collector transfers. Its per-entry `entered` flag resets for the next
 contained entry; no lifetime completion counter blocks later entries.
 
 Every promising C entry receives the next nonzero instance-local uint64 BigInt
-identity. The admission import normalizes Wasm's signed i64 presentation back
-to unsigned before comparison. The final identity is reserved for close.
-Exhaustion is refused at the identity allocation site, before incrementing
-the counter; a delivered item takes its identity before marshaling.
+identity, and so does each item that a drive delivers. The admission import
+normalizes Wasm's signed i64 presentation back to unsigned before comparison.
+One allocator, `nextOperationId`, hands the identities out and keeps the
+final one for close. When the others are used up it throws
+`TITAN_BROWSER_STATE` without incrementing the counter. Admission itself does
+not test for exhaustion, so a method that allocates no identity still works:
+`notify` enqueues, and a `drain()` with nothing to deliver succeeds. A
+delivered item takes its identity before its arguments are marshalled.
 The pending record has that identity, the expected operation kind, and one
 completion slot. The non-suspending completion import validates identity and
 kind and copies all result/error/trace data while C owns it. Duplicate,
@@ -2899,18 +2912,21 @@ bare value (`null` for `is_nil()`, `BigInt` for `is_integer`, string for
 `is_handle`).
 
 Callable wrappers have module-private WeakMap brands and state/slot/generation
-records. Logical release invalidates immediately and calls the synchronous
-no-switch release entry on a callback thread. Its allocation-free body is
-bracketed by saving `gcstp`, adding `GCSTPGC` and restoring the exact bits:
-entry polls must not run a finalizer between logical release and pin retirement.
-The bracket leaves ordinary collector pacing unchanged and preserves a user
-pause. Refusal leaves the pin for state close. Release has no completion or
-notification error.
-A detached FIFO batch
-revalidates both its target and every branded argument before any Wasm
-allocation. A released target drops the notification; a released argument of a
-plain notification reports an error without Lua entry. A request event with an
-unmarshallable argument instead queues its failure event. State-close notification
+records. `release()` marks the record released and removes it from the
+callable table, which invalidates the wrapper for every later use. Then,
+unless the instance is disposing or poisoned, it calls the synchronous export
+`titan_browser_release_callable`. That call is not an operation: it has no
+identity, no completion, and no notification error, and the loader ignores
+the status it returns. [Synchronous wrapper
+release](browser-bridge.md#synchronous-wrapper-release) describes the Titan
+side, including the collector stop and what a refused release leaves behind.
+
+A detached FIFO batch revalidates both its target and every branded argument
+before any Wasm allocation. A released target drops the notification. A
+released argument is a marshalling failure: a plain notification reports it
+through `onNotificationError` without entering Lua, and a request event
+becomes the request's failure event ([request
+boundary](browser-bridge.md#request-boundary)). State-close notification
 invalidates every callable, notification, request, and JS slot charged to that
 state, including close-phase slots created without Lua finalizer registration.
 
@@ -2946,30 +2962,37 @@ checks.
   exit, every application method rejects (`notify` throws)
   `TITAN_BROWSER_EXITED`.
 - **Delivery.** `host_batch` moves the owner's items present now into the
-  current batch; `host_item` revalidates each item as `drain()` does, assigns
-  it a fresh identity from the operation counter, marshals its arguments and
-  writes the delivery record; `host_settle` validates that identity, copies
-  the completion as `receiveCompletion` does, reports a notification's
-  failure as a callback error and settles a plain call's promise immediately;
-  `host_item_done` frees the item's allocations and unadopted temporaries.
-  An unmarshallable request success becomes a failure event appended to the
-  live queue; an unmarshallable failure event is reported and returned as
-  `UNDELIVERED` with target identity and no arguments, settlement or
-  `item_done`. Titan drops a one-shot's holds for that item; listener holds
-  remain. Other unmarshallable items are reported and skipped. Promise
-  continuations run at the next microtask checkpoint, which can fall between
-  internal coroutine hops of the same turn, never under a Wasm frame. Calls
-  made there wait for a later turn. A call queued too late for the drive's
-  last batch runs at the next safe point as an ordinary call.
-- **Wake sources.** A queued owner item, an open owner request or listener,
-  an open owner `BrowserPin`, or an already scheduled wake keeps a waiting
-  relinquish parked; a JS call that might come later does not. `titan.browser`
-  counts open pins per state and passes that wake source as `WAIT_HELD`.
-  Every enqueue of an owner item, `dispose()`, and `titan_browser_host_wake`
-  schedule the one coalesced turn-source macrotask that resolves the parked
-  gate ([relinquish import](#the-relinquish-import)). Closing the owner's last
-  pin calls `wake`, so a parked gate resumes with `RESUMED` and the drive's
-  next wait re-checks its wake sources.
+  current batch. `host_item` revalidates each item as `drain()` does, assigns
+  it a fresh identity from the operation counter, marshals its arguments, and
+  writes the delivery record. `host_settle` validates that identity and
+  copies the completion as `receiveCompletion` does; it reports a
+  notification's failure as a callback error, and it settles a plain call's
+  promise there and then. `host_item_done` frees the item's allocations and
+  unadopted temporaries.
+  - *Items that cannot be marshalled.* A call's promise rejects with the
+    marshalling error. A request's success event becomes its failure event,
+    appended to the live queue. A request's failure event is reported through
+    `onNotificationError` and handed to Titan as `UNDELIVERED`, with the
+    target identity and nothing else, so that Titan can drop a one-shot's
+    holds ([request holds](browser-bridge.md#request-holds)). A plain
+    notification is reported and skipped.
+  - *When the awaiting code runs.* A queued call's promise settles while the
+    drive is still inside its turn. Its continuation runs at the next
+    microtask checkpoint, which is never under a Wasm frame but can fall
+    between two internal coroutine hops of the same turn. A call made from
+    that continuation is queued for a later turn.
+  - A call queued too late for the drive's last batch runs at the next safe
+    point as an ordinary call.
+- **Wake sources.** A waiting relinquish stays parked while the owner has a
+  queued item, an open request or listener, an open `BrowserPin`, or an
+  already scheduled wake; a JS call that might come later does not count. The
+  loader knows all of these except the pins, which `titan.browser` counts and
+  reports with the wait itself, as `WAIT_HELD`. Every enqueue of an owner
+  item, `dispose()`, and `titan_browser_host_wake` schedule the one coalesced
+  turn-source macrotask that resolves the parked gate ([relinquish
+  import](#the-relinquish-import)). `titan.browser` calls `wake` when the
+  owner's last pin closes, so the gate resumes with `RESUMED` and the drive's
+  next wait finds out whether a wake source remains.
 - **Synchronous C callbacks.** A C callback that enters Titan through
   `titan_browser_call_sync` is not an operation and takes no admission.
   `callbackAdmit`, behind `titan_browser_host_callback`, admits it unless the
@@ -2989,18 +3012,23 @@ checks.
   listener, a module-scope function over a detachable cell, queues one
   notification of `cancel` with `String(signal.reason)`; settlement removes
   it and releases the cancel wrapper. On an idle instance the spawn entry
-  itself drives and its failure wins over a stored outcome; during a drive
-  the spawn call is queued. A failed spawn entry rejects immediately; otherwise
-  the loader keeps the call in `openTasks` until the Task's outcome arrives
-  and settles its promise then. An outcome that arrived before the spawn
-  entry returned is settled when that entry returns. Plain calls never enter
-  this set, and there is no outcome sweep at relinquish.
+  itself drives, and its failure wins over a stored outcome. During a drive
+  the spawn call is queued, and its promise settles in one of three ways:
+  - a spawn entry that fails rejects the promise at once;
+  - an outcome that arrived before the spawn entry returned settles the
+    promise when that entry returns;
+  - otherwise the call waits in `openTasks`, and its outcome settles the
+    promise when it arrives.
+
+  Plain calls never enter `openTasks`, and a relinquish settles nothing.
 - **Exit.** `host_drive_end` with an exit status latches `exited`. `run()`
-  then reports `exited` unless its completion failed; a call or Task-form
-  call whose entry hosted the exiting drive rejects `TITAN_BROWSER_EXITED`.
-  Queued calls the drive never delivered and unfinished Task-form calls that
-  joined it reject too. Calls that already settled keep their results,
-  including Task-form calls whose Tasks finished before the exit.
+  then reports `exited` unless its completion failed, and a call or Task-form
+  call whose own entry hosted the exiting drive rejects
+  `TITAN_BROWSER_EXITED`. Among the calls queued into that drive, those that
+  already settled keep their results, including a Task-form call whose Task
+  finished before the exit. The rest reject `TITAN_BROWSER_EXITED`: calls
+  that the drive never delivered, and Task-form calls whose Tasks had not
+  finished.
 - **Main failure.** `titan_browser_host_main_failed(state, message, length,
   trace, length)`, the import behind `browser.main_failed`, copies both byte
   ranges onto the active operation's token when that operation is `run` and
@@ -3049,25 +3077,27 @@ failure releases the unreturned unit; an already accepted retained operation
 still owns its terminal retirement even if cancellation reports an error. C
 output needs no request unit.
 
-Titan owns request callable holds. A one-shot drops both holds after its
-callback returns or raises; cancel and close drop them after the host import
-returns. Cancel also suppresses a settlement already queued for delivery. A
-drive's `UNDELIVERED` hand-back drops a one-shot's holds without callback entry.
-The same double fault in idle `drain()`, or failure inside Titan before the
-callback runs, keeps the callables until request close or state close.
+The loader keeps no account of the callables that a request holds.
+`titan.browser` owns those holds and decides when they drop ([request
+holds](browser-bridge.md#request-holds)). The loader's part is to drop a
+cancelled request's queued events, including the settlement of a one-shot
+that settled before the cancel, and to hand an undeliverable failure event
+back to a drive.
 
 Every request has both a success target and a mandatory failure target.
 One-shot `start` settlement enqueues one argument (the settled value marshalled
 by runtime type, with `undefined` mapped to `is_nil`), `listen` emissions
 enqueue each emitted argument by runtime type, and Promise rejection queues the
 failure notification with `(is_string(message), is_handle(thrown))`, creating
-`thrown`'s state-owned handle only on delivery. Success marshalling failure,
-whether at settlement or delivery, queues the same failure notification.
-`onNotificationError` is not a substitute for the request's outcome. It receives
-`{kind: 'callback' | 'cleanup', operation, error}` for errors without another
-caller: an unmarshallable failure event, callback failures, secondary cleanup
-failures. Public operation labels are `initialize`, `run`, `call`, `callTask`,
-`drain`, `dispose`, and `notify`; work-announcement failure uses `requestDrain`.
+`thrown`'s state-owned handle only on delivery. A success event that cannot
+be marshalled, when it is queued or when it is delivered, queues that same
+failure notification instead. `onNotificationError` is not a substitute for
+the request's outcome. It receives
+`{kind: 'callback' | 'cleanup', operation, error}` for errors that have no
+other caller: a callback that raises, a failure event that cannot itself be
+marshalled, and secondary cleanup failures. Public operation labels are
+`initialize`, `run`, `call`, `callTask`, `drain`, `dispose`, and `notify`;
+work-announcement failure uses `requestDrain`.
 
 ### Output, disposal, and observation
 

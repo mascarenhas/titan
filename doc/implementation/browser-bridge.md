@@ -1,14 +1,17 @@
 # Browser bridge runtime
 
 The core JavaScript bridge uses the browser JSPI backend and the single
-persistent image lifecycle. It does not add another coroutine driver, native
-message format, or general synchronous JavaScript-to-Titan call. Synchronous
-callbacks and allocation-free wrapper release use the same no-switch bracket,
-and it supplies the [drive interface](#drive-interface-and-delivery) a
-scheduler uses rather than a scheduler. The
-public Titan API is [JavaScript bindings](../language/standard-library-browser.md);
-[the browser target](browser-target.md) owns link profiles, the embedded
-loader, the runner, deployment, and fatal engine classifications.
+persistent image lifecycle. It adds no second coroutine driver and no native
+message format, and JavaScript has no general synchronous call into Titan:
+every application entry is a promised export. Two narrow entries are
+synchronous and run in no-switch mode on a callback thread: [synchronous C
+callbacks](#synchronous-c-callbacks) and [wrapper
+release](#synchronous-wrapper-release). The bridge supplies the [drive
+interface](#drive-interface-and-delivery) that a scheduler uses, not a
+scheduler. The public Titan API is [JavaScript
+bindings](../language/standard-library-browser.md); [the browser
+target](browser-target.md) owns link profiles, the embedded loader, the
+runner, deployment, and fatal engine classifications.
 
 ## Source ownership
 
@@ -69,12 +72,14 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    creates the owner `lua_State *`, opens the Lua libraries, installs the Titan
    searcher and preloads, and requires the root module without calling `main`.
    `titan.browser` initializes in ordinary dependency order; images without it
-   use a bare host state token. The loader memoizes initialization and admits
-   `run()` once. `titan_browser_entry` requires the launcher's ready owner,
-   retrieves the initialized module from `LUA_LOADED_TABLE`, constructs its
-   counted string Array, and runs `main`. Both entries run under
-   `titan_browser_protected_entry` with plain `errorhandler` as the `lua_pcall`
-   message handler. On failure,
+   use a bare host state token. `titan_browser_entry` requires the launcher's
+   ready owner, retrieves the initialized module from `LUA_LOADED_TABLE`,
+   constructs its counted string Array, and runs `main`. The launcher keeps no
+   one-shot flags of its own: the loader memoizes `initialize()` and admits
+   `run()` once ([logical
+   operations](browser-target.md#logical-operations-and-protected-entries)).
+   Both entries run under `titan_browser_protected_entry` with plain
+   `errorhandler` as the `lua_pcall` message handler. On failure,
    `titan_browser_complete_failure` snapshots `TITAN_BACKTRACE_KEY` on the
    stack, converts the final escaped error object once under `lua_pcall` using
    `titan_entry_error_message` and `strip_bootstrap_prefix`, shared with native
@@ -91,12 +96,12 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    `titan_browser_\u2133_release_callable_titan` as `__attribute__((weak))`. When
    `titan.browser` is linked into the image, `titan_browser_invoke` and
    `titan_browser_release_callable` forward in one line to those public
-   `foreign function`s in `titan/browser.browser.titan`; in C-only protocol or
-   probe images without `titan.browser`, the weak pointers are `NULL`. Invoke
-   reports an admitted failure through `titan_browser_invalid_entry`; synchronous
-   release returns `TITAN_BROWSER_STATE` without a completion.
-   The C entries for [synchronous callbacks](#synchronous-c-callbacks) forward
-   the same way.
+   `foreign function`s in `titan/browser.browser.titan`. In a C-only protocol
+   or probe image without `titan.browser` the weak pointers are `NULL`: the
+   promised invoke entry then reports an admitted failure through
+   `titan_browser_invalid_entry`, and the synchronous release entry, which has
+   no completion, returns `TITAN_BROWSER_STATE`. The C entries for
+   [synchronous callbacks](#synchronous-c-callbacks) forward the same way.
 3. **Foreign trampoline (`invoke`) and protected Titan entry (`invoke_entry`):**
    The public foreign function in `titan/browser.browser.titan` uses
    header-free C primitive parameter types so consumers of `"browser"` need no
@@ -107,7 +112,8 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    completion if the stack check fails. It recovers the module (`upvalue[0]`)
    and entry pointer (`upvalue[2]`) from the handler closure, installs
    `errorhandler` as `L->errfunc`, calls `invoke_entry`, and restores the
-   error handler and stack top.
+   error handler and stack top. `release_callable` is a callback trampoline
+   instead ([synchronous wrapper release](#synchronous-wrapper-release)).
 4. **Minimal protected entry (`invoke_entry` -> `invoke_work`):**
    `invoke_entry` is a function-scope `catch` wrapper whose preamble fits
    inside the trampoline's `LUA_MINSTACK` reservation. Argument decoding,
@@ -131,15 +137,20 @@ rules](../style-guide.md#write-native-bindings-titan-first):
 
 | Export | Operation kind | Role |
 | --- | --- | --- |
-| `titan_browser_initialize(uint64_t)` | INITIALIZE1 | Generated protected bootstrap, once |
-| `titan_browser_entry(uint64_t, int, argv, lengths)` | MAIN2 | Generated protected main, once |
+| `titan_browser_initialize(uint64_t)` | INITIALIZE1 | Generated protected bootstrap; the loader enters it once |
+| `titan_browser_entry(uint64_t, int, argv, lengths)` | MAIN2 | Generated protected main; the loader enters it once |
 | `titan_browser_invoke(uint64_t, state, slot, generation, argc, args)` | INVOKE3 | 1-line weak forward to `titan.browser` `invoke` |
 | `titan_browser_close(uint64_t)` | CLOSE5 | Generated owner-held `lua_close` |
 
+These four are the promised entries. `titan_browser_release_callable(state,
+slot, generation)` is exported as well, but it is synchronous and has no
+operation identity, kind, or completion ([synchronous wrapper
+release](#synchronous-wrapper-release)).
+
 `operation_id` is an instance-local never-reused unsigned 64-bit identity.
-JavaScript uses a BigInt counter; an operation that needs an identity rejects
-at allocation instead of wrapping to zero. Export return values are admission
-only. Exactly one completion with
+JavaScript uses a BigInt counter. It never wraps to zero: once the identities
+run out, an operation is refused at the point where it would allocate one.
+Export return values are admission only. Exactly one completion with
 the same id/kind carries application values/status/errors, and the loader
 settles only after both completion and promised-export/context retirement.
 A private engine entry is not an application gateway. The loader uses
@@ -196,13 +207,13 @@ independent states load modules normally too: no `attach` operation or
 pre-`luaL_openlibs` bootstrap is required. `titan.lua` is native-only, so no
 standard-library API creates independent browser states.
 `state_closing()` and `current_state()` check `titan_state_closing(L)`
-(`G(L)->gcstp & GCSTPCLS`) before imports, so direct independent `lua_close`
-refuses new requests and reverse calls before a finalizer's first binding call.
-Synchronous binding calls, copied output, and handle release remain valid until
-the browser record finalizes. Wrapper release instead follows callback
-admission and leaves closing-state pins for state close. Every JS slot is
-charged to the state, including slots
-created during close when Lua suppresses new reachability finalizers.
+(`G(L)->gcstp & GCSTPCLS`) before imports, so a direct `lua_close` of an
+independent state refuses new requests and reverse calls before a finalizer's
+first binding call. Synchronous binding calls, copied output, and handle
+release stay valid until the browser record is finalized. Wrapper release is
+different: it is admitted as a callback is, so a closing state refuses it and
+state close retires the pin. Every JS slot is charged to the state, including
+slots created during close, when Lua suppresses new reachability finalizers.
 
 `BrowserHandle` registers the allocation-free
 `gc.finalizable<|value|>(owner, finalizer)` callback shape, initially with an
@@ -215,26 +226,33 @@ module variables (`pins_by_slot: {Pin}`, `pins_by_fn: {value: Pin}`,
 
 - One `Pin` and one JavaScript `CallableView` wrapper exist per function per
   state while live.
-- Titan is the single authority for hold counts on each `Pin`:
-  - `wrapper_live: boolean` tracks whether a live JavaScript wrapper currently
-    holds the pin (set when the callable crosses as `BrowserValue.is_callable`
-    and no live wrapper exists in JavaScript).
-  - `holds: integer` counts active request and listener holds (incremented for
-    `completion` and `failure` at `BrowserHandle:start` / `BrowserHandle:listen`).
-- JavaScript reports wrapper releases synchronously through
-  `release_callable(state, slot, generation)`, setting `wrapper_live = false`. Titan's
-  `RequestHolds` drops the completion and failure holds once: after a one-shot's
-  callback returns or raises, after cancel, after close, or on an `UNDELIVERED`
-  drive item. Listener holds remain until cancel, close or state close.
-  `Pin:retire_if_unused()` removes an unused pin from `pins_by_slot` and
-  `pins_by_fn` and recycles its slot with an increasing generation.
+- Titan is the single authority for what holds each `Pin`:
+  - `wrapper_live: boolean` records that a live JavaScript wrapper holds the
+    pin (set when the callable crosses as `BrowserValue.is_callable` and
+    JavaScript has no live wrapper for it).
+  - `holds: integer` counts the other holders: a request or listener (one
+    hold each for `completion` and `failure`, taken at `BrowserHandle:start` /
+    `BrowserHandle:listen`) and an open `BrowserPin`.
+- Each hold ends in Titan, once, and the loader keeps no hold accounting:
+  - `wrapper.release()` enters `release_callable(state, slot, generation)`
+    synchronously, which clears `wrapper_live` ([synchronous wrapper
+    release](#synchronous-wrapper-release)).
+  - A request's `RequestHolds` record drops its two holds together
+    ([request holds](#request-holds)).
+  - `BrowserPin:close` drops its hold ([synchronous C
+    callbacks](#synchronous-c-callbacks)).
+
+  `Pin:retire_if_unused()` then removes a pin with no wrapper and no holds
+  from `pins_by_slot` and `pins_by_fn` and recycles its slot with the next
+  generation.
 - Every pin allocation and hold mutation is exception-atomic: `allocate_pin`
   undoes partial table insertions on raise before mutating `free_slots` or
   `next_slot`, and `pin_wrapper` / `pin_request_hold` allocate and append their
   `ProvisionalPin` rollback record before `allocate_pin` or mutating `Pin`.
-- Re-export after release creates a fresh wrapper. An applied release with no
-  other holder retired the pin, so export allocates another; a refused release
-  leaves the old pin available for the fresh wrapper.
+- Exporting a function again after its wrapper was released creates a fresh
+  `CallableView`. If the release retired the pin, the export allocates a new
+  one. If another hold kept the pin, or the release was refused, the fresh
+  wrapper takes over the existing pin.
 - A newly registered callable wrapper starts with `exposed = false` in
   JavaScript and is marked `exposed = true` only when `valuesAt` finishes
   decoding that crossing's own arguments in `hostCall` or `hostStart` (right
@@ -276,27 +294,38 @@ drives, and `titan.browser` never learns about Tasks.
   both strings to the nonthrowing `titan_browser_host_main_failed`, which
   marks the pending `run()` ([loader drives](browser-target.md#drives-the-call-queue-and-wake-sources)).
   Titan keeps no record of it.
-- **Relinquish.** `relinquish(wait)` flushes C `stdout` and `stderr`, then
-  calls the suspending import `titan_browser_relinquish(state, mode)`
-  ([relinquish import](browser-target.md#the-relinquish-import)). A turn passes
-  `TURN`; a wait passes `WAIT_HELD` while the state has open `BrowserPin`s,
-  otherwise `WAIT`. The import's resolved value is the status.
-- **Delivery.** `deliver` sets `delivering` for its extent, asks
-  `titan_browser_host_batch` to snapshot the owner's queued items, and for
-  each one lets `titan_browser_host_item` marshal it into a
-  `titan_browser_delivery` record, skipping released targets. A request's
-  unmarshallable success event becomes a failure event appended to the live
-  queue. An unmarshallable failure event is reported and returned as
-  `UNDELIVERED`: Titan drops a one-shot's holds without invoking, settling or
-  acknowledging the item; a listener keeps its holds. Other unmarshallable items
-  are reported and skipped. It runs ordinary items through `invoke_work`, the
-  same body as an `invoke` entry, with `queued = true`: the completion record
-  goes to `titan_browser_host_settle` instead of `titan_browser_complete`,
-  because the entry that hosts the drive still owns the one ordinary
-  completion. An inline `catch` around each item keeps `invoke_entry`'s
-  allocation-free fallback, settling through the same import, so one item can
-  never leave the delivery half done. `titan_browser_host_item_done` then
-  frees the item's host allocations and releases unadopted temporaries.
+- **Relinquish.** `relinquish(wait)` flushes C `stdout` and `stderr`, chooses
+  the mode, and calls the suspending import
+  `titan_browser_relinquish(state, mode)` ([relinquish
+  import](browser-target.md#the-relinquish-import)); the import's resolved
+  value is the status. The mode carries what Titan knows: `TURN` when `wait`
+  is false, `WAIT_HELD` for a wait while the state has an open `BrowserPin`
+  (`open_pins > 0`), and `WAIT` for any other wait. The loader therefore
+  keeps no copy of the pin count.
+- **Delivery.** `deliver` sets `delivering` for its extent and asks
+  `titan_browser_host_batch` to snapshot the owner's queued items. For each
+  one, `titan_browser_host_item` passes over an item whose target was
+  released or whose request was cancelled, marshals the arguments, and fills
+  a `titan_browser_delivery` record, which `deliver` handles by kind:
+  - `NOTIFY` and `CALL` run through `invoke_work`, the same body as an
+    `invoke` entry, with `queued = true`: the completion record goes to
+    `titan_browser_host_settle` instead of `titan_browser_complete`, because
+    the entry that hosts the drive still owns the one ordinary completion. An
+    inline `catch` around each item keeps `invoke_entry`'s allocation-free
+    fallback, settling through the same import, so an item never leaves the
+    delivery half done. `titan_browser_host_item_done` then frees the item's
+    host allocations and releases unadopted temporaries.
+  - `UNDELIVERED` names a request's failure event that the loader could not
+    marshal ([request boundary](#request-boundary)). It carries the target
+    identity and nothing else: no arguments, no settlement, and no
+    `item_done`. `drop_undelivered` finds the pin and, for a one-shot, drops
+    the request's holds. A listener's pin names no `RequestHolds`, so its
+    holds stay.
+
+  The loader deals with every other item that it cannot marshal without
+  handing it to Titan: a call's promise rejects, a request's success event
+  becomes its failure event at the end of the live queue, and a plain
+  notification is reported through `onNotificationError`.
 - **Wake.** `wake` calls `titan_browser_host_wake(state)`; the loader ignores
   it unless that state is driving.
 
@@ -308,35 +337,22 @@ contract](../language/standard-library-browser.md#synchronous-c-callbacks)).
 `titan.browser` provides the pin, the C entry and its bracket; core modules
 learn about the callback only through `titan_no_switch`.
 
-- **Synchronous release.** `titan_browser_release_callable` forwards to
-  `release_callable`, which follows callback admission, stack reservation and
-  error-handler restoration on the state's callback thread. It invokes the
-  protected `release_entry` -> `apply_release` path in no-switch mode, with no
-  operation identity or completion. Around that call it saves `G(L)->gcstp`,
-  adds `GCSTPGC` as Lua's `GCTM` does, and restores the saved bits exactly.
-  Its pre-catch frame must stay below `LUA_MINSTACK`, leaving room for the
-  pushed error handler without raising before the entry's catch is active.
-  Such a raise would skip the collector-stop restore.
-  Entry polls must not collect: a finalizer could otherwise re-export the
-  function after logical release and before its pin is retired. The body
-  clears `wrapper_live`, removes an unused pin, and appends its slot to
-  pre-grown `free_slots`; it allocates nothing and calls no imports. It does
-  not prepare another callback thread because it cannot nest a callback.
-  A refused entry or stack reservation leaves the pin until state close.
-  Disposal, exit and poison use the same refusal rule as callbacks.
-
 - **Pins.** `pin(fn)` adds one hold to the function's existing `Pin`
   (`holds`, as a request hold does, allocating the pin when the function has
   none) and returns a `BrowserPin` record with the state token, slot and
   generation. The record registers the allocation-free `gc.finalizable`
-  shape, so an unreachable pin closes. `titan.browser` counts open pins in
-  the per-state module variable `open_pins`, a
-  [wake source](browser-target.md#drives-the-call-queue-and-wake-sources)
-  for the owner. `BrowserPin:close` is idempotent: it drops the hold, calls
-  `retire_if_unused`, and decrements `open_pins`. Closing the last pin calls
-  `wake`, so a parked gate resumes with `RESUMED` and the drive's next wait
-  re-checks its wake sources. A wait with an open pin passes `WAIT_HELD`;
-  the loader keeps no copy of the count.
+  shape, so an unreachable pin closes. `BrowserPin:close` is idempotent: it
+  drops the hold and calls `retire_if_unused`.
+
+  An open pin is a [wake
+  source](browser-target.md#drives-the-call-queue-and-wake-sources) for the
+  owner's drive, and Titan keeps that fact too. The per-state module variable
+  `open_pins` counts open `BrowserPin`s: `pin` increments it once the record
+  holds its slot, and `close` decrements it. `relinquish` passes `WAIT_HELD`
+  while the count is above zero, so the drive parks even when the loader
+  knows no wake source. Closing the last pin calls `wake`: the parked gate
+  resumes with `RESUMED`, and the drive's next wait finds out whether a wake
+  source remains.
 - **C entries.** `browserentry.lua` declares `call_sync`, `callback_enter`
   and `callback_leave` as weak, like the invoke and release forwards, and
   defines the C functions `titan_browser_call_sync`,
@@ -417,6 +433,86 @@ learn about the callback only through `titan_no_switch`.
   C-stack counter of its own and Lua's `LUAI_MAXCCALLS` starts afresh on a
   callback thread, so Emscripten's checked stack is the limit; overflowing it
   aborts and poisons the instance.
+
+## Synchronous wrapper release
+
+`wrapper.release()` invalidates the wrapper in JavaScript at once and then
+tells Titan, in the same call, to drop the wrapper's hold on the pin. Unless
+the instance is disposing or poisoned, the loader calls the export
+`titan_browser_release_callable(state, slot, generation)` directly. This is
+the bridge's one synchronous entry from the loader. It takes no operation
+identity and writes no completion, and the loader ignores its status: a
+release that Titan refuses is not an error ([refused
+releases](#refused-releases)).
+
+### The trampoline
+
+The export forwards to the `foreign function` `release_callable`, which is a
+callback trampoline like `call_sync` ([synchronous C
+callbacks](#synchronous-c-callbacks)). It finds the open, configured state
+record (`callback_state`), asks `titan_browser_host_callback(state, 1)` for
+admission, takes the state's next callback thread, and reserves
+`LUA_MINSTACK` on it. It then installs `errorhandler`, calls `release_entry`,
+restores the error handler and the stack top, and ends the callback with
+`callback_finish`. The body therefore runs in no-switch mode, apart from the
+frames of a parked drive or coroutine.
+
+`release_entry` is a function-scope `catch` around `apply_release`.
+`apply_release` finds the pin by slot and generation, clears `wrapper_live`,
+and, when no hold remains, removes the pin from both tables and appends its
+slot to `free_slots`, whose capacity `allocate_pin` reserved. It allocates
+nothing, calls no import, and runs none of the program's code. The entry
+does not publish a thread for a nested callback, because nothing in it can
+start one.
+
+### The collector stop
+
+The body allocates nothing, but that alone does not keep the collector out.
+A compiled Titan function that reserves root slots polls the collector when
+it is entered, and the poll runs a step whenever one is due from earlier
+allocation. A step can call finalizers. Inside `release()` a finalizer would
+run program code in the middle of the embedder's call, and it could export
+the function that is being released: the loader would create a fresh wrapper
+for the pin, and `apply_release` would then clear `wrapper_live` and retire
+the pin under that wrapper.
+
+So the trampoline stops the collector for the extent of the entry. It reads
+`G(L)->gcstp` (`lmacro_get_gcstp`), writes the saved bits plus `GCSTPGC`
+(`lmacro_set_gcstp`), calls the entry, and writes the saved value back. Lua's
+`GCTM` brackets every finalizer call the same way. Restoring the saved bits,
+instead of restarting the collector, has three consequences:
+
+- a pause that the program set with `gc.pause()` survives the release;
+- a release made from inside a finalizer leaves that finalizer's own stop in
+  place;
+- the collector's debt is untouched, so a step that was due runs at the first
+  poll after the release returns, and pacing does not change.
+
+`titan_in_finalizer` reads `GCSTPGC`, so it is true inside the entry
+([finalizer context](coroutines.md#finalizer-context)). Nothing in the entry
+consults it.
+
+The bracket is exact only if no raise can skip the restore. `release_entry`
+reserves its own small frame before its `catch` begins, so that frame must
+fit in what is left of the `LUA_MINSTACK` reservation after the pushed error
+handler takes one slot. `apply_release`'s larger frame is reserved inside the
+`catch`: when the stack cannot grow for it, the raise is caught and the pin
+stays.
+
+### Refused releases
+
+`release_callable` returns `TITAN_BROWSER_STATE` when the state record or the
+callback admission refuses, and `TITAN_BROWSER_MEMORY` when the callback
+thread's stack cannot be reserved. In those cases, and when `release_entry`
+catches an error, the wrapper hold is not dropped. The pin then stays in the
+table until its state closes, or until the function is exported again and a
+fresh wrapper takes the pin over. Nothing is retried, queued, or reported.
+
+The admission rule is the callbacks' rule, so one rule covers every
+synchronous entry: a closing or unconfigured state, a disposing, exited, or
+poisoned instance, and callbacks nested too deeply all refuse. The loader
+does not even call the export once disposal has begun or the instance is
+poisoned. A JavaScript exception from the export poisons the instance.
 
 ## Fixed wasm32 layout
 
@@ -552,32 +648,65 @@ Both directions marshal by runtime type into `BrowserValue`:
 `host_start` receives target identity, counted `titan_browser_value` arguments,
 completion and failure slot/generation pairs, mode `START = 0` / `LISTEN = 1`,
 and a response pointer. The request slot is reserved before argument decoding
-and host invocation.
-- One-shot `start` settlement enqueues one argument (the resolved value
-  marshalled by runtime type, with `undefined` mapped to `is_nil`).
-- `listen` emissions enqueue every emitted argument marshalled by runtime type.
-- Failure settlement (including a `start` settlement or `listen` emission that
-  fails marshalling at snapshot or delivery) enqueues
-  `(is_string(message), is_handle(thrown))`, where `thrown` is always wrapped in
-  a handle slot even for a primitive rejection. A delivery-time failure is
-  appended to the live queue, after events already waiting. A failure event
-  that cannot be marshalled is reported through `onNotificationError`.
+and host invocation. The loader then queues one event per outcome:
+
+- A one-shot `start` settlement queues one argument for `completion`: the
+  resolved value marshalled by runtime type, with `undefined` mapped to
+  `is_nil`.
+- Each `listen` emission queues its arguments for `completion`, marshalled by
+  runtime type.
+- A rejection queues `(is_string(message), is_handle(thrown))` for `failure`.
+  `thrown` always gets a handle slot, even for a primitive.
+- A success event that cannot be marshalled becomes a failure event whose
+  `thrown` is the marshalling error. The arguments are snapshotted when the
+  event is queued and written into Wasm memory when it is delivered, and
+  either step can fail: an out-of-range `BigInt` fails the first, and a
+  wrapper argument released in between fails the second. A failure found at
+  delivery is appended to the live queue, behind the events already waiting,
+  so it arrives in a later batch. Nothing is retried in place.
+- A failure event that cannot be marshalled has no callable left to receive
+  it. The loader reports it through `onNotificationError`.
 
 Detachable mailbox and guaranteed-terminal retained ownership, cancellation,
 listener removal, late-settlement dropping, FIFO batching, and disposal all
 remain with the JS bridge owner. No C import awaits host work.
 
-Drain and drive delivery recheck each detached entry's request cancellation:
-cancellation removes live queued entries, including already settled one-shots,
-and silences the detached batch. Host retirement alone does not cancel a queued
-completion. Titan preallocates the inert `BrowserRequest` and `RequestHolds`
-before host acceptance, then publishes only fields afterwards. A one-shot uses
-fresh wrapper closures whose `defer` drops both holds after the user's callback
-returns or raises. Cancel drops both after the cancel import returns, even on
-host failure; close drops them after release. A double fault in idle `drain()`,
-or a Titan decoding failure before callback entry, retains the holds until
-request close or state close. In a drive an unmarshallable failure event returns
-as `UNDELIVERED`, letting Titan drop the one-shot's holds immediately.
+`drain()` and a drive's `deliver` each work on a detached batch, so both
+recheck an entry's request before invoking it. Cancellation removes the
+request's entries from the live queue, including the queued event of a
+one-shot that has already settled, and the recheck silences entries that a
+detached batch already holds. Retirement on the host side alone cancels
+nothing: a one-shot that settled normally still delivers its queued event.
+
+### Request holds
+
+`titan.browser` owns the holds that keep a request's `completion` and
+`failure` pinned, and the loader keeps no count. `BrowserHandle:request`
+allocates the inert `BrowserRequest` and its `RequestHolds` before the host
+accepts the request and only assigns fields afterwards, so nothing can raise
+between acceptance and ownership. `RequestHolds:drop` then releases both
+holds, once:
+
+| Event | One-shot (`start`) | Listener (`listen`) |
+| --- | --- | --- |
+| The callback returns or raises | drops | keeps |
+| `BrowserRequest:cancel`, once the cancel import returns, also when the host's cancel function threw | drops | drops |
+| `BrowserRequest:close`, once the request slot is released | drops | drops |
+| A drive hands the failure event back as `UNDELIVERED` | drops | keeps |
+
+State close needs no drop: the pin table goes with the state.
+
+A one-shot gets the first row by pinning two fresh closures instead of the
+caller's functions. Each closure calls the caller's function under a `defer`
+that drops the holds, and each of the two pins names the `RequestHolds` in
+its `request` field, which is how `drop_undelivered` finds them. A listener
+pins the caller's functions directly.
+
+Two failures leave a one-shot's holds in place until the request is closed or
+its state closes, because no Titan code runs for the event. One is the double
+fault in an idle `drain()`, which has no drive to hand the item back to. The
+other is a failure inside `invoke_work` before it calls the callback, such as
+a handle argument that is no longer live.
 
 ## Test layers
 

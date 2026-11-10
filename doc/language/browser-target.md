@@ -628,14 +628,20 @@ The instance has the following methods:
 
 `initialize`, `run`, `call`, `callTask`, `drain`, and `dispose` always return
 promises, including admission errors. Calling `call` or `drain` before
-initialization does not initialize implicitly. A callable wrapper also has
-`call(...args)`, `callTask(args, options)` and idempotent, synchronous logical
-`release()`. Physical pin release is immediate when the instance can be
-entered; otherwise state close retires the pin. `release()` runs no finalizer
-and no Titan code of the program. Wrappers belong to one instance and one Lua
-state; another instance cannot use them. After an exit,
+initialization does not initialize implicitly. Wrappers belong to one
+instance and one Lua state; another instance cannot use them. After an exit,
 `call`, `callTask`, `drain` and `run` reject and `notify` throws
-`TITAN_BROWSER_EXITED`; `dispose` stays available and `release()` is inert.
+`TITAN_BROWSER_EXITED`; `dispose` stays available.
+
+A callable wrapper also has `call(...args)`, `callTask(args, options)` and
+`release()`. `release()` is synchronous and idempotent and never throws. The
+wrapper stops working at once, and in the same call Titan gives up the hold
+that the wrapper had on the function, so a function that nothing else holds
+can be collected. The call runs none of the program's Titan code and no
+finalizer, and it is allowed anywhere, including inside a binding and during
+a drive. Where the instance cannot be entered (once `dispose()` has begun,
+after an exit, or after an engine failure), `release()` only invalidates the
+wrapper, and the function is let go when its Lua state closes.
 
 **Exclusive entry.** One logical operation owns the instance from argument
 validation through all protected C entries and output flush. Promise
@@ -656,7 +662,7 @@ Options are:
 | `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
 | `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
 | `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. Names starting with `titan:` are [reserved for the SDK](standard-library-browser.md#reserved-sdk-bindings) and rejected with `TypeError`. |
-| `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks and secondary or callerless cleanup failures. A host Promise rejection instead goes to its mandatory failure callable. |
+| `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks, a request failure event that cannot be delivered, and secondary cleanup failures. A host Promise rejection instead goes to its mandatory failure callable. |
 | `requestDrain()` | A coalesced announcement of queued work at a complete logical safe point; the application chooses when to call and await `drain()`. |
 | `onEngineFailure({kind, cause})` | Observes a terminal engine failure after the instance has been poisoned; `kind` is `"abort"`, `"trap"`, or `"protocol"`. Observer exceptions cannot replace that failure. |
 
@@ -681,8 +687,8 @@ runs. Later chunks continue after a sink throws or rejects. An otherwise
 successful operation rejects with its first
 cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
-message and trace remain primary while deliverable output and deferred
-retirement are still attempted. There is no cross-stream ordering guarantee.
+message and trace remain primary while deliverable output is still flushed.
+There is no cross-stream ordering guarantee.
 A C-stdio sink failure is returned by the operation that flushes it, or by
 disposal if the operation already failed in Titan; empty flushes and unrelated
 output-free operations do not fail again with that error, and observing it does
@@ -718,13 +724,18 @@ value marshalled by runtime type, with `undefined` mapped to `is_nil()`);
 `listen` passes each emitted argument marshalled by runtime type. Failure
 receives `(BrowserValue.is_string(message), BrowserValue.is_handle(thrown))`:
 the diagnostic message text and a handle retaining the exact rejected
-JavaScript value (even for a primitive). An unmarshallable `start` settlement
-or `listen` emission is delivered to `failure`, whether marshalling fails when
-it is queued or when it is delivered. A delivery-time failure joins the next
-batch, after events already waiting. Both outcomes use protected delivery; a
-Promise rejection is not merely logged to an observer. If the failure event
-itself cannot be marshalled, or `completion` or `failure` raises at delivery,
-that error is reported through `onNotificationError`.
+JavaScript value (even for a primitive). Both outcomes are queued and
+delivered under protection; a Promise rejection is not merely logged to an
+observer.
+
+A `start` settlement or `listen` emission that cannot be marshalled is
+delivered to `failure` too, with the marshalling error as `thrown`.
+Marshalling can fail when the event is queued (an out-of-range `BigInt`) or
+when it is delivered (a wrapper argument released in the meantime). In the
+second case the failure event joins the queue behind the events already
+waiting, so it arrives in a later batch. `onNotificationError` receives what
+no callable can: an error that `completion` or `failure` raises when it is
+delivered, and a failure event that itself cannot be marshalled.
 
 **Observation and errors.** `instance.trace` is a fresh frozen `{state,
 reason}` snapshot, including before initialization. It preserves the last
@@ -756,12 +767,13 @@ from `notify` with `TypeError`, as do invalid `run` arguments. Other argument
 values cross by runtime type as `BrowserValue`, and a Titan callable that
 rejects a variant raises an ordinary Titan error (`TITAN_BROWSER_TITAN`).
 
-Operation identities are never reused. Exhaustion refuses an operation that
-needs a new identity, not a method that allocates none: `notify` can still
-enqueue, and an empty `drain` succeeds. A queued notification that cannot get
-an identity at delivery reports `TITAN_BROWSER_STATE` through
-`onNotificationError`, like other notification failures. The final identity
-is reserved for disposal.
+Operation identities are never reused, and the last one is reserved for
+disposal. Once the others are used up, an operation that needs a new identity
+is refused with `TITAN_BROWSER_STATE`. A method that needs none still works:
+`notify` enqueues, and a `drain` with nothing to deliver succeeds. A queued
+notification that cannot get an identity when it is delivered is reported
+through `onNotificationError` with that same error, like any other
+notification failure.
 
 Byte argument snapshots for `call`, `callable.call`, `notify` and `run` read
 native `Uint8Array` storage, including subarrays, subclasses and Node Buffers.
@@ -793,9 +805,10 @@ distinction:
 | `drain()`, `run()` | reject `TITAN_BROWSER_REENTRY` | reject `TITAN_BROWSER_REENTRY` |
 | `dispose()` | closes admission and wakes the drive | closes admission and wakes the drive |
 
-Code awaiting a queued call can run before that turn ends, between the
-driver's internal steps. A `call()` or `callTask()` made from that continuation
-is queued for a later turn; `drain()` and `run()` still reject
+A queued call's promise settles while the driver is still inside that turn,
+so the code awaiting it can run before the turn ends, between two of the
+driver's internal steps. A `call()` or `callTask()` made there is queued for
+a later turn, and `drain()` and `run()` still reject
 `TITAN_BROWSER_REENTRY`.
 
 Calls and notifications for a Lua state other than the instance owner are
