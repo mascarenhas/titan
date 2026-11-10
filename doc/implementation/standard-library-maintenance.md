@@ -214,6 +214,10 @@ and at commit `48b26b75`; rules 2 and 5 have no JavaScript reading.
    `spawn_call` and `shutdown_call` in `titan/async/runtime.browser.titan`
    start, cancel, and settle the Task, while the loader keeps the promise,
    the `AbortSignal` listener (`taskAborted`), and the `Error` objects.
+   Wrong (`titan-browser.mjs` at `48b26b75`): `armChunk` and `periodElapsed`
+   re-armed long delays inside the loader. Right: each SDK source arms one
+   bounded host timer, and `timer.browser.titan` chains chunks for long sleeps
+   and ticker periods.
 3. **Protected work belongs in Titan.** Right: `importResponse` catches a
    binding's exception at the import, keeps the thrown value in a slot, and
    fills `titan_browser_response`; `check_response` in

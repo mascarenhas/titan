@@ -1,4 +1,4 @@
-import {decode, encode, makeHost, observe, rejection, settledMarker, thrown, until} from './support.mjs';
+import {decode, encode, makeHost, observe, rejection, settledMarker, thrown, until, watchTimers} from './support.mjs';
 
 // The drive interface without async: owner identity, SDK bindings, idle and
 // queued Task-form calls, waits, idle detection and AbortSignal admission.
@@ -406,96 +406,37 @@ async function exits(context, image) {
   await host.instance.dispose();
 }
 
-// A titan:interval period beyond the host's timer range, on held host
-// timeouts: chunked, never early, re-armed for the whole period at each tick,
-// and cleared by a cancellation during a chunk.
-async function longInterval(context, host, spy) {
-  const period = 3e9, first = 2147483647, rest = period - first;
-  const held = () => [...spy.held.values()].map(timer => timer.delay);
-  const fire = () => {
-    context.assert(spy.held.size === 1, `expected one held chunk, found ${held()}`);
-    const [[id, timer]] = spy.held;
-    spy.held.delete(id);
-    timer.callback(...timer.rest);
-  };
-  const quiet = async () => { for (let tick = 0; tick < 5; tick++) await context.tick(); };
-  const ticking = host.task('ticks', [2n, period]);
-  await until(context, () => spy.held.size === 1 && host.snapshot().parked, 'a long titan:interval was not armed');
-  for (let tick = 1; tick <= 2; tick++) {
-    context.assert(held()[0] === first, `period ${tick} did not start with a whole first chunk: ${held()}`);
-    const woken = host.probes.length;
-    fire();
-    await quiet();
-    context.assert(held()[0] === rest && host.probes.length === woken,
-      `the first chunk of period ${tick} ticked early or lost the remainder: ${held()}`);
-    fire();
-    if (tick === 1) await until(context, () => host.probes.length > woken, 'a whole long period never ticked');
-  }
-  context.assert(await ticking === 2n && spy.held.size === 0,
-    'a long titan:interval did not tick twice or kept a host timeout after its listener closed');
-  const controller = new AbortController();
-  const cancelled = host.task('ticks', [1n, period], {signal: controller.signal});
-  await until(context, () => spy.held.size === 1 && host.snapshot().parked, 'a second long titan:interval was not armed');
-  fire();
-  context.assert(held()[0] === rest, 'the second long titan:interval did not reach its last chunk');
-  controller.abort('stop');
-  await rejection(context, cancelled, 'CANCELLED');
-  context.assert(spy.held.size === 0, 'a cancellation during a chunk left its host timeout');
-  return [first, rest];
-}
-
-// SDK timer sources: chunked delays, cancellation and interval cleanup.
-// Timeouts of at least 10^8 ms (about 28 hours) never reach the host: the
-// test fires them.
+// SDK timer sources: one bounded host timer, cancellation and interval cleanup.
 async function timers(context, image) {
-  const saved = {setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
-    setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval};
-  const spy = {timeouts: new Map(), delays: [], held: new Map(), intervals: new Map(), periods: []};
-  globalThis.setTimeout = function (callback, delay, ...rest) {
-    spy.delays.push(delay);
-    if (delay >= 1e8) {
-      const id = Symbol('held timeout');
-      spy.held.set(id, {callback, delay, rest});
-      return id;
-    }
-    const id = saved.setTimeout.call(globalThis, (...values) => {
-      spy.timeouts.delete(id);
-      callback(...values);
-    }, delay, ...rest);
-    spy.timeouts.set(id, delay);
-    return id;
-  };
-  globalThis.clearTimeout = function (id) {
-    if (spy.held.delete(id)) return;
-    spy.timeouts.delete(id);
-    saved.clearTimeout.call(globalThis, id);
-  };
-  globalThis.setInterval = function (callback, period, ...rest) {
-    const id = saved.setInterval.call(globalThis, callback, period, ...rest);
-    spy.intervals.set(id, period);
-    spy.periods.push(period);
-    return id;
-  };
-  globalThis.clearInterval = function (id) {
-    spy.intervals.delete(id);
-    saved.clearInterval.call(globalThis, id);
-  };
+  const spy = watchTimers();
   const host = makeHost(context, image);
+  host.bindings.timer_type_error = error => context.assert(error instanceof TypeError,
+    'a timer range failure did not retain the exact host TypeError');
   try {
     await host.instance.initialize();
     await host.call('register');
-    await host.task('timer_cancel', [3e9]);
-    context.assert(spy.delays.includes(2147483647) && spy.held.size === 0,
-      'a long titan:timeout was not chunked or survived its cancellation');
+    await host.task('timer_cancel', [2147483647]);
+    context.assert(spy.delays.filter(delay => delay === 2147483647).length === 1 && spy.held.size === 0,
+      'the maximum titan:timeout was not armed once or survived its cancellation');
+    context.assert(await host.call('timer_range', 'titan:interval', 2147483647) === 'accepted' &&
+      spy.periods.filter(period => period === 2147483647).length === 1 && spy.intervals.size === 0,
+      'the maximum titan:interval was not armed once or survived its request close');
+    for (const source of ['titan:timeout', 'titan:interval']) {
+      const arms = spy.delays.length + spy.periods.length;
+      context.assert(await host.call('timer_range', source, 2147483648) ===
+        (source === 'titan:timeout' ? 'titan:timeout delay must be a Number from 0 to 2147483647' :
+          'titan:interval period must be a Number above 0 and at most 2147483647'),
+        `${source} did not raise a BrowserError holding a TypeError for an over-range argument`);
+      context.assert(spy.delays.length + spy.periods.length === arms,
+        `${source} armed a host timer for an over-range argument`);
+    }
     context.assert(await host.task('nap', [3]) === 'woke' && ![...spy.timeouts.values()].includes(3),
       'a fired titan:timeout left its host timer');
     context.assert(await host.task('ticks', [3n, 5]) === 3n && spy.periods.includes(5) && spy.intervals.size === 0,
       'titan:interval did not tick or kept its host interval');
-    const chunks = await longInterval(context, host, spy);
-    return {intervals: spy.periods.filter(period => period === 5).length, longIntervalChunks: chunks};
+    return {intervals: spy.periods.filter(period => period === 5).length};
   } finally {
-    Object.assign(globalThis, saved);
-    await host.instance.dispose();
+    try { await host.instance.dispose(); } finally { spy.restore(); }
   }
 }
 

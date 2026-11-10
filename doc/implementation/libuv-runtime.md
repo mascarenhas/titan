@@ -896,23 +896,31 @@ state.
   - A zero delay is `async.yield()`: no host request, and the Task resumes in
     a later turn, after the driver's one-macrotask relinquish, without the
     clamp that HTML puts on nested `setTimeout`.
-  - Any other delay starts a detachable `titan:timeout` request whose
-    completion resumes the Task's `ResumeToken`, and suspends with a cancel
-    action that cancels the request. Cancellation therefore clears the host
-    timer and ends the wait at once, and the loader drops a settlement that
-    arrives later. Native `sleep` passes no cancel action and retires its uv
-    timer in a deferred close instead.
+  - Any other delay chains detachable `titan:timeout` requests, each at most
+    2,147,483,647 ms. Each completion resumes the Task's `ResumeToken`; the
+    Task starts the next chunk only after the previous chunk has elapsed.
+    Each suspension has a cancel action that cancels its request, clearing
+    the current host timer and ending the chain at once. The loader drops a
+    settlement that arrives later. Native `sleep` passes no cancel action
+    and retires its uv timer in a deferred close instead.
   - A host failure resumes the Task, which then raises
     `OperationError(-EIO, "EIO", <host message>, "timer.sleep")`.
   - After `dispose()` the request cannot start (`browser.BrowserError`,
     `"browser state is closing"`). A disposal cleanup never gets that far,
     because its checkpoint raises the Task's cancellation first.
 - **`ticker(ms)`** registers a close listener with the Runtime, then a
-  `CoalescingSubscription` whose producer opens a `titan:interval` listener.
+  `CoalescingSubscription`. For periods up to 2,147,483,647 ms its producer
+  opens a `titan:interval` listener. Longer periods chain one-shot
+  `titan:timeout` requests in `Ticker:arm`, each bounded by that same limit.
+  The whole period is re-armed before each tick is published.
   - Each event publishes `true`, so missed firings, including throttled ones,
     coalesce into one pending tick.
-  - `stop` cancels the listener, and `close` marks the ticker closed and
-    closes its request.
+  - Arming a later chunk can fail during delivery when the state is closing.
+    The completion callback catches that error, closes a thrown
+    `BrowserError`, and fails the subscription rather than reporting an
+    unhandled notification error.
+  - `stop` cancels the current request, and `close` marks the ticker closed
+    and closes its request.
   - The close listener does the same when the Runtime closes, so a ticker
     left open is Runtime-bound, like a native ticker whose loop closed. Close
     listeners run in registration order with the user's, whereas a native

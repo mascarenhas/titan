@@ -130,25 +130,15 @@ function taskAborted(cell) {
 const maximumTimerDelay = 2147483647;
 
 function timeoutSource(ms) {
-  if (typeof ms !== 'number' || !(ms >= 0)) throw new TypeError('titan:timeout delay must be a nonnegative Number');
+  if (typeof ms !== 'number' || !(ms >= 0 && ms <= maximumTimerDelay)) throw new TypeError('titan:timeout delay must be a Number from 0 to 2147483647');
   const timer = {id: undefined, resolve: undefined};
   const promise = new Promise(resolve => { timer.resolve = resolve; });
-  armChunk(timer, ms, timeoutElapsed);
+  timer.id = setTimeout(timeoutElapsed, ms, timer);
   return {kind: 'detachable', promise, cancel: cancelTimeout.bind(undefined, timer)};
 }
 
-// Delays beyond the host's 32-bit timer range are re-armed in chunks.
-function armChunk(timer, remaining, elapsed) {
-  const delay = Math.min(remaining, maximumTimerDelay);
-  timer.id = setTimeout(elapsed, delay, timer, remaining - delay);
-}
-
-function timeoutElapsed(timer, remaining) {
+function timeoutElapsed(timer) {
   timer.id = undefined;
-  if (remaining > 0) {
-    armChunk(timer, remaining, timeoutElapsed);
-    return;
-  }
   const resolve = timer.resolve;
   timer.resolve = undefined;
   resolve?.(undefined);
@@ -160,37 +150,17 @@ function cancelTimeout(timer) {
 }
 
 function intervalSource(ms) {
-  if (typeof ms !== 'number' || !(ms > 0)) throw new TypeError('titan:interval period must be a positive Number');
+  if (typeof ms !== 'number' || !(ms > 0 && ms <= maximumTimerDelay)) throw new TypeError('titan:interval period must be a Number above 0 and at most 2147483647');
   return {kind: 'listener', subscribe: intervalSubscribe.bind(undefined, ms)};
 }
 
-// A period beyond the host's timer range repeats through chunked timeouts.
 function intervalSubscribe(ms, emit) {
-  if (ms <= maximumTimerDelay) return stopInterval.bind(undefined, setInterval(intervalTick, ms, emit));
-  const timer = {id: undefined, period: ms, emit};
-  armChunk(timer, ms, periodElapsed);
-  return stopPeriod.bind(undefined, timer);
+  return stopInterval.bind(undefined, setInterval(intervalTick, ms, emit));
 }
 
 function intervalTick(emit) { emit(); }
 
 function stopInterval(id) { clearInterval(id); }
-
-// The whole period is re-armed before the tick is emitted, so unregistering
-// after any tick clears the next period's first chunk.
-function periodElapsed(timer, remaining) {
-  if (remaining > 0) {
-    armChunk(timer, remaining, periodElapsed);
-    return;
-  }
-  armChunk(timer, timer.period, periodElapsed);
-  timer.emit();
-}
-
-function stopPeriod(timer) {
-  clearTimeout(timer.id);
-  timer.id = undefined;
-}
 
 const sdkBindings = Object.freeze(Object.assign(Object.create(null), {
   'titan:timeout': () => timeoutSource,
