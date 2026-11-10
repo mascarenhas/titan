@@ -417,9 +417,9 @@ function main_failed(message: string, trace: string)
 - `relinquish(wait)` gives the event loop back. With `wait = false` it resumes
   after one host macrotask (`setImmediate` in Node, a `MessageChannel` message
   in browsers, never a clamped timer) and returns `RELINQUISH_RESUMED`. With
-  `wait = true` it returns `RELINQUISH_IDLE` at once when the state has no wake source (no
-  queued item, open request or listener, or pending wake); otherwise it
-  resumes after a wake source fires, from a macrotask, with
+  `wait = true` it returns `RELINQUISH_IDLE` at once when the state has no
+  wake source (no queued item, open request or listener, or pending wake);
+  otherwise it resumes after a wake source fires, from a macrotask, with
   `RELINQUISH_RESUMED`. While the drive is relinquished, buffered output,
   including C standard I/O, goes to the sinks; an immediate `RELINQUISH_IDLE`
   leaves it buffered for the next relinquish or the end of the operation.

@@ -780,7 +780,7 @@ distinction:
 | JavaScript action during a drive | Inside a binding or sink | Anywhere else |
 | --- | --- | --- |
 | `call()` | rejects `TITAN_BROWSER_REENTRY` | queued; the driver invokes it at its next turn, outside any Task, and its promise settles when the call returns |
-| `callTask()` | rejects `TITAN_BROWSER_REENTRY` | queued Task start; its promise settles when the Task's outcome arrives |
+| `callTask()` | rejects `TITAN_BROWSER_REENTRY` | queued Task start; its promise settles when the Task's outcome arrives, or rejects at once if the Task cannot start |
 | `notify()` | queued for the driver | queued for the driver |
 | `drain()`, `run()` | reject `TITAN_BROWSER_REENTRY` | reject `TITAN_BROWSER_REENTRY` |
 | `dispose()` | closes admission and wakes the drive | closes admission and wakes the drive |

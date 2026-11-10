@@ -2800,21 +2800,21 @@ the loader owner, which also requires the state's active drive with no gate
 parked and no item in delivery.
 
 Outside disposal, every branch that parks a gate also schedules both output
-pumps on a microtask, so sinks run once the drive has suspended, never inside the
-import, and only while that gate is still parked; a numeric `IDLE` schedules
-none, so the coroutine switches of orphan unwinding that may follow it never
-meet a sink. Disposal is signalled once: the first relinquish after
-`dispose()` began (or a gate parked when it began) resolves `DISPOSING` after
-one turn. A turn (`TURN = 0`), or a wait with a queued owner item, parks a
-gate and schedules one turn-source macrotask. `titan.browser` passes
-`WAIT_HELD = 2` while the state has an open `BrowserPin`, otherwise
-`WAIT = 1`. A plain `WAIT` with no loader wake source returns `IDLE` as a
-number, so JSPI does not suspend; the terminal `titan_mco_transfer` path
-already relies on that. `WAIT_HELD` parks even when the loader has no wake
-source. A parked gate is created synchronously inside the import so a wake
-can never fire before it exists. Every resumption resolves the gate from the
-turn source, never directly from a microtask, with `DISPOSING` once disposal
-began and `RESUMED` otherwise.
+pumps on a microtask, so sinks run once the drive has suspended, never
+inside the import, and only while that gate is still parked. A numeric
+`IDLE` schedules none, so the coroutine switches of orphan unwinding that
+may follow it never meet a sink. Disposal is signalled once: the first
+relinquish after `dispose()` began (or a gate parked when it began) resolves
+`DISPOSING` after one turn. A turn (`TURN = 0`), or a wait with a queued
+owner item, parks a gate and schedules one turn-source macrotask.
+`titan.browser` passes `WAIT_HELD = 2` while the state has an open
+`BrowserPin`, otherwise `WAIT = 1`. A plain `WAIT` with no loader wake source
+returns `IDLE` as a number, so JSPI does not suspend; the terminal
+`titan_mco_transfer` path already relies on that. `WAIT_HELD` parks even
+when the loader has no wake source. A parked gate is created synchronously
+inside the import so a wake can never fire before it exists. Every
+resumption resolves the gate from the turn source, never directly from a
+microtask, with `DISPOSING` once disposal began and `RESUMED` otherwise.
 
 The turn source is `setImmediate` where the host defines it (Node) and
 otherwise one `MessageChannel` per instance, created on first use; neither
@@ -3003,7 +3003,7 @@ once and accepts a drive only from that state inside an active operation.
   callable under a `dispose` operation that defers its output to the final
   drain. Then it cancels every remaining request, awaits their terminal
   settlement, and runs the close entry as before.
-- **Abort.** Poison rejects every unsettled queued call, including the
+- **Abort.** Poison rejects every unsettled call, including `openTasks`, the
   current batch and the item in delivery, with the saved failure and drops
   the drive; its gate is never resolved.
 
