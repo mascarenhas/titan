@@ -9,6 +9,9 @@ foreign import "errno.h"
 
 local type Value = browser.BrowserValue
 
+-- Host timers take a signed 32-bit delay; longer waits are chained here.
+local const MAX_HOST_DELAY = 2147483647
+
 --- A Runtime-bound recurring timer that coalesces missed firings.
 -- @usage standard-library-timer.md#recurring-tickers
 record Ticker
@@ -53,20 +56,7 @@ local function host_error(message: Value, thrown: Value, operation: string): asy
   return async.OperationError(-ffi.EIO, "EIO", text, operation)
 end
 
---- Suspend the current Task until a one-shot timer fires.
--- @param milliseconds Delay or interval in milliseconds.
--- @usage standard-library-timer.md#one-shot-delays
-function sleep(milliseconds: integer)
-  async.checkpoint()
-  if milliseconds < 0 then
-    raise async.OperationError(-ffi.EINVAL, "EINVAL", "invalid argument", "timer.sleep")
-  end
-  -- A zero delay is a yield: no host timer, and the Task resumes in a later
-  -- turn, after the driver gives the event loop one macrotask.
-  if milliseconds == 0 then
-    async.yield()
-    return
-  end
+local function sleep_once(milliseconds: integer)
   local task = async.running()
   local token = async.ResumeToken("timer.sleep")
   local failure: async.OperationError? = nil
@@ -86,6 +76,29 @@ function sleep(milliseconds: integer)
   if failed ~= nil then raise failed end
 end
 
+--- Suspend the current Task until a one-shot timer fires.
+-- @param milliseconds Delay or interval in milliseconds.
+-- @usage standard-library-timer.md#one-shot-delays
+function sleep(milliseconds: integer)
+  async.checkpoint()
+  if milliseconds < 0 then
+    raise async.OperationError(-ffi.EINVAL, "EINVAL", "invalid argument", "timer.sleep")
+  end
+  -- A zero delay is a yield: no host timer, and the Task resumes in a later
+  -- turn, after the driver gives the event loop one macrotask.
+  if milliseconds == 0 then
+    async.yield()
+    return
+  end
+  local remaining = milliseconds
+  while remaining > 0 do
+    local delay = remaining
+    if delay > MAX_HOST_DELAY then delay = MAX_HOST_DELAY end
+    sleep_once(delay)
+    remaining = remaining - delay
+  end
+end
+
 --- Yield the current Task to a later event-loop turn.
 -- @usage standard-library-timer.md#one-shot-delays
 function yield()
@@ -102,6 +115,37 @@ local function Ticker:retire_request()
     self.request = nil
     open:close()
   end
+end
+
+-- One chunk of a period beyond the host's timer range. The whole period is
+-- re-armed before the tick is published, as a host interval does.
+local function Ticker:arm(remaining: integer, period: integer,
+    publish: function (boolean): (boolean), fail: function (async.OperationError): (boolean))
+  local delay = remaining
+  if delay > MAX_HOST_DELAY then delay = MAX_HOST_DELAY end
+  local previous? = self.request
+  self.request = timeout_source():start(function (...: Value): Value
+    if remaining > delay then
+      self:arm(remaining - delay, period, publish, fail)
+    else
+      self:arm(period, period, publish, fail)
+      publish(true)
+    end
+    return Value.is_nil()
+  catch
+    local message = "host timer failed"
+    if error is browser.BrowserError then
+      local failure: browser.BrowserError = error
+      message = failure.message
+      failure:close()
+    end
+    fail(async.OperationError(-ffi.EIO, "EIO", message, "timer.ticker"))
+    return Value.is_nil()
+  end, function (...: Value): Value
+    fail(host_error(...[1], ...[2], "timer.ticker"))
+    return Value.is_nil()
+  end, Value.is_float(delay))
+  if previous ~= nil then previous:close() end
 end
 
 --- Create a recurring timer with a positive interval in milliseconds.
@@ -128,13 +172,17 @@ function ticker(milliseconds: integer): Ticker
         recurring:retire_request()
       end
       local actions = async.SubscriptionActions<|boolean|>(stop, close)
-      recurring.request = interval_source():listen(function (...: Value): Value
-        publish(true)
-        return Value.is_nil()
-      end, function (...: Value): Value
-        fail(host_error(...[1], ...[2], "timer.ticker"))
-        return Value.is_nil()
-      end, Value.is_float(milliseconds))
+      if milliseconds > MAX_HOST_DELAY then
+        recurring:arm(milliseconds, milliseconds, publish, fail)
+      else
+        recurring.request = interval_source():listen(function (...: Value): Value
+          publish(true)
+          return Value.is_nil()
+        end, function (...: Value): Value
+          fail(host_error(...[1], ...[2], "timer.ticker"))
+          return Value.is_nil()
+        end, Value.is_float(milliseconds))
+      end
       return actions
     end)
   accepted = true

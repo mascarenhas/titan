@@ -106,3 +106,51 @@ export function settledMarker(promise) {
   promise.then(settle, settle);
   return marker;
 }
+
+// Shared timer spy. Timeouts of at least 10^8 ms (about 28 hours) never reach
+// the host: the timer cases fire them explicitly.
+export function watchTimers() {
+  const saved = {setTimeout, clearTimeout, setInterval, clearInterval};
+  const spy = {timeouts: new Map(), delays: [], held: new Map(), intervals: new Map(), periods: []};
+  globalThis.setTimeout = function (callback, delay, ...rest) {
+    spy.delays.push(delay);
+    if (delay >= 1e8) {
+      const id = Symbol('held timeout');
+      spy.held.set(id, {callback, delay, rest});
+      return id;
+    }
+    const id = saved.setTimeout.call(globalThis, (...values) => {
+      spy.timeouts.delete(id);
+      callback(...values);
+    }, delay, ...rest);
+    spy.timeouts.set(id, delay);
+    return id;
+  };
+  globalThis.clearTimeout = function (id) {
+    if (spy.held.delete(id)) return;
+    spy.timeouts.delete(id);
+    saved.clearTimeout.call(globalThis, id);
+  };
+  globalThis.setInterval = function (callback, period, ...rest) {
+    const id = saved.setInterval.call(globalThis, callback, period, ...rest);
+    spy.intervals.set(id, period);
+    spy.periods.push(period);
+    return id;
+  };
+  globalThis.clearInterval = function (id) {
+    spy.intervals.delete(id);
+    saved.clearInterval.call(globalThis, id);
+  };
+  spy.count = delay => [...spy.timeouts.values(), ...spy.intervals.values(), ...spy.held.values()].filter(
+    timer => (typeof timer === 'object' ? timer.delay : timer) === delay).length;
+  spy.fire = delay => {
+    const entry = [...spy.held].find(([, timer]) => timer.delay === delay);
+    if (!entry) return false;
+    const [id, timer] = entry;
+    spy.held.delete(id);
+    timer.callback(...timer.rest);
+    return true;
+  };
+  spy.restore = () => { Object.assign(globalThis, saved); };
+  return spy;
+}

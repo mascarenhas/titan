@@ -50,11 +50,11 @@ The loader's parts:
 | Marshalling (`snapshotArguments`, `writeValue`, `valuesAt`, `completionAt`, `importResponse`) | Nothing between calls | Converting JavaScript values to and from the records of `titan/browser.h` |
 | Queue (`queue`, `batch`) | Notifications, request events, and calls that wait for `drain()` or a drive, with each queued call's promise | JavaScript values that have no slot yet; items that wait for a point where Wasm can be entered |
 | Pending Task-form calls (`openTasks`) | Delivered Task-form calls whose Task has not reported its outcome, with each call's promise | The embedder-facing promise API; promises waiting for a Titan-reported outcome |
-| Requests | The detachable cell of each promise or listener continuation, the host cancel function, the ownership form, and the terminal promise that disposal awaits. The loader also keeps each request's completion and failure targets and the count of its queued events, and reports the request's two hold drops once those have been delivered | Promise and listener continuations |
-| Deferred releases (`releases`) | Wrapper releases and request-hold drops, applied by a release entry at a safe point or handed to `deliver` | A release requested where Wasm cannot be entered |
+| Requests | The detachable cell of each promise or listener continuation, the host cancel function, the ownership form, the completion and failure targets, and the terminal promise that disposal awaits; no callable hold accounting | Promise and listener continuations |
+| Deferred releases (`releases`) | Wrapper releases, applied by a release entry at a safe point or handed to `deliver` | A wrapper release requested where Wasm cannot be entered |
 | Drive | The gate promise of the suspending import, the turn source, the owner token, and the exit latch | JSPI resumption; macrotask scheduling |
 | `OutputChannel` and `drainOutput` | One FIFO of copied chunks per stream, at most one sink call in flight, and the drains that run after the image is released | The embedder's sinks and their promises |
-| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | Host timers, re-armed in chunks beyond the 32-bit range, and the two driver callables | Host timer APIs |
+| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | One bounded host timer per arm, and the two driver callables; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs |
 
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
 `titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
@@ -222,21 +222,20 @@ module variables (`pins_by_slot: {Pin}`, `pins_by_fn: {value: Pin}`,
     and no live wrapper exists in JavaScript).
   - `holds: integer` counts active request and listener holds (incremented for
     `completion` and `failure` at `BrowserHandle:start` / `BrowserHandle:listen`).
-- JavaScript reports each hold drop once via `release_callable(id, state, slot,
-  generation, wrapper)`: `wrapper.release()` passes `wrapper = 1` (setting
-  `wrapper_live = false`), and request retirement (after any queued settlement
-  notification finishes in `drain()`, or upon cancellation/discard) passes
-  `wrapper = 0` (decrementing `holds`). When `!pin.wrapper_live && pin.holds <= 0`,
-  `Pin:retire_if_unused()` removes the pin from `pins_by_slot` and `pins_by_fn`
-  and recycles its slot with a monotonically increasing generation.
+- JavaScript reports only wrapper releases through `release_callable(id, state,
+  slot, generation, wrapper = 1)`, setting `wrapper_live = false`. Titan's
+  `RequestHolds` drops the completion and failure holds once: after a one-shot's
+  callback returns or raises, after cancel, after close, or on an `UNDELIVERED`
+  drive item. Listener holds remain until cancel, close or state close.
+  `Pin:retire_if_unused()` removes an unused pin from `pins_by_slot` and
+  `pins_by_fn` and recycles its slot with an increasing generation.
 - Every pin allocation and hold mutation is exception-atomic: `allocate_pin`
   undoes partial table insertions on raise before mutating `free_slots` or
   `next_slot`, and `pin_wrapper` / `pin_request_hold` allocate and append their
   `ProvisionalPin` rollback record before `allocate_pin` or mutating `Pin`.
 - Re-exporting a callable while its wrapper release is queued in JavaScript
-  cancels only that queued wrapper release (`entry.wrapper === true`) while
-  preserving any queued request-hold drops (`entry.wrapper === false`), and
-  issues a fresh `CallableView` wrapper for the existing pin.
+  cancels that queued release and issues a fresh `CallableView` wrapper for the
+  existing pin.
 - A newly registered callable wrapper starts with `exposed = false` in
   JavaScript and is marked `exposed = true` only when `valuesAt` finishes
   decoding that crossing's own arguments in `hostCall` or `hostStart` (right
@@ -247,8 +246,7 @@ module variables (`pins_by_slot: {Pin}`, `pins_by_fn: {value: Pin}`,
   completes, host calls and starts use `rollback_provisioned`, while invoke
   completions use `invoke_work`'s inline rollback. Both call
   `titan_browser_host_callable_closed`, which discards the unexposed wrapper
-  without touching queued request-hold drops and returns `1`, then retire the
-  pin if unused. Once exposed to host JavaScript,
+  and returns `1`, then retire the pin if unused. Once exposed to host JavaScript,
   `titan_browser_host_callable_closed` returns `0` and the wrapper stays live
   until its own `release()`.
 
@@ -287,8 +285,12 @@ drives, and `titan.browser` never learns about Tasks.
 - **Delivery.** `deliver` sets `delivering` for its extent, asks
   `titan_browser_host_batch` to snapshot the owner's queued items, and for
   each one lets `titan_browser_host_item` marshal it into a
-  `titan_browser_delivery` record (skipping released targets and reporting
-  marshalling failures itself). It runs the item through `invoke_work`, the
+  `titan_browser_delivery` record, skipping released targets. A request's
+  unmarshallable success event becomes a failure event appended to the live
+  queue. An unmarshallable failure event is reported and returned as
+  `UNDELIVERED`: Titan drops a one-shot's holds without invoking, settling or
+  acknowledging the item; a listener keeps its holds. Other unmarshallable items
+  are reported and skipped. It runs ordinary items through `invoke_work`, the
   same body as an `invoke` entry, with `queued = true`: the completion record
   goes to `titan_browser_host_settle` instead of `titan_browser_complete`,
   because the entry that hosts the drive still owns the one ordinary
@@ -297,8 +299,8 @@ drives, and `titan.browser` never learns about Tasks.
   never leave the delivery half done. `titan_browser_host_item_done` then
   frees the item's host allocations and releases unadopted temporaries.
 - **Deferred releases.** After the batch, `titan_browser_host_release_next`
-  hands back the owner's queued wrapper releases and request-hold drops, and
-  `apply_release` (the pin block shared with `release_work`) retires them, so a
+  hands back the owner's queued wrapper releases, and `apply_release` (the pin
+  block shared with `release_work`) retires them, so a
   long drive does not accumulate pinned callables. Other states' releases
   wait for the loader's next safe point after the drive.
 - **Wake.** `wake` calls `titan_browser_host_wake(state)`; the loader ignores
@@ -321,8 +323,9 @@ learn about the callback only through `titan_no_switch`.
   [wake source](browser-target.md#drives-the-call-queue-and-wake-sources)
   for the owner. `BrowserPin:close` is idempotent: it drops the hold, calls
   `retire_if_unused`, and decrements `open_pins`. Closing the last pin calls
-  `wake`, so a parked wait re-checks its wake sources. A wait with an open
-  pin passes `WAIT_HELD`; the loader keeps no copy of the count.
+  `wake`, so a parked gate resumes with `RESUMED` and the drive's next wait
+  re-checks its wake sources. A wait with an open pin passes `WAIT_HELD`;
+  the loader keeps no copy of the count.
 - **C entries.** `browserentry.lua` declares `call_sync`, `callback_enter`
   and `callback_leave` as weak, like the invoke and release forwards, and
   defines the C functions `titan_browser_call_sync`,
@@ -432,13 +435,13 @@ import result kind for `host_start`. Statuses are `OK = 0`, `TITAN_ERROR = 1`,
 
 | Offset | Field | Meaning |
 | --- | --- | --- |
-| 0 | `id` | Unsigned 64-bit item identity for `item_done` and the settlement record |
-| 8 | `kind` | `NOTIFY = 1`, `CALL = 2`, or `RELEASE = 3` |
+| 0 | `id` | Unsigned 64-bit item identity for `item_done` and settlement; zero for `UNDELIVERED` |
+| 8 | `kind` | `NOTIFY = 1`, `CALL = 2`, `RELEASE = 3`, or `UNDELIVERED = 4` |
 | 12 | `slot` | Target callable slot, or the released pin's slot |
 | 16 | `generation` | Its generation |
-| 20 | `argc` | Argument count |
-| 24 | `args` | Host-owned `titan_browser_value` array, valid until `item_done` |
-| 28 | `wrapper` | `RELEASE` only: 1 for a wrapper release, 0 for a request-hold drop |
+| 20 | `argc` | Argument count; zero for `UNDELIVERED` |
+| 24 | `args` | Host-owned array valid until `item_done`; absent for `UNDELIVERED` |
+| 28 | `wrapper` | `RELEASE` only: 1 for a wrapper release |
 
 Relinquish modes are `TURN = 0`, `WAIT = 1`, and `WAIT_HELD = 2`; statuses
 are `RESUMED = 0`, `IDLE = 1`, and `DISPOSING = 2`.
@@ -544,21 +547,27 @@ and host invocation.
   marshalled by runtime type, with `undefined` mapped to `is_nil`).
 - `listen` emissions enqueue every emitted argument marshalled by runtime type.
 - Failure settlement (including a `start` settlement or `listen` emission that
-  fails marshalling with `TypeError` or a handle error) enqueues
+  fails marshalling at snapshot or delivery) enqueues
   `(is_string(message), is_handle(thrown))`, where `thrown` is always wrapped in
-  a handle slot even for a primitive rejection.
+  a handle slot even for a primitive rejection. A delivery-time failure is
+  appended to the live queue, after events already waiting. A failure event
+  that cannot be marshalled is reported through `onNotificationError`.
 
 Detachable mailbox and guaranteed-terminal retained ownership, cancellation,
 listener removal, late-settlement dropping, FIFO batching, and disposal all
 remain with the JS bridge owner. No C import awaits host work.
 
-Drain rechecks each detached entry's request cancellation before invoking it:
-cancellation can remove entries from the live queue, not the already-detached
-batch. A normally settled one-shot marks its request retired before delivery;
-retirement alone does not cancel that queued completion, and the request's pin
-holds on `completion` and `failure` are released only after that queued
-notification finishes in `drain()` (or is discarded). A drive's `deliver`
-applies the same checks to its batch.
+Drain and drive delivery recheck each detached entry's request cancellation:
+cancellation removes live queued entries, including already settled one-shots,
+and silences the detached batch. Host retirement alone does not cancel a queued
+completion. Titan preallocates the inert `BrowserRequest` and `RequestHolds`
+before host acceptance, then publishes only fields afterwards. A one-shot uses
+fresh wrapper closures whose `defer` drops both holds after the user's callback
+returns or raises. Cancel drops both after the cancel import returns, even on
+host failure; close drops them after release. A double fault in idle `drain()`,
+or a Titan decoding failure before callback entry, retains the holds until
+request close or state close. In a drive an unmarshallable failure event returns
+as `UNDELIVERED`, letting Titan drop the one-shot's holds immediately.
 
 ## Test layers
 
@@ -637,8 +646,11 @@ child-state refusals, the `timer` cases, and the synchronous-callback cases).
 - **Timer cases:** sleeps mixed with host requests, and zero delays and yields
   that resume in a later browser task, shown by a marker armed on the driver's
   turn source having run. Sleeps, tickers and a ticker left open past its
-  Runtime leave no JavaScript timer armed; the harness wraps the global timer
-  functions to count them.
+  Runtime leave no JavaScript timer armed. Long sleeps and ticker periods
+  chain bounded chunks, never fire early, and clear the current chunk on
+  cancellation or close; each long ticker re-arms its whole period before
+  publishing. The shared harness spy holds long delays for manual firing and
+  counts pending timers.
 - **Synchronous-callback cases:** they run in `browser.call_sync`.
   - Coroutine switches raise, also from inside a coroutine, and the current
     coroutine and Task are hidden.

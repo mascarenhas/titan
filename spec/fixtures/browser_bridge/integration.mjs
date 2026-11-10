@@ -592,7 +592,7 @@ async function resultRepairs(context, host, engineFailures) {
     await context.tick();
     await host.instance.drain();
     context.assert(host.successes.at(-1)[0] === 51n && (await host.call('pin_holders_collected')) === 0n,
-      'request retirement dropped a pin still held by an active listener');
+      'the one-shot callback dropped a pin still held by an active listener');
     holdEmit(60n);
     await host.instance.drain();
     context.assert(host.successes.at(-1)[0] === 61n);
@@ -601,12 +601,12 @@ async function resultRepairs(context, host, engineFailures) {
     context.assert((await host.call('pin_holders_collected')) === 3n,
       'closing the last holder did not drop the completion and failure pins');
     host.successes.length = 0;
-    // 5. Queued request-hold drop survives a failed wrapper re-export in the same operation (R-H4).
+    // 5. Listener close drops its holds before a failed wrapper re-export (R-H4).
     host.hooks.pinHoldListener = () => ({kind: 'listener', subscribe() { return () => {}; }});
     await host.call('lost_release_regression');
     await host.instance.drain();
     context.assert((await host.call('pin_holders_collected')) === 64n,
-      'provisional wrapper rollback deleted a queued request-hold drop');
+      'failed wrapper re-export retained a closed listener callback');
 
     // 6. Wrapper exposed to host JS before the host throws, returns an unmarshallable value, or refuses start stays live (R-H5).
     for (const mode of [1n, 2n, 3n]) {
@@ -925,6 +925,107 @@ async function prepareNotificationCollection(context, host) {
   handleTarget.release();
   await host.instance.drain();
   return [reference];
+}
+
+// Kept-open request owners must not keep the callables after Titan ends delivery.
+async function requestHolds(context, host) {
+  const prepare = (name, listener = false) => host.call('prepare_request_lifetime', name, listener);
+  const collectedPins = () => host.call('pin_holders_collected');
+  const errors = host.notificationErrors.length;
+  let source = gate();
+  host.bindings.lifetime_request = () => ({kind: 'detachable', promise: source.promise});
+  await prepare('lifetime_request');
+  context.assert(await collectedPins() === 0n, 'an active request lost its captures');
+  source.resolve(101n);
+  await context.tick(); await host.instance.drain();
+  context.assert(await collectedPins() === 3n, 'a delivered one-shot kept captures until close');
+  await host.call('close_request');
+
+  source = gate();
+  await prepare('lifetime_request');
+  await host.call('cancel_request');
+  context.assert(await collectedPins() === 3n, 'a cancelled one-shot kept captures until close');
+  await host.call('close_request');
+
+  // A settled request is retired on the host, but cancel still drops its queued event.
+  source = gate();
+  await prepare('lifetime_request');
+  const successes = host.successes.length;
+  source.resolve(102n);
+  await context.tick();
+  await host.call('cancel_request');
+  await host.instance.drain();
+  context.assert(host.successes.length === successes && await collectedPins() === 3n,
+    'cancel after settlement delivered an event or kept its captures');
+  await host.call('close_request');
+
+  source = gate();
+  await prepare('lifetime_request');
+  const wrapper = await host.call('make_pinned_wrapper', 0n);
+  source.resolve(wrapper);
+  await context.tick();
+  wrapper.release();
+  const failures = host.failures.length;
+  let announced = 0;
+  host.hooks.requestDrain = () => { announced++; };
+  await host.instance.drain();
+  context.assert(host.failures.length === failures && announced > 0,
+    'unmarshallable settlement retried in place or failed to announce its queued failure');
+  await host.instance.drain();
+  context.assert(host.failures.length === failures + 1 &&
+    host.failures.at(-1)[1].code === 'TITAN_BROWSER_HANDLE' &&
+    decode(host.failures.at(-1)[0]) === host.failures.at(-1)[1].message &&
+    await collectedPins() === 3n, 'delivery marshalling failure did not reach failure and drop holds');
+  host.hooks.requestDrain = undefined;
+  await host.call('close_request');
+
+  let emit;
+  host.bindings.lifetime_listener = () => ({kind: 'listener', subscribe(callback) {
+    emit = callback;
+    return () => { emit = undefined; };
+  }});
+  await prepare('lifetime_listener', true);
+  const argument = await host.call('make_pinned_wrapper', 0n);
+  emit(argument);
+  emit(103n);
+  argument.release();
+  const listenerFailures = host.failures.length;
+  await host.instance.drain();
+  context.assert(host.successes.at(-1)[0] === 103n && host.failures.length === listenerFailures &&
+    await collectedPins() === 0n, 'listener failure displaced an already queued emission or dropped holds');
+  await host.instance.drain();
+  context.assert(host.failures.length === listenerFailures + 1 && await collectedPins() === 0n,
+    'listener delivery failure did not keep its callable holds');
+  emit(104n);
+  await host.instance.drain();
+  context.assert(host.successes.at(-1)[0] === 104n, 'listener stopped after a marshalling failure');
+  await host.call('cancel_request');
+  context.assert(await collectedPins() === 3n, 'listener cancel kept captures until close');
+  await host.call('close_request');
+  context.assert(host.notificationErrors.length === errors, 'request delivery failure reached the observer');
+
+  // D8: idle delivery has no Titan stack on a double fault; close ends the holds.
+  source = gate();
+  await prepare('lifetime_request');
+  source.resolve(null);
+  await context.tick();
+  const restore = host.controls.failNextAllocations(2);
+  try {
+    await host.instance.drain();
+    await host.instance.drain();
+  } finally { restore(); }
+  context.assert(host.notificationErrors.length === errors + 1 &&
+    host.notificationErrors.at(-1).kind === 'callback' &&
+    host.notificationErrors.at(-1).operation === 'drain' && await collectedPins() === 0n,
+    'idle double fault did not report once and retain the callables');
+  await host.call('close_request');
+  context.assert(await collectedPins() === 3n, 'close did not release idle double-fault holds');
+  // Injected JavaScript Error stack frames retain the fixture's Module closure.
+  // Discard only this case's observations before the later whole-image GC proof.
+  host.notificationErrors.length = errors;
+  host.failures.length = failures;
+  delete host.bindings.lifetime_request;
+  delete host.bindings.lifetime_listener;
 }
 
 async function requests(context, host) {
@@ -1726,6 +1827,7 @@ export async function run(context) {
       'instances shared original capture ownership');
     const announcements = await notifications(context, first, completions);
     await requests(context, first);
+    await requestHolds(context, first);
     const io = await stdio(context, first);
     const repairs = {results: await resultRepairs(context, first, engineFailures),
       responses: await responseRepairs(context, first, engineFailures),

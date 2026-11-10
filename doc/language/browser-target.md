@@ -719,11 +719,12 @@ value marshalled by runtime type, with `undefined` mapped to `is_nil()`);
 receives `(BrowserValue.is_string(message), BrowserValue.is_handle(thrown))`:
 the diagnostic message text and a handle retaining the exact rejected
 JavaScript value (even for a primitive). An unmarshallable `start` settlement
-or `listen` emission is delivered to `failure` as a `TypeError` (or bridge
-handle error). Both outcomes enqueue and use protected delivery; a Promise
-rejection is not merely logged to an observer. If `completion` or `failure`
-raises at delivery time (for example when rejecting an unexpected argument
-variant), that failure is reported through `onNotificationError`.
+or `listen` emission is delivered to `failure`, whether marshalling fails when
+it is queued or when it is delivered. A delivery-time failure joins the next
+batch, after events already waiting. Both outcomes use protected delivery; a
+Promise rejection is not merely logged to an observer. If the failure event
+itself cannot be marshalled, or `completion` or `failure` raises at delivery,
+that error is reported through `onNotificationError`.
 
 **Observation and errors.** `instance.trace` is a fresh frozen `{state,
 reason}` snapshot, including before initialization. It preserves the last

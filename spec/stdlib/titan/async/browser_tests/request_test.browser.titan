@@ -1,0 +1,99 @@
+-- Request delivery faults must end the wait, or release a one-shot's holds
+-- when neither its completion nor its failure can cross the host boundary.
+
+function test_request_delivery_failure_reaches_the_awaiting_task(_: test.Context)
+  runtime_test.run(function ()
+    local source = browser.binding("released_settlement")
+    defer source:close()
+    local request: browser.BrowserRequest?
+    defer do
+      if request ~= nil then request:close() end
+    end
+    local before = macrotasks()
+    local result = async.await<|boolean, browser.BrowserError|>(function (
+        resolve: function (boolean): (), reject: function (browser.BrowserError): (),
+        _: function (value, string): ())
+      request = source:start(function (...: Value): Value
+        resolve(true)
+        return Value.is_nil()
+      end, function (...: Value): Value
+        case ...[1]
+        when is_string(message) then
+          case ...[2]
+          when is_handle(thrown) then
+            reject(browser.BrowserError(message, thrown))
+            return Value.is_nil()
+          end
+        end
+        raise "failure expected a message and thrown handle"
+      end, Value.is_callable(function (...: Value): Value
+        return Value.is_nil()
+      end))
+    end)
+    case result
+    when error(failure) then
+      defer failure:close()
+      test.assert(failure.message == "browser callable is foreign, released, or belongs to a closed state",
+        "delivery failure lost the released-callable diagnostic")
+    else raise "unmarshallable request settlement resolved its awaiting Task"
+    end
+    test.assert(macrotasks() > before, "request failure resumed in the same browser task")
+  end)
+end
+
+function test_timer_sleep_delivery_failure_is_an_operation_error(_: test.Context)
+  runtime_test.run(function ()
+    ffi.scheduler_fail_deliveries(1)
+    local caught = false
+    do
+      timer.sleep(1)
+    catch
+      caught = true
+      test.assert(error is async.OperationError, "timer delivery failure lost OperationError")
+      local failure: async.OperationError = error
+      test.assert(failure.operation == "timer.sleep" and
+        failure.message == "injected delivery allocation failure",
+        "timer delivery failure lost its operation or message")
+    end
+    test.assert(caught and ffi.scheduler_delivery_failures() == 0,
+      "timer sleep did not consume its delivery allocation fault")
+  end)
+end
+
+local record RequestMarker
+  weight: integer
+end
+local request_markers_collected = 0
+
+local function request_marker_finalize(candidate: value)
+  local marker: RequestMarker = candidate
+  request_markers_collected = request_markers_collected + marker.weight
+end
+
+local function start_undelivered_request(): browser.BrowserRequest
+  local source = browser.binding("delay")
+  defer source:close()
+  local done = RequestMarker { weight = 1 }
+  gc.finalizable<|value|>(done, request_marker_finalize)
+  local failed = RequestMarker { weight = 2 }
+  gc.finalizable<|value|>(failed, request_marker_finalize)
+  return source:start(function (...: Value): Value
+    return Value.is_integer(done.weight)
+  end, function (...: Value): Value
+    return Value.is_integer(failed.weight)
+  end, Value.is_integer(0), Value.is_nil())
+end
+
+function test_undeliverable_request_drops_holds_inside_a_drive(_: test.Context)
+  runtime_test.run(function ()
+    request_markers_collected = 0
+    local request = start_undelivered_request()
+    defer request:close()
+    ffi.scheduler_fail_deliveries(2)
+    while ffi.scheduler_delivery_failures() > 0 do async.yield() end
+    gc.collect()
+    gc.collect()
+    test.assert(request_markers_collected == 3,
+      "a double-faulted one-shot kept its captures until request close")
+  end)
+end

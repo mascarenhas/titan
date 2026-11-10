@@ -415,7 +415,8 @@ native and browser providers.
 The sixteenth root is `titan.timer`, whose flat variant `titan/timer.browser.titan`
 sits beside `titan/timer.native.titan` with the same public interface. It
 imports `async`, `titan.browser` and `errno.h`, and builds one-shot sleeps on
-the SDK's `titan:timeout` source and tickers on `titan:interval`
+the SDK's `titan:timeout` source. Tickers use `titan:interval` for bounded
+periods and chain `titan:timeout` requests for longer ones
 ([browser timers](libuv-runtime.md#browser-timers)). Its `Ticker` keeps its
 methods but holds a host request instead of a uv timer, so the member
 inventory records it as an opaque record.
@@ -2899,10 +2900,11 @@ Callable wrappers have module-private WeakMap brands and state/slot/generation
 records. Logical release invalidates immediately, while physical pin retirement
 uses the release entry at a complete safe point. A detached FIFO batch
 revalidates both its target and every branded argument before any Wasm
-allocation. A released target drops the notification; a released argument
-reports an error without Lua entry. State-close notification invalidates every
-callable, notification, request, and JS slot charged to that state, including
-close-phase slots created without Lua finalizer registration.
+allocation. A released target drops the notification; a released argument of a
+plain notification reports an error without Lua entry. A request event with an
+unmarshallable argument instead queues its failure event. State-close notification
+invalidates every callable, notification, request, and JS slot charged to that
+state, including close-phase slots created without Lua finalizer registration.
 
 `drain()` detaches one FIFO batch of notifications under one logical
 admission; queued calls stay behind. Each callback has a unique protected
@@ -2939,12 +2941,16 @@ once and accepts a drive only from that state inside an active operation.
   writes the delivery record; `host_settle` validates that identity, copies
   the completion as `receiveCompletion` does, reports a notification's
   failure as a callback error and settles a plain call's promise immediately;
-  `host_item_done` frees the item's allocations and unadopted temporaries and
-  finishes a request event's hold accounting. Promise continuations run at the
-  next microtask checkpoint, which can fall between internal coroutine hops
-  of the same turn, never under a Wasm frame. Calls made there wait for a later
-  turn. A call queued too late for the drive's last batch runs at the next
-  safe point as an ordinary call.
+  `host_item_done` frees the item's allocations and unadopted temporaries.
+  An unmarshallable request success becomes a failure event appended to the
+  live queue; an unmarshallable failure event is reported and returned as
+  `UNDELIVERED` with target identity and no arguments, settlement or
+  `item_done`. Titan drops a one-shot's holds for that item; listener holds
+  remain. Other unmarshallable items are reported and skipped. Promise
+  continuations run at the next microtask checkpoint, which can fall between
+  internal coroutine hops of the same turn, never under a Wasm frame. Calls
+  made there wait for a later turn. A call queued too late for the drive's
+  last batch runs at the next safe point as an ordinary call.
 - **Wake sources.** A queued owner item, an open owner request or listener,
   an open owner `BrowserPin`, or an already scheduled wake keeps a waiting
   relinquish parked; a JS call that might come later does not. `titan.browser`
@@ -2952,7 +2958,8 @@ once and accepts a drive only from that state inside an active operation.
   Every enqueue of an owner item, `dispose()`, and `titan_browser_host_wake`
   schedule the one coalesced turn-source macrotask that resolves the parked
   gate ([relinquish import](#the-relinquish-import)). Closing the owner's last
-  pin calls `wake`, so a parked wait re-checks its wake sources.
+  pin calls `wake`, so a parked gate resumes with `RESUMED` and the drive's
+  next wait re-checks its wake sources.
 - **Synchronous C callbacks.** A C callback that enters Titan through
   `titan_browser_call_sync` is not an operation and takes no admission.
   `callbackAdmit(state)`, behind `titan_browser_host_callback`, admits it
@@ -3031,16 +3038,25 @@ failure releases the unreturned unit; an already accepted retained operation
 still owns its terminal retirement even if cancellation reports an error. C
 output needs no request unit.
 
+Titan owns request callable holds. A one-shot drops both holds after its
+callback returns or raises; cancel and close drop them after the host import
+returns. Cancel also suppresses a settlement already queued for delivery. A
+drive's `UNDELIVERED` hand-back drops a one-shot's holds without callback entry.
+The same double fault in idle `drain()`, or failure inside Titan before the
+callback runs, keeps the callables until request close or state close.
+
 Every request has both a success target and a mandatory failure target.
 One-shot `start` settlement enqueues one argument (the settled value marshalled
 by runtime type, with `undefined` mapped to `is_nil`), `listen` emissions
 enqueue each emitted argument by runtime type, and Promise rejection queues the
 failure notification with `(is_string(message), is_handle(thrown))`, creating
-`thrown`'s state-owned handle only on delivery. `onNotificationError` is not a
-substitute for the rejected request's outcome. It receives
+`thrown`'s state-owned handle only on delivery. Success marshalling failure,
+whether at settlement or delivery, queues the same failure notification.
+`onNotificationError` is not a substitute for the request's outcome. It receives
 `{kind: 'callback' | 'cleanup', operation, error}` for errors without another
-caller: callback failures, secondary cleanup failures, and callerless physical
-release failure. Public operation labels are `initialize`, `run`, `call`,
+caller: an unmarshallable failure event, callback failures, secondary cleanup
+failures, and callerless physical release failure. Public operation labels are
+`initialize`, `run`, `call`,
 `drain`, `dispose`, and `notify`; work-announcement failure uses `requestDrain`
 and background physical release uses `release_callable`. Failed physical
 release is not retried; state close remains the retirement fallback.

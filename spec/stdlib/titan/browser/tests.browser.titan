@@ -546,6 +546,38 @@ local function pin_marker_finalize(candidate: value)
   pin_markers_collected = pin_markers_collected + marker.weight
 end
 
+function test_export_request_lifetimes(_: test.Context)
+  publish("prepare_request_lifetime", function(...: Value): Value
+    local name = expect_string(...[1])
+    local listener = expect_boolean(...[2])
+    pin_markers_collected = 0
+    local done_marker = PinMarker { weight = 1 }
+    gc.finalizable<|value|>(done_marker, pin_marker_finalize)
+    local failed_marker = PinMarker { weight = 2 }
+    gc.finalizable<|value|>(failed_marker, pin_marker_finalize)
+    local done = function(...: Value): Value
+      local observer = browser.binding("request_success")
+      defer observer:close()
+      observer:call(...[1])
+      return Value.is_integer(done_marker.weight)
+    end
+    local failed = function(...: Value): Value
+      local thrown = expect_handle(...[2])
+      defer thrown:close()
+      local observer = browser.binding("request_failure")
+      defer observer:close()
+      observer:call(Value.is_string(expect_string(...[1])), Value.is_handle(thrown))
+      return Value.is_integer(failed_marker.weight)
+    end
+    local source = browser.binding(name)
+    defer source:close()
+    if listener then pending = source:listen(done, failed)
+    else pending = source:start(done, failed)
+    end
+    return Value.is_nil()
+  end)
+end
+
 function test_export_requests_and_listeners(_: test.Context)
   local stop_after_success: boolean?
   local completion = function(...: browser.BrowserValue): browser.BrowserValue
