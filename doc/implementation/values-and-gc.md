@@ -614,9 +614,18 @@ inputs as C values and roots none of them. The caller upholds one invariant:
   is not recognised. `coder._stabilize_input_code` publishes it in a slot from
   `newborrowedslot` (`coder/flow.lua`) at the position where it is evaluated.
   That slot is not an allocation, so it does not make a loop poll the
-  collector, and like every temporary it holds its value until the enclosing
-  block ends. The store also closes the window before the callee is entered:
-  a later argument can clear an earlier argument's home and collect.
+  collector. Like every temporary's slot it is never cleared: it holds its
+  value until a later temporary of the function reuses the slot, which cannot
+  happen before the enclosing block ends. An input therefore stays reachable
+  after its call has returned, even when its home is cleared in the meantime,
+  and a finalizer that depends on it waits. Code that must observe that
+  finalization makes the call in another frame: a helper function, or an
+  [immediate function](immediate-functions.md#captures-roots-and-protected-control-flow),
+  whose root range is cleared at its continuation
+  (`spec/fixtures/stdlib/titan/transfer_ownership_smoke_app.titan` sends
+  through a `Sender` that way before it drops the field and collects). The
+  store also closes the window before the callee is entered: a later argument
+  can clear an earlier argument's home and collect.
 
   A raw `TitanVargX` and its C `args` array merely borrow their elements and
   are never roots. Static elements are classified like fixed arguments. The
