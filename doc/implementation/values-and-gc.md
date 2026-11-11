@@ -200,9 +200,8 @@ generated codecs use `TITAN_MT_PROJECT`, `TITAN_MT_CONSTRUCT`,
 
 Metatables that Titan creates on first use and may need to retry are built
 off-registry: the shared Array proxy pair (`titan-runtime/titan.c`,
-`TITAN_ARRAY_METATABLE_PAIR`), generated owned-C metatables
-(`titan-compiler/coder/generate.lua`), and the private `titan.coroutine` owner
-metatable (`titan/coroutine.titan`). Each is fully initialized before it is
+`TITAN_ARRAY_METATABLE_PAIR`) and generated owned-C metatables
+(`titan-compiler/coder/generate.lua`). Each is fully initialized before it is
 stored in the registry, and a pre-existing non-table entry is an error. Do not
 initialize conditionally on `luaL_newmetatable`'s return value: that call
 publishes a minimally initialized entry first, so an allocation error during

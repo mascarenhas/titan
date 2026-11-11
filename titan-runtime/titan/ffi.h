@@ -148,14 +148,15 @@ static inline int titan_state_closing(lua_State *L) {
 TITAN_RUNTIME_FUNC TITAN_COLD l_noret titan_unwind(lua_State *L);
 
 struct mco_coro;
-typedef void (*titan_coroutine_entry)(lua_State *, Udata *, CClosure *, TValue,
-                                      struct mco_coro *);
-/* Run a coroutine entry above an unwind floor on its thread T. An unwind that
-** reaches the floor closes T's remaining Lua frames and finishes the
-** coroutine with an unwind transfer; a real error that escapes the entry is
-** delivered to the resumer as an error transfer. */
+typedef void (*titan_coroutine_entry)(lua_State *, Udata *, CClosure *,
+                                      Udata *);
+/* Run a coroutine entry above an unwind floor on its thread T, passing it the
+** owner record. An unwind that reaches the floor closes T's remaining Lua
+** frames and finishes the coroutine with an unwind transfer; a real error that
+** escapes the entry is delivered to the resumer as an error transfer, and
+** stays on T's stack as its root. */
 TITAN_RUNTIME_FUNC void titan_coroutine_enter(lua_State *T, Udata *module,
-    TValue func, struct mco_coro *co, titan_coroutine_entry entry);
+    Udata *owner, struct mco_coro *co, titan_coroutine_entry entry);
 
 static inline TValue lua_totvalue(lua_State *L, int idx) {
   if (TITAN_UNLIKELY(idx > 0)) {

@@ -15,9 +15,8 @@ static int minicoro_tag_equal(void *t1, void *t2) {
   return luaV_equalobj(NULL, (const TValue *)t1, (const TValue *)t2);
 }
 
-/* Matches titan/coroutine.titan: TITAN_CORO_TRANSFER_USERVALUE (1-based 5)
-** and the transfer flags of a returned and of an unwound coroutine. */
-#define TITAN_CORO_TRANSFER_UV_INDEX 4
+/* The transfer flags of a returned and of an unwound coroutine in
+** titan/coroutine.titan. */
 #define TITAN_CORO_TRANSFER_VALUE 1
 #define TITAN_CORO_TRANSFER_UNWIND 2
 
@@ -28,27 +27,24 @@ static void titan_coroutine_abort(const char *why) {
 }
 
 /* Push the final (payload, ok) transfer of a coroutine whose entry did not
-** push its own, rooting the payload in the owner's transfer uservalue first,
-** exactly as push_transfer in titan/coroutine.titan does. The storage is
-** empty here: the request was popped and the entry pushed nothing. */
+** push its own. The storage is empty here: the request was popped and the
+** entry pushed nothing. Nothing is rooted here: a nil payload needs no root,
+** and the caller keeps an error payload on T's stack. */
 static void titan_coroutine_push_final(lua_State *T, mco_coro *co,
                                        const TValue *payload, int ok) {
-  Udata *owner = (Udata *)mco_get_user_data(co);
   TValue value = {0};
   if (payload != NULL) {
     setobj(T, &value, payload);
   } else {
     setnilvalue(&value);
   }
-  setobj(T, &owner->uv[TITAN_CORO_TRANSFER_UV_INDEX].uv, &value);
-  luaC_barrierback(T, obj2gco(owner), &value);
   if (mco_push(co, &value, sizeof(TValue)) != MCO_SUCCESS ||
       mco_push(co, &ok, sizeof(int)) != MCO_SUCCESS)
     titan_coroutine_abort("cannot push the final coroutine transfer");
 }
 
 /* Implementation notes: doc/implementation/coroutines.md#unwinding-an-abandoned-coroutine */
-void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
+void titan_coroutine_enter(lua_State *T, Udata *module, Udata *owner,
                            struct mco_coro *co, titan_coroutine_entry entry) {
   l_uint32 oldnC = T->nCcalls;
   CallInfo *oldci = T->ci;
@@ -63,7 +59,7 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
   floor.lj.previous = T->errorJmp;
   T->errorJmp = &floor.lj;
   if (TITAN_SETJMP(floor.lj.b) == 0) {
-    entry(T, module, NULL, func, co);
+    entry(T, module, NULL, owner);
   } else {
     /* The jump removed every native frame above the floor: unlink the frames'
     ** boundaries and restore the saved call state, C-call count included,
@@ -109,18 +105,22 @@ void titan_coroutine_enter(lua_State *T, Udata *module, TValue func,
       ** as unwound, so its resumer keeps unwinding instead of returning. */
       titan_unwind_close(T, oldtop);
       titan_coroutine_push_final(T, co, NULL, TITAN_CORO_TRANSFER_UNWIND);
+      T->top.p = restorestack(T, oldtop);
     } else if (floor.lj.status == LUA_OK) {
       /* Lua code on T closed its own thread (coroutine.close() with no
       ** argument): lua_closethread already closed every variable, and
       ** luaD_throwbaselevel jumped here. Finish as dead with no result, like
       ** a Lua coroutine that closes itself. */
       titan_coroutine_push_final(T, co, NULL, TITAN_CORO_TRANSFER_VALUE);
+      T->top.p = restorestack(T, oldtop);
     } else {
-      /* Deliver the real error to the resumer. */
+      /* Deliver the real error to the resumer. It stays in the slot of T's
+      ** stack where luaD_seterrorobj put it, which roots it until the resumer
+      ** has popped it: the owner record keeps T reachable, and T never runs
+      ** again. */
       luaD_seterrorobj(T, floor.lj.status, restorestack(T, oldtop));
       titan_coroutine_push_final(T, co, s2v(T->top.p - 1), 0);
     }
-    T->top.p = restorestack(T, oldtop);
   }
   T->errorJmp = floor.lj.previous;
   T->nCcalls = oldnC;

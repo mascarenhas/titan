@@ -965,8 +965,9 @@ scheduler or adapter APIs:
 - Zero steady-state allocation does not make module loading, first Task
   creation, or Runtime teardown free.
 
-Coroutine owners are finalizable: `coro_gc` (`titan/coroutine.titan`) destroys
-the native coroutine but leaves the traced uservalue graph for the collector, so
+`Coroutine` records are finalizable: `coro_gc` (`titan/coroutine.titan`)
+destroys the native coroutine but leaves the graph that the record's fields
+trace (its thread and callback) for the collector, so
 reclaiming a finished or cancelled Task graph can take more than one full
 collection. A heap-retention test should run at least two full collections
 before comparing against a baseline. Fewer allocations also do not imply lower

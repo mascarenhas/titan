@@ -607,7 +607,7 @@ delivered.
 
 | Module | Delivered | Omitted members | Browser test owners | Final initializer, verified by `init_<module>` and `init_subset` | Raw exports |
 | --- | --- | --- | --- | --- | --- |
-| `coroutine` | yes | none | `coroutine.tests` (the Lua-host cases are in the native contributor `tests/lua_boundary_test.native.titan`) | creates or checks the `titan.coroutine` registry metatable | none |
+| `coroutine` | yes | none | `coroutine.tests` (the Lua-host cases are in the native contributor `tests/lua_boundary_test.native.titan`) | allocates the module's `mco_runtime` | none |
 | `gc` | yes | none | `gc.tests` | none | none |
 | `iteration` | yes | none | `iteration.tests` | none | none |
 | `math` | yes | none | `math.tests`, including automatic and argumentless seeding | calls `randomseed()` | none |
