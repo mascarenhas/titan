@@ -357,7 +357,7 @@ local function slice_to_string(
     offset: integer,
     length: integer): string
   if length <= 0 then return "" end
-  return ((base + offset) as foreign const *char) as string(length)
+  return (base + offset) as string(length)
 end
 
 local function buffer_to_string(buf: foreign *titan_protobuf_buffer): string
@@ -733,10 +733,7 @@ end
 -- @return Fresh nominal value and recursively copied fields.
 -- @usage standard-library-protobuf.md#api
 function deserialize(bytes: string, descriptor: reflect.Type): value
-  return deserialize_buffer(
-      bytes as foreign const *void,
-      #bytes,
-      descriptor, packet_context(false), bytes)
+  return deserialize_buffer(bytes, #bytes, descriptor, packet_context(false), bytes)
 end
 
 --- Append the wire encoding of an anonymous root message to an initialized titan_protobuf_buffer.
@@ -828,8 +825,7 @@ end
 -- @return Exactly one result per declared field, preserving nil positions.
 -- @usage standard-library-protobuf.md#anonymous-messages
 function deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
-  return deserialize_fields_slice(
-      (bytes as foreign const *char) as foreign const *uint8_t, #bytes, fields, packet_context(false), bytes)
+  return deserialize_fields_slice(bytes, #bytes, fields, packet_context(false), bytes)
 end
 
 --- Resolve an initialized nominal type by name and decode it from a raw byte buffer.
@@ -892,8 +888,7 @@ end
 -- @usage standard-library-protobuf.md#api
 function deserialize_nominal(bytes: string, name: string, is_union: boolean): value
   return deserialize_nominal_slice(
-      bytes as foreign const *void,
-      #bytes, reflect.find_nominal(name), name, is_union, packet_context(false), bytes)
+      bytes, #bytes, reflect.find_nominal(name), name, is_union, packet_context(false), bytes)
 end
 
 --- Render a complete proto3 schema describing the public record or union wire format.

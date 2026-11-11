@@ -226,9 +226,9 @@ local function read_float32(base: foreign const *uint8_t, offset: integer): floa
   local third: integer = base[offset + 2]
   local high: integer = base[offset + 3]
   local bits = (low | (second << 8) | (third << 16) | (high << 24)) as foreign uint32_t
-  local single: foreign float = 0.0 as foreign float
+  local single: foreign float = 0.0
   ffi.memcpy(single, bits, foreign float.sizeof)
-  return single as float
+  return single
 end
 
 -- Singular embedded messages merge across repeated occurrences. Scalars use
@@ -258,7 +258,7 @@ local function Message:merged_slice(
     output:write(slice_to_string(self.base, chunk.offset, chunk.length))
   end
   local merged = output:drain()
-  return (merged as foreign const *char) as foreign const *uint8_t, 0, #merged, merged
+  return merged, 0, #merged, merged
 end
 
 local function Message:merged_message(number: integer): Message
@@ -327,8 +327,7 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
         payload:write(slice_to_string(message.base, chunk.offset, chunk.length))
       end
       local merged = payload:drain()
-      return read_message_slice(
-          (merged as foreign const *char) as foreign const *uint8_t, 0, #merged, merged, message.context)
+      return read_message_slice(merged, 0, #merged, merged, message.context)
     end
     local field = message:entry(selected_field)
     return read_message_slice(

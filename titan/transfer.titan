@@ -165,7 +165,7 @@ local function reserve_resource(owner: foreign *titan_transfer_scope_owner): boo
     return true
   end
   local capacity = owner.capacity
-  if capacity > ((ffi.TITAN_TRANSFER_INVALID_INDEX / 2) as foreign size_t) then
+  if capacity > ffi.TITAN_TRANSFER_INVALID_INDEX / 2 then
     capacity = ffi.TITAN_TRANSFER_INVALID_INDEX as foreign size_t
   else capacity = capacity * 2 end
   local entry_size = foreign titan_transfer_resource.sizeof as foreign size_t
@@ -174,12 +174,11 @@ local function reserve_resource(owner: foreign *titan_transfer_scope_owner): boo
   if owner.capacity == ffi.TITAN_TRANSFER_INLINE_RESOURCES then
     -- The inline address is never passed to realloc. Failed spill leaves it
     -- and all prior units owned by the scope for native rollback.
-    entries = ffi.malloc(capacity * entry_size) as foreign *titan_transfer_resource
+    entries = ffi.malloc(capacity * entry_size)
     if entries == nil then return false end
     ffi.memcpy(entries, owner.resources.entries, owner.resources.count * entry_size)
   else
     entries = ffi.realloc(owner.resources.entries, capacity * entry_size)
-        as foreign *titan_transfer_resource
     if entries == nil then return false end
   end
   owner.resources.entries = entries
@@ -335,8 +334,7 @@ function claim_resource(index_bytes: string,
     expected_release: foreign function(*void): void): foreign *void
   local scope? = current_resource_scope()
   if scope == nil then raise "transfer: resource claim requires a decode scope" end
-  return scope:claim(index_bytes as foreign const *void,
-      #index_bytes, expected_release)
+  return scope:claim(index_bytes, #index_bytes, expected_release)
 end
 
 -- Internal compiled constructor collaboration. The context is never serialized
@@ -918,17 +916,12 @@ function TransferValue:to_value(): value
   when is_closure(module, token, data) then
     -- data remains rooted in self throughout restore_closure_from_buffer.
     return restore_closure_from_buffer(
-        module,
-        #module as foreign size_t,
-        token,
-        data as foreign const *void,
-        #data, packet_context(false))
+        module, #module, token, data, #data, packet_context(false))
   when is_record_payload(module, name, payload) then
     initialize_nominal(module, name)
     local codec? = protobuf.find_resource_codec_by_name(name)
     if codec ~= nil then
-      return codec.decode(packet_context(false),
-          payload as foreign const *void, #payload)
+      return codec.decode(packet_context(false), payload, #payload)
     end
     return decode_initialized_record_payload(name, payload)
   end
@@ -1064,8 +1057,8 @@ local function init_packet_buffer(buf: foreign *titan_protobuf_buffer,
   if name_length > ffi.SIZE_MAX - header_size then return false end
   if module_length > ffi.SIZE_MAX - header_size - name_length then return false end
   local trailer_size = name_length + module_length
-  if trailer_size > 64 then trailer_size = 64 as foreign size_t end
-  ffi.titan_protobuf_buf_init_heap(buf, 0 as foreign size_t)
+  if trailer_size > 64 then trailer_size = 64 end
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
   if ffi.titan_protobuf_buf_reserve(buf, header_size + trailer_size) == 0 then
     return false
   end
@@ -1206,7 +1199,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     -- Snapshot each capture once before choosing the bounded buffer hint.
     local module, entry, policies, was_policy = project_closure_captures(candidate)
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
-    if not init_packet_buffer(buf, 0, #module as foreign size_t) then
+    if not init_packet_buffer(buf, 0, #module) then
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
@@ -1225,7 +1218,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     local module = nominal_module(candidate)
     local name = codec.name as string
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
-    if not init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) then
+    if not init_packet_buffer(buf, #name, #module) then
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
@@ -1254,7 +1247,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
           module, name, payload, nil, scope.native) as foreign *void
     end
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
-    if not init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) then
+    if not init_packet_buffer(buf, #name, #module) then
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
@@ -1265,7 +1258,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     local module = nominal_module(candidate)
     local name = union_value.type.name
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
-    if not init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) then
+    if not init_packet_buffer(buf, #name, #module) then
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)

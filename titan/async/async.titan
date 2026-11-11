@@ -717,19 +717,14 @@ local function finish_task(task: Task, state: TaskStatus)
 end
 
 local function error_text(err: value): string
-  local text = "<error while rendering Task failure>"
-  do
-    if err is OperationError then
-      local failure = err as OperationError
-      text = failure.operation .. ": " .. failure.name ..
-             " (" .. failure.code .. "): " .. failure.message
-    else
-      text = string.tostring(err)
-    end
-  catch
-    -- Keep the conservative fallback already installed above.
+  if err is OperationError then
+    local failure = err as OperationError
+    return failure.operation .. ": " .. failure.name ..
+           " (" .. failure.code .. "): " .. failure.message
   end
-  return text
+  return string.tostring(err)
+catch
+  return "<error while rendering Task failure>"
 end
 
 local function report_task_error(err: value, trace: string)

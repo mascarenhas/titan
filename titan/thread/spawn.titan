@@ -610,7 +610,7 @@ local foreign function thread_worker_protected(state: *lua_State): int
   ffi.lua_settop(state, 0)
   ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_BOOTSTRAP")
   ffi.lua_pushlightuserdata(state, ctrl)
-  ffi.lua_callk(state, 1, 0, 0 as foreign lua_KContext, nil)
+  ffi.lua_callk(state, 1, 0, 0, nil)
   return 0
 end
 
