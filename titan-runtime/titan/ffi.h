@@ -118,11 +118,6 @@ static inline int titan_posix_getsockname(int descriptor,
 ** pending re-raise sets the pin so the original error's trace is preserved; a
 ** fresh error leaves it clear so it gets a freshly-captured trace. */
 #define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
-/* Temporary handoff slot used by Titan coroutines. A dead coroutine entry
-** stages its own trace here; the resume/error side captures a new propagation
-** trace, appends it, stores the combined trace in TITAN_BACKTRACE_KEY, and
-** sets TITAN_TRACE_PINNED for the final re-raise. */
-#define TITAN_TRACE_APPEND_KEY "4f895b66-bae0-4e97-afb3-83a31f2f9e96"
 #define TITAN_MAIN_BOOTSTRAP_KEY "41c48a97-55a5-4514-a76f-79ab028ae6e0"
 #define TITAN_MAIN_ARGC_KEY "fd9c8d85-f521-4052-92e6-8af5c349e5bb"
 #define TITAN_MAIN_ARGV_KEY "fc1376f3-2cb7-48d4-969c-c02df930cf68"

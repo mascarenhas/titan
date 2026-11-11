@@ -823,15 +823,6 @@ function TransferValue.from_value(candidate: value): TransferValue
   end
 end
 
-local function pointer_to_value(pointer: foreign *void): value
-  local top = ffi.lua_gettop(L)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer pointer stack" end
-  ffi.lua_pushlightuserdata(L, pointer)
-  local result: value = ffi.lua_totvalue(L, -1)
-  ffi.lua_settop(L, top)
-  return result
-end
-
 local function cfunction_to_value(item: foreign function (*lua_State): int): value
   if not item then raise "cannot transfer a NULL Lua C function" end
   local top = ffi.lua_gettop(L)
@@ -918,8 +909,8 @@ function TransferValue:to_value(): value
   when is_integer(item) then return item
   when is_float(item) then return item
   when is_string(item) then return item
-  when is_lua_state(item) then return pointer_to_value(item)
-  when is_pointer(item) then return pointer_to_value(item)
+  when is_lua_state(item) then return item
+  when is_pointer(item) then return item
   when is_function(item) then return cfunction_to_value(item)
   when is_record(module, name, data) then
     initialize_nominal(module, name)

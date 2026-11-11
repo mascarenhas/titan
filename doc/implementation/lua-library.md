@@ -400,10 +400,10 @@ Three small helpers isolate the other raw operations:
   `lua_getglobal`, and copies it to a traced `value`;
 * `registry_map` pushes the registry field, checks that it is a table, and
   transfers it to a traced typed Map before cleanup;
-* `is_lua_function` pushes a traced candidate and uses `lua_type` without
-  retaining the temporary slot.
+* `is_lua_function` reads the candidate's type tag from a `foreign TValue`
+  copy with `lmacro_ttype` and uses no stack slot.
 
-Each helper calls `lua_checkstack` before its first push and uses one deferred
+The first two call `lua_checkstack` before their first push and use one deferred
 `lua_settop` as the authoritative cleanup. Global lookup can run `__index` on
 the global table and allocate or raise; the deferred restoration and traced copy
 cover those paths. Registry lookup is treated as an allocating, error-capable

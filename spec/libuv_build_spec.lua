@@ -2707,8 +2707,8 @@ int main(void) {
         assert.same(expected, declarations)
 
         assert.truthy(native:find("local events: {Event}", 1, true), native)
-        assert.truthy(native:find(
-            "ffi.lua_pushtvalue(L, input)", 1, true), native)
+        -- The caller's argument roots `input`; nothing is pushed to root it.
+        assert.falsy(native:find("ffi.lua_pushtvalue(", 1, true), native)
         assert.truthy(native:find(
             "ffi.lua_checkstack(L, ffi.LUA_MINSTACK)", 1, true), native)
         assert.truthy(native:find(

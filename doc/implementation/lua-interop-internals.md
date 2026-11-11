@@ -573,7 +573,6 @@ support-helper caches). The complete inventory:
 | `TITAN_MAIN_ARGV_KEY` (`"fc1376f3-2cb7-48d4-969c-c02df930cf68"`) | the process argument vector, replaced by the pointer `uv_setup_args` returns when `uv.setup_process_args()` runs |
 | `TITAN_BT_STATE_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | userdata holding the per-state `backtrace_state *`; invalidation clears it so the next capture resnapshots loaded objects |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
-| `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | coroutine trace handoff slot |
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | native-symbol display names for trace formatting |
 | `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for a bare re-raise |
 | `TITAN_LAZY_LIBS_KEY` (`"b03f87d2-aea4-407c-87df-054d5be15ef2"`) | `titan._loadlib`'s lazy/local handle cache (path 2) |

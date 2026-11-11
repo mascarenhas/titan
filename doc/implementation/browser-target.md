@@ -2432,7 +2432,7 @@ runtime and its current-engine tests.
    fibers before yield, after resume, and after sleep inside a fiber. Inside a
    fiber, the physical stack ends at `fiber_entry`, `_mco_main`,
    `_mco_wrap_main`, and `dynCall_vi`; the resumer's native frames are absent
-   and are supplied by `TITAN_TRACE_APPEND_KEY`.
+   and are supplied by the coroutine trace handoff.
 5. **Observed depth limits (`Object.defineProperty` versus assignment).** In
    the surveyed versions, default `Error.stackTraceLimit` was 10 on V8
    (leaving 9 Wasm frames), 100 on JSC, and absent on Firefox. Raising the

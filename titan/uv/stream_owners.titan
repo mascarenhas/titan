@@ -189,7 +189,6 @@ local foreign function tcp_read_callback(native: *uv_stream_t, nread: ssize_t, b
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "tcp_t", "read_buffer"))
   entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
   ffi.lua_settop(L, top)
 end
@@ -365,7 +364,6 @@ local foreign function pipe_read_callback(native: *uv_stream_t, nread: ssize_t, 
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "pipe_t", "read_buffer"))
   entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
   ffi.lua_settop(L, top)
 end
@@ -538,7 +536,6 @@ local foreign function tty_read_callback(native: *uv_stream_t, nread: ssize_t, b
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "tty_t", "read_buffer"))
   entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
   ffi.lua_settop(L, top)
 end

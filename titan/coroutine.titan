@@ -44,6 +44,8 @@ local runtime = foreign mco_runtime.new()
 local const TRANSFER_ERROR = 0
 local const TRANSFER_VALUE = 1
 local const TRANSFER_UNWIND = 2
+-- A failed coroutine body leaves its trace here for the resumer to append.
+local pending_append_trace: string? = nil
 
 --- Opaque tagged coroutine created by coroutine.create; use async Tasks for scheduling.
 -- @usage coroutines.md
@@ -140,19 +142,12 @@ local function reinstall_trace(trace: string)
 end
 
 local function stash_trace_for_append(trace: string)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack for a trace" end
-  ffi.lua_pushtvalue(L, trace)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
+  pending_append_trace = trace
 end
 
-local function pop_trace_for_append(): value
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve Lua stack for a trace" end
-  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
-  local trace = ffi.lua_totvalue(L, -1)
-  ffi.lua_pushnil(L)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_APPEND_KEY)
+local function pop_trace_for_append(): string?
+  local trace? = pending_append_trace
+  pending_append_trace = nil
   return trace
 end
 
@@ -160,9 +155,9 @@ local function raise_with_appended_trace(err: value)
   do
     raise err
   catch
-    local inner = pop_trace_for_append()
+    local inner? = pop_trace_for_append()
     if inner ~= nil then
-      reinstall_trace((inner as string) .. "\n" .. traceback)
+      reinstall_trace(inner .. "\n" .. traceback)
     end
     raise error
   end

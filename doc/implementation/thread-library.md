@@ -340,9 +340,9 @@ so transfer snapshots them as one closure.
 Worker sequence:
 
 1. `thread_worker_protected` loads `titan.thread` in the child with
-   `transfer.transfer_load_module`, stores `ctrl` in
-   `LUA_REGISTRYINDEX["_TITAN_THREAD_CTRL"]`, and calls the
-   `child_thread_bootstrap` registered under `"_TITAN_THREAD_BOOTSTRAP"`.
+   `transfer.transfer_load_module` and calls the `child_thread_bootstrap`
+   registered under `"_TITAN_THREAD_BOOTSTRAP"`, passing `ctrl` as its
+   light-userdata argument.
 2. `child_thread_bootstrap` takes `ctrl.entry_msg` under a `defer` that discards
    any unconsumed entry or leftover cancellation packet, schedules the root Task
    (which decodes the entry), registers an unreferenced `uv.async_t`

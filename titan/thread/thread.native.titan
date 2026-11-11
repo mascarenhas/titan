@@ -15,6 +15,7 @@ local async = import "async"
 local gc = import "gc"
 local iteration = import "iteration"
 local lua = import "lua"
+local string = import "string"
 local transfer = import "transfer"
 local uv = import "uv"
 
@@ -393,24 +394,12 @@ end
 local function render_error_text(err: value): string
   local text = "<error while rendering thread failure>"
   do
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
     if err is async.OperationError then
       local failure = err as async.OperationError
       text = failure.operation .. ": " .. failure.name ..
              " (" .. failure.code .. "): " .. failure.message
     else
-      -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
-      if ffi.lua_checkstack(L, 3) == 0 then
-        raise "cannot reserve Lua stack for thread error rendering"
-      end
-      ffi.lua_pushtvalue(L, err)
-      local rendered = ffi.luaL_tolstring(L, -1, nil)
-      if rendered then
-        text = rendered as string
-      else
-        text = "<unprintable error>"
-      end
+      text = string.tostring(err)
     end
   catch
   end

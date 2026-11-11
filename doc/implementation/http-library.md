@@ -69,8 +69,9 @@ After the synchronous call returns, Titan either re-raises that stored failure
 or drains the typed events into the high-level parser state.
 
 `llhttp_execute` borrows its input while those callbacks may allocate and
-collect. `execute_input` therefore stack-roots the immutable input string for
-the entire execute, callback, consumed-suffix, and event-drain interval. The
+collect. The immutable input string is `execute_input`'s parameter, so its
+caller's argument roots it for the entire execute, callback, consumed-suffix,
+and event-drain interval, and the function pushes nothing to root it. The
 span pointers remain valid only during their individual synchronous callbacks,
 and no callback retains one. Both execute and finish first reserve Lua stack
 space for the source foreign entry's temporary owner root and the generated
