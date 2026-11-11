@@ -148,7 +148,7 @@ local function raise_with_appended_trace(err: value)
 catch
   local inner? = pop_trace_for_append()
   if inner ~= nil then raise error, inner .. "\n" .. traceback end
-  raise error
+  raise
 end
 
 local function transfer_source(co: foreign *mco_coro): foreign *mco_coro

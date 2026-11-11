@@ -1555,7 +1555,7 @@ describe("catch", function()
             end
 
             local function hold(make: Make): Holder
-                return Holder.new(make())
+                return Holder(make())
             end
 
             function run(make: Make, collected: Count): integer

@@ -93,7 +93,7 @@ local pending: Failure? = nil
 function attempt(work: function (): ())
     work()
 catch
-    pending = Failure.new(error, traceback)
+    pending = Failure(error, traceback)
 end
 
 function finish()
