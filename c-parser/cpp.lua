@@ -1793,8 +1793,10 @@ end
 
 cpp.tokenize = typed("string -> table", function(line)
     local tokens = c99.match_preprocessing_grammar(line)
-    if not tokens then
-        return tokens
+    -- A match without captures is its end position, not a token table. No
+    -- line may reach the dispatch below in that form.
+    if type(tokens) ~= "table" then
+        return { directive = "invalid" }
     end
 
     if not tokens.directive then
@@ -2712,6 +2714,11 @@ parse_contents = function(filename, contents, ctx, read_state)
         return ctx
     end
     local linelist = initial_processing_contents(contents)
+    -- Every directive diagnostic names its header and line.
+    local function reject(lineitem, message)
+        table.remove(ctx.current_dir)
+        return nil, filename .. ":" .. lineitem.nr .. ": " .. message
+    end
 
     for _, lineitem in ipairs(linelist) do
         lineitem.tk = cpp.tokenize(lineitem.line)
@@ -2727,8 +2734,7 @@ parse_contents = function(filename, contents, ctx, read_state)
         debug(filename, cur, ifmode[#ifmode], #ifmode, line)
 
         if #ifmode == 1 and (tk.directive == "elif" or tk.directive == "else" or tk.directive == "endif") then
-            table.remove(ctx.current_dir)
-            return nil, "unexpected directive " .. tk.directive
+            return reject(lineitem, "unexpected directive " .. tk.directive)
         end
 
         if tk.exp then
@@ -2739,7 +2745,9 @@ parse_contents = function(filename, contents, ctx, read_state)
             if tk.directive then
                 debug(tk)
             end
-            if tk.directive == "define" then
+            if tk.directive == "invalid" then
+                return reject(lineitem, "invalid or incomplete preprocessing directive: " .. line)
+            elseif tk.directive == "define" then
                 local k = tk.id
                 local v = tk.args and tk or tk.repl
                 ctx.defines[k] = v
@@ -2747,11 +2755,14 @@ parse_contents = function(filename, contents, ctx, read_state)
             elseif tk.directive == "undef" then
                 ctx.defines[tk.id] = nil
                 ctx.macro_changes[tk.id] = true
-            elseif tk.directive == "ifdef" then
-                table.insert(ifmode, (ctx.defines[tk.id] ~= nil))
-            elseif tk.directive == "ifndef" then
-                table.insert(ifmode, (ctx.defines[tk.id] == nil))
+            elseif tk.directive == "ifdef" or tk.directive == "ifndef" then
+                if not tk.id then
+                    return reject(lineitem, "no macro name given in #" .. tk.directive .. " directive")
+                end
+                local defined = ctx.defines[tk.id] ~= nil
+                table.insert(ifmode, defined == (tk.directive == "ifdef"))
             elseif tk.directive == "if" then
+                if not tk.exp then return reject(lineitem, "#if with no expression") end
                 table.insert(ifmode, run_expression(ctx, tk.exp))
             elseif tk.directive == "elif" then
                 ifmode[#ifmode] = "skip"
@@ -2765,10 +2776,14 @@ parse_contents = function(filename, contents, ctx, read_state)
                     -- must retain their ordinary behavior.
                     ctx.once_files[once_identity] = filename
                 end
-            elseif tk.directive == "error" then
+            elseif tk.directive == "error" or tk.directive == "warning" or tk.directive == "null" then
                 -- ignore
             elseif tk.directive == "include" or tk.directive == "include_next" then
                 local name = tk.exp[1]
+                -- A macro operand can expand to nothing.
+                if not name then
+                    return reject(lineitem, "#" .. tk.directive .. " expects a header name")
+                end
                 local mode = tk.exp.mode
                 local is_next = (tk.directive == "include_next")
                 local inc_filename, inc_contents, err, observer_failed, inc_read_state =
@@ -2812,6 +2827,7 @@ parse_contents = function(filename, contents, ctx, read_state)
             elseif tk.directive == "else" then
                 ifmode[#ifmode] = not ifmode[#ifmode]
             elseif tk.directive == "elif" then
+                if not tk.exp then return reject(lineitem, "#elif with no expression") end
                 ifmode[#ifmode] = run_expression(ctx, tk.exp)
             elseif tk.directive == "endif" then
                 table.remove(ifmode, #ifmode)

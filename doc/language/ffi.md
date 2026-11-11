@@ -67,9 +67,15 @@ environment, including a self-include or mutual include after the pragma.
 Files are matched by physical identity where available, so symbolic and hard
 links to one header are deduplicated; otherwise the resolved spelling is used.
 Includes above the pragma are not suppressed retroactively. Conventional
-`#ifndef`/`#define` guards also work. Other pragmas and `#error` are ignored.
+`#ifndef`/`#define` guards also work. Other pragmas, `#error` and `#warning`
+are ignored, and so are a `#pragma` without tokens and a `#` alone.
 At most 200 nested includes are allowed below the top-level C input; exceeding
 that depth reports the offending header and the top of its include chain.
+
+A directive that Titan does not recognise, or one that lacks its operand
+(`#define` without a name, `#if` without an expression, `#include` without a
+header name), is reported with its header and line. Inside a conditional group
+that is skipped, such a line is ignored, as in C.
 
 An explicit source import, such as `local a = import "A.titan"`, first includes
 A's C environment. Direct source dependencies come first, in Titan import

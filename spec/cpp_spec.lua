@@ -16,8 +16,9 @@ local platform = require "titan-compiler.platform"
 
 -- Run the preprocessor over `src` (a chunk of C) in isolation -- an empty
 -- define set and no system include paths, so nothing is pulled in from the
--- host toolchain -- and return the produced output lines joined by a space.
-local function expand(src)
+-- host toolchain. Returns the context, or nil and the diagnostic, then the
+-- name `src` was read under. A Lua error fails the calling test.
+local function preprocess_source(src)
     local tmp = temporary.name()
     local f = assert(io.open(tmp, "wb"))
     f:write(src)
@@ -42,7 +43,13 @@ local function expand(src)
     debug.sethook(previous_hook, previous_mask, previous_count)
     os.remove(tmp)
     assert(ok, rctx)  -- on a hook/runtime error, rctx is the message
-    assert(rctx, err) -- parse_file returned (nil, err)
+    return rctx, err, tmp
+end
+
+-- The output lines of `src` joined by a space; a diagnostic fails the test.
+local function expand(src)
+    local ctx, err = preprocess_source(src)
+    assert(ctx, err) -- parse_file returned (nil, err)
     return table.concat(ctx.output, " ")
 end
 
@@ -1164,13 +1171,129 @@ third
         end)
 
         it("does not split longer identifiers into conditional directive names", function()
-            assert.has_error(function() expand("#iffoo\nwrong\n#endif\n") end)
-            assert.has_error(function() expand("#if 0\n#elifx\nwrong\n#endif\n") end)
+            local parsed, err = preprocess_source("#iffoo\nwrong\n#endif\n")
+            assert.is_nil(parsed)
+            assert.matches("invalid or incomplete preprocessing directive: #iffoo", err, 1, true)
+            -- Split as `#elif 1`, this would keep `wrong`.
+            assert.equal("", expand("#if 0\n#elif1\nwrong\n#endif\n"))
         end)
 
         it("ignores #error and pragmas other than once", function()
             assert.equal("kept", expand(
                 "#error deliberately ignored\n#pragma pack(1)\nkept\n"))
+        end)
+    end)
+
+    describe("malformed and token-less directives", function()
+        it("accepts and ignores the directives C allows without operands", function()
+            for _, directive in ipairs({
+                "#", "# ", "%:", "#pragma", "#pragma ", "#pragma pack(1)", "#pragma-once",
+                "#warning", "#warning ", "#warning text", '#warning"text"',
+                "#error", "#error ", "#error text",
+            }) do
+                local ctx, err = preprocess_source("before\n" .. directive .. "\nafter\n")
+                assert(ctx, directive .. ": " .. tostring(err))
+                assert.same({ "before", "after" }, ctx.output, directive)
+            end
+        end)
+
+        it("keeps every directive working with its operand", function()
+            for _, case in ipairs({
+                { "#define VALUE 1\nVALUE\n", "1" },
+                { "#define VALUE 1\n#undef VALUE\nVALUE\n", "VALUE" },
+                { "#if 1\nkept\n#endif\n", "kept" },
+                { "#ifdef MISSING\ndropped\n#endif\nkept\n", "kept" },
+                { "#ifndef MISSING\nkept\n#endif\n", "kept" },
+                { "#if 0\ndropped\n#elif 1\nkept\n#else\ndropped\n#endif\n", "kept" },
+                { "#line 7\nkept\n", "kept" },
+            }) do
+                local ctx, err = preprocess_source(case[1])
+                assert(ctx, case[1] .. ": " .. tostring(err))
+                assert.equal(case[2],
+                    table.concat(ctx.output, " "):match("^%s*(.-)%s*$"), case[1])
+            end
+        end)
+
+        it("diagnoses every other incomplete or unknown directive with its file and line", function()
+            local invalid = "invalid or incomplete preprocessing directive: "
+            for _, case in ipairs({
+                { "#if", "#if with no expression" },
+                { "#if ", "#if with no expression" },
+                { "#ifdef", "no macro name given in #ifdef directive" },
+                { "#ifdef ", "no macro name given in #ifdef directive" },
+                { "#ifdef 3", "no macro name given in #ifdef directive" },
+                { "#ifndef", "no macro name given in #ifndef directive" },
+                { "#ifndef ", "no macro name given in #ifndef directive" },
+                { "#elif", "unexpected directive elif" },
+                { "#elif ", "unexpected directive elif" },
+                { "#else", "unexpected directive else" },
+                { "#endif", "unexpected directive endif" },
+                { "#include", invalid .. "#include" },
+                { "#include ", invalid .. "#include" },
+                { "#include_next", invalid .. "#include_next" },
+                { "#include_next ", invalid .. "#include_next" },
+                { "#define", invalid .. "#define" },
+                { "#define ", invalid .. "#define" },
+                { "#undef", invalid .. "#undef" },
+                { "#undef ", invalid .. "#undef" },
+                { "#line", invalid .. "#line" },
+                { "#line ", invalid .. "#line" },
+                { "#foo", invalid .. "#foo" },
+                { "# foo", invalid .. "# foo" },
+                { "#!", invalid .. "#!" },
+                { "#import x", invalid .. "#import x" },
+                -- A longer word is not the directive it starts with.
+                { "#elsewhere", invalid .. "#elsewhere" },
+                { "#endif1", invalid .. "#endif1" },
+                { "#errors", invalid .. "#errors" },
+                { "#pragmatic", invalid .. "#pragmatic" },
+                { "#warnings", invalid .. "#warnings" },
+                { "#includes <a.h>", invalid .. "#includes <a.h>" },
+                { "#ifdefX", invalid .. "#ifdefX" },
+            }) do
+                local ctx, err, filename = preprocess_source("kept\n" .. case[1] .. "\n")
+                assert.is_nil(ctx, case[1])
+                assert.matches(filename .. ":2: " .. case[2], err, 1, true)
+                assert.not_matches("cpp.lua:", err, 1, true)
+            end
+        end)
+
+        it("diagnoses an evaluated #elif that has no expression", function()
+            local ctx, err, filename = preprocess_source("#if 0\n#elif\n#endif\n")
+            assert.is_nil(ctx)
+            assert.matches(filename .. ":2: #elif with no expression", err, 1, true)
+            -- A group that is already decided does not evaluate its #elif.
+            assert.equal("kept", expand("#if 1\nkept\n#elif\ndropped\n#endif\n"))
+        end)
+
+        it("ignores invalid directives in a skipped group and nests by directive name", function()
+            assert.equal("kept", expand(
+                "#if 0\n#foo\n#define\n#undef\n#include\n#line\n#\n#endif\nkept\n"))
+            assert.equal("kept", expand(
+                "#if 0\n#if\ndropped\n#endif\n#ifdef\n#endif\n#ifndef\n#else\n#endif\n"
+                .. "dropped\n#endif\nkept\n"))
+            assert.equal("kept", expand(
+                "#if 1\nkept\n#else\n#if\n#foo\n#endif\ndropped\n#endif\n"))
+        end)
+
+        it("diagnoses an #include whose operand expands to nothing", function()
+            for _, directive in ipairs({ "#include", "#include_next" }) do
+                local ctx, err, filename = preprocess_source(
+                    "#define EMPTY\n" .. directive .. " EMPTY\nmarker\n")
+                assert.is_nil(ctx)
+                assert.matches(filename .. ":2: " .. directive .. " expects a header name",
+                    err, 1, true)
+                assert.not_matches("platform.lua:", err, 1, true)
+            end
+        end)
+
+        it("never dispatches a capture-less grammar match", function()
+            local match = c99.match_preprocessing_grammar
+            c99.match_preprocessing_grammar = function() return 3 end
+            local ok, tokens = pcall(cpp.tokenize, "#unmatched")
+            c99.match_preprocessing_grammar = match
+            assert(ok, tokens)
+            assert.same({ directive = "invalid" }, tokens)
         end)
     end)
 
@@ -1232,6 +1355,18 @@ third
             assert(parsed, err)
             return table.concat(parsed.output, " "):match("^%s*(.-)%s*$"):gsub("%s+", " ")
         end
+
+        it("accepts a header name written directly after #include", function()
+            with_headers({
+                ["main.h"] = '#include"quoted.h"\n#include<angled.h>\n',
+                ["quoted.h"] = "quoted_marker\n",
+                ["angled.h"] = "angled_marker\n",
+            }, function(root)
+                local ctx = context()
+                ctx.incdirs.system = { root }
+                assert.equal("quoted_marker angled_marker", output(root, "main.h", ctx))
+            end)
+        end)
 
         it("terminates a self-include after executing #pragma once", function()
             with_headers({ ["main.h"] =

@@ -2076,6 +2076,21 @@ describe("Titan type checker", function()
         assert.match("does_not_exist.h:file not found", err, 1, true)
     end)
 
+    it("reports a malformed C preprocessor directive against its header and line", function()
+        with_header("#pragma\nint marker;\n", function(header)
+            local ok, err = run_checker('foreign import "' .. header .. '"\n')
+            assert.truthy(ok, err)
+        end)
+        with_header("int marker;\n#define\n", function(header)
+            local ok, err = run_checker('foreign import "' .. header .. '"\n')
+            assert.falsy(ok)
+            assert.match("failed preprocessing", err)
+            assert.match(header .. ":2: invalid or incomplete preprocessing directive: #define",
+                err, 1, true)
+            assert.not_match("cpp.lua:", err, 1, true)
+        end)
+    end)
+
     it("correctly imports modules that do exist", function ()
         local modules = {
             foo = [[
