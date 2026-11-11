@@ -1537,7 +1537,7 @@ describe("unions (end-to-end)", function()
 
     it("exposes constructors and methods but keeps representation opaque to Lua",
         function()
-            h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function()
+            h.with_runtime_brands(function()
                 h.run_coder([[
             union Message
                 quit()
@@ -1558,7 +1558,7 @@ describe("unions (end-to-end)", function()
                 return message:length()
             end
           ]], [[
-            local registry = debug.getregistry()
+            local brands = require "runtime_brands"
             assert(test.Message.write == test.Message.write)
             assert(test.Message.hidden == nil)
             local message = test.Message.write("hello")
@@ -1567,10 +1567,10 @@ describe("unions (end-to-end)", function()
             assert(getmetatable(message) == "Titan union test.Message")
             local mt = debug.getmetatable(message)
             assert(type(mt) == "table")
-            assert(mt[registry.TITAN_BRAND] == 4)
-            assert(mt[registry.TITAN_MT_TYPE] == "Union(\"test.Message\",{Variant('test.Message', 'quit', {}, 0),Variant('test.Message', 'write', {Field('test.Message', 'value', String(), 1, false)}, 1)},{[\"quit\"] = StaticMethod('test.Message', 'quit',{},{Nominal('test.Message')},nil,nil,{}),[\"write\"] = StaticMethod('test.Message', 'write',{String()},{Nominal('test.Message')},nil,nil,{\"value\"})},{[\"length\"] = Method('test.Message', 'length',{},{Integer()},nil,nil,{})},3)")
-            assert(mt[registry.TITAN_MT_MEMBERMAP].length(message) == 5)
-            assert(mt[registry.TITAN_MT_STATICS].write == test.Message.write)
+            assert(mt[brands.TITAN_BRAND] == 4)
+            assert(mt[brands.TITAN_MT_TYPE] == "Union(\"test.Message\",{Variant('test.Message', 'quit', {}, 0),Variant('test.Message', 'write', {Field('test.Message', 'value', String(), 1, false)}, 1)},{[\"quit\"] = StaticMethod('test.Message', 'quit',{},{Nominal('test.Message')},nil,nil,{}),[\"write\"] = StaticMethod('test.Message', 'write',{String()},{Nominal('test.Message')},nil,nil,{\"value\"})},{[\"length\"] = Method('test.Message', 'length',{},{Integer()},nil,nil,{})},3)")
+            assert(mt[brands.TITAN_MT_MEMBERMAP].length(message) == 5)
+            assert(mt[brands.TITAN_MT_STATICS].write == test.Message.write)
             assert(not pcall(function() return message.tag end))
             assert(not pcall(function() message.payload = 1 end))
           ]])

@@ -591,20 +591,6 @@ static l_inline Table *titan_reflect_projection_input(lua_State *L,
 
 static l_inline Table *titan_ensure_metatables_table(lua_State *L) {
   luaL_checkstack(L, 1, "stack overflow creating metatables table");
-#ifdef TITAN_COMPILER_TESTS
-  lua_pushlightuserdata(L, TITAN_BRAND);
-  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_BRAND");
-  lua_pushlightuserdata(L, TITAN_MT_TYPE);
-  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_TYPE");
-  lua_pushlightuserdata(L, TITAN_MT_STATICS);
-  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_STATICS");
-  lua_pushlightuserdata(L, TITAN_MT_MEMBERMAP);
-  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_MEMBERMAP");
-  lua_pushlightuserdata(L, TITAN_MT_MOD);
-  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_MOD");
-  lua_pushlightuserdata(L, TITAN_MT_PAYLOAD);
-  lua_setfield(L, LUA_REGISTRYINDEX, "TITAN_MT_PAYLOAD");
-#endif
   lua_getfield(L, LUA_REGISTRYINDEX, TITAN_METATABLES_KEY);
   TValue *v = s2v(L->top.p - 1);
   if (ttisnil(v)) {

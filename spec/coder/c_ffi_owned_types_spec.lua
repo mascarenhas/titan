@@ -46,8 +46,7 @@ describe("source-written owned C type code generation", function()
                 int value;
             } ffi_item;
         ]], function(header)
-            local csrc = h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function ()
-              return h.compile_and_read_c([[
+            local csrc = h.compile_and_read_c([[
                 foreign import "]] .. header .. [["
                 local type Item = owned *ffi_item
                 local item: Item = foreign ffi_item.new()
@@ -59,7 +58,6 @@ describe("source-written owned C type code generation", function()
                     return made
                 end
               ]])
-            end)
             local lookup = assert(csrc:find(
                 "luaL_getmetatable(L, \"Titan owned C", 1, true))
             local construct = assert(csrc:find(
@@ -81,18 +79,19 @@ describe("source-written owned C type code generation", function()
                 "invalid Titan owned C metatable registry entry", publish,
                 true))
 
-            local ok, err = h.call("test", [[
-                local registry = debug.getregistry()
+            local ok, err = h.with_runtime_brands(function()
+                return h.call("test", [[
+                local brands = require "runtime_brands"
                 local item = test.make()
                 local public_name = getmetatable(item)
                 local metatable = debug.getmetatable(item)
                 assert(type(public_name) == "string")
                 assert(type(metatable) == "table")
                 assert(metatable.__name == public_name)
-                assert(metatable[registry.TITAN_BRAND] == 6)
+                assert(metatable[brands.TITAN_BRAND] == 6)
                 local types = require "titan-compiler.types"
                 local descriptor = assert(load(
-                    "return " .. metatable[registry.TITAN_MT_TYPE],
+                    "return " .. metatable[brands.TITAN_MT_TYPE],
                     "owned C descriptor", "t", types))()
                 assert(descriptor._tag == "Type.COwned" and not descriptor.count)
                 local alias = descriptor.pointee
@@ -109,6 +108,7 @@ describe("source-written owned C type code generation", function()
                 assert(tostring(item):sub(1, #public_name + 2) ==
                        public_name .. ": ")
             ]])
+            end)
             assert.truthy(ok, err)
         end)
     end)

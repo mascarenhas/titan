@@ -609,11 +609,12 @@ Interface keys in `coder._codeinterfacedec` (all `coder/module.lua`),
 reflection consumes each key is in
 [Reflection: metadata ownership](standard-library-reflect.md#metadata-ownership).
 
-In compiler test builds (`TITAN_COMPILER_TESTS`),
-`titan_ensure_metatables_table` (`titan.h`) also publishes `TITAN_BRAND`,
-`TITAN_MT_TYPE`, `TITAN_MT_STATICS`, `TITAN_MT_MEMBERMAP`, `TITAN_MT_MOD` and
-`TITAN_MT_PAYLOAD` in the registry under their string names for test
-inspection.
+The keys are light userdata, which Lua code cannot spell. The runtime does
+not publish them by name. A compiler spec that inspects a metatable from Lua
+loads the fixture module `spec/fixtures/runtime_brands.titan`
+(`h.with_runtime_brands` in `spec/support/helpers.lua`), whose public
+variables hold `TITAN_BRAND`, `TITAN_MT_TYPE`, `TITAN_MT_STATICS`,
+`TITAN_MT_MEMBERMAP`, `TITAN_MT_MOD` and `TITAN_MT_PAYLOAD`.
 
 Interface witnesses add no registry key. They are traced entries at raw
 `concrete_metatable[target_Interface_metatable]`; the value is the first

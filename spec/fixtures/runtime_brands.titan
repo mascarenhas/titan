@@ -1,0 +1,11 @@
+-- A nominal metatable publishes its runtime type information under light
+-- userdata keys, which Lua cannot spell. A compiler spec's Lua child loads
+-- this module to index a metatable by them.
+foreign import "titan/ffi.h"
+
+const TITAN_BRAND: value = ffi.TITAN_BRAND
+const TITAN_MT_TYPE: value = ffi.TITAN_MT_TYPE
+const TITAN_MT_STATICS: value = ffi.TITAN_MT_STATICS
+const TITAN_MT_MEMBERMAP: value = ffi.TITAN_MT_MEMBERMAP
+const TITAN_MT_MOD: value = ffi.TITAN_MT_MOD
+const TITAN_MT_PAYLOAD: value = ffi.TITAN_MT_PAYLOAD

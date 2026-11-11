@@ -3375,7 +3375,7 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
     end)
 
     it("gets record from Titan and sends it back", function ()
-        h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function ()
+        h.with_runtime_brands(function ()
           run_coder([[
             record Point
                 x: float
@@ -3388,7 +3388,7 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
                 return p.x, p.y
             end
           ]], [[
-            local registry = debug.getregistry()
+            local brands = require "runtime_brands"
             local p1 = test.point()
             assert(type(p1) == 'userdata')
             local x, y = test.unpack(p1)
@@ -3399,11 +3399,11 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
             assert(getmetatable(p1) == getmetatable(p2))
             local mt = debug.getmetatable(p1)
             assert(type(mt) == 'table')
-            assert(mt[registry.TITAN_BRAND] == 3)
-            assert(type(mt[registry.TITAN_MT_MEMBERMAP].y) == 'userdata')
-            assert(mt[registry.TITAN_MT_MOD] == test)
-            assert(test.Point.new == mt[registry.TITAN_MT_STATICS].new)
-            assert(mt[registry.TITAN_MT_TYPE] == "Record('test.Point',{Field('test.Point', 'x', Float(), 0, false),Field('test.Point', 'y', Float(), 1, false)},{[\"new\"] = StaticMethod('test.Point', 'new',{Float(),Float()},{Nominal('test.Point')},nil,nil,{\"x\",\"y\"})},{},2)")
+            assert(mt[brands.TITAN_BRAND] == 3)
+            assert(type(mt[brands.TITAN_MT_MEMBERMAP].y) == 'userdata')
+            assert(mt[brands.TITAN_MT_MOD] == test)
+            assert(test.Point.new == mt[brands.TITAN_MT_STATICS].new)
+            assert(mt[brands.TITAN_MT_TYPE] == "Record('test.Point',{Field('test.Point', 'x', Float(), 0, false),Field('test.Point', 'y', Float(), 1, false)},{[\"new\"] = StaticMethod('test.Point', 'new',{Float(),Float()},{Nominal('test.Point')},nil,nil,{\"x\",\"y\"})},{},2)")
           ]])
         end)
     end)

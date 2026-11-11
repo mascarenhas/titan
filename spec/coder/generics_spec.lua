@@ -62,8 +62,7 @@ describe("generic erased core", function()
     end)
 
     it("publishes declared generic nominal metadata beside erased accessors", function()
-        local _, tree = h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
-            return h.compile_and_read_c([[
+        local _, tree = h.compile_and_read_c([[
                 record Box<|T|>
                     local hidden: T
                     item: T
@@ -80,14 +79,15 @@ describe("generic erased core", function()
                     item: T
                 end
             ]])
-        end)
         types.assert_erased(tree._type)
-        local ok, err = h.call("test", [[
+        local ok, err = h.with_runtime_brands(function()
+            return h.call("test", [[
+            local brands = require "runtime_brands"
             local registry = debug.getregistry()
             local types = require "titan-compiler.types"
             local function descriptor(kind, name)
                 local mt = registry["Titan " .. kind .. " test." .. name .. " metatable"]
-                return assert(load("return " .. mt[registry.TITAN_MT_TYPE],
+                return assert(load("return " .. mt[brands.TITAN_MT_TYPE],
                     "nominal descriptor", "t", types))(), mt
             end
             local box, mt = descriptor("record", "Box")
@@ -96,8 +96,8 @@ describe("generic erased core", function()
             assert(box.fields[1].type.erased_constraint == nil)
             assert(box.fields[2].type._tag == "Type.Option")
             assert(box.fields[2].type.base._tag == "Type.Parameter")
-            assert(type(mt[registry.TITAN_MT_MEMBERMAP].item) == "userdata")
-            assert(mt[registry.TITAN_MT_MEMBERMAP].hidden == nil)
+            assert(type(mt[brands.TITAN_MT_MEMBERMAP].item) == "userdata")
+            assert(mt[brands.TITAN_MT_MEMBERMAP].hidden == nil)
             local choice = descriptor("union", "Choice")
             assert(#choice.variants == 1 and choice.variants[1].index == 0)
             assert(#choice.variants[1].parts == 1)
@@ -110,6 +110,7 @@ describe("generic erased core", function()
             assert(constraint._tag == "Type.Nominal")
             assert(constraint.fqtn == "test.Reader")
         ]])
+        end)
         assert.truthy(ok, err)
     end)
 
