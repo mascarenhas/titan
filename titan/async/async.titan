@@ -498,21 +498,10 @@ local function require_main_thread()
   if L ~= main then raise "async.loop must be driven from the Lua main thread" end
 end
 
-local function rethrow_failure(failure: Error)
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve error handoff" end
-  ffi.lua_pushtvalue(L, failure.traceback)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
-  ffi.lua_pushboolean(L, 1)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
-  raise failure.error
-end
-
 --- Rethrow the original error value with its preserved traceback.
 -- @usage async-io.md
 function Error:raise()
-  rethrow_failure(self)
+  raise self.error, self.traceback
 end
 
 -- At Lua-state close, Task coroutines were already unwound (their defers and

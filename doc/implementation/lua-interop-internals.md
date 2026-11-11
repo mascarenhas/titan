@@ -574,7 +574,7 @@ support-helper caches). The complete inventory:
 | `TITAN_BT_STATE_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | userdata holding the per-state `backtrace_state *`; invalidation clears it so the next capture resnapshots loaded objects |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
 | `TITAN_NAMES_KEY` (`"a7c4e2f0-1d6b-4e3a-9c5f-8b2d7e0a4f16"`) | native-symbol display names for trace formatting |
-| `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for a bare re-raise |
+| `TITAN_TRACE_PINNED` (`"5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"`) | the one-shot flag that preserves an existing traceback for a bare re-raise or a `raise <exp>, <trace>` |
 | `TITAN_LAZY_LIBS_KEY` (`"b03f87d2-aea4-407c-87df-054d5be15ef2"`) | `titan._loadlib`'s lazy/local handle cache (path 2) |
 | `TITAN_LAZY_GLOBAL_LIBS_KEY` (`"3f6cae7b-8aeb-42eb-9f72-a978cfe96f7c"`) | `titan._loadlibglobal`'s canonical-path lazy/global handle cache |
 | `"Titan function type <runtime identity> tag"` | a shared light-userdata identity tag per first-class function type, keyed by `types.runtime_identity` (`coder/generate.lua`) |

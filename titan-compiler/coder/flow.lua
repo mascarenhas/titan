@@ -120,7 +120,9 @@ local function statement_expressions(node, visit)
         end
     elseif tag == "Ast.StatCall" then
         return visit(node.callexp)
-    elseif tag == "Ast.StatRaise" or tag == "Ast.StatCase" then
+    elseif tag == "Ast.StatRaise" then
+        return visit(node.exp) or visit(node.trace)
+    elseif tag == "Ast.StatCase" then
         return visit(node.exp)
     elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat" then
         return visit(node.condition)
@@ -382,6 +384,7 @@ collect_reads_stat = function(node, out)
         for _, exp in ipairs(node.exps) do collect_reads_exp(exp, out) end
     elseif tag == "Ast.StatRaise" then
         collect_reads_exp(node.exp, out)
+        collect_reads_exp(node.trace, out)
     elseif tag == "Ast.StatWhile" then
         collect_reads_exp(node.condition, out)
         collect_reads_stat(node.block, out)
@@ -445,6 +448,7 @@ collect_writes_stat = function(node, out)
         end
     elseif tag == "Ast.StatRaise" then
         coder._collect_writes_exp(node.exp, out)
+        coder._collect_writes_exp(node.trace, out)
     elseif tag == "Ast.StatWhile" or tag == "Ast.StatRepeat"
             or tag == "Ast.StatFor" or tag == "Ast.StatForIn" then
         if tag == "Ast.StatWhile" or tag == "Ast.StatRepeat" then

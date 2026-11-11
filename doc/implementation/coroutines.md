@@ -235,9 +235,9 @@ value.
 
 When the wrapper observes `ok=false` after `resume` or `error`,
 `raise_with_appended_trace` raises and catches the payload locally to capture
-the propagation-side trace, combines it with the staged coroutine trace, pins
-it, and re-raises the same payload. The registry protocol is canonical in
-[Error handling](error-handling.md#trace-pinning).
+the propagation-side trace, combines it with the staged coroutine trace, and
+raises the same payload again with the combined trace
+(`raise <exp>, <trace>`; see [Error handling](error-handling.md#trace-pinning)).
 
 The public `Coroutine:transfer(payload, tag, inject_error)` runs the same
 finalizer check, tag resolution, receiver root, and

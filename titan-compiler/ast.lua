@@ -66,7 +66,8 @@ local ast = typedecl("Ast", {
         StatReturn      = {"loc", "exps"},
         StatCase        = {"loc", "exp", "arms", "elseblock"},
         StatBreak       = {"loc"},
-        StatRaise       = {"loc", "exp"},   -- `raise <exp>`; nil `exp` means bare re-raise
+        -- `raise <exp>[, <trace>]`; nil `exp` means bare re-raise
+        StatRaise       = {"loc", "exp", "trace"},
         StatTry         = {"loc", "block", "catchblock", "finallyblock"},
     },
 

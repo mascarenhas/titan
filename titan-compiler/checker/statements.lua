@@ -1045,6 +1045,13 @@ checkstat_visitor = util.make_visitor({
             checkexp(node.exp, st, errors, types.Value())
             node.exp = coerce_and_check(
                 node.exp, types.Value(), "raise", errors, node.loc)
+            -- `raise <exp>, <trace>`: the trace that the error carries
+            -- instead of one captured at this statement.
+            if node.trace then
+                checkexp(node.trace, st, errors, types.String())
+                node.trace = coerce_and_check(
+                    node.trace, types.String(), "raise trace", errors)
+            end
         end
         -- `raise` is a terminator: control never falls through it.
         return true

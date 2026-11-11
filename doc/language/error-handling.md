@@ -75,6 +75,39 @@ end
 
 Using bare `raise` anywhere else is a compile-time error.
 
+### Raising with a saved trace
+
+`raise <exp>, <trace>` raises a value with a trace that was captured earlier,
+in place of the stack of the `raise` statement itself. Use it for an error that
+a `catch` saved in order to raise it later or somewhere else. The trace is a
+`string`, normally the `traceback` of that `catch`:
+
+```titan
+record Failure
+    error: value
+    trace: string
+end
+
+local pending: Failure? = nil
+
+function attempt(work: function (): ())
+    work()
+catch
+    pending = Failure.new(error, traceback)
+end
+
+function finish()
+    local failure? = pending
+    pending = nil
+    if failure ~= nil then raise failure.error, failure.trace end
+end
+```
+
+A `catch` that handles this error sees the given string as its `traceback`,
+and `titan.backtrace()` returns it when the error reaches Lua. The trace
+belongs to this one error: the next error gets its own. The value is evaluated
+before the trace, and a trace cannot be written without a value.
+
 ## `catch`
 
 Titan does not have a `try` keyword. Instead, `catch` attaches to a block.
@@ -209,7 +242,8 @@ message, a `stack traceback:` header, or tab indentation.
 When Titan catches and handles an error, the registry slot backing
 `titan.backtrace()` is cleared; the handled trace is available as the
 catch-local `traceback`. A bare re-raise pins that saved trace so the outer
-handler sees the original stack. A fresh `raise <exp>` builds a fresh trace.
+handler sees the original stack, and `raise <exp>, <trace>` does the same with
+the trace it is given. A fresh `raise <exp>` builds a fresh trace.
 
 The merged trace uses libbacktrace and the generated C debug information
 on Linux, macOS, and Windows. Windows providers retain their DWARF sections;

@@ -227,7 +227,7 @@ const module variables alike.
 | `StatCall` | `callexp` | a parsed prefix-expression statement candidate; checking requires an actual call |
 | `StatReturn` | `exps` | zero or more; `return` can only be the last statement of a block |
 | `StatBreak` | — | `break`; the checker tracks it per loop frame for non-fallthrough analysis |
-| `StatRaise` | `exp` | `raise <exp>`; nil `exp` is a bare re-raise ([Error handling](error-handling.md#frontend-representation)) |
+| `StatRaise` | `exp`, `trace` | `raise <exp>[, <trace>]`; nil `exp` is a bare re-raise, nil `trace` lets the handler capture one ([Error handling](error-handling.md#frontend-representation)) |
 | `StatTry` | `block`, `catchblock`, `finallyblock` | built by the parser's `do ... catch` and `defer` lowering; see [Error handling](error-handling.md#frontend-representation) |
 
 ### Variables (lvalues)

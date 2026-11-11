@@ -537,10 +537,12 @@ raise { "structured", "error" }
 
 A bare `raise` is a re-raise and is legal only inside a `catch` block; it
 preserves the original caught error value and traceback. Outside a catch,
-bare `raise` is a compile-time error. `raise` always terminates the
-current control-flow path, like `return` for the purpose of checking that
-a function with return values cannot fall off the end. Full propagation and
-Full propagation semantics are in [Error handling](error-handling.md).
+bare `raise` is a compile-time error. `raise <exp>, <trace>` raises the value
+with a `string` trace that was saved earlier, in place of the stack of the
+statement itself. `raise` always terminates the current control-flow path,
+like `return` for the purpose of checking that a function with return values
+cannot fall off the end. Full propagation semantics are in
+[Error handling](error-handling.md).
 
 ## `defer`
 

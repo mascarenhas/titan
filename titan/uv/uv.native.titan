@@ -167,14 +167,7 @@ local function rethrow(loop: loop_t)
   loop.failure_count = 0
   loop.failure_error = false
   loop.failure_trace = ""
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve error handoff" end
-  ffi.lua_pushtvalue(L, trace)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
-  ffi.lua_pushboolean(L, 1)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
-  raise err
+  raise err, trace
 end
 
 --- Drive the loop in DEFAULT, ONCE, or NOWAIT mode.

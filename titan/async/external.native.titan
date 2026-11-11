@@ -294,7 +294,7 @@ local function ExternalBridge:drain()
     end
   end
   check_status(status, "async.external_wait.drain")
-  if failed then rethrow_failure(self.runtime.failure) end
+  if failed then self.runtime.failure:raise() end
 end
 
 local function external_bridge(runtime: Runtime): ExternalBridge

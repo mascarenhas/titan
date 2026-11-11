@@ -1237,8 +1237,9 @@ targets.
 
 ### Supervised error handoff
 
-`async.Error:raise()` calls `rethrow_failure`, which installs the captured trace
-with the runtime's pinned-trace marker and then raises the original value.
+`async.Error:raise()` is `raise self.error, self.traceback`: it raises the
+original value with the captured trace
+([trace pinning](error-handling.md#trace-pinning)).
 Domain supervisors can keep an ordinary `Error` carrier during
 cancellation-insensitive cleanup and propagate it after abort and drain without
 losing child-operation frames or reporting an uncaught internal worker failure.

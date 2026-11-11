@@ -1918,6 +1918,45 @@ function recovery_string(ctx, literal)
     }))
 end
 
+-- Raise an error value that carries a given trace instead of one captured at
+-- this site. `trace` is a C expression for the `TString *` and `err` one for
+-- a `const TValue *`; both values are rooted elsewhere and are copied into C
+-- before anything can move the stack. The trace goes to
+-- registry[TITAN_BACKTRACE_KEY] and the pin (TITAN_TRACE_PINNED) is set, so
+-- `errorhandler` keeps that trace; the error then takes the one top slot that
+-- Lua's error ABI requires. This is the only emitter of the protocol: a bare
+-- `raise`, `raise <exp>, <trace>` and a finally's pending raise all end here.
+-- Implementation notes: doc/implementation/error-handling.md#trace-pinning
+function raise_with_trace(ctx, trace, err, linedir)
+    ctx.raise_id = (ctx.raise_id or 0) + 1
+    ctx.uses_base_off = true
+    return render([[
+        TValue _raise_trace_$ID;
+        TValue _raise_pin_$ID = {0};
+        TValue _raise_error_$ID;
+        setsvalue(L, &_raise_trace_$ID, $TRACE);
+        setbtvalue(&_raise_pin_$ID);
+        setobj(L, &_raise_error_$ID, $ERR);
+        titan_registry_set_string(
+            L, $TRACEKEY, &_raise_trace_$ID);
+        titan_registry_set_string(
+            L, $PINKEY, &_raise_pin_$ID);
+        _base = restorestack(L, _base_off);
+        titan_ensure_stack(L, 1);
+        setobj2s(L, L->top.p, &_raise_error_$ID);
+        L->top.p++;
+        $LINEDIR
+        lua_error(L);
+    ]], {
+        ID = ctx.raise_id,
+        TRACE = trace,
+        ERR = err,
+        LINEDIR = linedir,
+        TRACEKEY = recovery_string(ctx, "TITAN_BACKTRACE_KEY"),
+        PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
+    })
+end
+
 -- `raise <exp>`: evaluate the (already `value`-coerced) operand into an anchored
 -- temp, place it in the one top slot required by Lua's error ABI, then
 -- `lua_error(L)`. The
@@ -1933,43 +1972,49 @@ end
 function coderaise(ctx, node)
     if not node.exp then
         -- Bare `raise` (re-raise) — legal only inside a catch (checker-enforced).
-        -- Reinstall the catch's saved `traceback` into registry[TITAN_BACKTRACE_KEY]
-        -- and SET the pin (TITAN_TRACE_PINNED), so errorhandler KEEPS the ORIGINAL
-        -- trace rather than capturing a fresh one at this (shallower) re-raise
-        -- site; then place the saved `error` in Lua's error-object slot and call
-        -- lua_error(L). The enclosing catch's implicit locals are threaded
+        -- It raises the catch's saved `error` with the catch's saved
+        -- `traceback`, so the ORIGINAL trace survives this (shallower)
+        -- re-raise site. The enclosing catch's implicit locals are threaded
         -- through ctx (`ctx.catch_*_decl`).
-        local errcvar = ctx.catch_error_decl._cvar      -- TValue (the error value)
-        local tbcvar = ctx.catch_traceback_decl._cvar   -- TString* (the trace)
-        ctx.raise_id = (ctx.raise_id or 0) + 1
-        local raise_id = ctx.raise_id
-        ctx.uses_base_off = true
-        return render([[
-            TValue _reraise_trace_$ID;
-            TValue _reraise_pin_$ID = {0};
-            setsvalue(L, &_reraise_trace_$ID, $TB);
-            setbtvalue(&_reraise_pin_$ID);
-            titan_registry_set_string(
-                L, $TRACEKEY, &_reraise_trace_$ID);
-            titan_registry_set_string(
-                L, $PINKEY, &_reraise_pin_$ID);
-            _base = restorestack(L, _base_off);
-            titan_ensure_stack(L, 1);
-            setobj2s(L, L->top.p, &$ERR);
-            L->top.p++;
-            $LINEDIR
-            lua_error(L);
-        ]], {
-            ID = raise_id,
-            LINEDIR = emitline(node),
-            TB = tbcvar,
-            ERR = errcvar,
-            TRACEKEY = recovery_string(ctx, "TITAN_BACKTRACE_KEY"),
-            PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
-        })
+        return raise_with_trace(ctx,
+            ctx.catch_traceback_decl._cvar,         -- TString* (the trace)
+            "&" .. ctx.catch_error_decl._cvar,      -- TValue (the error value)
+            emitline(node))
     end
     local cstats, cexp = codeexp(ctx, node.exp)
     local ctmp, tmpname, tmpslot = newtmp(ctx, types.Value(), true)
+    if node.trace then
+        -- `raise <exp>, <trace>`. The error value is anchored before the
+        -- trace expression runs, because that expression can clear the
+        -- value's home and collect. The trace is anchored too: publishing it
+        -- in the registry can allocate.
+        local tstats, texp = codeexp(ctx, node.trace)
+        local ttmp, ttmpname, ttmpslot = newtmp(ctx, types.String(), true)
+        return render([[
+            $CSTATS
+            $CTMP
+            $TMPNAME = $CEXP;
+            $ANCHOR
+            $TSTATS
+            $TTMP
+            $TTMPNAME = $TEXP;
+            $TANCHOR
+            $RAISE
+        ]], {
+            CSTATS = cstats,
+            CTMP = ctmp,
+            TMPNAME = tmpname,
+            CEXP = cexp,
+            ANCHOR = setslot(types.Value(), tmpslot, tmpname),
+            TSTATS = tstats,
+            TTMP = ttmp,
+            TTMPNAME = ttmpname,
+            TEXP = texp,
+            TANCHOR = setslot(types.String(), ttmpslot, ttmpname),
+            RAISE = raise_with_trace(
+                ctx, ttmpname, "&" .. tmpname, emitline(node)),
+        })
+    end
     return render([[
         $CSTATS
         $CTMP
@@ -2116,32 +2161,10 @@ function dispatch_after_finally(ctx, pa_var, frame, d_pa_err, d_pa_tb)
     local break_arm = (ctx.loopstack and #ctx.loopstack > 0)
         and realize_break(ctx) or "/* unreachable: no enclosing loop */ ;"
 
-    -- RAISE arm: reinstall the saved trace + pin (preserve original trace), put
-    -- the saved error in Lua's one required error-object slot, and lua_error.
-    ctx.uses_base_off = true
-    local raise_arm = render([[
-        TValue _pa_trace_$ID;
-        TValue _pa_pin_$ID = {0};
-        TValue _pa_error_$ID;
-        setobj(L, &_pa_trace_$ID, $PATB);
-        setbtvalue(&_pa_pin_$ID);
-        setobj(L, &_pa_error_$ID, $PAERR);
-        titan_registry_set_string(
-            L, $TRACEKEY, &_pa_trace_$ID);
-        titan_registry_set_string(
-            L, $PINKEY, &_pa_pin_$ID);
-        _base = restorestack(L, _base_off);
-        titan_ensure_stack(L, 1);
-        setobj2s(L, L->top.p, &_pa_error_$ID);
-        L->top.p++;
-        lua_error(L);
-    ]], {
-        ID = frame.id,
-        PATB = slotat(d_pa_tb),
-        PAERR = slotat(d_pa_err),
-        TRACEKEY = recovery_string(ctx, "TITAN_BACKTRACE_KEY"),
-        PINKEY = recovery_string(ctx, "TITAN_TRACE_PINNED"),
-    })
+    -- RAISE arm: raise the saved error with its saved trace (the pending
+    -- slots always hold a string trace; see `no_catch_raise` in `codetry`).
+    local raise_arm = raise_with_trace(ctx,
+        "tsvalue(" .. slotat(d_pa_tb) .. ")", slotat(d_pa_err), "")
 
     -- PA_UNWIND: the finally ran under the unwind guard, which reuses this
     -- try's `_lj_N` (declared at try scope). Unlink it and continue the unwind

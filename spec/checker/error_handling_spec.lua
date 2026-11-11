@@ -130,6 +130,23 @@ describe("error handling (typechecker)", function()
             ]])
         end)
 
+        it("accepts `raise <exp>, <trace>` with a string trace", function()
+            ok([[
+                record Failure
+                    error: value
+                    trace: string
+                end
+                function rethrow(failure: Failure): nil
+                    raise failure.error, failure.trace
+                end
+                function append(inner: string): nil
+                    nop(1)
+                catch
+                    raise error, inner .. "\n" .. traceback
+                end
+            ]])
+        end)
+
         it("accepts `raise <exp>` in a defer", function()
             ok([[
                 function f(): nil
@@ -220,6 +237,22 @@ describe("error handling (typechecker)", function()
             bad("bare 'raise'", [[
                 function f(): nil
                     raise
+                end
+            ]])
+        end)
+
+        it("rejects a `raise` trace that is not a string", function()
+            bad("types in raise trace do not match, expected string but found integer", [[
+                function f(): nil
+                    raise "boom", 42
+                end
+            ]])
+        end)
+
+        it("checks the names a `raise` trace reads", function()
+            bad("variable 'missing' not declared", [[
+                function f(): nil
+                    raise "boom", missing
                 end
             ]])
         end)
