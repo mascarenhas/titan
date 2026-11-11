@@ -2393,11 +2393,14 @@ local function code_spread_carrier(ctx, node)
     if kind == "dots" then
         assert(ctx.varargs, "vararg spread outside a variadic function")
     else
+        -- The subject's elements are read after `first` and `last` run, and
+        -- an open consumer reads them later still: root a subject that has
+        -- no stable root, as a native-call input is rooted.
         local subjectstats, subjectexp = codeexp(ctx, node.exp)
-        local frozen
-        frozen, subject = coder._freeze_code(
-            ctx, node.exp._type, subjectstats, subjectexp)
-        table.insert(stats, frozen)
+        local stable
+        stable, subject = coder._stabilize_input_code(
+            ctx, node.exp._type, subjectstats, subjectexp, node.exp)
+        table.insert(stats, stable)
     end
 
     local first
@@ -2487,6 +2490,9 @@ local function code_spread_carrier(ctx, node)
         }
         if kind == "array" then
             run.retain_read_results = coder._may_discover_interface(elem)
+            -- The elements stay in the Array, whose slots a variadic callee
+            -- can overwrite while it holds them.
+            run.callee_mutable = types.is_gc(elem)
             run.read = function(
                     readctx, index, loc, result_root, result_stack)
                 local offset = render("($SKIP + (lua_Unsigned)($INDEX))", {
@@ -3318,13 +3324,30 @@ function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpConcat" then
         local strs, copies = {}, {}
         local ctmp, tmpname, tmpslot = newtmp(ctx, types.String(), true)
+        local coded = {}
         for i, exp in ipairs(node.exps) do
             local cstat, cexp = codeexp(ctx, exp)
+            coded[i] = { stat = cstat, exp = cexp }
+        end
+        -- An operand's bytes are copied after every later operand has run.
+        -- A later operand that emits statements or calls can clear the home
+        -- of an earlier one and collect, so an earlier operand without a
+        -- stable root is published in a slot, as a native-call input is.
+        local later_effects = false
+        for i = #node.exps, 1, -1 do
+            local exp = node.exps[i]
+            coded[i].root = later_effects
+                and not coder._has_stable_root(ctx, exp)
+            later_effects = later_effects or coded[i].stat ~= ""
+                or expression_contains_call(exp)
+        end
+        for i, operand in ipairs(coded) do
             local strvar = string.format('_str%d', i)
             local lenvar = string.format('_len%d', i)
             table.insert(strs, render([[
                 $CSTAT
                 TString *$STRVAR = $CEXP;
+                $ROOT
                 size_t $LENVAR = tsslen($STRVAR);
                 if (TITAN_UNLIKELY($LENVAR >=
                         MAX_SIZE - sizeof(TString) - _len)) {
@@ -3332,9 +3355,11 @@ function codeexp_dispatch(ctx, node, iscondition, target)
                 }
                 _len += $LENVAR;
             ]], {
-                CSTAT = cstat,
-                CEXP = cexp,
+                CSTAT = operand.stat,
+                CEXP = operand.exp,
                 STRVAR = strvar,
+                ROOT = operand.root and setslot(types.String(),
+                    newborrowedslot(ctx), strvar) or "",
                 LENVAR = lenvar,
             }))
             table.insert(copies, render([[

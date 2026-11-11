@@ -123,6 +123,7 @@ compiler spec/coder/c_ffi_spec.lua 15.748 58.723
 compiler spec/coder/c_ffi_stack_objects_spec.lua 2.817 11.685
 compiler spec/coder/c_ffi_surface_types_spec.lua 2.437 15.402
 compiler spec/coder/c_ffi_tag_names_spec.lua 1.433 9.229
+compiler spec/coder/call_input_roots_spec.lua 1.000 -
 compiler spec/coder/closure_adjustment_wrappers_spec.lua 5.706 15.454
 compiler spec/coder/closure_transfer_spec.lua 1.137 0.000
 compiler spec/coder/closures_spec.lua 9.812 18.381

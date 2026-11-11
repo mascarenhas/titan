@@ -677,13 +677,16 @@ void        packtest_\u2133_strings_titan(lua_State *L, Udata *_mod, CClosure *_
 
 A Titan-to-Titan call is therefore an ordinary C call: no `CallInfo`, and no
 boxing of integers, floats, or booleans. Inputs are evaluated in lexical
-order. When later setup is effectful, `coder._freeze_code` freezes the
-first-class callee or receiver and the affected inputs in untraced C
-temporaries; a pure trailing suffix may stay as direct C expressions. The call
-never publishes tracing-only Lua-stack copies of native inputs, and the caller
-roots every live GC-bearing result immediately after return. The complete
-rooting protocol, including stack rebasing after native calls and the VM
-transport slots of the slow paths, is in
+order. When later setup is effectful, `coder._stabilize_input_code` freezes
+the first-class callee or receiver and the affected inputs in untraced C
+temporaries; a pure trailing suffix may stay as direct C expressions. The
+caller keeps every GC-bearing input reachable until the call returns: it
+publishes an input in a slot of its own frame only when that input has no
+root that later code cannot clear, so a parameter needs no root in the
+callee. The caller also roots every live GC-bearing result immediately after
+return. The complete rooting protocol, including which inputs are already
+stable, stack rebasing after native calls and the VM transport slots of the
+slow paths, is in
 [values and the GC](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport).
 
 ### Direct calls and lexical evaluation order

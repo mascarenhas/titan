@@ -39,10 +39,11 @@ every later assignment. The generated shape is shown in
   or parameter `_used` when it is assigned, even if nothing reads it, so
   every assignment has a slot to store into
   ([home roots](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
-- An unassigned, unspilled parameter (`_param_<name>`) is only its C formal
-  and relies on the input's existing provenance; native calls create no
-  argument root. A `_paramslot_<name>` home exists only when the parameter is
-  assigned or must survive setjmp recovery.
+- An unassigned, unspilled parameter (`_param_<name>`) is only its C formal.
+  The caller keeps it reachable until the call returns
+  ([calls](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)),
+  so the callee creates no root for it. A `_paramslot_<name>` home exists only
+  when the parameter is assigned or must survive setjmp recovery.
 - Module variables live in `_mod` user values. Reads are `getslot` from
   `&_mod->uv[i].uv`. Writes of GC-bearing values add
   `luaC_barrierback(L, obj2gco(_mod), <slot>);` (a userdata owner takes the
@@ -785,9 +786,11 @@ finite/open demand below but omitting closure allocation and callable dispatch.
 
 `codecall` implements the caller's half of the native calling convention
 ([overview](codegen-overview.md)). Argument marshaling is minimal: preliminary
-statements run in lexical order, effect-ordered values are frozen only in C, and
+statements run in lexical order, effect-ordered values are frozen in C, and
 then the checker's delivered fixed prefix and accepted input tail are passed.
-There is no tracing-only native-input publication or per-call pushing.
+There is no per-call pushing: an input is published in a caller slot only
+when it has no stable root
+([values and the GC](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
 Explicit surplus arguments still run but are discarded. If the source call
 supplied too few fixed arguments, the checker has already appended
 `Ast.ExpNil` expressions and inserted the ordinary coercions, so code

@@ -196,6 +196,34 @@ producer that cannot fill a required position is still an error. A declared
 flexible result tail represents positions that may be absent; see the next
 section and [Flexible returns](flexible-returns.md).
 
+### Arguments stay reachable during the call
+
+An argument stays reachable until its call returns, wherever the caller read
+it from. The callee may clear the record field, module variable, or captured
+local that held the value, and the evaluation of a later argument may do the
+same: the parameter still holds a valid value. The same is true of a method's
+receiver, of a function value while it is being called, and of every value a
+variadic function receives through `...`, including the elements of a spread
+Array.
+
+```titan
+record Holder
+    item: value
+end
+
+local function take(holder: Holder, item: value): value
+    holder.item = nil     -- removes the argument's only other home
+    return item           -- still the value the caller passed
+end
+
+function detach(holder: Holder): value
+    return take(holder, holder.item)
+end
+```
+
+The guarantee covers the call. To keep a value longer, store it in a local,
+a field, or a container.
+
 ## Named calls
 
 A direct declaration can also be called with a brace-delimited named list:

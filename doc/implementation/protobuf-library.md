@@ -485,8 +485,10 @@ The owning `Message` remains traced throughout entry and byte-slice use. Its
 `holder` retains the backing string and is propagated to child slices: string
 entry points pass their input as the root holder, and merged children hold
 their concatenated merge string. A custom decoder that drops its caller's last
-input reference therefore cannot free the bytes behind `Message.base`; native
-call inputs alone are not roots ([values and GC](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
+input reference therefore cannot free the bytes behind `Message.base`: the
+holder keeps them for as long as the message is used, which can be longer
+than the call whose input the caller roots
+([values and GC](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
 Raw-buffer entry points pass no holder and retain their existing synchronous
 caller-owned borrow contract. Neither an entry pointer nor `Message.base` owns
 its bytes. Directory owners and holders therefore survive allocations,

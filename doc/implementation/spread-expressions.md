@@ -94,16 +94,19 @@ and no Titan run descriptor enters that ABI.
 
 `code_spread_carrier` (`coder/expressions.lua`) emits, in source order:
 
-1. the frozen Array or Map subject;
+1. the stabilized Array or Map subject;
 2. each explicit frozen bound;
 3. the default upper bound (the subject's length) when needed;
 4. one unsigned selected-count calculation.
 
-The frozen subject is the ordinary C temporary that evaluates the expression
-once. It is not a new traced slot: the subject's existing provenance (an
-allocation or result root, a semantic home, or a VM stack slot) keeps it alive,
-as for any native input
-([Calls](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
+The subject is evaluated once into an ordinary C temporary. Its elements are
+read after the bounds run, and an open consumer reads them later still, so
+the subject follows the rule for native inputs
+([Calls](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)):
+`coder._stabilize_input_code` publishes it in a slot of this frame when it
+has no stable root, for example when it was read from a record field that a
+bound expression can overwrite. A subject that already has one (a local, a
+parameter, a fresh constructor, a call result) gets no store.
 Later bound evaluation cannot change the frozen temporary.
 
 The range comparison is signed, but the inclusive distance uses Lua's unsigned
@@ -123,13 +126,23 @@ current function; no C auxiliary is generated.
 ## Element reads and GC ownership
 
 Array reads follow the raw positive-index path of ordinary typed Array
-indexing and apply the checker's strict guard. The frozen Array subject owns
-its stored collectables until the destination publishes them. The exception is
-an Array element guard that can discover an Interface: it may allocate a fresh
-wrapper the subject does not own. A finite or immediately consumed read
-publishes that wrapper in one reusable result slot; a buffered open sink gives
-every still-live wrapper a distinct result slot. Variadic reads borrow the
-input descriptor's existing provenance. A finite `ExpSpreadIndex` is a
+indexing and apply the checker's strict guard. The Array subject owns its
+stored collectables until the destination publishes them. Two cases need a
+root of their own:
+
+- An Array element guard that can discover an Interface may allocate a fresh
+  wrapper the subject does not own. A finite or immediately consumed read
+  publishes that wrapper in one reusable result slot; a buffered open sink
+  gives every still-live wrapper a distinct result slot.
+- A variadic callee can overwrite the Array's slots while it holds the
+  elements in its descriptor. The array run is marked `callee_mutable` when
+  its elements are collectable, and `coder._emit_open_vararg_struct`
+  publishes each element in the call site's traced range. A flexible `return`
+  and a constructor tail need no such range: no user code runs between the
+  read and the destination's own publication.
+
+Variadic reads borrow the input descriptor's elements, which the function's
+caller roots. A finite `ExpSpreadIndex` is a
 nil-filling `T?` projection whose target adjustment may force presence; only an
 open vararg run keeps the raising out-of-range read.
 

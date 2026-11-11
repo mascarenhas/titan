@@ -268,7 +268,8 @@ array with `memcpy`; arrays and wrappers are not interned.
 
 **Construction.** `coder._render_interface_wrapper_allocation` is the shared
 body. `coder._code_interface_wrapper` evaluates the concrete value once into an
-untraced C temporary, relying on its ordinary provenance. A method-only pair is
+untraced C temporary: it is stored into the fresh wrapper before any user code
+or collector poll can run, so its existing home still holds it. A method-only pair is
 allocated inline; a field-bearing pair calls the pair's allocator. Either way
 the body:
 
@@ -349,9 +350,11 @@ the write.
 
 ### Direct Titan method calls
 
-For `wrapper:method(...)` (`coder/calls.lua`), generated code freezes the
-wrapper once into an untraced C temporary before later argument effects and
-creates no input root. It checks that the payload length is exactly the
+For `wrapper:method(...)` (`coder/calls.lua`), generated code stabilizes the
+wrapper once before later argument effects, like every native-call input: a C
+temporary, plus a caller slot when the wrapper has no stable root (for
+example when it was read from a record field). The receiver and the module
+are immutable user values of that wrapper. It checks that the payload length is exactly the
 Interface's method count ("malformed internal Interface wrapper for %s"),
 loads the declaration-order slot, rejects a `NULL` entry ("uninitialized
 internal Interface method %s:%s"), casts it to the method signature, and calls

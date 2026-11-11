@@ -391,11 +391,12 @@ local shadow slot, module/record/container field, native-result slot, or another
 GC object. `newtmp(ctx, typ, true)` (`coder/flow.lua`) creates a C temporary
 `_tmp_N` plus a reserved stack slot when the temporary itself owns that
 lifetime; `coder._codeinitializeddecl` does the same for used locals. Native
-call sequencing is deliberately different: `coder._freeze_code` may copy a
-callee, receiver, fixed argument, or variadic element into an untraced C
-temporary for lexical order, but it never publishes a tracing-only
-call-activation slot. Fresh allocations and native results already acquired
-their mandatory roots; other inputs retain their ordinary semantic or VM homes.
+call sequencing is narrower: `coder._stabilize_input_code` (`coder/calls.lua`)
+copies a callee, receiver, fixed argument, or variadic element into an
+untraced C temporary for lexical order, and also publishes it in a slot of the
+caller's frame only when it has no root that later code cannot clear (see
+[Calls](#calls-c-only-inputs-immediate-result-roots-and-vm-transport)). Fresh
+allocations and native results already acquired their mandatory roots.
 For
 
 ```titan
@@ -419,9 +420,9 @@ local. Mutable C out-parameters additionally use the handoff rules below.
 Parameters (including method `self`) get a slot only when the body assigns to
 them or the checker marks them for spill across a catchable call. That is a
 semantic local/spill home, not argument transport; otherwise the parameter
-remains only its native C formal and its reachability comes from the input's
-existing provenance. Module variables need no shadow: their `_mod` user value is
-itself GC-visible.
+remains only its native C formal, and its caller keeps the argument reachable
+until the call returns (the declaration is marked `_borrows_root`). Module
+variables need no shadow: their `_mod` user value is itself GC-visible.
 
 A local roots its value from its declaration until its block ends, whether or
 not anything reads it:
@@ -573,26 +574,73 @@ use-after-free on the next one.
 ## Calls: C-only inputs, immediate result roots, and VM transport
 
 The [calling convention](codegen-overview.md#the-titan-native-function-and-its-calling-convention)
-separates native C transport from GC publication. A native fast call does
-**not** establish a new tracing lifetime for its inputs.
+separates native C transport from GC publication. The callee receives its
+inputs as C values and roots none of them. The caller upholds one invariant:
+
+> For the duration of a native call, every GC-bearing input is reachable from
+> a root that no code running before the call returns can clear.
 
 * **Native inputs.** The caller evaluates left-to-right. Where later setup is
   effectful, it freezes the first-class callee, receiver, fixed arguments, and
   variadic elements in ordinary C temporaries (`ordered_call_args`,
   `coder/calls.lua`). Pure trailing reads may remain direct C expressions.
-  Neither form writes a tracing-only Lua-stack slot. Fresh values retain the
-  roots installed at allocation or at an earlier native-result handoff;
-  established values retain their semantic module/record/container/local home
-  or an upstream Lua VM argument slot. A raw `TitanVargX` and its C `args` array
-  merely borrow those values and are never roots. Callable and Interface
-  adapters follow the same rule and have an empty input-source root inventory.
-  A newly allocated argument conversion is the one exception in the
-  *destination*: the fresh wrapper gets its mandatory initial allocation root.
 
-  Consequently the no-copy native protocol does not manufacture a lifetime
-  after a program destroys an input's sole traced provenance while retaining
-  only its raw C formal. Supporting that stronger case would require the third
-  call-activation root that this protocol deliberately excludes.
+  `has_stable_root` (`coder/calls.lua`) decides from the caller's checked AST
+  alone, with no fact about the callee, whether an input already satisfies the
+  invariant. A stable input gets no store. Stable inputs are:
+
+  1. a value that is not collectable;
+  2. a local with a frame slot of its own: only this function's statements
+     write that slot, and the callee's frame lies above it. A local that a
+     closure captures and assigns lives in a box instead and is not stable;
+  3. a parameter or `self`, which this function's caller roots by the same
+     invariant (`_borrows_root`), and a catch's `error` and `traceback`, which
+     the try's anchored slots hold. An assigned parameter has a slot and falls
+     under 2;
+  4. a by-value capture (`_fn->upvalue[i]` is never rewritten, and `_fn` is
+     itself an input of this activation), and a canonical function or static
+     closure in a module slot;
+  5. a value this frame already published: a literal, constructor,
+     concatenation, closure, bound method, or Interface or callable wrapper
+     (its allocation root), a Titan call result (its result slot), and an
+     Array or Map element (the read's traced temporary);
+  6. a `...` element, which this function's caller roots like a parameter;
+  7. `and`/`or` over stable operands, and a cast that keeps a stable operand's
+     object: an equal type, an injection into `value`, or an Option wrap or
+     force whose payload needs no conversion.
+
+  Every other input was read from a home that other code can overwrite (a
+  record field, a module variable, a capture box, a foreign call's result), or
+  is not recognised. `coder._stabilize_input_code` publishes it in a slot from
+  `newborrowedslot` (`coder/flow.lua`) at the position where it is evaluated.
+  That slot is not an allocation, so it does not make a loop poll the
+  collector, and like every temporary it holds its value until the enclosing
+  block ends. The store also closes the window before the callee is entered:
+  a later argument can clear an earlier argument's home and collect.
+
+  A raw `TitanVargX` and its C `args` array merely borrow their elements and
+  are never roots. Static elements are classified like fixed arguments. The
+  elements of a spread Array stay in the Array, whose slots the callee can
+  overwrite, so `coder._emit_open_vararg_struct` publishes each one in the
+  call site's traced range (`run.callee_mutable`), as a Map spread's retained
+  reads already are.
+
+  Generated wrappers need no input roots under this invariant. A callable or
+  Interface adapter, a strict relay and a bound-method trampoline receive
+  their inputs as their own parameters or as immutable upvalues of `_fn`, so
+  their input-source root inventory is empty. A newly allocated argument
+  conversion gets its mandatory initial allocation root in the *destination*.
+
+  The base cases are the entries whose arguments already sit in Lua-stack
+  slots (a Lua entry, a strict entry) and hand-written native callers. A
+  `foreign function` that calls a native entry through a pointer is such a
+  caller: it keeps the arguments it passes reachable, for example by pushing
+  the owner before a callback that may remove the owner's last other home.
+
+  The same rule covers two places outside calls where a C copy outlives
+  effectful evaluation: a concatenation operand is published when a later
+  operand emits statements or calls, and a spread subject is published before
+  its bounds are evaluated.
 
 * **Native returns.** The callee returns its first fixed result in C and writes
   later results through out-parameters without rooting them. Merely returning
@@ -617,7 +665,7 @@ _visible_2 = _abi_2;
 setsvalue(L, s2v(restorestack(L, _base_off) + 0), _visible_2); /* immediate handoff */
 ```
 
-* **Flexible runs.** Native input descriptors borrow the existing provenance
+* **Flexible runs.** Native input descriptors borrow the roots described
   above. Every live GC-bearing native output prefix uses bounded caller-owned C
   backing plus a parallel traced range: after rebasing and validating its count,
   the caller copies the complete live prefix into that range and clears it only

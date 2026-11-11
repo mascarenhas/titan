@@ -790,6 +790,17 @@ function newslot(ctx --[[:table]])
     return slotat(reserveslot(ctx))
 end
 
+-- A slot that roots a value this frame read from a home other code can
+-- overwrite: a native-call input, a concatenation operand, a spread subject.
+-- It is not an allocation, and `ctx.allocations` decides whether a loop polls
+-- the collector at its tail, so the count is left as it was.
+function newborrowedslot(ctx --[[:table]])
+    local allocations = ctx.allocations
+    local slot = newslot(ctx)
+    ctx.allocations = allocations
+    return slot
+end
+
 -- Implementation notes: doc/implementation/error-handling.md#setjmp-sensitive-localparameter-spills
 function coder._decl_volatile_home(decl)
     return decl and decl._needs_spill and decl._c_address_taken
