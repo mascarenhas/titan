@@ -6,13 +6,13 @@
 typedef struct titan_uv_pipe_eligibility {
   int available;
 } titan_uv_pipe_eligibility;
-static inline int titan_uv_network_is_windows(void) {
+/* _WIN32 is undefined off Windows, so Titan reads the platform from a macro
+ * that always has a value. */
 #ifdef _WIN32
-  return 1;
+#define TITAN_UV_NETWORK_WINDOWS 1
 #else
-  return 0;
+#define TITAN_UV_NETWORK_WINDOWS 0
 #endif
-}
 /* Unix try_write2 omits the source-fd check performed by write2 and asserts
  * later for a descriptor-less borrowed handle. Windows rejects all transfers
  * with EAGAIN; preserve that native behavior without checking its descriptor. */

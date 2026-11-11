@@ -86,7 +86,7 @@ function read_start(stream: stream_t, alloc_callback: alloc_cb, read_callback: r
     local old_read? = owner.read_callback
     owner.alloc_callback = alloc_callback
     owner.read_callback = read_callback
-    if ffi.titan_uv_network_is_windows() == 0 then
+    if ffi.TITAN_UV_NETWORK_WINDOWS == 0 then
       local status = ffi.uv_read_start(native, tty_alloc_callback, tty_read_callback) as integer
       if status < 0 then owner.alloc_callback = old_alloc; owner.read_callback = old_read end
       return status

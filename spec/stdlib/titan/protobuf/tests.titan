@@ -747,7 +747,7 @@ end
 local function decode_with_nominal(bytes: string, nominal: reflect.NominalType?,
                                    name: string, is_union: boolean): value
   return protobuf.deserialize_nominal_buffer_with_context(
-    ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void, #bytes,
+    bytes as foreign const *void, #bytes,
     nominal, name, is_union, nil)
 end
 

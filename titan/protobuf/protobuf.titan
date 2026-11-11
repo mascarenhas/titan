@@ -357,7 +357,7 @@ local function slice_to_string(
     offset: integer,
     length: integer): string
   if length <= 0 then return "" end
-  return ffi.titan_protobuf_offset_ptr(base, offset) as string(length)
+  return ((base + offset) as foreign const *char) as string(length)
 end
 
 local function buffer_to_string(buf: foreign *titan_protobuf_buffer): string
@@ -734,7 +734,7 @@ end
 -- @usage standard-library-protobuf.md#api
 function deserialize(bytes: string, descriptor: reflect.Type): value
   return deserialize_buffer(
-      ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void,
+      bytes as foreign const *void,
       #bytes,
       descriptor, packet_context(false), bytes)
 end
@@ -829,7 +829,7 @@ end
 -- @usage standard-library-protobuf.md#anonymous-messages
 function deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
   return deserialize_fields_slice(
-      ffi.titan_protobuf_bytes_ptr(bytes), #bytes, fields, packet_context(false), bytes)
+      (bytes as foreign const *char) as foreign const *uint8_t, #bytes, fields, packet_context(false), bytes)
 end
 
 --- Resolve an initialized nominal type by name and decode it from a raw byte buffer.
@@ -892,7 +892,7 @@ end
 -- @usage standard-library-protobuf.md#api
 function deserialize_nominal(bytes: string, name: string, is_union: boolean): value
   return deserialize_nominal_slice(
-      ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void,
+      bytes as foreign const *void,
       #bytes, reflect.find_nominal(name), name, is_union, packet_context(false), bytes)
 end
 
