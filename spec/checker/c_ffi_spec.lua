@@ -1279,10 +1279,8 @@ describe("C FFI type checking", function()
             local function bad(p: foreign *integer)
             end
             ]])
-            assert.equal(2, #errors, table.concat(errors, "\n"))
+            assert.equal(1, #errors, table.concat(errors, "\n"))
             assert.match("foreign type 'integer' is not declared", errors[1])
-            assert.match("C pointer type can only point to a C FFI type",
-                errors[2])
         end)
     end)
 

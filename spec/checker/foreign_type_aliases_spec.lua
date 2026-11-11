@@ -145,17 +145,38 @@ describe("foreign type declarations", function()
         end
     end)
 
-    it("diagnoses an undeclared type inside an alias's array or function type", function()
+    it("diagnoses an undeclared type inside a pointer, array or function type once", function()
         for _, source in ipairs({
             "foreign type Callback = function (*missing_t): void",
             "foreign type Callback = function (missing_t, int): void",
             "foreign type Callback = function (int): missing_t",
             "foreign type Items = missing_t[]",
             "foreign type Nested = *(function (missing_t[]): void)",
+            -- The same types outside an alias reach the C probes.
+            [[local function same(a: foreign *(missing_t[]), b: foreign *(int[])): boolean
+                return a == b
+            end]],
+            [[local function qualify(a: foreign *(missing_t[])): foreign const *(int[])
+                return a
+            end]],
+            [[local function same(a: foreign *(function (missing_t): void),
+                                  b: foreign *(function (int): void)): boolean
+                return a == b
+            end]],
+            [[local function qualify(a: foreign *(function (int): missing_t)):
+                    foreign const *(function (int): void)
+                return a
+            end]],
         }) do
             local ok, err = check(source)
             assert.falsy(ok, source)
             assert.matches("foreign type 'missing_t' is not declared", err, 1, true)
+            for _, cascade in ipairs({ "can only point to a C FFI type",
+                                       "element type must be a C FFI type",
+                                       "probe infrastructure failed",
+                                       "cdeclarator.lua:", "cprobe.lua:" }) do
+                assert.not_matches(cascade, err, 1, true)
+            end
         end
     end)
 

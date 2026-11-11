@@ -337,26 +337,6 @@ local function foreign_alias_has_owned(typ, seen)
     return false
 end
 
--- A written array or function type keeps an undeclared component as
--- `Type.Invalid`, which no typedef can spell. A named type ends the search:
--- a declaration renders it by name.
-local function foreign_alias_has_undeclared(typ)
-    local tag = typ._tag
-    if tag == "Type.Invalid" then
-        return true
-    elseif tag == "Type.CPointer" then
-        return foreign_alias_has_undeclared(typ.pointee)
-    elseif tag == "Type.CArray" then
-        return foreign_alias_has_undeclared(typ.elem)
-    elseif tag == "Type.CFunction" then
-        for _, param in ipairs(typ.params) do
-            if foreign_alias_has_undeclared(param) then return true end
-        end
-        return foreign_alias_has_undeclared(typ.ret)
-    end
-    return false
-end
-
 -- Implementation notes: doc/implementation/type-aliases.md#foreign-aliases-are-a-separate-c-declaration
 function resolve_foreign_type_alias(node, st, errors)
     if node._alias_state == "resolved" then return node._type end
@@ -369,14 +349,13 @@ function resolve_foreign_type_alias(node, st, errors)
     node._alias_state = "resolving"
     local target = typefromnode(node.type, st, errors, true)
     if node._alias_state == "resolved" then return node._type end
-    if foreign_alias_has_undeclared(target) then
-        -- Its diagnostic was reported where the component was written.
-        target = types.Invalid()
-    elseif not types.is_direct_c(target) or foreign_alias_has_owned(target) then
-        checker.typeerror(errors, node.type.loc or node.loc,
-            "foreign type alias '%s' requires a raw C type without owned storage",
-            node.name)
-        target = types.Invalid()
+    if target._tag ~= "Type.Invalid" then
+        if not types.is_direct_c(target) or foreign_alias_has_owned(target) then
+            checker.typeerror(errors, node.type.loc or node.loc,
+                "foreign type alias '%s' requires a raw C type without owned storage",
+                node.name)
+            target = types.Invalid()
+        end
     end
     if target._tag == "Type.Invalid" then
         node._type = target
