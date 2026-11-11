@@ -508,7 +508,7 @@ foreign function transfer_load_module(state: *lua_State,
   end
   ffi.lua_copy(state, -1, top + 1)
   ffi.lua_settop(state, top + 1)
-  ffi.lua_callk(state, 0, 1, 0 as foreign lua_KContext, nil)
+  ffi.lua_callk(state, 0, 1, 0, nil)
   -- The generated initializer publishes this exact module before returning.
   -- A preload wrapper may not substitute unrelated native userdata.
   ffi.lua_pushstring(state, "Titan module ")

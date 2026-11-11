@@ -646,8 +646,7 @@ local foreign function thread_worker_main(arg: *void)
     if ffi.lua_checkstack(state, 3) ~= 0 then
       ffi.lua_pushcclosure(state, thread_worker_protected, 0)
       ffi.lua_pushlightuserdata(state, ctrl as foreign *void)
-      local status = ffi.lua_pcallk(
-        state, 1, 0, 0, 0 as foreign lua_KContext, nil)
+      local status = ffi.lua_pcallk(state, 1, 0, 0, 0, nil)
       if status ~= ffi.LUA_OK then
         local len = 0 as foreign size_t
         local msg_bytes = ffi.lua_tolstring(state, -1, len)

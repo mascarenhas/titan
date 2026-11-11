@@ -32,7 +32,7 @@ local foreign function lua_state_open(initialization: *titan_lua_open): int
   if ffi.lua_checkstack(state, 2) == 0 then return ffi.LUA_ERRMEM end
   ffi.lua_pushcclosure(state, lua_state_open_libraries, 0)
   ffi.lua_pushlightuserdata(state, initialization)
-  return ffi.lua_pcallk(state, 1, 0, 0, 0 as foreign lua_KContext, nil)
+  return ffi.lua_pcallk(state, 1, 0, 0, 0, nil)
 end
 
 local foreign function lua_state_error_message(state: *lua_State): int
@@ -158,7 +158,7 @@ local foreign function lua_state_converted_value(state: *lua_State, position: in
   end
   lua_state_transfer_function(state, "from_value")
   ffi.lua_pushvalue(state, position)
-  ffi.lua_callk(state, 1, 1, 0 as foreign lua_KContext, nil)
+  ffi.lua_callk(state, 1, 1, 0, nil)
   ffi.lua_copy(state, -1, position)
   ffi.lua_settop(state, top)
   if lua_state_transfer_value(state, position, result) == 0 then
@@ -200,10 +200,10 @@ local foreign function lua_state_push_packet(state: *lua_State,
     ffi.lua_pushconstlightuserdata(state, argument.entry)
   else ffi.lua_pushlstring(state, argument.name, argument.name_length) end
   ffi.lua_pushlstring(state, argument.bytes, argument.length)
-  ffi.lua_callk(state, 3, 1, 0 as foreign lua_KContext, nil)
+  ffi.lua_callk(state, 3, 1, 0, nil)
   ffi.lua_getfield(state, -1, "to_value")
   ffi.lua_pushvalue(state, -2)
-  ffi.lua_callk(state, 1, 1, 0 as foreign lua_KContext, nil)
+  ffi.lua_callk(state, 1, 1, 0, nil)
   ffi.lua_copy(state, -1, -2)
   ffi.lua_settop(state, -2)
   return 0
@@ -248,8 +248,7 @@ local foreign function lua_state_execute(state: *lua_State): int
     end
   end
 
-  ffi.lua_callk(state, call.nargs, ffi.LUA_MULTRET,
-    0 as foreign lua_KContext, nil)
+  ffi.lua_callk(state, call.nargs, ffi.LUA_MULTRET, 0, nil)
   local count = ffi.lua_gettop(state)
   if count > 0 then
     if count as foreign size_t > ffi.SIZE_MAX / foreign titan_lua_value.sizeof then
@@ -330,8 +329,7 @@ local foreign function lua_state_run(argument: *void)
   ffi.lua_pushcclosure(state, lua_state_error_message, 0)
   ffi.lua_pushcclosure(state, lua_state_execute, 0)
   ffi.lua_pushlightuserdata(state, call)
-  call.status = ffi.lua_pcallk(state, 1, ffi.LUA_MULTRET, top + 1,
-    0 as foreign lua_KContext, nil)
+  call.status = ffi.lua_pcallk(state, 1, ffi.LUA_MULTRET, top + 1, 0, nil)
   if call.status ~= ffi.LUA_OK then
     local length = 0 as foreign size_t
     call.message = ffi.lua_tolstring(state, -1, length)

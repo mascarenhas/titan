@@ -13,7 +13,7 @@ local function _initialize_native()
   -- Reserve the function slot and its one result.
   if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve Lua stack for LPegLabel" end
   ffi.lua_pushcclosure(L, ffi.titan_lpeglabel_open, 0)
-  ffi.lua_callk(L, 0, 1, 0 as foreign lua_KContext, nil)
+  ffi.lua_callk(L, 0, 1, 0, nil)
   if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
     raise "embedded LPegLabel opener did not return its module table"
   end
