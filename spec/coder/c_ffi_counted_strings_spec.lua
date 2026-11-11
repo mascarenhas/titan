@@ -1,4 +1,44 @@
 local h = require "spec.support.helpers"
+local temporary = require "spec.support.temporary"
+
+-- Every resize allocates, copies, and frees, as ASan's realloc does, so a
+-- shrinking Lua stack moves under any system allocator.
+local MOVING_ALLOCATOR = [[
+    #include <stddef.h>
+    #include <string.h>
+    #include "lua.h"
+
+    static lua_Alloc moving_saved_alloc = NULL;
+    static void *moving_saved_ud = NULL;
+
+    static void *moving_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {
+        void *fresh;
+        (void)ud;
+        if (ptr == NULL || nsize == 0)
+            return moving_saved_alloc(moving_saved_ud, ptr, osize, nsize);
+        fresh = moving_saved_alloc(moving_saved_ud, NULL, 0, nsize);
+        if (fresh == NULL)
+            return NULL;
+        memcpy(fresh, ptr, osize < nsize ? osize : nsize);
+        moving_saved_alloc(moving_saved_ud, ptr, osize, 0);
+        return fresh;
+    }
+
+    static void moving_arm(lua_State *L) {
+        if (moving_saved_alloc == NULL) {
+            moving_saved_alloc = lua_getallocf(L, &moving_saved_ud);
+            lua_setallocf(L, moving_alloc, NULL);
+        }
+    }
+
+    static void moving_disarm(lua_State *L) {
+        if (moving_saved_alloc != NULL) {
+            lua_setallocf(L, moving_saved_alloc, moving_saved_ud);
+            moving_saved_alloc = NULL;
+            moving_saved_ud = NULL;
+        }
+    }
+]]
 
 describe("counted C pointer-to-string code generation", function()
     after_each(function()
@@ -359,5 +399,44 @@ describe("counted C pointer-to-string code generation", function()
             collectgarbage("collect")
             assert(text == "A\0B\255")
         ]])
+    end)
+
+    it("rebases the frame after the copy's collection moves the stack", function()
+        -- With pause 0 and stepmul 0 every poll runs a full collection, whose
+        -- atomic phase shrinks an oversized running stack. The Lua recursion
+        -- grows the stack after `copy` captured its frame, so the copy's own
+        -- poll moves it; returning must leave `L->top` in the live stack.
+        local header = temporary.name(".h")
+        local file = assert(io.open(header, "wb"))
+        assert(file:write(MOVING_ALLOCATOR))
+        assert(file:close())
+        local ok, err = pcall(h.run_coder, [[
+            foreign import "]] .. header .. [["
+            local function copy(grow: function (integer): ()): string
+                grow(2000)
+                local pointer: foreign const *char = "abc"
+                return pointer as string(3)
+            end
+            function top_survives(grow: function (integer): ()): boolean
+                local before = ffi.lua_gettop(L)
+                ffi.moving_arm(L)
+                defer ffi.moving_disarm(L)
+                local text = copy(grow)
+                return ffi.lua_gettop(L) == before and text == "abc"
+            end
+        ]], [[
+            local function grow(depth)
+                if depth > 0 then grow(depth - 1) end
+            end
+            local pause = collectgarbage("param", "pause", 0)
+            local stepmul = collectgarbage("param", "stepmul", 0)
+            local ok, survived = pcall(test.top_survives, grow)
+            collectgarbage("param", "pause", pause)
+            collectgarbage("param", "stepmul", stepmul)
+            assert(ok, tostring(survived))
+            assert(survived, "counted string copy returned with a stale L->top")
+        ]])
+        os.remove(header)
+        if not ok then error(err, 0) end
     end)
 end)
