@@ -209,8 +209,6 @@ local foreign function udp_send_callback(native: *uv_udp_send_t, status: int)
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign UDPSendEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "udp_send_t", "buffers"))
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "udp_send_t", "native_buffers"))
   entry(L, module, handler, owner, loop, status)
   ffi.lua_settop(L, top)
 end

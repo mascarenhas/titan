@@ -1083,7 +1083,7 @@ local function work_deliver(owner: work_t, loop: loop_t, status: integer)
   -- user code can resubmit this owner, possibly on a different loop.
   loop.requests[owner] = nil
   owner.pending = false
-  local _argument_owner = owner.argument_owner
+  local argument_owner = owner.argument_owner
   owner.argument_owner = nil
   local callback? = owner.callback
   owner.callback = nil

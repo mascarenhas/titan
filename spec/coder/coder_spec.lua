@@ -1828,6 +1828,143 @@ describe("Titan code generator", function()
         assert.truthy(ok, err)
     end)
 
+    it("roots a GC-bearing local that nothing reads", function()
+        -- No function below reads `keep`. Each assignment case leaves the
+        -- block that evaluated the assigned value and runs a sibling block of
+        -- the same shape, which reuses that block's temporaries: only the slot
+        -- of `keep` can still hold the value when `collected` runs a full
+        -- collection.
+        run_coder([[
+            local type Make = function (): value
+            local type Count = function (): integer
+
+            record Holder
+                item: value
+            end
+
+            local function hold(make: Make): Holder
+                return Holder.new(make())
+            end
+
+            function assigned(make: Make, spare: Make, collected: Count): integer
+                local keep: Holder?
+                local other: Holder?
+                do keep = hold(make) end
+                do other = hold(spare) end
+                return collected()
+            end
+
+            function parameter(keep: value, make: Make, spare: Make,
+                               collected: Count): integer
+                local other: value
+                do keep = make() end
+                do other = spare() end
+                return collected()
+            end
+
+            function multiple(make: Make, spare: Make, collected: Count): integer
+                local keep: Holder?
+                local keep_too: Holder?
+                local other: Holder?
+                local other_too: Holder?
+                do keep, keep_too = hold(make), hold(make) end
+                do other, other_too = hold(spare), hold(spare) end
+                return collected()
+            end
+
+            function replaced(make: Make, spare: Make, collected: Count): integer
+                local keep: Holder?
+                do keep = hold(make) end
+                do keep = hold(spare) end
+                return collected()
+            end
+
+            -- Three more places where the coder gives `keep` its storage: a
+            -- declaration after a `defer`, a parameter of an immediate
+            -- function, and a `case` binder.
+            function after_defer(make: Make, spare: Make, collected: Count): integer
+                defer spare()
+                local keep: Holder?
+                local other: Holder?
+                do keep = hold(make) end
+                do other = hold(spare) end
+                return collected()
+            end
+
+            function immediate_parameter(make: Make, spare: Make,
+                                         collected: Count): integer
+                return (function (keep: Holder?, other: Holder?): integer
+                    do keep = hold(make) end
+                    do other = hold(spare) end
+                    return collected()
+                end)(nil, nil)
+            end
+
+            union Kept
+                one(holder: Holder)
+            end
+
+            function binder(make: Make, spare: Make, collected: Count): integer
+                case Kept.one(hold(spare))
+                when one(keep) then
+                    local other: Holder?
+                    do keep = hold(make) end
+                    do other = hold(spare) end
+                    return collected()
+                end
+            end
+
+            -- A declaration: the initializer's temporary is the root once
+            -- the field no longer is.
+            function declared(make: Make, collected: Count): integer
+                local holder = hold(make)
+                local keep = holder.item
+                holder.item = nil
+                return collected()
+            end
+
+            -- The same in a statement that also declares automatic C storage.
+            function declared_beside_storage(make: Make, collected: Count): integer
+                local holder = hold(make)
+                local total, keep = foreign int.new_array(1), holder.item
+                holder.item = nil
+                total[0] = collected()
+                return total[0]
+            end
+        ]], [[
+            local finalized = 0
+            local function make()
+                return setmetatable({}, {
+                    __gc = function () finalized = finalized + 1 end,
+                })
+            end
+            local function spare() return {} end
+            local function collected()
+                collectgarbage("collect")
+                return finalized
+            end
+
+            assert(test.assigned(make, spare, collected) == 0)
+            assert(collected() == 1)
+            assert(test.parameter(nil, make, spare, collected) == 1)
+            assert(collected() == 2)
+            assert(test.multiple(make, spare, collected) == 2)
+            assert(collected() == 4)
+            -- The second assignment replaces the only root of the first value.
+            assert(test.replaced(make, spare, collected) == 5)
+            assert(test.after_defer(make, spare, collected) == 5)
+            assert(collected() == 6)
+            assert(test.immediate_parameter(make, spare, collected) == 6)
+            assert(collected() == 7)
+            assert(test.binder(make, spare, collected) == 7)
+            assert(collected() == 8)
+            assert(test.declared(make, collected) == 8)
+            assert(collected() == 9)
+            assert(test.declared_beside_storage(make, collected) == 9)
+            assert(collected() == 10)
+        ]])
+    end)
+
     it("generates code for integer exported variables", function()
         local code = [[
             a: integer = 1
