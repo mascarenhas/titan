@@ -978,22 +978,21 @@ cleanup:
     short flags = POSIX_SPAWN_SETSIGMASK;
     char *argv[3];
     char **child_environ;
-    int environment_ref;
+    int top = lua_gettop(L);
     if (program == NULL || program[0] == '\0') program = "titanc";
     /* Build the child's environment before any descriptor exists, so its Lua
-    ** allocation cannot strand native state; the registry reference keeps it
-    ** alive until posix_spawnp has copied it. */
+    ** allocation cannot strand native state; its stack slot keeps it alive
+    ** until posix_spawnp has copied it. */
     child_environ = titan_path_push_query_environ(L);
-    environment_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     if (titan_path_pipe(descriptors) != 0) {
-        luaL_unref(L, LUA_REGISTRYINDEX, environment_ref);
+        lua_settop(L, top);
         lua_pushfstring(L, "cannot create a pipe for '%s --print-root': %s",
             program, strerror(errno));
         return 0;
     }
     rc = posix_spawn_file_actions_init(&actions);
     if (rc != 0) {
-        luaL_unref(L, LUA_REGISTRYINDEX, environment_ref);
+        lua_settop(L, top);
         close(descriptors[0]);
         close(descriptors[1]);
         lua_pushfstring(L, "cannot start '%s --print-root': %s", program,
@@ -1002,7 +1001,7 @@ cleanup:
     }
     rc = posix_spawnattr_init(&attributes);
     if (rc != 0) {
-        luaL_unref(L, LUA_REGISTRYINDEX, environment_ref);
+        lua_settop(L, top);
         posix_spawn_file_actions_destroy(&actions);
         close(descriptors[0]);
         close(descriptors[1]);
@@ -1028,9 +1027,9 @@ cleanup:
     argv[2] = NULL;
     if (rc == 0) rc = posix_spawnp(&pid, program, &actions, &attributes, argv,
         child_environ);
-    /* The child has its own copy now. luaL_unref only rewrites registry slots,
-    ** so it cannot allocate while the descriptors are still open. */
-    luaL_unref(L, LUA_REGISTRYINDEX, environment_ref);
+    /* The child has its own copy now. lua_settop cannot allocate while the
+    ** descriptors are still open. */
+    lua_settop(L, top);
     posix_spawnattr_destroy(&attributes);
     posix_spawn_file_actions_destroy(&actions);
     close(descriptors[1]);
