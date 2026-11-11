@@ -145,6 +145,20 @@ describe("foreign type declarations", function()
         end
     end)
 
+    it("diagnoses an undeclared type inside an alias's array or function type", function()
+        for _, source in ipairs({
+            "foreign type Callback = function (*missing_t): void",
+            "foreign type Callback = function (missing_t, int): void",
+            "foreign type Callback = function (int): missing_t",
+            "foreign type Items = missing_t[]",
+            "foreign type Nested = *(function (missing_t[]): void)",
+        }) do
+            local ok, err = check(source)
+            assert.falsy(ok, source)
+            assert.matches("foreign type 'missing_t' is not declared", err, 1, true)
+        end
+    end)
+
     it("retains function-pointer and grouped pointer structure in C typedefs", function()
         local ok, err, ast = check([[
             foreign type Callback = function(int): int
