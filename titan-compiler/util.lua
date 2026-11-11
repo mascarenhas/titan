@@ -2,6 +2,9 @@ local lpeg = require "lpeglabel"
 
 local util = {}
 
+-- Renders a Lua literal: the sequence part in order, then the remaining
+-- entries in bytewise order of their text. Serialized types and function-type
+-- tags contain it, so the text must not follow `pairs` order.
 function util.tostring(v)
     if type(v) ~= "table" then
         return string.format("%q", v)
@@ -10,16 +13,19 @@ function util.tostring(v)
     local parts = {}
     local seen = {}
 
-    for i, v in ipairs(v) do
+    for i, item in ipairs(v) do
         seen[i] = true
-        table.insert(parts, util.tostring(v))
+        parts[#parts + 1] = util.tostring(item)
     end
 
-    for k, v in pairs(v) do
+    local keyed = {}
+    for k, item in pairs(v) do
         if not seen[k] then
-            table.insert(parts, string.format("[%s] = %s", util.tostring(k), util.tostring(v)))
+            keyed[#keyed + 1] = string.format("[%s] = %s", util.tostring(k), util.tostring(item))
         end
     end
+    table.sort(keyed, util.bytewise_less)
+    table.move(keyed, 1, #keyed, #parts + 1, parts)
 
     return "{" .. table.concat(parts, ", ") .. "}"
 end

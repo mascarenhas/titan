@@ -180,10 +180,26 @@ int value;
          assert.equal("true", util.tostring(true))
          assert.equal("{}", util.tostring({}))
          assert.equal('{1, 2, "a"}', util.tostring({ 1, 2, "a" }))
-         local s1 = util.tostring({ b = 2, a = 1 })
-         assert.is_true('{["a"] = 1, ["b"] = 2}' == s1 or '{["b"] = 2, ["a"] = 1}' == s1)
-         local s2 = util.tostring({ 1, [5] = "five", b = 2 })
-         assert.is_true('{1, [5] = "five", ["b"] = 2}' == s2 or '{1, ["b"] = 2, [5] = "five"}' == s2)
+         assert.equal('{["a"] = 1, ["b"] = 2}', util.tostring({ b = 2, a = 1 }))
+         assert.equal('{1, ["b"] = 2, [5] = "five"}',
+             util.tostring({ 1, [5] = "five", b = 2 }))
          assert.equal('{["nested"] = {1, 2}}', util.tostring({ nested = { 1, 2 } }))
+     end)
+
+     it("renders keyed entries in one order whatever order pairs yields", function()
+         local entries = { type = "struct", id = "sockaddr", op = "sizeof" }
+         local function yielding(order)
+             return setmetatable({}, { __pairs = function()
+                 local index = 0
+                 return function()
+                     index = index + 1
+                     local key = order[index]
+                     if key ~= nil then return key, entries[key] end
+                 end
+             end })
+         end
+         local expected = '{["id"] = "sockaddr", ["op"] = "sizeof", ["type"] = "struct"}'
+         assert.equal(expected, util.tostring(yielding({ "type", "id", "op" })))
+         assert.equal(expected, util.tostring(yielding({ "op", "id", "type" })))
      end)
 end)

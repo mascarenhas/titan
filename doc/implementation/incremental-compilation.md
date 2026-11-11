@@ -668,7 +668,9 @@ reports the exact component:
 certified identity. Resolver contexts identify the selected SDK prefix, the
 compiler's source checkout when applicable, and the output root. A path under
 one of these roots receives a root label and relative suffix; the most
-specific root wins. A symlinked root is not admitted as a relocatable binding.
+specific root wins, and when two roots name the same directory the
+bytewise-first label does, so the label never follows table iteration order.
+A symlinked root is not admitted as a relocatable binding.
 Neither a user source root nor an arbitrary external include/provider/tool
 directory becomes relocatable just because it appears in a command.
 The reuse-on-move guarantee requires an explicit `-o`/`--output` tree.

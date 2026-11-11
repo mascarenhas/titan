@@ -5120,6 +5120,14 @@ local foreign_display_tags = {
     ["Type.CTypedef"] = true,
 }
 
+-- A non-literal extent is its C expression tree; display it as C text.
+-- Displayed types can precede validation, so a malformed extent must not raise.
+local function c_extent_string(extent)
+    local rendered, text = pcall(
+        require("titan-compiler.cdeclarator").render_array_extent, extent)
+    return rendered and text or "<invalid extent>"
+end
+
 local function foreign_type_string(t, grouped, scoped)
     local tag, result = t._tag
     if tag == "Type.Invalid" then return "invalid type"
@@ -5151,7 +5159,7 @@ local function foreign_type_string(t, grouped, scoped)
         local qualifiers = #(t.quals or {}) > 0
             and table.concat(t.quals, " ") .. " " or ""
         result = qualifiers .. foreign_type_string(t.elem, true, scoped)
-            .. "[" .. (t.len and tostring(t.len) or "") .. "]"
+            .. "[" .. c_extent_string(t.len) .. "]"
     elseif tag == "Type.COwned" then
         result = t.count
             and ("owned " .. foreign_type_string(t.pointee, true, scoped) .. "[]")
