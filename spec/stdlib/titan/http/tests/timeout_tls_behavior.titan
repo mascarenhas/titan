@@ -339,7 +339,7 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
           if error is ssl.Error then
             observed = (error as ssl.Error).name
           else
-            raise error
+            raise
           end
         end
         return nil
@@ -454,7 +454,7 @@ local function start_https(first_port: integer): async.Task
            (error as async.OperationError).name == "EADDRINUSE" then
           port = port + 1
         else
-          raise error
+          raise
         end
       end
     end

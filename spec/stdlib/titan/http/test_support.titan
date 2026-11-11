@@ -25,9 +25,9 @@ local function absent_temporary_path(_: test.Context): string
     catch
       if error is async.OperationError then
         local failure = error as async.OperationError
-        if failure.name ~= "ENOENT" then raise error end
+        if failure.name ~= "ENOENT" then raise end
       else
-        raise error
+        raise
       end
     end
   end)
@@ -68,7 +68,7 @@ local function raw_listen(first_port: integer): (net.Server, integer)
          (error as async.OperationError).name == "EADDRINUSE" then
         port = port + 1
       else
-        raise error
+        raise
       end
     end
   end
@@ -89,7 +89,7 @@ local function http_listen(first_port: integer,
          (error as async.OperationError).name == "EADDRINUSE" then
         port = port + 1
       else
-        raise error
+        raise
       end
     end
   end
@@ -110,7 +110,7 @@ local function https_listen(first_port: integer, handler: http.Handler,
          (error as async.OperationError).name == "EADDRINUSE" then
         port = port + 1
       else
-        raise error
+        raise
       end
     end
   end

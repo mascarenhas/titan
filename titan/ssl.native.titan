@@ -597,14 +597,12 @@ end
 
 local function drain_step(connection: Connection, code: integer,
                            failure: Error): integer
-  do return drain_output(connection)
-  catch
-    if code == ffi.SSL_ERROR_SSL or code == ffi.SSL_ERROR_SYSCALL then
-      raise failure
-    end
-    raise error
+  return drain_output(connection)
+catch
+  if code == ffi.SSL_ERROR_SSL or code == ffi.SSL_ERROR_SYSCALL then
+    raise failure
   end
-  return 0
+  raise
 end
 
 -- BIO_set_mem_eof_return is a public function-like macro unavailable to the
@@ -649,7 +647,7 @@ local function feed_input(connection: Connection, owner: Operation, operation: s
         raise truncated_eof_error(ffi.SSL_ERROR_SYSCALL, operation)
       end
     end
-    raise error
+    raise
   end)(connection, operation)
   require_engine(connection, operation)
   if not encrypted then
@@ -1847,7 +1845,7 @@ function Connection:close()
         if not (error is async.OperationError and
                 (error as async.OperationError).name == "ENOTCONN" and
                 (error as async.OperationError).operation == "net.shutdown") then
-          raise error
+          raise
         end
       end
     end

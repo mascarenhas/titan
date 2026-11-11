@@ -17,9 +17,9 @@ local function cleanup_path(_: test.Context, path: string)
     catch
       if error is async.OperationError then
         local failure = error as async.OperationError
-        if failure.name ~= "ENOENT" then raise error end
+        if failure.name ~= "ENOENT" then raise end
       else
-        raise error
+        raise
       end
     end
   end)
@@ -63,7 +63,7 @@ local function listen_available(first_port: integer,
                 failure.message
         end
       else
-        raise error
+        raise
       end
     end
   end

@@ -41,7 +41,7 @@ local function listen_available(first_port: integer): (net.Server, integer)
                 ":" .. failure.name .. ": " .. failure.message
         end
       else
-        raise error
+        raise
       end
     end
   end
