@@ -58,9 +58,11 @@ local function clean()
     for name in pairs(generated_modules) do
         local stem = name:gsub("[.]", "/")
         for _, suffix in ipairs({ ".o", ".so", ".a", ".dll", ".def",
-                ".dll.def", ".so.dSYM", ".ffi.h", ".titan.h", ".priv.h", ".parts", ".c" }) do
+                ".dll.def", ".so.dSYM", ".ffi.h", ".titan.h", ".priv.h", ".parts", ".c",
+                "__entrypoint.o", "__entrypoint.c" }) do
             local path = stem .. suffix
-            if (suffix ~= ".c" or not h.verbose) and lfs.symlinkattributes(path) then
+            local kept_source = h.verbose and suffix:match("[.]c$")
+            if not kept_source and lfs.symlinkattributes(path) then
                 remove_generated(path)
             end
         end
