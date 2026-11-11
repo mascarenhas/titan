@@ -162,6 +162,44 @@ function test_scalar_write_callback_failure_preserves_successor(_context: test.C
   test.assert(calls == 2 and received == "old\0" .. strings.rep("next\0", 20000))
 end
 
+local function write_weak_buffer(request: uv.write_t, stream: uv.stream_t,
+                                 weak: {value: value}, key: integer,
+                                 callback: uv.write_cb)
+  local buffer = uv.buf_t.from_string("vector")
+  weak[key] = buffer
+  success(uv.write(request, stream, {buffer}, callback))
+end
+
+function test_vector_write_keeps_old_buffers_through_callback_reuse(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local _, writer = open_pipe_pair(loop)
+  local stream = writer:as_stream_t()
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  local calls = 0
+  write_weak_buffer(uv.write_t(), stream, weak, 1,
+    function (completed: uv.write_t, status: integer)
+      success(status)
+      calls = calls + 1
+      write_weak_buffer(completed, stream, weak, 2,
+        function (_again: uv.write_t, result: integer)
+          success(result)
+          calls = calls + 1
+        end)
+      -- The request holds only the successor's buffers now.
+      collect()
+      assert_retained(weak, 1)
+      assert_retained(weak, 2)
+    end)
+  collect()
+  assert_retained(weak, 1)
+  success(uv.run(loop))
+  test.assert(calls == 2)
+  collect()
+  test.assert(weak[1] == nil and weak[2] == nil, "completed write retained its buffers")
+end
+
 function test_tcp_public_views_write_shutdown_and_eof(_context: test.Context)
   local loop = new_loop()
   defer finish_loop(loop)
@@ -348,4 +386,43 @@ function test_empty_datagram_and_reused_request(context: test.Context)
   test.assert(uv.cancel(request:as_req_t()) < 0)
   test.assert(uv.run(loop) == 0)
   test.assert(seen == 2 and sends == 2 and closed == 2)
+end
+
+local function send_weak_buffer(request: uv.udp_send_t, sender: uv.udp_t,
+                                address: uv.sockaddr_t, weak: {value: value},
+                                key: integer, callback: uv.udp_send_cb)
+  local buffer = uv.buf_t.from_string("datagram")
+  weak[key] = buffer
+  success(uv.udp_send(request, sender, {buffer}, address, callback))
+end
+
+function test_udp_send_keeps_old_buffers_through_callback_reuse(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local _, address = bound(loop, 0)
+  local sender = uv.udp_t.new()
+  success(uv.udp_init(loop, sender))
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  local calls = 0
+  send_weak_buffer(uv.udp_send_t.new(), sender, address, weak, 1,
+    function (completed: uv.udp_send_t, status: integer)
+      success(status)
+      calls = calls + 1
+      send_weak_buffer(completed, sender, address, weak, 2,
+        function (_again: uv.udp_send_t, result: integer)
+          success(result)
+          calls = calls + 1
+        end)
+      -- The request holds only the successor's buffers now.
+      collect()
+      assert_retained(weak, 1)
+      assert_retained(weak, 2)
+    end)
+  collect()
+  assert_retained(weak, 1)
+  success(uv.run(loop))
+  test.assert(calls == 2)
+  collect()
+  test.assert(weak[1] == nil and weak[2] == nil, "completed send retained its buffers")
 end

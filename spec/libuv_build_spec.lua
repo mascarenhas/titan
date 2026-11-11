@@ -2747,7 +2747,10 @@ int main(void) {
                     "loop.failure_error = error", "loop.failure_trace = traceback",
                     "loop.failure_count = loop.failure_count + 1", "ffi.uv_stop(loop.native)")
                 assert.truthy(source:find(callback.field .. " = " .. callback.handler, 1, true), callback.name)
-                for _, forbidden in ipairs({"owner.uv[", "titan_ffi_pushudata", "async.", "Task"}) do
+                -- A handler local roots what the handler clears; the
+                -- trampoline pushes only the owner.
+                for _, forbidden in ipairs({"owner.uv[", "titan_ffi_pushudata",
+                        "ffi.lua_pushtvalue(", "async.", "Task"}) do
                     assert.falsy(body:find(forbidden, 1, true), body)
                 end
             end

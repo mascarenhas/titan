@@ -77,12 +77,18 @@ forwarding closure nor a union view.
 `write_t` (`string_buffer`) and retains the immutable string in the traced
 `string_data` field. It shares the allocation-free `buf_check_length` check with
 `buf_init` before acceptance; an adapter may call that check earlier when its
-contract validates inputs before async admission. The foreign write callback
-pushes the old string, vector owner, and descriptor roots onto its Lua stack
-before calling the protected Titan handler, and the handler clears the old
-string field before user code runs. Callback-time request reuse therefore cannot
-erase the old native frame's byte root, even when user code raises after
-submitting a successor. Immediate native rejection clears the attempted string
+contract validates inputs before async admission. The terminal handler
+`write_deliver` (`titan/uv/stream_owners.titan`) copies the old string, vector
+owner, and descriptor owner into locals before it clears those fields, and
+only then calls user code. Callback-time request reuse therefore cannot erase
+the old write's byte root while user code runs, even when that code submits a
+successor. `udp_sent` does the same for a send's buffers and descriptors, and
+`work_deliver` for a work request's argument owner. Nothing reads these
+locals: a local is a root whether or not it is read
+([home roots](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
+They end when a raise from user code reaches the handler's `catch`, which is
+late enough: libuv does not read a request's buffers once it has called the
+completion callback. Immediate native rejection clears the attempted string
 registration.
 
 Init and rejection rules belong to each native API. A failed initializer usually

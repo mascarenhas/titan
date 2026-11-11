@@ -716,6 +716,12 @@ local function write_deliver(owner: write_t, loop: loop_t, status: integer)
   loop.requests[owner] = nil
   owner.pending = false
   owner.loop = nil
+  -- Keep the old buffers, descriptors, and string through actual callback
+  -- return, independent of the new fields installed if user code resubmits
+  -- this same request.
+  local buffers? = owner.buffers
+  local native_buffers? = owner.native_buffers
+  local string_data? = owner.string_data
   local callback? = owner.callback
   owner.callback = nil
   owner.buffers = nil
@@ -741,10 +747,6 @@ local foreign function network_write_callback(native: *uv_write_t, status: int)
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "write_t", "buffers"))
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "write_t", "native_buffers"))
-  -- The old immutable bytes survive callback-time request reuse and errors.
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "write_t", "string_data"))
   entry(L, module, handler, owner, loop, status as foreign lua_Integer)
   ffi.lua_settop(L, top)
 end
