@@ -262,12 +262,12 @@ copy, on Titan's supported toolchains
 
 Once its body runs, `decode_message` consumes the packet and clears the slot on
 every outcome, before it returns or an error propagates with its original
-traceback: success, failure to reserve the result's stack slot
-(`"transfer: cannot reserve packet operation stack"`), module initialization
-failure, decoder or hook failure, partially claimed endpoints, and destination
-setup failure. Only its own function entry can fail first, with a memory or
-stack error; the slot then still owns the packet, and the caller's deferred
-`discard_message` disposes of it.
+traceback: success, module initialization failure, decoder or hook failure,
+partially claimed endpoints, and destination setup failure. A nil, boolean,
+number or address packet decodes without a Lua stack slot or an allocation,
+so it has no failure of its own. Only the function entry of `decode_message`
+can fail first, with a memory or stack error; the slot then still owns the
+packet, and the caller's deferred `discard_message` disposes of it.
 
 A nil `slot` raises `"transfer: invalid packet owner slot"`, and an empty slot
 raises `"transfer: cannot decode a NULL packet"`. Decoding leaves the caller's

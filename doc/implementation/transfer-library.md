@@ -136,21 +136,21 @@ state and consumes the packet in `slot[0]`. Its generated preamble
 error there leaves the packet in `slot[0]` for the caller's guard. The body:
 
 1. raises `"transfer: invalid packet owner slot"` for a nil `slot`;
-2. reserves the result slot with `lua_checkstack`; on failure it clears
-   `slot[0]`, discards the packet and raises
-   `"transfer: cannot reserve packet operation stack"`;
-3. for an allocation-free scalar (`NIL`, `BOOLEAN`, `INTEGER`, `FLOAT`,
-   `STATE`, `POINTER`, or `FUNCTION` with a non-NULL pointer),
-   `decode_scalar_message` pushes the value in C; decode clears the slot,
-   discards the packet and returns without a protected region or scope;
-4. otherwise calls `decode_message_worker(slot)` inside one inline `catch`. The
+2. for a scalar that Titan boxes directly (`NIL`, `BOOLEAN`, `INTEGER`,
+   `FLOAT`, `STATE`, `POINTER`), boxes the value, clears the slot, discards the
+   packet and returns. This path uses no Lua stack slot, allocation, protected
+   region or scope, so it has no failure of its own;
+3. otherwise calls `decode_message_worker(slot)` inside one inline `catch`. The
    catch clears `slot[0]`, discards any residual owner and re-raises with a bare
    `raise`, preserving the original error and traceback
    ([trace pinning](error-handling.md#trace-pinning)).
 
-`decode_message_worker` copies `STRING` bytes while the slot still owns the
-packet, then discards it; a `FUNCTION` packet with a NULL pointer raises with
-the packet still in the slot. Neither acquires a scope. `RECORD`, `UNION`,
+`decode_message_worker` copies `STRING` bytes, and makes a `FUNCTION` packet's
+light C function (`cfunction_to_value`, the one value that needs
+`lua_pushcclosure`), while the slot still owns the packet, and then discards
+it. A `FUNCTION` packet with a NULL pointer, or a Lua stack that cannot take
+that one slot, raises with the packet still in the slot. Neither acquires a
+scope. `RECORD`, `UNION`,
 `CLOSURE` and `RECORD_PAYLOAD` packets acquire a scope, install its retiring
 `defer`, and only then call `move_slot_to_scope`, so every earlier failure
 (worker entry, scope preparation) leaves the packet in the caller's slot for the
@@ -224,9 +224,12 @@ custom-hook policy; local nominal types are ineligible. Unsupported
 reconstruction conversions fail during projection, before the packet exists.
 
 **Projection.** `project_closure_captures` serves both `from_value` and
-`encode_packet`. The source-defined foreign helpers `transfer_closure_entry`
-(header, brand, module userdata, and `entry.native`/`entry.strict` manifest
-match, all without `reflect.inspect`) and `transfer_project` push **all**
+`encode_packet`. `transfer_closure_entry` is an ordinary function: it reads
+the closure's header, brand and module userdata from a `foreign TValue` copy
+with the `lmacro_*` bridges, matches `entry.native`/`entry.strict` against the
+module's manifest (all without `reflect.inspect`), and returns the manifest
+entry and the module's name as values. The source-defined foreign helper
+`transfer_project` then calls the generated callback, which pushes **all**
 immediate captures onto the Lua stack before any hook runs. That rooted range
 freezes the capture frontier while Titan converts each capture once, in
 declaration order, with `TransferValue.from_value`, so a hook in an earlier
@@ -234,6 +237,18 @@ capture cannot mutate a shared box before a later capture is read. A nested
 closure or custom record is already opaque bytes inside its parent. Neither
 root nor nested closure transfer hydrates reflection's `FunctionType` signature
 text.
+
+**Roots.** Validation holds only C pointers: into the closure, into its module
+userdata and into that module's immutable manifest. The closure is the
+caller's argument, which the caller keeps reachable
+([calls](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)),
+and it holds its module in its first upvalue; the manifest is static data of
+the module's image. The module name is copied into a Titan string that the
+calling frame roots. The Lua stack is used only where the generated callbacks'
+ABI requires it: the projected captures, and on reconstruction the loaded
+module and the captures to restore. `nominal_module` reads a nominal's
+declaring module name through `titan_codec_nominal_module`
+(`titan-runtime/transfer.h`), without the stack.
 
 **Snapshot format.** One anonymous protobuf message (`closure_fields`) has two
 Array fields: the `{TransferValue}` policies and `{boolean}` flags marking
@@ -246,14 +261,17 @@ protobuf policy and carries its declaring module from `TITAN_MT_MOD`.
 1. Load the packet's module through `transfer_load_module`. No initializer
    pointer travels with the packet.
 2. Resolve the token by pointer equality against that provider's manifest
-   entries (`transfer_resolve`) before dereferencing it. An invalid token or a
-   different physical provider is rejected before any capture is decoded.
+   entries (`transfer_resolve`, an ordinary function over the module userdata
+   that `transfer_module_value` validated in its stack slot) before
+   dereferencing it. An invalid token or a different physical provider is
+   rejected before any capture is decoded.
 3. Check both array lengths against the entry's capture count and every policy
    slot before any `to_value` decoder runs. Read each flag through a typed
    `boolean` local: Array holes are legal regardless of the element descriptor,
    and a truthiness conversion would turn nil into false.
 4. Push each policy (flagged slots as the union itself, others through
-   `to_value()`) and call the generated restore function (`transfer_restore`).
+   `to_value()`) and call the generated restore function through the foreign
+   helper `transfer_restore`, which checks the capture range on the stack.
 
 Each reconstructed closure gets fresh mutable cells; aliasing between related
 source closures is not preserved. Module globals refer to the destination

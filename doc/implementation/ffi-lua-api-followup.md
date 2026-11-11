@@ -22,8 +22,7 @@ module:
   and [worker ownership](lua-library.md#worker-ownership-and-cancellation).
 - `titan.transfer`: [consuming raw-slot decode](transfer-library.md#consuming-raw-slot-decode)
   and [closure snapshots](transfer-library.md#closure-snapshots), including the
-  source foreign functions `transfer_closure_entry`, `transfer_project`,
-  `transfer_resolve`, `transfer_restore`, `transfer_nominal_module`, and the
+  source foreign functions `transfer_project` and `transfer_restore` and the
   public `transfer_load_module`.
 - `titan.peg`: [LPegLabel embedding](lpeglabel-embedding.md) (`titan_lpeglabel_open`).
 
