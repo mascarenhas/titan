@@ -416,8 +416,8 @@ function M.with_runtime_brands(body)
         assert.truthy(ok, err)
         return body()
     end, debug.traceback))
-    for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".a", ".ffi.h",
-                              ".titan.h", ".priv.h", ".parts" }) do
+    for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".def", ".dll.def", ".a",
+                              ".ffi.h", ".titan.h", ".priv.h", ".parts" }) do
         os.remove(modname .. suffix)
     end
     local removed, remove_error = driver.remove_path(modname .. ".so.dSYM")
