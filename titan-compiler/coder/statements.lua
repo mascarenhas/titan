@@ -3110,6 +3110,12 @@ function codestat_dispatch(ctx, node)
                 else
                     local exp = assert(adjusted.fixed[i])
                     local cstats, cexp = codeexp(ctx, exp)
+                    if types.is_gc(exp._type) then
+                        -- As in `_codeadjustedfixed`: the traced temporary
+                        -- is the root of a local that nothing reads.
+                        cstats, cexp = materialize_code(
+                            ctx, exp._type, cstats, cexp)
+                    end
                     table.insert(code, coder._codeinitializeddecl(
                         ctx, decl, cstats, cexp))
                 end

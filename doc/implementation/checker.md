@@ -876,6 +876,10 @@ For each in-function local/param `Decl`:
 * `decl._used` is **forced true** when a decl is captured, so a variable
   only *written* (never read) by an inner function still passes
   `StatDecl`'s `_used` gate and gets its box allocated.
+* `decl._used` is also forced true when a GC-bearing local or parameter is
+  assigned (`Ast.StatAssign`), so the variable keeps the frame slot that
+  roots the assigned value even when nothing reads it
+  ([home roots](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
 
 Capture detection lives in **one place**, the `Ast.VarName` visitor
 (`checker/variables.lua`), which covers reads and assignment targets. A

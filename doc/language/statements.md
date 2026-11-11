@@ -41,10 +41,14 @@ catch are sibling scopes, and the catch has implicit `error: value` and
 See [Error handling](error-handling.md).
 
 Unused variables are not an error or a warning. The compiler notices
-variables that are never read and simply omits storage for them — the
-initializer is still evaluated for its effects. The name `_` has no
-special meaning in Titan; it is an ordinary identifier that is
-conventionally used for values you want to discard:
+variables that are never read and may omit storage for them; the
+initializer is still evaluated for its effects. Reading a variable is not
+what keeps its value alive: the value that a local holds stays reachable
+until the local's block ends or the local is assigned another value. A
+local declared only to own a buffer therefore keeps that buffer alive for a
+raw C pointer into it (see [Owned C objects](ffi.md#owned-c-objects)). The
+name `_` has no special meaning in Titan; it is an ordinary identifier that
+is conventionally used for values you want to discard:
 
 ```lua
 local x, _ = f()   -- keep the first result, ignore the second

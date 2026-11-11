@@ -1035,6 +1035,24 @@ function formatted_len(s: string): integer
 end
 ```
 
+A pointer taken from an owner is borrowed: it is valid only while the owner is
+reachable. A local that holds the owner keeps it reachable until that local's
+block ends or the local is assigned another value, whether or not anything
+reads the local again. When a raw pointer is used after the block that
+allocated its storage, declare the owner in the outer block:
+
+```lua
+local small = foreign int.new_array(8)   -- automatic storage for the common case
+local slots: foreign *int = small
+local extra: (owned int[])?              -- never read: it keeps the buffer alive
+if count > 8 then
+    local buffer: owned int[] = foreign int.new_array(count)
+    extra = buffer
+    slots = buffer
+end
+-- `slots` is valid here in both cases.
+```
+
 Counted owned character arrays have one additional explicit conversion:
 
 ```lua

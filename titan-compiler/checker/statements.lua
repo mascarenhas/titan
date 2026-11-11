@@ -1235,6 +1235,13 @@ checkstat_visitor = util.make_visitor({
                         end
                         if not var._const_write_rejected then
                             var._decl._assigned = true
+                            -- The assignment has to root its value even when
+                            -- nothing reads the variable, so a GC-bearing
+                            -- local or parameter keeps its frame slot.
+                            if var._decl._tag == "Ast.Decl"
+                               and types.is_gc(texp) then
+                                var._decl._used = true
+                            end
                         end
                     end
                 end

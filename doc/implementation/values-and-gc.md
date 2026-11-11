@@ -423,6 +423,26 @@ remains only its native C formal and its reachability comes from the input's
 existing provenance. Module variables need no shadow: their `_mod` user value is
 itself GC-visible.
 
+A local roots its value from its declaration until its block ends, whether or
+not anything reads it:
+
+- An assignment to a GC-bearing local or parameter makes the checker mark the
+  declaration `_used` (`Ast.StatAssign`, `checker/statements.lua`), so the
+  variable has the slot above and the assignment stores into it. Otherwise a
+  value assigned inside an inner block would be held only by that block's
+  temporaries, and an owner declared in the outer block could not keep a
+  buffer alive for a raw pointer that is used after the inner block.
+- A local that is declared and then neither read nor assigned has no C
+  variable and no slot of its own. The traced temporary that materialized its
+  initializer holds the value until the block ends: `coder._codeadjustedfixed`
+  creates it for every delivered initializer, and the `Ast.StatDecl` branch
+  for a statement that also declares automatic C storage calls
+  `materialize_code` for its GC-bearing initializers.
+
+This keeps a value alive; it does not release one early. Assigning `nil`
+clears the local's slot, but a temporary of a block that is still open can
+hold the old value until that block ends.
+
 #### Mutable GC out-parameters
 
 A recovery-sensitive exact Lua `TValue` or `Udata *` local/parameter whose

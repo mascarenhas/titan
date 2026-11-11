@@ -32,8 +32,13 @@ and, for GC-bearing types, a shadow slot refreshed at the declaration and at
 every later assignment. The generated shape is shown in
 [values and the GC](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies).
 
-- A local that the checker marked unused still evaluates its initializer; the
-  result is discarded with a `(void)` statement.
+- A local that the checker did not mark `_used` has no C variable. Its
+  initializer is still evaluated and the value is discarded with a `(void)`
+  statement; a GC-bearing value stays rooted by the temporary that
+  materialized it until the block ends. The checker marks a GC-bearing local
+  or parameter `_used` when it is assigned, even if nothing reads it, so
+  every assignment has a slot to store into
+  ([home roots](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
 - An unassigned, unspilled parameter (`_param_<name>`) is only its C formal
   and relies on the input's existing provenance; native calls create no
   argument root. A `_paramslot_<name>` home exists only when the parameter is
