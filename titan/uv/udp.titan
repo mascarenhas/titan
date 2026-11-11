@@ -183,7 +183,6 @@ local foreign function udp_recv_callback(native: *uv_udp_t, nread: ssize_t, buff
   local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign UDPRecvEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "udp_t", "recv_buffer"))
   entry(L, module, handler, owner, loop, nread, buffer, address, flags)
   ffi.lua_settop(L, top)
 end

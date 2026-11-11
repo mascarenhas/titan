@@ -13,6 +13,8 @@ static inline size_t titan_sockaddr_family_size(void) {
   return offsetof(struct sockaddr, sa_family) +
          sizeof(((struct sockaddr*) 0)->sa_family);
 }
+/* Only BSD-derived sockaddr layouts carry sa_len, and Titan has no conditional
+ * import; -1 reports that this platform has no such field. */
 static inline int titan_sockaddr_length_field(const struct sockaddr* address) {
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
     defined(__OpenBSD__) || defined(__DragonFly__)

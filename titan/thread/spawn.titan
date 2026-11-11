@@ -439,22 +439,9 @@ local function thread_message_cancellation(
   return async.CancellationReason.simple("cancelled")
 end
 
-local function take_bootstrap_control(): foreign *titan_thread_control
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 2) == 0 then
-    raise "cannot reserve stack for thread bootstrap"
-  end
-  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_CTRL")
-  local ctrl = ffi.lua_touserdata(L, -1) as foreign *titan_thread_control
-  ffi.lua_pushnil(L)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_CTRL")
-  return ctrl
-end
-
 -- Implementation notes: doc/implementation/thread-library.md#isolated-os-thread-lifecycle-and-cancellation
-local function child_thread_bootstrap()
-  local ctrl = take_bootstrap_control()
+local function child_thread_bootstrap(raw_ctrl: value)
+  local ctrl = raw_ctrl as foreign *titan_thread_control
   local entry_msg = thread_control_take_entry_native(ctrl)
   defer do
     if entry_msg ~= nil then
@@ -621,10 +608,9 @@ local foreign function thread_worker_protected(state: *lua_State): int
   local ctrl = ffi.lua_touserdata(state, 1)
   transfer.transfer_load_module(state, "titan.thread", 12 as foreign unsigned long long)
   ffi.lua_settop(state, 0)
-  ffi.lua_pushlightuserdata(state, ctrl)
-  ffi.lua_setfield(state, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_CTRL")
   ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_BOOTSTRAP")
-  ffi.lua_callk(state, 0, 0, 0 as foreign lua_KContext, nil)
+  ffi.lua_pushlightuserdata(state, ctrl)
+  ffi.lua_callk(state, 1, 0, 0, nil)
   return 0
 end
 
@@ -660,8 +646,7 @@ local foreign function thread_worker_main(arg: *void)
     if ffi.lua_checkstack(state, 3) ~= 0 then
       ffi.lua_pushcclosure(state, thread_worker_protected, 0)
       ffi.lua_pushlightuserdata(state, ctrl as foreign *void)
-      local status = ffi.lua_pcallk(
-        state, 1, 0, 0, 0 as foreign lua_KContext, nil)
+      local status = ffi.lua_pcallk(state, 1, 0, 0, 0, nil)
       if status ~= ffi.LUA_OK then
         local len = 0 as foreign size_t
         local msg_bytes = ffi.lua_tolstring(state, -1, len)

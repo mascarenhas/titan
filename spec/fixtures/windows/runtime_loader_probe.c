@@ -37,7 +37,8 @@ static int environment_retry_error(lua_State *L) {
 static int check_provider(lua_State *L) {
     const char *file = luaL_checkstring(L, 1);
     void *library = loadlib(L, file);
-    titan_check_abi(L, library, "fixture_alpha_abi", file);
+    TitanModuleProvider provider = { library, NULL };
+    titan_check_module_abi(L, provider, "fixture_alpha_abi", file);
     return 0;
 }
 

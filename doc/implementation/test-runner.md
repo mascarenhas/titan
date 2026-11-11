@@ -342,7 +342,9 @@ not depend on timing.
 `titan.test` imports `lua.h`, `lauxlib.h`, `titan/ffi.h`, `stdio.h`, and
 `string.h`, and no Titan standard modules. A guarded
 final initializer compiles one fixed Lua chunk with callable `luaL_loadstring`
-and `lua_pcallk`; the function-like `luaL_dostring` macro is intentionally not
+and calls the loaded chunk as a typed Titan function value, so an error in it
+goes through the generated call boundary and needs no manual `lua_pcallk`. The
+function-like `luaL_dostring` macro is intentionally not
 available through the FFI. In a normal standalone, `luaL_openlibs` has already
 run, so this snapshots the helpers before any test-owner initializer. A bare
 validation state may not have opened the standard libraries; the initializer
@@ -357,8 +359,9 @@ returns two traced closures:
 Capturing at `titan.test` initialization keeps those helpers valid even when a
 test owner has a logical name such as `math` and replaces the corresponding Lua
 global during standalone initialization. The helper saves the Lua top, reserves
-stack space, converts returned closures to traced Titan function values, and
-restores the stack through `defer`.
+the one slot that `luaL_loadstring` fills, copies the chunk to a traced Titan
+function value, calls it for the two closures, and restores the stack through
+`defer`.
 `runner_error_text` uses the same ledger around `luaL_tolstring` and catches a
 throwing `__tostring`, preserving a fixed fallback.
 

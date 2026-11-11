@@ -281,7 +281,8 @@ end
 local function load_lua_helpers(): (TraceScanner, PatternMatcher)
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 3) == 0 then
+  -- luaL_loadstring pushes one value: the chunk or its error message.
+  if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for titan.test helpers"
   end
 
@@ -324,19 +325,11 @@ return
   end
 ]]
   local status = ffi.luaL_loadstring(L, source)
-  if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
-    raise failure
-  end
-  status = ffi.lua_pcallk(L, 0, 2, 0, 0, nil)
-  if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
-    raise failure
-  end
-
-  local scanner_value: value = ffi.lua_totvalue(L, -2)
-  local matcher_value: value = ffi.lua_totvalue(L, -1)
-  return scanner_value as TraceScanner, matcher_value as PatternMatcher
+  local loaded: value = ffi.lua_totvalue(L, -1)
+  if status ~= ffi.LUA_OK then raise loaded end
+  local factory: function (): (TraceScanner, PatternMatcher) = loaded
+  local scanner, matcher = factory()
+  return scanner, matcher
 end
 
 local record OwnerTiming

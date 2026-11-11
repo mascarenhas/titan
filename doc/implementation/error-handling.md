@@ -83,8 +83,9 @@ free node exists, but only after the enclosing cleanup has already run.
 Intervening Lua-frame `__close` handlers can allocate; `luaD_closeprotected`
 runs them under its own protection.
 
-Coroutines use one extra registry slot, `TITAN_TRACE_APPEND_KEY`, for uncaught
-errors in a dead coroutine. The coroutine entry stages its own trace there; the
+Coroutines hand over one more trace, for uncaught errors in a dead coroutine,
+through `titan.coroutine`'s module variable `pending_append_trace`, not through
+the registry. The coroutine entry stages its own trace there; the
 `resume`/`error` side then raises and catches the same payload to capture the
 propagation trace in the caller, appends it to the staged trace, writes the
 combined string to `TITAN_BACKTRACE_KEY`, sets `TITAN_TRACE_PINNED`, and
@@ -341,7 +342,7 @@ asynchronous ancestry after a JavaScript frame prefixed by an async cause and
 the saved JavaScript and Wasm frames from capture. It recognizes Wasm frames
 first, so an asterisk in an image name is not a boundary; asterisk-bearing URLs
 are not cause prefixes either. Parent coroutine traces come exclusively from
-`TITAN_TRACE_APPEND_KEY`.
+the coroutine trace handoff (`pending_append_trace` in `titan.coroutine`).
 
 Header flag `TRUNCATED` is set when more Wasm frames exist beyond `capacity`,
 when the synchronous stack reaches the effective `stackTraceLimit` (counting

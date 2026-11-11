@@ -219,6 +219,18 @@ local function require_wire(field: foreign const *titan_protobuf_field, expected
   if field.wire ~= expected then raise "protobuf: unexpected wire type" end
 end
 
+-- Wire type 5 carries an IEEE-754 single as four little-endian bytes.
+local function read_float32(base: foreign const *uint8_t, offset: integer): float
+  local low: integer = base[offset]
+  local second: integer = base[offset + 1]
+  local third: integer = base[offset + 2]
+  local high: integer = base[offset + 3]
+  local bits = (low | (second << 8) | (third << 16) | (high << 24)) as foreign uint32_t
+  local single: foreign float = 0.0
+  ffi.memcpy(single, bits, foreign float.sizeof)
+  return single
+end
+
 -- Singular embedded messages merge across repeated occurrences. Scalars use
 -- the final occurrence, as required by the Protocol Buffers wire contract.
 -- The merged bytes of one embedded field: its base, offset, length, and the
@@ -246,7 +258,7 @@ local function Message:merged_slice(
     output:write(slice_to_string(self.base, chunk.offset, chunk.length))
   end
   local merged = output:drain()
-  return ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged
+  return merged, 0, #merged, merged
 end
 
 local function Message:merged_message(number: integer): Message
@@ -315,8 +327,7 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
         payload:write(slice_to_string(message.base, chunk.offset, chunk.length))
       end
       local merged = payload:drain()
-      return read_message_slice(
-          ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged, message.context)
+      return read_message_slice(merged, 0, #merged, merged, message.context)
     end
     local field = message:entry(selected_field)
     return read_message_slice(
@@ -487,7 +498,7 @@ local function decode_field(message: Message, number: integer,
       return slice_to_string(message.base, field.offset, field.length)
     elseif spelling == "float" then
       require_wire(field, 5)
-      return ffi.titan_protobuf_read_float32(message.base, field.offset as foreign size_t)
+      return read_float32(message.base, field.offset)
     elseif spelling == "double" then
       require_wire(field, 1)
       return ffi.titan_protobuf_read_double(message.base, field.offset as foreign size_t)

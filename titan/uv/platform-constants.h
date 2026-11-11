@@ -9,6 +9,9 @@
 #else
 #include <unistd.h>
 #endif
+/* Each name is a macro that only some platforms define, and Titan cannot
+ * import a conditionally defined macro. Returns 1 and the value where this
+ * platform defines the name, 0 elsewhere. */
 static inline int titan_uv_platform_constant(const char* name, int* out) {
 #ifdef AF_UNIX
   if (strcmp(name, "AF_UNIX") == 0) { *out = (int) AF_UNIX; return 1; }

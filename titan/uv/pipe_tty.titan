@@ -253,7 +253,7 @@ function tty_set_mode(handle: tty_t, mode: tty_mode_t): integer
   when TTY_MODE_IO() then native_mode = ffi.UV_TTY_MODE_IO
   when TTY_MODE_RAW_VT() then native_mode = ffi.UV_TTY_MODE_RAW_VT
   end
-  if ffi.titan_uv_network_is_windows() == 0 then
+  if ffi.TITAN_UV_NETWORK_WINDOWS == 0 then
     return ffi.uv_tty_set_mode(handle.native, native_mode)
   end
   local loop = handle.loop as loop_t

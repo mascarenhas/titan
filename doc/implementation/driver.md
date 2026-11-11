@@ -192,7 +192,7 @@ printed would corrupt the one-line answer. All other entries, including
 * Unix uses `posix_spawnp` (a `PATH` search for a bare name) with stdin and
   stderr on `/dev/null`, stdout on a close-on-exec pipe, an empty signal
   mask, `POSIX_SPAWN_CLOEXEC_DEFAULT` where available, and a filtered `envp`
-  array of the parent's own strings that a registry reference keeps alive
+  array of the parent's own strings that its Lua stack slot keeps alive
   until the spawn has copied it; reads and `waitpid` retry on `EINTR`.
 * Windows looks up a bare name (the default `titanc`, or a `TITANC` value
   containing no `\`, `/`, or `:`) only in the `PATH` entries, never in the
@@ -2710,7 +2710,7 @@ It also declares the dynamic-loading and error functions: `loadlib`,
 `titan_module_provider`, `titan_check_abi_entry`, and the support-module
 entries `titan_path_lua_executable_dir`, `titan_path_lua_compiler_root`, and
 `titan_path_lua_expand` (implemented in `titan_path.c`), plus `loadsym`,
-`loadglobalsym`, `titan_module_symbol`, the remaining ABI/compatibility check
+`titan_module_symbol`, the ABI/compatibility check
 helpers, and `errorhandler` (in `titan.c`). `titan/ffi.h` declares
 `titan_install_searcher` beside the native preload helpers, because
 `titan/lua/worker.titan` calls it through the FFI. Generated imports use

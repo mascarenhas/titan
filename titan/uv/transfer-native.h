@@ -12,6 +12,10 @@
 #include <unistd.h>
 #endif
 
+/* Handle duplication and close differ by platform, and the pending-request
+ * fields are libuv internals that differ by platform too. Titan has no
+ * conditional import, so each helper takes formals and returns a libuv status;
+ * the transfer policy stays in titan/uv/transfer.titan. */
 /* Implementation notes: doc/implementation/libuv-extension-guide.md#native-socket-and-pipe-handoff */
 /* Native requests can remain pending after read_stop. In particular, Windows
  * zero-byte reads retain their source IOCP until terminal delivery. */
@@ -82,6 +86,8 @@ static inline int titan_uv_transfer_dup_socket(const uv_tcp_t *source,
 #endif
 }
 
+/* uv_os_sock_t is an integer whose width depends on the platform. Titan's
+ * checked casts do not reinterpret an integer as a pointer. */
 static inline void *titan_uv_transfer_socket_pointer(uv_os_sock_t socket) {
   return (void *)(uintptr_t)socket;
 }

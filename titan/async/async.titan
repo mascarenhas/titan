@@ -717,31 +717,14 @@ local function finish_task(task: Task, state: TaskStatus)
 end
 
 local function error_text(err: value): string
-  local text = "<error while rendering Task failure>"
-  do
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    if err is OperationError then
-      local failure = err as OperationError
-      text = failure.operation .. ": " .. failure.name ..
-             " (" .. failure.code .. "): " .. failure.message
-    else
-      -- Candidate plus the two temporary slots used by luaL_getmetafield/callmeta.
-      if ffi.lua_checkstack(L, 3) == 0 then
-        raise "cannot reserve Lua stack for Task error rendering"
-      end
-      ffi.lua_pushtvalue(L, err)
-      local rendered = ffi.luaL_tolstring(L, -1, nil)
-      if rendered then
-        text = rendered as string
-      else
-        text = "<unprintable error>"
-      end
-    end
-  catch
-    -- Keep the conservative fallback already installed above.
+  if err is OperationError then
+    local failure = err as OperationError
+    return failure.operation .. ": " .. failure.name ..
+           " (" .. failure.code .. "): " .. failure.message
   end
-  return text
+  return string.tostring(err)
+catch
+  return "<error while rendering Task failure>"
 end
 
 local function report_task_error(err: value, trace: string)

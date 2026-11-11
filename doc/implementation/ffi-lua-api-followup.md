@@ -103,9 +103,8 @@ follows these rules:
   manual `pcall`. A C callback that must run Titan reaches a Titan handler
   through the callback trampoline (rules 1 and 3), and no manual protected call
   wraps a C function that Lua never sees (rule 2). The only manual `lua_pcallk` sites are
-  `titan/test.titan` `load_lua_helpers` (the fixed Lua helper factory),
   `titan/lua/worker.titan` `lua_state_open` and `lua_state_run` (independent
-  state open and execution), and `titan/thread/spawn.titan`
+  state open and execution) and `titan/thread/spawn.titan`
   `thread_worker_main` (thread bootstrap). Each uses a nil continuation and has
   an explicit result ledger and owned cleanup. Restricted foreign bodies have no
   Titan `catch`/`defer` or implicit `L`, and a remote state's error must never

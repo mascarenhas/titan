@@ -129,9 +129,6 @@ local UV_FOREIGN_CALLBACKS = {
     { name = "pipe_close_callback", source = "titan/uv/stream_owners.titan",
       record = "pipe_t", field = "close_handler", handler = "pipe_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
-    { name = "tty_connection_callback", source = "titan/uv/stream_owners.titan",
-      record = "tty_t", field = "connection_handler", handler = "tty_connection_deliver", owner = "owner",
-      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
     { name = "tty_alloc_callback", source = "titan/uv/stream_owners.titan",
       record = "tty_t", field = "alloc_handler", handler = "tty_alloc_deliver", owner = "owner",
       call = "entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)" },
@@ -2707,8 +2704,8 @@ int main(void) {
         assert.same(expected, declarations)
 
         assert.truthy(native:find("local events: {Event}", 1, true), native)
-        assert.truthy(native:find(
-            "ffi.lua_pushtvalue(L, input)", 1, true), native)
+        -- The caller's argument roots `input`; nothing is pushed to root it.
+        assert.falsy(native:find("ffi.lua_pushtvalue(", 1, true), native)
         assert.truthy(native:find(
             "ffi.lua_checkstack(L, ffi.LUA_MINSTACK)", 1, true), native)
         assert.truthy(native:find(

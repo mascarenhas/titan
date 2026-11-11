@@ -56,19 +56,6 @@ TITAN_RUNTIME_FUNC void titan_install_searcher(lua_State *L);
 ** Returns -1 when the platform clock fails or exceeds lua_Integer range. */
 TITAN_RUNTIME_FUNC lua_Integer titan_test_monotonic_ns(void);
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <sys/socket.h>
-
-/* glibc's GNU getsockname declaration uses a transparent-union argument,
-** which Titan's C importer does not support. Expose the ordinary POSIX
-** sockaddr-pointer signature without changing the call or its errno. */
-static inline int titan_posix_getsockname(int descriptor,
-                                         struct sockaddr *address,
-                                         socklen_t *length) {
-  return getsockname(descriptor, address, length);
-}
-#endif
-
 /*
 ** Macro to convert between function pointers and object/void pointers.
 ** These casts are not portable ISO C, but the supported toolchains and
@@ -118,11 +105,6 @@ static inline int titan_posix_getsockname(int descriptor,
 ** pending re-raise sets the pin so the original error's trace is preserved; a
 ** fresh error leaves it clear so it gets a freshly-captured trace. */
 #define TITAN_TRACE_PINNED "5b3f0f7e-4b1a-4d2e-9a8c-2f6d4c1e7a90"
-/* Temporary handoff slot used by Titan coroutines. A dead coroutine entry
-** stages its own trace here; the resume/error side captures a new propagation
-** trace, appends it, stores the combined trace in TITAN_BACKTRACE_KEY, and
-** sets TITAN_TRACE_PINNED for the final re-raise. */
-#define TITAN_TRACE_APPEND_KEY "4f895b66-bae0-4e97-afb3-83a31f2f9e96"
 #define TITAN_MAIN_BOOTSTRAP_KEY "41c48a97-55a5-4514-a76f-79ab028ae6e0"
 #define TITAN_MAIN_ARGC_KEY "fd9c8d85-f521-4052-92e6-8af5c349e5bb"
 #define TITAN_MAIN_ARGV_KEY "fc1376f3-2cb7-48d4-969c-c02df930cf68"
@@ -250,27 +232,6 @@ static inline int lmacro_ttislightuserdata(const TValue *o) {
 static inline lua_CFunction lmacro_fvalue(const TValue *o) { return fvalue(o); }
 
 static inline void *lmacro_getudatamem(Udata *u) { return getudatamem(u); }
-
-static inline void *lmacro_ccl_f(const CClosure *cl) {
-  return titan_cast_func(void *, cl->f);
-}
-
-/* `o` is an untyped collectable object; cast it directly, because `obj2gco`
- * reads its tag under LUAI_ASSERT and `void *` has none. */
-static inline void lmacro_luaC_barrierback(lua_State *L, void *o,
-                                           const TValue *v) {
-  luaC_barrierback(L, (GCObject *)o, v);
-}
-
-typedef void (*generic_func_ptr)(void);
-
-static inline generic_func_ptr titan_ptof(void *p) {
-  return titan_cast_func(generic_func_ptr, p);
-}
-
-static inline void *titan_ftop(generic_func_ptr f) {
-  return titan_cast_func(void *, f);
-}
 
 static inline void lmacro_sethvalue(lua_State *L, TValue *o, Table *t) {
   sethvalue(L, o, t);

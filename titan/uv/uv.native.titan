@@ -283,7 +283,6 @@ local function abandon_handle(handle: handle_t, _: value)
     owner.read_callback = nil
     owner.close_callback = nil
   when tty(owner) then
-    owner.connection_callback = nil
     owner.alloc_callback = nil
     owner.read_callback = nil
     owner.close_callback = nil

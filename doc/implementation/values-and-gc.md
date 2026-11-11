@@ -526,9 +526,8 @@ existing closure would need the **forward** barrier (recolouring the value).
 
 Back-barrier sites pass `obj2gco(owner)`, not the owner's concrete pointer type.
 The `obj2gco` operand must be a typed GC object pointer (`Udata *`, `Table *`,
-…): under `-DLUAI_ASSERT` the macro reads its `tt` field, so an untyped
-`void *` bridge casts to `GCObject *` instead (`titan/ffi.h`
-`lmacro_luaC_barrierback`).
+…): under `-DLUAI_ASSERT` the macro reads its `tt` field, which an untyped
+`void *` does not have.
 Map raw stores go through `luaH_set`/`luaH_setint` (`set_table_entry_raw`,
 `coder/statements.lua`): "The GC barrier for the stored value is the caller's
 responsibility; new keys are barriered internally by the insertion code."

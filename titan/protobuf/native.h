@@ -26,27 +26,6 @@ typedef struct titan_protobuf_field {
   uint32_t chain;
 } titan_protobuf_field;
 
-static inline const uint8_t *titan_protobuf_bytes_ptr(const char *s) {
-  return (const uint8_t *)s;
-}
-
-static inline const char *titan_protobuf_offset_ptr(
-    const uint8_t *base, size_t offset) {
-  return (const char *)(base + offset);
-}
-
-static inline double titan_protobuf_read_float32(
-    const uint8_t *base, size_t offset) {
-  const uint8_t *p = base + offset;
-  uint32_t u = ((uint32_t)p[0]) |
-               ((uint32_t)p[1] << 8) |
-               ((uint32_t)p[2] << 16) |
-               ((uint32_t)p[3] << 24);
-  float f;
-  memcpy(&f, &u, sizeof(f));
-  return (double)f;
-}
-
 /* Titan's checked numeric casts intentionally do not expose pointer/integer
  * reinterpretation. Keep that operation, and only that operation, here. */
 static inline int64_t titan_protobuf_pointer_bits(void *address) {

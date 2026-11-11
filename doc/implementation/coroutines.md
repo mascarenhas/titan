@@ -228,7 +228,7 @@ function-level `catch`.
 
 On success, the entry pushes `ok=true` and the result (rooted in uservalue 5),
 clears the dead child stack, and returns control. On error, it stages the
-catch-local `traceback` under `registry[TITAN_TRACE_APPEND_KEY]`
+catch-local `traceback` in the module variable `pending_append_trace`
 (`stash_trace_for_append`) and pushes `(false, error)` the same way. The
 receiver clears uservalue 5 only after its successful pop has anchored the
 value.
@@ -243,10 +243,10 @@ The public `Coroutine:transfer(payload, tag, inject_error)` runs the same
 finalizer check, tag resolution, receiver root, and
 `push_transfer`/`resume_switch`/`pop_transfer` sequence as `resume` and
 `error`. It differs only after the pop. On `ok=false` it calls
-`pop_trace_for_append`, which reads the staged trace into a traced local and
-clears `TITAN_TRACE_APPEND_KEY`, and then returns `(true, payload, trace)`
+`pop_trace_for_append`, which takes the staged trace out of
+`pending_append_trace`, and then returns `(true, payload, trace)`
 instead of raising. On `ok=true` it returns `(false, payload, nil)` without
-reading the registry, capturing a trace, or allocating. Every `ok=false` that
+reading the staged trace, capturing a trace, or allocating. Every `ok=false` that
 reaches a resumer comes from `coro_entry`'s catch, which always stages a trace
 first, so a returned outcome never leaves a stale trace behind. Errors raised
 before or during the switch (tag, state, finalizer, minicoro, stack) propagate

@@ -617,6 +617,12 @@ pairs each rule with a wrong and a right example.
      `lua_CFunction`s): a `local foreign function`, address taken.
    - *Called by name where any C symbol works*: a public `foreign function`; C
      callers use the generated `.titan.h` (or the mangled declaration).
+   - *A private helper of such an entry, or a C-only critical interval* (a
+     body that holds a native mutex, performs an atomic handoff, or moves a
+     native resource between two owners, where nothing may raise, collect, or
+     grow the Lua stack): a `local foreign function` called by name, which
+     takes formals and returns a status (rule 2). Code that only computes, or
+     that a raise on entry cannot harm, is an ordinary Titan function.
    - *Needs an exact unmangled C symbol* (an Emscripten export, a symbol a C
      library looks up): a compiler-generated one-line forward to a public
      `foreign function` (with a weak declaration when the owning module may be
@@ -645,6 +651,16 @@ pairs each rule with a wrong and a right example.
      headers hold only struct layouts, declarations, and one-expression inline
      bridges (`lmacro_*` in `titan/ffi.h`) for macros, internal fields of
      incomplete structs, and `const` casts that the FFI cannot spell directly.
+   - *Platform-conditional code*: Titan has no conditional `foreign import`,
+     so an operation whose headers, types, or calls differ by platform lives
+     in a `static inline` function in the owning module's `*_platform.h` or
+     `*-native.h` header. It takes formals and returns a status or fills a
+     plain struct (rule 2), and its comment names the platform difference.
+     Classification, mapping to public errors, retries, and ownership stay in
+     Titan (`titan/os_platform.h` and its callers in `titan.os`). A platform
+     fact that takes no argument is not a function: define a macro on every
+     platform (`TITAN_PATH_WINDOWS` in `titan/path_platform.h`) and read it
+     through `ffi` as a constant.
    - *Test-only C*: stays in test fixtures.
 
    ```text
@@ -665,7 +681,10 @@ pairs each rule with a wrong and a right example.
 2. **Plain C stays plain C.** Data that only C uses lives in C locals,
    formals, and return codes, never on the Lua stack. Never `lua_pcall` a C
    function that Lua never sees just to get a protected region; return a
-   status from it instead.
+   status from it instead. Scratch storage is not transit: a `lua_CFunction`
+   in the runtime may allocate a buffer as userdata and keep it on its own
+   stack while it calls Lua API functions that can raise. It anchors the
+   buffer by that stack slot, never by `luaL_ref`.
 3. **Protected work belongs in Titan.** A boundary that must catch raises
    calls a Titan function whose body uses `catch` and `defer`, where `error`
    and `traceback` are available. The native callback trampolines are the

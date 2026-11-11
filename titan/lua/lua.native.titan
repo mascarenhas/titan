@@ -49,13 +49,8 @@ local function registry_map(name: string): {string: value}
 end
 
 local function is_lua_function(candidate: value): boolean
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then
-    raise "cannot reserve Lua stack for function test"
-  end
-  ffi.lua_pushtvalue(L, candidate)
-  return ffi.lua_type(L, -1) == ffi.LUA_TFUNCTION
+  local raw: foreign TValue = candidate
+  return ffi.lmacro_ttype(raw) == ffi.LUA_TFUNCTION
 end
 
 --- Compile Lua text or bytecode without executing it; invalid chunks raise.

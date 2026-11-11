@@ -2208,8 +2208,7 @@ error instead of calling a stub:
 | Path | Browser behavior |
 | --- | --- |
 | `<dlfcn.h>` in `titan.c`, `ltitanlib.c`, `titan_path.c` | not included |
-| `titan.c` `loadsym`, opaque-handle `titan_module_symbol`, `titan_check_abi` | `browser target symbol lookup requires an explicit provider symbol table` |
-| `titan.c` `loadglobalsym` | `browser target cannot resolve global native symbol '<symbol>'; use the canonical module provider` |
+| `titan.c` `loadsym`, opaque-handle `titan_module_symbol` | `browser target symbol lookup requires an explicit provider symbol table` |
 | `ltitanlib.c` `_loadlib`, `_loadlibglobal`, lazy loading | `browser target does not support dynamic provider loading` |
 | `titan_path.c` provider open and ABI-checked entry lookup | `browser target does not support dynamic provider loading` |
 | `titan_path.c` executable discovery (`/proc/self/exe` and its OS branches) | fails with `browser target cannot locate a host executable` |
@@ -2432,7 +2431,7 @@ runtime and its current-engine tests.
    fibers before yield, after resume, and after sleep inside a fiber. Inside a
    fiber, the physical stack ends at `fiber_entry`, `_mco_main`,
    `_mco_wrap_main`, and `dynCall_vi`; the resumer's native frames are absent
-   and are supplied by `TITAN_TRACE_APPEND_KEY`.
+   and are supplied by the coroutine trace handoff.
 5. **Observed depth limits (`Object.defineProperty` versus assignment).** In
    the surveyed versions, default `Error.stackTraceLimit` was 10 on V8
    (leaving 9 Wasm frames), 100 on JSC, and absent on Firefox. Raising the

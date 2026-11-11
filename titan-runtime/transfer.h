@@ -227,6 +227,8 @@ static inline int titan_protobuf_buf_write_double(
   return titan_protobuf_buf_write_fixed64(buf, key_bits, bits);
 }
 
+/* titan.protobuf is the only caller. The narrowing stays in C so that NaN and
+ * infinities encode: Titan's conversion to a C float is range-checked. */
 static inline int titan_protobuf_buf_write_float32(
     titan_protobuf_buffer *buf, int64_t key_bits, double value) {
   if (!titan_protobuf_buf_write_varint(buf, key_bits)) {
