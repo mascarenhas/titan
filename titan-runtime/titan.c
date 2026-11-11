@@ -1145,26 +1145,6 @@ void *loadsym (lua_State *L, void *lib, const char *sym) {
 #endif
 }
 
-void *loadglobalsym (lua_State *L, const char *sym) {
-#if defined(TITAN_TARGET_BROWSER)
-    luaL_error(L, "browser target cannot resolve global native symbol '%s'; "
-        "use the canonical module provider", sym);
-    return NULL;
-#elif defined(_WIN32)
-    luaL_error(L, "Windows Titan cannot resolve global native symbol '%s'; "
-        "use the canonical module provider", sym);
-    return NULL;
-#else
-    void *f;
-    const char *err;
-    dlerror();  /* clear stale error; a NULL symbol value can be valid */
-    f = dlsym(RTLD_DEFAULT, sym);
-    err = dlerror();
-    if(err != NULL) luaL_error(L, "%s", err);
-    return f;
-#endif
-}
-
 static void *titan_find_module_symbol(TitanModuleProvider provider,
                                       const char *sym, const char **error) {
     void *raw;
@@ -1200,24 +1180,6 @@ void *titan_module_symbol(lua_State *L, TitanModuleProvider provider,
         luaL_error(L, "Titan module provider is missing symbol '%s': %s",
             sym, error ? error : "symbol not found");
     return raw;
-}
-
-void titan_check_abi(lua_State *L, void *lib, const char *sym,
-                     const char *file) {
-#if defined(TITAN_TARGET_BROWSER)
-    (void)lib; (void)sym; (void)file;
-    luaL_error(L, "browser target symbol lookup requires an explicit provider symbol table");
-#elif defined(_WIN32)
-    TitanModuleProvider provider = { lib, NULL };
-    titan_check_module_abi(L, provider, sym, file);
-#else
-    void *raw;
-    const char *error;
-    dlerror();
-    raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
-    error = raw == NULL ? dlerror() : NULL;
-    titan_check_abi_entry(L, raw, sym, file, error);
-#endif
 }
 
 void titan_check_module_abi(lua_State *L, TitanModuleProvider provider,

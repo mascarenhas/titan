@@ -368,7 +368,6 @@ inline static TString *_float2str(lua_State *L, lua_Number f) {
 ** or cannot be opened. Implemented in titan_path.c. */
 TITAN_RUNTIME_FUNC void *loadlib(lua_State *L, const char *file);
 TITAN_RUNTIME_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
-TITAN_RUNTIME_FUNC void *loadglobalsym(lua_State *L, const char *sym);
 typedef struct TitanModuleProvider {
   void *handle;
   TitanModuleSymbols symbols;
@@ -387,8 +386,6 @@ TITAN_RUNTIME_FUNC void titan_check_module_abi(lua_State *L,
 TITAN_RUNTIME_FUNC void titan_check_module_compatibility(lua_State *L,
     TitanModuleProvider provider, const char *sym, const char *file,
     const char *verifier, size_t verifier_size);
-TITAN_RUNTIME_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
-                               const char *file);
 /* Check one resolved ABI marker (`<m>_abi` on Unix, the plain-C
 ** `<m>_abi_value` query on Windows); raises unless it reports
 ** TITAN_ABI_VERSION. Implemented in titan_path.c. */

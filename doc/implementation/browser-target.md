@@ -2208,8 +2208,7 @@ error instead of calling a stub:
 | Path | Browser behavior |
 | --- | --- |
 | `<dlfcn.h>` in `titan.c`, `ltitanlib.c`, `titan_path.c` | not included |
-| `titan.c` `loadsym`, opaque-handle `titan_module_symbol`, `titan_check_abi` | `browser target symbol lookup requires an explicit provider symbol table` |
-| `titan.c` `loadglobalsym` | `browser target cannot resolve global native symbol '<symbol>'; use the canonical module provider` |
+| `titan.c` `loadsym`, opaque-handle `titan_module_symbol` | `browser target symbol lookup requires an explicit provider symbol table` |
 | `ltitanlib.c` `_loadlib`, `_loadlibglobal`, lazy loading | `browser target does not support dynamic provider loading` |
 | `titan_path.c` provider open and ABI-checked entry lookup | `browser target does not support dynamic provider loading` |
 | `titan_path.c` executable discovery (`/proc/self/exe` and its OS branches) | fails with `browser target cannot locate a host executable` |

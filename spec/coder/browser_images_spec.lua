@@ -766,7 +766,7 @@ describe("real browser test image", function()
         assert.is_nil(program_link:find("--skip-pass", 1, true), program_link)
     end)
 
-    it("raises the seven dynamic-provider guard diagnostics without native loader imports", function()
+    it("raises the five dynamic-provider guard diagnostics without native loader imports", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
@@ -775,7 +775,7 @@ describe("real browser test image", function()
             local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
                 "--chrome", info.chrome.path, "--grace", "0", image })
             assert.is_true(result.ok, result.output or result.diagnostic)
-            assert.truthy(result.output:find("dynamic-guards=7", 1, true), result.output)
+            assert.truthy(result.output:find("dynamic-guards=5", 1, true), result.output)
         end
     end)
 

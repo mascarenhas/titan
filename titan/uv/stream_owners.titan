@@ -388,12 +388,10 @@ record tty_t
   local native: foreign uv_tty_t
   local phase: integer
   local loop: loop_t?
-  local connection_callback: connection_cb?
   local alloc_callback: alloc_cb?
   local read_callback: read_cb?
   local read_buffer: buf_t?
   local close_callback: (function (handle_t): ())?
-  local connection_handler: function (tty_t, loop_t, integer): ()
   local alloc_handler: function (tty_t, loop_t, integer, foreign *uv_buf_t): ()
   local read_handler: function (tty_t, loop_t, integer, foreign const *uv_buf_t): ()
   local close_handler: function (tty_t, loop_t): ()
@@ -406,9 +404,9 @@ end
 function tty_t.new(): tty_t
   local native = foreign uv_tty_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
-    connection_callback = nil, alloc_callback = nil, read_callback = nil,
+    alloc_callback = nil, read_callback = nil,
     read_buffer = nil, close_callback = nil, userdata = nil,
-    connection_handler = tty_connection_deliver, alloc_handler = tty_alloc_deliver,
+    alloc_handler = tty_alloc_deliver,
     read_handler = tty_read_deliver, close_handler = tty_closed}
 end
 
@@ -428,18 +426,6 @@ end
 
 local function tty_t:valid(): boolean
   return self.phase == HANDLE_LIVE and ffi.uv_is_closing(self.native as foreign *uv_handle_t) == 0
-end
-
-local function tty_connection_deliver(owner: tty_t, loop: loop_t, status: integer)
-  local callback? = owner.connection_callback
-  if callback ~= nil then callback(stream_t.tty(owner), status) end
-catch
-  if loop.failure_count == 0 then
-    loop.failure_error = error
-    loop.failure_trace = traceback
-  end
-  loop.failure_count = loop.failure_count + 1
-  ffi.uv_stop(loop.native)
 end
 
 local function tty_alloc_deliver(owner: tty_t, loop: loop_t,
@@ -483,7 +469,6 @@ local function tty_closed(owner: tty_t, loop: loop_t)
   owner.phase = HANDLE_RETIRED
   -- Keep the original loop observable through close; init replaces it.
   local callback? = owner.close_callback
-  owner.connection_callback = nil
   owner.alloc_callback = nil
   owner.read_callback = nil
   owner.read_buffer = nil
@@ -496,20 +481,6 @@ catch
   end
   loop.failure_count = loop.failure_count + 1
   ffi.uv_stop(loop.native)
-end
-
-local foreign function tty_connection_callback(native: *uv_stream_t, status: int)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
-  local L = ffi.titan_record_field(loop, "loop_t", "state")
-  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tty_t", "connection_handler"))
-  local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
-  local top = ffi.lua_gettop(L)
-  ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
-  ffi.lua_settop(L, top)
 end
 
 local foreign function tty_alloc_callback(native: *uv_handle_t, suggested_size: size_t, output: *uv_buf_t)

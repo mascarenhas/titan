@@ -307,12 +307,10 @@ The header also defines typed one-expression `static inline` bridges,
 `lmacro_*`, for operations the FFI cannot spell directly. These include real
 Lua function-like macros, evaluated where the host preprocessor can see them:
 value extractors (`lmacro_thvalue`, `lmacro_uvalue`, `lmacro_clCvalue`,
-`lmacro_pvalue`, `lmacro_fvalue`, `lmacro_ccl_f`, `lmacro_getudatamem`), tag
+`lmacro_pvalue`, `lmacro_fvalue`, `lmacro_getudatamem`), tag
 tests (`lmacro_ttype`, `lmacro_ttypetag`, `lmacro_ttisLclosure`,
 `lmacro_ttisCclosure`, `lmacro_ttisfulluserdata`, `lmacro_ttislcf`,
-`lmacro_ttislightuserdata`), and writes (`lmacro_sethvalue`,
-`lmacro_luaC_barrierback`, whose untyped object casts to `GCObject *` rather
-than through `obj2gco`, which reads the object's tag under `-DLUAI_ASSERT`).
+`lmacro_ttislightuserdata`), and a write (`lmacro_sethvalue`).
 Other bridges access internal fields of incomplete structs: `lmacro_get_errfunc`
 and `lmacro_set_errfunc` for `L->errfunc`, and `lmacro_get_gcstp` and
 `lmacro_set_gcstp` for `G(L)->gcstp`, which the browser bridge saves and

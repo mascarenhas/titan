@@ -2710,7 +2710,7 @@ It also declares the dynamic-loading and error functions: `loadlib`,
 `titan_module_provider`, `titan_check_abi_entry`, and the support-module
 entries `titan_path_lua_executable_dir`, `titan_path_lua_compiler_root`, and
 `titan_path_lua_expand` (implemented in `titan_path.c`), plus `loadsym`,
-`loadglobalsym`, `titan_module_symbol`, the remaining ABI/compatibility check
+`titan_module_symbol`, the ABI/compatibility check
 helpers, and `errorhandler` (in `titan.c`). `titan/ffi.h` declares
 `titan_install_searcher` beside the native preload helpers, because
 `titan/lua/worker.titan` calls it through the FFI. Generated imports use
