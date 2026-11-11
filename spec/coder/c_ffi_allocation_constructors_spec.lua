@@ -110,6 +110,60 @@ describe("constructor-selected C allocation code generation", function()
         end)
     end)
 
+    it("clears every byte of automatic unions and flexible tails at each declaration",
+    function()
+        -- `= {0}` initializes only a union's first member; the other bytes
+        -- must not keep what an earlier iteration left in the same storage.
+        with_header([[
+            typedef struct ffi_packet { int tag; int items[]; } ffi_packet;
+            typedef union ffi_wide { char tag; long long big; } ffi_wide;
+            typedef struct ffi_holder {
+                union { char tag; long long big; } cell;
+                int tail;
+            } ffi_holder;
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                function stale(): integer
+                    local found = 0
+                    for round = 1, 3 do
+                        local packet = foreign ffi_packet.new(4)
+                        local wide = foreign ffi_wide.new()
+                        local wides = foreign ffi_wide.new_array(2)
+                        local view: foreign *ffi_wide = foreign ffi_wide.new_array(2)
+                        local holder = foreign ffi_holder.new()
+                        if packet.items[1] ~= 0 or packet.items[3] ~= 0 then
+                            found = found + 1
+                        end
+                        if wide.big ~= 0 then found = found + 1 end
+                        if wides[0].big ~= 0 or wides[1].big ~= 0 then
+                            found = found + 1
+                        end
+                        if view[0].big ~= 0 or view[1].big ~= 0 then
+                            found = found + 1
+                        end
+                        if holder.cell.big ~= 0 or holder.tail ~= 0 then
+                            found = found + 1
+                        end
+                        packet.items[1] = round
+                        packet.items[3] = round
+                        wide.big = -1
+                        wides[0].big = -1
+                        wides[1].big = -1
+                        view[0].big = -1
+                        view[1].big = -1
+                        holder.cell.big = -1
+                        holder.tail = round
+                    end
+                    return found
+                end
+            ]], [[
+                assert(test.stale() == 0, test.stale())
+            ]])
+        end)
+    end)
+
     it("spills automatic object, array, and FAM backing across a caught raise",
     function()
         with_header([[

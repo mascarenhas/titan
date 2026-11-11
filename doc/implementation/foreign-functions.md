@@ -122,10 +122,13 @@ After ordinary checking and elaboration, `checker._checkforeignfunc` runs
 walk. It rejects every tag in `checker._foreign_forbidden_statements` and
 `checker._foreign_forbidden_expressions`, `StatTry` (reported as `defer` when
 it is a parser-lowered defer tail, otherwise as `catch`/`finally`), allocation
-pseudo-calls, `..`, `and`, `or`, `not`, and casts between Titan and C values
-other than literal and nil-to-pointer casts. Every local must have an
-initializer and a direct non-owner, non-function, non-module, non-void C type
+pseudo-calls whose plan is not automatic storage, `..`, `and`, `or`, `not`,
+and casts between Titan and C values other than literal and nil-to-pointer
+casts. Every local must have an initializer and a direct non-owner,
+non-function, non-module, non-void C type
 (`checker._valid_foreign_local_type`). A return has zero or one expression.
+The length operator `#` is rejected earlier, by the `ExpUnop` check in foreign
+mode, so no foreign-body expression gets a Titan `integer` from it.
 This second pass is important: parser desugarings and checker-synthesized nodes
 cannot bypass the raw-C surface merely because their original spelling looked
 innocent.
@@ -435,11 +438,36 @@ the saved translation unit.
 
 ## Allocation and recovery storage
 
-Foreign bodies reject `.new` and `.new_array` because they have no Lua
-allocation or root context, and they have no `setjmp` spill protocol because
-they cannot establish a Titan recovery boundary. Target-directed allocation
-plans, flexible-array-member provenance, automatic-to-owned copies and
-aggregate spills in ordinary Titan functions are documented in
+Foreign bodies have no Lua allocation or root context, and they have no
+`setjmp` spill protocol because they cannot establish a Titan recovery
+boundary. An allocation pseudo-call (`.new`, `.new_array`) is planned by
+`checker._plan_c_allocation` exactly as in an ordinary function. The body
+validator then reads the recorded plan:
+
+* `automatic_object`, `automatic_array`, `automatic_array_borrow` and
+  `automatic_fam` are accepted. They exist only at a direct local sink and
+  need no Lua state. The walk does not descend into the call: its count is a
+  constant of the plan.
+* `owned_borrow` (a pointer local with `.new()`, or with a dynamic or zero
+  `.new_array` count) and `owned` are rejected. `foreign_allocation_error`
+  words the diagnostic by the plan and by `local_sink`, the name of the
+  declaration the allocation initializes, which is absent for an argument, a
+  return value, an assigned value or an operand.
+
+`foreign_raw_stat_dispatch` (`coder/declarations.lua`) lowers a declaration
+with a plan through `coder._automatic_allocation_storage`, the renderer that
+ordinary locals use, and emits no initializer assignment for it. The storage
+is declared at the statement, inside the C block of its Titan block, so a
+loop body zeroes it again on every iteration. The names are
+`_foreign_local_<name>_<n>` for an object, a fixed array or the pointer view,
+`_foreign_backing_<name>_<n>` for the borrow's array and the FAM union, and
+`_foreign_fam_pointer_<name>_<n>` for the FAM's typed pointer; a FAM local is
+spelled `(*pointer)` wherever the body names it. Indexing stays raw C: the
+foreign lowering never reads `_c_fam_access`, and `#` is rejected.
+
+Target-directed allocation plans, flexible-array-member provenance,
+automatic-to-owned copies and aggregate spills in ordinary Titan functions
+are documented in
 [target-directed automatic aggregates and fixed arrays](c-ffi-expressions.md#target-directed-automatic-aggregates-and-fixed-arrays).
 
 ## Standard-library foreign callbacks

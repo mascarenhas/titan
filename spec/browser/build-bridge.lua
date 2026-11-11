@@ -42,8 +42,8 @@ for _, assertions in ipairs({2, 0}) do
       source=path.join(fixture, "independent_states.c"), wrap=true},
     {name="initializer-failure", owner="initializer_failure", tree=fixture},
     -- Page tests of their own images, which need a DOM: the html5 click
-    -- counter of synchronous C callbacks and the async driver's responsiveness.
-    {name="counter", owner="counter", tree=fixture, source=path.join(fixture, "counter.c")},
+    -- counter of synchronous callbacks and the async driver's responsiveness.
+    {name="counter", owner="counter", tree=fixture},
     {name="responsive", owner="responsive", tree=fixture},
   }) do
     -- Use the installed compiler and the existing assertion/profile controls,

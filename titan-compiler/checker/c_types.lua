@@ -1450,6 +1450,7 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
         fam = pseudo.fam == true,
         storage = "owned",
         result_type = pseudo.rettypes[1],
+        local_sink = decl and decl.name or nil,
     }
     local count_argument = node._arg_adjustment
         and node._arg_adjustment.fixed[1] or node.args.args[1]

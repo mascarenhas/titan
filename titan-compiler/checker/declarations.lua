@@ -314,6 +314,26 @@ function checker._valid_foreign_local_type(typ)
        and resolved._tag ~= "Type.CVoid"
 end
 
+-- Why an allocation plan other than automatic storage cannot appear in a
+-- foreign body: each one needs an object that Lua owns and the frame roots.
+local function foreign_allocation_error(plan)
+    local name = plan.local_sink
+    if not name then
+        return "a C allocation inside a foreign function must be the initializer of a local ('local x = foreign T.new()'); any other use needs a Lua-owned object, which a foreign function cannot allocate or root"
+    elseif plan.storage == "owned_borrow" and plan.array then
+        return string.format(
+            "pointer local '%s' needs a positive constant '.new_array' count inside a foreign function; a dynamic or zero count needs a Lua-owned array, which a foreign function cannot allocate or root",
+            name)
+    elseif plan.storage == "owned_borrow" then
+        return string.format(
+            "pointer local '%s' cannot be initialized with '.new()' inside a foreign function, because its pointee would be a Lua-owned object; declare the local by value ('local %s = foreign T.new()') and pass it where a pointer is expected",
+            name, name)
+    end
+    return string.format(
+        "the C allocation for local '%s' needs a Lua-owned object, which a foreign function cannot allocate or root; only '.new()' of a struct or union and '.new_array(N)' with a positive constant N give a zeroed automatic local",
+        name)
+end
+
 -- Implementation notes: doc/implementation/foreign-functions.md#one-checker-a-restricted-context
 function checker._validate_foreign_body_node(node, errors, seen)
     if type(node) ~= "table" or seen[node] then return end
@@ -348,8 +368,15 @@ function checker._validate_foreign_body_node(node, errors, seen)
         elseif tag == "Ast.ExpCall" and node.exp and node.exp.var
                and node.exp.var._decl
                and node.exp.var._decl._tag == "Checker.CPseudoNew" then
-            checker.typeerror(errors, node.loc,
-                "C allocation pseudo-functions are not available inside a foreign function")
+            -- A call without a plan already has its own diagnostic. The
+            -- count is a compile-time constant of the plan, not a body
+            -- expression, so the walk stops here.
+            local plan = node._c_allocation_plan
+            if plan and not plan.storage:match("^automatic") then
+                checker.typeerror(errors, node.loc, "%s",
+                    foreign_allocation_error(plan))
+            end
+            return
         elseif tag == "Ast.ExpBinop"
                and (node.op == ".." or node.op == "and" or node.op == "or") then
             checker.typeerror(errors, node.loc,

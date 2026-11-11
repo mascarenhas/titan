@@ -698,6 +698,110 @@ describe("source-defined foreign functions", function()
         end)
     end)
 
+    it("zeroes automatic foreign locals at their declaration", function()
+        with_header([[
+            typedef struct ffi_result {
+                const unsigned char *message;
+                unsigned long length;
+                int status;
+            } ffi_result;
+            typedef struct ffi_tail { int count; int items[]; } ffi_tail;
+            typedef union ffi_wide { char tag; long long big; } ffi_wide;
+            #define FFI_COUNT 4
+            static int ffi_fill(ffi_result *out) {
+                if (out->message != 0 || out->length != 0 || out->status != 0) {
+                    return -1;
+                }
+                out->message = (const unsigned char *)"abc";
+                out->length = 3;
+                out->status = 7;
+                return 0;
+            }
+            static int ffi_sum(const int *items, int count) {
+                int total = 0;
+                for (int index = 0; index < count; index++) {
+                    total += items[index];
+                }
+                return total;
+            }
+            static int ffi_tail_sum(const ffi_tail *tail) {
+                return ffi_sum(tail->items, tail->count);
+            }
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                -- C fills the zeroed object through an out-parameter.
+                local foreign function object(): int
+                    local result = foreign ffi_result.new()
+                    if ffi.ffi_fill(result) ~= 0 then return -1 end
+                    return result.status + (result.length as foreign int)
+                        + (result.message[2] as foreign int)
+                end
+
+                local foreign function arrays(): int
+                    local row = foreign int.new_array(4)
+                    local counted = foreign int.new_array(ffi.FFI_COUNT)
+                    local view: foreign int[] = foreign int.new_array(2)
+                    local pointer: foreign *int = foreign int.new_array(2)
+                    if ffi.ffi_sum(row, 4) + ffi.ffi_sum(counted, ffi.FFI_COUNT)
+                        + ffi.ffi_sum(view, 2) + ffi.ffi_sum(pointer, 2) ~= 0 then
+                        return -1
+                    end
+                    row[3] = 1
+                    counted[3] = 10
+                    view[1] = 100
+                    pointer[1] = 1000
+                    return ffi.ffi_sum(row, 4) + ffi.ffi_sum(counted, 4)
+                        + ffi.ffi_sum(view, 2) + ffi.ffi_sum(pointer, 2)
+                end
+
+                local foreign function flexible(): int
+                    local tail = foreign ffi_tail.new(4)
+                    if tail.count ~= 0 then return -1 end
+                    tail.count = 4
+                    if ffi.ffi_tail_sum(tail) ~= 0 then return -2 end
+                    tail.items[0] = 1
+                    tail.items[3] = 10
+                    return ffi.ffi_tail_sum(tail)
+                end
+
+                -- Each iteration writes where the next one must find zeroes.
+                local foreign function fresh(): int
+                    local stale = 0
+                    for round = 1, 3 do
+                        local result = foreign ffi_result.new()
+                        local row = foreign int.new_array(2)
+                        local view: foreign *int = foreign int.new_array(2)
+                        local tail = foreign ffi_tail.new(2)
+                        local wide = foreign ffi_wide.new()
+                        if result.status ~= 0 then stale = stale + 1 end
+                        if row[1] ~= 0 then stale = stale + 1 end
+                        if view[1] ~= 0 then stale = stale + 1 end
+                        if tail.items[1] ~= 0 then stale = stale + 1 end
+                        if wide.big ~= 0 then stale = stale + 1 end
+                        result.status = round
+                        row[1] = round
+                        view[1] = round
+                        tail.items[1] = round
+                        wide.big = -1
+                    end
+                    return stale
+                end
+
+                function run(): (integer, integer, integer, integer)
+                    return object(), arrays(), flexible(), fresh()
+                end
+            ]], [[
+                local object, arrays, flexible, fresh = test.run()
+                assert(object == 7 + 3 + string.byte("c"), object)
+                assert(arrays == 1111, arrays)
+                assert(flexible == 11, flexible)
+                assert(fresh == 0, fresh)
+            ]])
+        end)
+    end)
+
     it("evaluates foreign elseif conditions lazily and once", function()
         with_header([[
             static int ffi_trace = 0;

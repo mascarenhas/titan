@@ -1033,6 +1033,125 @@ describe("foreign functions (checker)", function()
         end)
     end)
 
+    it("plans zeroed automatic locals at a direct foreign-body sink", function()
+        with_header(declarations .. [[
+            typedef struct ffi_tail { int count; int items[]; } ffi_tail;
+            #define FFI_COUNT 3
+        ]], function(header)
+            local ok, err, ast = check_with_header(header, [[
+                foreign function zeroed(): ffi_int
+                    local item = foreign ffi_item.new()
+                    local typed: foreign ffi_item = foreign ffi_item.new()
+                    local row = foreign ffi_int.new_array(3)
+                    local counted = foreign ffi_int.new_array(ffi.FFI_COUNT)
+                    local view: foreign ffi_int[] = foreign ffi_int.new_array(3)
+                    local pointer: foreign *ffi_int = foreign ffi_int.new_array(3)
+                    local tail = foreign ffi_tail.new(2)
+                    return item.value + typed.value + row[0] + counted[0]
+                        + view[0] + pointer[0] + tail.count
+                end
+            ]])
+            assert.truthy(ok, err)
+            local expected = {
+                "automatic_object", "automatic_object", "automatic_array",
+                "automatic_array", "automatic_array_borrow",
+                "automatic_array_borrow", "automatic_fam",
+            }
+            for index, storage in ipairs(expected) do
+                local decl = ast[2].block.stats[index].decls[1]
+                assert.equal(storage, decl._c_allocation_plan.storage, decl.name)
+            end
+        end)
+    end)
+
+    it("rejects foreign-body allocations that need a Lua owner", function()
+        with_header(declarations .. [[
+            typedef struct ffi_tail { int count; int items[]; } ffi_tail;
+            static int ffi_take(ffi_item *item) { return item->value; }
+        ]], function(header)
+            local needs_owner = "needs a Lua%-owned object, which a foreign function cannot allocate or root"
+            local rejected = {
+                {
+                    [[foreign function bad(): void
+                          local item: owned *ffi_item = foreign ffi_item.new()
+                      end]],
+                    "the C allocation for local 'item' " .. needs_owner,
+                },
+                {
+                    [[foreign function bad(): void
+                          local number = foreign ffi_int.new()
+                      end]],
+                    "the C allocation for local 'number' " .. needs_owner,
+                },
+                {
+                    [[foreign function bad(count: ffi_int): void
+                          local row = foreign ffi_int.new_array(count)
+                      end]],
+                    "the C allocation for local 'row' " .. needs_owner,
+                },
+                {
+                    [[foreign function bad(count: ffi_int): void
+                          local tail = foreign ffi_tail.new(count)
+                      end]],
+                    "the C allocation for local 'tail' " .. needs_owner,
+                },
+                {
+                    [[foreign function bad(): void
+                          local item: foreign *ffi_item = foreign ffi_item.new()
+                      end]],
+                    "pointer local 'item' cannot be initialized with '.new%(%)' inside a foreign function",
+                },
+                {
+                    [[foreign function bad(count: ffi_int): void
+                          local row: foreign *ffi_int = foreign ffi_int.new_array(count)
+                      end]],
+                    "pointer local 'row' needs a positive constant '.new_array' count",
+                },
+                {
+                    [[foreign function bad(): void
+                          local row: foreign ffi_int[] = foreign ffi_int.new_array(0)
+                      end]],
+                    "pointer local 'row' needs a positive constant '.new_array' count",
+                },
+                {
+                    [[foreign function bad(): ffi_int
+                          return ffi.ffi_take(foreign ffi_item.new())
+                      end]],
+                    "a C allocation inside a foreign function must be the initializer of a local",
+                },
+                {
+                    [[foreign function bad(): *ffi_item
+                          return foreign ffi_item.new()
+                      end]],
+                    "a C allocation inside a foreign function must be the initializer of a local",
+                },
+                {
+                    [[foreign function bad(): void
+                          local item: foreign *ffi_item = nil
+                          item = foreign ffi_item.new()
+                      end]],
+                    "a C allocation inside a foreign function must be the initializer of a local",
+                },
+                {
+                    [[foreign function bad(): ffi_int
+                          local row = foreign ffi_int.new_array(3)
+                          return #row
+                      end]],
+                    "the length operator '#' is not available inside a foreign function",
+                },
+                {
+                    [[foreign function bad(): void
+                          local item = foreign ffi_incomplete.new()
+                      end]],
+                    "ffi_incomplete",
+                },
+            }
+            for _, case in ipairs(rejected) do
+                assert_rejected(header, case[1], case[2])
+            end
+        end)
+    end)
+
     it("diagnoses Titan-only visibility and body constructs", function()
         with_header(declarations, function(header)
             local rejected = {
@@ -1092,12 +1211,6 @@ describe("foreign functions (checker)", function()
                           local text = prefix .. "b"
                       end]],
                     "string concatenation are not available",
-                },
-                {
-                    [[foreign function bad(): void
-                          local item = foreign ffi_item.new()
-                      end]],
-                    "allocation pseudo%-functions are not available",
                 },
                 {
                     [[foreign function bad(input: ffi_int): ffi_int

@@ -268,7 +268,9 @@ A direct local declaration selects the allocation representation described
 below. Direct generated record and variant constructors also support final
 embedded objects and fresh trailing buffers; see [Native storage in records and
 unions](nominal-storage.md). Other return, argument, later-assignment, and
-nested-expression uses retain the ordinary GC-owned result.
+nested-expression uses retain the ordinary GC-owned result. A
+[foreign function body](foreign-functions.md#zeroed-locals) accepts only the
+automatic forms.
 
 For a complete non-GC-bearing C structure or union `T`, `.new()` selects:
 

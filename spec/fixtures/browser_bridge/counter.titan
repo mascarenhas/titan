@@ -2,8 +2,10 @@
 -- synchronously, and each handler shows the count through a binding.
 local browser = import "browser"
 foreign import "emscripten/html5.h"
+foreign import "stdio.h"
+foreign import "stdlib.h"
 foreign import "titan/browser.h"
-foreign import "counter.h"
+foreign import "titan/ffi.h"
 
 local type Value = browser.BrowserValue
 
@@ -38,6 +40,24 @@ end
 
 local listeners: {Listener} = {}
 
+-- The click callback, html5's `em_mouse_callback_func`. The pinned handler
+-- returns nil, so only a failure's message and trace need freeing.
+local foreign function counter_click(kind: int, event: const *EmscriptenMouseEvent,
+                                     identity: *void): bool
+  local result = foreign titan_browser_sync_result.new()
+  local status = ffi.titan_browser_call_sync(
+    identity as foreign const *titan_browser_identity, 0, nil, result)
+  if status ~= ffi.TITAN_BROWSER_OK then
+    if result.message ~= nil then
+      ffi.fprintf(ffi.stderr, "click handler failed: %.*s\n",
+        result.message_length as foreign int, result.message as foreign const *char)
+    end
+  end
+  ffi.free(ffi.lmacro_unconst(result.message))
+  ffi.free(ffi.lmacro_unconst(result.trace))
+  return false
+end
+
 -- The listener is rooted in `listeners` before C receives the identity, so no
 -- allocation can fail after the registration and leave C a dangling pointer.
 local function listen(selector: string, handler: function (...: Value): Value)
@@ -51,7 +71,7 @@ local function listen(selector: string, handler: function (...: Value): Value)
   listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
   -- The short click-registration spelling is a function-like macro.
   if ffi.emscripten_set_click_callback_on_thread(
-      selector, identity, 0, ffi.counter_click,
+      selector, identity, 0, counter_click,
       ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD) ~= ffi.EMSCRIPTEN_RESULT_SUCCESS then
     listeners[index] = nil
     pin:close()

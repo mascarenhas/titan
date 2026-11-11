@@ -992,23 +992,44 @@ local function foreign_raw_stat_dispatch(ctx, node)
         local out, values = {}, {}
         for _, decl in ipairs(node.decls) do
             ctx.local_count = ctx.local_count + 1
-            decl._foreign_cname = "_foreign_local_" .. decl.name .. "_"
-                .. tostring(ctx.local_count)
-            out[#out + 1] = coder._render_c_declaration(
-                coder._c_value_type(decl._type), decl._foreign_cname) .. ";"
+            local suffix = decl.name .. "_" .. tostring(ctx.local_count)
+            local plan = decl._c_allocation_plan
+            if plan then
+                -- Zeroed storage is declared in place: it has C block
+                -- lifetime, so a loop body zeroes it on every iteration.
+                local home = { backing = "_foreign_backing_" .. suffix }
+                if plan.storage == "automatic_fam" then
+                    home.pointer = "_foreign_fam_pointer_" .. suffix
+                    decl._foreign_cname = "(*" .. home.pointer .. ")"
+                else
+                    decl._foreign_cname = "_foreign_local_" .. suffix
+                    home.name = decl._foreign_cname
+                    home.declaration = coder._render_c_declaration(
+                        coder._c_value_type(decl._type), decl._foreign_cname)
+                end
+                out[#out + 1] = coder._automatic_allocation_storage(plan, home)
+            else
+                decl._foreign_cname = "_foreign_local_" .. suffix
+                out[#out + 1] = coder._render_c_declaration(
+                    coder._c_value_type(decl._type), decl._foreign_cname) .. ";"
+            end
         end
         for index, exp in ipairs(node.exps) do
             local decl = assert(node.decls[index],
                 "foreign local initializer has no declaration")
-            local stats, value = coder._foreign_freeze(
-                ctx, exp, decl._type, "declaration")
-            out[#out + 1] = stats
-            values[index] = value
+            if not decl._c_allocation_plan then
+                local stats, value = coder._foreign_freeze(
+                    ctx, exp, decl._type, "declaration")
+                out[#out + 1] = stats
+                values[index] = value
+            end
         end
         for index, decl in ipairs(node.decls) do
-            out[#out + 1] = decl._foreign_cname .. " = "
-                .. assert(values[index],
-                    "foreign local declaration has no initializer") .. ";"
+            if not decl._c_allocation_plan then
+                out[#out + 1] = decl._foreign_cname .. " = "
+                    .. assert(values[index],
+                        "foreign local declaration has no initializer") .. ";"
+            end
         end
         return table.concat(out, "\n")
     elseif tag == "Ast.StatAssign" then

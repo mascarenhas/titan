@@ -66,7 +66,7 @@ describe("persistent core JavaScript bridge", function()
             local failure = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "initializer_failure", "initializer-failure", false)
             local counter = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
-                "counter", "counter", false, repository .. "/spec/fixtures/browser_bridge/counter.c")
+                "counter", "counter", false)
             local responsive = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "responsive", "responsive", false)
             for _, engine in ipairs({ "node", "chromium" }) do

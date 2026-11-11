@@ -332,6 +332,12 @@ checkexp = util.make_visitor({
             return
         end
         checkexp(node.exp, st, errors)
+        if op == "#" and checker._foreign_function_depth > 0 then
+            -- Indexing in a foreign body is raw C: nothing keeps a count.
+            node._type = invalid(errors, node.loc,
+                "the length operator '#' is not available inside a foreign function, where indexing is raw C and no element count is kept")
+            return
+        end
         if check_c_unary_operator(node, st, errors) then
             return
         end

@@ -183,14 +183,56 @@ The following Titan facilities are unavailable in a foreign body:
 * generic `for ... in` and `case`;
 * lambdas, bound methods, and Titan record/union/Array/Map constructors;
 * `...`, flexible results, `is`, concatenation, and Titan `and`/`or`/`not`;
-* Lua-owned `.new()` and `.new_array()` allocation.
+* Lua-owned `.new()` and `.new_array()` allocation: an allocation can only be
+  the [zeroed storage of a local](#zeroed-locals);
+* the length operator `#`.
 
 Every local must have a direct C type. A mutable local may omit its initializer
 only when that explicit type admits nil, such as a C object or function
 pointer; the compiler supplies `NULL`. Direct C aggregates and scalars still
-need an initializer, and every const local needs an initializer. A non-void
+need an initializer (`foreign T.new()` is the zeroing initializer of an
+aggregate), and every const local needs an initializer. A non-void
 foreign function must return one C value on every path; a void function may
 fall through or use bare `return`.
+
+### Zeroed locals
+
+A foreign body has no Lua state to allocate from and no frame that could root
+an owner. The only C allocation it accepts is therefore the automatic storage
+of a local that the allocation initializes directly. The forms and their
+eligibility rules are those of an ordinary function
+([target-directed C allocation](c-ffi-expressions.md#target-directed-c-allocation)):
+
+| Declaration | Local |
+| --- | --- |
+| `local x = foreign T.new()`, or annotated `foreign T`; `T` a complete struct or union | a zeroed `T` |
+| `local a = foreign T.new_array(N)` | a zeroed `T[N]` |
+| `local p: foreign *T = foreign T.new_array(N)`, or annotated `foreign T[]` | a pointer to a zeroed `T[N]` |
+| `local f = foreign F.new(N)`; `F` ends in a flexible array member | a zeroed `F` with room for `N` elements |
+
+`N` is a positive integer literal or integer macro; a flexible-array count
+may also be zero. The storage is declared where the statement stands and has
+C block lifetime. Every byte of it is zeroed each time the declaration runs,
+so a loop body starts every iteration with zeroes. Passing such a local where
+a pointer is expected passes its address:
+
+```titan
+local foreign function status_of(source: *Source): int
+  local result = foreign Result.new()
+  if ffi.fill(source, result) ~= 0 then return -1 end
+  return result.status
+end
+```
+
+Every other allocation needs an object that Lua owns, and is rejected with a
+diagnostic that says so: a pointer local initialized with `.new()`, a pointer
+local with a dynamic or zero `.new_array` count, a scalar `.new()`, an
+inferred dynamic count, and an allocation used as an argument, a return value,
+an assigned value or an operand.
+
+Indexing these locals is raw C, like every index in a foreign body: there is
+no bounds check, and `#` is unavailable because nothing keeps an element
+count.
 
 ### Literals and control flow
 
