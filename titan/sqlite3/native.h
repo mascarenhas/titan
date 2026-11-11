@@ -64,6 +64,8 @@ typedef struct TitanSqlitePacket {
 #define TITAN_SQLITE_WORKER_FINISHED 1
 #define TITAN_SQLITE_WORKER_ABANDONED 2
 
+/* Titan's FFI cannot spell the compiler's generic atomic builtin; this one
+ * expression is the whole C part of the handoff. */
 /* Implementation notes: doc/implementation/sqlite3-library.md#lua-state-close */
 static inline int titan_sqlite_handoff(TitanSqlitePacket *packet, int side) {
     return __atomic_exchange_n(&packet->handoff, side, __ATOMIC_ACQ_REL);

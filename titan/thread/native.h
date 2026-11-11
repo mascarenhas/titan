@@ -118,6 +118,9 @@ typedef struct titan_thread_join_wait {
   titan_thread_waiter waiter;
 } titan_thread_join_wait;
 
+/* The helpers below take a field's address for the same reason as
+ * titan_thread_channel_waiter: Titan's mutable address coercion accepts
+ * locals/formals, not struct fields. */
 static inline titan_thread_waiter *titan_thread_join_waiter(
     titan_thread_join_wait *wait) {
   return &wait->waiter;

@@ -139,12 +139,25 @@ JavaScript](#the-same-rules-for-browser-javascript) follow the six pairs.
    are local `foreign function`s whose one C helper,
    `titan_uv_push_owner` in `titan/uv/callback.h`, wraps the `setuvalue` macro
    that the FFI cannot spell ([standard-library foreign
-   callbacks](foreign-functions.md#standard-library-foreign-callbacks)).
+   callbacks](foreign-functions.md#standard-library-foreign-callbacks)). Two
+   more kinds of C stay. A private helper of such an entry, or a C-only
+   critical interval, is a `local foreign function` called by name:
+   `channel_try_enqueue_native` in `titan/thread/channel.titan` holds the
+   channel mutex around the enqueue. A helper that only computes is an
+   ordinary function (`reserve_resource` in `titan/transfer.titan`).
+   Platform-conditional work is a `static inline` helper that returns a
+   status or fills a plain struct, as `titan_probe_parent_stdio` in
+   `titan/os_platform.h` does for `titan.os`, which keeps the classification;
+   a platform flag is a macro (`TITAN_UV_NETWORK_WINDOWS` in
+   `titan/uv/network-native.h`), not a function.
 2. **Plain C stays plain C.** Wrong (`titan-browser.c` at `843b446e`):
    `root_callable_worker`, pushed with a light-userdata context and run under
    `lua_pcall` only so that `luaL_ref` can raise, be caught, `luaL_unref`'d and
    raised again. Right: a helper that returns a status for its caller to act
-   on, as each `uv_*` call returns its status to the Titan wrapper.
+   on, as each `uv_*` call returns its status to the Titan wrapper. Scratch
+   storage is not transit: `titan_path_query_root` in `titan_path.c` keeps the
+   child's environment block as userdata on its own stack until `posix_spawnp`
+   has copied it, and restores the top instead of taking a registry reference.
 3. **Protected work belongs in Titan.** Wrong (`titan-browser.c` at
    `843b446e`): the invoke and release entries each run a C worker under
    `protected_entry`'s `lua_pcall`, and `complete_failure` adds three more
