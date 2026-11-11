@@ -571,9 +571,9 @@ controls inside the low-level module that owns their lifetime. Convert to a
 public record, union, Interface, Array, Map, option, string, or number before
 returning from that boundary.
 
-Standard-library and runtime code that writes C or calls the Lua C API also
-follows the six rules in [Write native bindings
-Titan-first](#write-native-bindings-titan-first).
+Standard-library and runtime code that writes C, calls the Lua C API, or adds
+JavaScript for the browser target also follows the six rules in [Write native
+bindings Titan-first](#write-native-bindings-titan-first).
 
 When libuv supplies an operation, prefer that reviewed portable API over
 either a POSIX-specific shortcut or a lower-level ISO C platform service; use
@@ -602,15 +602,17 @@ contract rather than embedding a second native copy.
 ## Write native bindings Titan-first
 
 Standard-library and runtime code that touches C (authored C, a source
-`foreign function` callback, or a `lua_*`/`luaL_*` call) follows six rules. A
-review counts the new Lua C API calls and authored C lines in a diff and
-justifies each one against a rule; [standard-library
+`foreign function` callback, or a `lua_*`/`luaL_*` call) or JavaScript (a
+`--js-library` file, the browser loader, an `EM_JS` or `EM_ASM` block, or
+JavaScript glue that the compiler generates) follows six rules. A review
+counts the new Lua C API calls, authored C lines, and authored JavaScript
+lines in a diff and justifies each one against a rule; [standard-library
 maintenance](implementation/standard-library-maintenance.md#keep-c-and-the-lua-c-api-to-what-titan-cannot-do)
 pairs each rule with a wrong and a right example.
 
 1. **Layering.** Write the work in Titan; do not add hand-written runtime C
-   files for standard-library bindings. Place each piece of a native boundary
-   by how C reaches it:
+   files or JavaScript state machines for standard-library bindings. Place
+   each piece of a native boundary by how C or the host reaches it:
    - *Called through a function pointer* (libuv callbacks, `__gc` and other
      `lua_CFunction`s): a `local foreign function`, address taken.
    - *Called by name where any C symbol works*: a public `foreign function`; C
@@ -623,11 +625,22 @@ pairs each rule with a wrong and a right example.
      `initialize`/`entry`/`close`): a compiler-generated launcher sharing one
      error-conversion and trace implementation; protected calls live there, not
      in runtime libraries.
-   - *Data placement*: per-state roots in module variables or owner fields;
-     cross-state maps with the host that already owns the lifetime (such as the
-     browser's JavaScript registry), not C statics in runtime code; the Lua
-     registry only to anchor an object before any module variable exists,
-     explicitly justified.
+   - *Needs the JavaScript host* (browser target): JavaScript, and only for an
+     operation that the host alone can perform: suspending and resuming Wasm
+     (JSPI), holding JavaScript values and host objects, host scheduling and
+     event APIs (`setTimeout`, `MessageChannel`, `AbortSignal`, listeners,
+     promises), the embedder-facing promise API, and engine stack capture.
+     State, policy, validation, and bookkeeping stay in Titan, and an import
+     is a one-line forward to the JavaScript object that owns the capability.
+   - *Data placement*: per-state roots in module variables or owner fields; a
+     cross-state map with the host that owns the instance (the browser
+     loader's state-token map), not C statics in runtime code; in JavaScript
+     only what needs host lifetime (JavaScript values and host objects,
+     promises and their continuations, and items that wait for a point where
+     Wasm can be entered), never a running copy of a count or table that
+     Titan owns, because Titan passes such a fact with the call that needs
+     it; the Lua registry only to anchor an object before any module variable
+     exists, explicitly justified.
    - *Struct access and marshalling*: in Titan through `foreign import`;
      headers hold only struct layouts, declarations, and one-expression inline
      bridges (`lmacro_*` in `titan/ffi.h`) for macros, internal fields of
@@ -642,6 +655,13 @@ pairs each rule with a wrong and a right example.
        raw_slot: unsigned int, raw_generation: unsigned int,
        raw_argc: unsigned int, raw_args: const *void): int
    ```
+
+   ```javascript
+   // In titan-runtime/browser/titan-browser-bridge.js: an import is a one-line
+   // forward to the loader owner, which holds the JavaScript value in a slot.
+   titan_browser_host_adopt: (state, slot, generation) =>
+     TitanBridge.trusted('adoptSlot', state >>> 0, slot >>> 0, generation >>> 0),
+   ```
 2. **Plain C stays plain C.** Data that only C uses lives in C locals,
    formals, and return codes, never on the Lua stack. Never `lua_pcall` a C
    function that Lua never sees just to get a protected region; return a
@@ -651,7 +671,9 @@ pairs each rule with a wrong and a right example.
    and `traceback` are available. The native callback trampolines are the
    model: recover the state, owner, handler closure, and entry; push the owner
    when the handler may remove its last other home; call the entry; restore
-   the stack top.
+   the stack top. A JavaScript import that can throw follows the same split:
+   it catches at its own boundary and fills a status record, and Titan raises
+   after the import returns. A JavaScript exception never unwinds Wasm frames.
 4. **Pinning.** Per-state roots live in a module variable (a Map or Array) or
    in an owner record's field, as `loop.handles` does in `titan.uv`, never in
    `luaL_ref` slots, registry tables, or userdata uservalue tables. The browser
@@ -669,7 +691,12 @@ pairs each rule with a wrong and a right example.
    boundary is dynamically typed, marshal by runtime type into one tagged
    union at the boundary and let the receiver decide what it accepts. Do not
    build parallel signature or descriptor machinery that re-checks the same
-   thing on both sides.
+   thing on both sides. The rule holds across the JavaScript boundary in both
+   directions: the side that owns a fact checks it, once. Titan refuses what
+   Titan knows (a closed handle, a drive that is not active) before it calls
+   an import, and the import does not test it again. JavaScript refuses what
+   only JavaScript knows (a released wrapper, a disposing instance, an
+   ill-formed string), and Titan does not test it again.
 
 ## Keep examples and documentation exact
 

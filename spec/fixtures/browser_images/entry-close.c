@@ -6,9 +6,8 @@ EM_JS(void, publish_absent_module_probe, (), {
     const hook = owner?.options?.bindings?.__absentProbe;
     if (hook) hook({
         unadmittedInvoke: () => Module['_titan_browser_invoke'](0n, 1, 1, 1, 0, 0),
-        unadmittedRelease: () => Module['_titan_browser_release_callable'](0n, 1, 1, 1, 1),
+        releaseUnknown: () => Module['_titan_browser_release_callable'](1, 1, 1),
         admittedInvoke: () => owner.operate('invoke', () => owner.entry('invoke', 1, 1, 1, 0, 0)),
-        admittedRelease: () => owner.operate('release_callable', () => owner.entry('release_callable', 1, 1, 1, 1)),
     });
 });
 

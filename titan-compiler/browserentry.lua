@@ -62,9 +62,8 @@ extern int $INVOKE_FN(
     unsigned long long operation_id, unsigned int state, unsigned int slot,
     unsigned int generation, unsigned int argc,
     const void *args) __attribute__((weak));
-extern int $RELEASE_FN(
-    unsigned long long operation_id, unsigned int state, unsigned int slot,
-    unsigned int generation, unsigned int wrapper) __attribute__((weak));
+extern int $RELEASE_FN(unsigned int state, unsigned int slot,
+    unsigned int generation) __attribute__((weak));
 extern int $CALL_SYNC_FN(const void *identity, unsigned int argc, const void *args,
     void *result) __attribute__((weak));
 extern int $CALLBACK_ENTER_FN(unsigned int state, void *frame) __attribute__((weak));
@@ -73,7 +72,7 @@ extern void $CALLBACK_LEAVE_FN(void *frame) __attribute__((weak));
 static lua_State *titan_browser_owner;
 /* Images without titan.browser use a launcher-owned bare token. */
 static uint32_t titan_browser_owner_token;
-static int titan_browser_initialized, titan_browser_owner_ready, titan_browser_main_started;
+static int titan_browser_owner_ready;
 
 /* titan.browser compares its state's main thread with this once, at module
  * initialization: only the launcher's owner state may drive the instance. */
@@ -209,12 +208,8 @@ static int titan_browser_initialize_entry(lua_State *L) {
 }
 
 int titan_browser_initialize(uint64_t operation_id) {
-    if (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_INITIALIZE))
+    if (!titan_browser_entry_allowed(operation_id, TITAN_BROWSER_INITIALIZE))
         return -1;
-    if (titan_browser_initialized)
-        return titan_browser_invalid_entry(operation_id, TITAN_BROWSER_INITIALIZE,
-            "browser instance is already initialized");
-    titan_browser_initialized = 1;
     titan_browser_owner = luaL_newstate();
     if (!titan_browser_owner) {
         titan_browser_completion completion = {0};
@@ -235,12 +230,11 @@ int titan_browser_initialize(uint64_t operation_id) {
 int titan_browser_entry(uint64_t operation_id, int argc,
         const unsigned char *const *argv, const size_t *lengths) {
     struct titan_browser_arguments arguments = {argc, argv, lengths};
-    if (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_MAIN))
+    if (!titan_browser_entry_allowed(operation_id, TITAN_BROWSER_MAIN))
         return -1;
-    if (!titan_browser_owner || !titan_browser_owner_ready || titan_browser_main_started)
+    if (!titan_browser_owner || !titan_browser_owner_ready)
         return titan_browser_invalid_entry(operation_id, TITAN_BROWSER_MAIN,
-            "browser main is unavailable or already invoked");
-    titan_browser_main_started = 1;
+            "browser main is unavailable");
     return titan_browser_protected_entry(operation_id, TITAN_BROWSER_MAIN,
         titan_browser_owner, titan_browser_worker, &arguments, 1);
 }
@@ -249,18 +243,13 @@ int titan_browser_invoke(uint64_t operation_id, uint32_t state, uint32_t slot,
         uint32_t generation, uint32_t argc, const titan_browser_value *args) {
     return $INVOKE_FN
         ? $INVOKE_FN(operation_id, state, slot, generation, argc, args)
-        : (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_INVOKE) ? -1
+        : (!titan_browser_entry_allowed(operation_id, TITAN_BROWSER_INVOKE) ? -1
             : titan_browser_invalid_entry(operation_id, TITAN_BROWSER_INVOKE,
                   "browser state is closed, closing or uninitialized"));
 }
 
-int titan_browser_release_callable(uint64_t operation_id, uint32_t state,
-        uint32_t slot, uint32_t generation, uint32_t wrapper) {
-    return $RELEASE_FN
-        ? $RELEASE_FN(operation_id, state, slot, generation, wrapper)
-        : (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_RELEASE) ? -1
-            : titan_browser_invalid_entry(operation_id, TITAN_BROWSER_RELEASE,
-                  "browser state is closed"));
+int titan_browser_release_callable(uint32_t state, uint32_t slot, uint32_t generation) {
+    return $RELEASE_FN ? $RELEASE_FN(state, slot, generation) : TITAN_BROWSER_STATE;
 }
 
 /* C-callable synchronous callback entries for authored C in the image. */
@@ -281,7 +270,7 @@ void titan_browser_callback_leave(titan_browser_callback_frame *frame) {
 
 int titan_browser_close(uint64_t operation_id) {
     titan_browser_completion completion = {0};
-    if (!operation_id || !titan_browser_entry_allowed(operation_id, TITAN_BROWSER_CLOSE))
+    if (!titan_browser_entry_allowed(operation_id, TITAN_BROWSER_CLOSE))
         return -1;
     completion.operation_id = operation_id;
     completion.operation = TITAN_BROWSER_CLOSE;

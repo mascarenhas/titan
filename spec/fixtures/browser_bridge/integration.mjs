@@ -538,7 +538,7 @@ async function resultRepairs(context, host, engineFailures) {
     await rejected(context, host.call('r1_release_results', 1n), 'TITAN');
     context.assert(invalidations === 1, 'R1 handle failure bypassed active-import invalidation');
 
-    // 2. Callable wrapper released during an active import and re-exported cancels queued release and returns a new wrapper.
+    // 2. Re-export after synchronous wrapper release returns a fresh working wrapper.
     const callableResult = await host.call('r1_prepare_callable');
     context.assert((await callableResult.call()) === 101n, 'R1 live callable result lost its original closure');
     host.hooks.r1Release = selected => {
@@ -548,10 +548,32 @@ async function resultRepairs(context, host, engineFailures) {
     };
     const reexported = await host.call('r1_release_results', 2n);
     context.assert(reexported !== callableResult && (await reexported.call()) === 101n,
-      're-export racing a queued release did not cancel the release and issue a fresh wrapper');
+      're-export after release did not issue a fresh working wrapper');
     await rejected(context, callableResult.call(), 'DISPOSED');
     reexported.release();
     await host.instance.drain();
+
+    // A due collector must not re-export the released function inside release().
+    const dueRelease = await host.call('make_callable');
+    let freshAfterGc;
+    host.hooks.r1Release = value => {
+      if (value !== undefined) { freshAfterGc = value; return; }
+      dueRelease.release();
+      return freshAfterGc === undefined;
+    };
+    context.assert((await host.call('release_with_gc_due')) === true,
+      'a due finalizer ran inside synchronous wrapper release');
+    context.assert(freshAfterGc && freshAfterGc !== dueRelease &&
+      (await freshAfterGc.call()) === 77n,
+      'the finalizer did not re-export a fresh working wrapper after retirement');
+    await rejected(context, dueRelease.call(), 'DISPOSED');
+    freshAfterGc.release();
+
+    const pausedRelease = await host.call('make_callable');
+    host.hooks.r1Release = () => pausedRelease.release();
+    context.assert((await host.call('release_with_gc_paused')) === true,
+      'synchronous release cleared a user GC pause');
+    await rejected(context, pausedRelease.call(), 'DISPOSED');
 
     // 3. Handle or callable invalidated by a GC finalizer after encoding and before completion rejects under protection.
     for (const position of [1n, 2n]) {
@@ -592,7 +614,7 @@ async function resultRepairs(context, host, engineFailures) {
     await context.tick();
     await host.instance.drain();
     context.assert(host.successes.at(-1)[0] === 51n && (await host.call('pin_holders_collected')) === 0n,
-      'request retirement dropped a pin still held by an active listener');
+      'the one-shot callback dropped a pin still held by an active listener');
     holdEmit(60n);
     await host.instance.drain();
     context.assert(host.successes.at(-1)[0] === 61n);
@@ -601,12 +623,12 @@ async function resultRepairs(context, host, engineFailures) {
     context.assert((await host.call('pin_holders_collected')) === 3n,
       'closing the last holder did not drop the completion and failure pins');
     host.successes.length = 0;
-    // 5. Queued request-hold drop survives a failed wrapper re-export in the same operation (R-H4).
+    // 5. Listener close drops its holds before a failed wrapper re-export (R-H4).
     host.hooks.pinHoldListener = () => ({kind: 'listener', subscribe() { return () => {}; }});
     await host.call('lost_release_regression');
     await host.instance.drain();
     context.assert((await host.call('pin_holders_collected')) === 64n,
-      'provisional wrapper rollback deleted a queued request-hold drop');
+      'failed wrapper re-export retained a closed listener callback');
 
     // 6. Wrapper exposed to host JS before the host throws, returns an unmarshallable value, or refuses start stays live (R-H5).
     for (const mode of [1n, 2n, 3n]) {
@@ -642,40 +664,33 @@ async function resultRepairs(context, host, engineFailures) {
       'outer invoke OOM leaked provisional callable capture');
     context.assert((await host.call('valid_after_failure')) === 42n, 'outer invoke OOM poisoned the instance');
 
-    // R-H3(c): outer release handler after inner-handler OOM emits fallback completion and leaves instance usable.
-    const releaseWrapper = await host.call('make_pinned_wrapper', 55n);
-    host.controls.failNextEntryStack('release_callable', 28, 2);
-    releaseWrapper.release();
-    const outerReleaseErr = await captureRejection(context, host.instance.drain(), 'TITAN');
-    context.equalBytes(outerReleaseErr.bytes, encode('not enough memory'));
-    context.assert((await host.call('finish_invoke_oom')) === 2n, 'outer release OOM did not trigger both growstack failures');
-    context.assert((await host.call('pin_holders_collected')) === 55n,
-      'outer release OOM did not retire the released pin');
-    context.assert((await host.call('valid_after_failure')) === 42n, 'outer release OOM poisoned the instance');
-
-    for (const [freeSlots, weight] of [[22, 66n], [19, 77n]]) {
-      // 22 reaches release_work's preamble; 19 fails the trampoline's stack check.
+    // The input includes the base-function slot: 21 refuses admission.
+    // At 22, the handler and 2-slot entry leave 18 slots, so apply_release
+    // must grow its 18-slot frame under catch; 23 leaves 19 and retires.
+    for (const [freeSlots, weight, status, retired] of [
+      [21, 55n, 4, false], [22, 66n, 0, false], [23, 77n, 0, true],
+    ]) {
       const wrapper = await host.call('make_pinned_wrapper', weight);
-      const records = [];
-      const unwatch = host.controls.watchCompletions(record => {
-        records.push({kind: record.kind, failed: record.failed});
-      });
+      const records = [], beforeErrors = host.notificationErrors.length;
+      const beforeId = host.controls.snapshot().operationId;
+      const unwatch = host.controls.watchCompletions(record => records.push(record));
       try {
-        host.controls.failNextEntryStack('release_callable', freeSlots, 2);
-        wrapper.release();
-        const failure = await captureRejection(context, host.instance.drain(), 'TITAN');
-        context.equalBytes(failure.bytes, encode('not enough memory'));
-        context.assert(records.length === 1 && records[0].kind === 4 && records[0].failed,
-          `release with ${freeSlots} free slots did not emit exactly one failed completion`);
-        if (freeSlots === 19) context.assert(failure.trace.length === 0,
-          'release trampoline fallback unexpectedly captured a Titan trace');
+        const attempt = host.controls.failNextEntryStack('release_callable', freeSlots, 2);
+        context.assert(wrapper.release() === undefined, 'synchronous release did not return normally');
+        context.assert(attempt.status === status,
+          `release with stack input ${freeSlots} reached the wrong admission branch`);
+        context.assert(records.length === 0 && host.controls.snapshot().operationId === beforeId,
+          'synchronous release emitted a completion or consumed an entry identity');
       } finally { unwatch(); }
-      context.assert((await host.call('finish_invoke_oom')) === 1n,
-        `release with ${freeSlots} free slots did not fail its stack growth`);
-      context.assert((await host.call('pin_holders_collected')) === 0n,
-        'failed release preamble/trampoline retired a pin before state close');
-      context.assert((await host.call('valid_after_failure')) === 42n,
-        `release with ${freeSlots} free slots poisoned the instance`);
+      await host.instance.drain();
+      const failures = await host.call('finish_invoke_oom');
+      context.assert(retired ? failures === 0n : failures > 0n,
+        `release with stack input ${freeSlots} had the wrong allocation outcome`);
+      context.assert((await host.call('pin_holders_collected')) === (retired ? weight : 0n),
+        `release with stack input ${freeSlots} had the wrong pin retirement outcome`);
+      context.assert(host.notificationErrors.length === beforeErrors &&
+        (await host.call('valid_after_failure')) === 42n,
+        `release with stack input ${freeSlots} poisoned the instance or reported an error`);
     }
   } finally {
     host.hooks.r1Release = undefined;
@@ -925,6 +940,107 @@ async function prepareNotificationCollection(context, host) {
   handleTarget.release();
   await host.instance.drain();
   return [reference];
+}
+
+// Kept-open request owners must not keep the callables after Titan ends delivery.
+async function requestHolds(context, host) {
+  const prepare = (name, listener = false) => host.call('prepare_request_lifetime', name, listener);
+  const collectedPins = () => host.call('pin_holders_collected');
+  const errors = host.notificationErrors.length;
+  let source = gate();
+  host.bindings.lifetime_request = () => ({kind: 'detachable', promise: source.promise});
+  await prepare('lifetime_request');
+  context.assert(await collectedPins() === 0n, 'an active request lost its captures');
+  source.resolve(101n);
+  await context.tick(); await host.instance.drain();
+  context.assert(await collectedPins() === 3n, 'a delivered one-shot kept captures until close');
+  await host.call('close_request');
+
+  source = gate();
+  await prepare('lifetime_request');
+  await host.call('cancel_request');
+  context.assert(await collectedPins() === 3n, 'a cancelled one-shot kept captures until close');
+  await host.call('close_request');
+
+  // A settled request is retired on the host, but cancel still drops its queued event.
+  source = gate();
+  await prepare('lifetime_request');
+  const successes = host.successes.length;
+  source.resolve(102n);
+  await context.tick();
+  await host.call('cancel_request');
+  await host.instance.drain();
+  context.assert(host.successes.length === successes && await collectedPins() === 3n,
+    'cancel after settlement delivered an event or kept its captures');
+  await host.call('close_request');
+
+  source = gate();
+  await prepare('lifetime_request');
+  const wrapper = await host.call('make_pinned_wrapper', 0n);
+  source.resolve(wrapper);
+  await context.tick();
+  wrapper.release();
+  const failures = host.failures.length;
+  let announced = 0;
+  host.hooks.requestDrain = () => { announced++; };
+  await host.instance.drain();
+  context.assert(host.failures.length === failures && announced > 0,
+    'unmarshallable settlement retried in place or failed to announce its queued failure');
+  await host.instance.drain();
+  context.assert(host.failures.length === failures + 1 &&
+    host.failures.at(-1)[1].code === 'TITAN_BROWSER_HANDLE' &&
+    decode(host.failures.at(-1)[0]) === host.failures.at(-1)[1].message &&
+    await collectedPins() === 3n, 'delivery marshalling failure did not reach failure and drop holds');
+  host.hooks.requestDrain = undefined;
+  await host.call('close_request');
+
+  let emit;
+  host.bindings.lifetime_listener = () => ({kind: 'listener', subscribe(callback) {
+    emit = callback;
+    return () => { emit = undefined; };
+  }});
+  await prepare('lifetime_listener', true);
+  const argument = await host.call('make_pinned_wrapper', 0n);
+  emit(argument);
+  emit(103n);
+  argument.release();
+  const listenerFailures = host.failures.length;
+  await host.instance.drain();
+  context.assert(host.successes.at(-1)[0] === 103n && host.failures.length === listenerFailures &&
+    await collectedPins() === 0n, 'listener failure displaced an already queued emission or dropped holds');
+  await host.instance.drain();
+  context.assert(host.failures.length === listenerFailures + 1 && await collectedPins() === 0n,
+    'listener delivery failure did not keep its callable holds');
+  emit(104n);
+  await host.instance.drain();
+  context.assert(host.successes.at(-1)[0] === 104n, 'listener stopped after a marshalling failure');
+  await host.call('cancel_request');
+  context.assert(await collectedPins() === 3n, 'listener cancel kept captures until close');
+  await host.call('close_request');
+  context.assert(host.notificationErrors.length === errors, 'request delivery failure reached the observer');
+
+  // D8: idle delivery has no Titan stack on a double fault; close ends the holds.
+  source = gate();
+  await prepare('lifetime_request');
+  source.resolve(null);
+  await context.tick();
+  const restore = host.controls.failNextAllocations(2);
+  try {
+    await host.instance.drain();
+    await host.instance.drain();
+  } finally { restore(); }
+  context.assert(host.notificationErrors.length === errors + 1 &&
+    host.notificationErrors.at(-1).kind === 'callback' &&
+    host.notificationErrors.at(-1).operation === 'drain' && await collectedPins() === 0n,
+    'idle double fault did not report once and retain the callables');
+  await host.call('close_request');
+  context.assert(await collectedPins() === 3n, 'close did not release idle double-fault holds');
+  // Injected JavaScript Error stack frames retain the fixture's Module closure.
+  // Discard only this case's observations before the later whole-image GC proof.
+  host.notificationErrors.length = errors;
+  host.failures.length = failures;
+  delete host.bindings.lifetime_request;
+  delete host.bindings.lifetime_listener;
 }
 
 async function requests(context, host) {
@@ -1370,21 +1486,13 @@ async function cleanupFailures(context, image) {
 
       const background = await host.call('make_callable');
       const beforeBackground = host.notificationErrors.length;
-      host.controls.failNextRelease();
+      host.controls.refuseNextRelease();
       background.release();
-      await until(context, () => host.notificationErrors.length > beforeBackground,
-        'callerless physical release failure was discarded');
-      const notification = host.notificationErrors[beforeBackground];
-      context.assert(host.notificationErrors.length === beforeBackground + 1 && notification.kind === 'cleanup' &&
-        notification.operation === 'release_callable' && notification.error.code === 'TITAN_BROWSER_TITAN',
-        'callerless release did not report exactly one tagged cleanup failure');
-      context.equalBytes(notification.error.bytes, encode('browser state is closed'));
-      const afterRelease = host.controls.snapshot().operationId;
-      await context.tick(); await context.tick();
-      context.assert(host.controls.snapshot().operationId === afterRelease,
-        'failed physical release was retried instead of leaving retirement to state close');
+      await context.tick();
+      context.assert(host.notificationErrors.length === beforeBackground,
+        'refused wrapper release reported a notification error');
       context.assert((await host.call('valid_after_failure')) === 42n,
-        'callerless release failure poisoned later valid entry');
+        'refused wrapper release poisoned a later valid entry');
       backgroundReleases++;
 
       const causes = {stdout: new Error('secondary stdout failure'), stderr: new Error('secondary stderr failure')};
@@ -1404,7 +1512,7 @@ async function cleanupFailures(context, image) {
       const deferred = await host.call('make_callable');
       const beforeErrors = host.notificationErrors.length;
       const beforeOut = host.stdout.length, beforeErr = host.stderr.length;
-      host.controls.failNextRelease();
+      host.controls.refuseNextRelease();
       deferred.release();
       const error = await captureRejection(context, host.call('cleanup_failure', binary()), 'TITAN');
       context.equalBytes(error.bytes, original.bytes, 'cleanup replaced the primary Titan message');
@@ -1412,14 +1520,13 @@ async function cleanupFailures(context, image) {
       await Promise.all(checks);
       checks.length = 0;
       host.sinks.stdout = host.sinks.stderr = undefined;
-      context.equalBytes(join(host.stdout.slice(beforeOut)), binary(), 'retirement failure skipped the surviving stdout flush');
-      context.equalBytes(join(host.stderr.slice(beforeErr)), binary(), 'retirement failure skipped the stderr flush');
+      context.equalBytes(join(host.stdout.slice(beforeOut)), binary(), 'refused release skipped the surviving stdout flush');
+      context.equalBytes(join(host.stderr.slice(beforeErr)), binary(), 'refused release skipped the stderr flush');
       const events = host.notificationErrors.slice(beforeErrors);
       context.assert(events.every(event => event.kind === 'cleanup' && event.operation === 'call') &&
-        events.length === 1 + calls.stdout + calls.stderr, 'secondary cleanup failures were lost, duplicated or mistagged');
-      const releases = events.filter(event => event.error.code === 'TITAN_BROWSER_TITAN');
-      context.assert(releases.length === 1, 'primary failure replaced or duplicated its failed physical retirement');
-      context.equalBytes(releases[0].error.bytes, encode('browser state is closed'));
+        events.length === calls.stdout + calls.stderr, 'secondary cleanup failures were lost, duplicated or mistagged');
+      context.assert(events.every(event => event.error.code !== 'TITAN_BROWSER_TITAN'),
+        'refused wrapper release reported a secondary cleanup failure');
       secondaryReleases++;
       for (const stream of ['stdout', 'stderr']) {
         const failures = events.filter(event => event.error.stream === stream);
@@ -1594,6 +1701,35 @@ async function initializationFailure(context, image) {
   }
 }
 
+async function terminalReleases(context, image) {
+  for (const terminal of ['dispose', 'exit']) {
+    const host = createHost(context, image);
+    let unwatch;
+    try {
+      await host.instance.initialize();
+      await nativeRun(context, host);
+      await host.call('close_detached');
+      const wrapper = await host.call('make_pinned_wrapper', 99n);
+      if (terminal === 'exit') await rejected(context, host.call('exit_for_release'), 'EXITED');
+      const records = [], beforeId = host.controls.snapshot().operationId;
+      unwatch = host.controls.watchCompletions(record => records.push(record));
+      const disposing = terminal === 'dispose' ? host.instance.dispose() : undefined;
+      context.assert(wrapper.release() === undefined && wrapper.release() === undefined,
+        `release after ${terminal} did not remain nonthrowing and idempotent`);
+      context.assert(records.length === 0 && host.controls.snapshot().operationId === beforeId &&
+        host.notificationErrors.length === 0, `release after ${terminal} entered a promising operation`);
+      await (disposing ?? host.instance.dispose());
+      context.assert(host.controls.snapshot().units === 0 &&
+        host.controls.snapshot().states.every(state => state.closed),
+        `release after ${terminal} prevented state-close retirement`);
+    } finally {
+      unwatch?.();
+      await host.instance?.dispose();
+      host.releaseObservations();
+    }
+  }
+}
+
 async function operationIdentities(context, image) {
   const host = createHost(context, image);
   let unwatch;
@@ -1612,13 +1748,25 @@ async function operationIdentities(context, image) {
     const callable = await host.call('make_callable');
     const maximum = (1n << 64n) - 1n;
     host.controls.advanceOperationId(maximum - 2n);
-    callable.release(); // Its root must retire with close, without spending the reserved final id.
+    callable.release(); // Synchronous retirement spends no entry identity.
     context.assert((await host.call('valid_after_failure')) === 42n);
     context.assert(records.at(-1).id === maximum - 1n, 'last application entry used the reserved close identity');
     const before = records.length;
     await rejected(context, host.call('valid_after_failure'), 'STATE');
-    await rejected(context, host.instance.drain(), 'STATE');
-    context.assert(records.length === before, 'exhausted admission entered Wasm or reused an identity');
+    await host.instance.drain();
+    context.assert(records.length === before && host.controls.snapshot().operationId === maximum - 1n,
+      'empty drain allocated an exhausted identity or emitted a completion');
+    const beforeErrors = host.notificationErrors.length;
+    host.instance.notify(host.callbacks.get('valid_after_failure'));
+    await host.instance.drain();
+    const failure = host.notificationErrors[beforeErrors];
+    context.assert(host.notificationErrors.length === beforeErrors + 1 &&
+      failure.kind === 'callback' && failure.operation === 'drain' &&
+      failure.error.code === 'TITAN_BROWSER_STATE' &&
+      failure.error.message === 'browser operation identity exhausted',
+      'notification delivery did not report identity exhaustion at allocation');
+    context.assert(records.length === before && host.controls.snapshot().operationId === maximum - 1n,
+      'exhausted identity allocation entered Wasm or reused an identity');
     await host.instance.dispose();
     context.assert(records.at(-1).id === maximum && records.at(-1).kind === 5 && host.closes.length === 2 &&
       host.controls.snapshot().units === 0, 'uint64 exhaustion prevented intact-state close/root retirement');
@@ -1726,6 +1874,7 @@ export async function run(context) {
       'instances shared original capture ownership');
     const announcements = await notifications(context, first, completions);
     await requests(context, first);
+    await requestHolds(context, first);
     const io = await stdio(context, first);
     const repairs = {results: await resultRepairs(context, first, engineFailures),
       responses: await responseRepairs(context, first, engineFailures),
@@ -1743,6 +1892,7 @@ export async function run(context) {
     await interruptedFailure(context, image);
     await initializationFailure(context, failedImage);
     const identities = await operationIdentities(context, image);
+    await terminalReleases(context, image);
     context.stdout(encode('BRIDGE ' + JSON.stringify({verdict: 'PASS', nativeCases: counts,
       instances: 2, interleavedSwitches: switches, operations: completions.length, requestDrain: announcements,
       notifications: first.notifications.length, requests: first.successes.length + first.failures.length,

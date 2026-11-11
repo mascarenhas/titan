@@ -31,7 +31,6 @@ enum titan_browser_operation {
   TITAN_BROWSER_INITIALIZE = 1,
   TITAN_BROWSER_MAIN = 2,
   TITAN_BROWSER_INVOKE = 3,
-  TITAN_BROWSER_RELEASE = 4,
   TITAN_BROWSER_CLOSE = 5
 };
 enum titan_browser_request_mode {
@@ -40,7 +39,10 @@ enum titan_browser_request_mode {
 };
 enum titan_browser_relinquish_mode {
   TITAN_BROWSER_TURN = 0,
-  TITAN_BROWSER_WAIT = 1
+  TITAN_BROWSER_WAIT = 1,
+  /* The state holds its own wake source (an open BrowserPin); park even when
+   * the loader has none. */
+  TITAN_BROWSER_WAIT_HELD = 2
 };
 /* A wait with no wake source returns IDLE without suspending. The first
  * relinquish after dispose() began resolves DISPOSING once; afterwards every
@@ -54,7 +56,7 @@ enum titan_browser_delivery_kind {
   TITAN_BROWSER_DELIVER_NONE = 0,
   TITAN_BROWSER_DELIVER_NOTIFY = 1,
   TITAN_BROWSER_DELIVER_CALL = 2,
-  TITAN_BROWSER_DELIVER_RELEASE = 3
+  TITAN_BROWSER_DELIVER_UNDELIVERED = 4
 };
 
 typedef union titan_browser_scalar {
@@ -64,7 +66,7 @@ typedef union titan_browser_scalar {
 typedef struct titan_browser_value {
   uint32_t kind;
   uint32_t state;
-  /* For STRING and BYTES results scalar.integer is the allocated byte capacity. */
+  /* Scalar payload for BOOLEAN, INTEGER and FLOAT; unused for other kinds. */
   titan_browser_scalar scalar;
   const unsigned char *bytes;
   uint32_t length;
@@ -78,8 +80,8 @@ typedef struct titan_browser_value {
  * false. The caller clears adopted slots; dispose releases remaining units.
  * Nonempty message and STRING/BYTES result
  * buffers are malloc-owned; dispose frees them even on a failed import.
- * JS must use current memory views after allocating. Capacity is validated
- * before copying and length is the exact returned byte count, not capacity. */
+ * JS must use current memory views after allocating. length is the exact
+ * returned byte count. */
 typedef struct titan_browser_response {
   uint32_t status;
   uint32_t state;
@@ -106,10 +108,9 @@ typedef struct titan_browser_completion {
   uint32_t trace_length;
 } titan_browser_completion;
 
-/* One host item that deliver() runs inside a drive, or one deferred physical
- * release. id names the item for item_done and settle; args stay host-owned
- * until titan_browser_host_item_done. wrapper is the RELEASE kind's flag:
- * 1 for a wrapper release, 0 for a request-hold drop. */
+/* One host item that deliver() runs inside a drive. id names the item for
+ * item_done and settle; args stay host-owned until titan_browser_host_item_done.
+ * UNDELIVERED has identity zero, no arguments, settlement or item_done. */
 typedef struct titan_browser_delivery {
   uint64_t id;
   uint32_t kind;
@@ -117,7 +118,6 @@ typedef struct titan_browser_delivery {
   uint32_t generation;
   uint32_t argc;
   const titan_browser_value *args;
-  uint32_t wrapper;
 } titan_browser_delivery;
 
 /* A pinned callable's identity, which C keeps as callback user data. Copy it
@@ -201,7 +201,6 @@ _Static_assert(offsetof(titan_browser_delivery, slot) == 12, "browser delivery s
 _Static_assert(offsetof(titan_browser_delivery, generation) == 16, "browser delivery generation offset");
 _Static_assert(offsetof(titan_browser_delivery, argc) == 20, "browser delivery count offset");
 _Static_assert(offsetof(titan_browser_delivery, args) == 24, "browser delivery arguments offset");
-_Static_assert(offsetof(titan_browser_delivery, wrapper) == 28, "browser delivery wrapper offset");
 _Static_assert(sizeof(titan_browser_identity) == 12, "browser identity layout");
 _Static_assert(offsetof(titan_browser_identity, slot) == 4, "browser identity slot offset");
 _Static_assert(offsetof(titan_browser_identity, generation) == 8, "browser identity generation offset");
@@ -216,15 +215,12 @@ _Static_assert(offsetof(titan_browser_callback_frame, state) == 4, "browser call
 _Static_assert(offsetof(titan_browser_callback_frame, depth) == 8, "browser callback frame depth offset");
 #endif
 
-/* Stateful promised exports. Only _malloc/_free and the backend stack metadata
- * helpers bypass the JSPI owner. The private engine entry is not a gateway. */
+/* Stateful promised exports. The private engine entry is not a gateway. */
 int titan_browser_initialize(uint64_t operation_id);
 int titan_browser_entry(uint64_t operation_id, int argc,
     const unsigned char *const *argv, const size_t *lengths);
 int titan_browser_invoke(uint64_t operation_id, uint32_t state, uint32_t slot,
     uint32_t generation, uint32_t argc, const titan_browser_value *args);
-int titan_browser_release_callable(uint64_t operation_id, uint32_t state,
-    uint32_t slot, uint32_t generation, uint32_t wrapper);
 int titan_browser_close(uint64_t operation_id);
 int titan_browser_invalid_entry(uint64_t operation_id, uint32_t operation,
     const char *message);
@@ -277,11 +273,14 @@ void titan_browser_host_cancel(uint32_t state, uint32_t slot, uint32_t generatio
 
 /* Driver imports. titan_browser_relinquish is the bridge's only suspending
  * import: it returns a titan_browser_relinquish_status after one turn-source
- * macrotask (TURN), or after a wake (WAIT); a WAIT with no wake source returns
- * IDLE at once. The others are trusted and nonthrowing. host_item marshals
- * arguments into host allocations; it reports a marshalling failure (a
- * callback error or a call rejection), skips that item, and returns 0 once the
- * batch is exhausted. host_settle receives the delivered item's completion. */
+ * macrotask (TURN), or after a wake (WAIT or WAIT_HELD); a WAIT with no wake
+ * source returns IDLE at once. The others are trusted and nonthrowing.
+ * host_item marshals arguments into host allocations. A request's
+ * unmarshallable success event becomes its failure event, appended to the live
+ * queue; an unmarshallable failure event returns UNDELIVERED with its target
+ * identity and no arguments, settlement or item_done. Other unmarshallable
+ * items are reported and skipped. It returns 0 once the batch is exhausted.
+ * host_settle receives the delivered item's completion. */
 uint32_t titan_browser_relinquish(uint32_t state, uint32_t mode);
 void titan_browser_host_owner(uint32_t state);
 void titan_browser_host_drive_begin(uint32_t state);
@@ -295,14 +294,17 @@ void titan_browser_host_wake(uint32_t state);
 uint32_t titan_browser_host_batch(uint32_t state);
 int titan_browser_host_item(uint32_t state, titan_browser_delivery *out);
 void titan_browser_host_item_done(uint32_t state, uint64_t id);
-int titan_browser_host_release_next(uint32_t state, titan_browser_delivery *out);
 void titan_browser_host_settle(const titan_browser_completion *record);
 
-/* Synchronous C callbacks. host_hold counts open BrowserPins per state (a
- * wake source for the owner's drive). host_callback(state, 1) admits a
- * callback unless the instance is closing, exited or poisoned and returns 0
- * when it refuses; host_callback(state, -1) ends it. Both are trusted. */
-void titan_browser_host_hold(uint32_t state, int32_t delta);
+/* Synchronous entries. titan_browser_release_callable is an export, not an
+ * import: the loader calls it from wrapper.release(), with no operation id
+ * and no completion. It drops only the wrapper's hold. It returns STATE when
+ * the entry is refused and MEMORY when the callback thread's stack cannot be
+ * reserved; an unapplied release leaves the pin until state close.
+ * host_callback(state, 1) is the trusted import that admits a synchronous
+ * entry unless the instance is closing, exited or poisoned, returning 0 when
+ * it refuses; host_callback(state, -1) ends the entry. */
+int titan_browser_release_callable(uint32_t state, uint32_t slot, uint32_t generation);
 int titan_browser_host_callback(uint32_t state, int32_t delta);
 
 /* Generated forwards to titan.browser's public foreign functions, for C in the

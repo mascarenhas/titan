@@ -248,7 +248,7 @@ remain:
    `cancel_shutdown_tasks`.
 2. `available = ready_count`, then `browser.deliver()` (request settlements,
    listener events, notifications and queued calls present when it starts,
-   each outside any Task, then the deferred releases), then
+   each outside any Task), then
    `drain_ready(runtime, available)`. Taking `available` before delivery puts
    a Task that a delivered completion resumed and that then yields in a later
    turn. Delivery or drain failures go to `fail_runtime`.
@@ -896,23 +896,36 @@ state.
   - A zero delay is `async.yield()`: no host request, and the Task resumes in
     a later turn, after the driver's one-macrotask relinquish, without the
     clamp that HTML puts on nested `setTimeout`.
-  - Any other delay starts a detachable `titan:timeout` request whose
-    completion resumes the Task's `ResumeToken`, and suspends with a cancel
-    action that cancels the request. Cancellation therefore clears the host
-    timer and ends the wait at once, and the loader drops a settlement that
-    arrives later. Native `sleep` passes no cancel action and retires its uv
-    timer in a deferred close instead.
+  - Any other delay waits on detachable `titan:timeout` requests, one at a
+    time. A host timer takes at most 2,147,483,647 ms, so `sleep` splits a
+    longer delay into chunks of at most that size and starts each chunk's
+    request only after the previous one has elapsed. Each completion resumes
+    the Task's `ResumeToken`. Each suspension's cancel action cancels the
+    current request, which clears the host timer and ends the whole sleep at
+    once; the loader drops a settlement that arrives later. Native `sleep`
+    passes no cancel action and retires its uv timer in a deferred close
+    instead.
   - A host failure resumes the Task, which then raises
     `OperationError(-EIO, "EIO", <host message>, "timer.sleep")`.
   - After `dispose()` the request cannot start (`browser.BrowserError`,
     `"browser state is closing"`). A disposal cleanup never gets that far,
     because its checkpoint raises the Task's cancellation first.
 - **`ticker(ms)`** registers a close listener with the Runtime, then a
-  `CoalescingSubscription` whose producer opens a `titan:interval` listener.
+  `CoalescingSubscription` whose producer arms the host timer.
+  - A period of at most 2,147,483,647 ms opens one `titan:interval` listener.
+  - A longer period has no host interval to run on, so `Ticker:arm` chains
+    one-shot `titan:timeout` requests of at most that size. The completion
+    of a period's last chunk arms the next period's first chunk before it
+    publishes the tick, as a host interval re-arms before it calls back.
+    Each completion closes the request that it replaces.
+  - Arming the next chunk can fail, for example while the state is closing.
+    The completion catches that error, closes a thrown `BrowserError`, and
+    fails the subscription, so the error reaches the waiting `tick()`
+    instead of `onNotificationError`.
   - Each event publishes `true`, so missed firings, including throttled ones,
     coalesce into one pending tick.
-  - `stop` cancels the listener, and `close` marks the ticker closed and
-    closes its request.
+  - `stop` cancels the current request, and `close` marks the ticker closed
+    and closes its request.
   - The close listener does the same when the Runtime closes, so a ticker
     left open is Runtime-bound, like a native ticker whose loop closed. Close
     listeners run in registration order with the user's, whereas a native

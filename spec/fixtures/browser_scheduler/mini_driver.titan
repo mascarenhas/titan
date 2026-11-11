@@ -4,6 +4,7 @@
 -- `titan:driver` callables follow the async backend's spawn/settle protocol.
 local browser = import "browser"
 local coroutine = import "coroutine"
+local gc = import "gc"
 local _ = import "mini_child"
 foreign import "stdio.h"
 foreign import "stdlib.h"
@@ -410,6 +411,28 @@ local function timer_cancel(...: Value): Value
   return Value.is_nil()
 end
 
+-- The SDK source owns range validation and retains the exact host TypeError.
+local function timer_range(...: Value): Value
+  local source = browser.binding(expect_string(...[1]))
+  defer source:close()
+  if expect_string(...[1]) == "titan:timeout" then
+    local request = source:start(ignore, ignore, ...[2])
+    request:close()
+  else
+    local request = source:listen(ignore, ignore, ...[2])
+    request:close()
+  end
+  return Value.is_string("accepted")
+catch
+  if error is browser.BrowserError then
+    local failure: browser.BrowserError = error
+    defer failure:close()
+    binding_call("timer_type_error", Value.is_handle(failure.thrown))
+    return Value.is_string(failure.message)
+  end
+  raise
+end
+
 -- Counts ticks of a titan:interval with the given period, then settles;
 -- settling cancels the listener.
 local function ticks(...: Value): Value
@@ -505,6 +528,20 @@ local function unpin_callbacks(...: Value): Value
   return Value.is_nil()
 end
 
+-- Closing the only open pin must wake the parked drive without an explicit wake.
+local function sync_last_close(...: Value): Value
+  unpin_callbacks()
+  local job? = awaiting
+  awaiting = nil
+  if job ~= nil then job:finish("succeeded", Value.is_string("pins closed"), Value.is_nil()) end
+  return Value.is_nil()
+end
+
+local function pin_last_close(...: Value): Value
+  publish_pin("last_close", sync_last_close)
+  return Value.is_nil()
+end
+
 -- Waits with no request: only an open pin keeps the drive from going idle.
 local function await_callback(...: Value): Value
   local job = current
@@ -534,6 +571,29 @@ local function shutdown(...: Value): Value
   cancel_all("instance disposed")
   if not driving and #open > 0 then drive() end
   return Value.is_nil()
+end
+
+local record ReleaseCapture
+  number: integer
+end
+local released_captures = 0
+
+local function release_capture_finalize(_: value)
+  released_captures = released_captures + 1
+end
+
+local function make_releasable(...: Value): Value
+  local captured = ReleaseCapture(42)
+  gc.finalizable<|value|>(captured, release_capture_finalize)
+  return Value.is_callable(function(...: Value): Value
+    return Value.is_integer(captured.number)
+  end)
+end
+
+local function count_released_captures(...: Value): Value
+  gc.collect()
+  gc.collect()
+  return Value.is_integer(released_captures)
 end
 
 local function register(...: Value): Value
@@ -666,6 +726,7 @@ do
     publish("overflow", overflow)
     publish("sdk_unknown", sdk_unknown)
     publish("timer_cancel", timer_cancel)
+    publish("timer_range", timer_range)
     publish("ticks", ticks)
     publish("register", register)
     publish("drive_job", drive_job)
@@ -674,8 +735,11 @@ do
     publish("park_idle", park_idle)
     publish("owner_probe", owner_probe)
     publish("spare", spare)
+    publish("make_releasable", make_releasable)
+    publish("released_captures", count_released_captures)
     publish("pin_callbacks", pin_callbacks)
     publish("unpin_callbacks", unpin_callbacks)
+    publish("pin_last_close", pin_last_close)
     publish("await_callback", await_callback)
     child_owner = ffi.mini_driver_new_child(L)
   end

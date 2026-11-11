@@ -415,7 +415,8 @@ native and browser providers.
 The sixteenth root is `titan.timer`, whose flat variant `titan/timer.browser.titan`
 sits beside `titan/timer.native.titan` with the same public interface. It
 imports `async`, `titan.browser` and `errno.h`, and builds one-shot sleeps on
-the SDK's `titan:timeout` source and tickers on `titan:interval`
+the SDK's `titan:timeout` source. Tickers use `titan:interval` for bounded
+periods and chain `titan:timeout` requests for longer ones
 ([browser timers](libuv-runtime.md#browser-timers)). Its `Ticker` keeps its
 methods but holds a host request instead of a uv timer, so the member
 inventory records it as an opaque record.
@@ -1611,7 +1612,7 @@ flag list.
 | --- | --- |
 | `<level>`, then `-fno-inline -fno-optimize-sibling-calls` except for a production `program`, then `-gsource-map -g2` | the level is the `optimization` override or else the descriptor's last `-O` flag (`-O1` for validation, `-O3` for production), so the link optimizes like its objects; a production program accepts the frames that inlining costs, while every other profile and purpose keeps the frame flags ([Link flags per purpose](#link-flags-per-purpose)); `-gsource-map -g2` writes the source map and keeps the Wasm `name` section in every profile |
 | `-sBINARYEN_EXTRA_PASSES=--skip-pass=inlining-optimizing,--skip-pass=duplicate-function-elimination` only for a production `test` image | retain distinct physical functions for test traces; JSPI needs no instrumentation-local cleanup passes |
-| `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"] -sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke","titan_browser_release_callable","titan_browser_close","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports for the five Lua-running bridge entries and the private coroutine entry. The bridge library's [relinquish import](#the-relinquish-import) is the third suspending import of a `titan` entry; the interpreter baseline (`lua-main`) keeps only the coroutine pair and promises `main`. The `gate` purpose adds its guarded export and `emscripten_sleep`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
+| `-sJSPI=1 -sJSPI_IMPORTS=["titan_mco_transfer","titan_mco_destroy","titan_browser_relinquish"] -sJSPI_EXPORTS=["titan_browser_initialize","titan_browser_entry","titan_browser_invoke","titan_browser_close","titan_mco_entry"]` | Emscripten 6.0.13 uses current `WebAssembly.Suspending` imports and `WebAssembly.promising` exports for the four promised bridge entries and the private coroutine entry. The bridge library's [relinquish import](#the-relinquish-import) is the third suspending import of a `titan` entry; the interpreter baseline (`lua-main`) keeps only the coroutine pair and promises `main`. The `gate` purpose adds its guarded export and `emscripten_sleep`. Authored `EM_ASYNC_JS` imports carry their own async declaration. |
 | `-sSUPPORT_LONGJMP=<sjlj> -sWASM_LEGACY_EXCEPTIONS=1` | the record's verified longjmp mode, `wasm`, with Emscripten 6.0.13's legacy EH encoding, matching every object and `liblua.a` |
 | `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
 | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | initial memory is the image's static data and main stack plus a 15 MiB heap, so static data never outgrows a fixed initial size (15 MiB is the heap a data-free image had under the former fixed 16 MiB; [measured sizes](#budgets)); coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
@@ -1619,7 +1620,7 @@ flag list.
 | `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
 | `-sFORCE_FILESYSTEM=1` | keeps Emscripten's filesystem and TTY layer in every image (see below) |
 | `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
-| `-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke","_titan_browser_release_callable","_titan_browser_close","_malloc","_free","_titan_browser_trace_identity"]` | the five promised bridge entries, the C buffer allocation and release used for argument marshalling, and the 64-hex image identity export; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
+| `-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke","_titan_browser_release_callable","_titan_browser_close","_malloc","_free","_titan_browser_trace_identity"]` | the four promised bridge entries, synchronous wrapper release, the C buffer allocation and release used for argument marshalling, and the 64-hex image identity export; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
 | `-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]` | the current heap view used by the loader, which calls the owner-wrapped exports directly rather than through `ccall` |
 | `-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]` | the only Emscripten module options the loader passes; the owner callbacks read by Titan's own JavaScript libraries are private Module properties |
 | `--js-library <sdk>/titan-browser-library.js`, `--js-library <sdk>/titan-browser-bridge.js`, `--js-library <sdk>/titan-browser-trace.js` | the completion/admission owner, the typed bridge imports, and the eager trace-map/stack-capture imports (all omitted for `lua-main`) |
@@ -2150,13 +2151,14 @@ public foreign functions. `driver.browser_c_image_contents` is the same
 boundary for protocol and test-owned C images. Options supply declarations, a
 protected initializer (empty for C-only controls), a program name, and the
 state-allocation status. The installed
-[`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout) defines the five
-promised export signatures, the shared struct layouts, and the JS imports.
+[`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout) defines the four
+promised export signatures, synchronous wrapper release, shared struct layouts,
+and JS imports.
 
 Initialization creates the owner Lua state and enters the image initializer
 under the shared protected gateway. `titan.browser` initializes and publishes
 its module-owned state record in ordinary dependency order, when linked.
-Main runs once on that initialized state and leaves it live. Each contained C entry
+Main runs once on that initialized state and leaves it live. Each promised C entry
 receives a nonzero unsigned 64-bit operation id, echoes it with its expected
 operation kind in exactly one completion, and returns only an admission code.
 The loader waits for both completion and physical promised-entry retirement.
@@ -2769,16 +2771,17 @@ public method contains. `titan_browser_entry_allowed(id, kind)` normalizes the
 unsigned identity and admits the C preamble once, only for the pending
 identity and kind; JSPI continuation wakes do not re-enter that preamble.
 
-Initialization wraps the five state-entering exports
+Initialization wraps the four promised state-entering exports
 (`titan_browser_initialize`, `titan_browser_entry`, `titan_browser_invoke`,
-`titan_browser_release_callable`, and `titan_browser_close`) and the gate's
+and `titan_browser_close`) and the gate's
 `titan_browser_gate_guarded` with this hook. Static `wasmExports[...]`
 accesses retain the explicit identity. Emscripten 6.0.13 disables
 import/export minification for JSPI, including O2/shrink controls; the
 optimized guard fixture asserts that pinned naming contract. The driver's
 lexical engine-entry export remains private; its published Module alias
 always rejects outside use. C-only state-neutral exports (`malloc`, `free`,
-the trace identity, and the gate observer) remain synchronous.
+the trace identity, and the gate observer) remain synchronous, as does the
+no-switch wrapper-release export.
 
 `poison(cause)` permanently blocks admission, rejects known parked engine
 gates, and poisons the loader owner after a fatal error. It never calls C to
@@ -2796,24 +2799,34 @@ inside a synchronous callback"`) when no promising entry holds the execution
 owner, when a [synchronous C callback](browser-bridge.md#synchronous-c-callbacks)
 runs (it then throws to the callback's caller), or when the main context is
 not current (`TitanBrowser.current !== 0`). Otherwise it hands the call to
-the loader owner, which also requires the state's active drive with no gate
-parked and no item in delivery.
+the loader owner. `titan.browser` has already required the owner's main
+thread, an active drive and no delivery in progress, and the loader does not
+test those again.
 
-A relinquish point settles the queued calls whose outcomes arrived. Outside
-disposal, every branch that parks a gate also schedules both output pumps on
-a microtask, so sinks run once the drive has suspended, never inside the
-import, and only while that gate is still parked; a numeric `IDLE` schedules
-none, so the coroutine switches of orphan unwinding that may follow it never
-meet a sink. Disposal is signalled once: the first relinquish after
-`dispose()` began (or a gate parked when it began) resolves `DISPOSING` after
-one turn. A turn (`mode` 0), or a wait with a queued owner
-item, parks a gate and schedules one turn-source macrotask. A wait with no
-wake source returns `IDLE` as a plain number, so JSPI does not suspend; the
-terminal `titan_mco_transfer` path already relies on that. Otherwise the wait
-parks its gate, created synchronously inside the import so a wake can never
-fire before it exists. Every resumption resolves the gate from the turn
-source, never directly from a microtask, with `DISPOSING` once disposal began
-and `RESUMED` otherwise.
+The loader owner decides in this order:
+
+1. **Disposal.** Disposal is signalled once: the first relinquish after
+   `dispose()` began (or a gate parked when it began) resolves `DISPOSING`
+   after one turn.
+2. **A turn.** `TURN = 0`, or any wait while an owner item is queued, parks a
+   gate and schedules one turn-source macrotask.
+3. **Nothing to wait for.** `WAIT = 1` with no loader wake source returns
+   `IDLE` as a plain number, so JSPI does not suspend; the terminal
+   `titan_mco_transfer` path already relies on that.
+4. **A wait.** Any other wait parks a gate until a wake. `WAIT_HELD = 2`
+   never returns `IDLE`: `titan.browser` passes it while the state has an
+   open `BrowserPin`, a wake source that only Titan knows about.
+
+A gate is created synchronously inside the import, so a wake can never fire
+before it exists. Every resumption resolves the gate from the turn source,
+never directly from a microtask, with `DISPOSING` once disposal began and
+`RESUMED` otherwise.
+
+Outside disposal, every branch that parks a gate also schedules both output
+pumps on a microtask, so sinks run once the drive has suspended, never
+inside the import, and only while that gate is still parked. A numeric
+`IDLE` schedules none, so the coroutine switches of orphan unwinding that
+may follow it never meet a sink.
 
 The turn source is `setImmediate` where the host defines it (Node) and
 otherwise one `MessageChannel` per instance, created on first use; neither
@@ -2867,16 +2880,20 @@ adds another asynchronous admission boundary.
 ### Logical operations and protected entries
 
 The loader holds one logical operation from validation and marshaling through
-all contained C entries, physical callable retirement, and stream flush.
+all contained C entries and stream flush.
 `TitanBrowser.enter` owns each promising C entry, including all private JSPI
 and collector transfers. Its per-entry `entered` flag resets for the next
 contained entry; no lifetime completion counter blocks later entries.
 
-Every C entry receives the next nonzero instance-local uint64 BigInt identity.
-The admission import normalizes Wasm's signed i64 presentation back to unsigned
-before comparison. The final identity is reserved for close: exhausted
-application admission rejects before marshaling, while remaining pinned
-callables retire with state close rather than consuming that last identity.
+Every promising C entry receives the next nonzero instance-local uint64 BigInt
+identity, and so does each item that a drive delivers. The admission import
+normalizes Wasm's signed i64 presentation back to unsigned before comparison.
+One allocator, `nextOperationId`, hands the identities out and keeps the
+final one for close. When the others are used up it throws
+`TITAN_BROWSER_STATE` without incrementing the counter. Admission itself does
+not test for exhaustion, so a method that allocates no identity still works:
+`notify` enqueues, and a `drain()` with nothing to deliver succeeds. A
+delivered item takes its identity before its arguments are marshalled.
 The pending record has that identity, the expected operation kind, and one
 completion slot. The non-suspending completion import validates identity and
 kind and copies all result/error/trace data while C owns it. Duplicate,
@@ -2895,13 +2912,23 @@ bare value (`null` for `is_nil()`, `BigInt` for `is_integer`, string for
 `is_handle`).
 
 Callable wrappers have module-private WeakMap brands and state/slot/generation
-records. Logical release invalidates immediately, while physical pin retirement
-uses the release entry at a complete safe point. A detached FIFO batch
-revalidates both its target and every branded argument before any Wasm
-allocation. A released target drops the notification; a released argument
-reports an error without Lua entry. State-close notification invalidates every
-callable, notification, request, and JS slot charged to that state, including
-close-phase slots created without Lua finalizer registration.
+records. `release()` marks the record released and removes it from the
+callable table, which invalidates the wrapper for every later use. Then,
+unless the instance is disposing or poisoned, it calls the synchronous export
+`titan_browser_release_callable`. That call is not an operation: it has no
+identity, no completion, and no notification error, and the loader ignores
+the status it returns. [Synchronous wrapper
+release](browser-bridge.md#synchronous-wrapper-release) describes the Titan
+side, including the collector stop and what a refused release leaves behind.
+
+A detached FIFO batch revalidates both its target and every branded argument
+before any Wasm allocation. A released target drops the notification. A
+released argument is a marshalling failure: a plain notification reports it
+through `onNotificationError` without entering Lua, and a request event
+becomes the request's failure event ([request
+boundary](browser-bridge.md#request-boundary)). State-close notification
+invalidates every callable, notification, request, and JS slot charged to that
+state, including close-phase slots created without Lua finalizer registration.
 
 `drain()` detaches one FIFO batch of notifications under one logical
 admission; queued calls stay behind. Each callback has a unique protected
@@ -2922,8 +2949,10 @@ the requesting method returns, never synchronously inside it.
 
 A drive is a span of one logical operation (its entry hosts the driver)
 between `titan_browser_host_drive_begin` and `titan_browser_host_drive_end`.
-The loader records the owner state token from `titan_browser_host_owner`
-once and accepts a drive only from that state inside an active operation.
+The loader records the owner state token from `titan_browser_host_owner`.
+`titan.browser` enforces drive ownership and order before reporting each
+transition; the loader holds the drive's host gate without repeating those
+checks.
 
 - **Admission.** While a drive is active, `call()` and `callTask()` made with
   no host invocation in flight are queued as `{kind: 'call'}` items in the
@@ -2933,28 +2962,43 @@ once and accepts a drive only from that state inside an active operation.
   exit, every application method rejects (`notify` throws)
   `TITAN_BROWSER_EXITED`.
 - **Delivery.** `host_batch` moves the owner's items present now into the
-  current batch; `host_item` revalidates each item as `drain()` does, marshals
-  its arguments, assigns it a fresh identity from the operation counter and
-  writes the delivery record; `host_settle` validates that identity, copies
-  the completion as `receiveCompletion` does, reports a notification's
-  failure as a callback error and stores a call's outcome; `host_item_done`
-  frees the item's allocations and unadopted temporaries and finishes a
-  request event's hold accounting. A call's promise settles at the next
-  relinquish point, or when the drive ends; a call queued too late for the
-  drive's last batch runs at the next safe point as an ordinary call.
-- **Wake sources.** A queued owner item, an open owner request or listener,
-  an open owner `BrowserPin` (the loader's `holds` count, kept by
-  `titan_browser_host_hold`), or an already scheduled wake keeps a waiting
-  relinquish parked; a JS call that might come later does not. Every enqueue
-  of an owner item, `dispose()`, `titan_browser_host_wake`, and the close of
-  the owner's last pin schedule the one coalesced turn-source macrotask that
-  resolves the parked gate ([relinquish import](#the-relinquish-import)), so
-  a parked wait re-checks its wake sources.
+  current batch. `host_item` revalidates each item as `drain()` does, assigns
+  it a fresh identity from the operation counter, marshals its arguments, and
+  writes the delivery record. `host_settle` validates that identity and
+  copies the completion as `receiveCompletion` does; it reports a
+  notification's failure as a callback error, and it settles a plain call's
+  promise there and then. `host_item_done` frees the item's allocations and
+  unadopted temporaries.
+  - *Items that cannot be marshalled.* A call's promise rejects with the
+    marshalling error. A request's success event becomes its failure event,
+    appended to the live queue. A request's failure event is reported through
+    `onNotificationError` and handed to Titan as `UNDELIVERED`, with the
+    target identity and nothing else, so that Titan can drop a one-shot's
+    holds ([request holds](browser-bridge.md#request-holds)). A plain
+    notification is reported and skipped.
+  - *When the awaiting code runs.* A queued call's promise settles while the
+    drive is still inside its turn. Its continuation runs at the next
+    microtask checkpoint, which is never under a Wasm frame but can fall
+    between two internal coroutine hops of the same turn. A call made from
+    that continuation is queued for a later turn.
+  - A call queued too late for the drive's last batch runs at the next safe
+    point as an ordinary call.
+- **Wake sources.** A waiting relinquish stays parked while the owner has a
+  queued item, an open request or listener, an open `BrowserPin`, or an
+  already scheduled wake; a JS call that might come later does not count. The
+  loader knows all of these except the pins, which `titan.browser` counts and
+  reports with the wait itself, as `WAIT_HELD`. Every enqueue of an owner
+  item, `dispose()`, and `titan_browser_host_wake` schedule the one coalesced
+  turn-source macrotask that resolves the parked gate ([relinquish
+  import](#the-relinquish-import)). `titan.browser` calls `wake` when the
+  owner's last pin closes, so the gate resumes with `RESUMED` and the drive's
+  next wait finds out whether a wake source remains.
 - **Synchronous C callbacks.** A C callback that enters Titan through
   `titan_browser_call_sync` is not an operation and takes no admission.
-  `callbackAdmit(state)`, behind `titan_browser_host_callback`, admits it
-  unless the instance is closing, exited or poisoned or the state is no
-  longer open, during a drive or not. JavaScript reached from the callback
+  `callbackAdmit`, behind `titan_browser_host_callback`, admits it unless the
+  instance is closing, exited or poisoned, during a drive or not.
+  `callback_state` has already required an open, configured state.
+  JavaScript reached from the callback
   gets ordinary admission: a binding the callback's Titan code calls counts
   in `inHost`, so reverse entries there reject `TITAN_BROWSER_REENTRY`, and an
   entry requested anywhere else starts in a microtask after the callback's
@@ -2968,14 +3012,23 @@ once and accepts a drive only from that state inside an active operation.
   listener, a module-scope function over a detachable cell, queues one
   notification of `cancel` with `String(signal.reason)`; settlement removes
   it and releases the cancel wrapper. On an idle instance the spawn entry
-  itself drives and its failure wins over a stored outcome; during a drive
-  the spawn call is queued and the promise settles at the relinquish point
-  after the outcome arrives.
+  itself drives, and its failure wins over a stored outcome. During a drive
+  the spawn call is queued, and its promise settles in one of three ways:
+  - a spawn entry that fails rejects the promise at once;
+  - an outcome that arrived before the spawn entry returned settles the
+    promise when that entry returns;
+  - otherwise the call waits in `openTasks`, and its outcome settles the
+    promise when it arrives.
+
+  Plain calls never enter `openTasks`, and a relinquish settles nothing.
 - **Exit.** `host_drive_end` with an exit status latches `exited`. `run()`
-  then reports `exited` unless its completion failed; a call or Task-form
-  call whose drive exited rejects `TITAN_BROWSER_EXITED`, as does every
-  queued call the exiting drive never delivered and every Task-form call
-  that joined it.
+  then reports `exited` unless its completion failed, and a call or Task-form
+  call whose own entry hosted the exiting drive rejects
+  `TITAN_BROWSER_EXITED`. Among the calls queued into that drive, those that
+  already settled keep their results, including a Task-form call whose Task
+  finished before the exit. The rest reject `TITAN_BROWSER_EXITED`: calls
+  that the drive never delivered, and Task-form calls whose Tasks had not
+  finished.
 - **Main failure.** `titan_browser_host_main_failed(state, message, length,
   trace, length)`, the import behind `browser.main_failed`, copies both byte
   ranges onto the active operation's token when that operation is `run` and
@@ -2984,11 +3037,11 @@ once and accepts a drive only from that state inside an active operation.
   `exited`, the mark as `failed` with status 1 and the copied message and
   trace, and otherwise `returned`. Every result carries `bytes` and `trace`,
   empty unless failed.
-- **Disposal.** `dispose()` settles every unsettled queued call with
-  `TITAN_BROWSER_DISPOSED` (an outcome that already failed keeps its failure)
-  and drops application notifications. With a drive active, or a registered
-  `titan:driver` to clean up and no exit, it keeps the owner state's request
-  events and lets new owner settlements keep queueing until the cleanup
+- **Disposal.** `dispose()` settles every unsettled queued call, including
+  `openTasks`, with `TITAN_BROWSER_DISPOSED` and drops application notifications.
+  A call that already settled keeps its result. With a drive active, or a
+  registered `titan:driver` to clean up and no exit, it keeps the owner state's
+  request events and lets new owner settlements keep queueing until the cleanup
   drive ends, deferring request cancellation to that point; `newRequest`
   still refuses new host work with `DISPOSED`. A parked drive is woken with
   the one-shot `DISPOSING`. `retireOwner` awaits the active operation; when
@@ -2996,7 +3049,7 @@ once and accepts a drive only from that state inside an active operation.
   callable under a `dispose` operation that defers its output to the final
   drain. Then it cancels every remaining request, awaits their terminal
   settlement, and runs the close entry as before.
-- **Abort.** Poison rejects every unsettled queued call, including the
+- **Abort.** Poison rejects every unsettled call, including `openTasks`, the
   current batch and the item in delivery, with the saved failure and drops
   the drive; its gate is never resolved.
 
@@ -3024,19 +3077,27 @@ failure releases the unreturned unit; an already accepted retained operation
 still owns its terminal retirement even if cancellation reports an error. C
 output needs no request unit.
 
+The loader keeps no account of the callables that a request holds.
+`titan.browser` owns those holds and decides when they drop ([request
+holds](browser-bridge.md#request-holds)). The loader's part is to drop a
+cancelled request's queued events, including the settlement of a one-shot
+that settled before the cancel, and to hand an undeliverable failure event
+back to a drive.
+
 Every request has both a success target and a mandatory failure target.
 One-shot `start` settlement enqueues one argument (the settled value marshalled
 by runtime type, with `undefined` mapped to `is_nil`), `listen` emissions
 enqueue each emitted argument by runtime type, and Promise rejection queues the
 failure notification with `(is_string(message), is_handle(thrown))`, creating
-`thrown`'s state-owned handle only on delivery. `onNotificationError` is not a
-substitute for the rejected request's outcome. It receives
-`{kind: 'callback' | 'cleanup', operation, error}` for errors without another
-caller: callback failures, secondary cleanup failures, and callerless physical
-release failure. Public operation labels are `initialize`, `run`, `call`,
-`drain`, `dispose`, and `notify`; work-announcement failure uses `requestDrain`
-and background physical release uses `release_callable`. Failed physical
-release is not retried; state close remains the retirement fallback.
+`thrown`'s state-owned handle only on delivery. A success event that cannot
+be marshalled, when it is queued or when it is delivered, queues that same
+failure notification instead. `onNotificationError` is not a substitute for
+the request's outcome. It receives
+`{kind: 'callback' | 'cleanup', operation, error}` for errors that have no
+other caller: a callback that raises, a failure event that cannot itself be
+marshalled, and secondary cleanup failures. Public operation labels are
+`initialize`, `run`, `call`, `callTask`, `drain`, `dispose`, and `notify`;
+work-announcement failure uses `requestDrain`.
 
 ### Output, disposal, and observation
 
@@ -3058,8 +3119,8 @@ sealed after a gate therefore wait for the next gate or the final flush, never
 only for a sink call to resolve. The operation's final flush awaits a running
 pump, then flushes again and drains everything left, and the pump's failures
 join that flush's. A sink call increments `inHost`.
-Titan failure remains primary while both deliverable stream flushes and
-deferred retirement are attempted. An otherwise successful operation returns
+Titan failure remains primary while both deliverable stream flushes are
+attempted. An otherwise successful operation returns
 its first cleanup failure; every secondary failure is reported once through
 the tagged observer. A secondary sink failure during a failed operation stays
 pending for disposal, while an unrelated or empty flush does not return it
@@ -3071,7 +3132,7 @@ sink through a detachable gate, and makes that stream terminal so it can never
 overlap the pending sink. Accepted C work retires, retained host work settles,
 and close runs as the last legitimate owner-held promised entry. The backend's
 permanent block is installed only after close, or immediately on poison.
-Capture the first failure where the action, retirement, or sink fails, not
+Capture the first failure where the action or sink fails, not
 after awaiting both streams. Disposal cannot replace an already captured
 failure while interrupting its flush. One shared interruption record is
 reported once as cleanup even if both streams are interrupted. Only an

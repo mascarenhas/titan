@@ -105,8 +105,8 @@ addToLibrary({
 
   titan_browser_host_drive_end__deps: ['$TitanBridge'],
   titan_browser_host_drive_end__sig: 'viii',
-  titan_browser_host_drive_end: (state, status, exited) =>
-    TitanBridge.trusted('driveEnd', state >>> 0, status | 0, exited !== 0),
+  titan_browser_host_drive_end: (_state, status, exited) =>
+    TitanBridge.trusted('driveEnd', status | 0, exited !== 0),
 
   titan_browser_host_main_failed__deps: ['$TitanBridge'],
   titan_browser_host_main_failed__sig: 'vipppp',
@@ -123,23 +123,14 @@ addToLibrary({
 
   titan_browser_host_item__deps: ['$TitanBridge'],
   titan_browser_host_item__sig: 'iip',
-  titan_browser_host_item: (state, out) => TitanBridge.trusted('nextItem', state >>> 0, out >>> 0),
+  titan_browser_host_item: (_state, out) => TitanBridge.trusted('nextItem', out >>> 0),
 
   titan_browser_host_item_done__deps: ['$TitanBridge'],
   titan_browser_host_item_done__sig: 'vij',
   titan_browser_host_item_done: (state, id) =>
     TitanBridge.trusted('itemDone', state >>> 0, BigInt.asUintN(64, id)),
 
-  titan_browser_host_release_next__deps: ['$TitanBridge'],
-  titan_browser_host_release_next__sig: 'iip',
-  titan_browser_host_release_next: (state, out) => TitanBridge.trusted('nextRelease', state >>> 0, out >>> 0),
-
   titan_browser_host_settle__deps: ['$TitanBridge'],
   titan_browser_host_settle__sig: 'vp',
   titan_browser_host_settle: record => TitanBridge.trusted('settleQueued', record >>> 0),
-
-  // Open BrowserPins per state: a wake source for the owner's drive.
-  titan_browser_host_hold__deps: ['$TitanBridge'],
-  titan_browser_host_hold__sig: 'vii',
-  titan_browser_host_hold: (state, delta) => TitanBridge.trusted('hold', state >>> 0, delta | 0),
 });

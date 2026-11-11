@@ -93,18 +93,20 @@ code leaves open once no live Task remains.
 with the same functions and contract. It runs on JavaScript timers that the
 SDK owns instead of libuv, so their timing is the browser's:
 
-- `sleep(milliseconds)` arms one `setTimeout` and resumes the Task when it
-  fires. The delay is at least the requested time, subject to the browser's
-  clamping and throttling: timers in a background tab can fire much later.
-  Cancelling an accepted sleep clears its JavaScript timer at once.
+- `sleep(milliseconds)` waits at least the requested time, subject to the
+  browser's clamping and throttling: timers in a background tab can fire much
+  later. A JavaScript timer takes at most 2,147,483,647 ms (about 24.8 days);
+  a longer sleep waits through several timers in a row. Cancelling an
+  accepted sleep clears its current JavaScript timer at once.
 - A negative duration raises the same `OperationError`, with name `"EINVAL"`
   and operation `"timer.sleep"`; its `code` is the browser's negated `EINVAL`.
 - `sleep(0)` and `yield()` arm no JavaScript timer. The Task resumes in a
   later turn of the [browser driver](async-io.md#the-browser-target), after
   the driver gives the event loop one macrotask, so never in the same browser
   task. This also avoids the 4 ms minimum that nested `setTimeout` calls get.
-- A Ticker runs on `setInterval`. Missed or throttled intervals coalesce into
-  one pending tick, as above.
+- A Ticker runs on `setInterval` for periods up to 2,147,483,647 ms, and on a
+  chain of one-shot timers for longer periods. Missed or throttled intervals
+  coalesce into one pending tick, as above.
 - A Ticker left open closes when its Runtime closes, after the last Task
   finishes, and later `tick()` calls return `false`.
 - Disposing the instance cancels every Task with `"instance disposed"`, so a

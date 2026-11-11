@@ -7,4 +7,6 @@
 TValue scheduler_new_child(lua_State *L);
 void scheduler_child_check(lua_State *L, TValue owner);
 void scheduler_close_child(lua_State *L, TValue owner);
+void scheduler_fail_deliveries(int count);
+int scheduler_delivery_failures(void);
 #endif

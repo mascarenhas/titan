@@ -1,4 +1,4 @@
-import {decode, encode, observe, rejection, settledMarker, thrown, until} from './support.mjs';
+import {decode, encode, observe, rejection, settledMarker, thrown, until, watchTimers} from './support.mjs';
 
 // Harness for the async scheduler owner (spec/stdlib/titan/async/browser_tests):
 // its bindings, a macrotask ticker, and the drives it disposes or that exit.
@@ -9,35 +9,8 @@ function join(chunks) {
   return bytes;
 }
 
-// Pending JavaScript timers armed through the global setTimeout and
-// setInterval, with their delays; the SDK's titan:timeout and titan:interval
-// sources arm theirs there.
-const liveTimers = new Map();
-
-function watchTimers() {
-  const saved = {setTimeout, clearTimeout, setInterval, clearInterval};
-  // Browsers require the global object as the receiver.
-  const call = (name, ...args) => saved[name].apply(globalThis, args);
-  globalThis.setTimeout = (callback, delay, ...args) => {
-    const id = call('setTimeout', (...values) => { liveTimers.delete(id); callback(...values); }, delay, ...args);
-    liveTimers.set(id, delay);
-    return id;
-  };
-  globalThis.clearTimeout = id => { liveTimers.delete(id); call('clearTimeout', id); };
-  globalThis.setInterval = (callback, delay, ...args) => {
-    const id = call('setInterval', callback, delay, ...args);
-    liveTimers.set(id, delay);
-    return id;
-  };
-  globalThis.clearInterval = id => { liveTimers.delete(id); call('clearInterval', id); };
-  return () => { Object.assign(globalThis, saved); liveTimers.clear(); };
-}
-
-function countTimers(delay) {
-  let count = 0;
-  for (const armed of liveTimers.values()) if (armed === delay) count++;
-  return count;
-}
+// Shared spy: count pending timers and manually fire held long-delay chunks.
+let timers;
 
 // One macrotask on the driver's turn source: setImmediate where the host has
 // it (Node), otherwise a MessageChannel message.
@@ -96,6 +69,13 @@ function makeHost(context, image) {
     delay(ms, value) {
       return {kind: 'detachable', promise: new Promise(resolve => { setTimeout(() => resolve(value), Number(ms)); })};
     },
+    released_settlement(value) {
+      const promise = Promise.resolve(value);
+      // The first microtask queues release after requestFulfilled snapshots it,
+      // but before the driver can enter its next host turn.
+      queueMicrotask(() => queueMicrotask(() => value.release()));
+      return {kind: 'detachable', promise};
+    },
     never() { return {kind: 'detachable', promise: new Promise(() => {})}; },
     held(ms) { return work('retained', 'held', ms); },
     late(ms) { return work('detachable', 'late', ms); },
@@ -111,7 +91,8 @@ function makeHost(context, image) {
       }};
     },
     dispose_now() { host.disposing = observe(host.instance.dispose()); },
-    host_timers(delay) { return BigInt(countTimers(Number(delay))); },
+    host_timers(delay) { return BigInt(timers.count(Number(delay))); },
+    fire_host_timer(delay) { return timers.fire(Number(delay)); },
     arm_marker() { host.marked = false; nextTurn(() => { host.marked = true; }); },
     marked() { return host.marked; },
   };
@@ -146,10 +127,14 @@ async function gate(context, image) {
     const out = decode(join(host.stdout)), err = decode(join(host.stderr));
     context.assert(result.kind === 'returned' && result.status === 0, `scheduler gate failed:\n${out}${err}`);
     const passed = out.match(/\[  PASSED  \] (\d+) tests?\./);
-    context.assert(passed && Number(passed[1]) === 16, `the gate did not pass its sixteen cases:\n${out}`);
+    context.assert(passed && Number(passed[1]) === 21, `the gate did not pass its twenty-one cases:\n${out}`);
     context.assert(err.includes('uncaught error in async Task: ordinary Task failure'),
       `an ordinary Task failure was not reported on stderr:\n${err}`);
-    context.assert(host.notificationErrors.length === 0, 'a gate case reported a notification error');
+    context.assert(host.notificationErrors.length === 1 &&
+      host.notificationErrors[0].kind === 'callback' &&
+      host.notificationErrors[0].operation === 'run' &&
+      host.notificationErrors[0].error.message === 'injected delivery allocation failure',
+      'the drive double fault did not report exactly one callback error');
     return Number(passed[1]);
   } finally { await host.close(); }
 }
@@ -270,6 +255,25 @@ async function disposal(context, image) {
     context.assert([...host.notes].sort().join('|') === 'held cleanup instance disposed|held parked|' +
       'late cleanup instance disposed|late parked', `retire notes: ${notes(host)}`);
   } finally { await host.close(); }
+  for (const settleChunk of [false, true]) {
+    host = makeHost(context, image);
+    try {
+      await host.instance.initialize();
+      const ticking = host.task('long_ticker_wait');
+      await until(context, () => timers.count(2147483647) === 1, 'the long ticker never armed before disposal');
+      context.assert(timers.fire(2147483647), 'the first long ticker chunk was not held');
+      const lastChunk = 852516353; // 3000000000 - 2147483647
+      await until(context, () => timers.count(lastChunk) === 1, 'the long ticker never armed its last chunk');
+      // A settled chunk survives retainOwnerWork and fails to re-arm during
+      // disposal delivery; its Titan callback must catch that failure.
+      if (settleChunk) context.assert(timers.fire(lastChunk), 'the final long ticker chunk was not held');
+      const disposing = host.instance.dispose();
+      await rejection(context, ticking, 'DISPOSED');
+      await disposing;
+      context.assert(timers.held.size === 0, 'disposing a long ticker left its chunk armed');
+      context.assert(host.notificationErrors.length === 0, 'disposing a long ticker reported a notification error');
+    } finally { await host.close(); }
+  }
   return summary;
 }
 
@@ -381,7 +385,7 @@ async function ownership(context, image) {
 export async function run(context) {
   context.assert(context.args.length === 1, 'pass the scheduler image');
   const image = await context.image(context.args[0]);
-  const restoreTimers = watchTimers();
+  timers = watchTimers();
   const restoreTurns = watchTurns();
   try {
     const report = {verdict: 'PASS'};
@@ -392,5 +396,5 @@ export async function run(context) {
     await exits(context, image);
     await ownership(context, image);
     context.stdout(encode('SCHEDULER ' + JSON.stringify(report) + '\n'));
-  } finally { restoreTurns(); restoreTimers(); }
+  } finally { restoreTurns(); timers.restore(); }
 }

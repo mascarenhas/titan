@@ -1,4 +1,4 @@
-import {decode, encode, makeHost, observe, rejection, settledMarker, thrown, until} from './support.mjs';
+import {decode, encode, makeHost, observe, rejection, settledMarker, thrown, until, watchTimers} from './support.mjs';
 
 // The drive interface without async: owner identity, SDK bindings, idle and
 // queued Task-form calls, waits, idle detection and AbortSignal admission.
@@ -39,7 +39,7 @@ async function surface(context, image) {
     const result = await host.instance.run(['return']);
     context.assert(result.kind === 'returned' && result.status === 7, 'a run without a drive');
     const snapshot = host.snapshot();
-    context.assert(!snapshot.driving && snapshot.settling === 0 && snapshot.queue === 0, 'drive state leaked');
+    context.assert(!snapshot.driving && snapshot.openTasks === 0 && snapshot.queue === 0, 'drive state leaked');
     return host.probes.length;
   } finally { await host.instance.dispose(); }
 }
@@ -255,13 +255,11 @@ async function queue(context, image) {
     host.hooks.kick = () => queueMicrotask(() => { host.hopCall = host.call('echo', 7n); });
     await host.task('hops');
     context.assert(await host.hopCall === 7n, 'a call from a microtask between internal hops');
-    const releases = host.snapshot().releases;
     host.fn('spare').release();
-    context.assert(host.snapshot().releases === releases + 1, 'a wrapper release was not deferred');
+    await rejection(context, host.fn('spare').call(), 'DISPOSED');
     host.instance.notify(host.fn('note'), 'n2');
     await until(context, () => host.notes.length === 2, 'the second notification');
-    context.assert(host.snapshot().releases === 0 && host.snapshot().driving,
-      'the driver did not apply deferred releases between turns');
+    context.assert(host.snapshot().driving, 'wrapper release interrupted the drive');
     const reason = {why: 'aborted while waiting'};
     controller.abort(reason);
     const cancelled = await rejection(context, hanging, 'CANCELLED');
@@ -273,6 +271,40 @@ async function queue(context, image) {
     context.assert(await host.leftCall === 8n, 'a call left by an ended drive did not run');
     return host.notes.length;
   } finally { await host.instance.dispose(); }
+}
+
+// A queued call settles before the turn's jobs finish hopping. Its
+// continuation keeps ordinary between-hops admission, not a new entry.
+async function midTurnCalls(context, image) {
+  const report = {};
+  for (const form of ['call', 'callTask']) {
+    const host = await disposeHost(context, image);
+    try {
+      const controller = new AbortController();
+      const hanging = host.task('hang', [], {signal: controller.signal});
+      await until(context, () => host.snapshot().parked, `${form}: hang did not park`);
+      let hoppingTurn;
+      host.hooks.kick = () => { hoppingTurn = host.probes.length; };
+      const first = form === 'call' ? host.call('echo', 21n) : host.task('echo', [21n]);
+      const hopping = host.task('hops');
+      context.assert(await first === 21n, `${form}: queued result changed`);
+      const snapshot = host.snapshot();
+      const settledTurn = host.probes.length;
+      context.assert(snapshot.driving && snapshot.active && !snapshot.parked &&
+        hoppingTurn === settledTurn, `${form}: continuation did not run between this turn's hops`);
+      const following = host.call('echo', 22n).then(value => {
+        context.assert(host.probes.length > settledTurn, `${form}: continuation's call ran in the same turn`);
+        return value;
+      });
+      await rejection(context, observe(host.instance.drain()), 'REENTRY');
+      context.assert(await following === 22n, `${form}: continuation's queued call changed`);
+      await hopping;
+      report[form] = 'mid-turn; follow-on call in later turn; drain refused';
+      controller.abort('done');
+      await rejection(context, hanging, 'CANCELLED');
+    } finally { await host.instance.dispose(); }
+  }
+  return report;
 }
 
 async function disposeHost(context, image) {
@@ -397,105 +429,46 @@ async function exits(context, image) {
   host.hooks.kick = () => queueMicrotask(() => { host.leftCall = host.call('echo', 9n); });
   const hopping = host.task('hops');
   const joined = host.task('exit_with', [6n]);
-  for (const promise of [hanging, hopping, joined]) {
-    const error = await rejection(context, promise, 'EXITED');
-    context.assert(error.status === 6, 'a Task-form call in the exiting drive');
-  }
+  context.assert(await hopping === null && await joined === null,
+    'completed Task-form calls lost their results when the drive exited');
+  const unfinished = await rejection(context, hanging, 'EXITED');
+  context.assert(unfinished.status === 6, 'an unfinished Task-form call in the exiting drive');
   const undelivered = await rejection(context, host.leftCall, 'EXITED');
   context.assert(undelivered.status === 6, 'a call the exiting drive never delivered');
   await host.instance.dispose();
 }
 
-// A titan:interval period beyond the host's timer range, on held host
-// timeouts: chunked, never early, re-armed for the whole period at each tick,
-// and cleared by a cancellation during a chunk.
-async function longInterval(context, host, spy) {
-  const period = 3e9, first = 2147483647, rest = period - first;
-  const held = () => [...spy.held.values()].map(timer => timer.delay);
-  const fire = () => {
-    context.assert(spy.held.size === 1, `expected one held chunk, found ${held()}`);
-    const [[id, timer]] = spy.held;
-    spy.held.delete(id);
-    timer.callback(...timer.rest);
-  };
-  const quiet = async () => { for (let tick = 0; tick < 5; tick++) await context.tick(); };
-  const ticking = host.task('ticks', [2n, period]);
-  await until(context, () => spy.held.size === 1 && host.snapshot().parked, 'a long titan:interval was not armed');
-  for (let tick = 1; tick <= 2; tick++) {
-    context.assert(held()[0] === first, `period ${tick} did not start with a whole first chunk: ${held()}`);
-    const woken = host.probes.length;
-    fire();
-    await quiet();
-    context.assert(held()[0] === rest && host.probes.length === woken,
-      `the first chunk of period ${tick} ticked early or lost the remainder: ${held()}`);
-    fire();
-    if (tick === 1) await until(context, () => host.probes.length > woken, 'a whole long period never ticked');
-  }
-  context.assert(await ticking === 2n && spy.held.size === 0,
-    'a long titan:interval did not tick twice or kept a host timeout after its listener closed');
-  const controller = new AbortController();
-  const cancelled = host.task('ticks', [1n, period], {signal: controller.signal});
-  await until(context, () => spy.held.size === 1 && host.snapshot().parked, 'a second long titan:interval was not armed');
-  fire();
-  context.assert(held()[0] === rest, 'the second long titan:interval did not reach its last chunk');
-  controller.abort('stop');
-  await rejection(context, cancelled, 'CANCELLED');
-  context.assert(spy.held.size === 0, 'a cancellation during a chunk left its host timeout');
-  return [first, rest];
-}
-
-// SDK timer sources: chunked delays, cancellation and interval cleanup.
-// Timeouts of at least 10^8 ms (about 28 hours) never reach the host: the
-// test fires them.
+// SDK timer sources: one bounded host timer, cancellation and interval cleanup.
 async function timers(context, image) {
-  const saved = {setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
-    setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval};
-  const spy = {timeouts: new Map(), delays: [], held: new Map(), intervals: new Map(), periods: []};
-  globalThis.setTimeout = function (callback, delay, ...rest) {
-    spy.delays.push(delay);
-    if (delay >= 1e8) {
-      const id = Symbol('held timeout');
-      spy.held.set(id, {callback, delay, rest});
-      return id;
-    }
-    const id = saved.setTimeout.call(globalThis, (...values) => {
-      spy.timeouts.delete(id);
-      callback(...values);
-    }, delay, ...rest);
-    spy.timeouts.set(id, delay);
-    return id;
-  };
-  globalThis.clearTimeout = function (id) {
-    if (spy.held.delete(id)) return;
-    spy.timeouts.delete(id);
-    saved.clearTimeout.call(globalThis, id);
-  };
-  globalThis.setInterval = function (callback, period, ...rest) {
-    const id = saved.setInterval.call(globalThis, callback, period, ...rest);
-    spy.intervals.set(id, period);
-    spy.periods.push(period);
-    return id;
-  };
-  globalThis.clearInterval = function (id) {
-    spy.intervals.delete(id);
-    saved.clearInterval.call(globalThis, id);
-  };
+  const spy = watchTimers();
   const host = makeHost(context, image);
+  host.bindings.timer_type_error = error => context.assert(error instanceof TypeError,
+    'a timer range failure did not retain the exact host TypeError');
   try {
     await host.instance.initialize();
     await host.call('register');
-    await host.task('timer_cancel', [3e9]);
-    context.assert(spy.delays.includes(2147483647) && spy.held.size === 0,
-      'a long titan:timeout was not chunked or survived its cancellation');
+    await host.task('timer_cancel', [2147483647]);
+    context.assert(spy.delays.filter(delay => delay === 2147483647).length === 1 && spy.held.size === 0,
+      'the maximum titan:timeout was not armed once or survived its cancellation');
+    context.assert(await host.call('timer_range', 'titan:interval', 2147483647) === 'accepted' &&
+      spy.periods.filter(period => period === 2147483647).length === 1 && spy.intervals.size === 0,
+      'the maximum titan:interval was not armed once or survived its request close');
+    for (const source of ['titan:timeout', 'titan:interval']) {
+      const arms = spy.delays.length + spy.periods.length;
+      context.assert(await host.call('timer_range', source, 2147483648) ===
+        (source === 'titan:timeout' ? 'titan:timeout delay must be a Number from 0 to 2147483647' :
+          'titan:interval period must be a Number above 0 and at most 2147483647'),
+        `${source} did not raise a BrowserError holding a TypeError for an over-range argument`);
+      context.assert(spy.delays.length + spy.periods.length === arms,
+        `${source} armed a host timer for an over-range argument`);
+    }
     context.assert(await host.task('nap', [3]) === 'woke' && ![...spy.timeouts.values()].includes(3),
       'a fired titan:timeout left its host timer');
     context.assert(await host.task('ticks', [3n, 5]) === 3n && spy.periods.includes(5) && spy.intervals.size === 0,
       'titan:interval did not tick or kept its host interval');
-    const chunks = await longInterval(context, host, spy);
-    return {intervals: spy.periods.filter(period => period === 5).length, longIntervalChunks: chunks};
+    return {intervals: spy.periods.filter(period => period === 5).length};
   } finally {
-    Object.assign(globalThis, saved);
-    await host.instance.dispose();
+    try { await host.instance.dispose(); } finally { spy.restore(); }
   }
 }
 
@@ -520,6 +493,34 @@ async function pinWakeSource(context, image) {
     context.assert(decode(orphaned.bytes) === 'mini driver became idle while jobs were waiting',
       'a wait with every pin closed did not go idle');
     return 'parked until called back';
+  } finally { await host.instance.dispose(); }
+}
+
+// Only closing the last pin wakes this held wait: the callback neither calls
+// browser.wake() nor queues a loader call, and no host request can wake it.
+async function lastPinCloseWake(context, image) {
+  const host = makeHost(context, image);
+  try {
+    await host.instance.initialize();
+    await host.call('register');
+    await host.call('pin_last_close');
+    const waiting = host.task('await_callback');
+    await until(context, () => host.snapshot().parked, 'the last-pin job did not park');
+    for (let tick = 0; tick < 5; tick++) await context.tick();
+    const parked = host.snapshot();
+    context.assert(parked.parked && !parked.turnScheduled && parked.queue === 0 && parked.requests === 0,
+      'the last-pin wait had another scheduled wake source');
+    const before = host.probes.length;
+    context.assert(host.fire('last_close') === 0, 'the last-pin callback failed');
+    await until(context, () => host.probes.length > before, 'closing the last pin did not wake the parked drive');
+    const resumed = host.probes[before].status;
+    context.assert(resumed === 0, 'closing the last pin did not resume the held wait with RESUMED');
+    context.assert(await waiting === 'pins closed', 'the last-pin callback did not finish its waiting job');
+    const idleBefore = host.probes.length;
+    const orphaned = await rejection(context, host.task('await_callback'), 'TITAN');
+    context.assert(decode(orphaned.bytes) === 'mini driver became idle while jobs were waiting' &&
+      host.probes[idleBefore]?.status === 1, 'the next wait after the last-pin wake did not report IDLE');
+    return {resumed, idle: host.probes[idleBefore].status};
   } finally { await host.instance.dispose(); }
 }
 
@@ -583,10 +584,12 @@ export async function run(context) {
   report.delayedSinks = await delayedSinks(context, image);
   report.heldSinkHandoffs = await heldSinkHandoffs(context, image);
   report.notes = await queue(context, image);
+  report.midTurnCalls = await midTurnCalls(context, image);
   report.disposal = await disposal(context, image);
   await exits(context, image);
   report.timers = await timers(context, image);
   report.pinWakeSource = await pinWakeSource(context, image);
+  report.lastPinCloseWake = await lastPinCloseWake(context, image);
   report.callbackSwitch = await callbackSwitch(context, image);
   context.stdout(encode('MINI-DRIVER ' + JSON.stringify(report) + '\n'));
 }

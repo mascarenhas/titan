@@ -2143,7 +2143,9 @@ the page runs again, so the gap grows with the work each Task does before it
 waits or yields.
 
 If every remaining Task is waiting and nothing can wake one (no queued host
-work, open request or listener), the driver stops the Runtime with
+work, open request or listener, or open
+[`BrowserPin`](standard-library-browser.md#synchronous-c-callbacks)), the
+driver stops the Runtime with
 `"async Runtime became idle while Tasks were waiting"` and unwinds the waiting
 Tasks, as a native drive does with its own message.
 

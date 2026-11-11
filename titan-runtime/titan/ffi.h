@@ -144,8 +144,9 @@ static inline int titan_posix_getsockname(int descriptor,
 
 int errorhandler(lua_State *L);
 
-/* True while a __gc finalizer runs (ordinary collection or lua_close). GCTM
-** sets GCSTPGC around every finalizer call; no other running code sees it. */
+/* True while a __gc finalizer runs (ordinary collection or lua_close), and
+** inside the browser wrapper-release entry. Both bracket the call with
+** GCSTPGC; the release body cannot reach coroutine or async operations. */
 /* Implementation notes: doc/implementation/coroutines.md#finalizer-context */
 static inline int titan_in_finalizer(lua_State *L) {
   return (G(L)->gcstp & GCSTPGC) != 0;
@@ -280,6 +281,11 @@ TITAN_RUNTIME_FUNC void titan_unwind_clear_trace(lua_State *L);
 static inline lua_State *lmacro_mainthread(lua_State *L) { return mainthread(G(L)); }
 static inline ptrdiff_t lmacro_get_errfunc(lua_State *L) { return L->errfunc; }
 static inline void lmacro_set_errfunc(lua_State *L, ptrdiff_t old) { L->errfunc = old; }
+
+/* An entry that must not collect saves these bits, adds GCSTPGC as GCTM
+** does around a finalizer, and restores them. The debt is untouched. */
+static inline int lmacro_get_gcstp(lua_State *L) { return G(L)->gcstp; }
+static inline void lmacro_set_gcstp(lua_State *L, int stop) { G(L)->gcstp = cast_byte(stop); }
 static inline ptrdiff_t lmacro_savestack_top(lua_State *L) { return savestack(L, L->top.p - 1); }
 static inline void *lmacro_unconst(const void *p) { return (void *)p; }
 

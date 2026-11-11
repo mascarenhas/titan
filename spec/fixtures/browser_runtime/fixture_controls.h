@@ -21,6 +21,10 @@ EM_JS(void, gate_test_state_closed, (uint32_t token), {
   if (observe) observe(token);
 });
 
+EM_JS(int, titan_bridge_test_release_due_gc, (), {
+  return Module['titanBrowserBridge'].options.bindings.r1_release_result();
+});
+
 /* Test-owned controls deliberately go only to an explicit fixture binding;
  * generated images never expose the raw Module/factory in their public API. */
 EM_JS(void, gate_test_publish, (), {
@@ -66,12 +70,31 @@ EM_JS(void, gate_test_publish, (), {
         get slotsAtFailure() { return slotsAtFailure; },
       });
     },
+    failNextAllocations(count) {
+      const allocate = owner.allocate;
+      owner.allocate = function() {
+        if (--count === 0) owner.allocate = allocate;
+        throw new Error('injected delivery allocation failure');
+      };
+      return () => { owner.allocate = allocate; };
+    },
     failNextEntryStack(kind, freeSlots, maxFailures) {
+      if (kind === 'release_callable') {
+        var attempt = {};
+        var release = Module['_titan_browser_release_callable'];
+        Module['_titan_browser_release_callable'] = function(state, slot, generation) {
+          Module['_titan_browser_release_callable'] = release;
+          Module['_titan_bridge_test_enter_with_free_stack'](freeSlots, maxFailures, state);
+          try { return attempt.status = release(state, slot, generation); }
+          finally { Module['_titan_bridge_test_reset_entry_stack'](); }
+        };
+        return attempt;
+      }
       var entry = owner.entry;
       owner.entry = function(entryKind, ...args) {
         if (entryKind === kind) {
           owner.entry = entry;
-          Module['_titan_bridge_test_enter_with_free_stack'](freeSlots, maxFailures);
+          Module['_titan_bridge_test_enter_with_free_stack'](freeSlots, maxFailures, 0);
           try {
             return entry.call(owner, entryKind, ...args);
           } finally {
@@ -81,14 +104,11 @@ EM_JS(void, gate_test_publish, (), {
         return entry.call(owner, entryKind, ...args);
       };
     },
-    failNextRelease() {
-      var entry = owner.entry;
-      owner.entry = function(kind, ...args) {
-        if (kind === 'release_callable') {
-          owner.entry = entry;
-          return entry.call(owner, kind, 0, 0, 0);
-        }
-        return entry.call(owner, kind, ...args);
+    refuseNextRelease() {
+      var release = Module['_titan_browser_release_callable'];
+      Module['_titan_browser_release_callable'] = function() {
+        Module['_titan_browser_release_callable'] = release;
+        return release(0, 0, 0);
       };
     },
     invalidateHandle(value) {

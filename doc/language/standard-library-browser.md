@@ -135,23 +135,40 @@ exported closures sharing a mutable local keep sharing that cell; this is not
 closure transfer or a capture snapshot.
 
 A callable stays pinned while any holder needs it:
-- a live JavaScript wrapper; or
-- an active request or listener (including a settled request whose notification
-  is still queued for `drain()`).
+- a live JavaScript wrapper;
+- a request or listener that can still deliver to it, including a settled
+  one-shot request whose notification is still queued; or
+- an open [`BrowserPin`](#synchronous-c-callbacks).
 
-Wrapper `release()`, request retirement, and state close drop their holds. A
-JavaScript wrapper's `release()` is synchronous and logically invalidates that
-wrapper immediately; physical unpinning in Titan occurs at a safe point once no
-holder remains. Re-exporting the same callable before a queued wrapper release
-is delivered cancels that queued release and issues a fresh live wrapper. If a
-crossing fails before JavaScript receives the callable wrapper (for example, a
-later argument raises during marshalling, or a host `call` or `start` target is
-not callable), any provisional pin created for that crossing is rolled back in
-the same operation. Once a wrapper has been passed into a host binding
-function, it remains live even if that binding later throws, returns an
-unmarshallable value, or returns an invalid request ownership form; for a
-refused `start` or `listen`, only the request's `completion` and `failure`
-holds are rolled back.
+Each holder lets go at a definite point:
+
+| Holder | Lets go when |
+| --- | --- |
+| JavaScript wrapper | `release()` is called |
+| One-shot request (`start`) | its `completion` or `failure` returns or raises, or the request is cancelled or closed |
+| Listener (`listen`) | the request is cancelled or closed |
+| `BrowserPin` | the pin is closed or collected |
+
+State close lets go of everything that remains. A one-shot whose outcome can
+never be delivered (its event cannot be marshalled, and neither can the
+failure that replaces it) may keep its callables until the request is closed
+or its state closes, so close the requests you keep.
+
+A wrapper's `release()` is synchronous: the wrapper stops working at once,
+and Titan drops the wrapper's hold in the same call, leaving the other
+holders in place. If the instance cannot be entered then (during disposal,
+after an exit, or after an engine failure), that hold lasts until state
+close. Exporting the function again after a release gives JavaScript a fresh
+wrapper, never the released one.
+
+If a crossing fails before JavaScript receives the callable wrapper (for
+example, a later argument raises during marshalling, or a host `call` or
+`start` target is not callable), any provisional pin created for that crossing
+is rolled back in the same operation. Once a wrapper has been passed into a
+host binding function, it remains live even if that binding later throws,
+returns an unmarshallable value, or returns an invalid request ownership
+form; for a refused `start` or `listen`, only the request's `completion` and
+`failure` holds are rolled back.
 
 Cross-heap cycles are explicit ownership: a JavaScript object retaining a
 Titan callable wrapper which retains a `BrowserHandle` back to that object
@@ -303,27 +320,33 @@ BrowserRequest:close()
 
 Both methods invoke the host binding synchronously with the supplied
 `BrowserValue` arguments without awaiting host work, and pin `completion` and
-`failure` for the life of the request.
+`failure` until the request can deliver nothing more ([callables and
+pinning](#callables-and-pinning)).
 - For a one-shot `start` request, `completion` receives one `BrowserValue`
   argument: the host promise's settled value marshalled by runtime type
   (`undefined` becomes `BrowserValue.is_nil()`).
 - For a `listen` request, each `emit(...args)` call passes its arguments
   marshalled by runtime type to `completion`.
 - For both, `failure` receives two arguments:
-  `(BrowserValue.is_string(message), BrowserValue.is_handle(thrown))`—the
-  diagnostic message text and a `BrowserHandle` retaining the exact
-  thrown/rejected JavaScript value (even when a primitive was thrown). If a
-  `start` settlement value or `listen` emission argument cannot be marshalled
-  (for example, an out-of-range `BigInt`, an ill-formed UTF-16 string with a
-  lone surrogate, or a foreign/released callable wrapper), that marshalling
-  `TypeError` or bridge handle error is delivered to `failure` in the same way.
+  `(BrowserValue.is_string(message), BrowserValue.is_handle(thrown))`, the
+  diagnostic message text and a `BrowserHandle` retaining the exact thrown or
+  rejected JavaScript value (even when a primitive was thrown).
+- A `start` settlement value or `listen` emission argument that cannot be
+  marshalled (for example, an out-of-range `BigInt`, an ill-formed UTF-16
+  string with a lone surrogate, or a foreign or released callable wrapper) is
+  delivered to `failure` in the same way, with the marshalling error as
+  `thrown`. Most such errors are found when the event is queued. One found
+  only at delivery, such as a wrapper released in the meantime, joins the
+  queue behind the events already waiting, so `failure` runs in a later
+  batch.
 
 Because callables are not signature-checked at registration time, type errors
 move from registration to call time: if `completion` or `failure` raises when
 delivered, that callback failure is reported through `onNotificationError`
 (`kind: "callback"`, with `operation: "drain"`, or the operation that contains
-the drive). Host promise rejection itself is delivered to `failure`, not
-`onNotificationError`.
+the drive). A failure event that itself cannot be marshalled is reported
+there too, because no callable is left to receive it. Host promise rejection
+is delivered to `failure`, not to `onNotificationError`.
 
 A start binding returns one of two explicit forms:
 
@@ -345,7 +368,8 @@ ordered until the request is closed. Unregister is idempotent and stops new
 admission before captured owners retire.
 Cancelling or closing a listener from one of its callbacks also suppresses its
 remaining events in the current detached batch. A normally settled one-shot
-request still delivers its queued success or failure notification.
+request still delivers its queued success or failure notification unless it is
+cancelled or closed before delivery.
 
 On an idle instance the host calls `drain()` to deliver one detached FIFO
 batch. While a drive is active, the driver delivers the owner state's queued
@@ -353,7 +377,8 @@ notifications and request events between its turns instead, in the same FIFO
 order and at most once each; `drain()` then rejects with
 `TITAN_BROWSER_REENTRY`. Imports which enqueue more work add it to the next
 batch. A released target is retired without delivery; a released queued
-argument is reported without entering Lua.
+argument of a plain notification is reported without entering Titan. A request
+event instead follows the failure rule above.
 
 Disposal first closes application admission, then permits only physical
 retirement, then closes the state. With an active drive or an `async` Runtime
@@ -375,8 +400,8 @@ entry, and `create` rejects a `bindings` key with that prefix with
 
 | Name | Use | Behavior |
 | --- | --- | --- |
-| `titan:timeout` | `start(completion, failure, is_float(ms))` | A detachable one-shot timer: `completion` receives `is_nil()` after `ms` milliseconds. Delays beyond the host's 32-bit timer range are re-armed in chunks. `cancel` clears the host timer. A negative or non-`Number` delay makes `start` raise a `browser.BrowserError` holding a `TypeError`. |
-| `titan:interval` | `listen(tick, failure, is_float(ms))` | A listener: `tick` receives no arguments every `ms` milliseconds. A period beyond the host's 32-bit timer range repeats through chunked host timeouts, re-armed for the whole period at each tick. Unregistering clears the host timer. A non-positive or non-`Number` period makes `listen` raise a `browser.BrowserError` holding a `TypeError`. |
+| `titan:timeout` | `start(completion, failure, is_float(ms))` | One detachable host timer: `completion` receives `is_nil()` after `ms` milliseconds. `cancel` clears the host timer. A delay outside 0 through 2,147,483,647 ms, or a non-`Number` delay, makes `start` raise a `browser.BrowserError` holding a `TypeError`. |
+| `titan:interval` | `listen(tick, failure, is_float(ms))` | One host interval: `tick` receives no arguments every `ms` milliseconds. Unregistering clears the host interval. A non-positive period, a period above 2,147,483,647 ms, or a non-`Number` period makes `listen` raise a `browser.BrowserError` holding a `TypeError`. |
 | `titan:driver` | reserved | The registration point for the `async` runtime's Task entry points. Only the instance owner state's registration is used; others are ignored. |
 
 Their callbacks are ordinary queued notifications, delivered by `drain()` or
@@ -412,15 +437,14 @@ function main_failed(message: string, trace: string)
   notifications, request settlements and listener events, and queued calls.
   Each runs once, in FIFO order, outside any Task; a failure is reported
   through `onNotificationError` (a notification) or rejects that call's
-  promise. Items queued while it runs wait for the next `deliver()`. It then
-  performs the callable releases the bridge deferred to a safe point.
-- `relinquish(wait)` gives the event loop back. It first settles the queued
-  calls whose results arrived. With `wait = false` it resumes after one host
-  macrotask (`setImmediate` in Node, a `MessageChannel` message in browsers,
-  never a clamped timer) and returns `RELINQUISH_RESUMED`. With `wait = true`
-  it returns `RELINQUISH_IDLE` at once when the state has no wake source (no
-  queued item, open request or listener, or pending wake); otherwise it
-  resumes after a wake source fires, from a macrotask, with
+  promise. Items queued while it runs wait for the next `deliver()`.
+- `relinquish(wait)` gives the event loop back. With `wait = false` it resumes
+  after one host macrotask (`setImmediate` in Node, a `MessageChannel` message
+  in browsers, never a clamped timer) and returns `RELINQUISH_RESUMED`. With
+  `wait = true` it returns `RELINQUISH_IDLE` at once when the state has no
+  wake source (no queued item, open request or listener, open `BrowserPin`,
+  or pending wake);
+  otherwise it resumes after a wake source fires, from a macrotask, with
   `RELINQUISH_RESUMED`. While the drive is relinquished, buffered output,
   including C standard I/O, goes to the sinks; an immediate `RELINQUISH_IDLE`
   leaves it buffered for the next relinquish or the end of the operation.
@@ -430,8 +454,10 @@ function main_failed(message: string, trace: string)
   returns `RELINQUISH_IDLE`.
 - `drive_end(exit_code)` ends the drive. A present `exit_code` latches the
   instance as exited with its low 32 bits as a signed status: `run()`
-  reports `exited` and later entries reject `TITAN_BROWSER_EXITED`
-  ([loader exit](browser-target.md#exit)).
+  reports `exited` and later entries reject `TITAN_BROWSER_EXITED`. Queued
+  calls still running or never delivered reject too; a call that already
+  settled keeps its result, including a Task-form call whose Task finished
+  before the exit ([loader exit](browser-target.md#exit)).
 - `deliver()`, `relinquish()` and `drive_end()` require the driving owner's
   main thread outside a delivered handler and raise `"browser delivery …"`,
   `"browser relinquish …"` or `"browser drive_end requires the driving
@@ -711,9 +737,11 @@ detached state; detaching a state does not close it. Handles from a closed state
 never become valid again, even if a new state reuses its memory.
 
 During close, synchronous binding calls, copied output admission, and
-idempotent release remain valid until that invalidation. New requests,
-listeners, and reverse application calls are refused, including for an
-independent state closing while its containing instance is not disposing.
+idempotent handle `close()` remain valid until that invalidation. A wrapper's
+`release()` stays valid too; a function released then is let go when the
+state finishes closing. New requests, listeners, and reverse application
+calls are refused, including for an independent state closing while its
+containing instance is not disposing.
 
 An object's earlier-registered finalizer runs after the browser record. Its
 `close()` and callable release operations are no-ops; binding lookup and calls

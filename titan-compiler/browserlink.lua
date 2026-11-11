@@ -131,7 +131,7 @@ function M.profile(descriptor, options)
         '"titan_mco_transfer","titan_mco_destroy"'
     local promised = entry == "titan" and
         '"titan_browser_initialize","titan_browser_entry","titan_browser_invoke",' ..
-        '"titan_browser_release_callable","titan_browser_close","titan_mco_entry"' or '"main"'
+        '"titan_browser_close","titan_mco_entry"' or '"main"'
     if purpose == "gate" then
         imports = imports .. ',"emscripten_sleep"'
         promised = promised .. ',"titan_browser_gate_guarded"'
