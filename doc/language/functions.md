@@ -247,10 +247,10 @@ record Slot
 end
 
 function use_and_drop(slot: Slot): boolean
-    -- `(slot.resource as Resource):use()` written directly in this body
-    -- could keep the Resource reachable until the function returns.
+    -- `slot.resource:use()` written directly in this body could keep the
+    -- Resource reachable until the function returns.
     local used = (function (): boolean
-        return (slot.resource as Resource):use()
+        return slot.resource:use()
     end)()
     slot.resource = nil    -- nothing in this function holds the Resource now
     return used

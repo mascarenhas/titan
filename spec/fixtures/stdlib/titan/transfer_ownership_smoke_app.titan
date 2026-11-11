@@ -151,7 +151,7 @@ local function run_smoke()
   -- function, whose roots are cleared when it returns: the collection below
   -- must find the field as the Sender's last home.
   test.assert((function (): boolean
-    return (dup_decoded.right as thread.Sender<|integer|>):try_send(77)
+    return dup_decoded.right:try_send(77)
   end)())
   dup_decoded.right = nil
   gc.collect()
@@ -188,7 +188,7 @@ local function run_smoke()
   gc.collect()
   local mal_ok: SmokeMalformedClaim = transfer.decode_message(mal_ok_raw)
   test.assert((function (): boolean -- as above
-    return (mal_ok.tx as thread.Sender<|integer|>):try_send(88)
+    return mal_ok.tx:try_send(88)
   end)())
   mal_ok.tx = nil
   gc.collect()
