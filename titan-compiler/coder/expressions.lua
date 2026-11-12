@@ -2732,9 +2732,12 @@ function coder._code_counted_string(ctx, node, is_test)
     -- Publish before polling, as lua_pushlstring does, including in tight
     -- byte-copy loops with no intervening Titan function entry.
     local string_stats, result = makestring(ctx, bytes, nil, count)
+    -- The poll may shrink and move the Lua stack: rebase `_base` afterward.
+    ctx.uses_base_off = true
     return table.concat({
         pointer_stats, length_stats, count_stats, guards, string_stats,
         "luaC_checkGC(L);",
+        "_base = restorestack(L, _base_off);",
     }, "\n"), result
 end
 

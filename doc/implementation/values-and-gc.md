@@ -514,7 +514,15 @@ collector itself:
   frozen action graph can allocate a nested wrapper
   (`coder._adapter_actions_allocate`), before stack reservation, `_base`, and
   every raw stack pointer;
-- after publishing a freshly allocated source closure.
+- after publishing a freshly allocated source closure;
+- after a counted pointer-to-string copy (`ptr as string(n)`), whose string is
+  published before the poll as `lua_pushlstring` would.
+
+Every poll after `_base` exists is followed by
+`_base = restorestack(L, _base_off)`. A step that reaches the atomic phase
+traverses the running thread and may shrink its stack (`luaD_shrinkstack`),
+moving it; a stale `_base` would then become `L->top.p` at the next native
+return.
 
 A pure-arithmetic loop carries no GC polling; an allocating Titan loop polls
 once per iteration and cannot starve the collector.
