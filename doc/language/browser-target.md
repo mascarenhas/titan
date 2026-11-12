@@ -1032,10 +1032,12 @@ unified Titan/Lua contract as native builds:
   frames from a module initialized only in the parent state, those outer frames
   fall back to their C symbol name (or `?` when no symbol is known), as on
   native hosts.
-* If a Titan frame's program counter has no line mapping inside its function
-  body, the frame uses the no-line form `<basename>: in <display name>` (with
-  the function's declaring `.titan` basename, or `?` when none is known), never
-  a synthetic `:0:` line.
+* If a Titan frame's program counter has no `.titan` line mapping inside its
+  function body, the frame uses the no-line form
+  `<basename>: in <display name>` (with the function's declaring `.titan`
+  basename, or `?` when none is known), never a synthetic `:0:` line. That
+  covers an unmapped instruction and C code that the optimizer inlined into
+  the function: a Titan frame never shows a C file.
 * Lua frames (`source:line: in name` or `source: in name`), genuine Lua C
   functions (`[C]: in name`), and `(...tail calls...)` interleave with
   compiled Titan runs in innermost-to-outer call order. Entry wrappers,
@@ -1055,11 +1057,11 @@ unified Titan/Lua contract as native builds:
 
 **Optimized frames.** As in a native production build, a `production` image
 has no frame for a function that the optimizer inlined into its caller. A
-frame that does appear is still exact, and an inlined function's line is
-reported under the name of the function that absorbed it, even when the
-inlined code is the runtime's own C: a production `async` program's traces
-can show `minicoro.c:66: in titan.coroutine.coro_entry_trampoline` where
-`validation` shows `coroutine.titan:44`. Titan's own trace fixture
+frame that does appear is still exact, and an inlined Titan function's line is
+reported under the name of the function that absorbed it. Where the inlined
+code is the runtime's own C, the frame has no line: a production `async`
+program's traces show `coroutine.titan: in titan.coroutine.coro_entry_trampoline`
+where `validation` shows `coroutine.titan:44`. Titan's own trace fixture
 `trace_uncaught.titan` shows the difference:
 
 ```titan

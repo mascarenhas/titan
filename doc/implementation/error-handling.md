@@ -411,25 +411,30 @@ populate six typed arrays without allocating one JS object per segment:
 `pcs` (`Uint32Array`), `sources` (`Int32Array`), and 1-based `lines`
 (`Uint32Array`, retaining 1-field unmapped VLQ segments as explicit
 `source = -1, line = 0` markers), along with the defined functions' half-open
-code ranges `starts` and `ends` (`Uint32Array`) and each function's first valid
-in-function mapped source index `first` (`Int32Array`, which
+code ranges `starts` and `ends` (`Uint32Array`) and each function's first
+in-function mapped `.titan` source index `first` (`Int32Array`). That is the
+function's declaring file:
 [function-definition `#line` stamps](codegen-overview.md#mixed-source-line-attribution)
-keep on the function's own declaring `.titan` file rather than a preceding
-contributor's trailing `#line`), plus the `names` and basename-normalized
-`bases` arrays. A line lookup (`lookup`) succeeds
+keep it from being a preceding contributor's trailing `#line`, and a C
+source, such as runtime C that the optimizer inlined ahead of the first
+statement, is never recorded. The index also holds the `names` and
+basename-normalized `bases` arrays. A line lookup (`lookup`) succeeds
 (`RESOLVED`, `line > 0`) only when:
 
 1. `pc` lies within `[start, end)` of a defined function body `j`;
 2. if `HAS_FUNCTION_INDEX` is set, `function_index` equals `imports + j`; and
-3. the greatest mapping segment with `offset <= pc` inside `[start, end)` exists
-   and is not an unmapped marker.
+3. the greatest mapping segment with `offset <= pc` inside `[start, end)` exists,
+   is not an unmapped marker, and names a `.titan` source.
 
 Unlike Emscripten's stock `WasmSourceMap.normalizeOffset`, which extends the
 preceding segment across function boundaries and unmapped gaps, this check
 never attributes an unmapped `dynCall_*` wrapper or a no-debug Lua C function to
 an adjacent Titan function's lines, and never invents a line from a function
 index alone. If PC validation fails, symbolization still retains a verified
-function name and declaring basename with `line = 0` (`UNKNOWN`).
+function name and declaring basename with `line = 0` (`UNKNOWN`). A PC in C
+that was inlined into a Titan function fails condition 3, so its frame has the
+declaring basename and no line, and no frame names a C file (titan#382). Titan
+code inlined from another `.titan` file keeps its own file and line.
 
 **Per-frame classification, entry registration (`TITAN_ENTRIES_KEY`), and
 rendering.** After `titan_browser_trace_capture` returns, `titan_trace_capture`
@@ -442,13 +447,18 @@ never discarded by a colliding filename:
   even when it has no mapped source line.
 * **Registered Titan symbol:** the resolved C symbol is present in
   `registry[TITAN_NAMES_KEY]`.
-* **Mapped Titan source frame:** after dropping `titan.c` and Lua core/library
-  files in `titan_is_lua_source`, a record whose resolved basename ends in
-  `.titan` (covering `name.browser.titan` variants) is kept.
-* **Dropped:** `titan.c`, `titan_is_lua_source` files, and unmapped non-Titan
-  C/Lua/`dynCall_*` helpers that matched neither `titanentry` nor
-  `TITAN_NAMES_KEY`. Arbitrary C symbols are not classified as Titan frames
-  merely because their name contains `_titan`.
+* **Titan source frame:** a record whose resolved basename ends in `.titan`
+  (covering `name.browser.titan` variants) is kept. The basename is the
+  adapter's: that of the PC's `.titan` segment, or the body's declaring
+  `.titan` file.
+* **Dropped:** everything else, that is C and Lua functions and `dynCall_*`
+  helpers that matched neither `titanentry` nor `TITAN_NAMES_KEY`. The adapter
+  gives them no `.titan` basename. `titan_trace_capture` still tests for
+  `titan.c` and the `titan_is_lua_source` files first; since titan#382 the
+  adapter never returns a C basename, so those tests decide nothing. An
+  unregistered C function is kept only if Titan code was inlined into it, in
+  which case it is shown under that code's file. Arbitrary C symbols are not
+  classified as Titan frames merely because their name contains `_titan`.
 
 On native targets, `titan_cfunction_is_entry` symbolizes a `CallInfo`'s
 `lua_CFunction` pointer through `libbacktrace`. In WebAssembly, a
