@@ -192,7 +192,7 @@ describe("selective binary dependency compatibility", function()
         ]])
         runs("assert(consumer.answer() == 42)")
         replace([[
-            foreign function increment(input: long): int return input as foreign int end
+            foreign function increment(input: long): int return input as int end
         ]], consumer_image)
         rejects("increment")
     end)

@@ -62,12 +62,12 @@ record CoalescingReceiverDuplexEnvelope
 end
 
 local foreign function coalescing_receiver_counter_retain(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] + 1
 end
 
 local foreign function coalescing_receiver_counter_release(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] - 1
 end
 
@@ -630,8 +630,8 @@ function test_receiver_close_and_shutdown_dispose_endpoints_without_decode(
 end
 
 local foreign function coalescing_receiver_count(counter: *void, slot: int)
-  local counts = counter as foreign *int
-  counts[slot] = counts[slot] + (1 as foreign int)
+  local counts = counter as *int
+  counts[slot] = counts[slot] + (1 as int)
 end
 
 local coalescing_receiver_abandoned_inbox: async.Receiver? = nil

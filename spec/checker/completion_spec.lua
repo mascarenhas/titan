@@ -214,6 +214,29 @@ describe('completion analysis',function()
             absent(names,'integer','ffi')
         end
     end)
+    it('captures the unprefixed type positions of a foreign function',function()
+        for _,source in ipairs({'foreign function f(x:@) end','foreign function f():@ return 1 end',
+            'foreign function f() local x:@=0 end','foreign function f(p:*void) local x=p as @ end',
+            'foreign function f() for i:@=0,1 do end end',
+            'foreign function f() local x:unsigned @=0 end',
+            'foreign function f(p:*void) if p ~= nil then local x=p as const *unsigned lo@ng end end'}) do
+            local names,result=analyze(source)
+            assert.truthy(names.int,source);assert.truthy(names['unsigned long long'],source)
+            assert.equal('foreign',result.kind,source)
+            absent(names,'integer','ffi')
+        end
+        local p=assert(prepare('foreign function f(p:*void) local x=p as const *unsigned lo@ng long end'))
+        assert.equal('foreign',p.kind);assert.equal('unsigned lo',p.prefix)
+        assert.matches('as const *__titan_completion_hole end',p.text,1,true)
+        -- A member named like a block keyword and a function-pointer type do
+        -- not end the body; its own `end` does.
+        p=assert(prepare('foreign function f(m:*M,c:function(int):int) if m.function==c then end local x:unsigned @ end'))
+        assert.equal('foreign',p.kind)
+        p=assert(prepare('foreign function f() repeat until 1 end function g(r:value) local x=r:@ end'))
+        assert.equal('colon',p.kind)
+        p=assert(prepare('function g(r:value) local x=r as unsigned @ end'))
+        assert.equal('lexical',p.kind)
+    end)
     it('does not weaken ordinary checking of member reference statements',function()
         local ast=assert(parser.parse('./test.titan','record R field:integer end function f(r:R) r.field end'))
         local _,errors=checker.check('test',ast,'','./test.titan')

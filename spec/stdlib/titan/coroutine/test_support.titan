@@ -24,7 +24,7 @@ local const UNWIND_BUFFER_SIZE = 8192
 -- read module constants: 8192 is UNWIND_BUFFER_SIZE.
 local foreign function unwind_buffer_append(buffer: *void, separator: const *char,
                                             text: const *char)
-  local bytes = buffer as foreign *char
+  local bytes = buffer as *char
   local used = ffi.strlen(bytes)
   if used + ffi.strlen(separator) + ffi.strlen(text) < 8192 then
     if used > 0 then

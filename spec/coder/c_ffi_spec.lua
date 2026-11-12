@@ -141,7 +141,7 @@ describe("C FFI code generation", function()
                 return ffi.memcmp(%q, expected, %d) == 0
             end
             local foreign function raw_bytes(expected: const *char): int
-                return ffi.memcmp(%q, expected, %d as foreign size_t)
+                return ffi.memcmp(%q, expected, %d as size_t)
             end
             function raw_matches(expected: string): boolean
                 return raw_bytes(expected) == 0
@@ -164,8 +164,8 @@ describe("C FFI code generation", function()
                 end
                 local foreign function raw_bytes(expected: const *char): int
                     return ffi.memcmp(
-                        (("raw" as foreign const *void) as foreign function(): void) as foreign const *void,
-                        expected, 3 as foreign size_t)
+                        (("raw" as const *void) as function(): void) as const *void,
+                        expected, 3 as size_t)
                 end
                 function raw_matches(expected: string): boolean
                     return raw_bytes(expected) == 0

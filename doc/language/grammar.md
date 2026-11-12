@@ -146,7 +146,7 @@ tlstaticfunc ::= [local] function AnyName '.' AnyName [typeparams]
 tlfunc ::= [local] function AnyName [typeparams]
            '(' [parlist] ')' [':' rettype] block end
 tlforeignfunc ::= [local] foreign function AnyName
-                  '(' [foreignparlist] ')' [':' foreigntype] block end
+                  '(' [foreignparlist] ')' [':' foreigntype] fblock end
 tlvar ::= [local] [const] AnyName
           (':' type ['=' exp] | '=' exp)
 tlrecord ::= [local] record AnyName [typeparams] {recordfield} end
@@ -178,7 +178,9 @@ namedtype ::= AnyName [typeargs] | AnyName '.' AnyName [typeargs]
 ```
 
 A missing named Titan function return annotation means zero results; a missing foreign
-function return annotation means C `void`. When a lambda omits its return
+function return annotation means C `void`. A foreign function's body is an
+`fblock`, specified under [foreign function bodies](#foreign-function-bodies).
+When a lambda omits its return
 annotation, its expected function type supplies the results when available;
 otherwise it has zero results. Results are not inferred from the body.
 A module variable needs an
@@ -413,3 +415,81 @@ once that terminal dispatch chooses a construct, its syntactic descents commit
 with explicit error labels. Bounded token-only convenience rules are the
 exception. Lexing a complete identifier or literal is separate from syntactic
 lookahead.
+
+## Foreign function bodies
+
+The body of a `tlforeignfunc` has a grammar of its own. It is the raw-C
+subset of the statement and expression grammar above, and it has
+`foreigntype` wherever that grammar has `type`: a body writes C types without
+`foreign`, as a foreign signature does.
+
+```text
+fblock ::= {fstatement} [freturn]
+fstatement ::= ';' | do fblock end
+             | while fexp do fblock end
+             | repeat fblock until fexp
+             | if fexp then fblock {elseif fexp then fblock} [else fblock] end
+             | for fdecl '=' fexp ',' fexp [',' fexp] do fblock end
+             | [local] const fdecllist '=' fexplist
+             | local fdecllist ['=' fexplist]
+             | fvarlist '=' fexplist | break | fcallstmt
+freturn ::= return [fexp] [';']
+fdecl ::= Name [':' foreigntype]
+fdecllist ::= fdecl {',' fdecl}
+fvarlist ::= fprefixexp {',' fprefixexp}
+fcallstmt ::= fprefixexp
+fexplist ::= fexp {',' fexp}
+fexp ::= fe3
+fe3 ::= fe4 {('==' | '~=' | '<' | '>' | '<=' | '>=') fe4}
+fe4 ::= fe5 {'|' fe5}
+fe5 ::= fe6 {'~' fe6}
+fe6 ::= fe7 {'&' fe7}
+fe7 ::= fe9 {('<<' | '>>') fe9}
+fe9 ::= fe10 {('+' | '-') fe10}
+fe10 ::= fe11 {('*' | '/' | '//' | '%') fe11}
+fe11 ::= fe12 [as foreigntype]
+fe12 ::= {funop} fe13
+fe13 ::= fprefixexp {'^' {funop} fprefixexp}
+funop ::= '#' | '-' | '~'
+fprefixexp ::= fbaseexp {fsuffixexp}
+fbaseexp ::= nil | false | true | Numeral | LiteralString
+           | Name | '(' fexp ')'
+           | foreign foreigntype '.' foreignop
+fsuffixexp ::= '.' AnyName | '[' fexp ']'
+             | '(' [fexplist] ')' | '{' [fnamedarglist] '}'
+             | LiteralString
+fnamedarglist ::= fnamedarg {fieldsep fnamedarg} [fieldsep]
+fnamedarg ::= AnyName '=' fexp
+```
+
+The level numbers are those of the ordinary expression grammar. `fe1`, `fe2`
+and `fe8` are absent, because a foreign body has no `or`, `and` or `..`; the
+remaining operators keep their precedence and associativity. Statements,
+operators and literals have C meaning; see
+[foreign functions](foreign-functions.md#body-subset).
+
+Every other construct is a syntax error with a message of its own, reported
+at the first token that shows the construct:
+
+* statements: `defer`, `catch`, `raise`, `case`, and generic `for ... in`;
+* expressions: lambdas, `{...}` constructors, `:` method selection, generic
+  type arguments, `...` and spreads, ranges, `is`, the counted `as T(n)` cast,
+  `..`, `and`, `or`, and `not`;
+* forms: `?` on a declaration or after a type, more than one return value,
+  `owned` types, `{...}` Array and Map types, and `foreign` before a body
+  type, whose message says to delete it.
+
+A Titan type name such as `string` or `value` is an ordinary C type name
+here, as in a foreign signature, and a Titan function type fails where a
+foreign function type would. The allocation and layout pseudo-expression
+keeps its `foreign`: in an expression nothing else can start a type, since a
+bare `T` is a term (so `T.sizeof` would select a field) and a type that begins
+with `*` or `const` cannot begin an expression.
+
+After the type of a cast, `(` is an error instead of the start of a new
+statement, because the ordinary grammar reads it as the count of a counted
+cast. Write `;` after the cast when a parenthesized statement follows.
+
+The grammar admits `#` and every allocation form; semantic analysis rejects
+`#` and an allocation that is not the
+[zeroed storage of a local](foreign-functions.md#zeroed-locals).

@@ -644,11 +644,11 @@ local foreign function counter_click(kind: int, event: const *EmscriptenMouseEve
                                      identity: *void): bool
   local result = foreign titan_browser_sync_result.new()
   local status = ffi.titan_browser_call_sync(
-    identity as foreign const *titan_browser_identity, 0, nil, result)
+    identity as const *titan_browser_identity, 0, nil, result)
   if status ~= ffi.TITAN_BROWSER_OK then
     if result.message ~= nil then
       ffi.fprintf(ffi.stderr, "click handler failed: %.*s\n",
-        result.message_length as foreign int, result.message as foreign const *char)
+        result.message_length as int, result.message as const *char)
     end
   end
   ffi.free(ffi.lmacro_unconst(result.message))

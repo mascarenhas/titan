@@ -199,16 +199,16 @@ end
 
 local foreign function getaddrinfo_callback(native: *uv_getaddrinfo_t,
                                        status: int, result: *addrinfo)
-  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
+  local owner = ffi.uv_req_get_data(native as *uv_req_t) as *Udata
+  local loop = ffi.uv_loop_get_data(native.loop) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "getaddrinfo_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign GetaddrinfoEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as GetaddrinfoEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer, result)
+  entry(L, module, handler, owner, loop, status as lua_Integer, result)
   ffi.lua_settop(L, top)
 end
 
@@ -359,16 +359,16 @@ end
 
 local foreign function getnameinfo_callback(native: *uv_getnameinfo_t, status: int,
     hostname: const *char, service: const *char)
-  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
+  local owner = ffi.uv_req_get_data(native as *uv_req_t) as *Udata
+  local loop = ffi.uv_loop_get_data(native.loop) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "getnameinfo_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign GetnameinfoEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as GetnameinfoEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer,
+  entry(L, module, handler, owner, loop, status as lua_Integer,
         hostname, service)
   ffi.lua_settop(L, top)
 end

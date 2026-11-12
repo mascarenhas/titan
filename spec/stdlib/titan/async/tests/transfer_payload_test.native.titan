@@ -25,7 +25,7 @@ end
 -- This stateful C entry receives the *caller's slot*, not an unguarded raw
 -- value. It is passed as an ordinary Lua C function to independent states.
 local foreign function transfer_discard_slot_lua(state: *lua_State): int
-  local slot = ffi.lua_touserdata(state, 1) as foreign *(*void)
+  local slot = ffi.lua_touserdata(state, 1) as *(*void)
   local raw = slot[0]
   slot[0] = nil
   transfer_mod.discard_message(raw)
@@ -263,48 +263,48 @@ local function transfer_payload_raises(action: function (): (), message: string)
   test.assert(caught, message)
 end
 local foreign function test_resource_retain(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] + 1
 end
 
 local foreign function test_resource_release(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] - 1
 end
 
 local foreign function test_resource_other_release(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] - 100
 end
 
 local foreign function transfer_limited_lua_alloc(
     ud: *void, ptr: *void, osize: size_t, nsize: size_t): *void
-  if nsize == (0 as foreign size_t) then
+  if nsize == (0 as size_t) then
     ffi.free(ptr)
     return nil
   end
-  local ctrl = ud as foreign *size_t
+  local ctrl = ud as *size_t
   if ctrl ~= nil then
     local mode = ctrl[0]
-    if mode == (1 as foreign size_t) then
+    if mode == (1 as size_t) then
       if ptr == nil then
-        if ctrl[1] > (0 as foreign size_t) then
-          ctrl[1] = ctrl[1] - (1 as foreign size_t)
+        if ctrl[1] > (0 as size_t) then
+          ctrl[1] = ctrl[1] - (1 as size_t)
         end
-        if ctrl[1] == (0 as foreign size_t) then
-          ctrl[2] = ctrl[2] + (1 as foreign size_t)
-          if ctrl[2] >= (2 as foreign size_t) then
-            ctrl[0] = 0 as foreign size_t
+        if ctrl[1] == (0 as size_t) then
+          ctrl[2] = ctrl[2] + (1 as size_t)
+          if ctrl[2] >= (2 as size_t) then
+            ctrl[0] = 0 as size_t
           end
           return nil
         end
       end
-    elseif mode == (2 as foreign size_t) then
+    elseif mode == (2 as size_t) then
       if nsize >= ctrl[1] then
         if nsize > osize then
-          ctrl[2] = ctrl[2] + (1 as foreign size_t)
-          if ctrl[2] >= (2 as foreign size_t) then
-            ctrl[0] = 0 as foreign size_t
+          ctrl[2] = ctrl[2] + (1 as size_t)
+          if ctrl[2] >= (2 as size_t) then
+            ctrl[0] = 0 as size_t
           end
           return nil
         end
@@ -1330,7 +1330,7 @@ local function make_recursive_receiver_raw(): (
 end
 
 local foreign function transfer_count_module_load(state: *lua_State): int
-  local count = ffi.lua_touserdata(state, 1) as foreign *int
+  local count = ffi.lua_touserdata(state, 1) as *int
   count[0] = count[0] + 1
   return 0
 end

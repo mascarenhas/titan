@@ -95,26 +95,26 @@ catch
 end
 
 local foreign function process_callback(native: *uv_process_t, exit_status: int64_t, term_signal: int)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "process_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign ExitEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as ExitEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, exit_status as foreign lua_Integer, term_signal as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, exit_status as lua_Integer, term_signal as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function process_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "process_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -150,7 +150,7 @@ local foreign function consume_spawn_pipes(options: *uv_process_options_t)
   for index = 0, options.stdio_count - 1 do
     local entry = options.stdio[index]
     if (entry.flags & ffi.UV_CREATE_PIPE) ~= 0 then
-      local owner = ffi.uv_handle_get_data(entry.data.stream as foreign *uv_handle_t) as foreign *Udata
+      local owner = ffi.uv_handle_get_data(entry.data.stream as *uv_handle_t) as *Udata
       local eligibility = ffi.titan_record_field(owner, "pipe_t", "eligibility")
       eligibility.available = 0
     end

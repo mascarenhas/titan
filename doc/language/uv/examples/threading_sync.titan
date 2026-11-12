@@ -1,7 +1,7 @@
 local uv = import "uv"
 
 foreign function fill(argument: *void): void
-  local item = argument as foreign *int
+  local item = argument as *int
   item[0] = 42
 end
 

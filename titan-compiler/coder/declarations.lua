@@ -927,7 +927,6 @@ function coder._foreign_raw_exp(ctx, node)
             node._c_operator and node._c_operator.lhs_target or nil,
             "operand")
         local op = node._c_operator and node._c_operator.cop or node.op
-        if op == "not" then op = "!" end
         return stats, "(" .. op .. "(" .. exp .. "))"
     elseif tag == "Ast.ExpBinop" then
         local trait = node._c_operator
@@ -940,10 +939,6 @@ function coder._foreign_raw_exp(ctx, node)
             op = "!="
         elseif op == "~" then
             op = "^"
-        elseif op == "and" then
-            op = "&&"
-        elseif op == "or" then
-            op = "||"
         end
         return lstats .. "\n" .. rstats,
             "((" .. lhs .. ") " .. op .. " (" .. rhs .. "))"

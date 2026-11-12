@@ -5,7 +5,7 @@ foreign type NativeThreadPtr = *void
 -- These callbacks are deliberately C-only. The public work/thread APIs accept
 -- portable C pointers; no libuv header, layout, or Titan/Lua worker entry is used.
 local foreign function increment_cell(argument: *void)
-  local cell = argument as foreign *int
+  local cell = argument as *int
   cell[0] = cell[0] + 1
 end
 
@@ -287,19 +287,19 @@ function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context
 end
 
 local foreign function native_token_increment_worker(argument: *void)
-  local slots = argument as foreign *NativeThreadPtr
+  local slots = argument as *NativeThreadPtr
   local go = slots[0]
-  local cell = slots[1] as foreign *int
+  local cell = slots[1] as *int
   uv.native_sem_wait(go)
   cell[0] = cell[0] + 1
 end
 
 local foreign function native_token_detached_worker(argument: *void)
-  local slots = argument as foreign *NativeThreadPtr
+  local slots = argument as *NativeThreadPtr
   local go = slots[0]
   local done = slots[1]
   local mutex = slots[2]
-  local cell = slots[3] as foreign *int
+  local cell = slots[3] as *int
   uv.native_sem_wait(go)
   uv.native_mutex_lock(mutex)
   cell[0] = cell[0] + 2
@@ -310,10 +310,10 @@ local foreign function native_token_detached_worker(argument: *void)
 end
 
 local foreign function native_token_self_join_worker(argument: *void)
-  local slots = argument as foreign *NativeThreadPtr
+  local slots = argument as *NativeThreadPtr
   local go = slots[0]
   local done = slots[1]
-  local status = slots[3] as foreign *int
+  local status = slots[3] as *int
   uv.native_sem_wait(go)
   local token = slots[2]
   local result = uv.native_thread_join(token)

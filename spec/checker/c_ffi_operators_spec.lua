@@ -244,16 +244,17 @@ describe("C FFI operator type checking", function()
                 "local_value = response.big + 1",
                 "response.fills, elements[0] = response.big + 1, response.big + 2",
             }) do
-                for _, signature in ipairs({
-                    "local function mismatch(response: foreign *ffi_store, "
-                        .. "elements: foreign *int)",
-                    "local foreign function mismatch(response: *ffi_store, "
-                        .. "elements: *int)",
+                -- Each form is a signature and its spelling of a C `int`.
+                for _, form in ipairs({
+                    { "local function mismatch(response: foreign *ffi_store, "
+                        .. "elements: foreign *int)", "foreign int" },
+                    { "local foreign function mismatch(response: *ffi_store, "
+                        .. "elements: *int)", "int" },
                 }) do
                     local ok, err, ast = run_checker([[
                         foreign import "]] .. header .. [["
-                        ]] .. signature .. [[
-                            local local_value: foreign int = 0
+                        ]] .. form[1] .. [[
+                            local local_value: ]] .. form[2] .. [[ = 0
                             ]] .. assignment .. [[
                         end
                     ]])

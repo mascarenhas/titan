@@ -223,7 +223,7 @@ describe("C FFI operator code generation", function()
         h.run_coder([[
             local foreign function large(input: int): long long
                 local sum = input + 3000000000
-                return sum as foreign long long
+                return sum as long long
             end
             local foreign function hexadecimal(): int
                 local maximum = 0xFFFFFFFFFFFFFFFF
@@ -231,9 +231,9 @@ describe("C FFI operator code generation", function()
                 return 0
             end
             local foreign function contextual(): unsigned long long
-                local sum: foreign unsigned long long =
-                    0 as foreign unsigned long long
-                for count: foreign unsigned long long = 0, 2, 1 do
+                local sum: unsigned long long =
+                    0 as unsigned long long
+                for count: unsigned long long = 0, 2, 1 do
                     sum = sum + count
                 end
                 return sum
@@ -254,12 +254,12 @@ describe("C FFI operator code generation", function()
             h.run_coder([[
                 local foreign function foreign_infinity(): double
                     local untyped = 1e400
-                    local typed: foreign double = 1e400
+                    local typed: double = 1e400
                     return untyped + typed
                 end
                 local foreign function finite(): float
-                    local fraction: foreign float = -0x.8
-                    local zero: foreign float = 1e-400
+                    local fraction: float = -0x.8
+                    local zero: float = 1e-400
                     return fraction + zero
                 end
                 function operator_infinity(input: foreign double): float

@@ -3,7 +3,7 @@ local lua_close_uv = import "uv"
 local lua_close_command = import "support.command.titan"
 
 local foreign function lua_close_record(cells: *void, slot: int, code: int)
-  local codes = cells as foreign *int
+  local codes = cells as *int
   codes[slot] = code
 end
 

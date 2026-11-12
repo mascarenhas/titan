@@ -133,7 +133,7 @@ describe("foreign functions (checker)", function()
             consumer = [[
                 local provider = import "provider"
                 foreign function raw(input: int): int
-                    local callback: foreign function(int, int): int = provider.add
+                    local callback: function(int, int): int = provider.add
                     return callback(input, provider.add { right = 2, left = 3 })
                 end
                 function ordinary(): integer
@@ -251,10 +251,10 @@ describe("foreign functions (checker)", function()
                     count: ffi_int,
                     limit: ffi_double
                 ): ffi_int
-                    local total: foreign ffi_int = 0
+                    local total: ffi_int = 0
                     local flag = true
-                    local text: foreign const *ffi_char = "ffi"
-                    local missing: foreign *ffi_item = nil
+                    local text: const *ffi_char = "ffi"
+                    local missing: *ffi_item = nil
 
                     if item then total = total + 1 end
                     if callback then total = total + 1 end
@@ -270,10 +270,10 @@ describe("foreign functions (checker)", function()
                         total = total + 1
                     until item
 
-                    for i: foreign ffi_int = 0, count, 1 do
+                    for i: ffi_int = 0, count, 1 do
                         total = total + i
                     end
-                    for n: foreign ffi_double = 0.0, limit, 1.0 do
+                    for n: ffi_double = 0.0, limit, 1.0 do
                         if n then break end
                     end
                     return total + ffi.ffi_text_present(text)
@@ -345,11 +345,11 @@ describe("foreign functions (checker)", function()
             local foreign function identity(input: int): int return input end
             local foreign function fraction(input: double): double return input end
             foreign function contextual(): int
-                local integral: foreign int = 1
-                local floating: foreign double = 0.5
+                local integral: int = 1
+                local floating: double = 0.5
                 local result = identity(2)
                 local other = fraction(0.25)
-                for count: foreign unsigned long long = 0, 2, 1 do
+                for count: unsigned long long = 0, 2, 1 do
                     integral = integral + 1
                 end
                 return 3
@@ -378,7 +378,7 @@ describe("foreign functions (checker)", function()
                 end
                 local foreign function returns_wide(): long long return 10 end
                 foreign function sinks(item: *ffi_context, elements: *long long)
-                    local wide: foreign long long = 5
+                    local wide: long long = 5
                     wide = 7
                     item.big = 6
                     elements[0] = 8
@@ -408,12 +408,12 @@ describe("foreign functions (checker)", function()
     it("fits exact signed minima and unsigned magnitudes contextually", function()
         local ok, err, ast = h.run_checker([[
             foreign function boundaries()
-                local small: foreign signed char = -128
-                local minimum: foreign long long = -9223372036854775808
-                local maximum: foreign unsigned long long = 18446744073709551615
-                local hexadecimal: foreign long long = -0xFFFFFFFF
-                local fractional: foreign float = -0.1
-                local widened: foreign long double = 0.1
+                local small: signed char = -128
+                local minimum: long long = -9223372036854775808
+                local maximum: unsigned long long = 18446744073709551615
+                local hexadecimal: long long = -0xFFFFFFFF
+                local fractional: float = -0.1
+                local widened: long double = 0.1
             end
         ]], probe_session)
         assert.truthy(ok, err)
@@ -426,14 +426,14 @@ describe("foreign functions (checker)", function()
 
     it("keeps non-fitting and cross-kind literals at their C99 types", function()
         for _, declaration in ipairs({
-            "local number: foreign unsigned char = 300",
-            "local number: foreign unsigned char = -1",
-            "local number: foreign signed char = -129",
-            "local number: foreign float = 1e100",
-            "local number: foreign long double = 1e400",
-            "local number: foreign unsigned int = 1.0",
-            "local number: foreign float = 1",
-            "local number: foreign long long = input + 1",
+            "local number: unsigned char = 300",
+            "local number: unsigned char = -1",
+            "local number: signed char = -129",
+            "local number: float = 1e100",
+            "local number: long double = 1e400",
+            "local number: unsigned int = 1.0",
+            "local number: float = 1",
+            "local number: long long = input + 1",
         }) do
             local ok, err = h.run_checker([[
                 foreign function rejected(input: int)
@@ -456,8 +456,8 @@ describe("foreign functions (checker)", function()
             typedef struct ffi_color_box { ffi_color color; } ffi_color_box;
         ]], function(header)
             for _, body in ipairs({
-                "local color: foreign ffi_color = 7",
-                "local color: foreign ffi_color_alias = 1",
+                "local color: ffi_color = 7",
+                "local color: ffi_color_alias = 1",
                 "box.color = 1",
                 "elements[0] = 1",
                 "takes_color(1)",
@@ -480,8 +480,8 @@ describe("foreign functions (checker)", function()
                 local foreign function takes_color(_: ffi_color) end
                 local foreign function accepted(box: *ffi_color_box,
                                                  elements: *ffi_color): ffi_color
-                    local color: foreign ffi_color = ffi.FFI_RED
-                    local alias: foreign ffi_color_alias = ffi.FFI_BLUE
+                    local color: ffi_color = ffi.FFI_RED
+                    local alias: ffi_color_alias = ffi.FFI_BLUE
                     box.color = color
                     elements[0] = alias
                     takes_color(color)
@@ -495,9 +495,9 @@ describe("foreign functions (checker)", function()
     it("adapts bool literals only within the bool range", function()
         local ok, err, ast = h.run_checker([[
             foreign function flags()
-                local zero: foreign bool = 0
-                local one: foreign bool = 1
-                local half: foreign float = -0.5
+                local zero: bool = 0
+                local one: bool = 1
+                local half: float = -0.5
             end
         ]], probe_session)
         assert.truthy(ok, err)
@@ -506,7 +506,7 @@ describe("foreign functions (checker)", function()
         end
         ok, err = h.run_checker([[
             foreign function rejected()
-                local flag: foreign bool = 2
+                local flag: bool = 2
             end
         ]], probe_session)
         assert.falsy(ok)
@@ -516,7 +516,7 @@ describe("foreign functions (checker)", function()
     it("rejects an unrepresentable foreign for-bound integer spelling", function()
         local ok, err = h.run_checker([[
             foreign function rejected()
-                for index: foreign int = 0, 99999999999999999999 do break end
+                for index: int = 0, 99999999999999999999 do break end
             end
         ]], probe_session)
         assert.falsy(ok)
@@ -528,12 +528,12 @@ describe("foreign functions (checker)", function()
     function()
         local ok, err, ast = h.run_checker([[
             foreign function controls()
-                for index: foreign unsigned long long =
+                for index: unsigned long long =
                     18446744073709551615, 18446744073709551615 do
                     break
                 end
-                for index: foreign double = 0, 2 do break end
-                for index: foreign unsigned char = 300, 300 do break end
+                for index: double = 0, 2 do break end
+                for index: unsigned char = 300, 300 do break end
             end
         ]], probe_session)
         assert.truthy(ok, err)
@@ -579,10 +579,10 @@ describe("foreign functions (checker)", function()
         ]], function(header)
             local ok, err, ast = check_with_header(header, [[
                 foreign function outputs()
-                    local item: foreign *ffi_item = nil
-                    local text: foreign const *char = nil
+                    local item: *ffi_item = nil
+                    local text: const *char = nil
                     ffi.ffi_outputs(item, text)
-                    local erased: foreign *void = item
+                    local erased: *void = item
                 end
             ]])
             assert.truthy(ok, err)
@@ -598,14 +598,14 @@ describe("foreign functions (checker)", function()
 
             assert_rejected(header, [[
                 foreign function wrong()
-                    local text: foreign const *char = nil
+                    local text: const *char = nil
                     ffi.ffi_mutable_text(text)
                 end
             ]], "would discard const")
             assert_rejected(header, [[
                 foreign function immutable()
-                    const item: foreign *ffi_item = nil
-                    local text: foreign const *char = nil
+                    const item: *ffi_item = nil
+                    local text: const *char = nil
                     ffi.ffi_outputs(item, text)
                 end
             ]], "cannot take a mutable C address")
@@ -622,16 +622,16 @@ describe("foreign functions (checker)", function()
                 foreign type Pointer = *void
 
                 foreign function call_pointer(): *Pointer
-                    return ffi.ffi_pointer_source() as foreign *Pointer
+                    return ffi.ffi_pointer_source() as *Pointer
                 end
 
                 foreign function local_pointer()
                     local raw = ffi.ffi_pointer_source()
-                    ffi.ffi_pointer_sink(raw as foreign *Pointer)
+                    ffi.ffi_pointer_sink(raw as *Pointer)
                 end
 
                 foreign function unrelated(pointer: *double): *int
-                    return pointer as foreign *int
+                    return pointer as *int
                 end
             ]])
             assert.truthy(ok, err)
@@ -777,7 +777,7 @@ describe("foreign functions (checker)", function()
                 assert.truthy(configured_ok, configuration_error)
                 local ok, err, ast = h.run_checker([[
                     foreign function reinterpret(pointer: *int): *double
-                        return pointer as foreign *double
+                        return pointer as *double
                     end
                 ]], context)
                 assert.truthy(ok, err)
@@ -981,7 +981,7 @@ describe("foreign functions (checker)", function()
                     input: ffi_int
                 ): ffi_int
                     return provider.ordinary(input as integer)
-                        as foreign ffi_int
+                        as ffi_int
                 end
             ]]
             ok, err = h.run_checker_modules(
@@ -1041,11 +1041,11 @@ describe("foreign functions (checker)", function()
             local ok, err, ast = check_with_header(header, [[
                 foreign function zeroed(): ffi_int
                     local item = foreign ffi_item.new()
-                    local typed: foreign ffi_item = foreign ffi_item.new()
+                    local typed: ffi_item = foreign ffi_item.new()
                     local row = foreign ffi_int.new_array(3)
                     local counted = foreign ffi_int.new_array(ffi.FFI_COUNT)
-                    local view: foreign ffi_int[] = foreign ffi_int.new_array(3)
-                    local pointer: foreign *ffi_int = foreign ffi_int.new_array(3)
+                    local view: ffi_int[] = foreign ffi_int.new_array(3)
+                    local pointer: *ffi_int = foreign ffi_int.new_array(3)
                     local tail = foreign ffi_tail.new(2)
                     return item.value + typed.value + row[0] + counted[0]
                         + view[0] + pointer[0] + tail.count
@@ -1073,12 +1073,6 @@ describe("foreign functions (checker)", function()
             local rejected = {
                 {
                     [[foreign function bad(): void
-                          local item: owned *ffi_item = foreign ffi_item.new()
-                      end]],
-                    "the C allocation for local 'item' " .. needs_owner,
-                },
-                {
-                    [[foreign function bad(): void
                           local number = foreign ffi_int.new()
                       end]],
                     "the C allocation for local 'number' " .. needs_owner,
@@ -1097,19 +1091,19 @@ describe("foreign functions (checker)", function()
                 },
                 {
                     [[foreign function bad(): void
-                          local item: foreign *ffi_item = foreign ffi_item.new()
+                          local item: *ffi_item = foreign ffi_item.new()
                       end]],
                     "pointer local 'item' cannot be initialized with '.new%(%)' inside a foreign function",
                 },
                 {
                     [[foreign function bad(count: ffi_int): void
-                          local row: foreign *ffi_int = foreign ffi_int.new_array(count)
+                          local row: *ffi_int = foreign ffi_int.new_array(count)
                       end]],
                     "pointer local 'row' needs a positive constant '.new_array' count",
                 },
                 {
                     [[foreign function bad(): void
-                          local row: foreign ffi_int[] = foreign ffi_int.new_array(0)
+                          local row: ffi_int[] = foreign ffi_int.new_array(0)
                       end]],
                     "pointer local 'row' needs a positive constant '.new_array' count",
                 },
@@ -1127,7 +1121,7 @@ describe("foreign functions (checker)", function()
                 },
                 {
                     [[foreign function bad(): void
-                          local item: foreign *ffi_item = nil
+                          local item: *ffi_item = nil
                           item = foreign ffi_item.new()
                       end]],
                     "a C allocation inside a foreign function must be the initializer of a local",
@@ -1152,7 +1146,11 @@ describe("foreign functions (checker)", function()
         end)
     end)
 
-    it("diagnoses Titan-only visibility and body constructs", function()
+    it("diagnoses Titan declarations, Titan type names and non-value locals in foreign bodies",
+    function()
+        -- The constructs a foreign body cannot contain are syntax errors
+        -- (spec/parser_spec.lua, "foreign function bodies"). What is left to
+        -- the checker is what a name means and what a local can hold.
         with_header(declarations, function(header)
             local rejected = {
                 {
@@ -1167,57 +1165,32 @@ describe("foreign functions (checker)", function()
                           local count: integer = 1
                           return 0
                       end]],
-                    "inside a foreign function must have a direct C FFI type",
-                },
-                {
-                    [[foreign function bad(): void
-                          for item in iterator do end
-                      end]],
-                    "generic for loops are not available",
-                },
-                {
-                    [[foreign function bad(): void
-                          raise "error"
-                      end]],
-                    "raise statements are not available",
-                },
-                {
-                    [[foreign function bad(): void
-                          do catch end
-                      end]],
-                    "catch/finally blocks are not available",
-                },
-                {
-                    [[foreign function bad(): void
-                          defer ffi.ffi_add(1, 2)
-                      end]],
-                    "defer statements are not available",
-                },
-                {
-                    [[foreign function bad(): void
-                          local callback = function() end
-                      end]],
-                    "anonymous functions are not available",
-                },
-                {
-                    [[foreign function bad(): void
-                          local values = {}
-                      end]],
-                    "Titan constructors are not available",
-                },
-                {
-                    [[foreign function bad(): void
-                          local prefix = "a"
-                          local text = prefix .. "b"
-                      end]],
-                    "string concatenation are not available",
+                    "foreign type 'integer' is not declared",
                 },
                 {
                     [[foreign function bad(input: ffi_int): ffi_int
                           local boxed = input as value
                           return input
                       end]],
-                    "casts between Titan values and C FFI values are not available",
+                    "foreign type 'value' is not declared",
+                },
+                {
+                    [[foreign function bad(pointer: *void): void
+                          local nothing = pointer[0]
+                      end]],
+                    "local variable 'nothing' inside a foreign function must have a direct C FFI type",
+                },
+                {
+                    [[foreign function bad(): void
+                          local namespace = ffi
+                      end]],
+                    "trying to access module 'ffi' as a first%-class value",
+                },
+                {
+                    [[foreign function bad(): void
+                          local designator = ffi.ffi_add
+                      end]],
+                    "a foreign %(C%) function cannot be used as a first%-class value",
                 },
             }
             for _, case in ipairs(rejected) do
@@ -1236,13 +1209,13 @@ describe("foreign functions (checker)", function()
 
             assert_rejected(header, [[
                 foreign function bad(limit: ffi_int): void
-                    for i: foreign ffi_int = 0, limit, 0 do end
+                    for i: ffi_int = 0, limit, 0 do end
                 end
             ]], "requires a nonzero step")
 
             assert_rejected(header, [[
                 foreign function bad(limit: ffi_double): void
-                    for i: foreign ffi_double = 0.0, limit, 0.0 do end
+                    for i: ffi_double = 0.0, limit, 0.0 do end
                 end
             ]], "requires a nonzero step")
 
@@ -1260,7 +1233,7 @@ describe("foreign functions (checker)", function()
 
             assert_rejected(header, [[
                 foreign function bad(item: *ffi_item): void
-                    for current: foreign *ffi_item = item, item do end
+                    for current: *ffi_item = item, item do end
                 end
             ]], "type of for control variable current must be integer or float")
         end)

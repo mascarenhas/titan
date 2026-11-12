@@ -283,37 +283,6 @@ function check_nominal_storage_type(
     end
 end
 
-checker._foreign_forbidden_statements = {
-    ["Ast.StatForIn"] = "generic for loops",
-    ["Ast.StatCase"] = "case statements",
-    ["Ast.StatRaise"] = "raise statements",
-}
-
-checker._foreign_forbidden_expressions = {
-    ["Ast.ExpInitList"] = "Titan constructors",
-    ["Ast.ExpFunction"] = "anonymous functions",
-    ["Ast.ExpMethodRef"] = "bound methods",
-    ["Ast.ExpUnionInit"] = "Titan union constructors",
-    ["Ast.ExpDots"] = "variadic expressions",
-    ["Ast.ExpDotsIndex"] = "variadic expressions",
-    ["Ast.ExpDotsLen"] = "variadic expressions",
-    ["Ast.ExpSubset"] = "spread expressions",
-    ["Ast.ExpSpread"] = "spread expressions",
-    ["Ast.ExpSpreadIndex"] = "spread expressions",
-    ["Ast.ExpConcat"] = "string concatenation",
-    ["Ast.ExpIs"] = "Titan type tests",
-}
-
-function checker._valid_foreign_local_type(typ)
-    local resolved = c_resolve(typ)
-    return typ and typ._tag ~= "Type.Invalid"
-       and types.is_direct_c(typ)
-       and resolved and resolved._tag ~= "Type.COwned"
-       and resolved._tag ~= "Type.CFunction"
-       and resolved._tag ~= "Type.CModule"
-       and resolved._tag ~= "Type.CVoid"
-end
-
 -- Why an allocation plan other than automatic storage cannot appear in a
 -- foreign body: each one needs an object that Lua owns and the frame roots.
 local function foreign_allocation_error(plan)
@@ -335,72 +304,41 @@ local function foreign_allocation_error(plan)
 end
 
 -- Implementation notes: doc/implementation/foreign-functions.md#one-checker-a-restricted-context
+-- The foreign-body grammar admits only the raw-C subset. This walk checks
+-- what syntax cannot: a local has an initializer and a value type, and an
+-- allocation is automatic storage.
 function checker._validate_foreign_body_node(node, errors, seen)
     if type(node) ~= "table" or seen[node] then return end
     seen[node] = true
     local tag = node._tag
-    if type(tag) == "string" and tag:match("^Ast%.") then
-        local forbidden = checker._foreign_forbidden_statements[tag]
-            or checker._foreign_forbidden_expressions[tag]
-        if tag == "Ast.StatTry" then
-            forbidden = node._defer_tail and "defer statements"
-                or "catch/finally blocks"
+    if tag == "Ast.StatDecl" then
+        if #node.exps == 0 then
+            checker.typeerror(errors, node.loc,
+                "a local declaration inside a foreign function requires an initializer")
         end
-        if forbidden then
-            checker.typeerror(errors, node.loc,
-                "%s are not available inside a foreign function", forbidden)
-        elseif tag == "Ast.StatDecl" then
-            if #node.exps == 0 then
-                checker.typeerror(errors, node.loc,
-                    "a local declaration inside a foreign function requires an initializer")
-            end
-            for _, decl in ipairs(node.decls) do
-                if decl._type and decl._type._tag ~= "Type.Invalid"
-                   and not checker._valid_foreign_local_type(decl._type) then
-                    checker.typeerror(errors, decl.loc,
-                        "local variable '%s' inside a foreign function must have a direct C FFI type, not '%s'",
-                        decl.name, types.tostring(decl._type))
-                end
-            end
-        elseif tag == "Ast.StatReturn" and #node.exps > 1 then
-            checker.typeerror(errors, node.loc,
-                "a foreign function return statement can return at most one value")
-        elseif tag == "Ast.ExpCall" and node.exp and node.exp.var
-               and node.exp.var._decl
-               and node.exp.var._decl._tag == "Checker.CPseudoNew" then
-            -- A call without a plan already has its own diagnostic. The
-            -- count is a compile-time constant of the plan, not a body
-            -- expression, so the walk stops here.
-            local plan = node._c_allocation_plan
-            if plan and not plan.storage:match("^automatic") then
-                checker.typeerror(errors, node.loc, "%s",
-                    foreign_allocation_error(plan))
-            end
-            return
-        elseif tag == "Ast.ExpBinop"
-               and (node.op == ".." or node.op == "and" or node.op == "or") then
-            checker.typeerror(errors, node.loc,
-                "Titan operator '%s' is not available inside a foreign function",
-                node.op)
-        elseif tag == "Ast.ExpUnop" and node.op == "not" then
-            checker.typeerror(errors, node.loc,
-                "Titan operator 'not' is not available inside a foreign function")
-        elseif tag == "Ast.ExpCast" then
-            local source = node.exp and node.exp._type
-            local target = node._type
-            local literal = node.exp and (node.exp._tag == "Ast.ExpInteger"
-                or node.exp._tag == "Ast.ExpFloat"
-                or node.exp._tag == "Ast.ExpString"
-                or node.exp._tag == "Ast.ExpNil")
-            local nil_pointer = source and source._tag == "Type.Nil"
-                and target and c_resolve(target)
-                and c_resolve(target)._tag == "Type.CPointer"
-            if not (types.is_direct_c(source) and types.is_direct_c(target))
-               and not literal and not nil_pointer then
-                checker.typeerror(errors, node.loc,
-                    "casts between Titan values and C FFI values are not available inside a foreign function")
+        for _, decl in ipairs(node.decls) do
+            -- Expression checking already rejects a C namespace or a function
+            -- designator as a value; `void` reaches a local through a void
+            -- pointee or a written annotation.
+            local resolved = decl._type and c_resolve(decl._type)
+            if resolved and resolved._tag == "Type.CVoid" then
+                checker.typeerror(errors, decl.loc,
+                    "local variable '%s' inside a foreign function must have a direct C FFI type, not '%s'",
+                    decl.name, types.tostring(decl._type))
             end
         end
+    elseif tag == "Ast.ExpCall" and node.exp and node.exp.var
+           and node.exp.var._decl
+           and node.exp.var._decl._tag == "Checker.CPseudoNew" then
+        -- A call without a plan already has its own diagnostic. The count
+        -- is a compile-time constant of the plan, not a body expression,
+        -- so the walk stops here.
+        local plan = node._c_allocation_plan
+        if plan and not plan.storage:match("^automatic") then
+            checker.typeerror(errors, node.loc, "%s",
+                foreign_allocation_error(plan))
+        end
+        return
     end
     for key, value in pairs(node) do
         if type(key) ~= "string" or key:sub(1, 1) ~= "_" then

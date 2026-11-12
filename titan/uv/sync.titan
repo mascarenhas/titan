@@ -78,7 +78,7 @@ end
 -- @param native Borrowed or process-heap `uv_mutex_t *` pointer.
 -- @usage uv/supplemental.md#native_mutex_lock
 foreign function native_mutex_lock(native: *void): void
-    ffi.uv_mutex_lock(native as foreign *uv_mutex_t)
+    ffi.uv_mutex_lock(native as *uv_mutex_t)
 end
 
 --- Convenience method for [`mutex_trylock`](functions/threading.md#mutex_trylock) on this owner.
@@ -94,7 +94,7 @@ end
 -- @return Native status result: zero when acquired, or a negative libuv status such as `EBUSY`.
 -- @usage uv/supplemental.md#native_mutex_trylock
 foreign function native_mutex_trylock(native: *void): int
-    return ffi.uv_mutex_trylock(native as foreign *uv_mutex_t)
+    return ffi.uv_mutex_trylock(native as *uv_mutex_t)
 end
 
 --- Convenience method for [`mutex_unlock`](functions/threading.md#mutex_unlock) on this owner.
@@ -108,7 +108,7 @@ end
 -- @param native Borrowed or process-heap `uv_mutex_t *` pointer.
 -- @usage uv/supplemental.md#native_mutex_unlock
 foreign function native_mutex_unlock(native: *void): void
-    ffi.uv_mutex_unlock(native as foreign *uv_mutex_t)
+    ffi.uv_mutex_unlock(native as *uv_mutex_t)
 end
 
 --- Allocate and initialize a process-heap mutex not owned by any state's GC.
@@ -129,7 +129,7 @@ end
 -- @usage uv/supplemental.md#native_mutex_destroy
 foreign function native_mutex_destroy(native: *void): void
     if native ~= nil then
-        ffi.uv_mutex_destroy(native as foreign *uv_mutex_t)
+        ffi.uv_mutex_destroy(native as *uv_mutex_t)
         ffi.free(native)
     end
 end
@@ -194,7 +194,7 @@ end
 -- @param native Borrowed initialized `uv_rwlock_t *` pointer.
 -- @usage uv/supplemental.md#native_rwlock_rdlock
 foreign function native_rwlock_rdlock(native: *void): void
-    ffi.uv_rwlock_rdlock(native as foreign *uv_rwlock_t)
+    ffi.uv_rwlock_rdlock(native as *uv_rwlock_t)
 end
 
 --- Convenience method for [`rwlock_tryrdlock`](functions/threading.md#rwlock_tryrdlock) on this owner.
@@ -210,7 +210,7 @@ end
 -- @return Native status result: zero when acquired, or a negative libuv status such as `EBUSY`.
 -- @usage uv/supplemental.md#native_rwlock_tryrdlock
 foreign function native_rwlock_tryrdlock(native: *void): int
-    return ffi.uv_rwlock_tryrdlock(native as foreign *uv_rwlock_t)
+    return ffi.uv_rwlock_tryrdlock(native as *uv_rwlock_t)
 end
 
 --- Convenience method for [`rwlock_rdunlock`](functions/threading.md#rwlock_rdunlock) on this owner.
@@ -224,7 +224,7 @@ end
 -- @param native Borrowed initialized `uv_rwlock_t *` pointer.
 -- @usage uv/supplemental.md#native_rwlock_rdunlock
 foreign function native_rwlock_rdunlock(native: *void): void
-    ffi.uv_rwlock_rdunlock(native as foreign *uv_rwlock_t)
+    ffi.uv_rwlock_rdunlock(native as *uv_rwlock_t)
 end
 
 --- Convenience method for [`rwlock_wrlock`](functions/threading.md#rwlock_wrlock) on this owner.
@@ -238,7 +238,7 @@ end
 -- @param native Borrowed initialized `uv_rwlock_t *` pointer.
 -- @usage uv/supplemental.md#native_rwlock_wrlock
 foreign function native_rwlock_wrlock(native: *void): void
-    ffi.uv_rwlock_wrlock(native as foreign *uv_rwlock_t)
+    ffi.uv_rwlock_wrlock(native as *uv_rwlock_t)
 end
 
 --- Convenience method for [`rwlock_trywrlock`](functions/threading.md#rwlock_trywrlock) on this owner.
@@ -254,7 +254,7 @@ end
 -- @return Native status result: zero when acquired, or a negative libuv status such as `EBUSY`.
 -- @usage uv/supplemental.md#native_rwlock_trywrlock
 foreign function native_rwlock_trywrlock(native: *void): int
-    return ffi.uv_rwlock_trywrlock(native as foreign *uv_rwlock_t)
+    return ffi.uv_rwlock_trywrlock(native as *uv_rwlock_t)
 end
 
 --- Convenience method for [`rwlock_wrunlock`](functions/threading.md#rwlock_wrunlock) on this owner.
@@ -268,7 +268,7 @@ end
 -- @param native Borrowed initialized `uv_rwlock_t *` pointer.
 -- @usage uv/supplemental.md#native_rwlock_wrunlock
 foreign function native_rwlock_wrunlock(native: *void): void
-    ffi.uv_rwlock_wrunlock(native as foreign *uv_rwlock_t)
+    ffi.uv_rwlock_wrunlock(native as *uv_rwlock_t)
 end
 
 --- Owned native sem storage with explicit initialization and destruction.
@@ -332,7 +332,7 @@ end
 -- @param native Borrowed initialized `uv_sem_t *` pointer.
 -- @usage uv/supplemental.md#native_sem_post
 foreign function native_sem_post(native: *void): void
-    ffi.uv_sem_post(native as foreign *uv_sem_t)
+    ffi.uv_sem_post(native as *uv_sem_t)
 end
 
 --- Convenience method for [`sem_wait`](functions/threading.md#sem_wait) on this owner.
@@ -346,7 +346,7 @@ end
 -- @param native Borrowed initialized `uv_sem_t *` pointer.
 -- @usage uv/supplemental.md#native_sem_wait
 foreign function native_sem_wait(native: *void): void
-    ffi.uv_sem_wait(native as foreign *uv_sem_t)
+    ffi.uv_sem_wait(native as *uv_sem_t)
 end
 
 --- Convenience method for [`sem_trywait`](functions/threading.md#sem_trywait) on this owner.
@@ -362,7 +362,7 @@ end
 -- @return Native status result: zero when decremented, or a negative libuv status such as `EAGAIN`.
 -- @usage uv/supplemental.md#native_sem_trywait
 foreign function native_sem_trywait(native: *void): int
-    return ffi.uv_sem_trywait(native as foreign *uv_sem_t)
+    return ffi.uv_sem_trywait(native as *uv_sem_t)
 end
 
 --- Owned native cond storage with explicit initialization and destruction.
@@ -425,7 +425,7 @@ end
 -- @param native Borrowed initialized `uv_cond_t *` pointer.
 -- @usage uv/supplemental.md#native_cond_signal
 foreign function native_cond_signal(native: *void): void
-    ffi.uv_cond_signal(native as foreign *uv_cond_t)
+    ffi.uv_cond_signal(native as *uv_cond_t)
 end
 
 --- Convenience method for [`cond_broadcast`](functions/threading.md#cond_broadcast) on this owner.
@@ -439,7 +439,7 @@ end
 -- @param native Borrowed initialized `uv_cond_t *` pointer.
 -- @usage uv/supplemental.md#native_cond_broadcast
 foreign function native_cond_broadcast(native: *void): void
-    ffi.uv_cond_broadcast(native as foreign *uv_cond_t)
+    ffi.uv_cond_broadcast(native as *uv_cond_t)
 end
 
 --- Owned native barrier storage with explicit initialization and destruction.
@@ -505,7 +505,7 @@ end
 -- @return Positive serial-thread indicator for one participant and zero for all others.
 -- @usage uv/supplemental.md#native_barrier_wait
 foreign function native_barrier_wait(native: *void): int
-    return ffi.uv_barrier_wait(native as foreign *uv_barrier_t)
+    return ffi.uv_barrier_wait(native as *uv_barrier_t)
 end
 
 --- Owned native key storage with explicit initialization and destruction.
@@ -584,7 +584,7 @@ end
 -- @param mutex Locked borrowed or process-heap `uv_mutex_t *` pointer.
 -- @usage uv/supplemental.md#native_cond_wait
 foreign function native_cond_wait(cond: *void, mutex: *void): void
-    ffi.uv_cond_wait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t)
+    ffi.uv_cond_wait(cond as *uv_cond_t, mutex as *uv_mutex_t)
 end
 
 --- Wait on a borrowed condition variable with a relative nanosecond timeout directly from C or Titan.
@@ -594,7 +594,7 @@ end
 -- @return Zero when signaled or a negative libuv status such as `ETIMEDOUT`.
 -- @usage uv/supplemental.md#native_cond_timedwait
 foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: unsigned long long): int
-    return ffi.uv_cond_timedwait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t, timeout_ns as foreign uint64_t)
+    return ffi.uv_cond_timedwait(cond as *uv_cond_t, mutex as *uv_mutex_t, timeout_ns as uint64_t)
 end
 
 -- TLS stores a raw pointer per native thread. The caller separately retains
@@ -620,7 +620,7 @@ end
 -- @return Calling thread's stored pointer value, or NULL.
 -- @usage uv/supplemental.md#native_key_get
 foreign function native_key_get(key: *void): *void
-    return ffi.uv_key_get(key as foreign *uv_key_t)
+    return ffi.uv_key_get(key as *uv_key_t)
 end
 
 --- Set the calling OS thread's value for a borrowed TLS key pointer directly from C or Titan.
@@ -628,7 +628,7 @@ end
 -- @param value Borrowed pointer stored for the calling OS thread, or NULL.
 -- @usage uv/supplemental.md#native_key_set
 foreign function native_key_set(key: *void, value: *void): void
-    ffi.uv_key_set(key as foreign *uv_key_t, value)
+    ffi.uv_key_set(key as *uv_key_t, value)
 end
 
 -- Canonical native-prefix-drop module functions.
@@ -915,5 +915,5 @@ end
 -- @param callback Non-null C-only callback with no arguments or return value.
 -- @usage uv/supplemental.md#native_once
 foreign function native_once(guard: *void, callback: function(): void): void
-    ffi.uv_once(guard as foreign *uv_once_t, callback)
+    ffi.uv_once(guard as *uv_once_t, callback)
 end

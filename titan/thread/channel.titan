@@ -24,7 +24,7 @@ local foreign function channel_new_native(
     capacity: size_t,
     mutex: *void): *titan_thread_channel
   if mutex == nil then return nil end
-  if capacity == (0 as foreign size_t) then
+  if capacity == (0 as size_t) then
     uv.native_mutex_destroy(mutex)
     return nil
   end
@@ -32,26 +32,26 @@ local foreign function channel_new_native(
     uv.native_mutex_destroy(mutex)
     return nil
   end
-  local ch = ffi.calloc(1 as foreign size_t, foreign titan_thread_channel.sizeof)
-    as foreign *titan_thread_channel
+  local ch = ffi.calloc(1 as size_t, foreign titan_thread_channel.sizeof)
+    as *titan_thread_channel
   if ch == nil then
     uv.native_mutex_destroy(mutex)
     return nil
   end
   local ring = ffi.calloc(capacity, foreign titan_thread_message_ptr.sizeof)
-    as foreign *titan_thread_message_ptr
+    as *titan_thread_message_ptr
   if ring == nil then
     ffi.free(ch)
     uv.native_mutex_destroy(mutex)
     return nil
   end
   ch.mutex = mutex
-  ch.active_senders = 1 as foreign size_t
-  ch.active_receivers = 1 as foreign size_t
+  ch.active_senders = 1 as size_t
+  ch.active_receivers = 1 as size_t
   ch.capacity = capacity
-  ch.head = 0 as foreign size_t
-  ch.tail = 0 as foreign size_t
-  ch.count = 0 as foreign size_t
+  ch.head = 0 as size_t
+  ch.tail = 0 as size_t
+  ch.count = 0 as size_t
   ch.ring = ring
   ch.closed = 0
   return ch
@@ -67,8 +67,8 @@ local foreign function channel_enqueue_locked(
   if ch.count < ch.capacity then
     local slot = ch.ring + ch.tail
     slot[0] = msg
-    ch.tail = (ch.tail + (1 as foreign size_t)) % ch.capacity
-    ch.count = ch.count + (1 as foreign size_t)
+    ch.tail = (ch.tail + (1 as size_t)) % ch.capacity
+    ch.count = ch.count + (1 as size_t)
     waiter_wake_one(ffi.titan_thread_underflow_queue(ch))
     return 0
   end
@@ -124,7 +124,7 @@ local foreign function channel_unregister_overflow_waiter(
     end
   end
   waiter.signaled = 0
-  if pinned ~= 0 then ch.waiter_pins = ch.waiter_pins - (1 as foreign size_t) end
+  if pinned ~= 0 then ch.waiter_pins = ch.waiter_pins - (1 as size_t) end
   local destroy = channel_unreferenced(ch)
   uv.native_mutex_unlock(ch.mutex)
   if destroy ~= 0 then channel_destroy_unreferenced(ch) end
@@ -137,12 +137,12 @@ local foreign function channel_dequeue_locked(
     wake_target: *void,
     result: *(*titan_thread_message)): int
   if ch.closed == 2 then return 2 end
-  if ch.count > (0 as foreign size_t) then
+  if ch.count > (0 as size_t) then
     local slot = ch.ring + ch.head
     result[0] = slot[0]
     slot[0] = nil
-    ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
-    ch.count = ch.count - (1 as foreign size_t)
+    ch.head = (ch.head + (1 as size_t)) % ch.capacity
+    ch.count = ch.count - (1 as size_t)
     waiter_wake_one(ffi.titan_thread_overflow_queue(ch))
     return 0
   end
@@ -191,14 +191,14 @@ local foreign function channel_unregister_underflow_waiter(
   if waiter.active ~= 0 then
     waiter_unlink(ffi.titan_thread_underflow_queue(ch), waiter)
   elseif waiter.signaled ~= 0 then
-    if ch.count > (0 as foreign size_t) then
+    if ch.count > (0 as size_t) then
       waiter_wake_one(ffi.titan_thread_underflow_queue(ch))
     elseif ch.closed ~= 0 then
       waiter_wake_one(ffi.titan_thread_underflow_queue(ch))
     end
   end
   waiter.signaled = 0
-  if pinned ~= 0 then ch.waiter_pins = ch.waiter_pins - (1 as foreign size_t) end
+  if pinned ~= 0 then ch.waiter_pins = ch.waiter_pins - (1 as size_t) end
   local destroy = channel_unreferenced(ch)
   uv.native_mutex_unlock(ch.mutex)
   if destroy ~= 0 then channel_destroy_unreferenced(ch) end
@@ -206,7 +206,7 @@ end
 
 -- Implementation notes: doc/implementation/thread-library.md#shared-external-wake-suspension
 local foreign function channel_register_send_wait(context: *void, target: *void): int
-  local wait = context as foreign *titan_thread_channel_wait
+  local wait = context as *titan_thread_channel_wait
   wait.status = channel_try_enqueue_native(
     wait.channel, wait.message, ffi.titan_thread_channel_waiter(wait), target)
   if wait.status == 0 then wait.message = nil end
@@ -220,7 +220,7 @@ end
 -- The send's defer runs after this withdrawal on cancellation and while an
 -- abandoned Task unwinds (including at lua_close); it finds the cleared pointer.
 local foreign function channel_unregister_send_wait(context: *void)
-  local wait = context as foreign *titan_thread_channel_wait
+  local wait = context as *titan_thread_channel_wait
   channel_unregister_overflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
   local message = wait.message
   wait.message = nil
@@ -228,8 +228,8 @@ local foreign function channel_unregister_send_wait(context: *void)
 end
 
 local foreign function channel_register_receive_wait(context: *void, target: *void): int
-  local wait = context as foreign *titan_thread_channel_wait
-  local message: foreign *titan_thread_message = nil
+  local wait = context as *titan_thread_channel_wait
+  local message: *titan_thread_message = nil
   wait.status = channel_try_dequeue_native(
     wait.channel, ffi.titan_thread_channel_waiter(wait), target, message)
   wait.message = message
@@ -238,7 +238,7 @@ local foreign function channel_register_receive_wait(context: *void, target: *vo
 end
 
 local foreign function channel_unregister_receive_wait(context: *void)
-  local wait = context as foreign *titan_thread_channel_wait
+  local wait = context as *titan_thread_channel_wait
   channel_unregister_underflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
 end
 

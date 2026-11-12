@@ -241,7 +241,7 @@ end
 -- its context borrows the rooted test-owned counters only during encoding.
 local foreign function record_buffer_growth(
     buf: *titan_protobuf_buffer, min_capacity: size_t): int
-  local counts = buf.context as foreign *size_t
+  local counts = buf.context as *size_t
   counts[0] = counts[0] + 1
   if min_capacity >= 65536 then counts[1] = counts[1] + 1 end
   return ffi.titan_protobuf_heap_grow(buf, min_capacity)
@@ -362,7 +362,7 @@ end
 -- Records the exact requested capacity and refuses the allocation.
 local foreign function record_refused_growth(
     buf: *titan_protobuf_buffer, min_capacity: size_t): int
-  local requested = buf.context as foreign *size_t
+  local requested = buf.context as *size_t
   requested[0] = min_capacity
   return 0
 end

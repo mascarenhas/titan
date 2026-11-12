@@ -33,10 +33,11 @@ callable protocol; `Type.CFunction` continues to mean a direct C declaration.
 
 The factored top-level grammar distinguishes `foreign function`, `foreign
 import`, and `foreign type` by their next keyword. A foreign function uses
-foreign-only parameter and return types:
+foreign-only parameter and return types, and its body is parsed by a grammar
+of its own:
 
 ```text
-[local] foreign function AnyName '(' [foreignparlist] ')' [':' foreigntype] block end
+[local] foreign function AnyName '(' [foreignparlist] ')' [':' foreigntype] fblock end
 ```
 
 It produces `Ast.TopLevelForeignFunc(loc, name, params, rettypes, flexrettype,
@@ -45,6 +46,17 @@ block)` with an `islocal` flag. Missing results become C void. `Ast.TypeForeignF
 to a C function pointer. Bare C variadic tails remain represented for a precise
 unsupported-source-variadic diagnostic. Titan function types use their distinct
 `function(types): results` grammar and may carry Titan flexible tails.
+
+The body rules (`fblock`, `fstatement`, `fexp` and the rest, in the section
+"Foreign function bodies" of `parser.lua`'s `grammar_source`) admit exactly
+the raw-C subset and take a `foreigntype` wherever the ordinary rules take a
+`type`, so a body annotation or cast is written without `foreign`. They add
+no AST node and no action: each rule ends in the action of its ordinary
+counterpart, and the block of a foreign function is the tree that the
+ordinary grammar builds for the same statements with `foreign` before each
+type (`spec/parser_spec.lua` compares the two). A construct outside the
+subset is a labelled syntax error; see
+[the foreign-body rules](lexer-parser.md#foreign-function-bodies).
 
 Unqualified `Ast.TypeForeignName` nodes never consult term bindings. Foreign
 pointer/array constructors use existing `TypeCPointer`/`TypeCArray` syntax nodes;
@@ -117,21 +129,26 @@ C namespace remains usable because its functions, values, fields, types,
 `sizeof`, and `alignof` are already direct C declarations. A producer's
 builtin `ffi` value namespace and separate foreign type namespace is established from the consumer's combined C header.
 
-After ordinary checking and elaboration, `checker._checkforeignfunc` runs
-`checker._validate_foreign_body_node` (`checker/declarations.lua`), a closed AST
-walk. It rejects every tag in `checker._foreign_forbidden_statements` and
-`checker._foreign_forbidden_expressions`, `StatTry` (reported as `defer` when
-it is a parser-lowered defer tail, otherwise as `catch`/`finally`), allocation
-pseudo-calls whose plan is not automatic storage, `..`, `and`, `or`, `not`,
-and casts between Titan and C values other than literal and nil-to-pointer
-casts. Every local must have an initializer and a direct non-owner,
-non-function, non-module, non-void C type
-(`checker._valid_foreign_local_type`). A return has zero or one expression.
-The length operator `#` is rejected earlier, by the `ExpUnop` check in foreign
-mode, so no foreign-body expression gets a Titan `integer` from it.
-This second pass is important: parser desugarings and checker-synthesized nodes
-cannot bypass the raw-C surface merely because their original spelling looked
-innocent.
+The grammar has already removed every construct that has no raw-C meaning, so
+after ordinary checking and elaboration `checker._checkforeignfunc` runs a
+small walk, `checker._validate_foreign_body_node` (`checker/declarations.lua`),
+for what syntax cannot decide:
+
+* a local declaration has an initializer;
+* a local's type is not `void`, which an inferred local takes from a void
+  pointee (a C namespace or a function designator never gets that far:
+  expression checking rejects them as values);
+* an allocation pseudo-call has an automatic-storage plan
+  ([allocation](#allocation-and-recovery-storage)).
+
+The length operator `#` is rejected by the `ExpUnop` check in foreign mode.
+With that, no expression of a foreign body has a Titan type: literals are
+C-typed in this mode, names are C declarations, calls return C values, and a
+cast's target is a `foreigntype`. The one C-to-Titan conversion the checker
+still synthesizes is the count argument of an allocation pseudo-call, which
+the walk does not enter. The former check on casts between Titan and C values
+has therefore no case left and is gone, together with the tables of forbidden
+statement and expression tags.
 
 The allowed body is intentionally unsafe C (see [The C FFI](../language/ffi.md#the-c-ffi)). Pointer dereference, indexing,
 function-pointer calls, arithmetic, and casts do not gain the NULL, bounds,

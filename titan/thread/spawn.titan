@@ -14,14 +14,14 @@ local foreign function thread_control_new_native(
   if mutex == nil then
     return nil
   end
-  local ctrl = ffi.calloc(1 as foreign size_t, foreign titan_thread_control.sizeof)
-    as foreign *titan_thread_control
+  local ctrl = ffi.calloc(1 as size_t, foreign titan_thread_control.sizeof)
+    as *titan_thread_control
   if ctrl == nil then
     uv.native_mutex_destroy(mutex)
     return nil
   end
   ctrl.mutex = mutex
-  ctrl.refcount = 1 as foreign size_t
+  ctrl.refcount = 1 as size_t
   ctrl.status_kind = ffi.TITAN_THREAD_STATE_RUNNING
   return ctrl
 end
@@ -54,7 +54,7 @@ local foreign function thread_control_destroy_unreferenced(
   if ctrl.status_kind == ffi.TITAN_THREAD_STATE_FAILED then
     if ctrl.observed == 0 then
       if ctrl.stderr_report ~= nil then
-        if ctrl.stderr_report_len > (0 as foreign size_t) then
+        if ctrl.stderr_report_len > (0 as size_t) then
           write_stderr_bytes(ctrl.stderr_report, ctrl.stderr_report_len)
         end
       end
@@ -78,9 +78,9 @@ end
 local foreign function thread_control_release_native(ctrl: *titan_thread_control)
   if ctrl == nil then return end
   uv.native_mutex_lock(ctrl.mutex)
-  ctrl.refcount = ctrl.refcount - (1 as foreign size_t)
-  local destroy = 0 as foreign int
-  if ctrl.refcount == (0 as foreign size_t) then
+  ctrl.refcount = ctrl.refcount - (1 as size_t)
+  local destroy = 0 as int
+  if ctrl.refcount == (0 as size_t) then
     destroy = 1
   end
   uv.native_mutex_unlock(ctrl.mutex)
@@ -114,15 +114,15 @@ end
 local foreign function thread_control_copy_cstr(
     src: const *char, len: size_t): *char
   if len == ffi.SIZE_MAX then return nil end
-  local buf = ffi.malloc(len + (1 as foreign size_t)) as foreign *char
+  local buf = ffi.malloc(len + (1 as size_t)) as *char
   if buf == nil then return nil end
-  if len > (0 as foreign size_t) then
+  if len > (0 as size_t) then
     if src ~= nil then
       ffi.memcpy(buf, src, len)
     end
   end
   local term = buf + len
-  term[0] = 0 as foreign char
+  term[0] = 0 as char
   return buf
 end
 
@@ -176,8 +176,8 @@ local foreign function thread_control_record_failed_native(
     report: const *char,
     report_len: size_t): *titan_thread_message
   local trace_copy = thread_control_copy_cstr(trace, trace_len)
-  local report_copy: foreign *char = nil
-  if report_len > (0 as foreign size_t) then
+  local report_copy: *char = nil
+  if report_len > (0 as size_t) then
     report_copy = thread_control_copy_cstr(report, report_len)
   end
   uv.native_mutex_lock(ctrl.mutex)
@@ -266,7 +266,7 @@ end
 
 -- Implementation notes: doc/implementation/thread-library.md#registration-pins-and-state-close-withdrawal
 local foreign function thread_control_register_join_wait(context: *void, target: *void): int
-  local wait = context as foreign *titan_thread_join_wait
+  local wait = context as *titan_thread_join_wait
   local ctrl = wait.control
   uv.native_mutex_lock(ctrl.mutex)
   ctrl.observed = 1
@@ -284,16 +284,16 @@ end
 -- keeps ctrl valid here even after the joining state's handle was released;
 -- a lua_close withdrawal can therefore be ctrl's last release.
 local foreign function thread_control_unregister_join_wait(context: *void)
-  local wait = context as foreign *titan_thread_join_wait
+  local wait = context as *titan_thread_join_wait
   local ctrl = wait.control
   local waiter = ffi.titan_thread_join_waiter(wait)
   uv.native_mutex_lock(ctrl.mutex)
   local pinned = waiter_holds_pin(waiter)
   waiter_unlink(ffi.titan_thread_join_queue(ctrl), waiter)
   waiter.signaled = 0
-  if pinned ~= 0 then ctrl.refcount = ctrl.refcount - (1 as foreign size_t) end
-  local destroy = 0 as foreign int
-  if ctrl.refcount == (0 as foreign size_t) then destroy = 1 end
+  if pinned ~= 0 then ctrl.refcount = ctrl.refcount - (1 as size_t) end
+  local destroy = 0 as int
+  if ctrl.refcount == (0 as size_t) then destroy = 1 end
   uv.native_mutex_unlock(ctrl.mutex)
   if destroy ~= 0 then thread_control_destroy_unreferenced(ctrl) end
 end
@@ -314,28 +314,28 @@ end
 -- reference pins this non-GC target slot even after host-state close.
 local foreign function thread_control_register_retirement_native(
     context: *void, target: *void): int
-  if context == nil then return -1 as foreign int end
-  if target == nil then return -1 as foreign int end
-  local ctrl = context as foreign *titan_thread_control
+  if context == nil then return -1 as int end
+  if target == nil then return -1 as int end
+  local ctrl = context as *titan_thread_control
   uv.native_mutex_lock(ctrl.mutex)
   ctrl.observed = 1
   if ctrl.finished ~= 0 then
     uv.native_mutex_unlock(ctrl.mutex)
-    return 0 as foreign int
+    return 0 as int
   end
   if ctrl.proxy_wake_target ~= nil then
     uv.native_mutex_unlock(ctrl.mutex)
-    return -1 as foreign int
+    return -1 as int
   end
   uv.native_external_wake_retain(target)
   ctrl.proxy_wake_target = target
   uv.native_mutex_unlock(ctrl.mutex)
-  return 1 as foreign int
+  return 1 as int
 end
 
 local foreign function thread_control_unregister_retirement_native(context: *void)
   if context == nil then return end
-  local ctrl = context as foreign *titan_thread_control
+  local ctrl = context as *titan_thread_control
   uv.native_mutex_lock(ctrl.mutex)
   local target = ctrl.proxy_wake_target
   ctrl.proxy_wake_target = nil
@@ -349,7 +349,7 @@ end
 -- and every later attempt returns actual join success or a preserved error.
 local foreign function thread_control_join_native(
     ctrl: *titan_thread_control, cancel_missing: int): int
-  if ctrl == nil then return -1 as foreign int end
+  if ctrl == nil then return -1 as int end
   uv.native_mutex_lock(ctrl.mutex)
   if ctrl.finished == 0 then
     if cancel_missing ~= 0 then
@@ -363,16 +363,16 @@ local foreign function thread_control_join_native(
       end
     end
     uv.native_mutex_unlock(ctrl.mutex)
-    return 1 as foreign int
+    return 1 as int
   end
   if ctrl.os_joined ~= 0 then
     uv.native_mutex_unlock(ctrl.mutex)
-    return 0 as foreign int
+    return 0 as int
   end
   local token = ctrl.os_thread
   if token == nil then
     uv.native_mutex_unlock(ctrl.mutex)
-    return -1 as foreign int
+    return -1 as int
   end
   uv.native_mutex_unlock(ctrl.mutex)
   -- The worker's final release needs ctrl.mutex; never hold it across join.
@@ -390,7 +390,7 @@ end
 -- candidate cannot finish cleanup, or after the monotonic finished receipt.
 -- A reasonless request never replaces an already-admitted child cancellation.
 local foreign function thread_control_retire_native(context: *void): int
-  return thread_control_join_native(context as foreign *titan_thread_control, 1)
+  return thread_control_join_native(context as *titan_thread_control, 1)
 end
 
 local function safe_value_to_thread_message(item: value): foreign *titan_thread_message
@@ -606,7 +606,7 @@ end
 
 local foreign function thread_worker_protected(state: *lua_State): int
   local ctrl = ffi.lua_touserdata(state, 1)
-  transfer.transfer_load_module(state, "titan.thread", 12 as foreign unsigned long long)
+  transfer.transfer_load_module(state, "titan.thread", 12 as unsigned long long)
   ffi.lua_settop(state, 0)
   ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_BOOTSTRAP")
   ffi.lua_pushlightuserdata(state, ctrl)
@@ -616,16 +616,16 @@ end
 
 local foreign function record_bootstrap_failure_native(
     ctrl: *titan_thread_control, msg_bytes: const *char, len: size_t)
-  local err_msg: foreign *titan_thread_message = nil
+  local err_msg: *titan_thread_message = nil
   if len <= ffi.SIZE_MAX - foreign titan_thread_message.sizeof then
-    err_msg = ffi.calloc(1 as foreign size_t, foreign titan_thread_message.sizeof + len)
-      as foreign *titan_thread_message
+    err_msg = ffi.calloc(1 as size_t, foreign titan_thread_message.sizeof + len)
+      as *titan_thread_message
     if err_msg ~= nil then
       err_msg.kind = ffi.TITAN_ASYNC_MESSAGE_STRING
       err_msg.length = len
-      local bytes = (err_msg + 1) as foreign *char
+      local bytes = (err_msg + 1) as *char
       err_msg.bytes = bytes
-      if len > (0 as foreign size_t) then
+      if len > (0 as size_t) then
         if msg_bytes ~= nil then
           ffi.memcpy(bytes, msg_bytes, len)
         end
@@ -633,26 +633,26 @@ local foreign function record_bootstrap_failure_native(
     end
   end
   local leftover = thread_control_record_failed_native(
-    ctrl, err_msg, "", 0 as foreign size_t, msg_bytes, len)
+    ctrl, err_msg, "", 0 as size_t, msg_bytes, len)
   if leftover ~= nil then
     thread_message_discard(leftover)
   end
 end
 
 local foreign function thread_worker_main(arg: *void)
-  local ctrl = arg as foreign *titan_thread_control
+  local ctrl = arg as *titan_thread_control
   local state = ctrl.child_state
   if state ~= nil then
     if ffi.lua_checkstack(state, 3) ~= 0 then
       ffi.lua_pushcclosure(state, thread_worker_protected, 0)
-      ffi.lua_pushlightuserdata(state, ctrl as foreign *void)
+      ffi.lua_pushlightuserdata(state, ctrl as *void)
       local status = ffi.lua_pcallk(state, 1, 0, 0, 0, nil)
       if status ~= ffi.LUA_OK then
-        local len = 0 as foreign size_t
+        local len = 0 as size_t
         local msg_bytes = ffi.lua_tolstring(state, -1, len)
         if msg_bytes == nil then
           msg_bytes = "child thread bootstrap failed"
-          len = 29 as foreign size_t
+          len = 29 as size_t
         end
         record_bootstrap_failure_native(ctrl, msg_bytes, len)
       end
@@ -663,7 +663,7 @@ local foreign function thread_worker_main(arg: *void)
   end
   if ctrl.status_kind == ffi.TITAN_THREAD_STATE_RUNNING then
     record_bootstrap_failure_native(
-      ctrl, "child thread exited without recording a status", 46 as foreign size_t)
+      ctrl, "child thread exited without recording a status", 46 as size_t)
   end
   thread_control_complete_native(ctrl)
   thread_control_release_native(ctrl)
@@ -673,8 +673,8 @@ local foreign function thread_control_abandon_and_release(ctrl: *titan_thread_co
   if ctrl == nil then return end
   uv.native_mutex_lock(ctrl.mutex)
   ctrl.abandoned = 1
-  local entry_msg: foreign *titan_thread_message = nil
-  local cancel_msg: foreign *titan_thread_message = nil
+  local entry_msg: *titan_thread_message = nil
+  local cancel_msg: *titan_thread_message = nil
   if ctrl.finished ~= 0 then
     entry_msg = ctrl.entry_msg
     ctrl.entry_msg = nil

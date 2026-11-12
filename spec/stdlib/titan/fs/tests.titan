@@ -1206,7 +1206,7 @@ function test_fs_file_transfer_crosses_states_and_survives_source_shutdown(
 end
 
 local foreign function fs_close_record(cells: *void, slot: int, code: int)
-  local codes = cells as foreign *int
+  local codes = cells as *int
   codes[slot] = code
 end
 

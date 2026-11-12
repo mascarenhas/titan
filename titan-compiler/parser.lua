@@ -1125,7 +1125,7 @@ local grammar_source = [[
     foreignfunc <- (P localopt FOREIGN FUNCTION P ANYNAME^NameFunc
                     (TYPEOPEN %{GenericForeignFunc})?
                     LPAREN^LParPList foreignparamlist^DeclParList RPAREN^RParPList
-                    foreignretopt^TypeFunc block^Statement P END^EndFunc) -> foreignfuncdecl
+                    foreignretopt^TypeFunc fblock^Statement P END^EndFunc) -> foreignfuncdecl
     foreignretopt <- (COLON foreigntype^TypeFunc) -> foreign_return / P -> foreign_void
     typealias <- (P localopt TYPE P ANYNAME^NameTypeAlias
                   (TYPEOPEN %{GenericTypeAlias})?
@@ -1375,6 +1375,96 @@ local grammar_source = [[
                 ASSIGN^AssignField exp^ExpFieldList) -> makefield
              / &expstart (P ('' -> tonil) exp^ExpFieldList) -> makefield
     fieldsep <- COMMA / SEMICOLON
+
+    -- Foreign function bodies ------------------------------------------------
+    -- The body of a foreign function is the raw-C subset of the statement and
+    -- expression rules above, and its types are C types without `foreign`.
+    -- Every rule builds the same AST as its ordinary counterpart, with the
+    -- same actions. A construct outside the subset throws a label of its own
+    -- from a lookahead, so the error is at the construct's first token.
+    fblock <- (P ((fresh (&fstatementstart fstatement^Statement)*
+                  (&RETURN freturnstat^ExpReturn)?) ~> append)
+               (&CATCH %{ForeignCatch})?) -> simpleblock
+    fstatementstart <- SEMICOLON / DO / BREAK / RAISE / DEFER / WHILE / REPEAT
+                     / IF / CASE / FOR / LOCAL / CONST / expstart
+    fstatement <- SEMICOLON / &DO fdoblock^EndBlock
+                / (P BREAK) -> StatBreak
+                / &RAISE %{ForeignRaise} / &DEFER %{ForeignDefer}
+                / &CASE %{ForeignCase}
+                / (P WHILE fexp^ExpWhile DO^DoWhile fblock^Statement P END^EndWhile) -> whilestat
+                / (P REPEAT fblock^Statement P UNTIL^UntilRepeat fexp^ExpRepeat) -> repeatstat
+                / (P IF fexp^ExpIf THEN^ThenIf fblock^Statement felseifstats^ExpElseIf
+                   ((ELSE fblock^Statement)? -> opt) P END^EndIf) -> ifstat
+                / &(FOR NAME (COMMA / IN)) %{ForeignForIn} / &FOR fforstat^DeclFor
+                / (P LOCAL? CONST fdecllist^DeclLocal ASSIGN^AssignLocal
+                   fexplist^ExpLocal) -> constlocalvardecl
+                / (P LOCAL fdecllist^DeclLocal
+                   ((ASSIGN fexplist^ExpLocal)? -> listopt)) -> StatDecl
+                / &expstart fassignmentorcall^ExpStat
+    fassignmentorcall <- (P fprefixexp^ExpStat
+                          ((&(COMMA / ASSIGN)
+                             (((fresh (COMMA fprefixexp^ExpVarList)*) ~> append)
+                              ASSIGN^AssignAssign fexplist^ExpAssign) -> assignment_tail)
+                           / ('' -> tofalse))) -> statement_candidate
+    fdoblock <- (P DO fblock^Statement P END^EndBlock) -> doblock
+    felseifstats <- (fresh (&ELSEIF felseifstat^ExpElseIf)*) ~> append
+    felseifstat <- (P ELSEIF fexp^ExpElseIf THEN^ThenElseIf fblock^Statement) -> Then
+    fforstat <- (P FOR fdecl^DeclFor (&(COMMA / IN) %{ForeignForIn})?
+                 fforrest^InFor) -> forstat
+    fforrest <- (P ASSIGN fexp^Exp1For COMMA^CommaFor fexp^Exp2For
+                 ((COMMA fexp^Exp3For)? -> opt)
+                 DO^DoFor fblock^Statement P END^EndFor) -> fornum_rest
+    freturnstat <- (P RETURN ((&expstart {| fexp^ExpReturn |}
+                               (&COMMA %{ForeignReturnList})?)? -> listopt)
+                    SEMICOLON?) -> StatReturn
+    fdecl <- (P NAME (&OPT %{ForeignOption})? ('' -> tofalse)
+              ((COLON ftype^TypeDecl)? -> opt)) -> declaration
+    fdecllist <- (fresh fdecl^DeclLocal (COMMA fdecl^DeclParList)*) ~> append
+    ftype <- (&FOREIGN %{ForeignBodyForeign} / &OWNED %{ForeignBodyOwned}
+              / &LCURLY %{ForeignBodyTitanType} / foreigntype)
+             (&OPT %{ForeignOption})?
+
+    fexp <- &expstart (((fe11^ExpSimpleExp -> binary_start)
+                        {: fbinaryop fe11^OpExp :}*) ~> binary_step) -> binary_finish
+    fbinaryop <- &OR %{ForeignOr} / &AND %{ForeignAnd} / compare
+               / BOR -> '|' / BXOR -> '~' / BAND -> '&'
+               / shift / &CONCAT %{ForeignConcat} / add / multiply
+    fe11 <- &expstart (fe12^ExpSimpleExp
+                       ((&(AS / IS) fcasttail^CastMissingType)? -> opt)) -> cast_or_test
+    fcasttail <- &IS %{ForeignIs}
+               / (AS ftype^CastMissingType (&LPAREN %{ForeignCountedCast})?
+                  ('' -> tonil)) -> cast_type_tail
+    fe12 <- (P ((fresh funop*) ~> append) fe13^ExpSimpleExp) -> fold_unops
+    fe13 <- (P fprefixexp^ExpSimpleExp ((fresh (POW fpoweroperand^OpExp)*) ~> append)) -> power
+    fpoweroperand <- (P ((fresh funop*) ~> append) P fprefixexp^OpExp) -> power_operand
+    funop <- &NOT %{ForeignNot} / LEN -> '#' / SUB -> '-' / BXOR -> '~'
+    fprefixexp <- &basestart (fbaseexp^ExpSimpleExp (&suffixstart fsuffixexp^ExpSuffix)*) ~> apply_suffix
+    fbaseexp <- (P NIL) -> nil_exp / (P FALSE -> tofalse) -> ExpBool
+              / (P TRUE -> totrue) -> ExpBool / (P NUMBER) -> number_exp
+              / (P STRINGLIT) -> ExpString
+              / &LCURLY %{ForeignConstructor} / &FUNCTION %{ForeignLambda}
+              / (P LPAREN fexp^ExpSimpleExp RPAREN^RParSimpleExp) -> adjust_exp
+              / (P FOREIGN foreigntype^TypeDecl (&DOT)^ForeignTypeMember) -> ExpForeignType
+              / (P NAME (&TYPEOPEN %{ForeignTypeArguments})?) -> name_exp
+              / &DOTS %{ForeignDots}
+    fsuffixexp <- (P DOT P ANYNAME^NameDotExpSuf
+                   (&TYPEOPEN %{ForeignTypeArguments})? fresh) -> dot_with_types
+                / &COLON %{ForeignMethod}
+                / &callstart fcallsuffix^RParFuncArgs
+                / &LBRACKET fbracketbody^RBracketExpSuf -> suffix_bracket_desc
+    fcallsuffix <- (P LPAREN ((&expstart fexplist^ExpExpList)? -> listopt) RPAREN^RParFuncArgs
+                    ('' -> tofalse)) -> call_suffix
+                 / (P LCURLY fnamedargs^NameNamedArg RCURLY^RCurlyNamedArgs
+                    ('' -> totrue)) -> call_suffix
+                 / (P {| (P STRINGLIT) -> ExpString |}
+                    ('' -> tofalse)) -> call_suffix
+    fbracketbody <- (P LBRACKET (&COMMA %{ForeignRange})?
+                     (fexp^ExpExpSuf (&COMMA %{ForeignRange})?
+                      RBRACKET^RBracketExpSuf ('' -> tofalse)) -> bracket_first_tail) -> bracket_finish
+    fexplist <- &expstart (((fresh fexp^ExpExpList (COMMA fexp^ExpExpList)*) ~> append) P) -> check_expression_list
+    fnamedargs <- (fresh (!RCURLY fnamedarg^NameNamedArg
+                   (fieldsep !RCURLY &. fnamedarg^NameNamedArg)* fieldsep?)?) ~> append
+    fnamedarg <- (P ANYNAME^NameNamedArg ASSIGN^AssignNamedArg fexp^ExpNamedArg) -> makefield
 
     P <- {} -> get_loc
     SKIP <- %SPACE / %COMMENT

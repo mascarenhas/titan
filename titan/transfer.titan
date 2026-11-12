@@ -18,7 +18,7 @@ local gc = import "gc"
 -- caller detaches the complete table before Receiver release can recurse.
 local foreign function dispose_resource_entries(entries: *titan_transfer_resource,
     count: size_t)
-  local index = 0 as foreign size_t
+  local index = 0 as size_t
   while index < count do
     local entry = entries + index
     local resource = entry.resource
@@ -33,7 +33,7 @@ local foreign function dispose_resources(table: *titan_transfer_resource_table)
   local entries = table.entries
   local count = table.count
   table.entries = nil
-  table.count = 0 as foreign size_t
+  table.count = 0 as size_t
   dispose_resource_entries(entries, count)
 end
 
@@ -42,7 +42,7 @@ end
 -- NULL is harmless; disposing the same non-NULL owner twice is invalid.
 foreign function discard_message(raw: *void)
   if raw == nil then return end
-  local message = raw as foreign *titan_async_message
+  local message = raw as *titan_async_message
   dispose_resources(ffi.titan_transfer_message_resources(message))
   ffi.free(message)
 end
@@ -55,18 +55,18 @@ local foreign function dispose_scope(owner: *titan_transfer_scope_owner)
   -- Detach both owners before any recursive native release callback.
   owner.message = nil
   owner.resources.entries = nil
-  owner.resources.count = 0 as foreign size_t
-  owner.capacity = 0 as foreign size_t
+  owner.resources.count = 0 as size_t
+  owner.capacity = 0 as size_t
   dispose_resource_entries(entries, count)
   if capacity > ffi.TITAN_TRANSFER_INLINE_RESOURCES then ffi.free(entries) end
-  discard_message(message as foreign *void)
+  discard_message(message as *void)
   -- In particular, no inline pointer or old native owner survives reuse.
   ffi.memset(owner, 0, foreign titan_transfer_scope_owner.sizeof)
 end
 
 local foreign function move_slot_to_scope(owner: *titan_transfer_scope_owner,
     slot: *(*void))
-  owner.message = slot[0] as foreign *titan_async_message
+  owner.message = slot[0] as *titan_async_message
   slot[0] = nil
 end
 
@@ -78,10 +78,10 @@ local foreign function packet_storage_size(content_size: size_t,
   local alignment = foreign titan_transfer_resource.alignof
   local padding = content_size % alignment
   if padding ~= 0 then padding = alignment - padding end
-  if padding > ffi.SIZE_MAX - content_size then return 0 as foreign size_t end
+  if padding > ffi.SIZE_MAX - content_size then return 0 as size_t end
   local aligned_size = content_size + padding
   if count > (ffi.SIZE_MAX - aligned_size) / foreign titan_transfer_resource.sizeof then
-    return 0 as foreign size_t
+    return 0 as size_t
   end
   return aligned_size + count * foreign titan_transfer_resource.sizeof
 end
@@ -93,24 +93,24 @@ local foreign function commit_resources(message: *titan_async_message,
   local count = owner.resources.count
   if count == 0 then return end
   local bytes = count * foreign titan_transfer_resource.sizeof
-  local entries = ((message as foreign *unsigned char) + storage_size - bytes)
-      as foreign *titan_transfer_resource
+  local entries = ((message as *unsigned char) + storage_size - bytes)
+      as *titan_transfer_resource
   ffi.memcpy(entries, owner.resources.entries, bytes)
   message.resources.entries = entries
   message.resources.count = count
-  owner.resources.count = 0 as foreign size_t
+  owner.resources.count = 0 as size_t
 end
 
 --- Copy an attachment-free packet, returning a new raw owner or NULL.
 -- Resource-bearing packets cannot be cloned; move their single owner instead.
 foreign function copy_message(raw: const *void): *void
   if raw == nil then return nil end
-  local input = raw as foreign const *titan_async_message
+  local input = raw as const *titan_async_message
   if input.resources.entries ~= nil then return nil end
   if input.resources.count ~= 0 then return nil end
-  local length = 0 as foreign size_t
-  local name_length = 0 as foreign size_t
-  local module_length = 0 as foreign size_t
+  local length = 0 as size_t
+  local name_length = 0 as size_t
+  local module_length = 0 as size_t
   if input.kind == ffi.TITAN_ASYNC_MESSAGE_STRING then
     length = input.length
   elseif input.kind >= ffi.TITAN_ASYNC_MESSAGE_RECORD then
@@ -126,9 +126,9 @@ foreign function copy_message(raw: const *void): *void
   if name_length > ffi.SIZE_MAX - header_size - length then return nil end
   if module_length > ffi.SIZE_MAX - header_size - length - name_length then return nil end
   local storage_size = packet_storage_size(
-      header_size + length + name_length + module_length, 0 as foreign size_t)
+      header_size + length + name_length + module_length, 0 as size_t)
   if storage_size == 0 then return nil end
-  local message = ffi.malloc(storage_size) as foreign *titan_async_message
+  local message = ffi.malloc(storage_size) as *titan_async_message
   if message == nil then return nil end
   ffi.memset(message, 0, header_size)
   message.kind = input.kind
@@ -141,7 +141,7 @@ foreign function copy_message(raw: const *void): *void
   message.function = input.function
   message.pointer = input.pointer
   message.entry = input.entry
-  local bytes = (message + 1) as foreign *char
+  local bytes = (message + 1) as *char
   message.bytes = bytes
   if length > 0 then ffi.memcpy(bytes, input.bytes, length) end
   message.name = bytes + length
@@ -150,7 +150,7 @@ foreign function copy_message(raw: const *void): *void
   if module_length > 0 then
     ffi.memcpy(bytes + length + name_length, input.module, module_length)
   end
-  return message as foreign *void
+  return message as *void
 end
 
 
@@ -195,7 +195,7 @@ local foreign function attach_reserved(table: *titan_transfer_resource_table,
   entry.resource = resource
   entry.release = release
   table.count = index + 1
-  return index as foreign unsigned int
+  return index as unsigned int
 end
 
 
@@ -451,7 +451,7 @@ end
 -- know the exact capture storage types.
 local foreign function transfer_project(state: *lua_State, closure: *CClosure,
                                   entry: const *TitanTransferEntry)
-  ffi.luaL_checkstack(state, (entry.capture_count as foreign int) + 2,
+  ffi.luaL_checkstack(state, (entry.capture_count as int) + 2,
     "projecting immediate closure captures")
   entry.project(state, closure)
 end
@@ -464,11 +464,11 @@ end
 -- @usage standard-library-transfer.md
 foreign function transfer_load_module(state: *lua_State,
                                       name: const *char, length: unsigned long long)
-  if length > (ffi.SIZE_MAX as foreign unsigned long long) then
+  if length > (ffi.SIZE_MAX as unsigned long long) then
     ffi.luaL_error(state, "transfer module name exceeds native size")
     return
   end
-  local native_length = length as foreign size_t
+  local native_length = length as size_t
   local top = ffi.lua_gettop(state)
   ffi.luaL_checkstack(state, 3, "loading a transfer module")
   ffi.lua_pushstring(state, ffi.LUA_PRELOAD_TABLE)
@@ -528,12 +528,12 @@ local foreign function transfer_restore(state: *lua_State,
       ffi.luaL_error(state, "closure transfer is missing captures")
       return
     end
-    if entry.capture_count > ((top - capture_base + 1) as foreign unsigned int) then
+    if entry.capture_count > ((top - capture_base + 1) as unsigned int) then
       ffi.luaL_error(state, "closure transfer is missing captures")
       return
     end
   end
-  ffi.luaL_checkstack(state, (entry.capture_count as foreign int) + 2,
+  ffi.luaL_checkstack(state, (entry.capture_count as int) + 2,
     "restoring immediate closure captures")
   entry.restore(state, module, capture_base)
 end

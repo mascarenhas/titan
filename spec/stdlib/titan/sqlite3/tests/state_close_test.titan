@@ -2,7 +2,7 @@ local sqlite_close_lua = import "lua"
 local sqlite_close_uv = import "uv"
 
 local foreign function sqlite_close_record(cells: *void, slot: int, code: int)
-  local codes = cells as foreign *int
+  local codes = cells as *int
   codes[slot] = code
 end
 

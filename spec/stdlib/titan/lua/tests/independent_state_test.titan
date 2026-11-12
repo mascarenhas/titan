@@ -8,9 +8,9 @@ local foreign function state_echo(state: *lua_State): int
 end
 
 local foreign function state_userdata(state: *lua_State): int
-  local pointer = ffi.lua_newuserdatauv(state, 1 as foreign size_t, 0)
-  local bytes = pointer as foreign *unsigned char
-  bytes[0] = 73 as foreign unsigned char
+  local pointer = ffi.lua_newuserdatauv(state, 1 as size_t, 0)
+  local bytes = pointer as *unsigned char
+  bytes[0] = 73 as unsigned char
   return 1
 end
 
@@ -50,7 +50,7 @@ function test_lua_independent_preserves_borrowed_state_stack(
 end
 
 local foreign function state_count_finalizer(state: *lua_State): int
-  local counter = ffi.lua_touserdata(state, 1) as foreign *int
+  local counter = ffi.lua_touserdata(state, 1) as *int
   counter[0] = counter[0] + 1
   return 0
 end

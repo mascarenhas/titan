@@ -63,6 +63,32 @@ local function import_transform(filename, text, caret, token, previous)
             transform_version=completion.TRANSFORM_VERSION}}
 end
 
+-- Whether the significant tokens before the caret end inside a `foreign
+-- function`, whose signature and body write C types without `foreign`. A
+-- `foreign function Name` opens one and the block keywords close it. A
+-- `function` there is the declaration's own or a function-pointer type, and
+-- a member name after `.` may be a reserved word; neither is a block keyword.
+local function inside_foreign_function(significant)
+    local depth
+    for index, token in ipairs(significant) do
+        local text = token.text
+        if not depth then
+            local keyword, name = significant[index+1], significant[index+2]
+            if text=='foreign' and keyword and keyword.text=='function'
+               and name and name.kind=='ANYNAME' then
+                depth = 1
+            end
+        elseif significant[index-1].text ~= '.' then
+            if text=='if' or text=='do' or text=='repeat' then
+                depth = depth + 1
+            elseif text=='end' or text=='until' then
+                depth = depth > 1 and depth - 1 or nil
+            end
+        end
+    end
+    return depth ~= nil
+end
+
 -- All offsets are zero-based UTF-8 byte boundaries; the host owns UTF-16 conversion.
 -- Multiword C primitive replacement covers the complete written primitive leaf.
 -- Implementation notes: doc/implementation/completion.md#disposable-source-and-coordinates
@@ -125,7 +151,9 @@ function completion.prepare(filename, text, caret)
     local raw_alias=marker and marker.text=='=' and significant[index-2]
         and significant[index-2].text=='type' and significant[index-3]
         and significant[index-3].text=='foreign'
-    if marker and (marker.text=='foreign' or marker.text=='owned' or raw_alias) then
+    local body_type=marker and (marker.text==':' or marker.text=='as')
+        and inside_foreign_function(significant)
+    if marker and (marker.text=='foreign' or marker.text=='owned' or raw_alias or body_type) then
         kind='foreign'
         first=leaf_first
         -- Include words following the caret in an already written primitive.

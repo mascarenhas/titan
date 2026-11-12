@@ -536,7 +536,8 @@ The optional `length` expression on `Ast.ExpCast` and `Ast.ExpIs` represents
 parentheses without newline sensitivity, at the existing cast precedence.
 The target can be a transparent string alias; semantic checking rejects
 other targets, pointer categories outside the existing character/`void`
-pointer domain, non-integer counts, and restricted foreign-body use.
+pointer domain, and non-integer counts. A foreign function body has no
+counted cast: its grammar rejects the parenthesis (`ForeignCountedCast`).
 
 `check_explicit_cast_relation` checks both operands and records an explicit
 `counted_pointer_to_string` conversion. Its `length_type` retains the native
@@ -572,8 +573,8 @@ its ordinary effects and errors.
 The length is an evaluated child, not metadata. Initializer dependency and
 callable-exposure checking, generic lowering, call-effect ordering, and the
 read/write/try-spill walker visit it after the pointer. Ordinary variable
-checking establishes its captures. Structural completion, binary-use, linear,
-and foreign-body walks include it as a public AST field.
+checking establishes its captures. Structural completion, binary-use and
+linear walks include it as a public AST field.
 
 
 ## Target-directed automatic aggregates and fixed arrays

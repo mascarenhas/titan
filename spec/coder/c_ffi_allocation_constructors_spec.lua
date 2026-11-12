@@ -419,9 +419,9 @@ describe("constructor-selected C allocation code generation", function()
             foreign type RawSlot = *void
 
             local foreign function acquire_slot(slot: *(*void), tag: int): int
-                local raw = ffi.malloc(foreign int.sizeof as foreign size_t)
+                local raw = ffi.malloc(foreign int.sizeof as size_t)
                 if raw == nil then return 0 end
-                local payload = raw as foreign *int
+                local payload = raw as *int
                 payload[0] = tag
                 slot[0] = raw
                 return 1
@@ -431,7 +431,7 @@ describe("constructor-selected C allocation code generation", function()
                 local raw = slot[0]
                 slot[0] = nil
                 if raw == nil then return -1 end
-                local payload = raw as foreign *int
+                local payload = raw as *int
                 local tag = payload[0]
                 ffi.free(raw)
                 return tag
@@ -441,7 +441,7 @@ describe("constructor-selected C allocation code generation", function()
                 local raw = slot[0]
                 slot[0] = nil
                 if raw == nil then return 0 end
-                local payload = raw as foreign *int
+                local payload = raw as *int
                 local tag = payload[0]
                 ffi.free(raw)
                 return tag

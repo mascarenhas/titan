@@ -15,25 +15,25 @@ local tse_hook_decode_calls = 0
 
 local foreign function tse_cfunc_echo(state: *lua_State): int
   local n = ffi.lua_gettop(state)
-  ffi.lua_pushinteger(state, (n + 100) as foreign lua_Integer)
+  ffi.lua_pushinteger(state, (n + 100) as lua_Integer)
   return 1
 end
 
 local foreign function tse_resource_retain(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] + 1
 end
 
 local foreign function tse_resource_release(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] - 1
 end
 
 -- ctrl[0] nonzero raises; ctrl[1] counts every inherited brand lookup.
 local foreign function tse_meta_index_probe(state: *lua_State): int
-  local key = (tse_meta_index_probe as foreign function(*lua_State): int) as foreign *void
+  local key = (tse_meta_index_probe as function(*lua_State): int) as *void
   ffi.lua_rawgetp(state, 1, key)
-  local ctrl = ffi.lua_touserdata(state, -1) as foreign *int
+  local ctrl = ffi.lua_touserdata(state, -1) as *int
   if ctrl ~= nil then
     ctrl[1] = ctrl[1] + 1
     if ctrl[0] ~= 0 then
@@ -53,22 +53,22 @@ local foreign function tse_deny_lua_alloc(
   if ptr ~= nil then
     if nsize <= osize then return ptr end
   end
-  local denied = ud as foreign *size_t
+  local denied = ud as *size_t
   if denied ~= nil then denied[0] = denied[0] + 1 end
   return nil
 end
 
 local foreign function tse_clear_encoded_cfunction_pointer(
     raw: *void, target: function(*lua_State): int): int
-  local message = raw as foreign *titan_async_message
+  local message = raw as *titan_async_message
   if message.function ~= target then return 0 end
   message.function = nil
   return 1
 end
 
 local foreign function tse_rewrite_packet_kind(raw: *void, template_raw: const *void)
-  local dst = raw as foreign *titan_async_message
-  local src = template_raw as foreign const *titan_async_message
+  local dst = raw as *titan_async_message
+  local src = template_raw as const *titan_async_message
   dst.kind = src.kind
 end
 

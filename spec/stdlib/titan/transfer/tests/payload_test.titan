@@ -237,12 +237,12 @@ local function transfer_payload_raises(action: function (): (), message: string)
   test.assert(caught, message)
 end
 local foreign function test_resource_retain(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] + 1
 end
 
 local foreign function test_resource_release(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] - 1
 end
 

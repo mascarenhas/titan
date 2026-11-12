@@ -23,7 +23,7 @@ local foreign function external_wait_worker_notify(argument: *void)
 end
 
 local foreign function external_wait_gated_worker_notify(argument: *void)
-  local slots = argument as foreign *ExternalWaitPointer
+  local slots = argument as *ExternalWaitPointer
   uv.native_sem_wait(slots[0])
   uv.native_external_wake_notify(slots[1])
   uv.native_external_wake_release(slots[1])
@@ -31,7 +31,7 @@ end
 
 local foreign function external_retirement_register(
     context: *void, target: *void): int
-  local fixture = context as foreign *titan_external_retirement_fixture
+  local fixture = context as *titan_external_retirement_fixture
   fixture.register_calls = fixture.register_calls + 1
   if fixture.register_error < 0 then return fixture.register_error end
   if fixture.ready ~= 0 then return 0 end
@@ -41,7 +41,7 @@ local foreign function external_retirement_register(
 end
 
 local foreign function external_retirement_unregister(context: *void)
-  local fixture = context as foreign *titan_external_retirement_fixture
+  local fixture = context as *titan_external_retirement_fixture
   fixture.unregister_calls = fixture.unregister_calls + 1
   local target = fixture.target
   fixture.target = nil
@@ -49,7 +49,7 @@ local foreign function external_retirement_unregister(context: *void)
 end
 
 local foreign function external_retirement_poll(context: *void): int
-  local fixture = context as foreign *titan_external_retirement_fixture
+  local fixture = context as *titan_external_retirement_fixture
   fixture.retire_calls = fixture.retire_calls + 1
   if fixture.ready == 0 then return 1 end
   if fixture.retire_error < 0 then
@@ -65,7 +65,7 @@ local foreign function external_retirement_poll(context: *void): int
 end
 
 local foreign function external_retirement_signal(context: *void): int
-  local fixture = context as foreign *titan_external_retirement_fixture
+  local fixture = context as *titan_external_retirement_fixture
   fixture.ready = 1
   local target = fixture.target
   fixture.target = nil
@@ -2517,7 +2517,7 @@ end
 
 local foreign function external_wait_window_register(context: *void, target: *void): int
   if target == nil then
-    local fixture = context as foreign *titan_external_retirement_fixture
+    local fixture = context as *titan_external_retirement_fixture
     fixture.retire_error = -1
     return -1
   end
