@@ -6,6 +6,7 @@ local coder_names = require "titan-compiler.coder.names"
 local coder_declarations = require "titan-compiler.coder.declarations"
 local types = require "titan-compiler.types"
 local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
 local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
 
@@ -802,16 +803,18 @@ describe("source-defined foreign functions", function()
         end)
     end)
 
-    it("keeps a body with zeroed automatic storage out of the source header", function()
-        -- Authored C may include the header before any C library header, and
-        -- an inline copy of these bodies would need memset, offsetof and
-        -- size_t there.
+    it("lets authored C include the source header before any other header", function()
+        -- The header includes only the module's `.ffi.h`. An inline copy of
+        -- these bodies would need memset, offsetof and size_t (zeroed
+        -- storage) or titan_cast_func of titan/ffi.h (a cast between a
+        -- function pointer and `void *`), so they keep a forwarder.
         with_header([[
             typedef struct ffi_pair { int left; int right; } ffi_pair;
             typedef struct ffi_tail { int count; int items[]; } ffi_tail;
         ]], function(header)
             h.run_coder([[
                 foreign import "]] .. header .. [["
+                foreign type Callback = function (int): int
 
                 local foreign function object(): int
                     local pair = foreign ffi_pair.new()
@@ -823,24 +826,52 @@ describe("source-defined foreign functions", function()
                     return tail.count + tail.items[1]
                 end
 
+                local foreign function twice(input: int): int
+                    return input + input
+                end
+
+                local foreign function erase(callback: Callback): *void
+                    return callback as *void
+                end
+
+                local foreign function restore(raw: *void): Callback
+                    return raw as Callback
+                end
+
+                local foreign function roundtrip(): int
+                    local callback = restore(erase(twice))
+                    return callback(4)
+                end
+
                 local foreign function plain(input: int): int
                     local doubled = input + input
                     return doubled
                 end
 
                 function run(): integer
-                    return object() + flexible() + plain(21)
+                    return object() + flexible() + roundtrip() + plain(21)
                 end
             ]], [[
-                assert(test.run() == 42)
+                assert(test.run() == 50)
             ]])
             local generated = read_file("test.titan.h")
-            for _, name in ipairs({ "memset", "offsetof", "size_t",
-                    "_foreign_local_pair_", "_foreign_fam_pointer_tail_" }) do
-                assert.falsy(generated:find(name, 1, true), name)
-            end
-            -- A body without such storage keeps its inline copy.
+            -- A body that names nothing else keeps its inline copy.
             assert.truthy(generated:find("_foreign_local_doubled_", 1, true))
+
+            local caller = temporary.name(".c")
+            local file = assert(io.open(caller, "wb"))
+            assert(file:write('#include "' .. lfs.currentdir() .. '/test.titan.h"\n'
+                .. "int authored_caller(void) { return 1; }\n"))
+            assert(file:close())
+            local argv = {}
+            for word in driver.CC:gmatch("%S+") do argv[#argv + 1] = word end
+            for _, word in ipairs({ "-fsyntax-only",
+                    "-Werror=implicit-function-declaration", caller }) do
+                argv[#argv + 1] = word
+            end
+            local result = compiler_io.new_sync():run(argv)
+            os.remove(caller)
+            assert.is_true(result.ok, result.output)
         end)
     end)
 

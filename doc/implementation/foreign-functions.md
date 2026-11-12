@@ -379,15 +379,21 @@ helper's address is never taken, so its per-unit copies are unobservable.
 `_foreign_function_is_inline` accepts the function, and otherwise a one-line
 forwarder to the canonical definition. `_foreign_function_is_inline` first
 excludes public declarations, coverage-outlined functions, and functions with
-private native-record field layouts. It then skips an optional prefix of
-initialized local declarations and recognizes exactly three root shapes: one
-return; one `if` whose sole then and else statements return; or one returning
-`if` without else followed by one return. A declaration with an
-[allocation plan](#allocation-and-recovery-storage) in that prefix excludes
-the function: its zeroed storage is rendered with `memset`, `offsetof` and
-`size_t`, and the header includes only the module's `.ffi.h`, so authored C
-that includes it first would not compile. Header and module generation each
-recompute the classification; nothing is cached on the AST node.
+private native-record field layouts. It then excludes a body whose lowering
+names something the header does not declare (`needs_producer_unit`). The
+header includes only the module's `.ffi.h`, and authored C may include it
+before any other header, so two lowerings keep a body in the producer's C
+unit: a declaration with an
+[allocation plan](#allocation-and-recovery-storage), whose zeroed storage is
+rendered with `memset`, `offsetof` and `size_t`, and a cast between a function
+pointer and `void *`, which is rendered with `titan_cast_func` of
+`titan/ffi.h`. Any lowering added to the raw-C path that names a C library or
+runtime symbol belongs in that predicate. Finally it skips an optional prefix
+of initialized local declarations and recognizes exactly three root shapes:
+one return; one `if` whose sole then and else statements return; or one
+returning `if` without else followed by one return. Header and module
+generation each recompute the classification; nothing is cached on the AST
+node.
 
 ### Temporary headers during checking
 

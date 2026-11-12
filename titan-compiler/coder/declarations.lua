@@ -677,6 +677,49 @@ function codeboxparam(ctx, param)
     })
 end
 
+-- The checked operation a foreign-body cast lowers as.
+local function foreign_cast_operation(node)
+    if node._adjustment and node._adjustment.kind == "direct_coercion" then
+        return node._adjustment.coercion.op
+    elseif node._written_cast and node._written_cast.tag == "just" then
+        local written = maybe3.get_checked(node._written_cast, "written cast")
+        if written.op == "coercion" then
+            return written.coercion.op
+        elseif written.op == "explicit" then
+            return written.conversion.op or written.conversion.kind
+        end
+    elseif node._c_conversion then
+        return node._c_conversion.op or node._c_conversion.kind
+    end
+end
+
+local function casts_function_pointer(operation)
+    return operation == "c_function_pointer_to_void"
+        or operation == "c_void_to_function_pointer"
+end
+
+-- Whether a body's lowering names something that the source header does not
+-- declare. The header includes only the module's `.ffi.h`, and authored C may
+-- include it before any other header. Zeroed storage is rendered with memset,
+-- offsetof and size_t, and a cast between a function pointer and `void *`
+-- with titan_cast_func of titan/ffi.h.
+local function needs_producer_unit(node, seen)
+    if type(node) ~= "table" or seen[node] then return false end
+    seen[node] = true
+    if node._tag == "Ast.Decl" and node._c_allocation_plan then return true end
+    if node._tag == "Ast.ExpCast"
+       and casts_function_pointer(foreign_cast_operation(node)) then
+        return true
+    end
+    for key, value in pairs(node) do
+        if (type(key) ~= "string" or key:sub(1, 1) ~= "_")
+           and needs_producer_unit(value, seen) then
+            return true
+        end
+    end
+    return false
+end
+
 -- Implementation notes: doc/implementation/foreign-functions.md#contents-and-inline-classification
 function coder._foreign_function_is_inline(node)
     -- Public callbacks need one provider-owned address, including when their
@@ -688,15 +731,10 @@ function coder._foreign_function_is_inline(node)
     if node._native_record_fields then return false end
     local block = node.block
     if not block or block._tag ~= "Ast.StatBlock" then return false end
+    if needs_producer_unit(block, {}) then return false end
     local stats = block.stats
     local first = 1
     while stats[first] and stats[first]._tag == "Ast.StatDecl" do
-        for _, decl in ipairs(stats[first].decls) do
-            -- Zeroed storage is rendered with memset, offsetof and size_t.
-            -- Authored C may include the source header before any C library
-            -- header, so such a body stays in the producer's C unit.
-            if decl._c_allocation_plan then return false end
-        end
         first = first + 1
     end
     local function return_block(candidate)
@@ -895,24 +933,10 @@ function coder._foreign_raw_exp(ctx, node)
         return coder._foreign_raw_call(ctx, node)
     elseif tag == "Ast.ExpCast" then
         local stats, exp = coder._foreign_raw_exp(ctx, node.exp)
-        local operation
-        if node._adjustment
-            and node._adjustment.kind == "direct_coercion" then
-            operation = node._adjustment.coercion.op
-        elseif (node._written_cast and node._written_cast.tag == "just") then
-            if maybe3.get_checked(node._written_cast, "written cast").op == "coercion" then
-                operation = maybe3.get_checked(node._written_cast, "written cast").coercion.op
-            elseif maybe3.get_checked(node._written_cast, "written cast").op == "explicit" then
-                operation = maybe3.get_checked(node._written_cast, "written cast").conversion.op
-                    or maybe3.get_checked(node._written_cast, "written cast").conversion.kind
-            end
-        elseif node._c_conversion then
-            operation = node._c_conversion.op or node._c_conversion.kind
-        end
+        local operation = foreign_cast_operation(node)
         if operation == "c_address" or operation == "mutable_c_address" then
             return stats, "(&(" .. exp .. "))"
-        elseif operation == "c_function_pointer_to_void"
-            or operation == "c_void_to_function_pointer" then
+        elseif casts_function_pointer(operation) then
             return stats, render("titan_cast_func($TARGET, $SOURCE)", {
                 TARGET = coder._render_c_type_name(node._type),
                 SOURCE = exp,
