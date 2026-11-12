@@ -889,9 +889,9 @@ local function adapter_rooting(source, target, actions, lifetimes, construction)
         raw_buffers_are_roots = false,
         construction = construction,
         fixed = {
-            -- Native inputs remain C arguments and acquire no tracing-only
-            -- source roots. Only a freshly allocated nested wrapper needs an
-            -- immediate destination root.
+            -- An adapter's inputs are its own parameters, which its caller
+            -- keeps reachable, so it needs no source roots. Only a freshly
+            -- allocated nested wrapper needs an immediate destination root.
             argument_source = {},
             argument_destination = adapter_fixed_allocation_roots(
                 actions.arguments, lifetimes.argument_destination),

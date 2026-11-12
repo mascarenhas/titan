@@ -196,6 +196,67 @@ producer that cannot fill a required position is still an error. A declared
 flexible result tail represents positions that may be absent; see the next
 section and [Flexible returns](flexible-returns.md).
 
+### Arguments stay reachable during the call
+
+An argument stays reachable until its call returns, wherever the caller read
+it from. The callee may clear the record field, module variable, or captured
+local that held the value, and the evaluation of a later argument may do the
+same: the parameter still holds a valid value. The same is true of a method's
+receiver, of a function value while it is being called, and of every value a
+variadic function receives through `...`, including the elements of a spread
+Array.
+
+```titan
+record Holder
+    item: value
+end
+
+local function take(holder: Holder, item: value): value
+    holder.item = nil     -- removes the argument's only other home
+    return item           -- still the value the caller passed
+end
+
+function detach(holder: Holder): value
+    return take(holder, holder.item)
+end
+```
+
+The guarantee covers the call. To keep a value longer, store it in a local,
+a field, or a container.
+
+It sets no upper limit either. An argument can stay reachable after its call
+has returned, while the calling function goes on, even when its last other
+home is cleared in the meantime. Clearing a field right after passing its
+value does not make the value collectable, and a finalizer that depends on it
+does not run yet. Code that needs an object to be collected or finalized at a
+known point makes the call in a function of its own, or releases the object
+explicitly. An immediately called function literal is enough: what it held is
+released when it returns.
+
+```titan
+record Resource
+    name: string
+end
+
+function Resource:use(): boolean
+    return #self.name > 0
+end
+
+record Slot
+    resource: Resource?
+end
+
+function use_and_drop(slot: Slot): boolean
+    -- `slot.resource:use()` written directly in this body could keep the
+    -- Resource reachable until the function returns.
+    local used = (function (): boolean
+        return slot.resource:use()
+    end)()
+    slot.resource = nil    -- nothing in this function holds the Resource now
+    return used
+end
+```
+
 ## Named calls
 
 A direct declaration can also be called with a brace-delimited named list:

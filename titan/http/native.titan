@@ -482,8 +482,8 @@ local function execute_input(parser: Parser, input: string)
   if ffi.lua_checkstack(L, ffi.LUA_MINSTACK) == 0 then
     raise "cannot reserve stack for HTTP parser callbacks"
   end
-  -- llhttp borrows the input bytes while callbacks may allocate. The caller's
-  -- argument provenance roots this parameter for the whole call.
+  -- llhttp borrows the input bytes while callbacks may allocate. The caller
+  -- keeps this parameter reachable for the whole call.
   local bytes = input as foreign const *char
   -- Limit the native span before callbacks copy attacker-controlled text.
   -- Count punctuation and leading lines as well as callback text. A headers

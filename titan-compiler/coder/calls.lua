@@ -4,8 +4,9 @@ local _ENV = core
 -- Generate native call arguments in source order. A pure trailing suffix may
 -- remain as direct C expressions: with no intervening statements, reordering
 -- those reads is unobservable. Every argument at or before effectful setup is
--- frozen in a C temporary at its source position. Native arguments never gain
--- tracing-only Lua-stack copies; this helper preserves evaluation order only.
+-- frozen in a C temporary at its source position. An argument that has no
+-- stable root is published in a slot of this frame as well (see
+-- `has_stable_root`); every other native argument stays C-only.
 function expression_contains_call(node)
     local tag = node._tag
     if tag == "Ast.ExpCall" then
@@ -27,6 +28,133 @@ function expression_contains_call(node)
             or expression_contains_call(node.rhs)
     end
     return false
+end
+
+local has_stable_root
+
+-- A cast keeps its operand's root when it yields the same object: an equal
+-- type, an injection into `value`, or an Option wrap or force whose payload
+-- needs no conversion. An Interface conversion, a counted string copy, a
+-- number-to-string conversion and a non-exact callable adjustment publish a
+-- fresh object (or the callable fallback) in a traced slot. Every other cast
+-- is treated as a new value.
+local function cast_has_stable_root(ctx, node)
+    if node._interface_conversion or node.length then return true end
+    local operator = node._operator_conversion
+    if operator then return operator.op == "number_to_string" end
+    if node._interface_downcast or node._c_conversion then return false end
+    local adjustment = node._adjustment
+    if adjustment and adjustment.kind == "callable" then
+        return not adjustment.exact or has_stable_root(ctx, node.exp)
+    end
+    if node._written_cast and node._written_cast.tag == "just" then
+        return false
+    end
+    local source, target = node.exp._type, node._type
+    if types.is_direct_c(source) or types.is_direct_c(target) then
+        return false
+    end
+    if types.equals(source, target) then
+        return has_stable_root(ctx, node.exp)
+    end
+    if target._tag == "Type.Value" then
+        return source._tag ~= "Type.Option" and has_stable_root(ctx, node.exp)
+    end
+    if target._tag == "Type.Option" and source._tag == "Type.Nil" then
+        return true
+    end
+    if (target._tag == "Type.Option") ~= (source._tag == "Type.Option") then
+        local coercion = coder._cast_coercion(node)
+        return coercion ~= nil and coercion.inner ~= nil
+            and coercion.inner.kind == "identity"
+            and (target._tag == "Type.Option" or coercion.op == "option_force")
+            and has_stable_root(ctx, node.exp)
+    end
+    return false
+end
+
+-- Whether a GC-bearing input of a native call is already reachable from a
+-- root that nothing can clear before the call returns. The answer uses only
+-- this function's checked AST, never a fact about the callee. Stable are:
+--   * a local with a frame slot of its own, and a declaration that borrows
+--     another root for its whole scope (`_borrows_root`: a parameter or
+--     `self`, which this function's caller roots, and a catch's `error` and
+--     `traceback`, which the try's slots hold). A captured and assigned
+--     declaration lives in a box and is not stable;
+--   * a by-value capture, and a canonical function or static closure in a
+--     module slot: those homes are never rewritten;
+--   * a value this frame published: a literal, constructor, concatenation,
+--     closure or bound method (its allocation root), a Titan call result
+--     (its result slot) and an Array or Map element (the read's traced
+--     temporary);
+--   * a `...` element, which this function's caller roots like a parameter;
+--   * `and`/`or` over stable operands, and a cast that keeps a stable
+--     operand's object or publishes a fresh one.
+-- Everything else was read from a home that other code can overwrite (a
+-- record field, a module variable, a capture box, a foreign result) or is
+-- not recognised, and gets a root.
+has_stable_root = function(ctx, node)
+    if not types.is_gc(node._type) then return true end
+    local tag = node._tag
+    if tag == "Ast.ExpVar" then
+        return has_stable_root(ctx, node.var)
+    elseif tag == "Ast.VarName" then
+        local decl = node._decl
+        if decl._tag == "Ast.TopLevelFunc" then return true end
+        if decl._tag == "Ast.TopLevelVar" then return false end
+        local capture = ctx.captures and ctx.captures[decl]
+        if capture then return not capture.boxed end
+        if decl._boxed then return false end
+        return decl._slot ~= nil or decl._borrows_root == true
+    elseif tag == "Ast.VarDot" then
+        local decl = node._decl
+        return decl ~= nil and (decl._tag == "Type.StaticMethod"
+            or (decl._tag == "Type.ModuleMember"
+                and node._type._tag == "Type.Function"))
+    elseif tag == "Ast.VarBracket" then
+        local base = node.exp1._type._tag
+        return base == "Type.Array" or base == "Type.Map"
+    elseif tag == "Ast.ExpString" or tag == "Ast.ExpInitList"
+        or tag == "Ast.ExpUnionInit" or tag == "Ast.ExpConcat"
+        or tag == "Ast.ExpFunction" or tag == "Ast.ExpMethodRef"
+        or tag == "Ast.ExpDotsIndex" then
+        return true
+    elseif tag == "Ast.ExpCall" then
+        -- A Titan call roots each visible result; a C allocation
+        -- pseudo-call roots its owner. A C call's result is a C copy.
+        return not (node._c_pointer_call or node._direct_foreign_reference)
+    elseif tag == "Ast.ExpExtra" then
+        return true
+    elseif tag == "Ast.ExpAdjust" then
+        return not (node._adjusted_spread or node._adjustvoid)
+            and has_stable_root(ctx, node.exp)
+    elseif tag == "Ast.ExpBinop" then
+        return (node.op == "and" or node.op == "or")
+            and has_stable_root(ctx, node.lhs)
+            and has_stable_root(ctx, node.rhs)
+    elseif tag == "Ast.ExpCast" then
+        return cast_has_stable_root(ctx, node)
+    end
+    return false
+end
+
+coder._has_stable_root = has_stable_root
+
+-- Stabilize one already generated native-call input: the callee value, the
+-- receiver, an argument or a static variadic element. It is frozen in C at
+-- its source position, and published in a slot of this frame when it has no
+-- stable root. The slot lives until the enclosing block ends.
+function coder._stabilize_input_code(ctx, typ, stats, exp, node)
+    local frozen, name = coder._freeze_code(ctx, typ, stats, exp)
+    if not types.is_gc(typ) or has_stable_root(ctx, node) then
+        return frozen, name
+    end
+    return frozen .. "\n" .. setslot(typ, newborrowedslot(ctx), name), name
+end
+
+function coder._stabilize_input(ctx, node)
+    local stats, exp = codeexp(ctx, node)
+    return coder._stabilize_input_code(ctx, node._type, stats, exp, node)
 end
 
 function ordered_call_args(ctx, args, n)
@@ -53,10 +181,9 @@ function ordered_call_args(ctx, args, n)
     local stats, exps = {}, {}
     for i = 1, n do
         local c = coded[i]
-        if freeze[i] then
-            local cstats, cexp =
-                coder._freeze_code(ctx, c.typ, c.stats, c.exp)
-            stats[i], exps[i] = cstats, cexp
+        if freeze[i] or not has_stable_root(ctx, args[i]) then
+            stats[i], exps[i] = coder._stabilize_input_code(
+                ctx, c.typ, c.stats, c.exp, args[i])
         else
             stats[i], exps[i] = c.stats, c.exp
         end
@@ -65,10 +192,10 @@ function ordered_call_args(ctx, args, n)
 end
 
 -- A checked named call carries a dense formal-order argument list plus the
--- formal indexes of explicitly written expressions in lexical order. Freeze
--- each explicit expression immediately in that lexical order, then generate
--- the synthetic nil omissions. The returned expressions remain indexed by
--- formal position for the unchanged native ABI.
+-- formal indexes of explicitly written expressions in lexical order.
+-- Stabilize each explicit expression immediately in that lexical order, then
+-- generate the synthetic nil omissions. The returned expressions remain
+-- indexed by formal position for the unchanged native ABI.
 function named_ordered_call_args(ctx, args, order)
     local stats = {}
     local exps = {}
@@ -79,8 +206,8 @@ function named_ordered_call_args(ctx, args, order)
         assert(not args[index]._named_omitted)
         seen[index] = true
         local cstats, cexp = codeexp(ctx, args[index])
-        local mstats, mexp = coder._freeze_code(ctx, args[index]._type,
-            cstats, cexp)
+        local mstats, mexp = coder._stabilize_input_code(
+            ctx, args[index]._type, cstats, cexp, args[index])
         table.insert(stats, mstats)
         exps[index] = mexp
     end
@@ -89,8 +216,8 @@ function named_ordered_call_args(ctx, args, order)
             assert(arg._named_omitted,
                 "named call order omitted an explicit argument")
             local cstats, cexp = codeexp(ctx, arg)
-            local mstats, mexp = coder._freeze_code(ctx, arg._type,
-                cstats, cexp)
+            local mstats, mexp = coder._stabilize_input_code(
+                ctx, arg._type, cstats, cexp, arg)
             table.insert(stats, mstats)
             exps[index] = mexp
         end
@@ -1386,7 +1513,7 @@ function coder._codeadjustedopen(
         local fi, ti = fixed_index[exp], tail_index[exp]
         if fi or ti then
             local mstats, name = stabilize(
-                ctx, exp._type, cs, ce)
+                ctx, exp._type, cs, ce, exp)
             table.insert(stats, mstats)
             if fi then fixednames[fi] = name else tailnames[ti] = name end
         else
@@ -1441,11 +1568,15 @@ function coder._check_open_vararg_count(ctx, node, nprefix, run, stats)
 end
 
 -- Materialize an adjusted scalar-prefix + dynamic run as one input-variadic
--- descriptor. Native inputs remain C values; each open conversion that actually
--- allocates a fresh callable/Interface wrapper establishes that allocation's
--- immediate element-specific traced root. A conditional identity fallback does
--- not publish the source there. The descriptor backing is an untraced caller C
--- array.
+-- descriptor. The descriptor backing is an untraced caller C array, so every
+-- element needs a root of its own while the callee runs:
+--   * a call's results and a forwarded `...` already have one;
+--   * a retained read (a Map element, an Interface discovery) and an
+--     allocating open conversion publish their value in this call site's
+--     traced range;
+--   * an Array's elements stay in the Array, whose slots the callee can
+--     overwrite (`run.callee_mutable`), so each is published in that range
+--     here.
 function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
                                         run, stats, callargs)
     local elem = assert(callee_ftype.varargtype)
@@ -1457,10 +1588,14 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
     local runcount = coder._check_open_vararg_count(
         ctx, node, #tailnames, run, stats)
     local root_depth
-    if run.retain_read_results
-        or coder._adjustment_allocates_gc(run.adjustment) then
+    local allocates = run.retain_read_results
+        or coder._adjustment_allocates_gc(run.adjustment)
+    if allocates or run.callee_mutable then
+        local allocations = ctx.allocations
         root_depth = ctx.depth
         for _ = 1, 200 do reserveslot(ctx) end
+        -- A range that only roots borrowed elements is not an allocation.
+        if not allocates then ctx.allocations = allocations end
     end
     local runindex = c_integer_literal(#tailnames) .. " + _vai"
     local result_stack = root_depth and ("("
@@ -1469,6 +1604,11 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         or nil
     local convstats, convexp = coder._convert_result_run_element(
         ctx, run, elem, "_vai", node.loc, result_root, result_stack)
+    local borrowed_root = ""
+    if run.callee_mutable and not run.retain_read_results then
+        borrowed_root = setslot(elem, result_root,
+            argsname .. "[" .. runindex .. "]")
+    end
     local prefixsets = {}
     for i, name in ipairs(tailnames) do
         local index = c_integer_literal(i - 1)
@@ -1487,12 +1627,14 @@ function coder._emit_open_vararg_struct(ctx, node, callee_ftype, tailnames,
         for (int _vai = 0; _vai < (int)$RUNCOUNT; _vai++) {
             $CONVSTATS
             $ARGS[$NPREFIX + _vai] = $VALUE;
+            $BORROWED_ROOT
         }
         $STRUCT $DESC = { (lu_byte)$COUNT, $ARGS };
     ]], {
         COUNT = countname,
         NPREFIX = c_integer_literal(#tailnames),
         RUNCOUNT = runcount,
+        BORROWED_ROOT = borrowed_root,
         FILE = c_string_literal(node.loc.filename),
         LINE = c_integer_literal(node.loc.line),
         COL = c_integer_literal(node.loc.col),
@@ -1550,14 +1692,14 @@ function codevaluecall(ctx, node)
     end
     local stats = {}
 
-    -- 1. evaluate the callee once into a C temporary. The exact Titan branch
-    -- receives it through the native convention; only the slow branches later
-    -- publish it on the Lua stack as an actual Lua-convention argument.
+    -- 1. evaluate the callee once into a C temporary, rooted when it has no
+    -- stable root: the exact Titan branch passes it as the callee's `_fn`
+    -- through the native convention. Only the slow branches later publish it
+    -- on the Lua stack as an actual Lua-convention argument.
     local fstat, fexp = codeexp(ctx, node.exp)
-    local fdecl, fname = newtmp(ctx, ftype, false)
-    table.insert(stats, fstat)
-    table.insert(stats, fdecl)
-    table.insert(stats, fname .. " = " .. fexp .. ";")
+    local fstats, fname = coder._stabilize_input_code(
+        ctx, ftype, fstat, fexp, node.exp)
+    table.insert(stats, fstats)
 
     -- A variadic callee value: `ftype.varargtype` is set. The argument list holds
     -- the fixed-param args (1..nfixed) followed by any surplus static args (each
@@ -1590,7 +1732,8 @@ function codevaluecall(ctx, node)
     if callee_vararg and node._arg_adjustment
         and node._arg_adjustment.open_source then
         local astats, fixednames, tailnames, run = coder._codeadjustedopen(
-            ctx, node._arg_adjustment, "LUA_MULTRET", "1", coder._freeze_code)
+            ctx, node._arg_adjustment, "LUA_MULTRET", "1",
+            coder._stabilize_input_code)
         for _, stat in ipairs(astats) do table.insert(stats, stat) end
         for i, atype in ipairs(ftype.params) do
             argnames[i] = assert(fixednames[i])
@@ -1603,7 +1746,7 @@ function codevaluecall(ctx, node)
         local astats, anames = coder._codeadjustedfixed(ctx, {
             _result_adjustment = node._arg_adjustment,
             exps = args,
-        }, coder._freeze_code)
+        }, coder._stabilize_input_code)
         for _, stat in ipairs(astats) do table.insert(stats, stat) end
         for i, atype in ipairs(ftype.params) do
             argnames[i] = assert(anames[i])
@@ -1617,9 +1760,9 @@ function codevaluecall(ctx, node)
             if i <= npassed then
                 local atype = (callee_vararg and i > nfixed) and callee_vararg
                     or ftype.params[i]
-                local adecl, aname = newtmp(ctx, atype, false)
-                table.insert(stats, adecl)
-                table.insert(stats, aname .. " = " .. aexp .. ";")
+                local mstats, aname = coder._stabilize_input_code(
+                    ctx, atype, "", aexp, arg)
+                table.insert(stats, mstats)
                 if callee_vararg and i > nfixed then
                     table.insert(vargexps, aname)
                 else
@@ -1662,7 +1805,7 @@ function codevaluecall(ctx, node)
     -- right before `$FASTCALL`). The struct is therefore built ONLY on the fast
     -- path (exact tag match). The generic path re-pushes elements directly from
     -- `vargexps` and does not read the struct. The descriptor's native elements
-    -- remain C arguments and receive no tracing-only copies.
+    -- were stabilized above like fixed arguments and receive no further copies.
     local vargca = {}    -- the two struct C exprs (_varargs ptr, _start)
     local vargstats = {} -- the struct-build setup statements (fast path only)
     if callee_vararg and not inputrun then
@@ -2175,7 +2318,7 @@ local function lower_call(ctx, node)
                     types.method_function_type(indexed),
                     types.method_function_type(mtype)),
                 "Interface call has a noncanonical method slot")
-            local cstat, wrapper = coder._freeze(ctx, node.exp)
+            local cstat, wrapper = coder._stabilize_input(ctx, node.exp)
             local fptr = fresh_lowering_name(
                 ctx, "_titan_interface_call_")
             table.insert(castats, cstat)
@@ -2236,7 +2379,7 @@ local function lower_call(ctx, node)
                     INDEX = c_integer_literal(ctx.modules[mod])
                 })
             end
-            local cstat, cexp = coder._freeze(ctx, node.exp)
+            local cstat, cexp = coder._stabilize_input(ctx, node.exp)
             table.insert(castats, cstat)
             table.insert(caexps, modarg)
             table.insert(caexps, "NULL")
@@ -2299,7 +2442,8 @@ local function lower_call(ctx, node)
     elseif callee_vararg and node._arg_adjustment
         and node._arg_adjustment.open_source then
         local astats, fixednames, tailnames, run = coder._codeadjustedopen(
-            ctx, node._arg_adjustment, "LUA_MULTRET", "1", coder._freeze_code)
+            ctx, node._arg_adjustment, "LUA_MULTRET", "1",
+            coder._stabilize_input_code)
         for _, stat in ipairs(astats) do table.insert(castats, stat) end
         for i = 1, #callee_ftype.params do
             local fixedname = assert(fixednames[i])
@@ -2316,7 +2460,7 @@ local function lower_call(ctx, node)
         local astats, anames = coder._codeadjustedfixed(ctx, {
             _result_adjustment = node._arg_adjustment,
             exps = args,
-        }, coder._freeze_code)
+        }, coder._stabilize_input_code)
         for _, stat in ipairs(astats) do table.insert(castats, stat) end
         for i = 1, #callee_ftype.params do
             local aname = assert(anames[i])

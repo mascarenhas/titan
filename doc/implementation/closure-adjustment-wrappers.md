@@ -223,8 +223,8 @@ Its order is fixed:
 1. validate target input and flexible-output descriptor bounds;
 2. reserve and nil-initialize only the scratch selected by the frozen root
    inventory, saving stack positions as offsets where a real rebase is needed;
-3. keep fixed `B` arguments and forwarded open values in C, borrowing their
-   existing provenance without input roots;
+3. keep fixed `B` arguments and forwarded open values in C: the wrapper's
+   caller keeps them reachable, so they get no input roots;
 4. realize contravariant argument actions into A's fixed and tail storage,
    immediately rooting each newly allocated nested wrapper;
 5. recover the source closure from slot `n-1`, read its authoritative module
@@ -282,10 +282,13 @@ strict entry or depending on which provider built A.
 
 ## Roots, relocation, and errors
 
-The general native-call rooting protocol (borrowed inputs, immediate result
-roots, rebase after native calls, non-moving heap) is canonical in
+The general native-call rooting protocol (inputs rooted by the caller,
+immediate result roots, rebase after native calls, non-moving heap) is
+canonical in
 [Values and the GC](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport).
-Wrapper-specific rules:
+An adapter, strict relay or bound-method trampoline roots none of its inputs:
+they are its own parameters, which its caller keeps reachable, or immutable
+upvalues of its `_fn`. Wrapper-specific rules:
 
 * Wrapper allocation is emitted in expression `stats`, never duplicated in a C
   expression template. Operand and call evaluation stay left-to-right and

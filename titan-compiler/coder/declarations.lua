@@ -1157,12 +1157,16 @@ end
 
 -- Titan calling convention:
 --     first parameter is a lua_State*; remaining inputs use their actual native
---     C types. The caller never publishes tracing-only Lua-stack copies of those
---     arguments. A callee creates a separate local home only when mutation or
---     setjmp spilling requires one. The function returns its first result
---     directly and writes later results through out parameters. A native caller
---     roots each GC-bearing result immediately after return, before later work
---     can collect it; returning itself cannot run the collector.
+--     C types. The caller keeps every GC-bearing input reachable until the
+--     call returns: it publishes an input in a slot of its own frame only
+--     when that input has no root that later code cannot clear
+--     (`has_stable_root` in coder/calls.lua). A parameter therefore borrows
+--     its caller's root (`_borrows_root`), and the callee creates a separate
+--     local home only when mutation or setjmp spilling requires one. The
+--     function returns its first result directly and writes later results
+--     through out parameters. A native caller roots each GC-bearing result
+--     immediately after return, before later work can collect it; returning
+--     itself cannot run the collector.
 -- Implementation notes: doc/implementation/codegen-overview.md#the-titan-native-function-and-its-calling-convention
 function codefuncdec(tlcontext, node)
     local ctx = newcontext(tlcontext)
@@ -1216,6 +1220,7 @@ function codefuncdec(tlcontext, node)
         -- assigned self, and boxed when captured-and-mutated by a nested lambda.
         local self = node._self
         self._cvar = "__self__"
+        self._borrows_root = true
         self._boxed = self._captured and self._assigned
         if types.is_gc(self._type) and (self._assigned or self._needs_spill) then
             self._slot = newslot(ctx)
@@ -1231,6 +1236,7 @@ function codefuncdec(tlcontext, node)
     end
     for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
+        param._borrows_root = true
         param._boxed = param._captured and param._assigned
         if types.is_gc(param._type) and (param._assigned or param._needs_spill) then
             param._slot = newslot(ctx)
@@ -1838,6 +1844,7 @@ function codelambdadec(tlcontext, node)
     local cparams = { "lua_State *L", "Udata *_mod", "CClosure *_fn" }
     for _, param in ipairs(fixed_params(node.params)) do
         param._cvar = "_param_" .. param.name
+        param._borrows_root = true
         param._boxed = param._captured and param._assigned
         if types.is_gc(param._type) and (param._assigned or param._needs_spill) then
             param._slot = newslot(ctx)

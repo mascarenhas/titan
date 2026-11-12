@@ -62,7 +62,7 @@ use the chapters below for the normative language reference.
 | [Expressions](expressions.md) | Literals and escapes, operators and precedence, Lua-faithful arithmetic, concatenation, `and`/`or`, explicit casts with `as`, non-raising type tests with `is`, constructors, calls. |
 | [Statements](statements.md) | Declarations and inference, assignment and multiple assignment, control flow, the numeric `for`, `defer`, `return`. |
 | [Defer](defer.md) | `defer <statement>` cleanup, scoping, LIFO order, and interaction with return, break, raise, and catch. |
-| [Functions](functions.md) | Declarations, argument adjustment, multiple return values, visibility, functions as values, and the `main` convention for standalone programs. |
+| [Functions](functions.md) | Declarations, argument adjustment, argument reachability during a call, multiple return values, visibility, functions as values, and the `main` convention for standalone programs. |
 | [Named arguments](named-arguments.md) | Declaration-based `f { name = value }` and method-call syntax, omissions, evaluation order, record construction, direct C prototype names, and Lua's positional-only boundary. |
 | [Anonymous functions and closures](closures.md) | Lambda expressions, contextual fixed/bare-variadic input and result inference, explicit `: ()`, inline immediate calls with finite/open results, lexical capture of enclosing locals, cross-state capture snapshots, fresh-value-per-evaluation semantics, and bound method references `obj:method`. |
 | [Closure adjustment wrappers](closure-adjustment-wrappers.md) | Directional callable actions, missing nil results, conditional target-wrapper realization and fresh identity, source Lua behavior, strict/generic fallback, `as`/`is`, and limits. |

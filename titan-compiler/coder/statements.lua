@@ -1229,10 +1229,12 @@ function coder._materialize_assignment_lvalue(ctx, var)
 end
 
 -- Evaluate a checker-adjusted finite expression list once in lexical order.
--- Values delivered to fixed sink slots use the supplied stabilizer; ordinary
--- sinks default to traced materialization, while native-call sites supply
--- `coder._freeze_code` so arguments remain C-only. Explicit surplus expressions are
--- forced for effect and never acquire a fake sink/output position.
+-- Values delivered to fixed sink slots use the supplied stabilizer, which
+-- also receives the expression: ordinary sinks default to traced
+-- materialization, while native-call sites supply
+-- `coder._stabilize_input_code`, which roots an argument only when it has no
+-- stable root. Explicit surplus expressions are forced for effect and never
+-- acquire a fake sink/output position.
 function coder._codeadjustedfixed(ctx, node, stabilize)
     stabilize = stabilize or materialize_code
     local adjusted = node._result_adjustment
@@ -1279,7 +1281,7 @@ function coder._codeadjustedfixed(ctx, node, stabilize)
                 })
             else
                 mstats, name = stabilize(ctx, exp._type,
-                    cstats, cexp)
+                    cstats, cexp, exp)
             end
             table.insert(stats, mstats)
             names[i], exptypes[i] = name, exp._type
@@ -2436,6 +2438,7 @@ function codetry(ctx, node)
     ctx.try_depth = ctx.try_depth - 1
 
     -- Bind the catch's implicit locals to C autos populated in the recovery.
+    -- Their values stay in the try's anchored slots for the whole catch.
     local errcvar = "_catch_error_" .. id
     local tbcvar = "_catch_tb_" .. id
     local ccatch = ""
@@ -2444,6 +2447,8 @@ function codetry(ctx, node)
         local tbdecl = node._traceback_decl
         errdecl._cvar = errcvar
         tbdecl._cvar = tbcvar
+        errdecl._borrows_root = true
+        tbdecl._borrows_root = true
         local saved_err, saved_tb = ctx.catch_error_decl, ctx.catch_traceback_decl
         ctx.catch_error_decl = errdecl
         ctx.catch_traceback_decl = tbdecl

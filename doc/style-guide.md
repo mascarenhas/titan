@@ -698,13 +698,17 @@ pairs each rule with a wrong and a right example.
    `luaL_ref` slots, registry tables, or userdata uservalue tables. The browser
    state record uses owned module storage and `gc.finalizable`, not a registry
    anchor; a genuinely pre-module lifecycle anchor needs separate justification.
-5. **Rooting.** A Titan parameter is rooted by its caller's provenance, and a
-   local by its frame slot, which is refreshed at its declaration and at every
-   assignment and is reused by sibling scopes once its block ends ([the
-   function frame](implementation/values-and-gc.md#1-the-function-frame-reserved-nil-initialized-stack-slots)
-   and [home roots](implementation/values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
-   Declare a value that must outlive an inner block in the outer block, and
-   copy an argument into a local before removing its last other home. Never
+5. **Rooting.** A Titan parameter is rooted by its caller until the call
+   returns, wherever the caller read the argument from, and a local by its
+   frame slot, which is refreshed at its declaration and at every assignment
+   and is reused by sibling scopes once its block ends ([the function
+   frame](implementation/values-and-gc.md#1-the-function-frame-reserved-nil-initialized-stack-slots),
+   [home roots](implementation/values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)
+   and [calls](implementation/values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
+   Declare a value that must outlive an inner block in the outer block. A
+   Titan function may remove an argument's last other home and keep using the
+   parameter. A `foreign function` that calls a native entry is the caller
+   in that contract and keeps what it passes reachable itself (rule 3). Never
    `lua_pushtvalue` a parameter or local just to keep it alive.
 6. **Don't duplicate checks the receiver makes.** Where the other side of a
    boundary is dynamically typed, marshal by runtime type into one tagged

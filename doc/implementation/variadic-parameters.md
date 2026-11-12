@@ -454,10 +454,13 @@ cover the DSO path.
 
 The rooting protocol for native calls is in
 [Calls: C-only inputs, immediate result roots, and VM transport](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport):
-descriptors and their `args` arrays are never roots, and every collectable
-element stays reachable from an independent traced owner (a semantic home, an
-allocation or native-result root, a Lua VM argument slot, or a flexible result
-range) for the descriptor's lifetime. The variadic-specific points are:
+descriptors and their `args` arrays are never roots, and the caller keeps
+every collectable element reachable for the descriptor's lifetime. A static
+element is classified like a fixed argument and gets a caller slot only when
+it has no stable root. A forwarded `...` is rooted by the forwarding
+function's own caller. An open run from a call sits in the caller's flexible
+result range, and the elements of a spread Array or Map are published in the
+call site's traced range. The variadic-specific points are:
 
 * **Raw payloads are not traced.** `traverseudata` (Lua's `lgc.c`) marks only a
   userdata's metatable and `uv[0..nuvalue-1]`, never `getudatamem`. A

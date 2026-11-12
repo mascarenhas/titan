@@ -175,16 +175,18 @@ without exposing it to codegen, which skips this private source edge.
 For a static Titan call, `codecall` (`coder/calls.lua`) uses
 `named_ordered_call_args` when `_named_arg_order` is present. That helper
 generates every explicit expression in recorded lexical order and immediately
-freezes it in an untraced C temporary. It freezes synthetic omissions afterward
-and returns expressions indexed by formal position. The existing `codecall`
-loop emits those C values into the ordinary positional native call.
+stabilizes it with `coder._stabilize_input_code`: a C temporary, plus a caller
+slot when the value has no stable root. It stabilizes synthetic omissions
+afterward and returns expressions indexed by formal position. The existing
+`codecall` loop emits those C values into the ordinary positional native call.
 
 Immediate freezing is essential: `codeexp` can produce deferred C expressions,
 so iterating in source order and later printing them in formal order would
-reorder effects. GC-bearing inputs do not get tracing-only call slots. For
-methods, `codecall` freezes the receiver once before invoking
-`named_ordered_call_args`, matching the language order of receiver first, then
-written arguments.
+reorder effects. A GC-bearing input follows the
+[caller-rooting rule](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)
+of every native call. For methods, `codecall` stabilizes the receiver once
+before invoking `named_ordered_call_args`, matching the language order of
+receiver first, then written arguments.
 
 `codeforeigncall` has a parallel path. It converts explicit named arguments in
 lexical order, freezes each nonliteral result in a C temporary of the formal's

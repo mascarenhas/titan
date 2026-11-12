@@ -146,7 +146,13 @@ local function run_smoke()
   gc.collect()
   gc.collect()
   test.assert(not dup_rx:is_closed(), "dropping first duplicate Sender closed peer early")
-  test.assert((dup_decoded.right as thread.Sender<|integer|>):try_send(77))
+  -- A call keeps its receiver reachable while the calling frame can hold its
+  -- root, which is past the call. The send therefore runs in an immediate
+  -- function, whose roots are cleared when it returns: the collection below
+  -- must find the field as the Sender's last home.
+  test.assert((function (): boolean
+    return dup_decoded.right:try_send(77)
+  end)())
   dup_decoded.right = nil
   gc.collect()
   gc.collect()
@@ -181,7 +187,9 @@ local function run_smoke()
   gc.collect()
   gc.collect()
   local mal_ok: SmokeMalformedClaim = transfer.decode_message(mal_ok_raw)
-  test.assert((mal_ok.tx as thread.Sender<|integer|>):try_send(88))
+  test.assert((function (): boolean -- as above
+    return mal_ok.tx:try_send(88)
+  end)())
   mal_ok.tx = nil
   gc.collect()
   gc.collect()
