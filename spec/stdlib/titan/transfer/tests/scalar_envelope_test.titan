@@ -772,8 +772,8 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       denied[0] = 0 as foreign size_t
       local top = ffi.lua_gettop(L)
       defer ffi.lua_settop(L, top)
-      -- Reserve before denial so decode's entry frame and result slot need no
-      -- stack growth; denial then surfaces inside its protected body.
+      -- Reserve before denial so decode's entry frame needs no stack growth;
+      -- denial then surfaces inside its protected body.
       tse_gc.collect()
       test.assert(ffi.lua_checkstack(L, 64) ~= 0)
       local prev_ud: foreign *void = nil
@@ -826,7 +826,7 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
                   "scope-free NULL-FUNCTION decode released injected attachments twice")
     end)
 
-  context:run("null-slot-and-result-stack-reservation-failure",
+  context:run("null-slot-and-entry-stack-failure",
     function (_context: test.Context)
       tse_expect_error(function ()
         tse_transfer.decode_message(nil)
@@ -835,9 +835,8 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       -- Scan the free Lua stack under allocator denial with an attachment-bearing
       -- packet relabeled as a C-only integer. Too little room fails decode's
       -- own entry before it takes ownership, so the guarded local still owns
-      -- the packet. Exactly one free slot past that entry frame fails only the
-      -- explicit result reservation, which consumes the packet before raising.
-      -- More room decodes normally.
+      -- the packet. Once the entry frame fits, a scalar decodes without
+      -- another stack slot, so no failure can consume the packet.
       local int_template = tse_transfer.encode_message(7)
       defer tse_transfer.discard_message(int_template)
       local denied: owned size_t[] = foreign size_t.new_array(1)
@@ -845,7 +844,6 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       local prev_ud: foreign *void = nil
       local prev_alloc = ffi.lua_getallocf(L, prev_ud)
       local saw_entry_failure = false
-      local saw_reservation_failure = false
       local decoded = false
       local free = 1
       while not decoded and free <= 128 do
@@ -876,21 +874,17 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
         ffi.lua_settop(L, base)
         if not failed then
           test.assert(raw == nil and c1[0] == 1 and c2[0] == 1,
-                      "reserved C-only decode did not consume its packet")
+                      "C-only decode did not consume its packet")
           decoded = true
-        elseif raw == nil then
-          test.assert(not saw_reservation_failure and c1[0] == 1 and c2[0] == 1,
-                      "result reservation failure did not release the consumed packet")
-          saw_reservation_failure = true
         else
-          test.assert(not saw_reservation_failure and c1[0] == 2 and c2[0] == 2,
+          test.assert(raw ~= nil and c1[0] == 2 and c2[0] == 2,
                       "decode entry failure consumed the caller-owned packet")
           saw_entry_failure = true
         end
         free = free + 1
       end
-      test.assert(saw_entry_failure and saw_reservation_failure and decoded,
-                  "stack scan did not reach entry failure, reservation failure, and success")
+      test.assert(saw_entry_failure and decoded,
+                  "stack scan did not reach entry failure and success")
     end)
 end
 

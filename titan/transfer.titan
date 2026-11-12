@@ -374,109 +374,86 @@ function register_resource(candidate: value,
   end
 end
 
--- These private C-ABI functions run only inside the owning state's protected
--- entry. They retain no state and leave all surviving values rooted on its
--- stack. The generated callbacks know the exact capture storage types.
-local foreign function transfer_module_value(state: *lua_State, index: int): *Udata
-  if ffi.lua_type(state, index) ~= ffi.LUA_TUSERDATA then
-    ffi.luaL_error(state, "closure transfer requires a Titan module")
-    return nil
+-- Closure-snapshot validation reads the module and closure layout directly.
+-- Its results are C pointers into a module userdata and into that module's
+-- immutable manifest; the closure or module value they were read from keeps
+-- both alive, and that value is an argument or a Lua stack slot of the caller.
+local function transfer_module_value(candidate: value): foreign *Udata
+  local boxed: foreign TValue = candidate
+  if ffi.lmacro_ttisfulluserdata(boxed) == 0 then
+    raise "closure transfer requires a Titan module"
   end
-  local candidate = ffi.lua_totvalue(state, index)
-  local module = ffi.lmacro_uvalue(candidate)
+  local module = ffi.lmacro_uvalue(boxed)
   if module.len < foreign TitanModuleData.sizeof then
-    ffi.luaL_error(state, "closure transfer module has no native descriptor")
-    return nil
+    raise "closure transfer module has no native descriptor"
   end
   return module
 end
 
-local foreign function transfer_manifest(state: *lua_State,
-                                   owner: *Udata): const *TitanTransferModule
+local function transfer_manifest(
+    owner: foreign *Udata): foreign const *TitanTransferModule
   if owner.len < foreign TitanModuleData.sizeof then
-    ffi.luaL_error(state, "transfer owner has no native module descriptor")
-    return nil
+    raise "transfer owner has no native module descriptor"
   end
   local data = ffi.lmacro_getudatamem(owner) as foreign const *TitanModuleData
   if data.symbols == nil then
-    ffi.luaL_error(state, "transfer owner has no native module descriptor")
-    return nil
+    raise "transfer owner has no native module descriptor"
   end
   local module = data.symbols(ffi.TITAN_TRANSFER_MANIFEST_SYMBOL)
     as foreign const *TitanTransferModule
-  if module == nil then
-    ffi.luaL_error(state, "transfer owner has no module manifest")
-    return nil
-  end
-  if module.name == nil then
-    ffi.luaL_error(state, "transfer owner has no module name")
-    return nil
-  end
-  if module.entry_count ~= 0 then
-    if module.entries == nil then
-      ffi.luaL_error(state, "transfer owner has no closure entries")
-      return nil
-    end
+  if module == nil then raise "transfer owner has no module manifest" end
+  if module.name == nil then raise "transfer owner has no module name" end
+  if module.entry_count ~= 0 and module.entries == nil then
+    raise "transfer owner has no closure entries"
   end
   return module
 end
 
--- Push the real owner name alongside the returned immutable source entry.
-local foreign function transfer_closure_entry(state: *lua_State,
-                                        index: int): const *TitanTransferEntry
-  local candidate = ffi.lua_totvalue(state, index)
-  if ffi.lmacro_ttisCclosure(candidate) == 0 then
-    ffi.luaL_error(state, "cannot transfer a value that is not a Titan closure")
-    return nil
+-- The immutable source entry of a Titan closure and its real owner's name.
+local function transfer_closure_entry(
+    candidate: value): (foreign const *TitanTransferEntry, string)
+  local boxed: foreign TValue = candidate
+  if ffi.lmacro_ttisCclosure(boxed) == 0 then
+    raise "cannot transfer a value that is not a Titan closure"
   end
-  local closure = ffi.lmacro_clCvalue(candidate)
-  if closure.nupvalues < 5 then
-    ffi.luaL_error(state, "invalid Titan closure header")
-    return nil
+  local closure = ffi.lmacro_clCvalue(boxed)
+  if closure.nupvalues < 5 then raise "invalid Titan closure header" end
+  local upvalues = closure.upvalue as foreign *TValue
+  local last = (closure.nupvalues as integer) - 1
+  if ffi.lmacro_ttisfulluserdata(upvalues[0]) == 0 then
+    raise "invalid Titan closure module"
   end
-  if ffi.lmacro_ttisfulluserdata(closure.upvalue[0]) == 0 then
-    ffi.luaL_error(state, "invalid Titan closure module")
-    return nil
+  if ffi.lmacro_ttislightuserdata(upvalues[2]) == 0 then
+    raise "invalid Titan closure native entry"
   end
-  if ffi.lmacro_ttislightuserdata(closure.upvalue[2]) == 0 then
-    ffi.luaL_error(state, "invalid Titan closure native entry")
-    return nil
+  if ffi.lmacro_ttislightuserdata(upvalues[3]) == 0
+      or ffi.lmacro_pvalue(upvalues[3]) ~= ffi.TITAN_BRAND then
+    raise "invalid Titan closure brand"
   end
-  if ffi.lmacro_ttislightuserdata(closure.upvalue[3]) == 0 then
-    ffi.luaL_error(state, "invalid Titan closure brand")
-    return nil
+  if ffi.lmacro_ttislcf(upvalues[last]) == 0 then
+    raise "invalid Titan closure strict entry"
   end
-  if ffi.lmacro_pvalue(closure.upvalue[3]) ~= ffi.TITAN_BRAND then
-    ffi.luaL_error(state, "invalid Titan closure brand")
-    return nil
-  end
-  if ffi.lmacro_ttislcf(closure.upvalue[closure.nupvalues - 1]) == 0 then
-    ffi.luaL_error(state, "invalid Titan closure strict entry")
-    return nil
-  end
-  local module = transfer_manifest(state, ffi.lmacro_uvalue(closure.upvalue[0]))
-  local ordinal = 0 as foreign unsigned int
-  while ordinal < module.entry_count do
+  local module = transfer_manifest(ffi.lmacro_uvalue(upvalues[0]))
+  for ordinal = 0, (module.entry_count as integer) - 1 do
     local entry = module.entries + ordinal
-    if entry.native == ffi.lmacro_pvalue(closure.upvalue[2]) then
-      if entry.strict == ffi.lmacro_fvalue(closure.upvalue[closure.nupvalues - 1]) then
-        ffi.luaL_checkstack(state, 1, "copying a closure module name")
-        ffi.lua_pushstring(state, module.name)
-        return entry
-      end
+    if entry.native == ffi.lmacro_pvalue(upvalues[2])
+        and entry.strict == ffi.lmacro_fvalue(upvalues[last]) then
+      return entry, module.name as string
     end
-    ordinal = ordinal + 1
   end
-  ffi.luaL_error(state, "Titan closure entry is absent from its module manifest")
-  return nil
+  raise "Titan closure entry is absent from its module manifest"
 end
 
-local foreign function transfer_project(state: *lua_State, index: int,
+-- These private C-ABI functions wrap the generated capture callbacks, whose
+-- ABI is the Lua stack: `project` pushes a closure's captures, and `restore`
+-- builds a closure from captures on the stack. They retain no state and
+-- leave all surviving values rooted on that stack. The generated callbacks
+-- know the exact capture storage types.
+local foreign function transfer_project(state: *lua_State, closure: *CClosure,
                                   entry: const *TitanTransferEntry)
   ffi.luaL_checkstack(state, (entry.capture_count as foreign int) + 2,
     "projecting immediate closure captures")
-  local candidate = ffi.lua_totvalue(state, index)
-  entry.project(state, ffi.lmacro_clCvalue(candidate))
+  entry.project(state, closure)
 end
 
 -- Implementation notes: doc/implementation/transfer-library.md#native-module-loading
@@ -526,25 +503,21 @@ foreign function transfer_load_module(state: *lua_State,
   ffi.lua_settop(state, top + 1)
 end
 
-local foreign function transfer_resolve(state: *lua_State, index: int,
-                                  token: const *void): const *TitanTransferEntry
-  local module = transfer_manifest(state, transfer_module_value(state, index))
-  local ordinal = 0 as foreign unsigned int
-  while ordinal < module.entry_count do
+local function transfer_resolve(owner: foreign *Udata,
+    token: foreign const *void): foreign const *TitanTransferEntry
+  local module = transfer_manifest(owner)
+  for ordinal = 0, (module.entry_count as integer) - 1 do
     local entry = module.entries + ordinal
     -- Compare addresses before reading any part of the incoming token.
     if (entry as foreign const *void) == token then return entry end
-    ordinal = ordinal + 1
   end
-  ffi.luaL_error(state, "closure transfer entry belongs to a different provider or is invalid")
-  return nil
+  raise "closure transfer entry belongs to a different provider or is invalid"
 end
 
 local foreign function transfer_restore(state: *lua_State,
                                   entry: const *TitanTransferEntry,
-                                  module_index: int, capture_base: int)
+                                  module: *Udata, capture_base: int)
   local top = ffi.lua_gettop(state)
-  local module = transfer_module_value(state, module_index)
   capture_base = ffi.lua_absindex(state, capture_base)
   if entry.capture_count ~= 0 then
     if capture_base < 1 then
@@ -563,20 +536,6 @@ local foreign function transfer_restore(state: *lua_State,
   ffi.luaL_checkstack(state, (entry.capture_count as foreign int) + 2,
     "restoring immediate closure captures")
   entry.restore(state, module, capture_base)
-end
-
-local foreign function transfer_nominal_module(state: *lua_State, index: int)
-  local top = ffi.lua_gettop(state)
-  index = ffi.lua_absindex(state, index)
-  ffi.luaL_checkstack(state, 2, "resolving a nominal's declaring module")
-  if ffi.lua_getmetatable(state, index) == 0 then
-    ffi.luaL_error(state, "transfer nominal has no metatable")
-    return
-  end
-  ffi.lua_rawgetp(state, -1, ffi.TITAN_MT_MOD)
-  local module = transfer_manifest(state, transfer_module_value(state, -1))
-  ffi.lua_settop(state, top)
-  ffi.lua_pushstring(state, module.name)
 end
 
 --- Values copied or borrowed across independent Lua states.
@@ -599,13 +558,12 @@ end
 local transfer_active_closures: {value: boolean} = {}
 local closure_fields: const {reflect.Type} = {}
 
+-- The name of the module that declares a nominal value.
 local function nominal_module(candidate: value): string
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve nominal transfer stack" end
-  ffi.lua_pushtvalue(L, candidate)
-  transfer_nominal_module(L, -1)
-  return ffi.lua_totvalue(L, -1) as value
+  local raw: foreign TValue = candidate
+  local module = ffi.titan_codec_nominal_module(raw)
+  if module == nil then raise "transfer nominal has no declaring module" end
+  return module as string
 end
 
 -- Implementation notes: doc/implementation/transfer-library.md#closure-snapshots
@@ -614,24 +572,20 @@ local function project_closure_captures(
   if transfer_active_closures[candidate] then raise "cannot transfer cyclic closure captures" end
   transfer_active_closures[candidate] = true
   defer transfer_active_closures[candidate] = nil
+  local entry, module = transfer_closure_entry(candidate)
+  local count: integer = entry.capture_count
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve transfer closure stack" end
-  ffi.lua_pushtvalue(L, candidate)
-  local closure_index = ffi.lua_gettop(L)
-  local entry = transfer_closure_entry(L, closure_index)
-  local module: string = ffi.lua_totvalue(L, -1) as value
-  local count: integer = entry.capture_count
-  local capture_base = ffi.lua_gettop(L) + 1
   -- Project the complete immediate frontier before any custom hook can change
   -- a captured cell. The Lua stack keeps every projected value rooted.
-  transfer_project(L, closure_index, entry)
+  local boxed: foreign TValue = candidate
+  transfer_project(L, ffi.lmacro_clCvalue(boxed), entry)
   local policies: {TransferValue} = {}
   local was_policy: {boolean} = {}
-  for index = 0, count - 1 do
-    local capture: value = ffi.lua_totvalue(L, (capture_base + index) as foreign int)
-    was_policy[index + 1] = capture is TransferValue
-    policies[index + 1] = TransferValue.from_value(capture)
+  for index = 1, count do
+    local capture: value = ffi.lua_totvalue(L, (top + index) as foreign int)
+    was_policy[index] = capture is TransferValue
+    policies[index] = TransferValue.from_value(capture)
   end
   return module, entry as foreign const *void, policies, was_policy
 end
@@ -846,9 +800,11 @@ local function restore_closure_from_buffer(
   defer ffi.lua_settop(L, top)
   transfer_load_module(L, module, module_len as foreign unsigned long long)
   local module_index = ffi.lua_gettop(L)
+  -- The loaded module stays in its stack slot until the closure is built.
+  local owner = transfer_module_value(ffi.lua_totvalue(L, module_index))
   -- Resolve the token by equality against the destination module's manifest
   -- before dereferencing it or reconstructing resource-bearing captures.
-  local entry = transfer_resolve(L, module_index, token)
+  local entry = transfer_resolve(owner, token)
   local count: integer = entry.capture_count
   local policies: {TransferValue}, was_policy: {value} =
     protobuf.deserialize_fields_buffer_with_context(data, data_len, closure_fields, context)
@@ -871,7 +827,7 @@ local function restore_closure_from_buffer(
     if was_policy[index] then ffi.lua_pushtvalue(L, policy)
     else ffi.lua_pushtvalue(L, policy:to_value()) end
   end
-  transfer_restore(L, entry, module_index, module_index + 1)
+  transfer_restore(L, entry, owner, module_index + 1)
   return ffi.lua_totvalue(L, -1) as value
 end
 
@@ -1318,9 +1274,12 @@ local function decode_message_worker(slot: foreign *(*void)): value
     discard_message(message as foreign *void)
     return text
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_FUNCTION then
-    -- Valid bare C functions already took the C-only path. This error cannot
-    -- claim attachments or need a scope; the residual owner stays in the slot.
-    raise "cannot transfer a NULL Lua C function"
+    -- The light C function is made while the slot still owns the packet, so a
+    -- NULL pointer or a full stack raises with the residual owner in the slot.
+    local item = cfunction_to_value(message.function)
+    slot[0] = nil
+    discard_message(message as foreign *void)
+    return item
   end
   local execution = current_execution()
   local previous? = resource_scopes[execution]
@@ -1379,36 +1338,6 @@ local function decode_message_worker(slot: foreign *(*void)): value
   raise "invalid transfer message kind"
 end
 
--- Every successful branch pushes one noncollectable value without allocation,
--- callbacks, or longjmp. decode_message reserves the stack and consumes the owner.
-local foreign function decode_scalar_message(
-    state: *lua_State, message: *titan_async_message): int
-  local kind = message.kind
-  if kind == ffi.TITAN_ASYNC_MESSAGE_NIL then
-    ffi.lua_pushnil(state)
-  elseif kind == ffi.TITAN_ASYNC_MESSAGE_BOOLEAN then
-    if message.integer ~= 0 then
-      ffi.lua_pushboolean(state, 1)
-    else
-      ffi.lua_pushboolean(state, 0)
-    end
-  elseif kind == ffi.TITAN_ASYNC_MESSAGE_INTEGER then
-    ffi.lua_pushinteger(state, message.integer)
-  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FLOAT then
-    ffi.lua_pushnumber(state, message.number)
-  elseif kind == ffi.TITAN_ASYNC_MESSAGE_STATE then
-    ffi.lua_pushlightuserdata(state, message.state as foreign *void)
-  elseif kind == ffi.TITAN_ASYNC_MESSAGE_POINTER then
-    ffi.lua_pushlightuserdata(state, message.pointer)
-  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FUNCTION then
-    if message.function == nil then return 0 end
-    ffi.lua_pushcclosure(state, message.function, 0)
-  else
-    return 0
-  end
-  return 1
-end
-
 -- Implementation notes: doc/implementation/transfer-library.md#consuming-raw-slot-decode
 --- Decode and consume the packet owned by an actual guarded raw slot.
 -- Pass the caller's own `foreign *void` local and guard it immediately with
@@ -1422,18 +1351,27 @@ function decode_message(slot: foreign *(*void)): value
   if slot == nil then raise "transfer: invalid packet owner slot" end
   local message = slot[0] as foreign *titan_async_message
   if message ~= nil then
-    -- Reserve the result slot without longjmp before taking ownership.
-    if ffi.lua_checkstack(L, 1) == 0 then
-      slot[0] = nil
-      discard_message(message as foreign *void)
-      raise "transfer: cannot reserve packet operation stack"
+    -- A nil, boolean, number or address boxes without the Lua stack,
+    -- allocation, callbacks or longjmp, so it needs no protected region.
+    local kind = message.kind
+    local scalar = true
+    local result: value = nil
+    if kind == ffi.TITAN_ASYNC_MESSAGE_BOOLEAN then
+      result = message.integer ~= 0
+    elseif kind == ffi.TITAN_ASYNC_MESSAGE_INTEGER then
+      result = message.integer
+    elseif kind == ffi.TITAN_ASYNC_MESSAGE_FLOAT then
+      result = message.number
+    elseif kind == ffi.TITAN_ASYNC_MESSAGE_STATE then
+      result = message.state
+    elseif kind == ffi.TITAN_ASYNC_MESSAGE_POINTER then
+      result = message.pointer
+    elseif kind ~= ffi.TITAN_ASYNC_MESSAGE_NIL then
+      scalar = false
     end
-    local top = ffi.lua_gettop(L)
-    if decode_scalar_message(L, message) ~= 0 then
+    if scalar then
       slot[0] = nil
       discard_message(message as foreign *void)
-      local result: value = ffi.lua_totvalue(L, -1)
-      ffi.lua_settop(L, top)
       return result
     end
   end
