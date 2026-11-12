@@ -115,6 +115,16 @@ called with `{ foreign = true }` and increments
 * contextually types fitting numeric literals at annotated declarations,
   assignments, C arguments, and C returns, without passing the expected result
   type into operator operands;
+* gives every operator its C99 result type: `finish_c_operator` types a
+  pointer difference as the [trait's](c-ffi-expressions.md#c-operator-traits)
+  `result_source`, the target's `ptrdiff_t`, and a relational or equality
+  operator as the target's `int`, where an ordinary function sees `integer`
+  and `boolean`; a binary operator that is not a C operator (`//`, `^`), or
+  that has no C operand, is an error;
+* accepts any C integer as a subscript of a C pointer or array (`checkvar`,
+  `Ast.VarBracket`): a numeral is an `int`, and an index that already has a C
+  integer type is not converted, where an ordinary function converts its
+  Titan `integer` index;
 * requires conditions to be C scalars;
 * requires numeric-for controls, limits, and steps to share a C integer or
   floating type; and
@@ -135,27 +145,24 @@ small walk, `checker._validate_foreign_body_node` (`checker/declarations.lua`),
 for what syntax cannot decide:
 
 * a local declaration has an initializer;
-* a local has a C value type: not a Titan type, which an inferred local would
-  take from a comparison (`boolean`) or a pointer difference (`integer`), and
-  not `void`, which it takes from a void pointee (a C namespace or a function
-  designator never gets that far: expression checking rejects them as values);
+* a local has a C value type. `void` is the case that occurs: an inferred
+  local takes it from a void pointee, and it can be written (a C namespace or
+  a function designator never gets that far: expression checking rejects them
+  as values). The test also rejects a Titan type, which nothing produces: it
+  is a guard, so that a Titan value that ever reaches a local is a diagnostic
+  and not a coder error;
 * an allocation pseudo-call has an automatic-storage plan
   ([allocation](#allocation-and-recovery-storage)).
 
 The length operator `#` is rejected by the `ExpUnop` check in foreign mode.
-Two expressions of a foreign body still have a Titan type, because the
-[C operator traits](c-ffi-expressions.md#c-operator-traits) are shared with
-ordinary functions: a comparison is a `boolean`, which a condition accepts,
-and a pointer difference is an `integer`, which converts to the C integer
-type that an annotation, a parameter, a return type or a cast gives.
-Everything else is C-typed: literals are C-typed in this mode, names are C
-declarations, calls return C values, and a cast's target is a `foreigntype`.
-The checker also synthesizes one C-to-Titan conversion, the count argument of
-an allocation pseudo-call, which the walk does not enter. The former check on
-casts between Titan and C values is gone, together with the tables of
-forbidden statement and expression tags: the only Titan-typed operand a cast
-can have is a pointer difference, and the ordinary cast rules lower it to a C
-cast.
+With that and the C99 operator results, every expression of a foreign body
+has a C type: literals are C-typed in this mode, names are C declarations,
+calls return C values, operators are C operators, and a cast's target is a
+`foreigntype`. The checker synthesizes one C-to-Titan conversion, the count
+argument of an allocation pseudo-call, which the walk does not enter. The
+former check on casts between Titan and C values therefore has no case left
+and is gone, together with the tables of forbidden statement and expression
+tags.
 
 The allowed body is intentionally unsafe C (see [The C FFI](../language/ffi.md#the-c-ffi)). Pointer dereference, indexing,
 function-pointer calls, arithmetic, and casts do not gain the NULL, bounds,

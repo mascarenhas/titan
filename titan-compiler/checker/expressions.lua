@@ -433,6 +433,24 @@ checkexp = util.make_visitor({
         if check_c_binary_operator(node, st, errors) then
             return
         end
+        if checker._foreign_function_depth > 0 then
+            -- Every operator of a foreign body is a C operator. What is left
+            -- here is a Titan-only operator, or one with no C operand.
+            if tlhs._tag == "Type.Invalid" or trhs._tag == "Type.Invalid" then
+                node._type = types.Invalid()
+            elseif op == "//" then
+                node._type = invalid(errors, node.loc,
+                    "operator '//' has no C meaning inside a foreign function; C division is '/'")
+            elseif op == "^" then
+                node._type = invalid(errors, node.loc,
+                    "operator '^' has no C meaning inside a foreign function; the C exclusive-or is '~'")
+            else
+                node._type = invalid(errors, node.loc,
+                    "operator '%s' needs a C operand inside a foreign function (found '%s' and '%s')",
+                    op, types.tostring(tlhs), types.tostring(trhs))
+            end
+            return
+        end
         local loc = node.loc
         if op ~= "==" and op ~= "~="
            and (tlhs._tag == "Type.Parameter"

@@ -1181,20 +1181,6 @@ describe("foreign functions (checker)", function()
                     "local variable 'nothing' inside a foreign function must have a direct C FFI type",
                 },
                 {
-                    -- A pointer difference is a Titan `integer` and a
-                    -- comparison a Titan `boolean`; neither is a C local.
-                    [[foreign function bad(first: *ffi_int, last: *ffi_int): void
-                          local distance = last - first
-                      end]],
-                    "local variable 'distance' inside a foreign function must have a direct C FFI type, not 'integer'",
-                },
-                {
-                    [[foreign function bad(left: ffi_int, right: ffi_int): void
-                          local smaller = left < right
-                      end]],
-                    "local variable 'smaller' inside a foreign function must have a direct C FFI type, not 'boolean'",
-                },
-                {
                     [[foreign function bad(): void
                           local namespace = ffi
                       end]],
@@ -1210,16 +1196,55 @@ describe("foreign functions (checker)", function()
             for _, case in ipairs(rejected) do
                 assert_rejected(header, case[1], case[2])
             end
-            -- The same values are usable where a C type is written or
-            -- expected: an annotation, a cast, a return, a condition.
+        end)
+    end)
+
+    it("gives operators their C99 result types in foreign bodies", function()
+        with_header([[
+            #include <stddef.h>
+            typedef short ffi_short;
+        ]], function(header)
+            -- A pointer difference is a `ptrdiff_t` and a relational or
+            -- equality operator an `int`. A typed local accepts only its own
+            -- type, so these annotations pin the result types on every host.
             assert.is_true(check_with_header(header, [[
-                foreign function distance(first: *ffi_int, last: *ffi_int): long
-                    local typed: long = last - first
-                    local cast = (last - first) as ffi_int
-                    if typed < (cast as long) then return typed end
-                    return last - first
+                foreign function typed(first: *int, last: *int, left: int, right: int): void
+                    local distance: ptrdiff_t = last - first
+                    local inferred = last - first
+                    local sum: ptrdiff_t = -inferred + (last - first) * 2
+                    local less: int = left < right
+                    local equal: int = (left < right) == (right < left)
+                    local null: int = first == nil
+                    local size = foreign int.sizeof
+                    local element: int = first[last - first] + first[size]
+                    first[last - first] = element
+                    for index = last - first, last - first do end
+                    if last - first then return end
+                    while (left < right) & (first ~= last) do return end
                 end
             ]]))
+            local rejected = {
+                -- No implicit conversion between C integer types.
+                { "local narrow: ffi_short = last - first",
+                  "types in declaration of local variable narrow do not match" },
+                { "local flag: bool = left < right",
+                  "types in declaration of local variable flag do not match" },
+                -- A subscript is any C integer, and nothing else.
+                { "local element = first[1.5]",
+                  "types in C pointer indexing do not match" },
+                -- Titan-only operators.
+                { "local floor = left // right",
+                  "operator '//' has no C meaning inside a foreign function; C division is '/'" },
+                { "local power = left ^ right",
+                  "operator '^' has no C meaning inside a foreign function; the C exclusive%-or is '~'" },
+                { "local same = nil == nil",
+                  "operator '==' needs a C operand inside a foreign function %(found 'nil' and 'nil'%)" },
+            }
+            for _, case in ipairs(rejected) do
+                assert_rejected(header,
+                    "foreign function bad(first: *int, last: *int, left: int, right: int): void\n"
+                    .. case[1] .. "\nend", case[2])
+            end
         end)
     end)
 

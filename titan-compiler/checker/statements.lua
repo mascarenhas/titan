@@ -26,8 +26,7 @@ function checkcondition(node, st, errors)
     if not typ or (typ._tag ~= "Type.CInteger"
                    and typ._tag ~= "Type.CFloat"
                    and typ._tag ~= "Type.CPointer"
-                   and typ._tag ~= "Type.CArray"
-                   and typ._tag ~= "Type.Boolean") then
+                   and typ._tag ~= "Type.CArray") then
         checker.typeerror(errors, node.loc,
             "a foreign function condition must have a C scalar type, found %s",
             types.tostring(node._type))

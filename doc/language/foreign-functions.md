@@ -306,10 +306,16 @@ requires a cast. Numeric-`for` literal bounds use their declared C control type.
 An untyped `local p = nil` has no pointee type and is rejected; write an
 annotation such as `local p: *Item = nil`.
 
-A comparison is a condition, not a C value, and the difference of two
-pointers is a Titan `integer`. Neither can initialize an untyped local. Give
-a pointer difference its C type with an annotation or a cast:
-`local count: long = last - first`, `(last - first) as int`.
+Operators have their C99 result types. The difference of two pointers is a
+`ptrdiff_t`, and a relational or equality operator gives an `int`, 0 or 1, so
+both are values like any other: `local count = last - first`,
+`local less = a < b`, `(a < b) == (c < d)`, `if last - first then`,
+`for i = first - first, last - first do`. As with every C integer, another
+integer type needs a cast: `(last - first) as int`, `(a < b) as bool`. A
+subscript is the exception, as in C: any C integer indexes a pointer or an
+array, so `items[last - first]` and `items[foreign Item.sizeof]` need none.
+Titan's `//` and `^` have no C meaning and are errors in a foreign body; C
+division is `/`, and the C exclusive-or is `~`.
 
 `foreign T.sizeof` and `foreign T.alignof` keep the configured C `size_t` type inside a
 foreign body. They can be passed directly to `malloc`/`calloc` or stored in a

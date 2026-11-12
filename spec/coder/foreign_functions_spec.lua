@@ -834,8 +834,8 @@ describe("source-defined foreign functions", function()
         -- forwarder. Add a function here with every new lowering.
         local inline = { "nil_return", "nil_local", "nil_compare", "state",
             "apply_state", "truth", "size", "align", "least", "text",
-            "text_local", "arithmetic", "bits", "negate", "compare", "widen",
-            "narrow", "index", "member", "distance", "call_pointer",
+            "text_local", "arithmetic", "bits", "negate", "compare", "less",
+            "widen", "narrow", "index", "member", "distance", "call_pointer",
             "call_local", "call_public", "reference", "constant", "twice",
             "plain" }
         local forwarded = { "object", "flexible", "erase", "restore",
@@ -972,7 +972,11 @@ describe("source-defined foreign functions", function()
                 end
 
                 local foreign function distance(first: *int, last: *int): long
-                    return last - first
+                    return (last - first) as long
+                end
+
+                local foreign function less(a: int, b: int): int
+                    return a < b
                 end
 
                 local foreign function apply_state(callback: StateCallback, L: *lua_State): int
@@ -1066,6 +1070,70 @@ describe("source-defined foreign functions", function()
         -- The body is a copy: the cast is in the header.
         assert.truthy(read_file("test.titan.h"):find("(struct lua_State *)", 1, true))
         assert_compiles_alone("test.titan.h", "int authored_caller(void) { return 1; }")
+    end)
+
+    it("gives operators their C99 results in a foreign body", function()
+        -- A pointer difference is a ptrdiff_t and a comparison an int, so
+        -- they are values like any other: locals, operands, loop bounds,
+        -- conditions and variadic arguments.
+        with_header([[
+            #include <stdarg.h>
+            #include <stddef.h>
+            static int ffi_items[8];
+            static int *ffi_at(int index) { return &ffi_items[index]; }
+            static long ffi_first_difference(int count, ...) {
+                va_list arguments;
+                va_start(arguments, count);
+                ptrdiff_t value = va_arg(arguments, ptrdiff_t);
+                va_end(arguments);
+                return (long)value;
+            }
+            static int ffi_first_int(int count, ...) {
+                va_list arguments;
+                va_start(arguments, count);
+                int value = va_arg(arguments, int);
+                va_end(arguments);
+                return value;
+            }
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                local foreign function operators(): int
+                    local first = ffi.ffi_at(1)
+                    local last = ffi.ffi_at(6)
+                    local total = 0
+                    local distance = last - first
+                    if distance == 5 then total = total + 1 end
+                    local negated = -(last - first)
+                    if negated == -5 then total = total + 1 end
+                    local doubled = (last - first) + (last - first)
+                    if doubled == 10 then total = total + 1 end
+                    local less = first < last
+                    total = total + less
+                    local both = (first < last) == (last > first)
+                    total = total + both
+                    local mixed = (first < last) & (first ~= last)
+                    total = total + mixed
+                    if (first < last) ~= (last < first) then total = total + 1 end
+                    if last - first then total = total + 1 end
+                    if (last - first) < (last - first) + 1 then total = total + 1 end
+                    local steps = 0
+                    for index = first - first, last - first do steps = steps + 1 end
+                    total = total + steps
+                    total = total + (ffi.ffi_first_difference(1, last - first) as int)
+                    first[last - first] = 7
+                    if last[0] == first[last - first] then total = total + 1 end
+                    return total + ffi.ffi_first_int(1, first < last)
+                end
+
+                function run(): integer
+                    return operators()
+                end
+            ]], [[
+                assert(test.run() == 22, test.run())
+            ]])
+        end)
     end)
 
     it("evaluates foreign elseif conditions lazily and once", function()

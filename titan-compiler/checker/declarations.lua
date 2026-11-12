@@ -317,11 +317,12 @@ function checker._validate_foreign_body_node(node, errors, seen)
                 "a local declaration inside a foreign function requires an initializer")
         end
         for _, decl in ipairs(node.decls) do
-            -- An inferred local takes a Titan type from a comparison
-            -- (`boolean`) or a pointer difference (`integer`), and `void`
-            -- from a void pointee; `void` can also be written. Expression
-            -- checking already rejects a C namespace or a function
-            -- designator as a value.
+            -- `void` reaches a local through a void pointee or a written
+            -- annotation. Nothing else should fail this test: operators
+            -- have their C99 result types in a foreign body, and expression
+            -- checking rejects a C namespace or a function designator as a
+            -- value. The test for a C type is a guard, so that a Titan value
+            -- that ever reaches a local is a diagnostic, not a coder error.
             local typ = decl._type
             if typ and typ._tag ~= "Type.Invalid"
                and (not types.is_direct_c(typ)

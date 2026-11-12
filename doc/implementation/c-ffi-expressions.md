@@ -877,9 +877,17 @@ Pointer subtraction converts the C result to Titan `integer`. Unrelated object
 pointers share a qualification-union `void *` common type for equality only;
 ordering requires qualification-compatible object-pointer types, while
 subtraction and pointer arithmetic additionally require complete non-void
-pointees. The checker records the target profile's authoritative `ptrdiff_t`
-type on the subtraction trait, and the coder feeds that exact source through
-the shared checked numeric conversion to `lua_Integer`.
+pointees.
+
+A trait's `result` is the type an ordinary function sees. The checker records
+the target profile's authoritative `ptrdiff_t` type on the subtraction trait
+as `result_source`, and in an ordinary function the coder feeds that exact
+source through the shared checked numeric conversion to `lua_Integer`. In a
+[foreign body](foreign-functions.md#one-checker-a-restricted-context)
+`finish_c_operator` gives the node the operator's C99 result type instead:
+the trait's `result_source` for a pointer difference, and the target's `int`
+(`foreign_c_int_type`) for a relational or equality operator, whose `result`
+is `boolean`. The raw-C lowering emits the C operator as it is.
 
 ## Preprocessor raw arguments
 
