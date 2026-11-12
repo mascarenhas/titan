@@ -102,4 +102,20 @@ describe("foreign alias header manifests", function()
         assert.falsy(ok)
         assert.matches("contents disagree", err, 1, true)
     end)
+
+    it("declares the built-in lua_State tag before an alias names it", function()
+        local provider = load_module("foreign_alias_state", [[
+            foreign type StateCallback = function (*lua_State): int
+        ]])
+        local restored = assert(driver.decode_project_entry(
+            assert(driver.encode_project_entry(provider))))
+        local plan = restored.ffi_header_descriptor
+        -- The plan stores the typedef alone; its contents derive the tag
+        -- declaration from it.
+        local typedef = "typedef int (*StateCallback)(struct lua_State *);"
+        assert.same({ typedef }, plan.typedef_declarations)
+        assert.truthy(plan.contents:find(
+            "\nstruct lua_State;\n" .. typedef .. "\n", 1, true), plan.contents)
+        assert.truthy(ffiheaders.validate_plan(plan))
+    end)
 end)

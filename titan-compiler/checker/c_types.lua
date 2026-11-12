@@ -100,6 +100,16 @@ function ensure_c_profile(st)
     return st.c_profile
 end
 
+-- The target's C `int`: in a foreign body, the type of a subscript and the
+-- C99 result of a relational or equality operator. A body checked before
+-- any profile is loaded gets the common 32-bit shape.
+function foreign_c_int_type(st)
+    local profile = st.c_profile
+    local entry = profile and profile.integers
+        and profile.integers[profile.int or "int"]
+    return entry and entry.type or types.CInteger("int", true, 3, 32)
+end
+
 function ensure_probe_service(st)
     if st.probe_service then return st.probe_service end
     if st.probe_service_error then
@@ -1450,6 +1460,7 @@ function checker._plan_c_allocation(node, pseudo, demand, st, errors)
         fam = pseudo.fam == true,
         storage = "owned",
         result_type = pseudo.rettypes[1],
+        local_sink = decl and decl.name or nil,
     }
     local count_argument = node._arg_adjustment
         and node._arg_adjustment.fixed[1] or node.args.args[1]

@@ -129,7 +129,7 @@ local foreign function waiter_enqueue(
     waiter: *titan_thread_waiter,
     wake_target: *void,
     pins: *size_t)
-  pins[0] = pins[0] + (1 as foreign size_t)
+  pins[0] = pins[0] + (1 as size_t)
   uv.native_external_wake_retain(wake_target)
   waiter.wake_target = wake_target
   waiter.next = nil
@@ -148,7 +148,7 @@ end
 local foreign function waiter_acknowledge(waiter: *titan_thread_waiter, pins: *size_t)
   if waiter.signaled == 0 then return end
   waiter.signaled = 0
-  pins[0] = pins[0] - (1 as foreign size_t)
+  pins[0] = pins[0] - (1 as size_t)
 end
 
 -- Unregister drops the pin of a still linked or unacknowledged woken waiter.
@@ -186,16 +186,16 @@ end
 
 local foreign function clear_ring_messages(ch: *titan_thread_channel)
   if ch.ring == nil then return end
-  while ch.count > (0 as foreign size_t) do
+  while ch.count > (0 as size_t) do
     local slot = ch.ring + ch.head
     local msg = slot[0]
     slot[0] = nil
-    ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
-    ch.count = ch.count - (1 as foreign size_t)
+    ch.head = (ch.head + (1 as size_t)) % ch.capacity
+    ch.count = ch.count - (1 as size_t)
     thread_message_discard(msg)
   end
-  ch.head = 0 as foreign size_t
-  ch.tail = 0 as foreign size_t
+  ch.head = 0 as size_t
+  ch.tail = 0 as size_t
 end
 
 local foreign function channel_destroy_unreferenced(ch: *titan_thread_channel)
@@ -218,9 +218,9 @@ end
 -- Callers hold ch.mutex. A pinned channel outlives its last endpoint until the
 -- final registration is withdrawn or acknowledged.
 local foreign function channel_unreferenced(ch: *titan_thread_channel): int
-  if ch.active_senders ~= (0 as foreign size_t) then return 0 end
-  if ch.active_receivers ~= (0 as foreign size_t) then return 0 end
-  if ch.waiter_pins ~= (0 as foreign size_t) then return 0 end
+  if ch.active_senders ~= (0 as size_t) then return 0 end
+  if ch.active_receivers ~= (0 as size_t) then return 0 end
+  if ch.waiter_pins ~= (0 as size_t) then return 0 end
   return 1
 end
 
@@ -228,23 +228,23 @@ local foreign function channel_drain_and_discard(ch: *titan_thread_channel)
   if ch == nil then return end
   while true do
     uv.native_mutex_lock(ch.mutex)
-    local msg: foreign *titan_thread_message = nil
+    local msg: *titan_thread_message = nil
     if ch.ring ~= nil then
-      if ch.count > (0 as foreign size_t) then
+      if ch.count > (0 as size_t) then
         local slot = ch.ring + ch.head
         msg = slot[0]
         slot[0] = nil
-        ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
-        ch.count = ch.count - (1 as foreign size_t)
+        ch.head = (ch.head + (1 as size_t)) % ch.capacity
+        ch.count = ch.count - (1 as size_t)
       else
-        ch.head = 0 as foreign size_t
-        ch.tail = 0 as foreign size_t
+        ch.head = 0 as size_t
+        ch.tail = 0 as size_t
         uv.native_mutex_unlock(ch.mutex)
         return
       end
     else
-      ch.head = 0 as foreign size_t
-      ch.tail = 0 as foreign size_t
+      ch.head = 0 as size_t
+      ch.tail = 0 as size_t
       uv.native_mutex_unlock(ch.mutex)
       return
     end
@@ -256,28 +256,28 @@ local foreign function channel_drain_and_discard(ch: *titan_thread_channel)
 end
 
 foreign function channel_retain_sender_native(raw: *void): void
-  local ch = raw as foreign *titan_thread_channel
+  local ch = raw as *titan_thread_channel
   if ch == nil then return end
   uv.native_mutex_lock(ch.mutex)
-  ch.active_senders = ch.active_senders + (1 as foreign size_t)
+  ch.active_senders = ch.active_senders + (1 as size_t)
   uv.native_mutex_unlock(ch.mutex)
 end
 
 foreign function channel_retain_receiver_native(raw: *void): void
-  local ch = raw as foreign *titan_thread_channel
+  local ch = raw as *titan_thread_channel
   if ch == nil then return end
   uv.native_mutex_lock(ch.mutex)
-  ch.active_receivers = ch.active_receivers + (1 as foreign size_t)
+  ch.active_receivers = ch.active_receivers + (1 as size_t)
   uv.native_mutex_unlock(ch.mutex)
 end
 
 foreign function channel_release_sender_native(raw: *void): void
-  local ch = raw as foreign *titan_thread_channel
+  local ch = raw as *titan_thread_channel
   if ch == nil then return end
   uv.native_mutex_lock(ch.mutex)
-  if ch.active_senders > (0 as foreign size_t) then
-    ch.active_senders = ch.active_senders - (1 as foreign size_t)
-    if ch.active_senders == (0 as foreign size_t) then
+  if ch.active_senders > (0 as size_t) then
+    ch.active_senders = ch.active_senders - (1 as size_t)
+    if ch.active_senders == (0 as size_t) then
       if ch.closed == 0 then
         ch.closed = 1
         waiter_wake_all(ffi.titan_thread_overflow_queue(ch))
@@ -294,15 +294,15 @@ end
 
 -- Implementation notes: doc/implementation/thread-library.md#endpoint-transfer-c-abi-release-chain-and-last-receiver-pin
 foreign function channel_release_receiver_native(raw: *void): void
-  local ch = raw as foreign *titan_thread_channel
+  local ch = raw as *titan_thread_channel
   if ch == nil then return end
   uv.native_mutex_lock(ch.mutex)
-  if ch.active_receivers == (0 as foreign size_t) then
+  if ch.active_receivers == (0 as size_t) then
     uv.native_mutex_unlock(ch.mutex)
     return
   end
-  if ch.active_receivers > (1 as foreign size_t) then
-    ch.active_receivers = ch.active_receivers - (1 as foreign size_t)
+  if ch.active_receivers > (1 as size_t) then
+    ch.active_receivers = ch.active_receivers - (1 as size_t)
     uv.native_mutex_unlock(ch.mutex)
     return
   end
@@ -313,7 +313,7 @@ foreign function channel_release_receiver_native(raw: *void): void
   uv.native_mutex_unlock(ch.mutex)
   channel_drain_and_discard(ch)
   uv.native_mutex_lock(ch.mutex)
-  ch.active_receivers = ch.active_receivers - (1 as foreign size_t)
+  ch.active_receivers = ch.active_receivers - (1 as size_t)
   local destroy = channel_unreferenced(ch)
   uv.native_mutex_unlock(ch.mutex)
   if destroy ~= 0 then
@@ -359,17 +359,17 @@ end
 
 local foreign function write_stderr_bytes(bytes: const *char, length: size_t)
   if bytes == nil then return end
-  if length == (0 as foreign size_t) then return end
-  local offset = 0 as foreign size_t
+  if length == (0 as size_t) then return end
+  local offset = 0 as size_t
   while offset < length do
     local chunk = length - offset
-    if chunk > (65536 as foreign size_t) then
-      chunk = 65536 as foreign size_t
+    if chunk > (65536 as size_t) then
+      chunk = 65536 as size_t
     end
     local written = ffi.write(
-      2 as foreign int,
+      2 as int,
       bytes + offset,
-      chunk as foreign titan_thread_write_count)
+      chunk as titan_thread_write_count)
     if written < 0 then
       if ffi.errno == ffi.EINTR then
         -- Retry interrupted write.
@@ -379,7 +379,7 @@ local foreign function write_stderr_bytes(bytes: const *char, length: size_t)
     elseif written == 0 then
       return
     else
-      offset = offset + (written as foreign size_t)
+      offset = offset + (written as size_t)
     end
   end
 end

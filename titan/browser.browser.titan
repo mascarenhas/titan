@@ -749,13 +749,13 @@ foreign function invoke(
     raw_generation: unsigned int,
     raw_argc: unsigned int,
     raw_args: const *void): int
-  local id = raw_id as foreign uint64_t
-  local token = raw_token as foreign uint32_t
-  local slot = raw_slot as foreign uint32_t
-  local generation = raw_generation as foreign uint32_t
-  local argc = raw_argc as foreign uint32_t
-  local args = raw_args as foreign const *titan_browser_value
-  local op = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
+  local id = raw_id as uint64_t
+  local token = raw_token as uint32_t
+  local slot = raw_slot as uint32_t
+  local generation = raw_generation as uint32_t
+  local argc = raw_argc as uint32_t
+  local args = raw_args as const *titan_browser_value
+  local op = ffi.TITAN_BROWSER_INVOKE as uint32_t
   if ffi.titan_browser_entry_allowed(id, op) == 0 then
     return -1
   end
@@ -783,11 +783,11 @@ foreign function invoke(
     local completion = state.fallback
     completion.operation_id = id
     completion.operation = op
-    completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
+    completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as uint32_t
     completion.application_status = 1
     completion.result_count = 0
     completion.results = nil
-    completion.message = message as foreign const *unsigned char
+    completion.message = message as const *unsigned char
     completion.message_length = 17
     completion.trace = nil
     completion.trace_length = 0
@@ -798,7 +798,7 @@ foreign function invoke(
   end
   local handler = ffi.lmacro_clCvalue(state.invoke_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign InvokeEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as InvokeEntry
   local top = ffi.lua_gettop(state_L)
   local old_errfunc = ffi.lmacro_get_errfunc(state_L)
   ffi.lua_pushcclosure(state_L, ffi.errorhandler, 0)
@@ -812,19 +812,19 @@ end
 --- The synchronous entry of a wrapper release, a callback trampoline with no entry identity or completion.
 foreign function release_callable(raw_token: unsigned int, raw_slot: unsigned int,
                                   raw_generation: unsigned int): int
-  local token = raw_token as foreign uint32_t
-  local slot = raw_slot as foreign uint32_t
-  local generation = raw_generation as foreign uint32_t
-  local state: foreign *titan_browser_state_record = nil
-  local thread: foreign *lua_State = nil
-  local refusal: foreign const *char = nil
+  local token = raw_token as uint32_t
+  local slot = raw_slot as uint32_t
+  local generation = raw_generation as uint32_t
+  local state: *titan_browser_state_record = nil
+  local thread: *lua_State = nil
+  local refusal: const *char = nil
   local status = callback_begin(token, state, thread, refusal)
   if status ~= ffi.TITAN_BROWSER_OK then
     return status
   end
   local handler = ffi.lmacro_clCvalue(state.release_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign ReleaseEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as ReleaseEntry
   local top = ffi.lua_gettop(thread)
   local old_errfunc = ffi.lmacro_get_errfunc(thread)
   local old_gcstp = ffi.lmacro_get_gcstp(thread)
@@ -841,7 +841,7 @@ foreign function release_callable(raw_token: unsigned int, raw_slot: unsigned in
   ffi.lmacro_set_errfunc(thread, old_errfunc)
   ffi.lua_settop(thread, top)
   callback_finish(state, token, thread)
-  return ffi.TITAN_BROWSER_OK as foreign int
+  return ffi.TITAN_BROWSER_OK as int
 end
 
 --- Look up an explicitly supplied create({bindings}) name, never a global or eval expression.
@@ -1361,27 +1361,27 @@ local foreign function callback_begin(token: uint32_t,
   local state = callback_state(token)
   if state == nil then
     refusal[0] = "browser state is closed, closing or uninitialized"
-    return ffi.TITAN_BROWSER_STATE as foreign int
+    return ffi.TITAN_BROWSER_STATE as int
   end
   if ffi.titan_browser_host_callback(token, 1) == 0 then
     refusal[0] = "browser instance is disposing, exited or poisoned"
-    return ffi.TITAN_BROWSER_STATE as foreign int
+    return ffi.TITAN_BROWSER_STATE as int
   end
   local thread = state.callback_next
   if thread == nil then
     ffi.titan_browser_host_callback(token, -1)
     refusal[0] = "synchronous callback nesting is too deep"
-    return ffi.TITAN_BROWSER_STATE as foreign int
+    return ffi.TITAN_BROWSER_STATE as int
   end
   if ffi.lua_checkstack(thread, ffi.LUA_MINSTACK) == 0 then
     ffi.titan_browser_host_callback(token, -1)
-    return ffi.TITAN_BROWSER_MEMORY as foreign int
+    return ffi.TITAN_BROWSER_MEMORY as int
   end
   state.callback_depth = state.callback_depth + 1
   state.callback_next = nil
   state_out[0] = state
   thread_out[0] = thread
-  return ffi.TITAN_BROWSER_OK as foreign int
+  return ffi.TITAN_BROWSER_OK as int
 end
 
 -- Ends a callback level: its thread is free for the next callback.
@@ -1396,47 +1396,47 @@ end
 -- message, or MEMORY when that copy cannot be allocated.
 local foreign function sync_refuse(result: *titan_browser_sync_result, message: const *char): int
   local length = ffi.strlen(message)
-  local copy = ffi.malloc(length) as foreign *unsigned char
+  local copy = ffi.malloc(length) as *unsigned char
   if copy == nil then
-    result.status = ffi.TITAN_BROWSER_MEMORY as foreign uint32_t
-    return ffi.TITAN_BROWSER_MEMORY as foreign int
+    result.status = ffi.TITAN_BROWSER_MEMORY as uint32_t
+    return ffi.TITAN_BROWSER_MEMORY as int
   end
   ffi.memcpy(copy, message, length)
-  result.status = ffi.TITAN_BROWSER_STATE as foreign uint32_t
+  result.status = ffi.TITAN_BROWSER_STATE as uint32_t
   result.message = copy
-  result.message_length = length as foreign uint32_t
-  return ffi.TITAN_BROWSER_STATE as foreign int
+  result.message_length = length as uint32_t
+  return ffi.TITAN_BROWSER_STATE as int
 end
 
 --- The C entry for a synchronous callback: runs the pinned callable on a callback thread and returns the result status.
 -- @usage standard-library-browser.md#synchronous-c-callbacks
 foreign function call_sync(raw_identity: const *void, raw_argc: unsigned int,
                            raw_args: const *void, raw_result: *void): int
-  local identity = raw_identity as foreign const *titan_browser_identity
-  local argc = raw_argc as foreign uint32_t
-  local args = raw_args as foreign const *titan_browser_value
-  local result = raw_result as foreign *titan_browser_sync_result
+  local identity = raw_identity as const *titan_browser_identity
+  local argc = raw_argc as uint32_t
+  local args = raw_args as const *titan_browser_value
+  local result = raw_result as *titan_browser_sync_result
   if result == nil then
-    return ffi.TITAN_BROWSER_STATE as foreign int
+    return ffi.TITAN_BROWSER_STATE as int
   end
   if identity == nil then
     return sync_refuse(result, "browser callback identity is absent")
   end
   local token = identity.state
-  local state: foreign *titan_browser_state_record = nil
-  local thread: foreign *lua_State = nil
-  local refusal: foreign const *char = nil
+  local state: *titan_browser_state_record = nil
+  local thread: *lua_State = nil
+  local refusal: const *char = nil
   local status = callback_begin(token, state, thread, refusal)
   if status == ffi.TITAN_BROWSER_STATE then
     return sync_refuse(result, refusal)
   end
   if status ~= ffi.TITAN_BROWSER_OK then
-    result.status = status as foreign uint32_t
+    result.status = status as uint32_t
     return status
   end
   local handler = ffi.lmacro_clCvalue(state.call_sync_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallSyncEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallSyncEntry
   local top = ffi.lua_gettop(thread)
   local old_errfunc = ffi.lmacro_get_errfunc(thread)
   ffi.lua_pushcclosure(thread, ffi.errorhandler, 0)
@@ -1445,31 +1445,31 @@ foreign function call_sync(raw_identity: const *void, raw_argc: unsigned int,
   ffi.lmacro_set_errfunc(thread, old_errfunc)
   ffi.lua_settop(thread, top)
   callback_finish(state, token, thread)
-  return result.status as foreign int
+  return result.status as int
 end
 
 -- The bracket for a standard library's hand-written trampoline: admits the
 -- callback and chooses frame.L, its callback thread. Not an application API
 -- (doc/implementation/browser-bridge.md, synchronous C callbacks).
 foreign function callback_enter(raw_state: unsigned int, raw_frame: *void): int
-  local token = raw_state as foreign uint32_t
-  local frame = raw_frame as foreign *titan_browser_callback_frame
+  local token = raw_state as uint32_t
+  local frame = raw_frame as *titan_browser_callback_frame
   if frame == nil then
-    return ffi.TITAN_BROWSER_STATE as foreign int
+    return ffi.TITAN_BROWSER_STATE as int
   end
   frame.L = nil
   frame.state = token
   frame.depth = 0
-  local state: foreign *titan_browser_state_record = nil
-  local thread: foreign *lua_State = nil
-  local refusal: foreign const *char = nil
+  local state: *titan_browser_state_record = nil
+  local thread: *lua_State = nil
+  local refusal: const *char = nil
   local status = callback_begin(token, state, thread, refusal)
   if status ~= ffi.TITAN_BROWSER_OK then
     return status
   end
   local handler = ffi.lmacro_clCvalue(state.callback_handler)
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(thread)
   local old_errfunc = ffi.lmacro_get_errfunc(thread)
   ffi.lua_pushcclosure(thread, ffi.errorhandler, 0)
@@ -1479,16 +1479,16 @@ foreign function callback_enter(raw_state: unsigned int, raw_frame: *void): int
   ffi.lua_settop(thread, top)
   if frame.L == nil then
     callback_finish(state, token, thread)
-    return ffi.TITAN_BROWSER_MEMORY as foreign int
+    return ffi.TITAN_BROWSER_MEMORY as int
   end
   frame.depth = state.callback_depth
-  return ffi.TITAN_BROWSER_OK as foreign int
+  return ffi.TITAN_BROWSER_OK as int
 end
 
 -- Ends a callback that titan_browser_callback_enter admitted; frame.L is
 -- free again.
 foreign function callback_leave(raw_frame: *void)
-  local frame = raw_frame as foreign *titan_browser_callback_frame
+  local frame = raw_frame as *titan_browser_callback_frame
   if frame == nil then
     return
   end

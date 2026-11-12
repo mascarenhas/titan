@@ -48,7 +48,7 @@ describe("surface C99 type code generation", function()
             surface_provider = [[
 
                 foreign function plus_one(item: int): int
-                    return item + (1 as foreign int)
+                    return item + (1 as int)
                 end
 
                 callback_invocations: integer = 0

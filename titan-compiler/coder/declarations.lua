@@ -677,6 +677,54 @@ function codeboxparam(ctx, param)
     })
 end
 
+-- The checked operation a foreign-body cast lowers as.
+local function foreign_cast_operation(node)
+    if node._adjustment and node._adjustment.kind == "direct_coercion" then
+        return node._adjustment.coercion.op
+    elseif node._written_cast and node._written_cast.tag == "just" then
+        local written = maybe3.get_checked(node._written_cast, "written cast")
+        if written.op == "coercion" then
+            return written.coercion.op
+        elseif written.op == "explicit" then
+            return written.conversion.op or written.conversion.kind
+        end
+    elseif node._c_conversion then
+        return node._c_conversion.op or node._c_conversion.kind
+    end
+end
+
+local function casts_function_pointer(operation)
+    return operation == "c_function_pointer_to_void"
+        or operation == "c_void_to_function_pointer"
+end
+
+-- Whether a body's lowering names something that the source header does not
+-- declare. The header includes only the module's `.ffi.h`, and authored C may
+-- include it before any other header. Zeroed storage is rendered with memset,
+-- offsetof and size_t, a cast between a function pointer and `void *` with
+-- titan_cast_func of titan/ffi.h, and a non-finite float literal with
+-- HUGE_VAL or NAN of math.h.
+local function needs_producer_unit(node, seen)
+    if type(node) ~= "table" or seen[node] then return false end
+    seen[node] = true
+    if node._tag == "Ast.Decl" and node._c_allocation_plan then return true end
+    if node._tag == "Ast.ExpCast"
+       and casts_function_pointer(foreign_cast_operation(node)) then
+        return true
+    end
+    if node._tag == "Ast.ExpFloat"
+       and (node.value ~= node.value or math.abs(node.value) == math.huge) then
+        return true
+    end
+    for key, value in pairs(node) do
+        if (type(key) ~= "string" or key:sub(1, 1) ~= "_")
+           and needs_producer_unit(value, seen) then
+            return true
+        end
+    end
+    return false
+end
+
 -- Implementation notes: doc/implementation/foreign-functions.md#contents-and-inline-classification
 function coder._foreign_function_is_inline(node)
     -- Public callbacks need one provider-owned address, including when their
@@ -688,6 +736,7 @@ function coder._foreign_function_is_inline(node)
     if node._native_record_fields then return false end
     local block = node.block
     if not block or block._tag ~= "Ast.StatBlock" then return false end
+    if needs_producer_unit(block, {}) then return false end
     local stats = block.stats
     local first = 1
     while stats[first] and stats[first]._tag == "Ast.StatDecl" do
@@ -867,7 +916,9 @@ function coder._foreign_raw_exp(ctx, node)
         return "", foreigncast(node._c_literal, node._type)
     end
     if tag == "Ast.ExpNil" then
-        return "", "NULL"
+        -- The null pointer constant itself: NULL is a macro of stddef.h,
+        -- which an inline copy in the source header may not have.
+        return "", "((void *)0)"
     elseif tag == "Ast.ExpBool" then
         return "", node.value and "1" or "0"
     elseif tag == "Ast.ExpInteger" then
@@ -889,24 +940,10 @@ function coder._foreign_raw_exp(ctx, node)
         return coder._foreign_raw_call(ctx, node)
     elseif tag == "Ast.ExpCast" then
         local stats, exp = coder._foreign_raw_exp(ctx, node.exp)
-        local operation
-        if node._adjustment
-            and node._adjustment.kind == "direct_coercion" then
-            operation = node._adjustment.coercion.op
-        elseif (node._written_cast and node._written_cast.tag == "just") then
-            if maybe3.get_checked(node._written_cast, "written cast").op == "coercion" then
-                operation = maybe3.get_checked(node._written_cast, "written cast").coercion.op
-            elseif maybe3.get_checked(node._written_cast, "written cast").op == "explicit" then
-                operation = maybe3.get_checked(node._written_cast, "written cast").conversion.op
-                    or maybe3.get_checked(node._written_cast, "written cast").conversion.kind
-            end
-        elseif node._c_conversion then
-            operation = node._c_conversion.op or node._c_conversion.kind
-        end
+        local operation = foreign_cast_operation(node)
         if operation == "c_address" or operation == "mutable_c_address" then
             return stats, "(&(" .. exp .. "))"
-        elseif operation == "c_function_pointer_to_void"
-            or operation == "c_void_to_function_pointer" then
+        elseif casts_function_pointer(operation) then
             return stats, render("titan_cast_func($TARGET, $SOURCE)", {
                 TARGET = coder._render_c_type_name(node._type),
                 SOURCE = exp,
@@ -921,7 +958,6 @@ function coder._foreign_raw_exp(ctx, node)
             node._c_operator and node._c_operator.lhs_target or nil,
             "operand")
         local op = node._c_operator and node._c_operator.cop or node.op
-        if op == "not" then op = "!" end
         return stats, "(" .. op .. "(" .. exp .. "))"
     elseif tag == "Ast.ExpBinop" then
         local trait = node._c_operator
@@ -934,10 +970,6 @@ function coder._foreign_raw_exp(ctx, node)
             op = "!="
         elseif op == "~" then
             op = "^"
-        elseif op == "and" then
-            op = "&&"
-        elseif op == "or" then
-            op = "||"
         end
         return lstats .. "\n" .. rstats,
             "((" .. lhs .. ") " .. op .. " (" .. rhs .. "))"
@@ -992,23 +1024,44 @@ local function foreign_raw_stat_dispatch(ctx, node)
         local out, values = {}, {}
         for _, decl in ipairs(node.decls) do
             ctx.local_count = ctx.local_count + 1
-            decl._foreign_cname = "_foreign_local_" .. decl.name .. "_"
-                .. tostring(ctx.local_count)
-            out[#out + 1] = coder._render_c_declaration(
-                coder._c_value_type(decl._type), decl._foreign_cname) .. ";"
+            local suffix = decl.name .. "_" .. tostring(ctx.local_count)
+            local plan = decl._c_allocation_plan
+            if plan then
+                -- Zeroed storage is declared in place: it has C block
+                -- lifetime, so a loop body zeroes it on every iteration.
+                local home = { backing = "_foreign_backing_" .. suffix }
+                if plan.storage == "automatic_fam" then
+                    home.pointer = "_foreign_fam_pointer_" .. suffix
+                    decl._foreign_cname = "(*" .. home.pointer .. ")"
+                else
+                    decl._foreign_cname = "_foreign_local_" .. suffix
+                    home.name = decl._foreign_cname
+                    home.declaration = coder._render_c_declaration(
+                        coder._c_value_type(decl._type), decl._foreign_cname)
+                end
+                out[#out + 1] = coder._automatic_allocation_storage(plan, home)
+            else
+                decl._foreign_cname = "_foreign_local_" .. suffix
+                out[#out + 1] = coder._render_c_declaration(
+                    coder._c_value_type(decl._type), decl._foreign_cname) .. ";"
+            end
         end
         for index, exp in ipairs(node.exps) do
             local decl = assert(node.decls[index],
                 "foreign local initializer has no declaration")
-            local stats, value = coder._foreign_freeze(
-                ctx, exp, decl._type, "declaration")
-            out[#out + 1] = stats
-            values[index] = value
+            if not decl._c_allocation_plan then
+                local stats, value = coder._foreign_freeze(
+                    ctx, exp, decl._type, "declaration")
+                out[#out + 1] = stats
+                values[index] = value
+            end
         end
         for index, decl in ipairs(node.decls) do
-            out[#out + 1] = decl._foreign_cname .. " = "
-                .. assert(values[index],
-                    "foreign local declaration has no initializer") .. ";"
+            if not decl._c_allocation_plan then
+                out[#out + 1] = decl._foreign_cname .. " = "
+                    .. assert(values[index],
+                        "foreign local declaration has no initializer") .. ";"
+            end
         end
         return table.concat(out, "\n")
     elseif tag == "Ast.StatAssign" then

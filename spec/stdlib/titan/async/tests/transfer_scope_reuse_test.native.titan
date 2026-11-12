@@ -44,18 +44,18 @@ local function scope_reuse_reset_state()
 end
 
 local foreign function scope_reuse_counter_retain(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] + 1
 end
 
 local foreign function scope_reuse_counter_release(raw: *void)
-  local count = raw as foreign *int
+  local count = raw as *int
   count[0] = count[0] - 1
 end
 
 local foreign function scope_reuse_limited_lua_alloc(
     ud: *void, ptr: *void, osize: size_t, nsize: size_t): *void
-  local ctrl = ud as foreign *size_t
+  local ctrl = ud as *size_t
   if ctrl[0] == 0 then
     if nsize == 0 then
       ffi.free(ptr)

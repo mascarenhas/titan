@@ -1,5 +1,5 @@
 local foreign function ssl_close_record(cells: *void, slot: int, code: int)
-  local codes = cells as foreign *int
+  local codes = cells as *int
   codes[slot] = code
 end
 

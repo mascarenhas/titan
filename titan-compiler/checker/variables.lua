@@ -583,15 +583,8 @@ checkvar = util.make_visitor({
             term = "map indexing"
         elseif celem then
             node._type, term = celem, cterm
-            if checker._foreign_function_depth > 0 then
-                local spelling = st.c_profile and st.c_profile.int or "int"
-                keystype = st.c_profile and st.c_profile.integers
-                    and st.c_profile.integers[spelling]
-                    and st.c_profile.integers[spelling].type
-                    or types.CInteger("int", true, 3, 32)
-            else
-                keystype = types.Integer()
-            end
+            keystype = checker._foreign_function_depth > 0
+                and foreign_c_int_type(st) or types.Integer()
         elseif cerr then
             node._type = invalid(errors, node.exp1.loc, cerr)
             return
@@ -603,9 +596,15 @@ checkvar = util.make_visitor({
         end
 
         checkexp(node.exp2, st, errors, keystype)
-        -- always try to coerce index key to key type
-        node.exp2 = coerce_and_check(
-            node.exp2, keystype, term, errors, node.exp2.loc)
+        -- A foreign body subscripts as C does, with any integer type: a
+        -- pointer difference, a size_t, a loop control. A numeral is an int.
+        local index_type = c_resolve(node.exp2._type)
+        if not (celem and checker._foreign_function_depth > 0
+                and index_type and index_type._tag == "Type.CInteger") then
+            -- always try to coerce index key to key type
+            node.exp2 = coerce_and_check(
+                node.exp2, keystype, term, errors, node.exp2.loc)
+        end
         if node._type and node._type._tag ~= "Type.Invalid"
            and not checker._ensure_c_enum_supported(
                st, node._type, node.loc, errors) then

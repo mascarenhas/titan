@@ -13,7 +13,7 @@ foreign import "native.h"
 -- searcher after its libraries and copied native preloads. It computes its own
 -- Titan path on first use; nothing about the creator's path is inherited.
 local foreign function lua_state_open_libraries(state: *lua_State): int
-  local initialization = ffi.lua_touserdata(state, 1) as foreign *titan_lua_open
+  local initialization = ffi.lua_touserdata(state, 1) as *titan_lua_open
   ffi.luaL_openselectedlibs(state, ~0, 0)
   for index = 0, initialization.count - 1 do
     local entry = initialization.preloads[index]
@@ -45,7 +45,7 @@ end
 -- entry -> one module; all allocation/errors stay under lua_state_execute.
 local foreign function lua_state_native_module(state: *lua_State,
                                          name: const *char): int
-  transfer.transfer_load_module(state, name, ffi.strlen(name) as foreign unsigned long long)
+  transfer.transfer_load_module(state, name, ffi.strlen(name) as unsigned long long)
   return 0
 end
 
@@ -77,12 +77,12 @@ local foreign function lua_state_transfer_value(state: *lua_State, position: int
   ffi.lua_getmetatable(state, position)
   ffi.lua_rawgetp(state, -1, ffi.TITAN_MT_PAYLOAD)
   local reader = ffi.lua_touserdata(state, -1)
-    as foreign function (*lua_State, *Udata, lua_Integer, *TValue): void
-  local owner = ffi.lua_togco(state, position) as foreign *Udata
+    as function (*lua_State, *Udata, lua_Integer, *TValue): void
+  local owner = ffi.lua_togco(state, position) as *Udata
   -- A by-value C temporary borrows from the still-rooted result owner. The
   -- canonical payload reader copies a scalar/string/pointer and cannot collect.
   local part = ffi.lua_totvalue(state, position)
-  reader(state, owner, 0 as foreign lua_Integer, part)
+  reader(state, owner, 0 as lua_Integer, part)
   ffi.lua_pushtvalue(state, part)
   local tag = ffi.lua_tointegerx(state, -1, nil)
   ffi.lua_settop(state, top)
@@ -90,11 +90,11 @@ local foreign function lua_state_transfer_value(state: *lua_State, position: int
     result.kind = ffi.TITAN_LUA_NIL
     return 1
   end
-  reader(state, owner, 1 as foreign lua_Integer, part)
+  reader(state, owner, 1 as lua_Integer, part)
   ffi.lua_pushtvalue(state, part)
   if tag == 1 then
     result.kind = ffi.TITAN_LUA_BOOLEAN
-    result.integer = ffi.lua_toboolean(state, -1) as foreign lua_Integer
+    result.integer = ffi.lua_toboolean(state, -1) as lua_Integer
   elseif tag == 2 then
     result.kind = ffi.TITAN_LUA_INTEGER
     result.integer = ffi.lua_tointegerx(state, -1, nil)
@@ -103,15 +103,15 @@ local foreign function lua_state_transfer_value(state: *lua_State, position: int
     result.number = ffi.lua_tonumberx(state, -1, nil)
   elseif tag == 4 then
     result.kind = ffi.TITAN_LUA_STRING
-    local length = 0 as foreign size_t
+    local length = 0 as size_t
     result.bytes = ffi.lua_tolstring(state, -1, length)
     result.length = length
   elseif tag == 5 then
     result.kind = ffi.TITAN_LUA_STATE
-    result.state = ffi.lua_touserdata(state, -1) as foreign *lua_State
+    result.state = ffi.lua_touserdata(state, -1) as *lua_State
   elseif tag == 6 then
     result.kind = ffi.TITAN_LUA_FUNCTION
-    result.function = ffi.lua_touserdata(state, -1) as foreign lua_CFunction
+    result.function = ffi.lua_touserdata(state, -1) as lua_CFunction
     if result.function == nil then
       return ffi.luaL_error(state, "cannot transfer a NULL Lua C function")
     end
@@ -124,20 +124,20 @@ local foreign function lua_state_transfer_value(state: *lua_State, position: int
     elseif tag == 9 then result.kind = ffi.TITAN_LUA_UNION
     elseif tag == 10 then result.kind = ffi.TITAN_LUA_CLOSURE
     else result.kind = ffi.TITAN_LUA_RECORD_PAYLOAD end
-    local module_length = 0 as foreign size_t
+    local module_length = 0 as size_t
     result.module = ffi.lua_tolstring(state, -1, module_length)
     result.module_length = module_length
-    reader(state, owner, 2 as foreign lua_Integer, part)
+    reader(state, owner, 2 as lua_Integer, part)
     ffi.lua_pushtvalue(state, part)
     if tag == 10 then result.entry = ffi.lua_touserdata(state, -1)
     else
-      local name_length = 0 as foreign size_t
+      local name_length = 0 as size_t
       result.name = ffi.lua_tolstring(state, -1, name_length)
       result.name_length = name_length
     end
-    reader(state, owner, 3 as foreign lua_Integer, part)
+    reader(state, owner, 3 as lua_Integer, part)
     ffi.lua_pushtvalue(state, part)
-    local length = 0 as foreign size_t
+    local length = 0 as size_t
     result.bytes = ffi.lua_tolstring(state, -1, length)
     result.length = length
   else
@@ -214,7 +214,7 @@ end
 -- Returning the complete result run leaves strings rooted in the remote stack
 -- until the caller copies them into its own heap and restores that stack.
 local foreign function lua_state_execute(state: *lua_State): int
-  local call = ffi.lua_touserdata(state, 1) as foreign *titan_lua_call
+  local call = ffi.lua_touserdata(state, 1) as *titan_lua_call
   ffi.lua_settop(state, 0)
   if ffi.lua_checkstack(state, call.nargs + 5) == 0 then
     return ffi.luaL_error(state, "cannot reserve independent Lua argument stack")
@@ -228,7 +228,7 @@ local foreign function lua_state_execute(state: *lua_State): int
     if argument.kind == ffi.TITAN_LUA_NIL then
       ffi.lua_pushnil(state)
     elseif argument.kind == ffi.TITAN_LUA_BOOLEAN then
-      ffi.lua_pushboolean(state, argument.integer as foreign int)
+      ffi.lua_pushboolean(state, argument.integer as int)
     elseif argument.kind == ffi.TITAN_LUA_INTEGER then
       ffi.lua_pushinteger(state, argument.integer)
     elseif argument.kind == ffi.TITAN_LUA_FLOAT then
@@ -251,10 +251,10 @@ local foreign function lua_state_execute(state: *lua_State): int
   ffi.lua_callk(state, call.nargs, ffi.LUA_MULTRET, 0, nil)
   local count = ffi.lua_gettop(state)
   if count > 0 then
-    if count as foreign size_t > ffi.SIZE_MAX / foreign titan_lua_value.sizeof then
+    if count as size_t > ffi.SIZE_MAX / foreign titan_lua_value.sizeof then
       return ffi.luaL_error(state, "independent Lua results are too large")
     end
-    call.results = ffi.calloc(count as foreign size_t, foreign titan_lua_value.sizeof)
+    call.results = ffi.calloc(count as size_t, foreign titan_lua_value.sizeof)
     if call.results == nil then
       return ffi.luaL_error(state, "cannot allocate independent Lua results")
     end
@@ -271,7 +271,7 @@ local foreign function lua_state_execute(state: *lua_State): int
     elseif kind == ffi.LUA_TBOOLEAN then
       call.results[index].kind = ffi.TITAN_LUA_BOOLEAN
       call.results[index].integer = ffi.lua_toboolean(state, position)
-        as foreign lua_Integer
+        as lua_Integer
     elseif kind == ffi.LUA_TNUMBER then
       if ffi.lua_isinteger(state, position) ~= 0 then
         call.results[index].kind = ffi.TITAN_LUA_INTEGER
@@ -282,7 +282,7 @@ local foreign function lua_state_execute(state: *lua_State): int
       end
     elseif kind == ffi.LUA_TSTRING then
       call.results[index].kind = ffi.TITAN_LUA_STRING
-      local length = 0 as foreign size_t
+      local length = 0 as size_t
       call.results[index].bytes = ffi.lua_tolstring(state, position, length)
       call.results[index].length = length
     elseif kind == ffi.LUA_TTHREAD then
@@ -313,11 +313,11 @@ end
 
 -- Implementation notes: doc/implementation/lua-library.md#protected-execution-and-stack-cleanup
 local foreign function lua_state_run(argument: *void)
-  local call = argument as foreign *titan_lua_call
+  local call = argument as *titan_lua_call
   local state = call.state
   call.nresults = 0
   call.message = nil
-  call.message_length = 0 as foreign size_t
+  call.message_length = 0 as size_t
   if ffi.lua_checkstack(state, 3) == 0 then
     call.status = ffi.LUA_ERRMEM
     call.message = "cannot reserve independent Lua call stack"
@@ -331,7 +331,7 @@ local foreign function lua_state_run(argument: *void)
   ffi.lua_pushlightuserdata(state, call)
   call.status = ffi.lua_pcallk(state, 1, ffi.LUA_MULTRET, top + 1, 0, nil)
   if call.status ~= ffi.LUA_OK then
-    local length = 0 as foreign size_t
+    local length = 0 as size_t
     call.message = ffi.lua_tolstring(state, -1, length)
     call.message_length = length
     if call.message == nil then
@@ -347,7 +347,7 @@ end
 -- abandoned job, because closing the independent state may itself wait for
 -- that state's queued pool work.
 local foreign function lua_state_release_abandoned(argument: *void)
-  local call = argument as foreign *titan_lua_call
+  local call = argument as *titan_lua_call
   ffi.free(call.results)
   call.results = nil
   ffi.lua_close(call.state)

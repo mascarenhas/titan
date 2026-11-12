@@ -2859,48 +2859,55 @@ function codeforin(ctx, node)
     })
 end
 
+-- `= {0}` zero-initializes members, but a union gets only its first member:
+-- GCC 15 and later leave its other bytes alone. The type graph does not
+-- record anonymous members, so no struct is known to be free of unions, and
+-- every aggregate payload is cleared bytewise as well.
+local function zero_aggregate_bytes(plan, name)
+    if not types.is_c_aggregate(plan.payload_type) then return "" end
+    return "memset((void *)&" .. name .. ", 0, sizeof(" .. name .. "));"
+end
+
 -- Implementation notes: doc/implementation/c-ffi-expressions.md#selection-at-the-direct-declaration-sink
-function coder._codeautomaticallocationdecl(ctx, decl)
-    local plan = assert(decl._c_allocation_plan)
-    decl._boxed = false
-    if decl._c_allocation_predeclared or not decl._used then return "" end
-    local logical = localname(ctx, decl.name)
+-- Declaration-owned zeroed storage for one automatic allocation plan, shared
+-- by ordinary locals and foreign-body locals. `home` names the C objects:
+-- `name` and `declaration` are the local and its own declaration (an object,
+-- a fixed array, or the pointer view of a borrow), `backing` the separate
+-- array or the FAM union, and `pointer` the FAM's typed pointer. `qualifier`
+-- and `spill` carry an ordinary function's recovery storage; a foreign body
+-- has none.
+function coder._automatic_allocation_storage(plan, home)
     local storage = plan.storage
     if storage == "automatic_object" or storage == "automatic_array" then
-        decl._cvar = decl._cvar or ("_local_" .. logical)
         return render([[
             $CDECL = {0};
+            $ZERO
             $CSPILLDECL
         ]], {
-            CDECL = coder._local_cvardecl(ctx, decl),
-            CSPILLDECL = spill_decl_init(ctx, decl),
+            CDECL = home.declaration,
+            ZERO = zero_aggregate_bytes(plan, home.name),
+            CSPILLDECL = home.spill or "",
         })
     elseif storage == "automatic_array_borrow" then
-        local count = assert(plan.array_count_literal)
-        local backing = "_foreign_backing_" .. logical
-        decl._cvar = decl._cvar or ("_local_" .. logical)
-        local array_type = types.CArray(plan.payload_type, count)
-        -- The view is a pointer scalar: spill its value, not backing bytes
-        -- that may have changed through the borrowed pointer.
+        local array_type = types.CArray(
+            plan.payload_type, assert(plan.array_count_literal))
         return render([[
             $BACKING = {0};
+            $ZERO
             $POINTER = $BACKING_NAME;
             $CSPILLDECL
         ]], {
-            BACKING = coder._render_c_declaration(array_type, backing),
-            BACKING_NAME = backing,
-            POINTER = coder._local_cvardecl(ctx, decl),
-            CSPILLDECL = spill_decl_init(ctx, decl),
+            BACKING = coder._render_c_declaration(array_type, home.backing),
+            ZERO = zero_aggregate_bytes(plan, home.backing),
+            BACKING_NAME = home.backing,
+            POINTER = home.declaration,
+            CSPILLDECL = home.spill or "",
         })
     elseif storage == "automatic_fam" then
         local field = assert(plan.fam_field)
         local array = types.resolve_c_typedef(field.type)
         assert(array._tag == "Type.CArray")
-        local count = assert(plan.fam_count_literal)
-        local union_name = "_foreign_fam_backing_" .. logical
-        local pointer = "_foreign_fam_pointer_" .. logical
         local ctype_name = coder._render_c_declaration(plan.payload_type, "")
-        local elem_name = coder._render_c_declaration(array.elem, "")
         local extent = render([[
             ((sizeof($CT) > (offsetof($CT, $FIELD) +
                 ((size_t)$COUNT * sizeof($ELEM))))
@@ -2910,33 +2917,56 @@ function coder._codeautomaticallocationdecl(ctx, decl)
         ]], {
             CT = ctype_name,
             FIELD = field.name,
-            COUNT = c_integer_literal(count),
-            ELEM = elem_name,
+            COUNT = c_integer_literal(assert(plan.fam_count_literal)),
+            ELEM = coder._render_c_declaration(array.elem, ""),
         })
-        decl._cvar = "(*" .. pointer .. ")"
-        decl._c_fam_storage = {
-            address = union_name .. ".bytes",
-            bytes = "sizeof(" .. union_name .. ".bytes)",
-        }
-        decl._c_backing_storage = decl._c_fam_storage
-        decl._spill_cvar = "_spill_foreign_fam_" .. logical
+        -- The byte array comes first so that `{0}` clears the whole extent.
         return render([[
             union {
-                $CT _align;
                 unsigned char bytes[$EXTENT];
+                $CT _align;
             } $QUAL$UNION = {0};
             $CT *$POINTER = ($CT *)$UNION.bytes;
             $CSPILLDECL
         ]], {
             CT = ctype_name,
             EXTENT = extent,
-            UNION = union_name,
-            QUAL = coder._decl_volatile_home(decl) and "volatile " or "",
-            POINTER = pointer,
-            CSPILLDECL = spill_decl_init(ctx, decl),
+            UNION = home.backing,
+            QUAL = home.qualifier or "",
+            POINTER = home.pointer,
+            CSPILLDECL = home.spill or "",
         })
     end
     error("unsupported automatic C allocation storage " .. tostring(storage))
+end
+
+function coder._codeautomaticallocationdecl(ctx, decl)
+    local plan = assert(decl._c_allocation_plan)
+    decl._boxed = false
+    if decl._c_allocation_predeclared or not decl._used then return "" end
+    local logical = localname(ctx, decl.name)
+    local home = {}
+    if plan.storage == "automatic_fam" then
+        home.backing = "_foreign_fam_backing_" .. logical
+        home.pointer = "_foreign_fam_pointer_" .. logical
+        home.qualifier = coder._decl_volatile_home(decl) and "volatile " or ""
+        decl._cvar = "(*" .. home.pointer .. ")"
+        decl._c_fam_storage = {
+            address = home.backing .. ".bytes",
+            bytes = "sizeof(" .. home.backing .. ".bytes)",
+        }
+        decl._c_backing_storage = decl._c_fam_storage
+        decl._spill_cvar = "_spill_foreign_fam_" .. logical
+    else
+        home.backing = "_foreign_backing_" .. logical
+        decl._cvar = decl._cvar or ("_local_" .. logical)
+        home.name = decl._cvar
+        home.declaration = coder._local_cvardecl(ctx, decl)
+    end
+    -- The view of a borrow is a pointer scalar: spill its value, not backing
+    -- bytes that may have changed through the borrowed pointer.
+    home.spill = spill_decl_init(ctx, decl)
+    return coder._automatic_allocation_storage(plan, home)
 end
 
 -- Initialize one ordinary local declaration from an already materialized

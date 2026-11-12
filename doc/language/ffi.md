@@ -894,9 +894,10 @@ the C compiler's rules. Unnamed bitfields are not exposed as Titan members.
 Named file-scope tag-only aggregates are available as `foreign Tag` without a C
 typedef. Such an aggregate local requires an initializer because the type does
 not admit nil; use `foreign Tag.new()` at a direct local sink to request zeroed
-automatic storage. An explicitly typed mutable C pointer local may omit its
-initializer and starts as `NULL`. See
-[C FFI declarations and expressions](c-ffi-expressions.md).
+automatic storage, in an ordinary function or in a
+[foreign function body](foreign-functions.md#zeroed-locals). An explicitly
+typed mutable C pointer local may omit its initializer and starts as `NULL`.
+See [C FFI declarations and expressions](c-ffi-expressions.md).
 
 A Titan [union](unions.md) is unrelated to a C `union`: it is nominal tagged
 userdata, not an overlay of C fields. There is no structural cast in either

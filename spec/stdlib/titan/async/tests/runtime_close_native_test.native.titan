@@ -114,7 +114,7 @@ function test_exit_rejects_native_adoption_during_cleanup_and_preserves_payload(
 end
 
 local foreign function runtime_close_record(cells: *void, slot: int, code: int)
-  local codes = cells as foreign *int
+  local codes = cells as *int
   codes[slot] = code
 end
 

@@ -1380,12 +1380,19 @@ local function render_foreign_header(modname, ast, tlcontext, header_paths,
                 types.CPointer(func.type, {}), func.binding) .. ";"
     end
 
-    local prefix = table.concat({
+    local prefix_lines = {
         ffiheaders.FOREIGN_MARKER,
         "#ifndef " .. guard,
         "#define " .. guard,
         "",
-    }, "\n")
+    }
+    -- See ffiheaders.names_state_tag. The tag goes before the includes, so
+    -- that it also precedes the module's `.ffi.h`.
+    if ffiheaders.names_state_tag(table.concat(declarations, "\n"))
+       or ffiheaders.names_state_tag(table.concat(inline_bodies, "\n")) then
+        prefix_lines[#prefix_lines + 1] = ffiheaders.STATE_TAG_DECLARATION .. "\n"
+    end
+    local prefix = table.concat(prefix_lines, "\n")
     local body = table.concat({
         "",
         "#ifndef TITAN_SOURCE_LOCAL",

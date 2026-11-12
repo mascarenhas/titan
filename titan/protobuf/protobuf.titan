@@ -132,20 +132,20 @@ end
 -- allocate, enter Lua, or interpret a native resource. Both producers (the
 -- owned packet buffer and the opaque-hook index string) call it.
 foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
-  local bytes = dst as foreign *uint8_t
-  bytes[0] = index as foreign uint8_t
-  bytes[1] = (index >> 8) as foreign uint8_t
-  bytes[2] = (index >> 16) as foreign uint8_t
-  bytes[3] = (index >> 24) as foreign uint8_t
+  local bytes = dst as *uint8_t
+  bytes[0] = index as uint8_t
+  bytes[1] = (index >> 8) as uint8_t
+  bytes[2] = (index >> 16) as uint8_t
+  bytes[3] = (index >> 24) as uint8_t
 end
 
 -- The root packet route uses this same C-only writer without a Lua index
 -- string or an intermediate payload buffer. The caller owns buf throughout.
 foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
-  local buf = raw_buf as foreign *titan_protobuf_buffer
-  if ffi.titan_protobuf_buf_reserve(buf, 4 as foreign size_t) == 0 then return 0 end
-  write_resource_index_bytes((buf.data + buf.length) as foreign *void, index)
-  buf.length = buf.length + (4 as foreign size_t)
+  local buf = raw_buf as *titan_protobuf_buffer
+  if ffi.titan_protobuf_buf_reserve(buf, 4 as size_t) == 0 then return 0 end
+  write_resource_index_bytes((buf.data + buf.length) as *void, index)
+  buf.length = buf.length + (4 as size_t)
   return 1
 end
 

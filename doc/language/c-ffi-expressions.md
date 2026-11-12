@@ -268,7 +268,9 @@ A direct local declaration selects the allocation representation described
 below. Direct generated record and variant constructors also support final
 embedded objects and fresh trailing buffers; see [Native storage in records and
 unions](nominal-storage.md). Other return, argument, later-assignment, and
-nested-expression uses retain the ordinary GC-owned result.
+nested-expression uses retain the ordinary GC-owned result. A
+[foreign function body](foreign-functions.md#zeroed-locals) accepts only the
+automatic forms.
 
 For a complete non-GC-bearing C structure or union `T`, `.new()` selects:
 
@@ -456,10 +458,17 @@ Titan `~=` emits C `!=`, and binary Titan `~` emits C `^`. Arrays decay before
 the operator is classified. Both operands are evaluated once in source order,
 then the generated C operator is applied to the temporaries.
 
+In a [foreign function body](foreign-functions.md#body-subset) the results are
+the C99 ones, not the Titan-facing ones of the table: a pointer difference is
+the target's `ptrdiff_t`, and the relational and equality operators give an
+`int`, 0 or 1.
+
 The following remain Titan operations and never acquire C meaning: `//` floor
 division, `^` exponentiation, `and`, `or`, `not`, concatenation, and the
-existing meanings of `#`. `COwned` is a Titan userdata wrapper rather than a C
-operand; a context must first adjust it to its payload pointer.
+existing meanings of `#`. A foreign function body has only C operators, so
+`//` and `^` are errors there, and the others are syntax errors. `COwned` is a
+Titan userdata wrapper rather than a C operand; a context must first adjust it
+to its payload pointer.
 
 Unsupported C combinations are errors rather than a fallback to Titan numeric
 helpers. These include floating remainder, aggregate operators, arithmetic on
@@ -475,7 +484,8 @@ C integer promotions and usual arithmetic conversions determine result types.
 Arithmetic drops typedef identity and produces the target's resolved primitive
 C type. Float rank follows C (`long double`, `double`, `float`), shifts use the
 promoted left type, and pointer subtraction produces a Titan `integer`.
-The subtraction itself has the target's exact `ptrdiff_t` type; the subsequent
+The subtraction itself has the target's exact `ptrdiff_t` type, which is the
+type a foreign function body sees; in an ordinary function the subsequent
 conversion to `lua_Integer` is checked and raises if the result is not
 representable rather than narrowing silently.
 

@@ -152,55 +152,55 @@ catch
 end
 
 local foreign function tcp_connection_callback(native: *uv_stream_t, status: int)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tcp_t", "connection_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkStatusEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, status as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function tcp_alloc_callback(native: *uv_handle_t, suggested_size: size_t, output: *uv_buf_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tcp_t", "alloc_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkAllocEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkAllocEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)
+  entry(L, module, handler, owner, loop, suggested_size as lua_Integer, output)
   ffi.lua_settop(L, top)
 end
 
 local foreign function tcp_read_callback(native: *uv_stream_t, nread: ssize_t, buffer: const *uv_buf_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tcp_t", "read_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkReadEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
+  entry(L, module, handler, owner, loop, nread as lua_Integer, buffer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function tcp_close_callback(native: *uv_handle_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tcp_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -327,55 +327,55 @@ catch
 end
 
 local foreign function pipe_connection_callback(native: *uv_stream_t, status: int)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "pipe_t", "connection_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkStatusEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, status as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function pipe_alloc_callback(native: *uv_handle_t, suggested_size: size_t, output: *uv_buf_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "pipe_t", "alloc_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkAllocEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkAllocEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)
+  entry(L, module, handler, owner, loop, suggested_size as lua_Integer, output)
   ffi.lua_settop(L, top)
 end
 
 local foreign function pipe_read_callback(native: *uv_stream_t, nread: ssize_t, buffer: const *uv_buf_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "pipe_t", "read_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkReadEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
+  entry(L, module, handler, owner, loop, nread as lua_Integer, buffer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function pipe_close_callback(native: *uv_handle_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "pipe_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -484,41 +484,41 @@ catch
 end
 
 local foreign function tty_alloc_callback(native: *uv_handle_t, suggested_size: size_t, output: *uv_buf_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tty_t", "alloc_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkAllocEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkAllocEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)
+  entry(L, module, handler, owner, loop, suggested_size as lua_Integer, output)
   ffi.lua_settop(L, top)
 end
 
 local foreign function tty_read_callback(native: *uv_stream_t, nread: ssize_t, buffer: const *uv_buf_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tty_t", "read_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkReadEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
+  entry(L, module, handler, owner, loop, nread as lua_Integer, buffer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function tty_close_callback(native: *uv_handle_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tty_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -642,16 +642,16 @@ catch
 end
 
 local foreign function network_connect_callback(native: *uv_connect_t, status: int)
-  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
-  local base = native.handle as foreign *uv_handle_t
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_req_get_data(native as *uv_req_t) as *Udata
+  local base = native.handle as *uv_handle_t
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "connect_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkStatusEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, status as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
@@ -738,16 +738,16 @@ catch
 end
 
 local foreign function network_write_callback(native: *uv_write_t, status: int)
-  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
-  local base = native.handle as foreign *uv_handle_t
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_req_get_data(native as *uv_req_t) as *Udata
+  local base = native.handle as *uv_handle_t
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "write_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkStatusEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, status as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
@@ -817,16 +817,16 @@ catch
 end
 
 local foreign function network_shutdown_callback(native: *uv_shutdown_t, status: int)
-  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
-  local base = native.handle as foreign *uv_handle_t
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_req_get_data(native as *uv_req_t) as *Udata
+  local base = native.handle as *uv_handle_t
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "shutdown_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as NetworkStatusEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, status as lua_Integer)
   ffi.lua_settop(L, top)
 end
 

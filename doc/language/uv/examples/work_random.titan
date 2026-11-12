@@ -3,7 +3,7 @@ local uv = import "titan.uv"
 -- This body is raw C and runs on a foreign worker. It cannot capture Titan
 -- values or call Lua/Titan. The ordinary submitting code owns the pointed bytes.
 foreign function double_value(argument: *void): void
-  local item = argument as foreign *int
+  local item = argument as *int
   item[0] = item[0] * 2
 end
 

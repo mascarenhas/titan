@@ -343,6 +343,55 @@ local errors = {
 
     ListTooLong = "List exceeds the maximum of 100 elements.",
 
+    --
+    -- Foreign function bodies: constructs outside the raw-C subset
+    -- (tested in spec/parser_spec.lua)
+    --
+
+    ForeignRaise = "Raise statements are not available inside a foreign function.",
+
+    ForeignDefer = "Defer statements are not available inside a foreign function.",
+
+    ForeignCatch = "Catch blocks are not available inside a foreign function.",
+
+    ForeignCase = "Case statements are not available inside a foreign function.",
+
+    ForeignForIn = "Generic for loops are not available inside a foreign function.",
+
+    ForeignLambda = "Anonymous functions are not available inside a foreign function.",
+
+    ForeignConstructor = "Titan constructors are not available inside a foreign function.",
+
+    ForeignMethod = "Method selection with ':' is not available inside a foreign function.",
+
+    ForeignTypeArguments = "Generic type arguments are not available inside a foreign function.",
+
+    ForeignDots = "Variadic and spread expressions are not available inside a foreign function.",
+
+    ForeignRange = "Range expressions are not available inside a foreign function.",
+
+    ForeignIs = "Titan type tests are not available inside a foreign function.",
+
+    ForeignCountedCast = "The counted cast 'as T(n)' is not available inside a foreign function; write ';' after the cast if a parenthesized statement follows.",
+
+    ForeignOr = "Titan operator 'or' is not available inside a foreign function.",
+
+    ForeignAnd = "Titan operator 'and' is not available inside a foreign function.",
+
+    ForeignConcat = "Titan operator '..' is not available inside a foreign function.",
+
+    ForeignNot = "Titan operator 'not' is not available inside a foreign function.",
+
+    ForeignOption = "Option declarations and types ('?') are not available inside a foreign function.",
+
+    ForeignReturnList = "A foreign function return statement can return at most one value.",
+
+    ForeignBodyForeign = "Types inside a foreign function body are C types: delete 'foreign' before this type.",
+
+    ForeignBodyOwned = "Owned types are not available inside a foreign function.",
+
+    ForeignBodyTitanType = "Titan Array and Map types are not available inside a foreign function.",
+
 }
 
 syntax_errors.errors = errors

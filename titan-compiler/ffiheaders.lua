@@ -102,13 +102,28 @@ function ffiheaders.foreign_contents(recipe, ffi_header, source_header)
     return util.normalize_line_directives(contents)
 end
 
+-- The built-in `lua_State` of a module that does not import lua.h is rendered
+-- by its tag. A tag first written in a parameter list is scoped to that one
+-- declaration, so a generated header that names the tag declares it at file
+-- scope first, and every later mention is the same type. The declaration is
+-- derived from the rendered text, so a stored plan does not carry it.
+ffiheaders.STATE_TAG_DECLARATION = "struct lua_State;"
+
+function ffiheaders.names_state_tag(rendered)
+    return rendered:find("struct lua_State", 1, true) ~= nil
+end
+
 local function render_includes(modname, includes, typedefs)
     assert(staticmetadata.valid_module_name(modname))
     -- Case and punctuation are significant in a logical module identity.
     local guard = "TITAN_GENERATED_FFI_" .. sha256.hex(modname):upper() .. "_H"
+    local declarations = table.concat(typedefs or {}, "\n")
+    if ffiheaders.names_state_tag(declarations) then
+        declarations = ffiheaders.STATE_TAG_DECLARATION .. "\n" .. declarations
+    end
     return table.concat({ ffiheaders.MARKER, "#ifndef " .. guard,
         "#define " .. guard, "", table.concat(includes, "\n"), "",
-        table.concat(typedefs or {}, "\n"), "",
+        declarations, "",
         "#endif /* " .. guard .. " */", "" }, "\n")
 end
 

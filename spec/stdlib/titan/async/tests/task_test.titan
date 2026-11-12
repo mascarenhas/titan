@@ -228,10 +228,10 @@ end
 -- returns. Cell 0 counts the captures.
 local foreign function task_trace_capture_hook(state: *lua_State, ar: *lua_Debug)
   ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_cells")
-  local cells = ffi.lua_touserdata(state, -1) as foreign *int
+  local cells = ffi.lua_touserdata(state, -1) as *int
   ffi.lua_settop(state, -2)
   if cells == nil then return end
-  local call = ar.i_ci as foreign *void
+  local call = ar.i_ci as *void
   ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "async.tests.task_trace_call")
   local pending = ffi.lua_touserdata(state, -1)
   ffi.lua_settop(state, -2)

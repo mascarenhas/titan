@@ -536,7 +536,8 @@ The optional `length` expression on `Ast.ExpCast` and `Ast.ExpIs` represents
 parentheses without newline sensitivity, at the existing cast precedence.
 The target can be a transparent string alias; semantic checking rejects
 other targets, pointer categories outside the existing character/`void`
-pointer domain, non-integer counts, and restricted foreign-body use.
+pointer domain, and non-integer counts. A foreign function body has no
+counted cast: its grammar rejects the parenthesis (`ForeignCountedCast`).
 
 `check_explicit_cast_relation` checks both operands and records an explicit
 `counted_pointer_to_string` conversion. Its `length_type` retains the native
@@ -572,8 +573,8 @@ its ordinary effects and errors.
 The length is an evaluated child, not metadata. Initializer dependency and
 callable-exposure checking, generic lowering, call-effect ordering, and the
 read/write/try-spill walker visit it after the pointer. Ordinary variable
-checking establishes its captures. Structural completion, binary-use, linear,
-and foreign-body walks include it as a public AST field.
+checking establishes its captures. Structural completion, binary-use and
+linear walks include it as a public AST field.
 
 
 ## Target-directed automatic aggregates and fixed arrays
@@ -581,9 +582,10 @@ and foreign-body walks include it as a public AST field.
 `Ast.TypeCArray` represents unsized foreign arrays. At a direct initialized
 local sink, `foreign T[]` is an uncounted borrowed pointer view. There is no
 written `T[N]` source form, and aggregates, fixed arrays and const locals still
-require an initializer. Foreign function bodies reject `.new` and `.new_array`
-(`checker._validate_foreign_body_node`) because they have no Lua allocation or
-root context.
+require an initializer. Foreign function bodies accept the automatic plans
+below and reject every plan that needs an owner, because they have no Lua
+allocation or root context
+([foreign-body storage](foreign-functions.md#allocation-and-recovery-storage)).
 
 ### Selection at the direct declaration sink
 
@@ -647,16 +649,30 @@ owner loses ownership when the generated frame stops rooting the owner. The
 borrowed `foreign T[]` view lowers to a raw pointer, so `#` and counted bounds
 checks are unavailable through it.
 
-`coder._codeautomaticallocationdecl` (`coder/statements.lua`) emits real
+`coder._automatic_allocation_storage` (`coder/statements.lua`) renders real
 declaration-owned storage rather than an expression temporary: `{0}` for an
 object or fixed array, a separate fixed backing plus one pointer-view
 declaration for `automatic_array_borrow`, and the aligned union backing below
-for a FAM. This keeps address-taking, C out-parameter mutation, block lifetime,
-defer-tail predeclaration, and try-spill analysis attached to the actual
-`Ast.Decl`. For `automatic_array_borrow` the emitter owns both declarations, so
-generic local lowering must not redeclare the view; defer-tail predeclaration
-places backing and view together in the enclosing cleanup scope and suppresses
-both at the original statement.
+for a FAM. It takes the plan and the C names of the home, and has two callers:
+`coder._codeautomaticallocationdecl` for an ordinary local, which adds the
+recovery storage (volatile home or spill copy), and the foreign-body
+declaration lowering (`foreign_raw_stat_dispatch`, `coder/declarations.lua`),
+which has none. In an ordinary function this keeps address-taking, C
+out-parameter mutation, block lifetime, defer-tail predeclaration, and
+try-spill analysis attached to the actual `Ast.Decl`. For
+`automatic_array_borrow` the emitter owns both declarations, so generic local
+lowering must not redeclare the view; defer-tail predeclaration places backing
+and view together in the enclosing cleanup scope and suppresses both at the
+original statement.
+
+The language promises zero bytes, and `= {0}` alone does not give them: it
+initializes only the first member of a union, and GCC 15 and later leave the
+union's other bytes as they were. The compiler's type graph does not record
+anonymous members, so it cannot prove that a struct holds no union. The
+renderer therefore follows the initializer of every aggregate payload with a
+`memset` of the object (a scalar or pointer element array needs none), and the
+FAM union declares its byte array first, so that `{0}` reaches the whole
+extent.
 
 ### Flexible-array-member provenance
 
@@ -678,8 +694,8 @@ and zero all of it. Before recording `automatic_fam`,
 `checker._validate_automatic_fam_extent` asks the configured C probe context to
 prove `count <= (((size_t)-1 - offsetof(T, field)) / sizeof(E))`, so the literal
 bounds provenance and the generated backing extent agree without host layout
-guesses. The automatic form is a union containing `T` for alignment and an
-unsigned-byte member of the complete constant extent. The owned form evaluates
+guesses. The automatic form is a union of an unsigned-byte member of the
+complete constant extent, declared first, and a `T` for alignment. The owned form evaluates
 the count once, rejects a negative value, checks addition and multiplication
 overflow, allocates exactly that many payload bytes, and stores the logical
 count in one private integer user value. `Udata.len` stays the byte extent, so
@@ -861,9 +877,17 @@ Pointer subtraction converts the C result to Titan `integer`. Unrelated object
 pointers share a qualification-union `void *` common type for equality only;
 ordering requires qualification-compatible object-pointer types, while
 subtraction and pointer arithmetic additionally require complete non-void
-pointees. The checker records the target profile's authoritative `ptrdiff_t`
-type on the subtraction trait, and the coder feeds that exact source through
-the shared checked numeric conversion to `lua_Integer`.
+pointees.
+
+A trait's `result` is the type an ordinary function sees. The checker records
+the target profile's authoritative `ptrdiff_t` type on the subtraction trait
+as `result_source`, and in an ordinary function the coder feeds that exact
+source through the shared checked numeric conversion to `lua_Integer`. In a
+[foreign body](foreign-functions.md#one-checker-a-restricted-context)
+`finish_c_operator` gives the node the operator's C99 result type instead:
+the trait's `result_source` for a pointer difference, and the target's `int`
+(`foreign_c_int_type`) for a relational or equality operator, whose `result`
+is `boolean`. The raw-C lowering emits the C operator as it is.
 
 ## Preprocessor raw arguments
 

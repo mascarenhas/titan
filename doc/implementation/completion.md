@@ -23,9 +23,20 @@ identifier. The checker identifies it using the filename and transformed source
 location carried in `request`; an unrelated identifier with the same spelling
 cannot activate the hook. A multiword C primitive is one replacement leaf:
 `foreign const *unsigned lo|ng long` replaces `unsigned long long` and retains
-`foreign const *`. Import-string completion returns `kind = "import"`, the
-literal's contents as its replacement span, and unchanged source; the host uses
-its captured eligible module catalog.
+`foreign const *`. The leaf follows `foreign`, `owned` or `foreign type Name =`.
+Inside a `foreign function`, whose signature and body write C types without
+that prefix, it also follows the `:` of an annotation and the `as` of a cast:
+`local x = p as const *unsigned lo|ng long` replaces the same leaf, and the
+context is `foreign`. `prepare` finds the enclosing foreign function from the
+tokens before the caret: a `foreign function Name` opens one, and the block
+keywords (`if`, `do`, `repeat`, `until`, `end`) close it. A reserved word
+written as a name does not count. It is a name before `=`, where it names an
+argument (`end = 5`), and after a token that a name or a type follows: `.`,
+`:`, `,`, `(`, `{`, `*`, `as`, `const`, `foreign` or `function`. That covers a
+member, a function or a C type called `end` or `repeat`, and `foreign` as a
+member or before a C type in ordinary code. Import-string completion
+returns `kind = "import"`, the literal's contents as its replacement span, and
+unchanged source; the host uses its captured eligible module catalog.
 
 `original_byte(request, analysis_byte)` reverses offsets after the one edit;
 positions inside the synthetic identifier map to the original leaf start.

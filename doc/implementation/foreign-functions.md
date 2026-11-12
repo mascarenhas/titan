@@ -33,10 +33,11 @@ callable protocol; `Type.CFunction` continues to mean a direct C declaration.
 
 The factored top-level grammar distinguishes `foreign function`, `foreign
 import`, and `foreign type` by their next keyword. A foreign function uses
-foreign-only parameter and return types:
+foreign-only parameter and return types, and its body is parsed by a grammar
+of its own:
 
 ```text
-[local] foreign function AnyName '(' [foreignparlist] ')' [':' foreigntype] block end
+[local] foreign function AnyName '(' [foreignparlist] ')' [':' foreigntype] fblock end
 ```
 
 It produces `Ast.TopLevelForeignFunc(loc, name, params, rettypes, flexrettype,
@@ -45,6 +46,17 @@ block)` with an `islocal` flag. Missing results become C void. `Ast.TypeForeignF
 to a C function pointer. Bare C variadic tails remain represented for a precise
 unsupported-source-variadic diagnostic. Titan function types use their distinct
 `function(types): results` grammar and may carry Titan flexible tails.
+
+The body rules (`fblock`, `fstatement`, `fexp` and the rest, in the section
+"Foreign function bodies" of `parser.lua`'s `grammar_source`) admit exactly
+the raw-C subset and take a `foreigntype` wherever the ordinary rules take a
+`type`, so a body annotation or cast is written without `foreign`. They add
+no AST node and no action: each rule ends in the action of its ordinary
+counterpart, and the block of a foreign function is the tree that the
+ordinary grammar builds for the same statements with `foreign` before each
+type (`spec/parser_spec.lua` compares the two). A construct outside the
+subset is a labelled syntax error; see
+[the foreign-body rules](lexer-parser.md#foreign-function-bodies).
 
 Unqualified `Ast.TypeForeignName` nodes never consult term bindings. Foreign
 pointer/array constructors use existing `TypeCPointer`/`TypeCArray` syntax nodes;
@@ -103,6 +115,16 @@ called with `{ foreign = true }` and increments
 * contextually types fitting numeric literals at annotated declarations,
   assignments, C arguments, and C returns, without passing the expected result
   type into operator operands;
+* gives every operator its C99 result type: `finish_c_operator` types a
+  pointer difference as the [trait's](c-ffi-expressions.md#c-operator-traits)
+  `result_source`, the target's `ptrdiff_t`, and a relational or equality
+  operator as the target's `int`, where an ordinary function sees `integer`
+  and `boolean`; a binary operator that is not a C operator (`//`, `^`), or
+  that has no C operand, is an error;
+* accepts any C integer as a subscript of a C pointer or array (`checkvar`,
+  `Ast.VarBracket`): a numeral is an `int`, and an index that already has a C
+  integer type is not converted, where an ordinary function converts its
+  Titan `integer` index;
 * requires conditions to be C scalars;
 * requires numeric-for controls, limits, and steps to share a C integer or
   floating type; and
@@ -117,18 +139,30 @@ C namespace remains usable because its functions, values, fields, types,
 `sizeof`, and `alignof` are already direct C declarations. A producer's
 builtin `ffi` value namespace and separate foreign type namespace is established from the consumer's combined C header.
 
-After ordinary checking and elaboration, `checker._checkforeignfunc` runs
-`checker._validate_foreign_body_node` (`checker/declarations.lua`), a closed AST
-walk. It rejects every tag in `checker._foreign_forbidden_statements` and
-`checker._foreign_forbidden_expressions`, `StatTry` (reported as `defer` when
-it is a parser-lowered defer tail, otherwise as `catch`/`finally`), allocation
-pseudo-calls, `..`, `and`, `or`, `not`, and casts between Titan and C values
-other than literal and nil-to-pointer casts. Every local must have an
-initializer and a direct non-owner, non-function, non-module, non-void C type
-(`checker._valid_foreign_local_type`). A return has zero or one expression.
-This second pass is important: parser desugarings and checker-synthesized nodes
-cannot bypass the raw-C surface merely because their original spelling looked
-innocent.
+The grammar has already removed every construct that has no raw-C meaning, so
+after ordinary checking and elaboration `checker._checkforeignfunc` runs a
+small walk, `checker._validate_foreign_body_node` (`checker/declarations.lua`),
+for what syntax cannot decide:
+
+* a local declaration has an initializer;
+* a local has a C value type. `void` is the case that occurs: an inferred
+  local takes it from a void pointee, and it can be written (a C namespace or
+  a function designator never gets that far: expression checking rejects them
+  as values). The test also rejects a Titan type, which nothing produces: it
+  is a guard, so that a Titan value that ever reaches a local is a diagnostic
+  and not a coder error;
+* an allocation pseudo-call has an automatic-storage plan
+  ([allocation](#allocation-and-recovery-storage)).
+
+The length operator `#` is rejected by the `ExpUnop` check in foreign mode.
+With that and the C99 operator results, every expression of a foreign body
+has a C type: literals are C-typed in this mode, names are C declarations,
+calls return C values, operators are C operators, and a cast's target is a
+`foreigntype`. The checker synthesizes one C-to-Titan conversion, the count
+argument of an allocation pseudo-call, which the walk does not enter. The
+former check on casts between Titan and C values therefore has no case left
+and is gone, together with the tables of forbidden statement and expression
+tags.
 
 The allowed body is intentionally unsafe C (see [The C FFI](../language/ffi.md#the-c-ffi)). Pointer dereference, indexing,
 function-pointer calls, arithmetic, and casts do not gain the NULL, bounds,
@@ -359,11 +393,34 @@ helper's address is never taken, so its per-unit copies are unobservable.
 `_foreign_function_is_inline` accepts the function, and otherwise a one-line
 forwarder to the canonical definition. `_foreign_function_is_inline` first
 excludes public declarations, coverage-outlined functions, and functions with
-private native-record field layouts. It then skips an optional prefix of
-initialized local declarations and recognizes exactly three root shapes: one
-return; one `if` whose sole then and else statements return; or one returning
-`if` without else followed by one return. Header and module generation each
-recompute it; nothing is cached on the AST node.
+private native-record field layouts. It then excludes a body whose lowering
+names something the header does not declare (`needs_producer_unit`). The
+header includes only the module's `.ffi.h`, and authored C may include it
+before any other header, so three lowerings keep a body in the producer's C
+unit: a declaration with an
+[allocation plan](#allocation-and-recovery-storage), whose zeroed storage is
+rendered with `memset`, `offsetof` and `size_t`; a cast between a function
+pointer and `void *`, which is rendered with `titan_cast_func` of
+`titan/ffi.h`; and a non-finite float literal, which is rendered with
+`HUGE_VAL` of `math.h`. Every other lowering names only C itself and the
+module's own declarations. `nil` is `((void *)0)`, not the `NULL` of
+`stddef.h`. The built-in `lua_State` of a module that does not import `lua.h`
+is rendered by its tag, and a tag first written in a parameter list is scoped
+to that one declaration. Each generated header that names the tag therefore
+declares `struct lua_State;` at file scope first
+(`ffiheaders.names_state_tag`): the `.ffi.h` before its typedefs, and the
+source header before its includes, when a prototype or a copied body names
+it. The declaration is derived from the rendered text, so the stored `.ffi.h`
+plan does not change. Any lowering added
+to the raw-C path that names a C library or runtime symbol belongs in the
+predicate, and a function that uses the new lowering belongs in the fixture of
+`spec/coder/foreign_functions_spec.lua` that compiles the header alone.
+Finally it skips an optional prefix
+of initialized local declarations and recognizes exactly three root shapes:
+one return; one `if` whose sole then and else statements return; or one
+returning `if` without else followed by one return. Header and module
+generation each recompute the classification; nothing is cached on the AST
+node.
 
 ### Temporary headers during checking
 
@@ -435,11 +492,36 @@ the saved translation unit.
 
 ## Allocation and recovery storage
 
-Foreign bodies reject `.new` and `.new_array` because they have no Lua
-allocation or root context, and they have no `setjmp` spill protocol because
-they cannot establish a Titan recovery boundary. Target-directed allocation
-plans, flexible-array-member provenance, automatic-to-owned copies and
-aggregate spills in ordinary Titan functions are documented in
+Foreign bodies have no Lua allocation or root context, and they have no
+`setjmp` spill protocol because they cannot establish a Titan recovery
+boundary. An allocation pseudo-call (`.new`, `.new_array`) is planned by
+`checker._plan_c_allocation` exactly as in an ordinary function. The body
+validator then reads the recorded plan:
+
+* `automatic_object`, `automatic_array`, `automatic_array_borrow` and
+  `automatic_fam` are accepted. They exist only at a direct local sink and
+  need no Lua state. The walk does not descend into the call: its count is a
+  constant of the plan.
+* `owned_borrow` (a pointer local with `.new()`, or with a dynamic or zero
+  `.new_array` count) and `owned` are rejected. `foreign_allocation_error`
+  words the diagnostic by the plan and by `local_sink`, the name of the
+  declaration the allocation initializes, which is absent for an argument, a
+  return value, an assigned value or an operand.
+
+`foreign_raw_stat_dispatch` (`coder/declarations.lua`) lowers a declaration
+with a plan through `coder._automatic_allocation_storage`, the renderer that
+ordinary locals use, and emits no initializer assignment for it. The storage
+is declared at the statement, inside the C block of its Titan block, so a
+loop body zeroes it again on every iteration. The names are
+`_foreign_local_<name>_<n>` for an object, a fixed array or the pointer view,
+`_foreign_backing_<name>_<n>` for the borrow's array and the FAM union, and
+`_foreign_fam_pointer_<name>_<n>` for the FAM's typed pointer; a FAM local is
+spelled `(*pointer)` wherever the body names it. Indexing stays raw C: the
+foreign lowering never reads `_c_fam_access`, and `#` is rejected.
+
+Target-directed allocation plans, flexible-array-member provenance,
+automatic-to-owned copies and aggregate spills in ordinary Titan functions
+are documented in
 [target-directed automatic aggregates and fixed arrays](c-ffi-expressions.md#target-directed-automatic-aggregates-and-fixed-arrays).
 
 ## Standard-library foreign callbacks

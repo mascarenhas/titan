@@ -37,11 +37,11 @@ foreign type coro_entry_func = function (*lua_State, *Udata, *CClosure, *Udata):
 
 -- Implementation notes: doc/implementation/coroutines.md#entry-function
 local foreign function coro_entry_trampoline(co: *mco_coro)
-  local owner = ffi.mco_get_user_data(co) as foreign *Udata
+  local owner = ffi.mco_get_user_data(co) as *Udata
   local T = ffi.lmacro_thvalue(ffi.titan_record_field(owner, "Coroutine", "thread"))
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "Coroutine", "entry"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign coro_entry_func
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as coro_entry_func
   -- The C shim installs the unwind floor below the entry on T.
   ffi.titan_coroutine_enter(T, module, owner, co, entry)
 end

@@ -1081,7 +1081,7 @@ describe("declared project manifests", function()
             local consumer = load_module("c_consumer", [[
                 local provider = import "c_provider.titan"
                 local foreign function inspect(node: *ManifestChain): DeclInt
-                    local callback: foreign ManifestCallback = provider.read
+                    local callback: ManifestCallback = provider.read
                     return callback(node) + node.row[1] + node.value
                 end
             ]], { c_provider = restored })

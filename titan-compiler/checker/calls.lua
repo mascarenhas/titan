@@ -441,6 +441,17 @@ function finish_c_operator(node, st, errors, decide, operands)
     trait.probe_key = probe.key
     node._c_operator = trait
     node._type = trait.result
+    if checker._foreign_function_depth > 0 then
+        -- An ordinary function sees the Titan-facing result. A foreign body
+        -- is C, where the operator has its C99 result type: the trait's
+        -- ptrdiff_t for a pointer difference, and int for a relational or
+        -- equality operator.
+        if trait.result_source then
+            node._type = trait.result_source
+        elseif trait.result._tag == "Type.Boolean" then
+            node._type = foreign_c_int_type(st)
+        end
+    end
     return true
 end
 
@@ -539,9 +550,7 @@ function check_explicit_cast_relation(node, st, errors)
     if node.length then
         local length_type = types.resolve_c_typedef(node.length._type)
         local message
-        if checker._foreign_function_depth > 0 then
-            message = "counted string conversion is unavailable in a foreign function body"
-        elseif not types.is_pointer_to_string_cast(source, target) then
+        if not types.is_pointer_to_string_cast(source, target) then
             message = "counted string conversion requires a character or void pointer and a string target"
         elseif length_type._tag ~= "Type.Integer"
            and length_type._tag ~= "Type.CInteger" then

@@ -83,16 +83,6 @@ describe("counted C pointer-to-string checking", function()
         assert.truthy(err:find("requires a character or void pointer", 1, true), err)
     end)
 
-    it("rejects counted strings in a restricted foreign body", function()
-        local ok, err = h.run_checker([[
-            foreign function copy(pointer: *char, length: unsigned long): *char
-                return pointer as string(length)
-            end
-        ]])
-        assert.falsy(ok)
-        assert.truthy(err:find("counted string conversion", 1, true), err)
-    end)
-
     it("checks names used only in the length operand", function()
         local ok, err = h.run_checker([[
             local function copy(pointer: foreign *char): string

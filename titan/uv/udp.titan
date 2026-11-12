@@ -162,12 +162,12 @@ catch
 end
 
 local foreign function udp_alloc_callback(base: *uv_handle_t, suggested: size_t, output: *uv_buf_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "udp_t", "alloc_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign UDPAllocEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as UDPAllocEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop, suggested, output)
@@ -175,12 +175,12 @@ local foreign function udp_alloc_callback(base: *uv_handle_t, suggested: size_t,
 end
 
 local foreign function udp_recv_callback(native: *uv_udp_t, nread: ssize_t, buffer: const *uv_buf_t, address: const *sockaddr, flags: unsigned int)
-  local owner = ffi.uv_handle_get_data(native as foreign *uv_handle_t) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(native as foreign *uv_handle_t)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(native as *uv_handle_t) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(native as *uv_handle_t)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "udp_t", "recv_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign UDPRecvEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as UDPRecvEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop, nread, buffer, address, flags)
@@ -188,12 +188,12 @@ local foreign function udp_recv_callback(native: *uv_udp_t, nread: ssize_t, buff
 end
 
 local foreign function udp_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "udp_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -201,12 +201,12 @@ local foreign function udp_close_callback(base: *uv_handle_t)
 end
 
 local foreign function udp_send_callback(native: *uv_udp_send_t, status: int)
-  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(native.handle as foreign *uv_handle_t)) as foreign *Udata
+  local owner = ffi.uv_req_get_data(native as *uv_req_t) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(native.handle as *uv_handle_t)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "udp_send_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign UDPSendEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as UDPSendEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop, status)

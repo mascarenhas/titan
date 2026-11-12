@@ -589,44 +589,26 @@ handler's identity as its user data. It calls
 `emscripten_set_click_callback_on_thread` because the shorter
 `emscripten_set_click_callback` spelling is a function-like macro.
 
-The small C helper, compiled with `--c-source counter.c`, supplies only the
-callback. Its automatic zero-initialized result aggregate cannot be declared
-in a restricted `foreign function` body:
+The callback is a [foreign function](foreign-functions.md), whose C type is
+html5's `em_mouse_callback_func`. Its result aggregate is a
+[zeroed local](foreign-functions.md#zeroed-locals), which
+`titan_browser_call_sync` requires. The pinned handlers return nil, so only a
+failure's message and trace need freeing; `lmacro_unconst` of `titan/ffi.h`
+passes a pointer to const where `free` takes a plain one.
 
-```c
-/* counter.h */
-#include <emscripten/html5.h>
-
-bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity);
-
-/* counter.c */
-#include <titan/browser.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include "counter.h"
-
-bool counter_click(int type, const EmscriptenMouseEvent *event, void *identity) {
-  titan_browser_sync_result result = {0};
-  if (titan_browser_call_sync(identity, 0, NULL, &result) != TITAN_BROWSER_OK && result.message)
-    fprintf(stderr, "click handler failed: %.*s\n", (int)result.message_length, (const char *)result.message);
-  free((void *)result.message);
-  free((void *)result.trace);
-  return false;
-}
-
-```
-
-The Titan module keeps each listener's pin and identity until `stop`
-unregisters it, and shows the count through the page's `show` binding. A
-listener is rooted in `listeners` before C receives its identity, so nothing
-can fail after the registration and leave C a dangling pointer, and a failure
-after a registration unregisters what was registered:
+The module keeps each listener's pin and identity until `stop` unregisters
+it, and shows the count through the page's `show` binding. A listener is
+rooted in `listeners` before C receives its identity, so nothing can fail
+after the registration and leave C a dangling pointer, and a failure after a
+registration unregisters what was registered:
 
 ```titan
 local browser = import "browser"
 foreign import "emscripten/html5.h"
+foreign import "stdio.h"
+foreign import "stdlib.h"
 foreign import "titan/browser.h"
-foreign import "counter.h"
+foreign import "titan/ffi.h"
 
 local type Value = browser.BrowserValue
 
@@ -658,6 +640,22 @@ end
 
 local listeners: {Listener} = {}
 
+local foreign function counter_click(kind: int, event: const *EmscriptenMouseEvent,
+                                     identity: *void): bool
+  local result = foreign titan_browser_sync_result.new()
+  local status = ffi.titan_browser_call_sync(
+    identity as const *titan_browser_identity, 0, nil, result)
+  if status ~= ffi.TITAN_BROWSER_OK then
+    if result.message ~= nil then
+      ffi.fprintf(ffi.stderr, "click handler failed: %.*s\n",
+        result.message_length as int, result.message as const *char)
+    end
+  end
+  ffi.free(ffi.lmacro_unconst(result.message))
+  ffi.free(ffi.lmacro_unconst(result.trace))
+  return false
+end
+
 local function listen(selector: string, handler: function (...: Value): Value)
   local pin = browser.pin(handler)
   local identity: owned *titan_browser_identity = foreign titan_browser_identity.new()
@@ -668,7 +666,7 @@ local function listen(selector: string, handler: function (...: Value): Value)
   local index = #listeners + 1
   listeners[index] = Listener { selector = selector, pin = pin, identity = identity }
   if ffi.emscripten_set_click_callback_on_thread(
-      selector, identity, 0, ffi.counter_click,
+      selector, identity, 0, counter_click,
       ffi.EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD) ~= ffi.EMSCRIPTEN_RESULT_SUCCESS then
     listeners[index] = nil
     pin:close()

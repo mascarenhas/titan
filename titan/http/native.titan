@@ -80,13 +80,13 @@ end
 local foreign function llhttp_url_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
-  local owner = parser.data as foreign *Udata
+  local owner = parser.data as *Udata
   local callback = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "Parser", "url_callback"))
   local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
-    ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = ffi.lua_gettop(L)
   local result = entry(L, module, callback, owner, data, length)
   ffi.lua_settop(L, top)
@@ -96,13 +96,13 @@ end
 local foreign function llhttp_status_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
-  local owner = parser.data as foreign *Udata
+  local owner = parser.data as *Udata
   local callback = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "Parser", "status_callback"))
   local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
-    ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = ffi.lua_gettop(L)
   local result = entry(L, module, callback, owner, data, length)
   ffi.lua_settop(L, top)
@@ -112,13 +112,13 @@ end
 local foreign function llhttp_header_field_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
-  local owner = parser.data as foreign *Udata
+  local owner = parser.data as *Udata
   local callback = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "Parser", "header_field_callback"))
   local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
-    ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = ffi.lua_gettop(L)
   local result = entry(L, module, callback, owner, data, length)
   ffi.lua_settop(L, top)
@@ -128,13 +128,13 @@ end
 local foreign function llhttp_header_value_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
-  local owner = parser.data as foreign *Udata
+  local owner = parser.data as *Udata
   local callback = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "Parser", "header_value_callback"))
   local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
-    ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = ffi.lua_gettop(L)
   local result = entry(L, module, callback, owner, data, length)
   ffi.lua_settop(L, top)
@@ -143,13 +143,13 @@ end
 
 local foreign function llhttp_header_value_complete_cb(
     parser: *llhttp_t): int
-  local owner = parser.data as foreign *Udata
+  local owner = parser.data as *Udata
   local callback = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "Parser", "header_value_complete_callback"))
   local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
-    ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpCallbackEntry
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
   local top = ffi.lua_gettop(L)
   local result = entry(L, module, callback, owner)
   ffi.lua_settop(L, top)
@@ -158,13 +158,13 @@ end
 
 local foreign function llhttp_headers_complete_cb(
     parser: *llhttp_t): int
-  local owner = parser.data as foreign *Udata
+  local owner = parser.data as *Udata
   local callback = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "Parser", "headers_complete_callback"))
   local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
-    ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpCallbackEntry
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
   local top = ffi.lua_gettop(L)
   local result = entry(L, module, callback, owner)
   ffi.lua_settop(L, top)
@@ -174,13 +174,13 @@ end
 local foreign function llhttp_body_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
-  local owner = parser.data as foreign *Udata
+  local owner = parser.data as *Udata
   local callback = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "Parser", "body_callback"))
   local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
-    ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpDataCallbackEntry
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpDataCallbackEntry
   local top = ffi.lua_gettop(L)
   local result = entry(L, module, callback, owner, data, length)
   ffi.lua_settop(L, top)
@@ -189,13 +189,13 @@ end
 
 local foreign function llhttp_message_complete_cb(
     parser: *llhttp_t): int
-  local owner = parser.data as foreign *Udata
+  local owner = parser.data as *Udata
   local callback = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "Parser", "message_complete_callback"))
   local L = ffi.titan_record_field(owner, "Parser", "callback_state")
   local module = ffi.lmacro_uvalue(callback.upvalue[0])
   local entry =
-    ffi.lmacro_pvalue(callback.upvalue[2]) as foreign LlhttpCallbackEntry
+    ffi.lmacro_pvalue(callback.upvalue[2]) as LlhttpCallbackEntry
   local top = ffi.lua_gettop(L)
   local result = entry(L, module, callback, owner)
   ffi.lua_settop(L, top)

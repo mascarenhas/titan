@@ -332,6 +332,12 @@ checkexp = util.make_visitor({
             return
         end
         checkexp(node.exp, st, errors)
+        if op == "#" and checker._foreign_function_depth > 0 then
+            -- Indexing in a foreign body is raw C: nothing keeps a count.
+            node._type = invalid(errors, node.loc,
+                "the length operator '#' is not available inside a foreign function, where indexing is raw C and no element count is kept")
+            return
+        end
         if check_c_unary_operator(node, st, errors) then
             return
         end
@@ -425,6 +431,24 @@ checkexp = util.make_visitor({
         checkexp(node.rhs, st, errors)
         local trhs = node.rhs._type
         if check_c_binary_operator(node, st, errors) then
+            return
+        end
+        if checker._foreign_function_depth > 0 then
+            -- Every operator of a foreign body is a C operator. What is left
+            -- here is a Titan-only operator, or one with no C operand.
+            if tlhs._tag == "Type.Invalid" or trhs._tag == "Type.Invalid" then
+                node._type = types.Invalid()
+            elseif op == "//" then
+                node._type = invalid(errors, node.loc,
+                    "operator '//' has no C meaning inside a foreign function; C division is '/'")
+            elseif op == "^" then
+                node._type = invalid(errors, node.loc,
+                    "operator '^' has no C meaning inside a foreign function; the C exclusive-or is '~'")
+            else
+                node._type = invalid(errors, node.loc,
+                    "operator '%s' needs a C operand inside a foreign function (found '%s' and '%s')",
+                    op, types.tostring(tlhs), types.tostring(trhs))
+            end
             return
         end
         local loc = node.loc

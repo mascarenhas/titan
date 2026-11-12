@@ -111,8 +111,55 @@ return annotation (`rettypeopt`): `{function(): T}` is an Array, and
 Foreign types cannot consume `.`, so `foreign T.new_array(n)` has an explicit
 boundary between its foreign type and pseudo-operation. A nested pointer
 constructor requires parentheses, as in `foreign *(*int)`. `owned` belongs to
-Titan type syntax and takes a complete foreign pointer/array operand. Typedef,
-owner eligibility, and foreign-function body restrictions belong to checking.
+Titan type syntax and takes a complete foreign pointer/array operand. Typedef
+and owner eligibility belong to checking; the restrictions on a foreign
+function's body belong to the grammar.
+
+## Foreign function bodies
+
+`foreignfunc` parses its body with `fblock`, the first rule of a separate
+section of `grammar_source`. The section repeats the statement and expression
+rules for the raw-C subset: `fstatement`, `fdecl`, `fexp`, `fe11` to `fe13`,
+`fprefixexp`, `fbaseexp`, `fsuffixexp` and their lists. The duplication is
+deliberate. The ordinary grammar stays as it was, and the subset is what the
+rules say, not what a later walk removes. Three things are shared: the C type
+rules (`foreigntype`, `baseforeign`), which a signature already uses; the
+binary-operator precedence table and its fold (`binary_start`, `binary_step`,
+`binary_finish`); and every action, so a foreign body has the AST of the same
+statements in an ordinary function.
+
+A body type is `ftype`: a `foreigntype`, guarded by lookaheads for the ways a
+Titan type can begin there (`foreign`, `owned`, and the `{` of an Array or Map
+type, alone or after `const` or `const?`) and for a trailing `?`.
+
+Each construct outside the subset is rejected by a labelled throw after a
+lookahead, `&RAISE %{ForeignRaise}` for example, placed where the ordinary
+grammar would accept the construct. The location is therefore the construct's
+first token, and no enclosing rule gets to report a missing `end`. Where the
+construct shows only later, the throw is at the token that shows it: the `in`
+or `,` of a generic `for` whose first variable is typed (an untyped one is
+caught at `for` by `&(FOR NAME (COMMA / IN))`), the `,` of a second return
+value or of a range, the `(` of a counted cast, the `?` of an Option. Every
+one of these predicates inspects a constant number of terminals, as rule 1
+requires.
+
+| Labels | Constructs |
+| --- | --- |
+| `ForeignRaise`, `ForeignDefer`, `ForeignCase`, `ForeignCatch`, `ForeignForIn` | `raise`, `defer`, `case`, `catch`, generic `for` |
+| `ForeignLambda`, `ForeignConstructor`, `ForeignMethod`, `ForeignTypeArguments`, `ForeignDots`, `ForeignRange` | lambdas, `{...}`, `:` selection, `<\|...\|>`, `...` and spreads, bracket ranges |
+| `ForeignIs`, `ForeignCountedCast` | `is`, `as T(n)` |
+| `ForeignOr`, `ForeignAnd`, `ForeignConcat`, `ForeignNot` | `or`, `and`, `..`, `not` |
+| `ForeignOption`, `ForeignReturnList` | `?` on a declaration or a type, a second return value |
+| `ForeignBodyForeign`, `ForeignBodyOwned`, `ForeignBodyTitanType` | `foreign`, `owned`, or an Array or Map type (`{`, `const {`, `const? {`) where a body type starts |
+
+The message of `ForeignBodyForeign` says to delete `foreign`. `catch` is
+tested after the statements of an `fblock`, where the ordinary `block` would
+continue with its catch clause. The parser has no token for the reserved word
+`finally`, so it fails in a foreign body as it does everywhere.
+
+A Titan type name in a body is parsed as a C type name and fails in the
+checker's foreign type lookup. A Titan function type fails with the labels of
+a foreign function type (`ForeignReturnColon`, `RParenTypelist`).
 
 ## Fold captures and expression precedence
 

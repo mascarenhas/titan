@@ -145,7 +145,9 @@ describe("simplified grammar semantic boundaries", function()
         assert.matches("as a first-class value", err, 1, true)
     end)
 
-    it("rejects owned local storage inside a source foreign function", function()
+    it("does not resolve a Titan owned alias as a type inside a foreign function", function()
+        -- `owned` itself is a syntax error in a foreign body; an alias of an
+        -- owned type is a Titan name, which a body type never looks up.
         local ok, err = h.run_checker([[
             type Buffer = owned int[]
             foreign function invalid(): void
@@ -153,6 +155,6 @@ describe("simplified grammar semantic boundaries", function()
             end
         ]], session)
         assert.falsy(ok)
-        assert.matches("inside a foreign function must have a direct C FFI type", err, 1, true)
+        assert.matches("foreign type 'Buffer' is not declared", err, 1, true)
     end)
 end)

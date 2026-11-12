@@ -6,6 +6,7 @@ local coder_names = require "titan-compiler.coder.names"
 local coder_declarations = require "titan-compiler.coder.declarations"
 local types = require "titan-compiler.types"
 local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
 local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
 
@@ -31,6 +32,26 @@ local function read_file(path)
     local contents = assert(file:read("*a"))
     assert(file:close())
     return contents
+end
+
+-- Compiles authored C that includes one generated header before anything
+-- else, then uses it.
+local function assert_compiles_alone(header, use)
+    local caller = temporary.name(".c")
+    local file = assert(io.open(caller, "wb"))
+    assert(file:write('#include "' .. lfs.currentdir() .. "/" .. header .. '"\n'
+        .. use .. "\n"))
+    assert(file:close())
+    local argv = {}
+    for word in driver.CC:gmatch("%S+") do argv[#argv + 1] = word end
+    for _, word in ipairs({ "-fsyntax-only",
+            "-Werror=implicit-function-declaration",
+            "-Werror=incompatible-pointer-types", caller }) do
+        argv[#argv + 1] = word
+    end
+    local result = compiler_io.new_sync():run(argv)
+    os.remove(caller)
+    assert.is_true(result.ok, result.output)
 end
 
 local function cleanup()
@@ -74,7 +95,7 @@ describe("source-defined foreign functions", function()
                 local foreign function returns_wide(): long long return 10 end
                 local foreign function contexts(item: *ffi_context,
                                                  elements: *long long): long long
-                    local wide: foreign long long = 5
+                    local wide: long long = 5
                     if wide ~= 5 then return -2 end
                     wide = 7
                     item.big = 6
@@ -101,22 +122,22 @@ describe("source-defined foreign functions", function()
     it("emits contextual signed minima and C-rounded floating values", function()
         h.run_coder([[
             local foreign function boundaries(): int
-                local small: foreign signed char = -128
-                local minimum: foreign long long = -9223372036854775808
-                local maximum: foreign unsigned long long = 18446744073709551615
-                local hexadecimal: foreign long long = -0xFFFFFFFF
-                local fraction: foreign float = -0.1
-                local wide: foreign long double = 0.1
-                local base: foreign double = 0.1
+                local small: signed char = -128
+                local minimum: long long = -9223372036854775808
+                local maximum: unsigned long long = 18446744073709551615
+                local hexadecimal: long long = -0xFFFFFFFF
+                local fraction: float = -0.1
+                local wide: long double = 0.1
+                local base: double = 0.1
                 if small ~= -128 then return 1 end
                 if minimum ~= -9223372036854775807 - 1 then
                     return 2
                 end
-                if maximum ~= ~(0 as foreign unsigned long long) then return 3 end
+                if maximum ~= ~(0 as unsigned long long) then return 3 end
                 if hexadecimal ~= -4294967295 then
                     return 4
                 end
-                if fraction ~= (-base as foreign float) then return 5 end
+                if fraction ~= (-base as float) then return 5 end
                 if wide ~= base then return 6 end
                 return 0
             end
@@ -130,16 +151,16 @@ describe("source-defined foreign functions", function()
     function()
         h.run_coder([[
             local foreign function controls(): int
-                for index: foreign unsigned long long =
+                for index: unsigned long long =
                     18446744073709551615, 18446744073709551615 do
-                    if index ~= ~(0 as foreign unsigned long long) then return 1 end
+                    if index ~= ~(0 as unsigned long long) then return 1 end
                     break
                 end
-                for index: foreign double = 0, 2 do
+                for index: double = 0, 2 do
                     if index ~= 0.0 then return 2 end
                     break
                 end
-                for index: foreign unsigned char = 300, 300 do
+                for index: unsigned char = 300, 300 do
                     if index ~= 44 then return 3 end
                     break
                 end
@@ -172,7 +193,7 @@ describe("source-defined foreign functions", function()
                     return provider.add
                 end
                 foreign function raw_call(value: int): int
-                    local callback: foreign function(int, int): int = provider.add
+                    local callback: function(int, int): int = provider.add
                     return callback(value, inline_call(2))
                 end
                 function exercise(): integer
@@ -400,7 +421,7 @@ describe("source-defined foreign functions", function()
                 local foreign function accumulate(limit: ffi_int): ffi_int
                     local total = 0
                     if limit then total = ffi.ffi_apply(add_one, total) end
-                    for index = 1 as foreign ffi_int, limit do
+                    for index = 1 as ffi_int, limit do
                         total = total + index
                     end
                     return total + choose(0) + choose_or(0)
@@ -526,7 +547,7 @@ describe("source-defined foreign functions", function()
 
                 foreign function raw(limit: ffi_int): ffi_int
                     local total = 0
-                    local pointer: foreign *ffi_int = nil
+                    local pointer: *ffi_int = nil
                     if pointer then total = 100 end
                     if limit then total = total + ffi.ffi_next() end
                     while total < limit do total = total + 1 end
@@ -564,7 +585,7 @@ describe("source-defined foreign functions", function()
                 foreign function roundtrip_pointer(
                     pointer: ffi_void_pointer
                 ): ffi_int
-                    local callback = pointer as foreign ffi_unary_callback
+                    local callback = pointer as ffi_unary_callback
                     return callback(1)
                 end
 
@@ -576,9 +597,9 @@ describe("source-defined foreign functions", function()
                 end
 
                 foreign function raw_forms(callback: ffi_callback): ffi_int
-                    local negative: foreign ffi_int = -1
+                    local negative: ffi_int = -1
                     local computed = callback(2, 5)
-                    local selected: foreign ffi_callback = named
+                    local selected: ffi_callback = named
                     local selected_value = selected(1, 2)
                     local holder = ffi.ffi_holder()
                     holder.pointer[holder.index] = 6
@@ -633,7 +654,7 @@ describe("source-defined foreign functions", function()
                 foreign import "]] .. header .. [["
 
                 foreign function float_loops(): ffi_double
-                    local total: foreign ffi_double = 0.0
+                    local total: ffi_double = 0.0
                     for up = 0.0, 1.0, 0.25 do
                         total = total + up
                     end
@@ -671,14 +692,14 @@ describe("source-defined foreign functions", function()
                 foreign import "]] .. header .. [["
 
                 foreign function outputs(): int
-                    local item: foreign *ffi_item = nil
-                    local text: foreign const *char = nil
+                    local item: *ffi_item = nil
+                    local text: const *char = nil
                     ffi.ffi_outputs(item, text)
-                    local erased: foreign *void = item
+                    local erased: *void = item
                     if erased ~= item then return -1 end
                     if ffi.ffi_layout(foreign ffi_item.sizeof,
                                     foreign ffi_item.alignof) == 0 then return -2 end
-                    return item.value + (text[0] as foreign int)
+                    return item.value + (text[0] as int)
                 end
 
                 function result(): integer
@@ -698,6 +719,423 @@ describe("source-defined foreign functions", function()
         end)
     end)
 
+    it("zeroes automatic foreign locals at their declaration", function()
+        with_header([[
+            typedef struct ffi_result {
+                const unsigned char *message;
+                unsigned long length;
+                int status;
+            } ffi_result;
+            typedef struct ffi_tail { int count; int items[]; } ffi_tail;
+            typedef union ffi_wide { char tag; long long big; } ffi_wide;
+            #define FFI_COUNT 4
+            static int ffi_fill(ffi_result *out) {
+                if (out->message != 0 || out->length != 0 || out->status != 0) {
+                    return -1;
+                }
+                out->message = (const unsigned char *)"abc";
+                out->length = 3;
+                out->status = 7;
+                return 0;
+            }
+            static int ffi_sum(const int *items, int count) {
+                int total = 0;
+                for (int index = 0; index < count; index++) {
+                    total += items[index];
+                }
+                return total;
+            }
+            static int ffi_tail_sum(const ffi_tail *tail) {
+                return ffi_sum(tail->items, tail->count);
+            }
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                -- C fills the zeroed object through an out-parameter.
+                local foreign function object(): int
+                    local result = foreign ffi_result.new()
+                    if ffi.ffi_fill(result) ~= 0 then return -1 end
+                    return result.status + (result.length as int)
+                        + (result.message[2] as int)
+                end
+
+                local foreign function arrays(): int
+                    local row = foreign int.new_array(4)
+                    local counted = foreign int.new_array(ffi.FFI_COUNT)
+                    local view: int[] = foreign int.new_array(2)
+                    local pointer: *int = foreign int.new_array(2)
+                    if ffi.ffi_sum(row, 4) + ffi.ffi_sum(counted, ffi.FFI_COUNT)
+                        + ffi.ffi_sum(view, 2) + ffi.ffi_sum(pointer, 2) ~= 0 then
+                        return -1
+                    end
+                    row[3] = 1
+                    counted[3] = 10
+                    view[1] = 100
+                    pointer[1] = 1000
+                    return ffi.ffi_sum(row, 4) + ffi.ffi_sum(counted, 4)
+                        + ffi.ffi_sum(view, 2) + ffi.ffi_sum(pointer, 2)
+                end
+
+                local foreign function flexible(): int
+                    local tail = foreign ffi_tail.new(4)
+                    if tail.count ~= 0 then return -1 end
+                    tail.count = 4
+                    if ffi.ffi_tail_sum(tail) ~= 0 then return -2 end
+                    tail.items[0] = 1
+                    tail.items[3] = 10
+                    return ffi.ffi_tail_sum(tail)
+                end
+
+                -- Each iteration writes where the next one must find zeroes.
+                local foreign function fresh(): int
+                    local stale = 0
+                    for round = 1, 3 do
+                        local result = foreign ffi_result.new()
+                        local row = foreign int.new_array(2)
+                        local view: *int = foreign int.new_array(2)
+                        local tail = foreign ffi_tail.new(2)
+                        local wide = foreign ffi_wide.new()
+                        if result.status ~= 0 then stale = stale + 1 end
+                        if row[1] ~= 0 then stale = stale + 1 end
+                        if view[1] ~= 0 then stale = stale + 1 end
+                        if tail.items[1] ~= 0 then stale = stale + 1 end
+                        if wide.big ~= 0 then stale = stale + 1 end
+                        result.status = round
+                        row[1] = round
+                        view[1] = round
+                        tail.items[1] = round
+                        wide.big = -1
+                    end
+                    return stale
+                end
+
+                function run(): (integer, integer, integer, integer)
+                    return object(), arrays(), flexible(), fresh()
+                end
+            ]], [[
+                local object, arrays, flexible, fresh = test.run()
+                assert(object == 7 + 3 + string.byte("c"), object)
+                assert(arrays == 1111, arrays)
+                assert(flexible == 11, flexible)
+                assert(fresh == 0, fresh)
+            ]])
+        end)
+    end)
+
+    it("lets authored C include a generated header before any other header", function()
+        -- The source header includes only the module's `.ffi.h`, so an inline
+        -- copy may name only what C itself and the module's own headers
+        -- declare. The fixture has one function for each lowering of a body
+        -- with an inline shape. `forwarded` lists those whose lowering names
+        -- a C library or runtime symbol (memset, offsetof and size_t for
+        -- zeroed storage, titan_cast_func for a cast between a function
+        -- pointer and `void *`, HUGE_VAL for a non-finite float); they keep a
+        -- forwarder. Add a function here with every new lowering.
+        local inline = { "nil_return", "nil_local", "nil_compare", "state",
+            "apply_state", "truth", "size", "align", "least", "text",
+            "text_local", "arithmetic", "bits", "negate", "compare", "less",
+            "widen", "narrow", "index", "member", "distance", "call_pointer",
+            "call_local", "call_public", "reference", "constant", "twice",
+            "plain" }
+        local forwarded = { "object", "flexible", "erase", "restore",
+            "infinite", "negative_infinite" }
+        with_header([[
+            typedef struct ffi_pair { int left; int right; } ffi_pair;
+            typedef struct ffi_tail { int count; int items[]; } ffi_tail;
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+                foreign type Callback = function (int): int
+                foreign type StateCallback = function (*lua_State): int
+
+                local foreign function object(): int
+                    local pair = foreign ffi_pair.new()
+                    return pair.left + pair.right
+                end
+
+                local foreign function flexible(): int
+                    local tail = foreign ffi_tail.new(2)
+                    return tail.count + tail.items[1]
+                end
+
+                local foreign function twice(input: int): int
+                    return input + input
+                end
+
+                local foreign function erase(callback: Callback): *void
+                    return callback as *void
+                end
+
+                local foreign function restore(raw: *void): Callback
+                    return raw as Callback
+                end
+
+                local foreign function roundtrip(): int
+                    local callback = restore(erase(twice))
+                    return callback(4)
+                end
+
+                local foreign function plain(input: int): int
+                    local doubled = input + input
+                    return doubled
+                end
+
+                local foreign function nil_return(): *void
+                    return nil
+                end
+
+                local foreign function nil_local(): *void
+                    local pointer: *void
+                    return pointer
+                end
+
+                local foreign function nil_compare(pointer: *int): int
+                    if pointer == nil then return 1 end
+                    return pointer[0]
+                end
+
+                local foreign function infinite(): double
+                    return 1e400
+                end
+
+                local foreign function negative_infinite(): double
+                    return -1e400
+                end
+
+                local foreign function state(L: *lua_State): int
+                    if L == nil then return 1 end
+                    return 0
+                end
+
+                local foreign function truth(flag: bool): bool
+                    if flag then return false end
+                    return true
+                end
+
+                local foreign function size(): int
+                    local bytes = foreign ffi_pair.sizeof
+                    return bytes as int
+                end
+
+                local foreign function align(): int
+                    return foreign double.alignof as int
+                end
+
+                local foreign function least(): long long
+                    return -9223372036854775808
+                end
+
+                local foreign function text(): const *char
+                    return "abc"
+                end
+
+                local foreign function text_local(): char
+                    local chars: const *char = "abc"
+                    return chars[1]
+                end
+
+                local foreign function arithmetic(a: int, b: int): int
+                    return (a + b) * (a - b) / (b | 1) % 7
+                end
+
+                local foreign function bits(a: unsigned int, b: unsigned int): unsigned int
+                    return ((a & b) | (a ~ b)) << 1 >> 1
+                end
+
+                local foreign function negate(a: int): int
+                    return -a + ~a
+                end
+
+                local foreign function compare(a: int, b: int): int
+                    if a < b then return 0 else return 1 end
+                end
+
+                local foreign function widen(a: int): double
+                    return a as double
+                end
+
+                local foreign function narrow(a: double): int
+                    return a as int
+                end
+
+                local foreign function index(pointer: *int, at: int): int
+                    return pointer[at]
+                end
+
+                local foreign function member(pair: *ffi_pair): int
+                    return pair.left
+                end
+
+                local foreign function call_pointer(callback: Callback, input: int): int
+                    return callback(input)
+                end
+
+                local foreign function distance(first: *int, last: *int): long
+                    return (last - first) as long
+                end
+
+                local foreign function less(a: int, b: int): int
+                    return a < b
+                end
+
+                local foreign function apply_state(callback: StateCallback, L: *lua_State): int
+                    return callback(L)
+                end
+
+                local foreign function call_local(input: int): int
+                    return twice(input)
+                end
+
+                foreign function exported(input: int): int
+                    return input
+                end
+
+                local foreign function call_public(input: int): int
+                    return exported(input)
+                end
+
+                local foreign function reference(): Callback
+                    return twice
+                end
+
+                local foreign function constant(): int
+                    local const three = 3
+                    return three
+                end
+
+                local foreign function shapes(): int
+                    local total = nil_compare(nil) + state(nil)
+                    if nil_return() == nil then total = total + 1 end
+                    if nil_local() == nil then total = total + 1 end
+                    if infinite() > 1e300 then total = total + 1 end
+                    if negative_infinite() < -1e300 then total = total + 1 end
+                    if truth(false) then total = total + 1 end
+                    if least() < 0 then total = total + 1 end
+                    if text()[0] == text_local() - 1 then total = total + 1 end
+                    return total + call_pointer(reference(), 2) + call_local(1)
+                        + call_public(1) + constant() + compare(1, 2)
+                        + narrow(widen(1)) + align() - align() + size() - size()
+                        + arithmetic(3, 1) + negate(-1) + (bits(3, 1) as int)
+                end
+
+                function run(): integer
+                    return object() + flexible() + roundtrip() + plain(21) + shapes()
+                end
+            ]], [[
+                assert(test.run() == 75, test.run())
+            ]])
+            local generated = read_file("test.titan.h")
+            local function helper_body(name)
+                return assert(generated:match("\nstatic inline [^;{]-foreign_inline_"
+                    .. name .. "%([^;{]*%) (%b{})"), name)
+            end
+            for _, name in ipairs(inline) do
+                assert.falsy(helper_body(name):find("_" .. name .. "_titan(", 1, true), name)
+            end
+            for _, name in ipairs(forwarded) do
+                assert.truthy(helper_body(name):find("_" .. name .. "_titan(", 1, true), name)
+            end
+
+            assert_compiles_alone("test.titan.h",
+                "int authored_caller(void) { return 1; }")
+            -- The `.ffi.h` declares the tag its alias names, so the alias
+            -- takes the `struct lua_State *` that authored C writes.
+            assert_compiles_alone("test.ffi.h",
+                "int authored_state(StateCallback callback, struct lua_State *state)"
+                .. " { return callback(state); }")
+        end)
+    end)
+
+    it("gives a foreign type alias and an inline body one lua_State", function()
+        -- No signature names the tag here. The alias in `.ffi.h` and the
+        -- cast in the copied body must still mean the same type.
+        h.run_coder([[
+            foreign type StateCallback = function (*lua_State): int
+
+            local foreign function invoke(callback: StateCallback, raw: *void): int
+                return callback(raw as *lua_State)
+            end
+
+            foreign function entry(callback: StateCallback, raw: *void): int
+                return invoke(callback, raw)
+            end
+
+            function run(): integer
+                return 1
+            end
+        ]], [[
+            assert(test.run() == 1)
+        ]])
+        -- The body is a copy: the cast is in the header.
+        assert.truthy(read_file("test.titan.h"):find("(struct lua_State *)", 1, true))
+        assert_compiles_alone("test.titan.h", "int authored_caller(void) { return 1; }")
+    end)
+
+    it("gives operators their C99 results in a foreign body", function()
+        -- A pointer difference is a ptrdiff_t and a comparison an int, so
+        -- they are values like any other: locals, operands, loop bounds,
+        -- conditions and variadic arguments.
+        with_header([[
+            #include <stdarg.h>
+            #include <stddef.h>
+            static int ffi_items[8];
+            static int *ffi_at(int index) { return &ffi_items[index]; }
+            static long ffi_first_difference(int count, ...) {
+                va_list arguments;
+                va_start(arguments, count);
+                ptrdiff_t value = va_arg(arguments, ptrdiff_t);
+                va_end(arguments);
+                return (long)value;
+            }
+            static int ffi_first_int(int count, ...) {
+                va_list arguments;
+                va_start(arguments, count);
+                int value = va_arg(arguments, int);
+                va_end(arguments);
+                return value;
+            }
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                local foreign function operators(): int
+                    local first = ffi.ffi_at(1)
+                    local last = ffi.ffi_at(6)
+                    local total = 0
+                    local distance = last - first
+                    if distance == 5 then total = total + 1 end
+                    local negated = -(last - first)
+                    if negated == -5 then total = total + 1 end
+                    local doubled = (last - first) + (last - first)
+                    if doubled == 10 then total = total + 1 end
+                    local less = first < last
+                    total = total + less
+                    local both = (first < last) == (last > first)
+                    total = total + both
+                    local mixed = (first < last) & (first ~= last)
+                    total = total + mixed
+                    if (first < last) ~= (last < first) then total = total + 1 end
+                    if last - first then total = total + 1 end
+                    if (last - first) < (last - first) + 1 then total = total + 1 end
+                    local steps = 0
+                    for index = first - first, last - first do steps = steps + 1 end
+                    total = total + steps
+                    total = total + (ffi.ffi_first_difference(1, last - first) as int)
+                    first[last - first] = 7
+                    if last[0] == first[last - first] then total = total + 1 end
+                    return total + ffi.ffi_first_int(1, first < last)
+                end
+
+                function run(): integer
+                    return operators()
+                end
+            ]], [[
+                assert(test.run() == 22, test.run())
+            ]])
+        end)
+    end)
+
     it("evaluates foreign elseif conditions lazily and once", function()
         with_header([[
             static int ffi_trace = 0;
@@ -713,7 +1151,7 @@ describe("source-defined foreign functions", function()
 
                 foreign function select_arm(selected: int): int
                     ffi.ffi_clear()
-                    local result: foreign int = 0
+                    local result: int = 0
                     if ffi.ffi_condition(1, selected) then
                         result = 10
                     elseif ffi.ffi_condition(2, selected) then
@@ -791,12 +1229,12 @@ describe("source-defined foreign functions", function()
                 foreign type Pointer = *void
 
                 foreign function call_pointer(): *Pointer
-                    return ffi.ffi_pointer_source() as foreign *Pointer
+                    return ffi.ffi_pointer_source() as *Pointer
                 end
 
                 foreign function local_pointer(): int
                     local raw = ffi.ffi_pointer_source()
-                    ffi.ffi_pointer_sink(raw as foreign *Pointer)
+                    ffi.ffi_pointer_sink(raw as *Pointer)
                     if raw ~= ffi.ffi_pointer_source() then return -1 end
                     return ffi.ffi_written()
                 end

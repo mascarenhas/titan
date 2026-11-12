@@ -24,7 +24,7 @@ end
 local foreign function receiver_send_native(receiver: *titan_async_receiver,
     source: *(*void)): int
   if receiver.closed ~= 0 then return 2 end
-  local message = source[0] as foreign *titan_async_message
+  local message = source[0] as *titan_async_message
   local previous = ffi.titan_async_receiver_exchange(receiver, message)
   source[0] = nil
   transfer.discard_message(previous)
@@ -35,7 +35,7 @@ local foreign function receiver_take_native(receiver: *titan_async_receiver,
     destination: *(*void)): int
   if receiver.closed ~= 0 then return 2 end
   local message = ffi.titan_async_receiver_exchange(receiver, nil)
-  destination[0] = message as foreign *void
+  destination[0] = message as *void
   if message == nil then return 0 end
   return 1
 end

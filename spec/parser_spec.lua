@@ -3643,6 +3643,143 @@ function f(x: Choice) case x when some(v) then return end end]]))
         assert.same({filename="labels.titan",line=2,col=40},arm.bindings[1]._name_loc)
     end)
 
+    describe("foreign function bodies", function()
+        local function without_locations(node)
+            if type(node) ~= "table" then return node end
+            local copy = {}
+            for key, value in pairs(node) do
+                if not (type(key) == "string" and key:find("loc", 1, true)) then
+                    copy[key] = without_locations(value)
+                end
+            end
+            return copy
+        end
+
+        it("builds the ordinary AST for the raw-C subset, with C types unprefixed",
+        function()
+            -- $F stands before each body type: absent in a foreign body,
+            -- `foreign` in an ordinary one.
+            local body = [[
+                local a: $F unsigned long long = 1
+                const b: $F *int = p
+                local c = p as $F const *void
+                local d, e = x, -x
+                local callback = p as $F function (*int, int): (*void)
+                for i: $F int = 0, x, 2 do p[i] = ~i end
+                for j = 1, 2 do break end
+                while x > 0 do x = x - 1 end
+                repeat x = x + 1 until x >= 3
+                if x == 1 then return 1 elseif x ~= 2 then return 2 else p[0] = x ^ 2 end
+                do f(x); g { first = 1, second = 2 }; h "text" end
+                p[0], p[1] = x << 1, x | 4
+                local size = foreign Item.sizeof
+                local item = foreign Item.new()
+                local row = foreign int.new_array(4)
+                local n = (f(x)) + #p + item.count
+                return x % 3
+            ]]
+            local raw = assert_parses_successfuly(
+                "foreign function f(x: int, p: *int): int\n"
+                .. body:gsub("%$F ", "") .. "\nend")
+            local ordinary = assert_parses_successfuly(
+                "function f()\n" .. body:gsub("%$F", "foreign") .. "\nend")
+            assert.equal("Ast.TopLevelForeignFunc", raw[1]._tag)
+            assert.equal(17, #raw[1].block.stats)
+            assert.are.same(without_locations(ordinary[1].block),
+                without_locations(raw[1].block))
+        end)
+
+        it("rejects each construct outside the subset with its own label",
+        function()
+            -- { body, label, line, column }: the location is the first token
+            -- that shows the construct.
+            local rejected = {
+                { "defer f()", "ForeignDefer", 2, 1 },
+                { "f()\ncatch\nf()", "ForeignCatch", 3, 1 },
+                { "do f() catch f() end", "ForeignCatch", 2, 8 },
+                { 'raise "x"', "ForeignRaise", 2, 1 },
+                { "case x when a() then end", "ForeignCase", 2, 1 },
+                { "for item in iterator do end", "ForeignForIn", 2, 1 },
+                { "for k, v in iterator do end", "ForeignForIn", 2, 1 },
+                { "for item: int in iterator do end", "ForeignForIn", 2, 15 },
+                { "local callback = function () end", "ForeignLambda", 2, 18 },
+                { "local values = {}", "ForeignConstructor", 2, 16 },
+                { "f({ 1, 2 })", "ForeignConstructor", 2, 3 },
+                { "local n = x:size()", "ForeignMethod", 2, 12 },
+                { "local n = make<|int|>()", "ForeignTypeArguments", 2, 15 },
+                { "local n = ffi.make<|int|>()", "ForeignTypeArguments", 2, 19 },
+                { "f(...)", "ForeignDots", 2, 3 },
+                { "local n = #...", "ForeignDots", 2, 12 },
+                { "f(...items)", "ForeignDots", 2, 3 },
+                { "local n = p[1, 2]", "ForeignRange", 2, 14 },
+                { "local n = p[, 2]", "ForeignRange", 2, 13 },
+                { "if x is int then end", "ForeignIs", 2, 6 },
+                { "local s = p as string(4)", "ForeignCountedCast", 2, 22 },
+                { 'local s = "a" .. "b"', "ForeignConcat", 2, 15 },
+                { "if x and p then end", "ForeignAnd", 2, 6 },
+                { "if x or p then end", "ForeignOr", 2, 6 },
+                { "if not x then end", "ForeignNot", 2, 4 },
+                { "local y? = p", "ForeignOption", 2, 8 },
+                { "local y: *int? = p", "ForeignOption", 2, 14 },
+                { "return 1, 2", "ForeignReturnList", 2, 9 },
+                { "local y: foreign int = 1", "ForeignBodyForeign", 2, 10 },
+                { "local y = p as foreign *int", "ForeignBodyForeign", 2, 16 },
+                { "for i: foreign int = 0, 1 do end", "ForeignBodyForeign", 2, 8 },
+                { "local y: owned *int = p", "ForeignBodyOwned", 2, 10 },
+                { "local y: {integer} = p", "ForeignBodyTitanType", 2, 10 },
+                { "local y = p as {integer: string}", "ForeignBodyTitanType", 2, 16 },
+                { "local y: const {integer} = p", "ForeignBodyTitanType", 2, 10 },
+                { "local y = p as const? {integer}", "ForeignBodyTitanType", 2, 16 },
+            }
+            for _, case in ipairs(rejected) do
+                local ast, err = parser.parse("(parser_spec)",
+                    "foreign function probe(x: int, p: *int)\n" .. case[1] .. "\nend\n")
+                assert.falsy(ast, case[1])
+                assert.equal(case[2], err.label, case[1])
+                assert.same({ case[3], case[4] }, { err.loc.line, err.loc.col }, case[1])
+            end
+        end)
+
+        it("leaves Titan type names and function types to the C type rules",
+        function()
+            -- A Titan type name is an ordinary C-name lookup, as in a
+            -- signature; a Titan function type fails as a foreign one does.
+            assert_parses_successfuly([[
+                foreign function probe(x: int)
+                    local count: integer = 1
+                    local boxed = x as value
+                end
+            ]])
+            assert_program_syntax_error([[
+                foreign function probe(p: *int)
+                    local y: function (*int): (int, int) = p
+                end
+            ]], "RParenTypelist")
+            assert_program_syntax_error([[
+                foreign function probe(p: *int)
+                    local y = p as function (*int)
+                end
+            ]], "ForeignReturnColon")
+        end)
+
+        it("keeps the ordinary grammar for every other body", function()
+            assert_parses_successfuly([[
+                function ordinary(p: foreign *int, ...: integer): integer
+                    local y: foreign int = p[0] as foreign int
+                    defer release(p)
+                    for index, item in ipairs({ ... }) do
+                        if item is integer and not done or index > 2 then
+                            raise "stop" .. index
+                        end
+                    end
+                    return #... + (y as integer)
+                catch
+                    return 0
+                end
+            ]])
+        end)
+    end)
+
     describe("reports focused generic syntax errors", function()
         it("labels malformed declaration binders and type applications",
         function()

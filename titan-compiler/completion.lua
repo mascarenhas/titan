@@ -63,6 +63,43 @@ local function import_transform(filename, text, caret, token, previous)
             transform_version=completion.TRANSFORM_VERSION}}
 end
 
+-- Tokens that a name or a type follows. A reserved word after one of them is
+-- a member, a named argument, a declared name or a C type, not a keyword.
+local before_name = {['.']=true, [':']=true, [',']=true, ['(']=true, ['{']=true, ['*']=true,
+    as=true, const=true, foreign=true, ['function']=true}
+
+-- Whether the reserved word at `index` is written as a name: it follows one
+-- of those tokens, or it names an argument (`end = 5`).
+local function written_as_name(significant, index)
+    local previous, following = significant[index-1], significant[index+1]
+    return previous ~= nil and before_name[previous.text] ~= nil
+        or following ~= nil and following.text == '='
+end
+
+-- Whether the significant tokens before the caret end inside a `foreign
+-- function`, whose signature and body write C types without `foreign`. A
+-- `foreign function Name` opens one and the block keywords close it.
+local function inside_foreign_function(significant)
+    local depth
+    for index, token in ipairs(significant) do
+        if not written_as_name(significant, index) then
+            local text = token.text
+            if not depth then
+                local keyword, name = significant[index+1], significant[index+2]
+                if text=='foreign' and keyword and keyword.text=='function'
+                   and name and name.kind=='ANYNAME' then
+                    depth = 1
+                end
+            elseif text=='if' or text=='do' or text=='repeat' then
+                depth = depth + 1
+            elseif text=='end' or text=='until' then
+                depth = depth > 1 and depth - 1 or nil
+            end
+        end
+    end
+    return depth ~= nil
+end
+
 -- All offsets are zero-based UTF-8 byte boundaries; the host owns UTF-16 conversion.
 -- Multiword C primitive replacement covers the complete written primitive leaf.
 -- Implementation notes: doc/implementation/completion.md#disposable-source-and-coordinates
@@ -125,7 +162,9 @@ function completion.prepare(filename, text, caret)
     local raw_alias=marker and marker.text=='=' and significant[index-2]
         and significant[index-2].text=='type' and significant[index-3]
         and significant[index-3].text=='foreign'
-    if marker and (marker.text=='foreign' or marker.text=='owned' or raw_alias) then
+    local body_type=marker and (marker.text==':' or marker.text=='as')
+        and inside_foreign_function(significant)
+    if marker and (marker.text=='foreign' or marker.text=='owned' or raw_alias or body_type) then
         kind='foreign'
         first=leaf_first
         -- Include words following the caret in an already written primitive.

@@ -31,16 +31,16 @@ end
 -- C-only worker that waits on a semaphore, notifies one retained target through
 -- exact C function pointers, records the status, and releases its target ref.
 local foreign function ew_sole_notify_worker(argument: *void)
-  local slots: foreign *EwVoidPtr = argument as foreign *EwVoidPtr
-  local target: foreign *void = slots[0]
-  local sem_go: foreign *void = slots[1]
-  local status_out: foreign *int = slots[2] as foreign *int
-  local wait_fn: foreign EwUnaryVoidFn = slots[3] as foreign EwUnaryVoidFn
-  local notify_fn: foreign EwNotifyFn = slots[4] as foreign EwNotifyFn
-  local release_fn: foreign EwUnaryVoidFn = slots[5] as foreign EwUnaryVoidFn
+  local slots: *EwVoidPtr = argument as *EwVoidPtr
+  local target: *void = slots[0]
+  local sem_go: *void = slots[1]
+  local status_out: *int = slots[2] as *int
+  local wait_fn: EwUnaryVoidFn = slots[3] as EwUnaryVoidFn
+  local notify_fn: EwNotifyFn = slots[4] as EwNotifyFn
+  local release_fn: EwUnaryVoidFn = slots[5] as EwUnaryVoidFn
   wait_fn(sem_go)
   status_out[0] = notify_fn(target)
-  status_out[1] = 1 as foreign int
+  status_out[1] = 1 as int
   release_fn(target)
   slots[0] = nil
 end
@@ -49,14 +49,14 @@ end
 -- repeating each notification to exercise duplicate coalescing, then releases
 -- each producer reference.
 local foreign function ew_batch_notify_worker(argument: *void)
-  local slots: foreign *EwVoidPtr = argument as foreign *EwVoidPtr
-  local targets: foreign *EwVoidPtr = slots[0] as foreign *EwVoidPtr
-  local statuses: foreign *int = slots[1] as foreign *int
-  local counts: foreign *int = slots[2] as foreign *int
-  local sem_ready: foreign *void = slots[3]
-  local sem_go: foreign *void = slots[4]
-  local total: foreign int = counts[0]
-  local repeats: foreign int = counts[1]
+  local slots: *EwVoidPtr = argument as *EwVoidPtr
+  local targets: *EwVoidPtr = slots[0] as *EwVoidPtr
+  local statuses: *int = slots[1] as *int
+  local counts: *int = slots[2] as *int
+  local sem_ready: *void = slots[3]
+  local sem_go: *void = slots[4]
+  local total: int = counts[0]
+  local repeats: int = counts[1]
 
   if sem_ready ~= nil then
     uv.native_sem_post { native = sem_ready }
@@ -65,12 +65,12 @@ local foreign function ew_batch_notify_worker(argument: *void)
     uv.native_sem_wait { native = sem_go }
   end
 
-  for index = 0 as foreign int, total - (1 as foreign int) do
-    local target: foreign *void = targets[index]
+  for index = 0 as int, total - (1 as int) do
+    local target: *void = targets[index]
     uv.native_external_wake_retain { target = target }
     uv.native_external_wake_release { target = target }
-    local last_status: foreign int = 0 as foreign int
-    for _rep = 0 as foreign int, repeats - (1 as foreign int) do
+    local last_status: int = 0 as int
+    for _rep = 0 as int, repeats - (1 as int) do
       last_status = uv.native_external_wake_notify { target = target }
     end
     statuses[index] = last_status
@@ -101,40 +101,40 @@ end
 -- C-only worker synchronized by a native barrier for multi-producer burst
 -- notifications and concurrent notify-versus-unregister/close races.
 local foreign function ew_barrier_race_worker(argument: *void)
-  local slots: foreign *EwVoidPtr = argument as foreign *EwVoidPtr
-  local targets: foreign *EwVoidPtr = slots[0] as foreign *EwVoidPtr
-  local barrier: foreign *void = slots[1]
-  local params: foreign *int = slots[2] as foreign *int
-  local done_sem: foreign *void = slots[3]
-  local start_sem: foreign *void = slots[4]
+  local slots: *EwVoidPtr = argument as *EwVoidPtr
+  local targets: *EwVoidPtr = slots[0] as *EwVoidPtr
+  local barrier: *void = slots[1]
+  local params: *int = slots[2] as *int
+  local done_sem: *void = slots[3]
+  local start_sem: *void = slots[4]
 
-  local barrier_wait: foreign EwBarrierWaitFn = uv.native_barrier_wait
-  local retain_fn: foreign EwUnaryVoidFn = uv.native_external_wake_retain
-  local release_fn: foreign EwUnaryVoidFn = uv.native_external_wake_release
-  local notify_fn: foreign EwNotifyFn = uv.native_external_wake_notify
+  local barrier_wait: EwBarrierWaitFn = uv.native_barrier_wait
+  local retain_fn: EwUnaryVoidFn = uv.native_external_wake_retain
+  local release_fn: EwUnaryVoidFn = uv.native_external_wake_release
+  local notify_fn: EwNotifyFn = uv.native_external_wake_notify
 
-  local count: foreign int = params[0]
-  local reverse: foreign int = params[1]
-  local allow_einval: foreign int = params[2]
-  local expected_einval: foreign int = params[3]
-  local failures: foreign int = 0 as foreign int
-  local zero_count: foreign int = 0 as foreign int
-  local einval_count: foreign int = 0 as foreign int
+  local count: int = params[0]
+  local reverse: int = params[1]
+  local allow_einval: int = params[2]
+  local expected_einval: int = params[3]
+  local failures: int = 0 as int
+  local zero_count: int = 0 as int
+  local einval_count: int = 0 as int
 
   -- Creation failure releases accepted workers without entering a partial barrier.
   uv.native_sem_wait(start_sem)
-  if params[7] ~= (0 as foreign int) then
-    for index = 0 as foreign int, count - (1 as foreign int) do
+  if params[7] ~= (0 as int) then
+    for index = 0 as int, count - (1 as int) do
       release_fn(targets[index])
       targets[index] = nil
     end
     return
   end
 
-  local barrier_rc: foreign int = barrier_wait(barrier)
-  if barrier_rc < (0 as foreign int) then
-    params[4] = 1000 as foreign int
-    for index = 0 as foreign int, count - (1 as foreign int) do
+  local barrier_rc: int = barrier_wait(barrier)
+  if barrier_rc < (0 as int) then
+    params[4] = 1000 as int
+    for index = 0 as int, count - (1 as int) do
       release_fn(targets[index])
       targets[index] = nil
     end
@@ -142,25 +142,25 @@ local foreign function ew_barrier_race_worker(argument: *void)
     return
   end
 
-  for step = 0 as foreign int, count - (1 as foreign int) do
-    local index: foreign int = step
-    if reverse ~= (0 as foreign int) then
-      index = (count - (1 as foreign int)) - step
+  for step = 0 as int, count - (1 as int) do
+    local index: int = step
+    if reverse ~= (0 as int) then
+      index = (count - (1 as int)) - step
     end
-    local target: foreign *void = targets[index]
+    local target: *void = targets[index]
     retain_fn(target)
     release_fn(target)
-    local rc: foreign int = notify_fn(target)
-    if rc == (0 as foreign int) then
-      zero_count = zero_count + (1 as foreign int)
-    elseif allow_einval ~= (0 as foreign int) then
+    local rc: int = notify_fn(target)
+    if rc == (0 as int) then
+      zero_count = zero_count + (1 as int)
+    elseif allow_einval ~= (0 as int) then
       if rc == expected_einval then
-        einval_count = einval_count + (1 as foreign int)
+        einval_count = einval_count + (1 as int)
       else
-        failures = failures + (1 as foreign int)
+        failures = failures + (1 as int)
       end
     else
-      failures = failures + (1 as foreign int)
+      failures = failures + (1 as int)
     end
     release_fn(target)
     targets[index] = nil
@@ -1207,11 +1207,11 @@ function test_external_wake_concurrent_native_notify_and_retire_with_producer_re
 end
 
 local foreign function ew_query_notify_worker(argument: *void)
-  local slots = argument as foreign *EwVoidPtr
-  local retained = slots[0] as foreign *EwVoidPtr
-  local statuses = slots[1] as foreign *int
+  local slots = argument as *EwVoidPtr
+  local retained = slots[0] as *EwVoidPtr
+  local statuses = slots[1] as *int
   local target = retained[1]
-  local query: foreign function(*void): int = uv.native_external_wake_is_notified
+  local query: function(*void): int = uv.native_external_wake_is_notified
   statuses[0] = query(target)
   statuses[1] = uv.native_external_wake_notify(target)
   statuses[2] = query(target)

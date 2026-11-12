@@ -92,8 +92,8 @@ end
 -- @return Native int status: zero consumes/frees the token; nonzero preserves it; NULL returns EINVAL.
 -- @usage uv/supplemental.md#native_thread_join
 foreign function native_thread_join(token: *void): int
-  if token == nil then return ffi.UV_EINVAL as foreign int end
-  local status = ffi.uv_thread_join(token as foreign *uv_thread_t)
+  if token == nil then return ffi.UV_EINVAL as int end
+  local status = ffi.uv_thread_join(token as *uv_thread_t)
   if status == 0 then ffi.free(token) end
   return status
 end
@@ -109,8 +109,8 @@ end
 -- @return Native int status: zero consumes/frees the token; nonzero preserves it; NULL returns EINVAL.
 -- @usage uv/supplemental.md#native_thread_detach
 foreign function native_thread_detach(token: *void): int
-  if token == nil then return ffi.UV_EINVAL as foreign int end
-  local status = ffi.uv_thread_detach(token as foreign *uv_thread_t)
+  if token == nil then return ffi.UV_EINVAL as int end
+  local status = ffi.uv_thread_detach(token as *uv_thread_t)
   if status == 0 then ffi.free(token) end
   return status
 end

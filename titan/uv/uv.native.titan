@@ -388,14 +388,14 @@ catch
 end
 
 local foreign function timer_callback(native: *uv_timer_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "timer_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -403,13 +403,13 @@ local foreign function timer_callback(native: *uv_timer_t)
 end
 
 local foreign function timer_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "timer_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   -- Exact Udata conversion is rooted before the handler retires its old map key.
   ffi.titan_uv_push_owner(L, owner)
@@ -769,13 +769,13 @@ catch
 end
 
 local foreign function fs_callback(native: *uv_fs_t)
-  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
+  local owner = ffi.uv_req_get_data(native as *uv_req_t) as *Udata
+  local loop = ffi.uv_loop_get_data(native.loop) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "fs_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -1099,25 +1099,25 @@ end
 local foreign function work_worker_callback(request: *uv_work_t)
   -- Submission publishes immutable native callback data before acceptance.
   -- The loop thread cannot replace it until this worker has completed.
-  local storage = request.data as foreign *titan_uv_work_data
+  local storage = request.data as *titan_uv_work_data
   local worker = storage.worker
   worker(storage.arg)
 end
 
 local foreign function work_after_callback(request: *uv_work_t, status: int)
-  local storage = request.data as foreign *titan_uv_work_data
-  local owner = storage.owner as foreign *Udata
-  local loop = ffi.uv_loop_get_data(request.loop) as foreign *Udata
+  local storage = request.data as *titan_uv_work_data
+  local owner = storage.owner as *Udata
+  local loop = ffi.uv_loop_get_data(request.loop) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(
       ffi.titan_record_field(owner, "work_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign WorkCallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as WorkCallbackEntry
   local top = ffi.lua_gettop(L)
   -- Root the exact concrete userdata before work_deliver removes its map key.
   -- Never leave a trailing root deletion or field clear after user delivery.
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, status as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
@@ -1932,12 +1932,12 @@ end
 
 foreign type WalkEntry = function (*lua_State, *Udata, *CClosure, *Udata, *uv_handle_t): void
 local foreign function walk_callback(native: *uv_handle_t, arg: *void)
-  local loop = arg as foreign *Udata
-  local owner = ffi.uv_handle_get_data(native) as foreign *Udata
+  local loop = arg as *Udata
+  local owner = ffi.uv_handle_get_data(native) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(loop, "loop_t", "walk_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign WalkEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as WalkEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, loop, native)
@@ -2020,13 +2020,13 @@ catch
 end
 
 local foreign function idle_callback(native: *uv_idle_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "idle_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2034,12 +2034,12 @@ local foreign function idle_callback(native: *uv_idle_t)
 end
 
 local foreign function idle_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "idle_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2148,13 +2148,13 @@ catch
 end
 
 local foreign function prepare_callback(native: *uv_prepare_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "prepare_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2162,12 +2162,12 @@ local foreign function prepare_callback(native: *uv_prepare_t)
 end
 
 local foreign function prepare_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "prepare_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2276,13 +2276,13 @@ catch
 end
 
 local foreign function check_callback(native: *uv_check_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "check_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2290,12 +2290,12 @@ local foreign function check_callback(native: *uv_check_t)
 end
 
 local foreign function check_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "check_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2404,13 +2404,13 @@ catch
 end
 
 local foreign function async_callback(native: *uv_async_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "async_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2418,12 +2418,12 @@ local foreign function async_callback(native: *uv_async_t)
 end
 
 local foreign function async_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "async_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2489,7 +2489,7 @@ end
 -- @return Native int result with the documented lifetime and units.
 -- @usage uv/supplemental.md#async_send_native
 foreign function async_send_native(handle: *void): int
-  return ffi.uv_async_send(handle as foreign *uv_async_t)
+  return ffi.uv_async_send(handle as *uv_async_t)
 end
 
 --- Return the C-only send entry for a borrowed initialized async handle.
@@ -2543,26 +2543,26 @@ end
 foreign type SignalEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer): void
 
 local foreign function signal_callback(native: *uv_signal_t, signum: int)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "signal_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign SignalEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as SignalEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, signum as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, signum as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function signal_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "signal_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -2701,26 +2701,26 @@ end
 foreign type PollEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, lua_Integer): void
 
 local foreign function poll_callback(native: *uv_poll_t, status: int, events: int)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "poll_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign PollEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as PollEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer, events as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, status as lua_Integer, events as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function poll_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "poll_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -3136,16 +3136,16 @@ end
 
 foreign type RandomEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, lua_Integer): void
 local foreign function random_callback(native: *uv_random_t, status: int, buf: *void, buflen: size_t)
-  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
+  local owner = ffi.uv_req_get_data(native as *uv_req_t) as *Udata
+  local loop = ffi.uv_loop_get_data(native.loop) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "random_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign RandomEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as RandomEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop,
-        status as foreign lua_Integer, buflen as foreign lua_Integer)
+        status as lua_Integer, buflen as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
@@ -3270,26 +3270,26 @@ end
 foreign type FsEventEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, const *char, lua_Integer, lua_Integer): void
 
 local foreign function fs_event_callback(native: *uv_fs_event_t, filename: const *char, events: int, status: int)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "fs_event_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign FsEventEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as FsEventEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, filename, events as foreign lua_Integer, status as foreign lua_Integer)
+  entry(L, module, handler, owner, loop, filename, events as lua_Integer, status as lua_Integer)
   ffi.lua_settop(L, top)
 end
 
 local foreign function fs_event_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "fs_event_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
@@ -3425,26 +3425,26 @@ end
 foreign type FsPollEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, const *uv_stat_t, const *uv_stat_t): void
 
 local foreign function fs_poll_callback(native: *uv_fs_poll_t, status: int, prev: const *uv_stat_t, curr: const *uv_stat_t)
-  local base = native as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local base = native as *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "fs_poll_t", "handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign FsPollEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as FsPollEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
-  entry(L, module, handler, owner, loop, status as foreign lua_Integer, prev, curr)
+  entry(L, module, handler, owner, loop, status as lua_Integer, prev, curr)
   ffi.lua_settop(L, top)
 end
 
 local foreign function fs_poll_close_callback(base: *uv_handle_t)
-  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
-  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local owner = ffi.uv_handle_get_data(base) as *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "fs_poll_t", "close_handler"))
   local module = ffi.lmacro_uvalue(handler.upvalue[0])
-  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as CallbackEntry
   local top = ffi.lua_gettop(L)
   ffi.titan_uv_push_owner(L, owner)
   entry(L, module, handler, owner, loop)
