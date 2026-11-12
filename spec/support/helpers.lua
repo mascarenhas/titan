@@ -396,6 +396,36 @@ function M.compile_and_read_c(titan_code, modname)
     return csrc, ast
 end
 
+-- A nominal metatable publishes its runtime type information under light
+-- userdata keys, which a Lua script cannot spell. Build the fixture provider
+-- that exports them as `runtime_brands` in the working directory, run `body`,
+-- and remove the provider. A Lua child reads the keys with
+-- `require "runtime_brands"`.
+function M.with_runtime_brands(body)
+    local modname, filename = "runtime_brands", "spec/fixtures/runtime_brands.titan"
+    local results = table.pack(xpcall(function()
+        local file = assert(io.open(filename, "rb"))
+        local source = file:read("a")
+        file:close()
+        reset()
+        local ast, perr = M.parse(source, filename)
+        assert.truthy(ast, perr)
+        local _, errs = checker.check(modname, ast, source, filename)
+        assert.equal(0, #errs, table.concat(errs, "\n"))
+        local ok, err = M.compile(modname, ast)
+        assert.truthy(ok, err)
+        return body()
+    end, debug.traceback))
+    for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".def", ".dll.def", ".a",
+                              ".ffi.h", ".titan.h", ".priv.h", ".parts" }) do
+        os.remove(modname .. suffix)
+    end
+    local removed, remove_error = driver.remove_path(modname .. ".so.dSYM")
+    assert.truthy(removed, remove_error)
+    if not results[1] then error(results[2], 0) end
+    return table.unpack(results, 2, results.n)
+end
+
 -- Check + compile `titan_code` as a standalone program and run it, capturing
 -- both stdout and stderr. Returns (exit_status, combined_output).
 function M.compile_and_run_app(titan_code, modname)

@@ -949,6 +949,29 @@ describe("compiler-owned relocation paths", function()
         assert.is_not.same(relocation.argv(first, arguments("/first")), relocation.argv(second, reversed))
     end)
 
+    it("labels a path under aliased roots the same whatever order pairs yields", function()
+        local aliased = { sdk = fixture_path("/shared/root"), compiler = fixture_path("/shared/root") }
+        local function yielding(order)
+            return setmetatable({}, { __index = aliased, __pairs = function()
+                local index = 0
+                return function()
+                    index = index + 1
+                    local name = order[index]
+                    if name ~= nil then return name, aliased[name] end
+                end
+            end })
+        end
+        local moved = { relocation_roots = {
+            sdk = fixture_path("/moved/sdk"), compiler = fixture_path("/moved/compiler") } }
+        for _, order in ipairs({ { "sdk", "compiler" }, { "compiler", "sdk" } }) do
+            local roots = yielding(order)
+            assert.equal("<titan:compiler>/a.h",
+                relocation.path({ relocation_roots = roots }, fixture_path("/shared/root/a.h")))
+            assert.equal(fixture_path("/moved/compiler/a.h"),
+                relocation.rebind(moved, fixture_path("/shared/root/a.h"), roots))
+        end
+    end)
+
     it("keeps opaque operands and path-valued flag text byte-exact", function()
         local first, second = owned("/first"), owned("/second")
         for _, arguments in ipairs({

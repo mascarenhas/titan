@@ -2292,6 +2292,9 @@ describe("Titan types", function()
             assert.same("foreign int[4]", types.tostring(types.CArray(int, 4)))
             assert.same("foreign const int[4]",
                 types.tostring(types.CArray(int, 4, {"const"})))
+            assert.same("foreign int[]", types.tostring(types.CArray(int, nil)))
+            assert.same("foreign int[(1 + 2)]",
+                types.tostring(types.CArray(int, { op = "+", 1, 2 })))
             assert.same("foreign function (int, ...): double", types.tostring(
                 types.CFunction({int}, types.CFloat("double"), true, "cdecl")))
             assert.same("foreign point", types.tostring(
@@ -2938,6 +2941,34 @@ describe("Titan types", function()
             round_trip(owned_ptr)
             round_trip(owned_arr)
             round_trip(mod)
+        end)
+
+        it("serializes an expression extent the same whatever order pairs yields", function()
+            -- A C array length or bit-field width that is not a literal keeps
+            -- its expression tree, whose keyed entries have no inherent order.
+            local entries = { type = "struct", id = "sockaddr" }
+            local function extent(order)
+                return setmetatable({}, { __pairs = function()
+                    local index = 0
+                    return function()
+                        index = index + 1
+                        local key = order[index]
+                        if key ~= nil then return key, entries[key] end
+                    end
+                end })
+            end
+            local function tag(order)
+                local int = cint()
+                local probe = types.CStruct("struct probe", "probe", nil, {
+                    types.CField(nil, "padding", types.CArray(int, extent(order)), nil, false),
+                    types.CField(nil, "width", int, extent(order), false),
+                }, true, false)
+                return types.serialize_semantic(
+                    types.Function({ types.CPointer(probe, {}) }, {}, false, nil, nil))
+            end
+            local first = tag({ "type", "id" })
+            assert.truthy(first:find('{["id"] = "sockaddr", ["type"] = "struct"}', 1, true))
+            assert.equal(first, tag({ "id", "type" }))
         end)
 
         it("reattaches target numeric traits to recovered portable scalars",

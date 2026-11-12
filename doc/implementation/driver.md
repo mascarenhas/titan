@@ -2621,9 +2621,11 @@ commands.
 * **`util.split_string(str, delim)`** — plain-pattern split; used to
   turn the `-l` comma list into linker flags.
 * **`util.tostring(v)`** — recursively formats primitive values and nested
-  tables (both array-like sequences and keyed maps) into canonical Lua-literal
-  string representations; used by `types.serialize` for compound C-FFI type
-  metadata (such as array lengths and bitfield tables).
+  tables into a Lua literal: the sequence part in order, then the keyed
+  entries in `util.bytewise_less` order of their text, never in `pairs`
+  order. `types.serialize` uses it for C array lengths and bit-field widths
+  that are expression trees, so serialized types and function-type tags are
+  the same text in every build.
 * **`util.to_set`**, **`util.curry`**, **`util.any`** — small
   functional helpers (`to_set` in the C parser; `any` and `curry` only in the
   specs).

@@ -83,8 +83,8 @@ skipped by the followed file's device/inode identity, including symbolic and
 hard links. Strategies without device/inode information use the resolved header
 spelling instead; they cannot deduplicate distinct spellings of one file.
 Forced `-include` and `-imacros` inputs share that environment's once state.
-Other pragmas and `#error` remain ignored. Generated `.ffi.h` files retain their
-ordinary `#ifndef` guards.
+Other pragmas, `#error` and `#warning` remain ignored. Generated `.ffi.h` files
+retain their ordinary `#ifndef` guards.
 
 The top-level input has include depth zero. Up to 200 nested includes are
 accepted; an attempted entry at depth 201 returns a preprocessing diagnostic
@@ -99,6 +99,44 @@ produced under different C interpretation semantics without changing a cache
 format version.
 Certified reuse does not observe every byte-identical once-header alias
 retarget; see the [incremental cache limit](incremental-compilation.md#semantic-c-header-identity-summary).
+
+### Directive lines
+
+`preprocessingLine` (`c-parser/c99.lua`) captures a table for every line that
+starts with `#` or `%:`, so `cpp.tokenize` (`c-parser/cpp.lua`) never hands
+`parse_contents` a capture-less match; it also converts any non-table match
+into `{ directive = "invalid" }`. The `directive` rule yields:
+
+- a recognised directive with its operand captures. The directive word ends
+  at `B` (no identifier character or digit follows), so `#elsewhere` is not
+  `#else`, and `#include` accepts a header name with no space before it;
+- `if`, `ifdef`, `ifndef` and `elif` without an operand, as their own name
+  with no `exp` or `id`, so a skipped group still nests by them;
+- `pragma`, `error` and `warning` without tokens, which are valid C;
+- `null` for C's null directive (`#` alone);
+- `invalid` for every other line: an unrecognised directive word, or
+  `#include`, `#include_next`, `#define`, `#undef` or `#line` without its
+  operand.
+
+`parse_contents` diagnoses only in the active group, through one local
+`reject` that removes the directory frame and returns
+`nil, "<header>:<line>: <message>"`:
+
+| Line | Message |
+| --- | --- |
+| `invalid` | `invalid or incomplete preprocessing directive: <line>` |
+| `#if` without an expression | `#if with no expression` |
+| `#ifdef`/`#ifndef` without a macro name | `no macro name given in #<name> directive` |
+| `#include`/`#include_next` whose operand expands to nothing | `#<name> expects a header name` |
+| an evaluated `#elif` without an expression | `#elif with no expression` |
+| `#elif`, `#else` or `#endif` outside a conditional | `unexpected directive <name>` |
+
+A skipped group reacts only to the conditional directive names, so every
+other line in it, valid or not, contributes nothing. `null`, `error`,
+`warning` and a `pragma` other than `once` contribute no output line. A
+malformed `#if` expression still raises its message (`syntax error in
+preprocessor expression`, division by zero, an invalid shift count) rather
+than returning it.
 
 The completed C environment is visible throughout the Titan module, including
 earlier module-variable closures and initializers. Ordinary Titan import and
@@ -1225,10 +1263,10 @@ as an owner.
   Clang's `_Nonnull`, `_Nullable`, `_Null_unspecified` and `_Nullable_result`
   pointer annotations, which carry no imported type meaning. Headers outside
   that subset can fail during preprocessing or parsing.
-* Some preprocessor paths still raise raw Lua errors instead of diagnostics
-  (`#if` operators outside the implemented set, unterminated function-like
-  macros, directives whose required token list is absent). `#error` and pragmas
-  other than `#pragma once` are ignored.
+* Some preprocessor paths still raise an error message instead of returning
+  a located diagnostic (`#if` expressions that do not parse or evaluate,
+  unterminated function-like macros, an invalid token paste). `#error`,
+  `#warning` and pragmas other than `#pragma once` are ignored.
 * Function-like macros are invisible to general Titan FFI inference; the
   `lmacro_*` bridges in `titan/ffi.h` are ordinary C functions whose bodies
   evaluate selected Lua macros. An object-like macro is

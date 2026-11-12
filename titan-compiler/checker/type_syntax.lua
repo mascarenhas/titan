@@ -320,10 +320,14 @@ typefromnode = util.make_visitor({
         return types.Invalid()
     end,
 
+    -- A pointer, array or function type over an undeclared component is
+    -- `Type.Invalid` itself: the component was diagnosed where it was written,
+    -- and no C declaration can spell the composite.
     ["Ast.TypeCPointer"] = function(node, st, errors)
         -- Forming a pointer needs only an exact pointee spelling. It does not
         -- carry an enum value and therefore must not force a wide-enum carrier.
         local pointee = typefromnode(node.subtype, st, errors, true)
+        if pointee._tag == "Type.Invalid" then return pointee end
         local resolved = c_resolve(pointee)
         if not types.is_direct_c(pointee)
            or (resolved and resolved._tag == "Type.COwned") then
@@ -337,10 +341,11 @@ typefromnode = util.make_visitor({
     ["Ast.TypeCArray"] = function(node, st, errors)
         -- Exact C array storage needs element spelling, not a numeric carrier.
         local elem = typefromnode(node.base, st, errors, true)
+        if elem._tag == "Type.Invalid" then return elem end
         local resolved = c_resolve(elem)
         if not types.is_direct_c(elem)
            or (resolved and resolved._tag == "Type.COwned") then
-            elem = invalid(errors, node.base.loc or node.loc,
+            return invalid(errors, node.base.loc or node.loc,
                 "fixed C array element type must be a C FFI type, not '%s'",
                 types.tostring(elem))
         end
@@ -404,6 +409,10 @@ typefromnode = util.make_visitor({
         local cfunction = checker._foreign_function_signature(
             node.argtypes, node.rettypes, node.varargtype,
             node.flexrettype, st, errors, "foreign function type")
+        if cfunction.ret._tag == "Type.Invalid" then return cfunction.ret end
+        for _, param in ipairs(cfunction.params) do
+            if param._tag == "Type.Invalid" then return param end
+        end
         return types.CPointer(cfunction, {})
     end,
 

@@ -82,6 +82,10 @@ contain Titan types, including owned storage. `resolve_foreign_type_alias`
 (`checker/common.lua`) resolves it with its own cycle check ("cyclic foreign
 type alias involving '%s'"), builds a `Type.CTypedef`, records the rendered
 declaration in `_c_typedef`, and appends the node to `st.foreign_alias_order`.
+`typefromnode` (`checker/type_syntax.lua`) yields `Type.Invalid` for a
+pointer, array or function type over an undeclared component, so such an
+alias is `Type.Invalid` itself and renders no typedef; the component's own
+diagnostic was reported where it was written.
 After all foreign aliases resolve, `checktoplevel` copies the declarations to
 `ast._foreign_typedefs` and re-checks the C environment, which must then
 declare each typedef name. `ffiheaders.lua` emits them into the module's

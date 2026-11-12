@@ -786,33 +786,41 @@ typedExpression <- expression !.
 
 local preprocessing_rules = [[--lpeg.re
 
+-- Every line that starts with `#` captures a table. A directive word ends at
+-- `B`, so `#elsewhere` is not `#else`. A conditional keeps its name when its
+-- operand is missing: a skipped group still nests by it. `null` is C's null
+-- directive; `invalid` is any other unrecognised or incomplete directive.
 preprocessingLine <- _ ( ("#" / "%:") _ directive _
-                       / ("#" / "%:") _ preprocessingTokenList? {| _ |} -- non-directive, ignore
                        / preprocessingTokenList
                        / empty
                        )
 
 preprocessingTokenList <- {| (preprocessingToken _)+ |}
 
-directive <- {| {:directive: "if"      :} !(identifierNondigit / [0-9]) _ {:exp: preprocessingTokenList :} |}
-           / {| {:directive: "ifdef"   :} S {:id: IDENTIFIER :} |}
-           / {| {:directive: "ifndef"  :} S {:id: IDENTIFIER :} |}
-           / {| {:directive: "elif"    :} !(identifierNondigit / [0-9]) _ {:exp: preprocessingTokenList :} |}
-           / {| {:directive: "else"    :} |}
-           / {| {:directive: "endif"   :} |}
-           / {| {:directive: "include" :} S {:exp: headerName :} |}
+directive <- {| {:directive: "if"      :} B _ {:exp: preprocessingTokenList :}? |}
+           / {| {:directive: "ifdef"   :} B _ {:id: IDENTIFIER :}? |}
+           / {| {:directive: "ifndef"  :} B _ {:id: IDENTIFIER :}? |}
+           / {| {:directive: "elif"    :} B _ {:exp: preprocessingTokenList :}? |}
+           / {| {:directive: "else"    :} B |}
+           / {| {:directive: "endif"   :} B |}
+           / {| {:directive: "include" :} B _ {:exp: headerName :} |}
            / {| {:directive: "define"  :} S {:id: MACRONAME :} "(" _ {:args: defineArgList :} _ ")" _ {:repl: replacementList :} |}
            / {| {:directive: "define"  :} S {:id: MACRONAME :} _ {:repl: replacementList :} |}
            / {| {:directive: "undef"   :} S {:id: IDENTIFIER :} |}
            / {| {:directive: "line"    :} S {:line: preprocessingTokenList :} |}
            / {| {:directive: "error"   :} S {:error: preprocessingTokenList / empty :} |}
-           / {| {:directive: "error"   :} |}
+           / {| {:directive: "error"   :} B |}
            / {| {:directive: "pragma"  :} S {:pragma: preprocessingTokenList / empty :} |}
+           / {| {:directive: "pragma"  :} B |}
            / gccDirective
-           / ""
+           / {| {:directive: (!.) -> "null" :} |}
+           / {| {:directive: "" -> "invalid" :} |}
 
-gccDirective <- {| {:directive: "include_next" :} S {:exp: headerName :} |}
+gccDirective <- {| {:directive: "include_next" :} B _ {:exp: headerName :} |}
               / {| {:directive: "warning" :} S {:exp: preprocessingTokenList / empty :} |}
+              / {| {:directive: "warning" :} B |}
+
+B <- !(identifierNondigit / [0-9])
 
 defineArgList <- {| { "..." } |}
                / {| identifierList _ "," _ {| { "..." } |} |} => join

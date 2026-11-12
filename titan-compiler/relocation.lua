@@ -3,6 +3,7 @@
 local paths = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
 local root_fields = require("titan-compiler.declarationschemas").relocation
+local util = require "titan-compiler.util"
 local relocation = {}
 
 local function normalized(path)
@@ -56,28 +57,32 @@ function relocation.roots(strategy, selected)
     return result
 end
 
-function relocation.path(context, path)
-    if type(path) ~= "string" or not platform.is_absolute(path) then return path end
-    local spelling, best, tail = normalized(path)
-    for name, root in pairs(context.relocation_roots or {}) do
+-- The longest root that contains `spelling`, among the `admitted` names when
+-- given. Roots that alias one directory tie, and the bytewise-first name wins
+-- whatever order `pairs` yields, so a certified label never depends on it.
+local function containing_root(roots, spelling, admitted)
+    local best, tail
+    for name, root in pairs(roots) do
         local relative = suffix(spelling, root)
-        if relative and (not best or #root > #context.relocation_roots[best]) then
+        if relative and (not admitted or admitted[name])
+           and (not best or #root > #roots[best]
+                or #root == #roots[best] and util.bytewise_less(name, best)) then
             best, tail = name, relative
         end
     end
+    return best, tail
+end
+
+function relocation.path(context, path)
+    if type(path) ~= "string" or not platform.is_absolute(path) then return path end
+    local best, tail = containing_root(context.relocation_roots or {}, normalized(path))
     return best and ("<titan:" .. best .. ">" .. tail) or path
 end
 
 function relocation.rebind(context, path, previous)
     if type(path) ~= "string" or not platform.is_absolute(path) then return path end
-    local spelling, best, tail = normalized(path)
-    for name, root in pairs(previous or {}) do
-        local relative = suffix(spelling, root)
-        if relative and context.relocation_roots and context.relocation_roots[name]
-            and (not best or #root > #previous[best]) then
-            best, tail = name, relative
-        end
-    end
+    local best, tail = containing_root(
+        previous or {}, normalized(path), context.relocation_roots or {})
     return best and (context.relocation_roots[best] .. tail) or path
 end
 

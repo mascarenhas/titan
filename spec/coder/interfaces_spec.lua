@@ -506,7 +506,7 @@ describe("interfaces (end-to-end)", function()
     end)
 
     it("publishes boxed field accessors for records and Interfaces", function()
-        h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
+        h.with_runtime_brands(function()
             local csrc = h.compile_and_read_c([[
                 interface View
                     maybe: {integer}?
@@ -552,12 +552,12 @@ describe("interfaces (end-to-end)", function()
 
             local ok, err = h.call("test", [[
                 local box, view = test.make()
-                local registry = debug.getregistry()
+                local brands = require "runtime_brands"
                 local box_mt = debug.getmetatable(box)
                 local view_mt = debug.getmetatable(view)
                 for _, mt in ipairs({box_mt, view_mt}) do
-                    assert(mt[registry.TITAN_MT_MOD] == test)
-                    local members = mt[registry.TITAN_MT_MEMBERMAP]
+                    assert(mt[brands.TITAN_MT_MOD] == test)
+                    local members = mt[brands.TITAN_MT_MEMBERMAP]
                     assert(type(members.numbers) == "userdata")
                     assert(type(members.maybe) == "userdata")
                     assert(members.hidden == nil)
@@ -890,9 +890,7 @@ describe("interfaces (end-to-end)", function()
                 return total
             end
         ]]
-            local csrc = h.with_extra_cflags({ '-DTITAN_COMPILER_TESTS' }, function ()
-                return h.compile_and_read_c(source)
-            end)
+            local csrc = h.compile_and_read_c(source)
             local box_wrapper = interface_wrapper_id(
                 "test_", "test.Box", "test.Getter")
             local choice_wrapper = interface_wrapper_id(
@@ -973,16 +971,18 @@ describe("interfaces (end-to-end)", function()
                 end
             end
 
-            local called, callerr = h.call("test", [[
+            local called, callerr = h.with_runtime_brands(function()
+                return h.call("test", [[
+            local brands = require "runtime_brands"
             local registry = debug.getregistry()
             local getter_meta = assert(
                 registry["Titan interface test.Getter metatable"])
             local scorer_meta = assert(
                 registry["Titan interface test.Scorer metatable"])
-            assert(getter_meta[registry.TITAN_BRAND] == 5)
-            assert(getter_meta[registry.TITAN_MT_TYPE] == "Interface(\"test.Getter\",{},{Method('test.Getter', 'get',{},{Integer()},nil,nil,{})})")
-            assert(scorer_meta[registry.TITAN_BRAND] == 5)
-            assert(scorer_meta[registry.TITAN_MT_TYPE] == "Interface(\"test.Scorer\",{},{Method('test.Scorer', 'score',{},{Integer()},nil,nil,{})})")
+            assert(getter_meta[brands.TITAN_BRAND] == 5)
+            assert(getter_meta[brands.TITAN_MT_TYPE] == "Interface(\"test.Getter\",{},{Method('test.Getter', 'get',{},{Integer()},nil,nil,{})})")
+            assert(scorer_meta[brands.TITAN_BRAND] == 5)
+            assert(scorer_meta[brands.TITAN_MT_TYPE] == "Interface(\"test.Scorer\",{},{Method('test.Scorer', 'score',{},{Integer()},nil,nil,{})})")
             local bare = test.bare_box(41)
             local box_meta = assert(debug.getmetatable(bare))
             local real_witness = assert(rawget(box_meta, getter_meta))
@@ -990,7 +990,7 @@ describe("interfaces (end-to-end)", function()
 
             assert(test.is_getter(bare))
             assert(test.as_getter(bare):get() == 41)
-            assert(getter_meta[registry.TITAN_MT_MEMBERMAP].get == test.as_getter(bare).get)
+            assert(getter_meta[brands.TITAN_MT_MEMBERMAP].get == test.as_getter(bare).get)
             assert(test.implicit_getter(bare):get() == 41)
             assert(test.optional_getter(bare):get() == 41)
             assert(test.optional_getter(nil) == nil)
@@ -1106,6 +1106,7 @@ describe("interfaces (end-to-end)", function()
                 end
             end
         ]])
+            end)
             assert.truthy(called, callerr)
         end)
 

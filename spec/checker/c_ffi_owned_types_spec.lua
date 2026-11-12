@@ -458,8 +458,7 @@ describe("source-written owned C types", function()
                 foreign type Bad = *Item
             ]])
             assert.falsy(ok)
-            assert.match("C pointer type can only point to a C FFI type",
-                err)
+            assert.match("foreign type 'Item' is not declared", err)
         end)
     end)
 

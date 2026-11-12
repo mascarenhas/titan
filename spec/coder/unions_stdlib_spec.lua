@@ -17,7 +17,7 @@ describe("unions with the standard provider", function()
     end)
 
     it("publishes a boxed payload reader including private Array variants", function()
-        h.with_extra_cflags({ "-DTITAN_COMPILER_TESTS" }, function()
+        h.with_runtime_brands(function()
             local compiled, compilation_error = h.build_so_chain({ {
                 name = "test", src = [[
                 local reflect = import "reflect"
@@ -64,10 +64,10 @@ describe("unions with the standard provider", function()
                 assert(tag == 0 and arity == 0 and total == nil)
                 tag, arity, total = test.inspect(test.public_packet())
                 assert(tag == 1 and arity == 1 and total == 42)
-                local registry = debug.getregistry()
+                local brands = require "runtime_brands"
                 local mt = debug.getmetatable(packet)
-                assert(type(mt[registry.TITAN_MT_PAYLOAD]) == "userdata")
-                assert(not mt[registry.TITAN_MT_TYPE]:find("hidden", 1, true))
+                assert(type(mt[brands.TITAN_MT_PAYLOAD]) == "userdata")
+                assert(not mt[brands.TITAN_MT_TYPE]:find("hidden", 1, true))
             ]])
             assert.truthy(ok, err)
         end)
