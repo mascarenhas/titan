@@ -48,13 +48,28 @@ handler's rule is:
 * if the pin is set, clear the pin and keep the existing traceback;
 * otherwise, regenerate the traceback from the current stack.
 
-This prevents stale-trace reuse while still supporting bare re-raise. For a bare
-`raise` in a catch, `coderaise` (`titan-compiler/coder/statements.lua`) writes
-the saved catch-local `traceback` back to `TITAN_BACKTRACE_KEY`, sets the pin,
-places the saved `error` in the single top slot required by Lua's error ABI, and
-calls `lua_error`. The handler sees the pin and preserves the original deep
-trace. A fresh `raise <exp>` leaves the pin clear, so the handler captures a new
-trace at the new raise site.
+This prevents stale-trace reuse while still letting an error keep a trace
+captured elsewhere. Generated code has one owner of that protocol,
+`raise_with_trace` (`titan-compiler/coder/statements.lua`): it copies the trace
+string and the error value into C, writes the trace to `TITAN_BACKTRACE_KEY`,
+sets the pin, places the error in the single top slot required by Lua's error
+ABI, and calls `lua_error`. The handler sees the pin and preserves the given
+trace. Three lowerings end there:
+
+* a bare `raise` in a catch passes the catch-local `error` and `traceback`, so
+  the original deep trace survives the shallower re-raise site;
+* `raise <exp>, <trace>` passes its two operands. `coderaise` stores the error
+  value in a traced slot before it evaluates the trace expression, which can
+  clear the value's home and collect, and stores the trace in a traced slot
+  too, because the registry write can allocate;
+* a finally's pending raise passes the error and trace it saved before the
+  cleanup ran ([pending actions](#pending-actions-for-finally)).
+
+A fresh `raise <exp>` leaves the pin clear, so the handler captures a new trace
+at the new raise site. No `.titan` source writes either registry key: a module
+that carries an error and its trace across a boundary (`coroutine`,
+`async.Error:raise`, `uv`'s loop rethrow, `thread.Error:raise`) uses
+`raise <exp>, <trace>`.
 
 When a boundary catches an error for a `catch` or `finally`, it snapshots the
 trace into a reserved stack slot and then clears both the trace slot and the
@@ -87,14 +102,15 @@ Coroutines hand over one more trace, for uncaught errors in a dead coroutine,
 through `titan.coroutine`'s module variable `pending_append_trace`, not through
 the registry. The coroutine entry stages its own trace there; the
 `resume`/`error` side then raises and catches the same payload to capture the
-propagation trace in the caller, appends it to the staged trace, writes the
-combined string to `TITAN_BACKTRACE_KEY`, sets `TITAN_TRACE_PINNED`, and
-re-raises the original payload. The final handler therefore preserves the
-combined trace instead of only the shallow propagation site. The code is in
-`titan/coroutine.titan` (see [Coroutines](coroutines.md)). The non-raising
-`Coroutine:transfer` instead clears the slot and returns the staged trace as an
-ordinary string; the async driver appends its own propagation trace only for a
-Task failure that it reports ([coroutine entry](coroutines.md#entry-function)).
+propagation trace in the caller, appends it to the staged trace, and raises
+the original payload again with the combined string as its trace
+(`raise error, inner .. "\n" .. traceback`). The final handler therefore
+preserves the combined trace instead of only the shallow propagation site. The
+code is in `titan/coroutine.titan` (see [Coroutines](coroutines.md)). The
+non-raising `Coroutine:transfer` instead clears the slot and returns the staged
+trace as an ordinary string; the async driver appends its own propagation trace
+only for a Task failure that it reports
+([coroutine entry](coroutines.md#entry-function)).
 
 ### libbacktrace and frame merging
 
@@ -578,8 +594,10 @@ Ast.StatTry(loc, block, catchblock, nil)
 `defer` statements lower to `Ast.StatTry(loc, tail, nil, finallyblock)`; see
 [Defer](defer.md#parser-lowering).
 
-`raise <exp>` and bare `raise` parse as `Ast.StatRaise(loc, exp)`, where a nil
-`exp` means bare re-raise.
+`raise <exp>`, `raise <exp>, <trace>` and bare `raise` parse as
+`Ast.StatRaise(loc, exp, trace)`. A nil `exp` means bare re-raise and a nil
+`trace` means that the handler captures one. A comma needs a trace expression
+after it (`ExpRaiseTrace`), and a trace needs an error value before it.
 
 The catch clause body is a plain statement list, not a full trailer-consuming
 block. Every `case` arm and its optional `else` consume the ordinary full
@@ -613,9 +631,10 @@ and saved and reset across nested function bodies
 * `finally_loop_floor`: `break` inside a finally is an error unless its target
   loop was opened inside that finally.
 
-`raise <exp>` checks the expression normally and coerces it to `value`. It is
-allowed in a finally, because ordinary run-time errors can always occur during
-cleanup and must override pending control flow. `StatRaise` is non-fallthrough.
+`raise <exp>` checks the expression normally and coerces it to `value`. A
+trace operand is checked as a `string` sink. Both forms are allowed in a
+finally, because ordinary run-time errors can always occur during cleanup and
+must override pending control flow. `StatRaise` is non-fallthrough.
 
 The non-fallthrough rule for a try is:
 
@@ -938,6 +957,8 @@ from silently loading stale build artifacts.
 * `spec/checker/error_handling_spec.lua`: catch/finally scopes, bare raise
   legality, finally transfer bans, and non-fallthrough analysis.
 * `spec/coder/error_handling_spec.lua`: catch, fresh raise versus re-raise,
+  `raise <exp>, <trace>` (the given trace caught and uncaught, the one-shot
+  pin, the value kept while the trace expression collects),
   trace clearing, pending actions, finally override, nested finally order,
   sustained-OOM catch/defer recovery across functions, closures, and module
   initializers, GC-valued pending returns (including flexible tails),

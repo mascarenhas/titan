@@ -122,7 +122,7 @@ local function ready_tick(timer: uv.timer_t)
       fail_runtime(runtime, error, traceback)
     end
   end
-  if failed then rethrow_failure(runtime.failure) end
+  if failed then runtime.failure:raise() end
 end
 
 local function ready_closed(timer: uv.timer_t)
@@ -276,7 +276,7 @@ function loop()
             notify_runtime_closed(runtime)
             active_runtime = nil
             local failure? = runtime.failure
-            if failure ~= nil then rethrow_failure(failure) end
+            if failure ~= nil then failure:raise() end
             return
           end
           check_status(status, "runtime.loop.close")

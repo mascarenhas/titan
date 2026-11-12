@@ -44,7 +44,7 @@ local function listen_available(first_port: integer, reuse_port: boolean?):
           raise
         end
       else
-        raise error
+        raise
       end
     end
   end

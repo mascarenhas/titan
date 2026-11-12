@@ -144,9 +144,8 @@ and the preload helpers).
 | `lua_rawequal` | Net zero; primitive equality without `__eq`. |
 | `lua_next` | Pop the key; on success push the next key and value, on exhaustion push nothing. Raises for an invalid key. Copy surviving results to traced locals before restoring. |
 | `lua_getmetatable` | Push the metatable when present, otherwise push nothing; no `__metatable` lookup. |
-| `lua_setmetatable`, `luaL_setmetatable` | Pop and install a metatable (`luaL_` names a registry metatable and pops nothing). Installing a metatable with `__gc` marks the object for finalization. |
+| `lua_setmetatable` | Pop and install a metatable. Installing a metatable with `__gc` marks the object for finalization. |
 | `luaL_testudata` | Net zero; returns NULL when the slot is not userdata with the named registry metatable. |
-| `lua_newuserdatauv`, `lua_setiuservalue`, `lua_getiuservalue`, `lua_createtable` | Allocate and push userdata or a table, or pop/push a user value. May raise on allocation. |
 | `lua_getupvalue`, `lua_setupvalue` | `getupvalue` pushes one value when the upvalue exists, otherwise nothing. `setupvalue` pops and installs (with barrier) when the upvalue exists, otherwise returns NULL and pops nothing, so the caller removes the unused value. |
 | `lua_type`, `lua_typename`, `lua_isinteger`, `lua_toboolean`, `lua_tointegerx`, `lua_tonumberx`, `lua_tothread`, `lua_touserdata`, `lua_tocfunction`, `lua_topointer`, `ffi.lua_togco` | Net zero. Check the kind before extracting. Pointer results are borrowed and do not root their source; a `lua_topointer` result is identity-only. |
 | `lua_tolstring` | Net zero for a string slot; returns borrowed bytes valid while the slot stays rooted. Converting a number allocates and must be protected. |

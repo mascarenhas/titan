@@ -4,39 +4,10 @@
 
 foreign import "minicoro.h"
 foreign import "lua.h"
-foreign import "lauxlib.h"
 foreign import "titan.h"
 foreign import "titan/ffi.h"
+local gc = import "gc"
 
-foreign type VoidPointer = *void
-
-foreign type coro_entry_func = function (*lua_State, *Udata, *CClosure, TValue, *mco_coro): void
-
--- Implementation notes: doc/implementation/coroutines.md#entry-function
-local foreign function coro_entry_trampoline(co: *mco_coro)
-  -- Foreign bodies cannot read Titan module constants. These are the C-array
-  -- indices corresponding to the first four owner uservalues below.
-  const THREAD_UV_INDEX = 0
-  const MODULE_UV_INDEX = 1
-  const ENTRY_UV_INDEX = 2
-  const CALLBACK_UV_INDEX = 3
-  local owner = ffi.mco_get_user_data(co) as foreign *Udata
-  local T = ffi.lmacro_thvalue(owner.uv[THREAD_UV_INDEX].uv)
-  local module = ffi.lmacro_uvalue(owner.uv[MODULE_UV_INDEX].uv)
-  local callback = ffi.lmacro_clCvalue(owner.uv[ENTRY_UV_INDEX].uv)
-  local func = owner.uv[CALLBACK_UV_INDEX].uv
-  local entry = ffi.lmacro_pvalue(callback.upvalue[2]) as foreign coro_entry_func
-  -- The C shim installs the unwind floor below the entry on T.
-  ffi.titan_coroutine_enter(T, module, func, co, entry)
-end
-
-local TITAN_CORO_OWNER_USERVALUES = 6
-local TITAN_CORO_THREAD_USERVALUE = 1
-local TITAN_CORO_MODULE_USERVALUE = 2
-local TITAN_CORO_ENTRY_USERVALUE = 3
-local TITAN_CORO_CALLBACK_USERVALUE = 4
-local TITAN_CORO_TRANSFER_USERVALUE = 5
-local TITAN_CORO_RECORD_USERVALUE = 6
 local runtime = foreign mco_runtime.new()
 -- Transfer flags popped by pop_transfer_or_raise. TRANSFER_UNWIND is both the
 -- request coro_gc pushes into an abandoned chain and the final transfer of an
@@ -50,9 +21,35 @@ local pending_append_trace: string? = nil
 --- Opaque tagged coroutine created by coroutine.create; use async Tasks for scheduling.
 -- @usage coroutines.md
 record Coroutine
-  local udata: value -- just for GC rooting
+  -- The record owns its coroutine; minicoro's user data points back at it.
+  -- `handle` is nil before the native stack exists and after its finalizer
+  -- destroyed it. `pending` roots the one pending transfer, which minicoro
+  -- stores as bytes.
   local handle: foreign *mco_coro
   local default_tag: value
+  local thread: value
+  local entry: function (Coroutine)
+  local body: function (value): (value)
+  local pending: value
+end
+
+foreign type coro_entry_func = function (*lua_State, *Udata, *CClosure, *Udata): void
+
+-- Implementation notes: doc/implementation/coroutines.md#entry-function
+local foreign function coro_entry_trampoline(co: *mco_coro)
+  local owner = ffi.mco_get_user_data(co) as foreign *Udata
+  local T = ffi.lmacro_thvalue(ffi.titan_record_field(owner, "Coroutine", "thread"))
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "Coroutine", "entry"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign coro_entry_func
+  -- The C shim installs the unwind floor below the entry on T.
+  ffi.titan_coroutine_enter(T, module, owner, co, entry)
+end
+
+-- The record that owns `co`.
+local function owner_of(co: foreign *mco_coro): Coroutine
+  local owner: value = ffi.mco_get_user_data(co) as foreign *Udata
+  return owner as Coroutine
 end
 
 local function missing_tag()
@@ -85,20 +82,8 @@ local function root_transfer(co: foreign *mco_coro, payload: value)
   if not co then
     return
   end
-  local owner: foreign *Udata =
-    ffi.mco_get_user_data(co) as foreign *Udata
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 2) == 0 then
-    raise "cannot reserve Lua stack for coroutine transfer root"
-  end
-  ffi.lua_pushtvalue(L, owner)
-  ffi.lua_pushtvalue(L, payload)
-  local set = ffi.lua_setiuservalue(
-    L, -2, TITAN_CORO_TRANSFER_USERVALUE)
-  if set == 0 then
-    raise "cannot set coroutine transfer root"
-  end
+  local owner = owner_of(co)
+  owner.pending = payload
 end
 
 local function clear_transfer(co: foreign *mco_coro)
@@ -133,14 +118,6 @@ local function discard_transfer(source: foreign *mco_coro)
   end
 end
 
-local function reinstall_trace(trace: string)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve Lua stack for a trace" end
-  ffi.lua_pushtvalue(L, trace)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
-  ffi.lua_pushboolean(L, 1)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
-end
-
 local function stash_trace_for_append(trace: string)
   pending_append_trace = trace
 end
@@ -152,15 +129,11 @@ local function pop_trace_for_append(): string?
 end
 
 local function raise_with_appended_trace(err: value)
-  do
-    raise err
-  catch
-    local inner? = pop_trace_for_append()
-    if inner ~= nil then
-      reinstall_trace(inner .. "\n" .. traceback)
-    end
-    raise error
-  end
+  raise err
+catch
+  local inner? = pop_trace_for_append()
+  if inner ~= nil then raise error, inner .. "\n" .. traceback end
+  raise
 end
 
 local function transfer_source(co: foreign *mco_coro): foreign *mco_coro
@@ -254,16 +227,10 @@ function Coroutine:resume(arg: value, tag: value): value
     raise "coroutine.resume is unavailable in a synchronous callback"
   end
   local effective = effective_tag(self.default_tag, tag)
-  -- Implementation notes: doc/implementation/coroutines.md#reachability-of-a-stacked-chain
-  -- `self` is an unanchored formal: this frame roots the resumed coroutine
-  -- for the whole switch, whatever home the caller read it from.
-  local resumed: Coroutine? = self
   local co = self.handle
   local source = transfer_source(co)
   push_transfer(source, TRANSFER_VALUE, arg)
-  local result = resume_result_or_raise(co, source, effective)
-  resumed = nil
-  return result
+  return resume_result_or_raise(co, source, effective)
 end
 
 --- Resume a suspended coroutine by raising a value at its yield point.
@@ -277,13 +244,10 @@ function Coroutine:error(err: value, tag: value): value
     raise "coroutine.error is unavailable in a synchronous callback"
   end
   local effective = effective_tag(self.default_tag, tag)
-  local resumed: Coroutine? = self -- see Coroutine:resume
   local co = self.handle
   local source = transfer_source(co)
   push_transfer(source, TRANSFER_ERROR, err)
-  local result = resume_result_or_raise(co, source, effective)
-  resumed = nil
-  return result
+  return resume_result_or_raise(co, source, effective)
 end
 
 --- Transfer control without raising an uncaught callee error.
@@ -299,7 +263,6 @@ function Coroutine:transfer(payload: value, tag: value,
     raise "coroutine.transfer is unavailable in a synchronous callback"
   end
   local effective = effective_tag(self.default_tag, tag)
-  local resumed: Coroutine? = self -- see Coroutine:resume
   local co = self.handle
   local source = transfer_source(co)
   if inject_error then
@@ -310,7 +273,6 @@ function Coroutine:transfer(payload: value, tag: value,
   local failed, result = pop_transfer(resume_switch(co, source, effective))
   local trace: string? = nil
   if failed then trace = pop_trace_for_append() end
-  resumed = nil
   return failed, result, trace
 end
 
@@ -372,8 +334,8 @@ end
 -- The coroutine floor stays linked on the coroutine's own Lua thread from the
 -- entry's first instruction until it returns.
 local function coroutine_started(co: foreign *mco_coro): boolean
-  local owner = ffi.mco_get_user_data(co) as foreign *Udata
-  local thread = ffi.lmacro_thvalue(owner.uv[TITAN_CORO_THREAD_USERVALUE - 1].uv)
+  local owner: foreign TValue = owner_of(co).thread
+  local thread = ffi.lmacro_thvalue(owner)
   return thread.errorJmp ~= nil
 end
 
@@ -396,14 +358,12 @@ local function unwind_chain(handler: foreign *mco_coro)
 end
 
 -- Implementation notes: doc/implementation/coroutines.md#unwinding-an-abandoned-coroutine
-local function coro_gc(handle: value)
-  -- The owner stays pushed while lua_getiuservalue pushes the record.
-  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve Lua stack for a coroutine" end
-  ffi.lua_pushtvalue(L, handle)
-  local slot = ffi.lua_touserdata(L, -1) as foreign *(*mco_coro)
-  local co = slot[0]
+local function coro_gc(finalized: value)
+  local owner = finalized as Coroutine
+  local co = owner.handle
   if not co then
-    -- Already destroyed: this handle was resurrected and finalized again.
+    -- No native stack: it was never created, or this record was resurrected
+    -- and is finalized again.
     return
   end
   local status = ffi.mco_status(co)
@@ -417,10 +377,10 @@ local function coro_gc(handle: value)
         coroutine_started(handler) then
       if ffi.titan_no_switch(L) ~= 0 then
         -- Unwinding would switch stacks, which a synchronous callback cannot.
-        -- Setting the metatable again marks the owner for finalization once
-        -- more: the next collection outside a callback, or lua_close, unwinds
-        -- the chain.
-        ffi.luaL_setmetatable(L, "titan.coroutine")
+        -- Registering the finalizer again marks the record for finalization
+        -- once more: the next collection outside a callback, or lua_close,
+        -- unwinds the chain.
+        gc.finalizable<|value|>(finalized, coro_gc)
         return
       end
       unwind_chain(handler)
@@ -433,23 +393,17 @@ local function coro_gc(handle: value)
     -- request: leave the stack mapped rather than free live frames.
     return
   end
-  ffi.lua_getiuservalue(L, -1, TITAN_CORO_RECORD_USERVALUE)
-  local handle_record: value = ffi.lua_totvalue(L, -1)
   ffi.mco_destroy(co)
-  slot[0] = nil
-  if handle_record ~= nil then
-    local finalized = handle_record as Coroutine
-    finalized.handle = nil
-  end
+  owner.handle = nil
 end
 
-local function coro_entry(func: function (value): (value), co: foreign *mco_coro)
-  local arg = pop_transfer_or_raise(co, false)
-  local res = func(arg)
-  push_transfer(co, 1, res)
+local function coro_entry(owner: Coroutine)
+  local co = owner.handle
+  local res = owner.body(pop_transfer_or_raise(co, false))
+  push_transfer(co, TRANSFER_VALUE, res)
 catch
   stash_trace_for_append(traceback)
-  push_transfer(co, 0, error)
+  push_transfer(owner.handle, TRANSFER_ERROR, error)
 end
 
 --- Create a suspended coroutine without running its function.
@@ -458,43 +412,36 @@ end
 -- @return Stable public Coroutine handle.
 -- @usage coroutines.md
 function create(func: function (value): (value), default_tag: value): Coroutine
+  -- titan_newthread leaves the thread on the stack until the record holds it.
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 2) == 0 then
+  if ffi.lua_checkstack(L, 1) == 0 then
     raise "cannot reserve Lua stack for coroutine creation"
   end
-  local slot: foreign *(*mco_coro) = ffi.lua_newuserdatauv(
-    L, foreign VoidPointer.sizeof, TITAN_CORO_OWNER_USERVALUES)
-  local owner_index = ffi.lua_gettop(L)
   local _ = ffi.titan_newthread(L)
-  ffi.lua_setiuservalue(L, -2, TITAN_CORO_THREAD_USERVALUE)
-  ffi.lua_pushtvalue(L, M as foreign *Udata)
-  ffi.lua_setiuservalue(L, -2, TITAN_CORO_MODULE_USERVALUE)
-  ffi.lua_pushtvalue(L, coro_entry)
-  ffi.lua_setiuservalue(L, -2, TITAN_CORO_ENTRY_USERVALUE)
-  ffi.lua_pushtvalue(L, func)
-  ffi.lua_setiuservalue(L, -2, TITAN_CORO_CALLBACK_USERVALUE)
-  ffi.luaL_setmetatable(L, "titan.coroutine")
+  local co = Coroutine {
+    handle = nil,
+    default_tag = default_tag,
+    thread = ffi.lua_totvalue(L, -1),
+    entry = coro_entry,
+    body = func,
+    pending = nil,
+  }
+  -- Registered before the native stack exists, so none can outlive its
+  -- finalizer; coro_gc ignores a record without one.
+  gc.finalizable<|value|>(co, coro_gc)
 
   local desc = ffi.mco_desc_init(nil, ffi.TITAN_COROUTINE_STACK_SIZE as integer)
   desc.runtime = runtime
   desc.func = coro_entry_trampoline
-  desc.user_data = ffi.lua_togco(L, -1)
+  desc.user_data = co as foreign *void
 
-  local res = ffi.mco_create(slot, desc)
+  local handle: foreign *mco_coro = nil
+  local res = ffi.mco_create(handle, desc)
   if res ~= ffi.MCO_SUCCESS then
     raise "could not create coroutine: " .. (ffi.mco_result_description(res) as string)
   end
-
-  local co = Coroutine {
-    udata = ffi.lua_totvalue(L, owner_index),
-    handle = slot[0],
-    default_tag = default_tag,
-  }
-  ffi.lua_pushtvalue(L, co)
-  if ffi.lua_setiuservalue(L, owner_index, TITAN_CORO_RECORD_USERVALUE) == 0 then
-    raise "cannot set coroutine record root"
-  end
+  co.handle = handle
   return co
 end
 
@@ -505,34 +452,7 @@ function running(): Coroutine?
   -- A synchronous callback sees no current coroutine, even when it runs
   -- inside a binding that a coroutine called.
   if ffi.titan_no_switch(L) ~= 0 then return nil end
-  local coro = ffi.mco_get_user_data(runtime.current_co) as foreign *Udata
-  if coro then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    if ffi.lua_checkstack(L, 2) == 0 then
-      raise "cannot reserve Lua stack for running coroutine lookup"
-    end
-    ffi.lua_pushtvalue(L, coro)
-    ffi.lua_getiuservalue(L, -1, TITAN_CORO_RECORD_USERVALUE)
-    return ffi.lua_totvalue(L, -1) as value
-  end
-
-  return nil
-end
-
-do
-  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, "titan.coroutine")
-  local kind = ffi.lua_type(L, -1)
-  if kind == ffi.LUA_TNIL then
-    ffi.lua_settop(L, -2)
-    ffi.lua_createtable(L, 0, 2)
-    ffi.lua_pushstring(L, "titan.coroutine")
-    ffi.lua_setfield(L, -2, "__name")
-    ffi.lua_pushtvalue(L, coro_gc)
-    ffi.lua_setfield(L, -2, "__gc")
-    ffi.lua_pushvalue(L, -1)
-    ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "titan.coroutine")
-  elseif kind ~= ffi.LUA_TTABLE then
-    raise "invalid Titan coroutine metatable registry entry"
-  end
+  -- Outside a coroutine the user data is null, which boxes as nil.
+  local owner: value = ffi.mco_get_user_data(runtime.current_co) as foreign *Udata
+  return owner as Coroutine?
 end

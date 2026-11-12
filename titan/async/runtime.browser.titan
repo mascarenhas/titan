@@ -106,7 +106,7 @@ function loop()
       notify_runtime_closed(runtime)
       active_runtime = nil
       local failure? = runtime.failure
-      if failure ~= nil then rethrow_failure(failure) end
+      if failure ~= nil then failure:raise() end
       return
     end
     runtime.backend.relinquished = true

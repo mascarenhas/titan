@@ -9,7 +9,7 @@ catch
       "HTTPS retirement raised an unexpected TLS failure")
     return true
   end
-  raise error
+  raise
 end
 
 -- Adopted Exchange serving owns its next-request header deadline policy.

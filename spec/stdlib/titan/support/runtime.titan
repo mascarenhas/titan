@@ -3,8 +3,6 @@
 -- needs async operations starts one Task and pumps one Runtime explicitly.
 local async = import "async"
 local test = import "test"
-foreign import "lua.h"
-foreign import "titan/ffi.h"
 
 local type Body = function (): ()
 local type Cleanup = function (): ()
@@ -19,13 +17,6 @@ local record Session
 end
 
 local active_session: Session? = nil
-
-local function reinstall_trace(trace: string)
-  ffi.lua_pushtvalue(L, trace)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
-  ffi.lua_pushboolean(L, 1)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
-end
 
 local function remember_failure(session: Session, failure: value,
                                 failure_traceback: string,
@@ -93,8 +84,5 @@ local function run(body: Body)
   local status = task:status()
   test.assert(status:has_succeeded(),
               "async test supervisor ended " .. status:as_string())
-  if session.failed then
-    reinstall_trace(session.failure_traceback)
-    raise session.failure
-  end
+  if session.failed then raise session.failure, session.failure_traceback end
 end

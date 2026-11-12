@@ -6,31 +6,6 @@ local function assert_coroutine_lua_probe(source: string, label: string)
               label .. " failed: " .. output)
 end
 
-function test_lua_host_rejects_poisoned_coroutine_metatable(
-    _context: test.Context)
-  assert_coroutine_lua_probe([==[
-    local registry = debug.getregistry()
-    registry["titan.coroutine"] = "poisoned"
-    local ok, failure = pcall(require, "titan.coroutine")
-    assert(not ok)
-    assert(tostring(failure):find(
-      "invalid Titan coroutine metatable registry entry", 1, true),
-      tostring(failure))
-    assert(registry["titan.coroutine"] == "poisoned")
-  ]==], "poisoned coroutine metatable probe")
-end
-
-function test_lua_host_observes_complete_coroutine_metatable(
-    _context: test.Context)
-  assert_coroutine_lua_probe([==[
-    require "titan.coroutine"
-    local metatable = debug.getregistry()["titan.coroutine"]
-    assert(type(metatable) == "table")
-    assert(metatable.__name == "titan.coroutine")
-    assert(type(metatable.__gc) == "function")
-  ]==], "coroutine metatable publication probe")
-end
-
 function test_lua_host_roots_coroutine_payloads_and_tags_across_gc(
     _context: test.Context)
   assert_coroutine_lua_probe([==[

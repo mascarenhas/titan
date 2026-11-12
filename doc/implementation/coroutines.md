@@ -4,12 +4,12 @@ The `coroutine` standard module is split deliberately:
 
 * `titan/coroutine.titan` owns the public API and policy: tag defaults, current
   coroutine lookup, status strings, result-code checks, `resume` versus `error`,
-  the success/error payload convention, Lua-thread/userdata setup, traceback
-  handoff, and the transfer choreography around minicoro. It also defines the
-  exact `void (*)(mco_coro *)` entry as the source-defined
-  [`foreign function`](foreign-functions.md) `coro_entry_trampoline`, and
-  installs and clears pending-transfer roots through public Lua stack and
-  uservalue APIs plus the `lua_pushtvalue` bridge.
+  the success/error payload convention, Lua-thread setup, traceback handoff,
+  and the transfer choreography around minicoro. The `Coroutine` record is the
+  owner of each coroutine: its fields hold the Lua thread, the entry, the body
+  and the pending-transfer root. The module also defines the exact
+  `void (*)(mco_coro *)` entry as the source-defined
+  [`foreign function`](foreign-functions.md) `coro_entry_trampoline`.
 * `titan-runtime/minicoro.c` owns only what genuinely needs one C translation
   unit or a raw Lua-internal operation: it `#define`s `MCO_NO_DEBUG`,
   `MCO_USE_VMEM_ALLOCATOR`, `MCO_TAG_COMPARATOR minicoro_tag_equal`, and
@@ -42,37 +42,45 @@ through the coroutine boundary
 ## Public wrapper
 
 `titan/coroutine.titan` imports minicoro's struct layout plus the Lua and
-private helper headers:
+private helper headers, and `titan.gc` for the finalizer:
 
 ```titan
 foreign import "minicoro.h"
 foreign import "lua.h"
-foreign import "lauxlib.h"
+foreign import "titan.h"
 foreign import "titan/ffi.h"
+local gc = import "gc"
 ```
 
 The exported `Coroutine` record has local fields:
 
 ```titan
 record Coroutine
-  local udata: value
   local handle: foreign *mco_coro
   local default_tag: value
+  local thread: value
+  local entry: function (Coroutine)
+  local body: function (value): (value)
+  local pending: value
 end
 ```
 
-That keeps the Lua-visible record opaque while letting the module keep the raw
-handle. `udata` roots the full userdata that owns the minicoro allocation; its
-payload is an `mco_coro *` slot. The owner uses the private `"titan.coroutine"`
-metatable whose `__gc` finalizer (`coro_gc`) reads the payload through
-`lua_touserdata` and passes the pointer to `mco_destroy`. `handle` caches the
-pointer with its native C type, so normal operations use `self.handle`
-directly.
+That keeps the Lua-visible record opaque while it owns everything a coroutine
+needs. `handle` is the minicoro allocation; it is nil until `mco_create`
+succeeds and again after the finalizer destroys it. `thread` is the
+coroutine's Lua thread, `entry` is the module function `coro_entry`, `body` is
+the caller's function, and `pending` roots the one pending transfer.
+`mco_coro->user_data` points at the record's userdata, and `owner_of` turns
+that pointer back into the record (a `*Udata` boxes as its userdata, and the
+`as Coroutine` cast checks it), so no operation needs the Lua stack to find
+its owner.
 
-The module initializer builds that metatable off-registry, installs `__gc`, and
-only then publishes it under `"titan.coroutine"`, so an allocation failure
-during initialization never leaves a partially initialized canonical table in
-the registry. A pre-existing non-table entry is rejected.
+`create` registers `coro_gc` on the record with
+`gc.finalizable<|value|>(co, coro_gc)` before it calls `mco_create`. A record
+whose native stack was never created is finalized as a no-op, and no stack
+can exist without a finalizer. `coro_gc` takes `value`, so the canonical
+function is stored as it is and `create` allocates no adjustment closure. The
+module creates no metatable of its own and writes nothing to the registry.
 
 Because `minicoro.h` is imported directly, Titan reads the `mco_coro` fields it
 needs, such as `stacked_co`, without a C helper. FFI calls that need the calling
@@ -86,8 +94,8 @@ coroutine from the module-local `mco_runtime` object (see
 
 1. `Coroutine:resume` selects the current transfer source (`co->stacked_co`
    when present, otherwise `co`; `transfer_source`), roots `payload=arg` in that
-   source owner's fifth uservalue, pushes `payload=arg` and `ok=true`, and calls
-   `mco_resume` with the resolved tag.
+   source owner's `pending` field, pushes `payload=arg` and `ok=true`, and
+   calls `mco_resume` with the resolved tag.
 2. `Coroutine:error` follows the same path but pushes `ok=false` and
    `payload=err`.
 3. `coroutine.yield` reads `runtime.current_co`, pushes `payload=arg` and
@@ -97,7 +105,7 @@ coroutine from the module-local `mco_runtime` object (see
    deepest stacked coroutine.
 5. The helper (`pop_transfer`) pops `ok` and then `payload`. Generated FFI code
    refreshes the payload's Lua stack anchor immediately after the payload pop;
-   only then does the helper clear the source owner's fifth uservalue. Its
+   only then does the helper clear the source owner's `pending` field. Its
    caller `pop_transfer_or_raise` raises for `ok=false`. For `resume`/`error`,
    `ok=false` means the source coroutine died; the caller performs the
    [traceback handoff](#entry-function) and re-raises `payload`. For `yield`,
@@ -121,9 +129,9 @@ ffi.mco_pop(source, payload, foreign TValue.sizeof)
 When a C call mutates a stack-anchored `TValue` local through a mutable pointer
 argument, the FFI lowering refreshes that local's Lua stack anchor immediately
 after the call. A pending payload is also held in the exact source owner's
-fifth uservalue from before the first `mco_push` until that anchor refresh. This
-is the root across the control switch, dead-child stack clearing, and any GC
-check in the receiver's generated prologue; same-function placement of the
+`pending` field from before the first `mco_push` until that anchor refresh.
+This is the root across the control switch, dead-child stack clearing, and any
+GC check in the receiver's generated prologue; same-function placement of the
 switch and pops is not itself a GC guarantee.
 
 For tags, the module materializes the effective `value` as a local C `TValue`
@@ -131,53 +139,51 @@ and passes its address to minicoro's `void *` tag parameter
 (`local ctag: foreign TValue = tag; ffi.mco_resume(co, ctag)`). Minicoro treats
 the pointer opaquely and compares it before the control-transfer call returns.
 
-`root_transfer` implements the uservalue update in Titan. It recovers the exact
-owner userdata from `mco_get_user_data` into a `*Udata` local, saves
-`lua_gettop(L)` and restores it with `defer`, requires two stack slots with
-`lua_checkstack`, pushes the owner and payload with `lua_pushtvalue`, and sets
-owner uservalue 5 with `lua_setiuservalue`, which supplies Lua's backward GC
-barrier. `clear_transfer` calls it with nil, so installing and clearing share
-the checked ordering and stack-balance contract.
+`root_transfer` is one field assignment: it recovers the source's record with
+`owner_of` and stores the payload in `pending`, which supplies the write
+barrier. It cannot fail and uses no Lua stack. `clear_transfer` calls it with
+nil.
 
 The live values are held in ordinary Lua roots:
 
-* `Coroutine.udata` roots the owner userdata whose payload stores the
-  `mco_coro *`; `Coroutine.handle` is the same pointer and is not a GC root;
-* owner uservalues 1–4 root the child Lua thread, module state, native Titan
-  entry closure, and callback function;
-* uservalue 5 roots the one pending payload copied through that coroutine's
+* the `Coroutine` record's `thread`, `entry` and `body` fields root the child
+  Lua thread, the native Titan entry closure and the callback function;
+  `handle` is a raw pointer and not a GC root;
+* `pending` roots the one pending payload copied through that coroutine's
   minicoro storage, written before the payload push and cleared only after the
   payload has been popped and stack-anchored;
-* uservalue 6 roots the public `Coroutine` record so `running()` can recover
-  that exact handle. The record and owner form an ordinary traced cycle;
 * when the entry finishes, its child-thread frame roots the final
-  return/error payload until `push_transfer` installs the uservalue-5 root;
-* `mco_coro->user_data` points back to the owner userdata needed by
+  return/error payload until `push_transfer` installs the `pending` root;
+* an error that escapes the entry is delivered by the C floor, which leaves it
+  in a slot of the child thread's own stack until the resumer has popped it
+  (see [Unwinding an abandoned coroutine](#unwinding-an-abandoned-coroutine));
+* `mco_coro->user_data` points back to the record's userdata needed by
   `void (*func)(mco_coro *co)`; minicoro does not trace that raw pointer;
 * in-flight arguments, yielded values, errors, tags, and handles stay rooted by
-  the Titan formal parameters whose C stack frames minicoro suspends.
+  the callers of the Titan functions whose C stack frames minicoro suspends
+  ([calls](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
 
 There is no registry pin for coroutine handles. A reachable coroutine stays
-alive through ordinary reachability. The `Coroutine` record roots the owner, and
-the owner roots the child thread and callback. Nested `resume`/`yield` chains
-keep their outer frames suspended instead of unwinding them.
+alive through ordinary reachability: the record roots the child thread and the
+callback. Nested `resume`/`yield` chains keep their outer frames suspended
+instead of unwinding them.
 
 ### Reachability of a stacked chain
 
-`Coroutine:resume` and `Coroutine:error` copy `self` into a GC-typed local
-(`resumed`) before the switch and clear it afterwards. That local occupies a
-reserved slot of the resuming frame. `self` itself is an unanchored native
-formal ([values and GC](values-and-gc.md#2-home-roots-shadow-slots-and-borrowed-c-copies)).
-Without the local, a receiver read from a mutable field or captured local
-could be cleared by other code while the resumer is suspended in a stacked
-chain, and the stacked member's Lua thread would then be freed under its
-suspended frames.
+The caller of `Coroutine:resume`, `Coroutine:error` or `Coroutine:transfer`
+keeps the receiver reachable until the call returns, wherever it read the
+receiver from
+([calls](values-and-gc.md#calls-c-only-inputs-immediate-result-roots-and-vm-transport)).
+A receiver read from a mutable field or captured local therefore stays alive
+when other code clears that home while the resumer is suspended in a stacked
+chain, and the stacked member's Lua thread is not freed under its suspended
+frames. The methods keep no root of their own.
 
-With the local, the handler's thread roots its resume frame. That frame roots
-the next member, and so on down the chain, including through a resume made on
-a Lua coroutine thread, because that thread is itself rooted by its resumer's
-frame. A stacked member is therefore unreachable only when its handler's owner
-is unreachable too.
+So the handler's thread roots the frame that resumed the next member. That
+frame roots the next member, and so on down the chain, including through a
+resume made on a Lua coroutine thread, because that thread is itself rooted by
+its resumer's frame. A stacked member is therefore unreachable only when its
+handler's owner is unreachable too.
 
 An unreachable suspended coroutine is unwound by its finalizer, as described
 under [Unwinding an abandoned coroutine](#unwinding-an-abandoned-coroutine).
@@ -190,9 +196,9 @@ then the `ok` flag with `mco_push`, spelling the `value -> TValue` copy
 explicitly before the contextual address-of conversion to `const void *`. The
 receiver pops `ok` first and the payload second. Minicoro copies the struct
 bytes and never owns a Lua root for the referenced object, so the selected
-source owner's fifth uservalue is the protocol root for every pending transfer,
-including a nested transfer whose source is `stacked_co`. A nil payload is
-valid, so nil in that slot is not an occupancy signal.
+source owner's `pending` field is the protocol root for every pending
+transfer, including a nested transfer whose source is `stacked_co`. A nil
+payload is valid, so nil in that field is not an occupancy signal.
 
 Failure handling: on a failed first push the helper clears the root before
 raising the minicoro error. On a failed flag push it verifies that rolling back
@@ -203,41 +209,43 @@ storage removal has not been established.
 
 ## Entry function
 
-Each owner userdata holds six uservalues, selected by the
-`TITAN_CORO_*_USERVALUE` constants: the `lua_newthread` thread, the owning
-module state, the native Titan entry closure, the callback value, the pending
-transfer root, and the public `Coroutine` record. `create` stores the owner
-pointer in `mco_coro->user_data` and assigns `coro_entry_trampoline` directly to
-the descriptor's `func` field. The module slot holds `M as foreign *Udata`, the
-actual module userdata, so no closure-upvalue lookup is needed to recover it.
+`create` makes the Lua thread with `titan_newthread`, which leaves it on the
+stack, and builds the record with that thread, `coro_entry`, the callback and
+a nil transfer root; the stack transaction that anchors the new thread is the
+module's only one. It registers the finalizer, stores the record's userdata in
+the descriptor's `user_data` (`co as foreign *void`), assigns
+`coro_entry_trampoline` to the descriptor's `func` field, and stores the
+pointer that `mco_create` returns in `handle`.
 
-`coro_entry_trampoline` recovers the first four values from the owner with the
-typed Lua-internal bridges in `titan/ffi.h` (zero-based `uv[]` indices), reads
-the native entry from the entry closure's native-pointer upvalue, casts it to
-the exact source alias
+`coro_entry_trampoline` follows the libuv trampolines. It recovers the owner
+from `mco_get_user_data`, reads the `thread` and `entry` fields with
+`ffi.titan_record_field`, takes the module userdata and the native entry from
+the entry closure's upvalues, casts the entry to the exact source alias
 
 ```text
-foreign function (*lua_State, *Udata, *CClosure, TValue, *mco_coro): void
+foreign function (*lua_State, *Udata, *CClosure, *Udata): void
 ```
 
-and calls it directly with a nil `CClosure *`. The trampoline is raw C: it
-does not enter through a Lua-stack wrapper on each resume and installs no
-protected call. The trusted Titan entry, `coro_entry`, calls the callback
-through the normal function-value call path and contains failure with its
-function-level `catch`.
+and hands all of it to `titan_coroutine_enter`, which calls the entry with the
+owner and a nil `CClosure *`. The trampoline is raw C: it does not enter
+through a Lua-stack wrapper on each resume and installs no protected call.
+The owner needs no root there: the resumer's caller holds the record, or its
+finalizer does. The trusted Titan entry, `coro_entry(owner: Coroutine)`, calls
+`owner.body` through the normal function-value call path and contains failure
+with its function-level `catch`.
 
-On success, the entry pushes `ok=true` and the result (rooted in uservalue 5),
-clears the dead child stack, and returns control. On error, it stages the
-catch-local `traceback` in the module variable `pending_append_trace`
-(`stash_trace_for_append`) and pushes `(false, error)` the same way. The
-receiver clears uservalue 5 only after its successful pop has anchored the
-value.
+On success, the entry pushes `ok=true` and the result (rooted in the owner's
+`pending` field), clears the dead child stack, and returns control. On error,
+it stages the catch-local `traceback` in the module variable
+`pending_append_trace` (`stash_trace_for_append`) and pushes `(false, error)`
+the same way. The receiver clears `pending` only after its successful pop
+has anchored the value.
 
 When the wrapper observes `ok=false` after `resume` or `error`,
 `raise_with_appended_trace` raises and catches the payload locally to capture
-the propagation-side trace, combines it with the staged coroutine trace, pins
-it, and re-raises the same payload. The registry protocol is canonical in
-[Error handling](error-handling.md#trace-pinning).
+the propagation-side trace, combines it with the staged coroutine trace, and
+raises the same payload again with the combined trace
+(`raise <exp>, <trace>`; see [Error handling](error-handling.md#trace-pinning)).
 
 The public `Coroutine:transfer(payload, tag, inject_error)` runs the same
 finalizer check, tag resolution, receiver root, and
@@ -267,19 +275,12 @@ the transfer is consumed.
 
 `running(): Coroutine?` observes the module-local `runtime.current_co`.
 Minicoro updates that pointer during resume, tagged yield, stack restoration,
-and entry completion, so no separate registry or module variable is needed. A
-null pointer means no Titan coroutine is executing; `mco_get_user_data(NULL)`
-returns null and the result is nil.
-
-`create` stores the new `Coroutine` record in the owner's sixth uservalue with
-`lua_setiuservalue`, which supplies the GC write barrier. It reserves two
-temporary stack slots and restores the saved entry top with `defer`; an
-absolute owner index stays valid across record allocation and stack
-relocation. `running` recovers the owner with `mco_get_user_data`, pushes it,
-reads the sixth uservalue with `lua_getiuservalue`, and copies the result into a
-traced return value before restoring the saved top. It neither allocates a
-replacement record nor returns the private owner userdata, so Lua and Titan
-callers observe the same record identity.
+and entry completion, so no separate registry or module variable is needed.
+The current coroutine's user data is its `Coroutine` record, so `running`
+boxes that `*Udata` and returns it `as Coroutine?`: Lua and Titan callers
+observe the same record identity, and nothing is allocated or pushed. A null
+pointer means no Titan coroutine is executing; `mco_get_user_data(NULL)`
+returns null, which boxes as nil.
 
 ## Tagged minicoro
 
@@ -361,8 +362,11 @@ described above.
 
 ## Unwinding an abandoned coroutine
 
-`coro_gc` (`titan/coroutine.titan`) is the coroutine owner's `__gc`. A dead
-coroutine, or one that never started, is destroyed at once. A started coroutine
+`coro_gc` (`titan/coroutine.titan`) is the finalizer of the `Coroutine`
+record. A record without a handle has nothing to destroy: its native stack
+was never created, or an earlier finalization destroyed it and the record was
+resurrected. A dead coroutine, or one that never started, is destroyed at
+once. A started coroutine
 whose status is `MCO_SUSPENDED` or `MCO_STACKED` is first **unwound**, as if an
 error that nothing can catch were raised where it stopped. "Started" means the
 coroutine's Lua thread still has an error-recovery boundary, because the floor
@@ -384,9 +388,9 @@ then:
    stack in turn.
 
 When the handler finishes, `coro_gc` discards the handler's final transfer,
-destroys the finalized coroutine, and clears both the payload slot and
-`Coroutine.handle` (owner uservalue 6). A resurrected handle then reports
-`"dead"`, and `resume` raises `Invalid coroutine`.
+destroys the finalized coroutine, and sets `Coroutine.handle` to nil. A
+resurrected handle then reports `"dead"`, and `resume` raises
+`Invalid coroutine`.
 
 `coro_gc` leaves a coroutine mapped, which leaks it, in three cases: when it is
 still `RUNNING` or `NORMAL` because the state is closed from inside a
@@ -399,7 +403,9 @@ resume failed. That is safer than freeing live frames.
 (`titan-runtime/minicoro.c`), a narrow C shim. It links a
 `titan_unwind_floor` (`titan-runtime/titan.h`) as the first boundary of the
 coroutine's thread. The floor has status `TITAN_STATUS_FLOOR` and records the
-real bounds of the minicoro stack. Then the shim calls the generated entry.
+real bounds of the minicoro stack. Then the shim calls the generated entry
+with the owner record. The shim never reads the record, so it depends on no
+record layout.
 
 The landing first unlinks the floor and every abandoned boundary above it
 (`T->errorJmp = floor.lj.previous`), so a close method that raises or closes
@@ -435,7 +441,12 @@ native frame above the floor; cleanup must not inherit their C-call count.
 - On any other status outside an unwind, a self-close's close error or a real
   error that escaped `coro_entry`'s catch is delivered. The floor
   closes the frames with that error and delivers it to the resumer as
-  `(error, 0)`. It runs that close with itself re-armed as
+  `(error, 0)`. `luaD_seterrorobj` puts the error in a slot of the coroutine's
+  own thread, and the floor leaves the thread's top above that slot: the
+  thread's stack roots the error until the resumer has popped it, because the
+  owner record keeps the thread reachable, and the dead thread never runs
+  again. The two nil transfers need no root. It runs that close with itself
+  re-armed as
   `TITAN_STATUS_FLOOR`, like a finally boundary's
   [error-recovery close](error-handling.md#unwinding-through-finally): if a
   `__close` suspends the coroutine and it is then abandoned, the unwind lands
@@ -564,17 +575,18 @@ callback:
   before any state changes, so the coroutine stays as it was.
 - `running()` returns nil and `is_yieldable(tag)` returns false, which hides
   the coroutine whose binding the callback interrupted.
-- `coro_gc` does not unwind a started suspended or stacked coroutine. It calls
-  `luaL_setmetatable(L, "titan.coroutine")` on the owner it already pushed and
-  returns. Setting the metatable inside `__gc` marks the owner for
-  finalization again, because `udata2finalize` clears `FINALIZEDBIT` and
-  `luaC_checkfinalizer` moves the object back to `finobj`. The next collection
-  outside a callback calls `coro_gc` again, and it unwinds then. During
-  `lua_close`, `GCSTPCLS` makes `luaC_checkfinalizer` ignore a re-arm, so the
-  state close runs a re-armed finalizer once and ends. Finalizers run in
-  reverse marking order, so it runs before `titan.browser`'s state-record
-  finalizer. Dead and never-started coroutines are destroyed at once, as
-  before; `mco_destroy` does not switch for them.
+- `coro_gc` does not unwind a started suspended or stacked coroutine. It
+  registers itself on the record again with `gc.finalizable` and returns.
+  That call sets the record's metatable again, and setting a metatable inside
+  `__gc` marks the object for finalization once more, because
+  `udata2finalize` clears `FINALIZEDBIT` and `luaC_checkfinalizer` moves the
+  object back to `finobj`. The next collection outside a callback calls
+  `coro_gc` again, and it unwinds then. During `lua_close`, `GCSTPCLS` makes
+  `luaC_checkfinalizer` ignore a re-arm, so the state close runs a re-armed
+  finalizer once and ends. Finalizers run in reverse marking order, so it runs
+  before `titan.browser`'s state-record finalizer. Dead and never-started
+  coroutines are destroyed at once, as before; `mco_destroy` does not switch
+  for them.
 
 `gc.tests` checks the re-arm under the incremental and the generational
 collector. `lua.tests` checks that a closed independent state runs a re-armed
@@ -612,7 +624,7 @@ Unwinding has three layers:
   nested pair there, and checks that the state's `lua_close` runs each defer
   exactly once and no abandoned `catch` or continuation body.
   `spec/coder/browser_fixtures_spec.lua` builds the module, with `gc.tests`,
-  for the browser. The five Lua-host cases (`test_lua_host_*` and
+  for the browser. The three Lua-host cases (`test_lua_host_*` and
   `test_running_lua_host_preserves_identity`) live in the native contributor
   `lua_boundary_test.native.titan`, so the browser selection (the common
   contributors plus `close.browser.titan`) runs in the browser core stdlib

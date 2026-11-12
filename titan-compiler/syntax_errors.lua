@@ -223,6 +223,8 @@ local errors = {
 
     CatchBlock = "Expected a block after 'catch'.",
 
+    ExpRaiseTrace = "Expected a trace expression after ',' in 'raise'.",
+
     DeferStatement = "Expected a statement after 'defer'.",
 
     DeferDefer = "Expected a non-defer statement after 'defer'.",

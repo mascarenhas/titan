@@ -1308,7 +1308,7 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
         b_rx:receive()
       catch
         c_tx:send(true)
-        raise error
+        raise
       end
     end, ready_tx, block_rx, cancelled_tx)
 
@@ -1337,7 +1337,7 @@ function test_group_admission_suspension_and_active_sibling_cancellation(context
         b_rx:receive()
       catch
         c_tx:send(true)
-        raise error
+        raise
       end
     end, ready_tx, block_rx, cancelled_tx)
     test.assert(ready_rx:receive())

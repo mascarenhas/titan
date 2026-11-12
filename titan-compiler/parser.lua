@@ -1262,7 +1262,9 @@ local grammar_source = [[
                     / IF / CASE / FOR / LOCAL / CONST / expstart
     statement <- SEMICOLON / &DO doblock^EndBlock
                 / (P BREAK) -> StatBreak
-                / (P RAISE ((&expstart exp^ExpSimpleExp)? -> opt)) -> StatRaise
+                / (P RAISE ((&expstart exp^ExpSimpleExp
+                             ((COMMA exp^ExpRaiseTrace)? -> opt))
+                            / (('' -> tonil) ('' -> tonil)))) -> StatRaise
                 / (P DEFER (!DEFER / %{DeferDefer}) (!SEMICOLON / %{DeferStatement})
                    statement^DeferStatement) -> deferstat
                 / (P WHILE exp^ExpWhile DO^DoWhile block^Statement P END^EndWhile) -> whilestat

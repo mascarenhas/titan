@@ -278,7 +278,7 @@ statement ::= ';' | do block end
             | for decl {',' decl} in explist do block end
             | [local] const decllist '=' explist
             | local decllist ['=' explist]
-            | varlist '=' explist | break | raise [exp]
+            | varlist '=' explist | break | raise [exp [',' exp]]
             | defer statement | callstmt
 returnstat ::= return [explist] [';']
 casearm ::= when AnyName '(' [Name {',' Name}] ')' then block

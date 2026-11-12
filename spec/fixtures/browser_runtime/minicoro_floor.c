@@ -36,9 +36,9 @@ static void push_to_be_closed(lua_State *L) {
   lua_setmetatable(L, -2);
   lua_toclose(L, -1);
 }
-static void entry(lua_State *L, Udata *module, CClosure *closure, TValue func,
-                  struct mco_coro *co) {
-  (void)module; (void)closure; (void)func; (void)co;
+static void entry(lua_State *L, Udata *module, CClosure *closure,
+                  Udata *owner) {
+  (void)module; (void)closure; (void)owner;
   push_to_be_closed(L);
   push_to_be_closed(L);
   if (scenario == UNWIND) titan_unwind(L);
@@ -46,9 +46,7 @@ static void entry(lua_State *L, Udata *module, CClosure *closure, TValue func,
   lua_error(L);
 }
 static void trampoline(mco_coro *co) {
-  TValue func;
-  setnilvalue(&func);
-  titan_coroutine_enter(thread, NULL, func, co, entry);
+  titan_coroutine_enter(thread, NULL, NULL, co, entry);
 }
 static void run(lua_State *L, int which, int expected_ok, int with_error,
                 int without_error) {
@@ -60,9 +58,7 @@ static void run(lua_State *L, int which, int expected_ok, int with_error,
   scenario = which;
   closed_with_error = closed_without_error = suspended_in_close = 0;
   thread = lua_newthread(L);
-  lua_newuserdatauv(L, sizeof(void *), 6);
   desc.runtime = &runtime;
-  desc.user_data = uvalue(s2v(L->top.p - 1));
   assert(mco_create(&co, &desc) == MCO_SUCCESS);
   assert(mco_resume(co, &tag) == MCO_SUCCESS);
   if (which == RAISE_THEN_SUSPEND_IN_CLOSE) {
@@ -70,14 +66,18 @@ static void run(lua_State *L, int which, int expected_ok, int with_error,
     assert(mco_resume(co, &tag) == MCO_SUCCESS);
   }
   assert(mco_status(co) == MCO_DEAD);
+  /* The floor roots an escaped error in the dead coroutine's own thread. */
+  lua_gc(L, LUA_GCCOLLECT, 0);
   assert(mco_pop(co, &ok, sizeof ok) == MCO_SUCCESS);
   assert(mco_pop(co, &payload, sizeof payload) == MCO_SUCCESS);
   assert(ok == expected_ok);
   if (expected_ok == 0) {
     assert(ttisstring(&payload));
     assert(strstr(getstr(tsvalue(&payload)), "escaped entry error") != NULL);
+    assert(lua_gettop(thread) == 1 && lua_type(thread, 1) == LUA_TSTRING);
   } else {
     assert(ttisnil(&payload));
+    assert(lua_gettop(thread) == 0);
   }
   assert(closed_with_error == with_error);
   assert(closed_without_error == without_error);

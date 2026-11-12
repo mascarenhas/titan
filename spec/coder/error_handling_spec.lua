@@ -1483,6 +1483,112 @@ describe("catch", function()
         assert.match("OK", out)
     end)
 
+    it("raise <exp>, <trace> raises the value with the given trace, once", function()
+        local out = compile_and_run([[
+            local saved_error: value = nil
+            local saved_trace: string = ""
+
+            function deep(): integer
+                raise "deep-boom"
+                return 0
+            end
+            function capture(): string
+                deep()
+                return ""
+            catch
+                saved_error = error
+                saved_trace = traceback
+                return traceback
+            end
+            function rethrow()
+                raise saved_error, saved_trace
+            end
+            function caught(): string
+                rethrow()
+                return ""
+            catch
+                return traceback
+            end
+            function fresh(): integer
+                raise "fresh-error"
+                return 0
+            end
+        ]], [==[
+            local titan = require 'titan'
+            local original = test.capture()
+            assert(original:find("in test.deep", 1, true), original)
+
+            -- Uncaught: the handler keeps the given trace, not the raise site's.
+            local ok, err = pcall(test.rethrow)
+            assert(not ok and err == "deep-boom", "wrong value: " .. tostring(err))
+            local bt = titan.backtrace()
+            assert(bt:find("in test.deep", 1, true),
+                   "the given trace was not reported\n" .. bt)
+            assert(not bt:find("in test.rethrow", 1, true),
+                   "a trace was captured at the raise site\n" .. bt)
+
+            -- Caught: the catch's `traceback` is the given trace.
+            assert(test.caught() == original)
+
+            -- The pin lasts for one error: the next one gets its own trace.
+            local ok2, err2 = pcall(test.fresh)
+            assert(not ok2 and err2 == "fresh-error")
+            local bt2 = titan.backtrace()
+            assert(bt2:find("in test.fresh", 1, true)
+                   and not bt2:find("in test.deep", 1, true),
+                   "the given trace outlived its error\n" .. bt2)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
+    it("raise <exp>, <trace> keeps the value while the trace expression runs", function()
+        -- The trace expression clears the value's only other home and
+        -- collects. `make` returns an object with a finalizer and `collected`
+        -- collects and returns how many were finalized.
+        local out = compile_and_run([[
+            local type Make = function (): value
+            local type Count = function (): integer
+
+            record Holder
+                item: value
+            end
+
+            local function hold(make: Make): Holder
+                return Holder(make())
+            end
+
+            function run(make: Make, collected: Count): integer
+                local holder = hold(make)
+                local during = -1
+                do
+                    raise holder.item, (function (): string
+                        holder.item = nil
+                        during = collected()
+                        return "given-trace"
+                    end)()
+                catch
+                    if traceback ~= "given-trace" then return -2 end
+                    if error == nil then return -3 end
+                end
+                return during
+            end
+        ]], [==[
+            local finalized = 0
+            local function make()
+                return setmetatable({}, { __gc = function() finalized = finalized + 1 end })
+            end
+            local function collected()
+                collectgarbage("collect")
+                return finalized
+            end
+            local during = test.run(make, collected)
+            assert(during == 0, "the raised value was finalized while pending: " .. during)
+            print("OK")
+        ]==])
+        assert.match("OK", out)
+    end)
+
     it("a return out of a protected body works (errorjmp restored)", function()
         local out = compile_and_run([[
             function run(): integer

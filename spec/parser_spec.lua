@@ -5127,6 +5127,33 @@ function f(x: Choice) case x when some(v) then return end end]]))
             })
         end)
 
+        it("parses `raise <exp>, <trace>`", function()
+            assert_statements_ast([[ raise failure, saved .. "\n" .. more ]], {
+                { _tag = "Ast.StatRaise",
+                  exp = { _tag = "Ast.ExpVar" },
+                  trace = { _tag = "Ast.ExpConcat" } }
+            })
+            assert_statements_ast([[ raise "boom" ]], {
+                { _tag = "Ast.StatRaise", trace = nil }
+            })
+        end)
+
+        it("rejects a comma without a trace expression", function()
+            assert_program_syntax_error([[
+                function f(): nil
+                    raise "boom",
+                end
+            ]], "ExpRaiseTrace")
+        end)
+
+        it("rejects a trace without an error value", function()
+            assert_program_syntax_error([[
+                function f(): nil
+                    raise , "trace"
+                end
+            ]], "EndFunc")
+        end)
+
         it("parses a `do` block with only a catch", function()
             assert_statements_ast([[
                 do

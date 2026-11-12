@@ -134,11 +134,11 @@ Only after children retire are partial-message/input buffers cleared. A valid
 peer Close plus reciprocal output becomes normal message EOF; earlier
 transport loss remains abnormal. Immediate close skips protocol negotiation.
 
-A closed endpoint is not reclaimed by one collection. Each Task's coroutine
-owner userdata (`titan/coroutine.titan`) has a `__gc` metamethod and roots its
-thread, callback and `Coroutine` record in user values, and the callbacks
-capture `Work` and message state or TLS operation results. The first
-collection after release finalizes the owners while the graphs they reference
+A closed endpoint is not reclaimed by one collection. Each Task's `Coroutine`
+record (`titan/coroutine.titan`) has a finalizer and roots its thread and
+callback in its fields, and the callbacks capture `Work` and message state or
+TLS operation results. The first collection after release finalizes the
+records while the graphs they reference
 survive; a later cycle frees those graphs. Tests and diagnostics that check
 release must run several collections (or check a weak slot after settling)
 rather than assume single-cycle release.
