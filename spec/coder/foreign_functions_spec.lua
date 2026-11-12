@@ -802,6 +802,48 @@ describe("source-defined foreign functions", function()
         end)
     end)
 
+    it("keeps a body with zeroed automatic storage out of the source header", function()
+        -- Authored C may include the header before any C library header, and
+        -- an inline copy of these bodies would need memset, offsetof and
+        -- size_t there.
+        with_header([[
+            typedef struct ffi_pair { int left; int right; } ffi_pair;
+            typedef struct ffi_tail { int count; int items[]; } ffi_tail;
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                local foreign function object(): int
+                    local pair = foreign ffi_pair.new()
+                    return pair.left + pair.right
+                end
+
+                local foreign function flexible(): int
+                    local tail = foreign ffi_tail.new(2)
+                    return tail.count + tail.items[1]
+                end
+
+                local foreign function plain(input: int): int
+                    local doubled = input + input
+                    return doubled
+                end
+
+                function run(): integer
+                    return object() + flexible() + plain(21)
+                end
+            ]], [[
+                assert(test.run() == 42)
+            ]])
+            local generated = read_file("test.titan.h")
+            for _, name in ipairs({ "memset", "offsetof", "size_t",
+                    "_foreign_local_pair_", "_foreign_fam_pointer_tail_" }) do
+                assert.falsy(generated:find(name, 1, true), name)
+            end
+            -- A body without such storage keeps its inline copy.
+            assert.truthy(generated:find("_foreign_local_doubled_", 1, true))
+        end)
+    end)
+
     it("evaluates foreign elseif conditions lazily and once", function()
         with_header([[
             static int ffi_trace = 0;

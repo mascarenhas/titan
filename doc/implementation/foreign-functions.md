@@ -365,8 +365,12 @@ excludes public declarations, coverage-outlined functions, and functions with
 private native-record field layouts. It then skips an optional prefix of
 initialized local declarations and recognizes exactly three root shapes: one
 return; one `if` whose sole then and else statements return; or one returning
-`if` without else followed by one return. Header and module generation each
-recompute it; nothing is cached on the AST node.
+`if` without else followed by one return. A declaration with an
+[allocation plan](#allocation-and-recovery-storage) in that prefix excludes
+the function: its zeroed storage is rendered with `memset`, `offsetof` and
+`size_t`, and the header includes only the module's `.ffi.h`, so authored C
+that includes it first would not compile. Header and module generation each
+recompute the classification; nothing is cached on the AST node.
 
 ### Temporary headers during checking
 

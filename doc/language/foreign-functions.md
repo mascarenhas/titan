@@ -383,9 +383,11 @@ optional direct local declarations followed by exactly one of:
    return.
 
 For every other local foreign function the helper simply calls the
-out-of-line definition. Direct calls to public foreign functions always call
-the exported definition. The inline copy is an optimization/header-availability
-rule, not a C constant-expression promise.
+out-of-line definition; that includes a body that declares a
+[zeroed local](#zeroed-locals), whose storage the header could not declare
+without C library headers. Direct calls to public foreign functions always
+call the exported definition. The inline copy is an
+optimization/header-availability rule, not a C constant-expression promise.
 
 ## Native C names and ABI
 

@@ -691,6 +691,12 @@ function coder._foreign_function_is_inline(node)
     local stats = block.stats
     local first = 1
     while stats[first] and stats[first]._tag == "Ast.StatDecl" do
+        for _, decl in ipairs(stats[first].decls) do
+            -- Zeroed storage is rendered with memset, offsetof and size_t.
+            -- Authored C may include the source header before any C library
+            -- header, so such a body stays in the producer's C unit.
+            if decl._c_allocation_plan then return false end
+        end
         first = first + 1
     end
     local function return_block(candidate)
