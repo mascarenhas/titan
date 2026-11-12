@@ -128,9 +128,9 @@ binary-operator precedence table and its fold (`binary_start`, `binary_step`,
 `binary_finish`); and every action, so a foreign body has the AST of the same
 statements in an ordinary function.
 
-A body type is `ftype`: a `foreigntype`, guarded by lookaheads for the three
-ways a Titan type can begin there (`foreign`, `owned`, `{`) and for a trailing
-`?`.
+A body type is `ftype`: a `foreigntype`, guarded by lookaheads for the ways a
+Titan type can begin there (`foreign`, `owned`, and the `{` of an Array or Map
+type, alone or after `const` or `const?`) and for a trailing `?`.
 
 Each construct outside the subset is rejected by a labelled throw after a
 lookahead, `&RAISE %{ForeignRaise}` for example, placed where the ordinary
@@ -150,7 +150,7 @@ requires.
 | `ForeignIs`, `ForeignCountedCast` | `is`, `as T(n)` |
 | `ForeignOr`, `ForeignAnd`, `ForeignConcat`, `ForeignNot` | `or`, `and`, `..`, `not` |
 | `ForeignOption`, `ForeignReturnList` | `?` on a declaration or a type, a second return value |
-| `ForeignBodyForeign`, `ForeignBodyOwned`, `ForeignBodyTitanType` | `foreign`, `owned` or `{` where a body type starts |
+| `ForeignBodyForeign`, `ForeignBodyOwned`, `ForeignBodyTitanType` | `foreign`, `owned`, or an Array or Map type (`{`, `const {`, `const? {`) where a body type starts |
 
 The message of `ForeignBodyForeign` says to delete `foreign`. `catch` is
 tested after the statements of an `fblock`, where the ordinary `block` would

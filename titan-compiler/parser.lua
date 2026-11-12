@@ -1421,7 +1421,7 @@ local grammar_source = [[
               ((COLON ftype^TypeDecl)? -> opt)) -> declaration
     fdecllist <- (fresh fdecl^DeclLocal (COMMA fdecl^DeclParList)*) ~> append
     ftype <- (&FOREIGN %{ForeignBodyForeign} / &OWNED %{ForeignBodyOwned}
-              / &LCURLY %{ForeignBodyTitanType} / foreigntype)
+              / &(LCURLY / CONST OPT? LCURLY) %{ForeignBodyTitanType} / foreigntype)
              (&OPT %{ForeignOption})?
 
     fexp <- &expstart (((fe11^ExpSimpleExp -> binary_start)

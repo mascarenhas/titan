@@ -3728,6 +3728,8 @@ function f(x: Choice) case x when some(v) then return end end]]))
                 { "local y: owned *int = p", "ForeignBodyOwned", 2, 10 },
                 { "local y: {integer} = p", "ForeignBodyTitanType", 2, 10 },
                 { "local y = p as {integer: string}", "ForeignBodyTitanType", 2, 16 },
+                { "local y: const {integer} = p", "ForeignBodyTitanType", 2, 10 },
+                { "local y = p as const? {integer}", "ForeignBodyTitanType", 2, 16 },
             }
             for _, case in ipairs(rejected) do
                 local ast, err = parser.parse("(parser_spec)",

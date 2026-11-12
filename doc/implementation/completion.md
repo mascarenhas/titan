@@ -29,8 +29,12 @@ that prefix, it also follows the `:` of an annotation and the `as` of a cast:
 `local x = p as const *unsigned lo|ng long` replaces the same leaf, and the
 context is `foreign`. `prepare` finds the enclosing foreign function from the
 tokens before the caret: a `foreign function Name` opens one, and the block
-keywords (`if`, `do`, `repeat`, `until`, `end`) close it; a `function (` type
-and a member name after `.` are not block keywords. Import-string completion
+keywords (`if`, `do`, `repeat`, `until`, `end`) close it. A reserved word
+written as a name does not count. It is a name before `=`, where it names an
+argument (`end = 5`), and after a token that a name or a type follows: `.`,
+`:`, `,`, `(`, `{`, `*`, `as`, `const`, `foreign` or `function`. That covers a
+member, a function or a C type called `end` or `repeat`, and `foreign` as a
+member or before a C type in ordinary code. Import-string completion
 returns `kind = "import"`, the literal's contents as its replacement span, and
 unchanged source; the host uses its captured eligible module catalog.
 
