@@ -34,6 +34,26 @@ local function read_file(path)
     return contents
 end
 
+-- Compiles authored C that includes one generated header before anything
+-- else, then uses it.
+local function assert_compiles_alone(header, use)
+    local caller = temporary.name(".c")
+    local file = assert(io.open(caller, "wb"))
+    assert(file:write('#include "' .. lfs.currentdir() .. "/" .. header .. '"\n'
+        .. use .. "\n"))
+    assert(file:close())
+    local argv = {}
+    for word in driver.CC:gmatch("%S+") do argv[#argv + 1] = word end
+    for _, word in ipairs({ "-fsyntax-only",
+            "-Werror=implicit-function-declaration",
+            "-Werror=incompatible-pointer-types", caller }) do
+        argv[#argv + 1] = word
+    end
+    local result = compiler_io.new_sync():run(argv)
+    os.remove(caller)
+    assert.is_true(result.ok, result.output)
+end
+
 local function cleanup()
     for _, path in ipairs({
         "test.c", "test.o", "test.so", "test.a", "test.titan.h", "test.ffi.h",
@@ -803,20 +823,21 @@ describe("source-defined foreign functions", function()
         end)
     end)
 
-    it("lets authored C include the source header before any other header", function()
-        -- The header includes only the module's `.ffi.h`, so an inline copy
-        -- may name only what C itself and the module's own headers declare.
-        -- The fixture has one function for each lowering of a body with an
-        -- inline shape. `forwarded` lists those whose lowering names a C
-        -- library or runtime symbol (memset, offsetof and size_t for zeroed
-        -- storage, titan_cast_func for a cast between a function pointer and
-        -- `void *`, HUGE_VAL for a non-finite float); they keep a forwarder.
-        -- Add a function here with every new lowering.
+    it("lets authored C include a generated header before any other header", function()
+        -- The source header includes only the module's `.ffi.h`, so an inline
+        -- copy may name only what C itself and the module's own headers
+        -- declare. The fixture has one function for each lowering of a body
+        -- with an inline shape. `forwarded` lists those whose lowering names
+        -- a C library or runtime symbol (memset, offsetof and size_t for
+        -- zeroed storage, titan_cast_func for a cast between a function
+        -- pointer and `void *`, HUGE_VAL for a non-finite float); they keep a
+        -- forwarder. Add a function here with every new lowering.
         local inline = { "nil_return", "nil_local", "nil_compare", "state",
-            "truth", "size", "align", "least", "text", "text_local",
-            "arithmetic", "bits", "negate", "compare", "widen", "narrow",
-            "index", "member", "call_pointer", "call_local", "call_public",
-            "reference", "constant", "twice", "plain" }
+            "apply_state", "truth", "size", "align", "least", "text",
+            "text_local", "arithmetic", "bits", "negate", "compare", "widen",
+            "narrow", "index", "member", "distance", "call_pointer",
+            "call_local", "call_public", "reference", "constant", "twice",
+            "plain" }
         local forwarded = { "object", "flexible", "erase", "restore",
             "infinite", "negative_infinite" }
         with_header([[
@@ -826,6 +847,7 @@ describe("source-defined foreign functions", function()
             h.run_coder([[
                 foreign import "]] .. header .. [["
                 foreign type Callback = function (int): int
+                foreign type StateCallback = function (*lua_State): int
 
                 local foreign function object(): int
                     local pair = foreign ffi_pair.new()
@@ -949,6 +971,14 @@ describe("source-defined foreign functions", function()
                     return callback(input)
                 end
 
+                local foreign function distance(first: *int, last: *int): long
+                    return last - first
+                end
+
+                local foreign function apply_state(callback: StateCallback, L: *lua_State): int
+                    return callback(L)
+                end
+
                 local foreign function call_local(input: int): int
                     return twice(input)
                 end
@@ -1003,21 +1033,39 @@ describe("source-defined foreign functions", function()
                 assert.truthy(helper_body(name):find("_" .. name .. "_titan(", 1, true), name)
             end
 
-            local caller = temporary.name(".c")
-            local file = assert(io.open(caller, "wb"))
-            assert(file:write('#include "' .. lfs.currentdir() .. '/test.titan.h"\n'
-                .. "int authored_caller(void) { return 1; }\n"))
-            assert(file:close())
-            local argv = {}
-            for word in driver.CC:gmatch("%S+") do argv[#argv + 1] = word end
-            for _, word in ipairs({ "-fsyntax-only",
-                    "-Werror=implicit-function-declaration", caller }) do
-                argv[#argv + 1] = word
-            end
-            local result = compiler_io.new_sync():run(argv)
-            os.remove(caller)
-            assert.is_true(result.ok, result.output)
+            assert_compiles_alone("test.titan.h",
+                "int authored_caller(void) { return 1; }")
+            -- The `.ffi.h` declares the tag its alias names, so the alias
+            -- takes the `struct lua_State *` that authored C writes.
+            assert_compiles_alone("test.ffi.h",
+                "int authored_state(StateCallback callback, struct lua_State *state)"
+                .. " { return callback(state); }")
         end)
+    end)
+
+    it("gives a foreign type alias and an inline body one lua_State", function()
+        -- No signature names the tag here. The alias in `.ffi.h` and the
+        -- cast in the copied body must still mean the same type.
+        h.run_coder([[
+            foreign type StateCallback = function (*lua_State): int
+
+            local foreign function invoke(callback: StateCallback, raw: *void): int
+                return callback(raw as *lua_State)
+            end
+
+            foreign function entry(callback: StateCallback, raw: *void): int
+                return invoke(callback, raw)
+            end
+
+            function run(): integer
+                return 1
+            end
+        ]], [[
+            assert(test.run() == 1)
+        ]])
+        -- The body is a copy: the cast is in the header.
+        assert.truthy(read_file("test.titan.h"):find("(struct lua_State *)", 1, true))
+        assert_compiles_alone("test.titan.h", "int authored_caller(void) { return 1; }")
     end)
 
     it("evaluates foreign elseif conditions lazily and once", function()

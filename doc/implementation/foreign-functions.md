@@ -392,8 +392,12 @@ pointer and `void *`, which is rendered with `titan_cast_func` of
 module's own declarations. `nil` is `((void *)0)`, not the `NULL` of
 `stddef.h`. The built-in `lua_State` of a module that does not import `lua.h`
 is rendered by its tag, and a tag first written in a parameter list is scoped
-to that one declaration, so when a declaration names it `render_foreign_header`
-declares `struct lua_State;` before the header's includes. Any lowering added
+to that one declaration. Each generated header that names the tag therefore
+declares `struct lua_State;` at file scope first
+(`ffiheaders.names_state_tag`): the `.ffi.h` before its typedefs, and the
+source header before its includes, when a prototype or a copied body names
+it. The declaration is derived from the rendered text, so the stored `.ffi.h`
+plan does not change. Any lowering added
 to the raw-C path that names a C library or runtime symbol belongs in the
 predicate, and a function that uses the new lowering belongs in the fixture of
 `spec/coder/foreign_functions_spec.lua` that compiles the header alone.

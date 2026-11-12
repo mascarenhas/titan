@@ -1386,12 +1386,11 @@ local function render_foreign_header(modname, ast, tlcontext, header_paths,
         "#define " .. guard,
         "",
     }
-    -- The built-in `lua_State` of a module that does not import lua.h is
-    -- rendered by its tag. A tag first written in a parameter list is scoped
-    -- to that one declaration, so a prototype and its definition would name
-    -- two types. Declare the tag at file scope before anything names it.
-    if table.concat(declarations, "\n"):find("struct lua_State", 1, true) then
-        prefix_lines[#prefix_lines + 1] = "struct lua_State;\n"
+    -- See ffiheaders.names_state_tag. The tag goes before the includes, so
+    -- that it also precedes the module's `.ffi.h`.
+    if ffiheaders.names_state_tag(table.concat(declarations, "\n"))
+       or ffiheaders.names_state_tag(table.concat(inline_bodies, "\n")) then
+        prefix_lines[#prefix_lines + 1] = ffiheaders.STATE_TAG_DECLARATION .. "\n"
     end
     local prefix = table.concat(prefix_lines, "\n")
     local body = table.concat({
