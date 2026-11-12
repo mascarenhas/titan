@@ -314,9 +314,15 @@ local function start_idle_timeout_tls(first_port: integer): async.Task
       handled = handled + 1
       response:set_header("Content-Length", "0")
     end
-    local server, port = support.https_listen(first_port, handler, 30)
+    -- The header deadline starts at accept and also covers the lazy TLS
+    -- handshake, which takes several event-loop turns. A process descheduled
+    -- for longer than the deadline therefore loses a connection before its
+    -- request arrives. Keep the deadline well above such stalls and well
+    -- below the watchdog of expect_tls_timeout.
+    const idle_timeout = 100
+    local server, port = support.https_listen(first_port, handler, idle_timeout)
     defer server:close()
-    test.assert(server:idle_timeout(nil) == 30,
+    test.assert(server:idle_timeout(nil) == idle_timeout,
           "HTTPS listener did not retain its idle timeout")
     local serving = async.run<|value, value|>(function (): value
       server:serve()

@@ -123,25 +123,20 @@ async function executeRow(context, row, degraded, recordCost, profile) {
     "titan.coroutine.coro_entry_trampoline"]);
   const asyncRuntimeFrame = frame => asyncRuntimeFiles.has(frame.file) &&
     (asyncRuntimeNames.has(frame.name) || /^anonymous function at (?:.*[/\\])?async[.]titan:[0-9]+$/.test(frame.name));
-  // D23: a production image may inline minicoro's C titan_coroutine_enter into
-  // the coroutine trampoline. Its frame then shows that C callee's own
-  // location under the trampoline's name, the inlining rendering of D32 with
-  // a C callee, and carries a line exactly where Titan frames do.
-  const inlinedRuntimeC = /^(minicoro[.]c)(?::([0-9]+))?: in (titan[.]coroutine[.]coro_entry_trampoline)$/;
-  function inlinedRuntimeFrame(line) {
-    const match = inlinedRuntimeC.exec(line);
-    if (!match || (webkit ? match[2] !== undefined : !(Number(match[2]) > 0))) return undefined;
-    return {file: match[1], line: match[2] === undefined ? undefined : Number(match[2]), name: match[3], text: line};
-  }
+  // A production image inlines minicoro's C titan_coroutine_enter into the
+  // coroutine trampoline. A PC in that C has no `.titan` location, so the
+  // trampoline's frame has the no-line form on every engine (titan#382).
+  const inlinedTrampoline = "coroutine.titan: in titan.coroutine.coro_entry_trampoline";
+  const mayLackLine = line => orderedSubsequence && line === inlinedTrampoline;
   const programs = {
-    uncaught: {file: "trace_uncaught.titan", entry: "trace_uncaught.main", inlinedC: false,
+    uncaught: {file: "trace_uncaught.titan", entry: "trace_uncaught.main",
       trailing: () => false, frames: [
         ["trace_uncaught.titan", 4, "trace_uncaught.uncaught_leaf"],
         ["trace_uncaught.titan", 8, "trace_uncaught.uncaught_middle"],
         ["trace_uncaught.titan", 16, "trace_uncaught.main"],
       ]},
-    async_uncaught: {file: "trace_async.titan", entry: "trace_async.main", inlinedC: true,
-      trailing: frame => asyncRuntimeFrame(frame) || frame.file === "minicoro.c", frames: [
+    async_uncaught: {file: "trace_async.titan", entry: "trace_async.main",
+      trailing: asyncRuntimeFrame, frames: [
         ["trace_async.titan", 7, "trace_async.async_leaf"],
         ["trace_async.titan", 11, "trace_async.async_middle"],
         ["trace_async.titan", 16, "trace_async.main"],
@@ -149,7 +144,8 @@ async function executeRow(context, row, degraded, recordCost, profile) {
   };
   // The program-row oracle: the first way `trace` breaks the contract, or
   // undefined. Every line is a Titan frame, a `[C]` or Lua frame, or a
-  // documented marker; a production async row may also show the D23 frame.
+  // documented marker, and outside WebKit every Titan frame has a line,
+  // except the inlined trampoline of a production image.
   // The program's own frames come first and end at its entry, which is
   // called from C or by the async bootstrap through a function value and so
   // is never inlined away; only `program.trailing` frames follow. Test images
@@ -160,12 +156,14 @@ async function executeRow(context, row, degraded, recordCost, profile) {
   function programViolation(program, trace) {
     const shown = [], unexplained = [];
     for (const line of trace.split("\n")) {
-      const frame = titanFrameLines(line)[0] ||
-        (program.inlinedC && orderedSubsequence ? inlinedRuntimeFrame(line) : undefined);
+      const frame = titanFrameLines(line)[0];
       if (frame) shown.push(frame);
       else if (line.length > 0 && !acceptedNonTitan(line)) unexplained.push(line);
     }
     if (unexplained.length > 0) return "program trace has unparsed lines: " + unexplained.join(" | ");
+    const unlocated = webkit ? undefined :
+      shown.find(frame => frame.line === undefined && !mayLackLine(frame.text));
+    if (unlocated) return "program frame has no line: " + unlocated.text;
     const count = shown.findIndex(frame => frame.file !== program.file);
     const ownFrames = shown.slice(0, count < 0 ? shown.length : count);
     if (ownFrames.length === 0) return "program trace does not start with its own frames";
@@ -216,7 +214,7 @@ async function executeRow(context, row, degraded, recordCost, profile) {
       "trace exposed internal/false location: " + label + "\n" + trace);
     for (const line of trace.split("\n")) {
       const match = /^([^:\n]+\.titan)(?::([0-9]+))?: in /.exec(line);
-      if (match) context.assert(webkit ? match[2] === undefined : Number(match[2]) > 0,
+      if (match) context.assert(webkit ? match[2] === undefined : Number(match[2]) > 0 || mayLackLine(line),
         "wrong execution-line fidelity on " + context.engine + ": " + line);
     }
     if (label === "nested_held") {
@@ -234,17 +232,20 @@ async function executeRow(context, row, degraded, recordCost, profile) {
           expectedFrames: program.frames.map(([file, line, name]) => exactFrame(file, line, name))});
       }
       // Oracle negatives: the same trace without its entry frame, with an
-      // unrelated Titan frame after its last one, or with the D23 C location
-      // under any other runtime name, must be rejected.
+      // unrelated Titan frame after its last one, or, where frames have
+      // lines, with a runtime frame other than the trampoline lacking one,
+      // must be rejected.
       const lines = trace.split("\n");
       const last = lines.findLastIndex(line => titanFrameLines(line).length > 0);
       const appended = extra => [...lines.slice(0, last + 1), extra, ...lines.slice(last + 1)].join("\n");
       const negatives = {
         "a trace without its entry frame": lines.filter(line => !line.endsWith(": in " + program.entry)).join("\n"),
         "an unrelated trailing Titan frame": appended(exactFrame("unrelated.titan", 1, "unrelated.saved_resumer")),
-        "an inlined C location under another runtime name": appended(
-          `minicoro.c:${webkit ? "" : "66:"} in titan.async.loop`),
       };
+      if (!webkit) {
+        negatives["a runtime frame without a line other than the trampoline"] =
+          appended("coroutine.titan: in titan.coroutine.coro_entry");
+      }
       for (const [what, mutated] of Object.entries(negatives)) {
         context.assert(programViolation(program, mutated) !== undefined, `${label} oracle accepted ${what}:\n${mutated}`);
       }

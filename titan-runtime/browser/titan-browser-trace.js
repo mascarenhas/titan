@@ -10,6 +10,8 @@ addToLibrary({
 
     u32(value) { return Number.isInteger(value) && value >= 0 && value <= 0xffffffff; },
     basename(path) { return path.replace(/\\/g, '/').split('/').pop() || '?'; },
+    // A frame names a `.titan` location or none.
+    titan(path) { return path.endsWith('.titan'); },
     upper(array, value) {
       var lo = 0, hi = array.length;
       while (lo < hi) {
@@ -102,10 +104,13 @@ addToLibrary({
       };
       var count = walk(null);
       var pcs = new Uint32Array(count), sources = new Int32Array(count), lines = new Uint32Array(count);
+      // A body is declared in its first `.titan` source: C that is inlined
+      // into a Titan body, even before its first statement, declares nothing.
+      var titan = map.sources.map(path => self.titan(path));
       walk(function(i, pc, source, line) {
         pcs[i] = pc; sources[i] = source; lines[i] = line;
         var body = self.upper(starts, pc);
-        if (source >= 0 && body >= 0 && pc < ends[body] && first[body] < 0) first[body] = source;
+        if (source >= 0 && titan[source] && body >= 0 && pc < ends[body] && first[body] < 0) first[body] = source;
       });
       return { pcs, sources, lines, starts, ends, first, imports,
         names: names.slice(), bases: map.sources.map(self.basename),
@@ -128,8 +133,11 @@ addToLibrary({
       var line = 0;
       if (body >= 0 && (!(flags & 2) || index === map.imports + body)) {
         var segment = self.upper(map.pcs, pc);
+        // Only a `.titan` segment locates the frame. A PC in C that was
+        // inlined into the body keeps the declaring basename and no line.
         if (segment >= 0 && map.pcs[segment] >= map.starts[body] &&
-            map.pcs[segment] < map.ends[body] && map.sources[segment] >= 0) {
+            map.pcs[segment] < map.ends[body] && map.sources[segment] >= 0 &&
+            self.titan(map.bases[map.sources[segment]])) {
           base = map.bases[map.sources[segment]]; line = map.lines[segment];
         }
       }

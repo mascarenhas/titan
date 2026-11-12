@@ -233,6 +233,37 @@ test('validated lookup respects bodies, boundaries, gaps, indexes and no-PC iden
     assert.equal(api.lookup(120, 2, 3).symbol, 'dynCall_v');
 });
 
+test('a frame takes its file and line from .titan segments only', () => {
+    // Body 1 (100..120): C inlined before the first statement (minicoro.c:66),
+    // the body's own line (coroutine.titan:44), then inlined C again.
+    // Body 2 (120..130): its own line (coroutine.titan:10), then Titan code
+    // inlined from another file (other.titan:5). Body 3 (140..160): C only.
+    const {api} = adapter({data: map({
+        sources: ['path/coroutine.titan', 'runtime/minicoro.c', 'path/other.titan'],
+        mappings: [[100, 1, 65, 0], [5, -1, -22, 0], [5, 1, 22, 0],
+            [10, -1, -56, 0], [5, 2, -5, 0], [15, -1, -4, 0]]
+            .map(row => row.map(vlq).join('')).join(','),
+        x_titan_function_names: [null, 'trampoline_titan', 'caller_titan', 'c_helper'],
+    })});
+    for (const [pc, index, flags, base, line] of [
+        // A PC in inlined C: the declaring basename and no line, also when
+        // the C comes first in the body.
+        [100, 1, 3, 'coroutine.titan', 0], [112, 1, 3, 'coroutine.titan', 0],
+        [105, 1, 3, 'coroutine.titan', 44], [0, 1, 2, 'coroutine.titan', 0],
+        // Titan code inlined from another file keeps its own file and line.
+        [121, 2, 3, 'coroutine.titan', 10], [126, 2, 3, 'other.titan', 5],
+        [0, 2, 2, 'coroutine.titan', 0],
+        // A body with no .titan segment declares nothing.
+        [145, 3, 3, '?', 0], [0, 3, 2, '?', 0],
+    ]) {
+        const result = api.lookup(pc, index, flags);
+        assert.equal(result.base, base, `base at ${pc}/${index}/${flags}`);
+        assert.equal(result.line, line, `line at ${pc}/${index}/${flags}`);
+    }
+    assert.equal(api.lookup(112, 1, 3).symbol, 'trampoline_titan');
+    assert.equal(api.lookup(145, 3, 3).symbol, 'c_helper');
+});
+
 for (const [name, overrides] of [
     ['extensions absent', {x_titan_image: undefined}], ['identity mismatch', {x_titan_image: 'b'.repeat(64)}],
     ['overlapping bodies', {x_titan_function_ranges: [[100, 121], [120, 130], [140, 160]]}],
@@ -453,7 +484,7 @@ test('pinned emcc empty sourcesContent table needs no source text', () => {
     assert.throws(() => api.buildIndex(map({sourcesContent: ['only one source']}), identity));
 });
 
-test('C merge retains entry and known-name identity despite runtime/Lua basenames', {
+test('C merge keeps entry and known names and drops symbols with no .titan source', {
     skip: !process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE,
 }, async () => {
     const image = resolve(process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE);

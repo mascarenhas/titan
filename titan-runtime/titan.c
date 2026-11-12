@@ -692,6 +692,14 @@ void titan_invalidate_backtrace_state(lua_State *L) {
 #endif
 
 #if defined(TITAN_HAVE_LIBBACKTRACE) || defined(TITAN_TARGET_BROWSER)
+/* TITAN_ENTRY_TAG must match coder.lua's: every generated Lua entry-wrapper C
+** symbol carries this substring, marking a Lua->Titan boundary in the native
+** stack. (The native functions a wrapper invokes are *_titan / *_titanstatic /
+** *_titanmethod / *_boundmethod and do NOT contain it.) */
+#define TITAN_ENTRY_TAG "titanentry"
+#endif
+
+#ifdef TITAN_HAVE_LIBBACKTRACE
 static const char *titan_basename(const char *path) {
     const char *slash = path ? strrchr(path, '/') : NULL;
 #if defined(_WIN32)
@@ -701,12 +709,6 @@ static const char *titan_basename(const char *path) {
 #endif
     return slash ? slash + 1 : path;
 }
-
-/* TITAN_ENTRY_TAG must match coder.lua's: every generated Lua entry-wrapper C
-** symbol carries this substring, marking a Lua->Titan boundary in the native
-** stack. (The native functions a wrapper invokes are *_titan / *_titanstatic /
-** *_titanmethod / *_boundmethod and do NOT contain it.) */
-#define TITAN_ENTRY_TAG "titanentry"
 
 /* The maintained list of Lua 5.5 source filenames (core + libraries). A native
 ** frame whose DWARF filename ends in one of these is a Lua interpreter or
@@ -737,9 +739,6 @@ static int titan_is_lua_source(const char *base) {
     return 0;
 }
 
-#endif
-
-#ifdef TITAN_HAVE_LIBBACKTRACE
 /* One captured native frame that survived filtering: either a Titan native
 ** function (a `.titan`-attributed frame) or a Titan entry-wrapper boundary
 ** (`is_entry`). The interpreter, libraries, runtime and unsymbolized frames are
@@ -923,8 +922,8 @@ static size_t titan_trace_capture(lua_State *L, TitanTraceStorage *st) {
         entry = strstr(symbol, TITAN_ENTRY_TAG) != NULL;
         titan = entry || titan_browser_known_name(L, symbol);
         if (!titan) {
-            if (strcmp(titan_basename(base), "titan.c") == 0 ||
-                titan_is_lua_source(base)) continue;
+            /* The adapter gives a frame a `.titan` basename or none, so a C
+            ** or Lua function is dropped here without a list of its files. */
             size_t length = strlen(base);
             titan = length >= 6 && strcmp(base + length - 6, ".titan") == 0;
         }
