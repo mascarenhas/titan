@@ -701,14 +701,19 @@ end
 -- Whether a body's lowering names something that the source header does not
 -- declare. The header includes only the module's `.ffi.h`, and authored C may
 -- include it before any other header. Zeroed storage is rendered with memset,
--- offsetof and size_t, and a cast between a function pointer and `void *`
--- with titan_cast_func of titan/ffi.h.
+-- offsetof and size_t, a cast between a function pointer and `void *` with
+-- titan_cast_func of titan/ffi.h, and a non-finite float literal with
+-- HUGE_VAL or NAN of math.h.
 local function needs_producer_unit(node, seen)
     if type(node) ~= "table" or seen[node] then return false end
     seen[node] = true
     if node._tag == "Ast.Decl" and node._c_allocation_plan then return true end
     if node._tag == "Ast.ExpCast"
        and casts_function_pointer(foreign_cast_operation(node)) then
+        return true
+    end
+    if node._tag == "Ast.ExpFloat"
+       and (node.value ~= node.value or math.abs(node.value) == math.huge) then
         return true
     end
     for key, value in pairs(node) do
@@ -911,7 +916,9 @@ function coder._foreign_raw_exp(ctx, node)
         return "", foreigncast(node._c_literal, node._type)
     end
     if tag == "Ast.ExpNil" then
-        return "", "NULL"
+        -- The null pointer constant itself: NULL is a macro of stddef.h,
+        -- which an inline copy in the source header may not have.
+        return "", "((void *)0)"
     elseif tag == "Ast.ExpBool" then
         return "", node.value and "1" or "0"
     elseif tag == "Ast.ExpInteger" then

@@ -804,10 +804,21 @@ describe("source-defined foreign functions", function()
     end)
 
     it("lets authored C include the source header before any other header", function()
-        -- The header includes only the module's `.ffi.h`. An inline copy of
-        -- these bodies would need memset, offsetof and size_t (zeroed
-        -- storage) or titan_cast_func of titan/ffi.h (a cast between a
-        -- function pointer and `void *`), so they keep a forwarder.
+        -- The header includes only the module's `.ffi.h`, so an inline copy
+        -- may name only what C itself and the module's own headers declare.
+        -- The fixture has one function for each lowering of a body with an
+        -- inline shape. `forwarded` lists those whose lowering names a C
+        -- library or runtime symbol (memset, offsetof and size_t for zeroed
+        -- storage, titan_cast_func for a cast between a function pointer and
+        -- `void *`, HUGE_VAL for a non-finite float); they keep a forwarder.
+        -- Add a function here with every new lowering.
+        local inline = { "nil_return", "nil_local", "nil_compare", "state",
+            "truth", "size", "align", "least", "text", "text_local",
+            "arithmetic", "bits", "negate", "compare", "widen", "narrow",
+            "index", "member", "call_pointer", "call_local", "call_public",
+            "reference", "constant", "twice", "plain" }
+        local forwarded = { "object", "flexible", "erase", "restore",
+            "infinite", "negative_infinite" }
         with_header([[
             typedef struct ffi_pair { int left; int right; } ffi_pair;
             typedef struct ffi_tail { int count; int items[]; } ffi_tail;
@@ -848,15 +859,149 @@ describe("source-defined foreign functions", function()
                     return doubled
                 end
 
+                local foreign function nil_return(): *void
+                    return nil
+                end
+
+                local foreign function nil_local(): *void
+                    local pointer: *void
+                    return pointer
+                end
+
+                local foreign function nil_compare(pointer: *int): int
+                    if pointer == nil then return 1 end
+                    return pointer[0]
+                end
+
+                local foreign function infinite(): double
+                    return 1e400
+                end
+
+                local foreign function negative_infinite(): double
+                    return -1e400
+                end
+
+                local foreign function state(L: *lua_State): int
+                    if L == nil then return 1 end
+                    return 0
+                end
+
+                local foreign function truth(flag: bool): bool
+                    if flag then return false end
+                    return true
+                end
+
+                local foreign function size(): int
+                    local bytes = foreign ffi_pair.sizeof
+                    return bytes as int
+                end
+
+                local foreign function align(): int
+                    return foreign double.alignof as int
+                end
+
+                local foreign function least(): long long
+                    return -9223372036854775808
+                end
+
+                local foreign function text(): const *char
+                    return "abc"
+                end
+
+                local foreign function text_local(): char
+                    local chars: const *char = "abc"
+                    return chars[1]
+                end
+
+                local foreign function arithmetic(a: int, b: int): int
+                    return (a + b) * (a - b) / (b | 1) % 7
+                end
+
+                local foreign function bits(a: unsigned int, b: unsigned int): unsigned int
+                    return ((a & b) | (a ~ b)) << 1 >> 1
+                end
+
+                local foreign function negate(a: int): int
+                    return -a + ~a
+                end
+
+                local foreign function compare(a: int, b: int): int
+                    if a < b then return 0 else return 1 end
+                end
+
+                local foreign function widen(a: int): double
+                    return a as double
+                end
+
+                local foreign function narrow(a: double): int
+                    return a as int
+                end
+
+                local foreign function index(pointer: *int, at: int): int
+                    return pointer[at]
+                end
+
+                local foreign function member(pair: *ffi_pair): int
+                    return pair.left
+                end
+
+                local foreign function call_pointer(callback: Callback, input: int): int
+                    return callback(input)
+                end
+
+                local foreign function call_local(input: int): int
+                    return twice(input)
+                end
+
+                foreign function exported(input: int): int
+                    return input
+                end
+
+                local foreign function call_public(input: int): int
+                    return exported(input)
+                end
+
+                local foreign function reference(): Callback
+                    return twice
+                end
+
+                local foreign function constant(): int
+                    local const three = 3
+                    return three
+                end
+
+                local foreign function shapes(): int
+                    local total = nil_compare(nil) + state(nil)
+                    if nil_return() == nil then total = total + 1 end
+                    if nil_local() == nil then total = total + 1 end
+                    if infinite() > 1e300 then total = total + 1 end
+                    if negative_infinite() < -1e300 then total = total + 1 end
+                    if truth(false) then total = total + 1 end
+                    if least() < 0 then total = total + 1 end
+                    if text()[0] == text_local() - 1 then total = total + 1 end
+                    return total + call_pointer(reference(), 2) + call_local(1)
+                        + call_public(1) + constant() + compare(1, 2)
+                        + narrow(widen(1)) + align() - align() + size() - size()
+                        + arithmetic(3, 1) + negate(-1) + (bits(3, 1) as int)
+                end
+
                 function run(): integer
-                    return object() + flexible() + roundtrip() + plain(21)
+                    return object() + flexible() + roundtrip() + plain(21) + shapes()
                 end
             ]], [[
-                assert(test.run() == 50)
+                assert(test.run() == 75, test.run())
             ]])
             local generated = read_file("test.titan.h")
-            -- A body that names nothing else keeps its inline copy.
-            assert.truthy(generated:find("_foreign_local_doubled_", 1, true))
+            local function helper_body(name)
+                return assert(generated:match("\nstatic inline [^;{]-foreign_inline_"
+                    .. name .. "%([^;{]*%) (%b{})"), name)
+            end
+            for _, name in ipairs(inline) do
+                assert.falsy(helper_body(name):find("_" .. name .. "_titan(", 1, true), name)
+            end
+            for _, name in ipairs(forwarded) do
+                assert.truthy(helper_body(name):find("_" .. name .. "_titan(", 1, true), name)
+            end
 
             local caller = temporary.name(".c")
             local file = assert(io.open(caller, "wb"))

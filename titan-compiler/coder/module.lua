@@ -1380,12 +1380,20 @@ local function render_foreign_header(modname, ast, tlcontext, header_paths,
                 types.CPointer(func.type, {}), func.binding) .. ";"
     end
 
-    local prefix = table.concat({
+    local prefix_lines = {
         ffiheaders.FOREIGN_MARKER,
         "#ifndef " .. guard,
         "#define " .. guard,
         "",
-    }, "\n")
+    }
+    -- The built-in `lua_State` of a module that does not import lua.h is
+    -- rendered by its tag. A tag first written in a parameter list is scoped
+    -- to that one declaration, so a prototype and its definition would name
+    -- two types. Declare the tag at file scope before anything names it.
+    if table.concat(declarations, "\n"):find("struct lua_State", 1, true) then
+        prefix_lines[#prefix_lines + 1] = "struct lua_State;\n"
+    end
+    local prefix = table.concat(prefix_lines, "\n")
     local body = table.concat({
         "",
         "#ifndef TITAN_SOURCE_LOCAL",

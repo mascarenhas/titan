@@ -382,13 +382,22 @@ excludes public declarations, coverage-outlined functions, and functions with
 private native-record field layouts. It then excludes a body whose lowering
 names something the header does not declare (`needs_producer_unit`). The
 header includes only the module's `.ffi.h`, and authored C may include it
-before any other header, so two lowerings keep a body in the producer's C
+before any other header, so three lowerings keep a body in the producer's C
 unit: a declaration with an
 [allocation plan](#allocation-and-recovery-storage), whose zeroed storage is
-rendered with `memset`, `offsetof` and `size_t`, and a cast between a function
+rendered with `memset`, `offsetof` and `size_t`; a cast between a function
 pointer and `void *`, which is rendered with `titan_cast_func` of
-`titan/ffi.h`. Any lowering added to the raw-C path that names a C library or
-runtime symbol belongs in that predicate. Finally it skips an optional prefix
+`titan/ffi.h`; and a non-finite float literal, which is rendered with
+`HUGE_VAL` of `math.h`. Every other lowering names only C itself and the
+module's own declarations. `nil` is `((void *)0)`, not the `NULL` of
+`stddef.h`. The built-in `lua_State` of a module that does not import `lua.h`
+is rendered by its tag, and a tag first written in a parameter list is scoped
+to that one declaration, so when a declaration names it `render_foreign_header`
+declares `struct lua_State;` before the header's includes. Any lowering added
+to the raw-C path that names a C library or runtime symbol belongs in the
+predicate, and a function that uses the new lowering belongs in the fixture of
+`spec/coder/foreign_functions_spec.lua` that compiles the header alone.
+Finally it skips an optional prefix
 of initialized local declarations and recognizes exactly three root shapes:
 one return; one `if` whose sole then and else statements return; or one
 returning `if` without else followed by one return. Header and module

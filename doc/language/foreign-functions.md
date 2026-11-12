@@ -403,9 +403,10 @@ optional direct local declarations followed by exactly one of:
 
 For every other local foreign function the helper simply calls the
 out-of-line definition. That includes a body with a
-[zeroed local](#zeroed-locals) and a body that casts between a function
-pointer and `void *`: the header could not compile either without headers it
-does not include. Direct calls to public foreign functions always call the
+[zeroed local](#zeroed-locals), a body that casts between a function pointer
+and `void *`, and a body with a float literal too large for a `double`, such
+as `1e400`: the header could not compile any of them without headers it does
+not include. Direct calls to public foreign functions always call the
 exported definition. The inline copy is an optimization/header-availability
 rule, not a C constant-expression promise.
 
