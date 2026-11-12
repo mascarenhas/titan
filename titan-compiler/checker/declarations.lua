@@ -305,7 +305,7 @@ end
 
 -- Implementation notes: doc/implementation/foreign-functions.md#one-checker-a-restricted-context
 -- The foreign-body grammar admits only the raw-C subset. This walk checks
--- what syntax cannot: a local has an initializer and a value type, and an
+-- what syntax cannot: a local has an initializer and a C value type, and an
 -- allocation is automatic storage.
 function checker._validate_foreign_body_node(node, errors, seen)
     if type(node) ~= "table" or seen[node] then return end
@@ -317,11 +317,15 @@ function checker._validate_foreign_body_node(node, errors, seen)
                 "a local declaration inside a foreign function requires an initializer")
         end
         for _, decl in ipairs(node.decls) do
-            -- Expression checking already rejects a C namespace or a function
-            -- designator as a value; `void` reaches a local through a void
-            -- pointee or a written annotation.
-            local resolved = decl._type and c_resolve(decl._type)
-            if resolved and resolved._tag == "Type.CVoid" then
+            -- An inferred local takes a Titan type from a comparison
+            -- (`boolean`) or a pointer difference (`integer`), and `void`
+            -- from a void pointee; `void` can also be written. Expression
+            -- checking already rejects a C namespace or a function
+            -- designator as a value.
+            local typ = decl._type
+            if typ and typ._tag ~= "Type.Invalid"
+               and (not types.is_direct_c(typ)
+                    or c_resolve(typ)._tag == "Type.CVoid") then
                 checker.typeerror(errors, decl.loc,
                     "local variable '%s' inside a foreign function must have a direct C FFI type, not '%s'",
                     decl.name, types.tostring(decl._type))

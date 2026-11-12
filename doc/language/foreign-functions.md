@@ -306,6 +306,11 @@ requires a cast. Numeric-`for` literal bounds use their declared C control type.
 An untyped `local p = nil` has no pointee type and is rejected; write an
 annotation such as `local p: *Item = nil`.
 
+A comparison is a condition, not a C value, and the difference of two
+pointers is a Titan `integer`. Neither can initialize an untyped local. Give
+a pointer difference its C type with an annotation or a cast:
+`local count: long = last - first`, `(last - first) as int`.
+
 `foreign T.sizeof` and `foreign T.alignof` keep the configured C `size_t` type inside a
 foreign body. They can be passed directly to `malloc`/`calloc` or stored in a
 C local; the ordinary Titan `integer` conversion applies only outside foreign

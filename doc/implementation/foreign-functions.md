@@ -135,20 +135,27 @@ small walk, `checker._validate_foreign_body_node` (`checker/declarations.lua`),
 for what syntax cannot decide:
 
 * a local declaration has an initializer;
-* a local's type is not `void`, which an inferred local takes from a void
-  pointee (a C namespace or a function designator never gets that far:
-  expression checking rejects them as values);
+* a local has a C value type: not a Titan type, which an inferred local would
+  take from a comparison (`boolean`) or a pointer difference (`integer`), and
+  not `void`, which it takes from a void pointee (a C namespace or a function
+  designator never gets that far: expression checking rejects them as values);
 * an allocation pseudo-call has an automatic-storage plan
   ([allocation](#allocation-and-recovery-storage)).
 
 The length operator `#` is rejected by the `ExpUnop` check in foreign mode.
-With that, no expression of a foreign body has a Titan type: literals are
-C-typed in this mode, names are C declarations, calls return C values, and a
-cast's target is a `foreigntype`. The one C-to-Titan conversion the checker
-still synthesizes is the count argument of an allocation pseudo-call, which
-the walk does not enter. The former check on casts between Titan and C values
-has therefore no case left and is gone, together with the tables of forbidden
-statement and expression tags.
+Two expressions of a foreign body still have a Titan type, because the
+[C operator traits](c-ffi-expressions.md#c-operator-traits) are shared with
+ordinary functions: a comparison is a `boolean`, which a condition accepts,
+and a pointer difference is an `integer`, which converts to the C integer
+type that an annotation, a parameter, a return type or a cast gives.
+Everything else is C-typed: literals are C-typed in this mode, names are C
+declarations, calls return C values, and a cast's target is a `foreigntype`.
+The checker also synthesizes one C-to-Titan conversion, the count argument of
+an allocation pseudo-call, which the walk does not enter. The former check on
+casts between Titan and C values is gone, together with the tables of
+forbidden statement and expression tags: the only Titan-typed operand a cast
+can have is a pointer difference, and the ordinary cast rules lower it to a C
+cast.
 
 The allowed body is intentionally unsafe C (see [The C FFI](../language/ffi.md#the-c-ffi)). Pointer dereference, indexing,
 function-pointer calls, arithmetic, and casts do not gain the NULL, bounds,

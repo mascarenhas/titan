@@ -1181,6 +1181,20 @@ describe("foreign functions (checker)", function()
                     "local variable 'nothing' inside a foreign function must have a direct C FFI type",
                 },
                 {
+                    -- A pointer difference is a Titan `integer` and a
+                    -- comparison a Titan `boolean`; neither is a C local.
+                    [[foreign function bad(first: *ffi_int, last: *ffi_int): void
+                          local distance = last - first
+                      end]],
+                    "local variable 'distance' inside a foreign function must have a direct C FFI type, not 'integer'",
+                },
+                {
+                    [[foreign function bad(left: ffi_int, right: ffi_int): void
+                          local smaller = left < right
+                      end]],
+                    "local variable 'smaller' inside a foreign function must have a direct C FFI type, not 'boolean'",
+                },
+                {
                     [[foreign function bad(): void
                           local namespace = ffi
                       end]],
@@ -1196,6 +1210,16 @@ describe("foreign functions (checker)", function()
             for _, case in ipairs(rejected) do
                 assert_rejected(header, case[1], case[2])
             end
+            -- The same values are usable where a C type is written or
+            -- expected: an annotation, a cast, a return, a condition.
+            assert.is_true(check_with_header(header, [[
+                foreign function distance(first: *ffi_int, last: *ffi_int): long
+                    local typed: long = last - first
+                    local cast = (last - first) as ffi_int
+                    if typed < (cast as long) then return typed end
+                    return last - first
+                end
+            ]]))
         end)
     end)
 
