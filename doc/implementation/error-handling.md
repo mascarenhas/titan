@@ -193,8 +193,8 @@ void titan_invalidate_backtrace_state(lua_State *L);  /* exported */
   512 × 520-byte frame array on the browser or coroutine C stack. Capture
   invokes the synchronous JavaScript adapter to read and parse one
   `Error.stack` into compact 12-byte Wasm records and compacts them in place
-  using `.wasm.map` symbolization, the `titan.c` and `titan_is_lua_source`
-  filters, and `registry[TITAN_NAMES_KEY]`. `titan_trace_frame_is_entry` tests
+  using `.wasm.map` symbolization, the `.titan` basename test, and
+  `registry[TITAN_NAMES_KEY]`. `titan_trace_frame_is_entry` tests
   the compact record's `TITAN_BROWSER_TRACE_ENTRY` flag;
   `titan_trace_cfunction_is_entry` looks up the light C function in
   `registry[TITAN_ENTRIES_KEY]` without symbolizing a Wasm indirect
@@ -438,9 +438,9 @@ code inlined from another `.titan` file keeps its own file and line.
 
 **Per-frame classification, entry registration (`TITAN_ENTRIES_KEY`), and
 rendering.** After `titan_browser_trace_capture` returns, `titan_trace_capture`
-compacts the raw records in place, checking symbol identity before the
-runtime/Lua basename filter so an entry sentinel or registered Titan symbol is
-never discarded by a colliding filename:
+compacts the raw records in place. It keeps a record in three cases, tested in
+this order, so that an entry sentinel or a registered Titan symbol is kept
+whatever its location:
 
 * **Entry sentinel:** the resolved C symbol contains `titanentry`
   (`TITAN_ENTRY_TAG`). The record is kept with `TITAN_BROWSER_TRACE_ENTRY` set,
@@ -453,12 +453,12 @@ never discarded by a colliding filename:
   `.titan` file.
 * **Dropped:** everything else, that is C and Lua functions and `dynCall_*`
   helpers that matched neither `titanentry` nor `TITAN_NAMES_KEY`. The adapter
-  gives them no `.titan` basename. `titan_trace_capture` still tests for
-  `titan.c` and the `titan_is_lua_source` files first; since titan#382 the
-  adapter never returns a C basename, so those tests decide nothing. An
-  unregistered C function is kept only if Titan code was inlined into it, in
-  which case it is shown under that code's file. Arbitrary C symbols are not
-  classified as Titan frames merely because their name contains `_titan`.
+  gives them no `.titan` basename, so the browser path needs no list of
+  runtime or Lua source files; the native path, whose frames carry DWARF
+  filenames, keeps that list (`titan_is_lua_source`). An unregistered C
+  function is kept only if Titan code was inlined into it, in which case it is
+  shown under that code's file. Arbitrary C symbols are not classified as
+  Titan frames merely because their name contains `_titan`.
 
 On native targets, `titan_cfunction_is_entry` symbolizes a `CallInfo`'s
 `lua_CFunction` pointer through `libbacktrace`. In WebAssembly, a

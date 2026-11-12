@@ -484,7 +484,7 @@ test('pinned emcc empty sourcesContent table needs no source text', () => {
     assert.throws(() => api.buildIndex(map({sourcesContent: ['only one source']}), identity));
 });
 
-test('C merge retains entry and known-name identity despite runtime/Lua basenames', {
+test('C merge keeps entry and known names and drops symbols with no .titan source', {
     skip: !process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE,
 }, async () => {
     const image = resolve(process.env.TITAN_BROWSER_TRACE_FILTER_IMAGE);

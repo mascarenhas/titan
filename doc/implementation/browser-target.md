@@ -3692,8 +3692,8 @@ hosts`).
   non-writable, and non-configurable descriptors without invoking getters or
   setters or constructing an `Error` on unsafe descriptors), lookup boundary,
   gap, and empty-`sourcesContent` validation, and the compiled `lifecycle.c`
-  (preRun/export readiness) and `filter.c` (entry/registered-name precedence
-  before `titan.c`/`titan_is_lua_source` basename filtering) fixtures.
+  (preRun/export readiness) and `filter.c` (entry sentinels and registered
+  names are kept, a symbol with no `.titan` basename is dropped) fixtures.
 * `spec/browser/build-trace.lua`, `spec/browser/trace.test.mjs`,
   `spec/browser/playwright-run.mjs`, `spec/browser/playwright-runner.test.mjs`,
   and `spec/fixtures/browser_trace/` — the
