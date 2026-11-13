@@ -3697,6 +3697,9 @@ hosts`).
   Chromium, the html5 click counter of synchronous C callbacks and the async
   driver's responsiveness page test (`responsive.mjs`, titan#334)
   ([browser bridge runtime](browser-bridge.md#test-layers)).
+  `browser_bridge_spec.lua` also runs `environment.mjs` with the libc
+  environment fixture in both assertion modes under Node and Chromium,
+  checking validation, empty defaults, UTF-8, mutation, and instance isolation.
 * `spec/coder/browser_deployment_spec.lua` with
   `spec/fixtures/browser_bridge/deployment.mjs` — a real program loaded over
   plain HTTP, with relocated assets through `locateFile`, and from a Vite

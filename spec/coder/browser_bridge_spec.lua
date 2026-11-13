@@ -70,10 +70,8 @@ describe("persistent core JavaScript bridge", function()
                 "counter", "counter", false)
             local responsive = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "responsive", "responsive", false)
-            local environment = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
-                "environment", "environment", false, nil, nil, "-D_GNU_SOURCE")
             for _, engine in ipairs({ "node", "chromium" }) do
-                local result = execute(info, engine, "integration.mjs", { native, failure, environment })
+                local result = execute(info, engine, "integration.mjs", { native, failure })
                 io.stdout:write(string.format("\nBRIDGE assertions=%d engine=%s node=%s chrome=%s\n%s\n",
                     assertions, engine, info.node.version, info.chrome.version, result.output))
                 io.stdout:flush()
@@ -104,6 +102,24 @@ describe("persistent core JavaScript bridge", function()
                         assert.truthy(result.output:find(page[3] .. ' {"verdict":"PASS"', 1, true), result.output)
                     end
                 end
+            end
+        end)
+
+        it("provides exact libc environments with ASSERTIONS=" .. assertions, function()
+            local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
+            if not info then pending(why) return end
+            fixture = files.new()
+            files.copy(repository .. "/spec/fixtures/browser_bridge/environment.mjs",
+                fixture.source .. "/environment.mjs")
+            local image = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
+                "environment", "environment", false, nil, nil, "-D_GNU_SOURCE")
+            for _, engine in ipairs({ "node", "chromium" }) do
+                local result = execute(info, engine, "environment.mjs", { image })
+                io.stdout:write(string.format("\nENVIRONMENT assertions=%d engine=%s node=%s chrome=%s\n%s\n",
+                    assertions, engine, info.node.version, info.chrome.version, result.output))
+                io.stdout:flush()
+                assert.is_true(result.ok, result.output)
+                assert.truthy(result.output:find('ENVIRONMENT {"verdict":"PASS"', 1, true), result.output)
             end
         end)
     end

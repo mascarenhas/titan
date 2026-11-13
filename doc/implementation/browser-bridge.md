@@ -860,6 +860,9 @@ JavaScript integration driver exercises public promises, two instances,
 runtime-type marshalling, variant rejections, non-string callable errors, pin
 hold lifetimes, re-export after synchronous release, notification batches,
 disposal, sinks, requests, and WeakRef ownership with real linked images.
+The separate `environment.mjs` driver, run by `browser_bridge_spec.lua`,
+checks empty and supplied libc environments, validation, UTF-8 round trips,
+mutation, and per-instance isolation under Node and Chromium.
 Test-only C instrumentation may hand explicit frozen controls to a supplied
 fixture binding; the generated application API never exposes the raw Emscripten
 Module or factory.
