@@ -56,10 +56,6 @@ local function output_handle(stream: OutputStream): Stdio
   return handle
 end
 
-local function captured_input_is_closed(stream: InputStream): boolean
-  return stream.parent_descriptor < 0 and not stream.handle
-end
-
 local function read_stream(stream: InputStream): string?
   if captured_input_is_closed(stream) then return nil end
   local handle = input_handle(stream)

@@ -264,7 +264,7 @@ prefix`.
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
-| `provider` | `titan.a` | the browser standard provider: thirteen shared core roots, `titan.async` and `titan.timer` with browser variants, browser-only `titan.browser`, and five LPegLabel members |
+| `provider` | `titan.a` | the browser standard provider: fourteen shared roots including `io`, browser compositions of `async`, `timer`, and the `os` subset, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
 
 None of the five runtime sources is compiled with `-fPIC`, LTO, or
@@ -338,7 +338,7 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
 4. `titanc --target browser --output <build> --source-first --incremental
    -X <titan_bin>/libtitan-lpeglabel.a <BROWSER_STDLIB_ROOTS>` publishes
    `<build>/titan.a` through ordinary library mode, which runs the executing
-   protocol check against the runtime and runner staged in step 3. The sixteen
+   protocol check against the runtime and runner staged in step 3. The eighteen
    roots and the payload are described in [the browser standard
    library](#the-browser-standard-library). No `titan.a` or manifest exists
    yet, and none is required.
@@ -348,11 +348,11 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    runs the [dependency-closure
    check](#the-dependency-closure-check) over the staged provider, the
    LPegLabel archive, and every object and link certificate under `<build>`,
-   requires exactly sixteen keys, in bytewise order: `titan.async`,
-   `titan.browser`, `titan.coroutine`, `titan.gc`, `titan.iteration`,
-   `titan.json`, `titan.math`, `titan.path`, `titan.peg`, `titan.protobuf`,
-   `titan.reflect`, `titan.string`, `titan.test`, `titan.timer`,
-   `titan.transfer`, and `titan.url`; copies it to `titan.a`; and
+   requires exactly eighteen keys, in bytewise order: `titan.async`,
+   `titan.browser`, `titan.coroutine`, `titan.gc`, `titan.io`, `titan.iteration`,
+   `titan.json`, `titan.math`, `titan.os`, `titan.path`, `titan.peg`,
+   `titan.protobuf`, `titan.reflect`, `titan.string`, `titan.test`,
+   `titan.timer`, `titan.transfer`, and `titan.url`; copies it to `titan.a`; and
    finally writes `sdk-digests` with `incremental.write_sdk_digests` and the
    existing schema.
 
@@ -380,7 +380,7 @@ in the language manual.
 
 ### Subset policy
 
-The thirteen shared standard modules reach neither `uv` nor
+The thirteen shared core standard modules reach neither `uv` nor
 `async` through their Titan imports: `coroutine`, `gc`, `iteration`, `math`,
 `test`, `reflect`, `json`, `protobuf`, `transfer`, `peg`, `string`, `url`, and
 `path`. All thirteen are delivered, each with its complete public interface:
@@ -393,26 +393,26 @@ whole-file variants: `TITAN_COROUTINE_STACK_SIZE` for `coroutine`, and
 `path`. The [library nesting policies](#nesting-limits) are shared with
 native targets and need no browser-specific defines.
 
-The provider adds a fourteenth root, the browser-only `titan.browser` in
+The provider includes the browser-only `titan.browser` in
 `titan/browser.browser.titan`, with no native placeholder. It imports only
 `gc`; its [foreign entry points and state lifecycle](browser-bridge.md) live in
 `titan/browser.browser.titan` and the generated launcher, not in a native-only
 dependency or a second coroutine driver.
 
-The fifteenth root is `titan.async`, composed for the browser from its shared
+`titan.async` is composed for the browser from its shared
 main `titan/async/async.titan` and the contributors
 `runtime.browser.titan` (the [browser driver](libuv-runtime.md#browser-driver))
 and `external.browser.titan` (an opaque `ExternalWait`); its native-only
 `receiver` and `foreign` families are dropped. Its browser composition imports
-`coroutine`, `gc`, `string`, `transfer`, and `titan.browser`, the only
-standard module that imports the bridge. Its omitted members and opaque
-record are recorded in the [member inventory](#interface-derived-member-inventory).
+`coroutine`, `gc`, `string`, `transfer`, and `titan.browser`.
+Its omitted members and opaque record are recorded in the
+[member inventory](#interface-derived-member-inventory).
 The opaque `ExternalWait` keeps one private field, so a record literal of it
 outside `titan.async` is rejected on both targets, as
 `spec/coder/browser_stdlib_closure_spec.lua` checks against the installed
 native and browser providers.
 
-The sixteenth root is `titan.timer`, whose flat variant `titan/timer.browser.titan`
+`titan.timer`'s flat variant `titan/timer.browser.titan`
 sits beside `titan/timer.native.titan` with the same public interface. It
 imports `async`, `titan.browser` and `errno.h`, and builds one-shot sleeps on
 the SDK's `titan:timeout` source. Tickers use `titan:interval` for bounded
@@ -421,6 +421,16 @@ periods and chain `titan:timeout` requests for longer ones
 methods but holds a host request instead of a uv timer, so the member
 inventory records it as an opaque record.
 
+`titan.os` composes its shared main with browser clock, environment, process,
+and stdio contributors. Calendar and locale code stays shared; environment
+and wall time use libc, Task exit uses `async.request_exit`, and parent
+streams use SDK sources. Native host queries, CPU time, processes, options,
+and signals are absent. The member inventory records those omissions and
+keeps `InputStream` and `OutputStream` opaque while comparing their public
+methods. See [the browser owner](os-library.md#browser-parent-stream-owner).
+The complete shared `titan.io` facade imports that composition and adds no
+foreign boundary or target variant.
+
 Nine standard modules have only native mains and are absent at compile time:
 the flat `titan/{fs,net,ssl}.native.titan` and the folder mains
 `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
@@ -428,31 +438,30 @@ the flat `titan/{fs,net,ssl}.native.titan` and the folder mains
 For `browser` the resolver finds no main, so an import reports the ordinary
 `module 'titan.<name>' not found`, and a contributor of a folder whose main is
 unselected stays blocked rather than resolving as a flat module.
-`os` and `io` also remain unavailable: their shared mains resolve, but `os`
-has no browser contributors defining its private types and operations, and
-`io` imports `os`. The plan for these eleven modules is provisional:
+The plan for the nine absent modules is provisional:
 
 | Modules | Browser plan (provisional) |
 | --- | --- |
-| `io`, `os`, `lua` | browser compositions with `io.print`, streams, clocks, and Lua loading |
+| `lua` | a browser composition for independent-state Lua loading |
 | `http` | a browser composition; the only absent module that may bring llhttp into the browser closure |
 | `fs` | only together with a virtual filesystem |
 | `uv`, `net`, `ssl` | absent |
 | `websocket`, `sqlite3`, `thread` | absent; browser WebSocket, SQLite, and Worker-based threads are possible later additions |
 
-The subset has no raise-on-invoke members and no complete-interface parity
-gate; `titan.async`'s recorded omissions are the one absence list. Output goes
-through Emscripten stdio only: `titan.test` writes with `putchar`/`fflush` and
-imports no Titan module, the generated runner imports only `titan.test` and the
-test owners, and the launcher's native `__wasi_fd_write` forwards nonempty
-iovecs to the [loader](#the-loader)'s copied-byte queues. A program that
-links `titan.async` runs `main` through the async bootstrap hook, as natively,
+No absent capability is exposed as a placeholder. The member inventory
+compares every delivered module with a native counterpart, recording the
+target-specific omissions and opaque owners. `io` and OS parent output use
+the SDK's awaited sinks. Test reporting stays on C stdio: `titan.test` writes
+with `putchar`/`fflush`, and the launcher's native `__wasi_fd_write` forwards
+nonempty iovecs to the [loader](#the-loader)'s copied-byte queues.
+A program that links `titan.async` runs `main` through the async bootstrap
+hook, as natively,
 unless it is built with `--no-uv-bootstrap`; otherwise the
 [entrypoint](#the-browser-entrypoint) calls `main` directly.
 
 ### Provider recipe
 
-`BROWSER_STDLIB_ROOTS` in the `Makefile` names the sixteen logical roots, and
+`BROWSER_STDLIB_ROOTS` in the `Makefile` names the eighteen logical roots, and
 [`make browser-sdk`](#make-browser-sdk) step 4 compiles them in one library-mode
 `titanc --target browser` invocation. The provider's native payload and
 include path are LPegLabel only:
@@ -476,7 +485,7 @@ include path ([standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image));
 native link inputs come from invocation options, not module metadata, so the
 browser recipe states its closure explicitly. The published `titan.a` holds
-the sixteen module objects (with their split parts) and the five LPegLabel
+the eighteen module objects (with their split parts) and the five LPegLabel
 members.
 
 ### The dependency-closure check
@@ -578,12 +587,15 @@ enumerates public top-level functions, variables, records, unions, Interfaces,
 and type aliases, plus their public fields, union variants, methods, and
 static functions. A `Type.CFunction` member is a raw `foreign function`
 export. A union variant's generated constructor counts once, as the variant.
+Interface methods use their ordered declaration list, not both its numeric
+and named lookup views; record and union method/static tables are name maps.
 Each member is compared by kind, rendered signature, and
 `types.serialize_semantic` (which excludes documentation and includes
 named-call parameter metadata); machine layouts are separate provider metadata
 and are not compared. `M.browser_differences` records, per module, the
 members that a browser composition omits on purpose and the records it keeps
-as opaque types; today only `titan.async` has entries. The audit requires each
+as opaque types; `titan.async`, `titan.timer`, and `titan.os` have entries.
+The audit requires each
 recorded omission to be a native member absent from the browser interface,
 each opaque record to be the same record name and kind on both targets
 (its private field count and method map may differ), and every other member
@@ -607,7 +619,7 @@ delivered.
 
 ### Inventory record
 
-| Module | Delivered | Omitted members | Browser test owners | Final initializer, verified by `init_<module>` and `init_subset` | Raw exports |
+| Module | Delivered | Omitted members | Browser test owners | Final initializer (core modules also have init fixtures) | Raw exports |
 | --- | --- | --- | --- | --- | --- |
 | `coroutine` | yes | none | `coroutine.tests` (the Lua-host cases are in the native contributor `tests/lua_boundary_test.native.titan`) | allocates the module's `mco_runtime` | none |
 | `gc` | yes | none | `gc.tests` | none | none |
@@ -624,8 +636,11 @@ delivered.
 | `path` | yes | none | `path.tests` | separator from `TITAN_PATH_WINDOWS` (POSIX on the browser) | none |
 | `async` | yes, from its shared main and browser contributors | the libuv-typed `current_loop`, `await_with`, `await_cleanup_with`, `await_cancellable_with`, `await_cancellable`; the native-only `run_foreign`, `prepare_native_retirement`, `wait_external_native`, `prepare_external_wait`, `wait_external`, `wait_external_cleanup`, `version`, `receiver`, `send`, `Receiver`; and `ExternalWait:close`, `:wait`, `:wait_cleanup`, with `ExternalWait` kept opaque | `async.tests` (its portable contributors; the rest are `.native.titan` contributors), and the scheduler gate owner `async.browser_tests` driven by the scheduler spec | builds the nil-result caches, registers `titan:driver` in the owner state, and registers the bootstrap hook | none |
 | `timer` | yes, from its browser variant `titan/timer.browser.titan` | none, with `Ticker` kept opaque | `timer.tests` (portable cases; the native-only ones are in `tests/timers.native.titan`), and the timer cases of `async.browser_tests` | none | none |
+| `io` | yes, from its complete shared source | none | `io.tests` (shared in-memory cases and browser parent-stream cases; captured-stdio printing is native-only) | none | none |
+| `os` | yes, from its shared main and browser contributors | `clock`; `cwd`, `chdir`, `homedir`, `tmpdir`, `hostname`, `exepath`, `pid`, `ppid`; `spawn`, every `with_*` option, `popen`, `wait_signal`; `ExitStatus`, `SpawnConfig`, `SpawnOption`, `Process`, `InputOutputStream`; `InputStream` and `OutputStream` kept opaque | `os.tests` (portable calendar/environment cases and browser streams; host commands, CPU time, and forced time zones are native-only) | constructs stable parent facades and transfer-field descriptors; Stdio owners remain lazy | none |
 
-The table covers the thirteen shared modules, `async` and `timer`. The provider's
+The table covers fourteen shared modules, `async`, `timer`, and `os`.
+The provider's
 browser-only `titan.browser` has no native counterpart; its owners and tests
 are described in [browser bridge runtime](browser-bridge.md#test-layers).
 
@@ -653,6 +668,10 @@ Initialization audit:
   `.` decimal point, so the alternate-locale parity cases in
   `string.format_pack_test` and `json.tests` take their existing capability
   skip.
+  emsdk 6.0.13's musl also retains a valid unknown locale name as the selection
+  while using C.UTF-8 locale data. OS tests keep that selected-name/query and
+  unchanged-format behavior browser-specific; rejection of an uninstalled
+  locale remains a native case.
 * **`transfer`.** Its nominal loader reaches `transfer_load_module`, which
   loads a module through the image's static preload table.
 
@@ -678,6 +697,13 @@ and their portable cases, while target-selected contributors (such as
 `tests/unwind_test.native.titan`) add cases to one target only.
 `support.async` keeps its libuv-driving `drive_until` in the native
 contributor `drive.native.titan`.
+`io.tests` keeps captured-stdio printing in `printing.native.titan`, while
+its shared contributors cover in-memory Readers and `streams.browser.titan`
+covers parent-stream conversions and printing. `os.tests` keeps host commands,
+CPU clocks, and forced time zones in native contributors; shared cases cover
+portable calendars and environment mutations, and browser contributors cover
+SDK parent streams and target-specific libc behavior. `os.process_tests`
+remains native-only.
 `spec/support/stdlib_test_modules.mk` lists the browser
 roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
 `TITAN_STDLIB_TEST_ROOTS`:
@@ -685,10 +711,10 @@ roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
 ```text
 coroutine.tests iteration.tests gc.tests math.tests peg.tests
 string.core_test string.format_pack_test string.regex_test url.tests path.tests
-test.tests reflect.tests json.tests protobuf.tests transfer.tests async.tests timer.tests
+test.tests reflect.tests json.tests protobuf.tests transfer.tests async.tests timer.tests os.tests io.tests
 ```
 
-All seventeen owners are compiled into `images/stdlib.mjs`, with its `.wasm`
+All nineteen owners are compiled into `images/stdlib.mjs`, with its `.wasm`
 and `.wasm.map` siblings. `TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK` rejects an
 empty or duplicate root inventory before build setup. The compiler's
 [general image bounds](#build-time-image-bounds) apply; the suite has no
@@ -765,10 +791,11 @@ fifteen `--test` images from `spec/fixtures/browser_stdlib/` with the `test`
 purpose and assertions 2, and runs them through `gate.mjs` under
 `titan-browser-run --js-test` on Node and Chromium:
 
-* `init_<module>.titan`, one for each of the thirteen shared modules, imports
+* `init_<module>.titan`, one for each of the thirteen core modules, imports
   only that module (and the `titan.test` runner every test image has) and must
   return status 0, run and pass exactly one case, and write nothing to stderr;
-* `init_subset.titan` imports all thirteen and is initialized, run, and
+* `init_subset.titan` imports all thirteen core modules and is initialized,
+  run, and
   disposed three times through one cached image creator, with a tick and a
   collection between cycles; and
 * `fidelity_test.titan` imports the real `coroutine.tests` owner, so its
@@ -1524,11 +1551,11 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
   filename inside `Type.Module` remains an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
-sixteen [browser stdlib](#the-browser-standard-library) modules resolve from it,
+eighteen [browser stdlib](#the-browser-standard-library) modules resolve from it,
 ahead of the Titan path and source. Modules with native-only mains have no
 browser source, so their imports fail with the ordinary
-`module 'titan.<name>' not found` diagnostic. The shared `os` main is not
-complete without target contributors, and `io` imports it
+`module 'titan.<name>' not found` diagnostic. The shared `os` main selects its
+browser contributors, and the shared `io` facade imports that composition
 ([target source selection](target-source-selection.md#make-inventories-and-audits)).
 
 ## Library mode and structural validation
@@ -3689,7 +3716,7 @@ hosts`).
   before execution or provider publication.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
-  `TITAN_EXTRA_CPPFLAGS`, the sixteen-module provider whose non-compiler
+  `TITAN_EXTRA_CPPFLAGS`, the eighteen-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
   order and contents, and the standalone `-shared-mem` archive regression.
 * `spec/browser_stdlib_spec.lua` (emsdk-free) and

@@ -316,6 +316,7 @@ BrowserHandle:listen(
     ...: BrowserValue): BrowserRequest
 BrowserRequest:cancel()
 BrowserRequest:close()
+function failure_text(message: BrowserValue, thrown: BrowserValue): string?
 ```
 
 Both methods invoke the host binding synchronously with the supplied
@@ -339,6 +340,12 @@ pinning](#callables-and-pinning)).
   only at delivery, such as a wrapper released in the meantime, joins the
   queue behind the events already waiting, so `failure` runs in a later
   batch.
+
+`failure_text(message, thrown)` consumes the failure's thrown-value handle
+when `thrown` is `is_handle`, and returns the message only when `message` is
+`is_string`; otherwise it returns nil. Use it when the diagnostic is enough
+and the exact thrown value is no longer needed. The caller supplies any
+default text and chooses its own error type and operation name.
 
 Because callables are not signature-checked at registration time, type errors
 move from registration to call time: if `completion` or `failure` raises when

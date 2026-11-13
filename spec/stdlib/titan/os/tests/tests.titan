@@ -1,6 +1,5 @@
--- Native public behavior tests for titan.os.
+-- Public behavior tests shared by the native and browser os compositions.
 local test = import "test"
 local system = import "os"
-local command = import "support.command.titan"
 
 local support = import "os.test_support.titan"

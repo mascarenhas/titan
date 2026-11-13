@@ -191,6 +191,10 @@ local function locale_category(name: string): foreign int
   raise "invalid locale category '" .. name .. "'"
 end
 
+local function captured_input_is_closed(stream: InputStream): boolean
+  return stream.parent_descriptor < 0 and not stream.handle
+end
+
 local function read_input_until(stream: InputStream, delimiter: string,
                                 chop: boolean?): string?
   if captured_input_is_closed(stream) then return nil end

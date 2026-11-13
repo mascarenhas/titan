@@ -1,0 +1,53 @@
+foreign import "stdlib.h"
+foreign import "errno.h"
+foreign import "environment.browser.h"
+
+-- These messages match native uv.strerror; libc setenv can also fail with
+-- ENOMEM, which must retain its own name rather than becoming an I/O error.
+local function make_error(code: integer, operation: string,
+                          detail: string?): async.OperationError
+  if code == ffi.EINVAL then
+    return async.OperationError(-code, "EINVAL", detail or "invalid argument", operation)
+  elseif code == ffi.ENOSYS then
+    return async.OperationError(-code, "ENOSYS", detail or "function not implemented", operation)
+  elseif code == ffi.ENOTSUP then
+    return async.OperationError(-code, "ENOTSUP", detail or "operation not supported on socket", operation)
+  elseif code == ffi.EPIPE then
+    return async.OperationError(-code, "EPIPE", detail or "broken pipe", operation)
+  elseif code == ffi.EIO then
+    return async.OperationError(-code, "EIO", detail or "i/o error", operation)
+  elseif code == ffi.ENOMEM then
+    return async.OperationError(-code, "ENOMEM", detail or "not enough memory", operation)
+  end
+  raise "unrecognized browser OS errno " .. code
+end
+
+local function checked_text(text: string, operation: string)
+  if ffi.strlen(text) ~= (#text as foreign size_t) then
+    raise make_error(ffi.EINVAL, operation)
+  end
+end
+
+local function os_getenv(name: string): string?
+  checked_text(name, "os.getenv")
+  local found = ffi.getenv(name)
+  if not found then return nil end
+  return found as string
+end
+
+local function os_setenv(name: string, contents: string)
+  checked_text(name, "os.setenv")
+  checked_text(contents, "os.setenv")
+  if ffi.setenv(name, contents, 1) ~= 0 then
+    local code: integer = ffi.errno
+    raise make_error(code, "os.setenv")
+  end
+end
+
+local function os_unsetenv(name: string)
+  checked_text(name, "os.unsetenv")
+  if ffi.unsetenv(name) ~= 0 then
+    local code: integer = ffi.errno
+    raise make_error(code, "os.unsetenv")
+  end
+end

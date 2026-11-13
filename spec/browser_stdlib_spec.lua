@@ -28,7 +28,7 @@ plan:
         return strategy:run(argv, {stderr_to_stdout = true})
     end
 
-    it("keeps all seventeen portable owners in the single-image root inventory", function()
+    it("keeps all nineteen portable owners in the single-image root inventory", function()
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local result = root_plan()
         assert.is_true(result.ok, result.output)
@@ -37,11 +37,13 @@ plan:
             assert.is_nil(roots[root], root)
             roots[root], count = true, count + 1
         end
-        assert.equal(17, count, "the audited browser inventory has 17 owners; change this deliberately")
+        assert.equal(19, count, "the audited browser inventory has 19 owners; change this deliberately")
         assert.is_true(roots["transfer.tests"])
         assert.is_true(roots["protobuf.tests"])
         assert.is_true(roots["async.tests"])
         assert.is_true(roots["timer.tests"])
+        assert.is_true(roots["os.tests"])
+        assert.is_true(roots["io.tests"])
     end)
 
     it("rejects empty and duplicate owner inventories before build setup", function()
@@ -145,6 +147,9 @@ plan:
         assert.truthy(err:find("/injected/libuv/include/uv.h", 1, true))
         assert(checks.check_path("/vendor/lpeglabel/titan_lpeglabel.h"))
         assert(checks.check_path("/sdk/libtitan-lpeglabel.a"))
+        for _, header in ipairs({ "time.h", "locale.h", "stdlib.h", "errno.h" }) do
+            assert(checks.check_headers({ c_header_dependencies = { { path = "/libc/" .. header } } }))
+        end
     end)
 
     it("rejects defined and undefined symbols from every excluded C library", function()
@@ -235,6 +240,31 @@ plan:
         assert.equal("integer (readonly)", members["Box.item"].signature)
         assert.equal("static function", members["Box.new"].kind)
         assert.equal("method", members["Box:get"].kind)
+    end)
+
+    it("inventories Interface members once despite their ordered and named views", function()
+        local function provider(parameter)
+            local owner = "fixture.View"
+            local view = types.Interface(owner, {
+                types.Field(owner, "size", types.Integer(), 0, true),
+            }, {
+                types.Method(owner, "read", {}, {types.String()}, nil, nil, {}),
+                types.Method(owner, "write", {parameter}, {}, nil, nil, {"data"}),
+            })
+            local modtype = types.Module("fixture", {}, {View = view})
+            return { key_order = {"fixture"},
+                entries = { fixture = {types = types.serialize(modtype)} } }
+        end
+        local rows = assert(checks.inventory(provider(types.String()), provider(types.String())))
+        local members = {}
+        for _, row in ipairs(rows) do members[row.name] = row.kind end
+        assert.equal(4, #rows)
+        assert.equal("field", members["View.size"])
+        assert.equal("method", members["View:read"])
+        assert.equal("method", members["View:write"])
+        local ok, err = checks.inventory(provider(types.String()), provider(types.Integer()))
+        assert.is_nil(ok)
+        assert.truthy(err:find("View:write", 1, true), err)
     end)
 
     it("compares named-call parameter metadata as well as rendered function types", function()

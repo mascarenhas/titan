@@ -258,7 +258,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | --- | --- |
 | `libtitan.a` | the browser runtime archive |
 | `libtitan-lpeglabel.a` | the PEG engine, built for the browser; `make browser-sdk` links it into `titan.a` |
-| `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen shared modules, `async` with a browser driver, `timer` on JavaScript timers, browser-only `titan.browser`, and the PEG engine |
+| `titan.a` | the [browser standard library](#the-browser-standard-library): fourteen shared modules including `io`, browser contributors for `async`, `timer`, and the `os` subset, browser-only `titan.browser`, and the PEG engine |
 | `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
@@ -1209,10 +1209,10 @@ bare `raise`.
 
 ## The browser standard library
 
-The browser SDK's `titan.a` holds sixteen standard modules that need no libuv
-or other native-only library: thirteen shared modules compiled from the same
-sources as the native standard library, `async` with a browser driver, `timer`
-on the SDK's JavaScript timers, and the browser-only `titan.browser`:
+The browser SDK's `titan.a` holds eighteen standard modules that need no libuv
+or other native-only library: fourteen shared modules compiled from the same
+sources as the native standard library, browser contributors for `async`,
+`timer`, and the `os` subset, and the browser-only `titan.browser`:
 
 | Module | Contents |
 | --- | --- |
@@ -1229,19 +1229,21 @@ on the SDK's JavaScript timers, and the browser-only `titan.browser`:
 | [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
 | [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
 | [`test`](standard-library-test.md) | the test API and the native test runner |
+| [`io`](standard-library-io.md) | byte-stream Interfaces, one-write printing, and ownership-safe line iteration |
 | [`async`](async-io.md#the-browser-target) | Tasks, cancellation, waits, channels, combinators, and subscriptions, driven between browser macrotasks |
 | [`timer`](standard-library-timer.md#on-the-browser) | Task delays, yields, and coalescing tickers on JavaScript timers |
+| [`os`](standard-library-os.md#on-the-browser) | calendars, wall time, locale, instance environment, Task exit, and embedding-provided parent streams |
 | [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
 
-Each of the thirteen shared modules is complete. Every public declaration, including the raw
-C functions `protobuf.write_resource_index`,
+Each of the fourteen shared modules keeps its complete interface. Every public
+declaration, including the raw C functions `protobuf.write_resource_index`,
 `protobuf.write_resource_index_bytes`, `transfer.copy_message`,
 `transfer.discard_message`, and `transfer.transfer_load_module`, has the same
 signature as on a native target and behaves as its chapter describes, apart
-from the target facts [below](#what-the-browser-target-changes). No member
-raises an "unavailable" error or returns a stand-in value. `transfer` encodes
-and decodes packets within one instance; the modules that carry packets to
-another Lua state or thread are not available.
+from the target facts [below](#what-the-browser-target-changes). There are no
+stand-in implementations; errors from concrete `io` streams propagate
+unchanged. `transfer` encodes and decodes packets within one instance; the
+modules that carry packets to another Lua state or thread are not available.
 
 `async` shares its scheduling core with the native module and keeps its
 public signatures, except for the members that the browser cannot provide:
@@ -1259,6 +1261,13 @@ between turns ([async on the browser target](async-io.md#the-browser-target)).
 JavaScript timers, with the browser's clamping and throttling; `sleep(0)` is
 a yield that arms no timer ([timer on the browser](standard-library-timer.md#on-the-browser)).
 
+`os` keeps its calendar, locale, environment, and parent-stream interfaces.
+Its time query uses the host wall clock, environment mutations stay within
+the instance, and standard streams use the embedding's byte sinks and optional
+input source. CPU time, host paths and identity, child processes, and signals
+are absent. See the [per-member availability table](standard-library-os.md#on-the-browser)
+and [browser parent streams](standard-library-os.md#browser-parent-streams).
+
 `titan.browser` is the reviewed target-only exception. It has no native
 placeholder and imports only the portable core. Its byte/scalar ABI is not the
 native transfer packet format, and schema copies are a separate feature. It
@@ -1269,9 +1278,9 @@ that the `async` driver uses but schedules nothing itself. See
 ### Modules that are not available
 
 The other standard modules are absent from the browser target: `uv`,
-`io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
-`sqlite3`, and `thread`. Each of them uses libuv, directly or through its
-imports. Most have only native variants (such as
+`fs`, `net`, `ssl`, `http`, `websocket`, `lua`, `sqlite3`, and `thread`.
+Each of them uses libuv, directly or through its imports. Most have only
+native variants (such as
 `titan/fs.native.titan`; see [target source
 selection](target-source-selection.md)), so a browser build finds no source and
 no browser archive for them. Their imports fail with the ordinary
@@ -1281,22 +1290,15 @@ missing-module error:
 module 'titan.fs' not found
 ```
 
-The shared mains of `os` and `io` resolve on the browser target, but `os`
-has no browser contributors defining its private stream type and operations.
-It therefore fails type-checking; `io` reaches the same failure through its
-`os` import.
-
 There are no stand-in modules for them, and their folder contributors, such as
 `titan.uv.tcp`, are not importable on their own. A test module that imports one
 of them cannot be built into a browser test image either; keep such cases in
 native-only test modules.
 
-Browser versions of `io`, `os`, `lua`, and `http` are
-planned, and `fs` is planned together with a browser file system. Until then,
-a program writes its output through C's `stdio.h`, as in [the first web
-page](#a-first-web-page), and the test runner reports through it too. Either
-way the output reaches the loader's sinks byte for byte ([status and output
-semantics](#status-and-output-semantics)).
+Programs can write through `io.print` and `os.stdout`/`os.stderr`, or through
+C's `stdio.h` as in [the first web page](#a-first-web-page).
+Both routes reach the loader's sinks byte for byte; Titan stream writes also
+await each sink's completion ([status and output semantics](#status-and-output-semantics)).
 
 ### What the browser target changes
 
@@ -1551,11 +1553,10 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 ## Current limits
 
-* The browser standard library has [sixteen of the standard
-  modules](#the-browser-standard-library). Files, networking,
-  `io`, `os`, `lua`, `thread`, and `sqlite3` are not available, so programs
-  write output through C's `stdio.h`, as in [the first web
-  page](#a-first-web-page).
+* The browser standard library has [eighteen standard
+  modules](#the-browser-standard-library), including `io` and the `os` subset.
+  Files, networking, child processes, host paths and identity, CPU time,
+  independent-state `lua`, `thread`, and `sqlite3` remain unavailable.
 * `async` Tasks run only in the instance's owner state and only while a drive
   runs: the program's `main`, a call that calls `async.loop()`, or a
   Task-form call. Receivers, `run_foreign`, and external waits are

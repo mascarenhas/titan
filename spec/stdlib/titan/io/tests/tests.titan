@@ -1,7 +1,5 @@
--- Native titan.io Interface, printing, and line-iteration behavior tests.
+-- Public titan.io Interface, printing, and line-iteration behavior tests.
 local test = import "test"
 local stream = import "io"
 local system = import "os"
 local runtime_test = import "support.runtime.titan"
-local support = import "io.test_support.titan"
-local process_support = import "os.process_test_support.titan"

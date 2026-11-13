@@ -262,6 +262,21 @@ function BrowserError:close()
   self.thrown:close()
 end
 
+--- Release a request's thrown handle and recover its optional diagnostic text.
+-- @param message The request failure's first argument.
+-- @param thrown The request failure's second argument, closed when it is a handle.
+-- @return The message string, or nil for a different value kind.
+-- @usage standard-library-browser.md#requests-and-listeners
+function failure_text(message: BrowserValue, thrown: BrowserValue): string?
+  case thrown
+  when is_handle(handle) then handle:close()
+  end
+  case message
+  when is_string(text) then return text
+  end
+  return nil
+end
+
 local function check_utf8(text: string)
   local input = text as foreign const *unsigned char
   local remaining = 0

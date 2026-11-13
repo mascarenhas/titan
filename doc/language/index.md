@@ -246,11 +246,12 @@ remains rejected.
   applications, with unified Titan/Lua tracebacks backed by `.wasm.map` (full
   file/line attribution on Chromium, Firefox, and Node; function-level reduced
   fidelity on WebKit and Safari), but its standard library currently provides
-  the thirteen modules that need no libuv, [`async`](async-io.md#the-browser-target)
-  with a browser driver, [`timer`](standard-library-timer.md#on-the-browser)
-  on JavaScript timers, and typed
-  [JavaScript bindings](standard-library-browser.md), without `io`,
-  `os`, files, or networking
+  fourteen shared modules including the complete [`io`](standard-library-io.md)
+  facade, [`async`](async-io.md#the-browser-target) with a browser driver,
+  [`timer`](standard-library-timer.md#on-the-browser) on JavaScript timers,
+  an [`os` subset](standard-library-os.md#on-the-browser) with embedding-provided
+  parent streams, and typed [JavaScript bindings](standard-library-browser.md).
+  Files, networking, child processes, and native host queries remain absent
   ([browser target](browser-target.md#the-browser-standard-library)).
 
 The [README roadmap](../../README.md) lists where the language is headed;

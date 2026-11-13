@@ -327,9 +327,9 @@ elseif action == "finalize" then
     if not closed then fail(closure_err) end
     io.stderr:write("browser-sdk: core stdlib closure passed (archive symbols and certified headers)\n")
     local expected_modules = {
-        "titan.async", "titan.browser", "titan.coroutine", "titan.gc", "titan.iteration", "titan.json", "titan.math",
-        "titan.path", "titan.peg", "titan.protobuf", "titan.reflect", "titan.string",
-        "titan.test", "titan.timer", "titan.transfer", "titan.url",
+        "titan.async", "titan.browser", "titan.coroutine", "titan.gc", "titan.io", "titan.iteration",
+        "titan.json", "titan.math", "titan.os", "titan.path", "titan.peg", "titan.protobuf",
+        "titan.reflect", "titan.string", "titan.test", "titan.timer", "titan.transfer", "titan.url",
     }
     if #(scanned.key_order or {}) ~= #expected_modules then
         fail("browser provider titan.a has unexpected module count: " .. tostring(#(scanned.key_order or {})))

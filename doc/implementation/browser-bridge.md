@@ -26,8 +26,9 @@ runner, deployment, and fatal engine classifications.
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
 contains the same four objects (`titan.o`, `minicoro.o`, `titan_path.o`,
 `ltitanlib.o`) on both native and browser targets. The native standard provider
-has no `titan.browser`, while the browser provider adds `titan.browser` beside
-the thirteen shared modules. It imports only `gc`, and the [member
+has no `titan.browser`, while the eighteen-module browser provider includes
+it alongside fourteen shared modules and the browser compositions of `async`,
+`timer`, and `os`. It imports only `gc`, and the [member
 inventory](browser-target.md#interface-derived-member-inventory) skips it
 because it has no native interface to compare.
 
@@ -686,6 +687,12 @@ and host invocation. The loader then queues one event per outcome:
   so it arrives in a later batch. Nothing is retried in place.
 - A failure event that cannot be marshalled has no callable left to receive
   it. The loader reports it through `onNotificationError`.
+
+`browser.failure_text(message, thrown)` is the shared Titan-side consumer for
+failure callbacks that need only a diagnostic. It closes an `is_handle`
+thrown value and returns an `is_string` message, or nil otherwise.
+The timer and OS adapters supply their own fallback text and construct their
+own `OperationError`; neither duplicates handle disposal or message extraction.
 
 Detachable mailbox and guaranteed-terminal retained ownership, cancellation,
 listener removal, late-settlement dropping, FIFO batching, and disposal all

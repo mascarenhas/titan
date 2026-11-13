@@ -16,25 +16,87 @@ process and stdio policy stays here.
 | `stdio.native.titan` | Native `Stdio` owners, parent descriptor probes and caches, stream operations and transfer hooks, and native status translation. |
 | `process.native.titan` | Child processes, shell streams, signals, host identity, graceful exit, and the sized-buffer helper shared with environment queries. |
 | `os_platform.h`, `os_environment.h` | Native platform operations, beside the canonical main; imported only by native contributors. |
+| `clock.browser.titan` | Current timestamp through libc `time`; no CPU-clock member. |
+| `environment.browser.titan` | Instance-local libc environment operations and browser `OperationError` construction. |
+| `environment.browser.h` | The two POSIX `setenv`/`unsetenv` declarations hidden by emsdk 6.0.13's `stdlib.h` without feature macros; a feature macro here would arrive too late in the generated translation unit. No function bodies. |
+| `process.browser.titan` | Task-only graceful exit through `async.request_exit`. |
+| `stdio.browser.titan` | SDK-backed parent streams, declared kinds, read state, and parent-only transfer hooks. |
 
 Contributors share the module's private namespace. The main calls `os_time`,
-`os_getenv`, `os_setenv`, `os_unsetenv`, `os_exit`, `read_stream`, and
-`captured_input_is_closed`; native contributors define those operations and
-the private `Stdio` named by the unchanged stream fields. Shared imports
-precede the stream variables and transfer-field initializers. No browser
-contributors are present, so the shared main alone cannot type-check for that
-target; `io` reaches the same incomplete composition through its `os` import.
+`os_getenv`, `os_setenv`, `os_unsetenv`, `os_exit`, and `read_stream`; both
+targets define those seams and the private `Stdio` named by the unchanged
+stream fields. `captured_input_is_closed` is shared because it reads only
+`InputStream` fields. Shared imports precede the stream variables and
+transfer-field initializers. Native-only process, signal, host-query, and CPU
+clock members have no browser declarations.
 
 Calendar, formatting, locale, and time-difference operations keep their ISO C
 implementation, adapted from Lua 5.5.1 `loslib.c`, with Lua-compatible
-validation. Clocks, environment snapshots, paths, process identifiers, and
-signal constants use public UV queries. Sized string queries go through
+validation. Native clocks, environment snapshots, paths, process identifiers,
+and signal constants use public UV queries. Sized string queries go through
 `os_sized_buffer`, which retries `ENOBUFS` and grows the buffer; a missing
 environment variable is nil. `os.exepath` first calls `uv.setup_process_args()`
 and raises in an ordinary Lua host, and treats a result that fills the buffer
 as possibly truncated. The SIGPIPE policy and generated-main hook belong to
 async initialization, not to this module
 ([startup policy](libuv-runtime.md#startup-policy)).
+
+## Browser parent-stream owner
+
+The browser composition imports public `async`, `browser`, `protobuf`, and
+`reflect`, never `uv`. A module Array indexed by parent descriptor plus one
+retains the three lazy `Stdio` owners. Each caches its SDK source handle and
+optional declared kind for the state; input also owns a request, optional
+chunk and failure, EOF, waiter Task, lazy ResumeToken, and Runtime registration.
+Output owns its accepted-shutdown flag and pending-write count.
+
+`kind` calls `titan:stdio` once and validates the four declared strings in
+Titan. A missing declaration stays nil: `kind()` raises the documented
+member-specific `ENOSYS` error and `is_tty()` is false. Invalid declarations
+retain a plain diagnostic naming the option. Missing `titan:stdin` is cached
+as unavailable, not converted to EOF.
+
+Each nonempty output write registers one request with `async.await` and
+`titan:stdout` or `titan:stderr`. Its completion and failure callbacks retire
+the pending count before settling the wait, and `defer` closes the request.
+There is no cancellation action: an admitted write keeps its request until
+the sink settles. An empty write only checkpoints and checks an existing
+owner's shutdown flag, without opening a source or allocating an owner.
+Shutdown checkpoints, checks for declared TCP, and starts an argumentless
+request on the same source. The accepted-shutdown flag changes only after
+start succeeds, so failed admission cannot poison later writes.
+
+Input checkpoints before contention, buffered host chunks, failure, and EOF.
+The facade's delimiter excess precedes that checkpoint, matching native
+`read_stream`'s Task-check, excess, then owner-read order.
+One request belongs to the stream, not to its current waiter. Cancelling a
+read clears only that Task reservation; completion can still retain an empty
+or nonempty chunk, EOF, or sticky failure for a successor. The callback closes
+the request and resumes only the current waiter with its token. A bad result
+type becomes sticky `stdio.read: EIO`. Shared `read_input_until` owns delimiter
+splitting and excess; the browser wrapper translates only primitive-read
+unavailability to `os.InputStream.read_until`.
+
+The first read registers one Runtime-close listener. It closes any request
+and clears the waiter, chunk, failure, EOF, read-started flag, and facade
+excess, so a later Runtime sees none of its predecessor's input state.
+The source handle and declared kind remain state-owned. Parent `close()` has
+no Task requirement and does nothing to those resources.
+
+Parent transfer hooks use the native descriptor payload schemas. They return
+the receiving state's stable stream records, reject active input or pending
+output, and release no resource when discarding a valid parent payload.
+There is no browser captured-stream adoption path.
+
+The browser error constructor uses negated libc errno values and the native
+libuv names/messages. Host failure callbacks use `browser.failure_text` to
+consume the thrown handle; the OS adapter chooses the operation and fallback
+text. Environment calls capture errno immediately; `ENOMEM` is included
+because libc `setenv` can allocate. Browser exit catches only failure of the
+Task lookup, leaving the sticky cancellation from `request_exit` untouched.
+
+The domain-owner table and native I/O sections below describe the native
+composition.
 
 ## Domain owners
 
