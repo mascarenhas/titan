@@ -239,12 +239,10 @@ export function portable(description) {
         for (const entry of entries) {
           if (entry[0] === 1) {
             const slot = message([entry], `${path}[${++count}]`), fields = matches(slot, 1);
-            if (fields.length) {
-              const item = decode(type[2], fields, depth + 1, `${path}[${count}]`);
-              if (item !== undefined) result[count - 1] = item;
-            }
+            result.push(fields.length ? decode(type[2], fields, depth + 1, `${path}[${count}]`) : undefined);
           } else if (entry[0] === 2) frozen = decode('boolean', [entry], depth, path);
         }
+        while (result.length && result.at(-1) === undefined) result.pop();
         return frozen ? Object.freeze(result) : result;
       }
       case 'nominal': {

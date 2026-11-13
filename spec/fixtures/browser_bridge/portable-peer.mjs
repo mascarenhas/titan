@@ -105,6 +105,8 @@ export async function peerTests(peerURL = new URL('./titan-protobuf.mjs', import
   rejects(() => dynamicCodec.encode(cyclicArray), 'cyclic object graph');
   round('value', [1n]); // A failed call must not poison another call.
   equal(dynamicCodec.decode(dynamicCodec.encode(1n)), [1n], 'failed codec remains usable');
+  const holes = codec([['array', 'maybe', 'integer']]).decode(hex('0a0c0a0208020a000a0208041000'))[0];
+  check(holes.length === 3 && Object.hasOwn(holes, 1) && holes[1] === undefined, 'interior hole decodes as undefined');
 
   const record = (name, fields) => ({ $type: name, ...fields });
   const nominals = {
