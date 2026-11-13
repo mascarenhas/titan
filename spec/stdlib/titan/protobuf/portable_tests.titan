@@ -554,3 +554,202 @@ function test_golden_wire_literals(_: test.Context)
   local dynamic = protobuf.portable({reflect.Type.is_value()})
   test.assert(dynamic:encode(7) == string.char(10, 2, 16, 14))
 end
+
+local function description_fields(): const {reflect.Type}
+  return {
+    reflect.Type.is_nil(), reflect.Type.is_boolean(), reflect.Type.is_integer(),
+    reflect.Type.is_float(), reflect.Type.is_string(),
+    reflect.Type.is_option(reflect.Type.is_string()),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+        reflect.Type.is_option(reflect.Type.is_string())),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_const(), reflect.Type.is_integer()),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_maybe_const(), reflect.Type.is_string()),
+    reflect.Type.is_value(), descriptor(Choice.empty()), descriptor(PublicView(nil, 1, nil)),
+    descriptor(PublicUnion.empty()), descriptor(Node(nil, 0)),
+  }
+end
+
+local function description_fixture(): string
+  return '{"fields":["nil","boolean","integer","float","bytes",["option","bytes"],' ..
+      '["array","mutable",["option","bytes"]],["array","const","integer"],' ..
+      '["array","maybe","bytes"],"value",["nominal","protobuf.portable_tests.Choice"],' ..
+      '["nominal","protobuf.portable_tests.PublicView"],' ..
+      '["nominal","protobuf.portable_tests.PublicUnion"],' ..
+      '["nominal","protobuf.portable_tests.Node"]],"nominals":{' ..
+      '"protobuf.portable_tests.Choice":{"module":"protobuf.portable_tests","union":[' ..
+      '["empty",[]],["scalar",[["value","integer"]]],' ..
+      '["pair",[["point",["nominal","protobuf.portable_tests.Point"]],' ..
+      '["note",["option","bytes"]]]]]},' ..
+      '"protobuf.portable_tests.Dynamic":{"module":"protobuf.portable_tests",' ..
+      '"record":[["item","value"]]},' ..
+      '"protobuf.portable_tests.Node":{"module":"protobuf.portable_tests",' ..
+      '"record":[["next",["option",["nominal","protobuf.portable_tests.Node"]]],' ..
+      '["number","integer"]]},' ..
+      '"protobuf.portable_tests.Point":{"module":"protobuf.portable_tests",' ..
+      '"record":[["x","integer"],["label","bytes"]]},' ..
+      '"protobuf.portable_tests.PublicUnion":{"module":"protobuf.portable_tests",' ..
+      '"union":[["shown",[["value","integer"]]],["empty",[]]]},' ..
+      '"protobuf.portable_tests.PublicView":{"module":"protobuf.portable_tests",' ..
+      '"record":[["number","integer"],["note",["option","bytes"]],' ..
+      '["last",["option","bytes"]],["dropped","integer"]]}}}'
+end
+
+local function fixture_hex(bytes: string): string
+  local output = string.writer()
+  defer output:close()
+  for index = 0, #bytes - 1 do
+    local byte: integer = (bytes as foreign const *unsigned char)[index]
+    output:write(string.format("%02x", byte))
+  end
+  return output:drain()
+end
+
+function test_describe_exact_public_closed_schema(context: test.Context)
+  local codec = protobuf.portable(description_fields(), {descriptor(Dynamic(nil))})
+  test.assert(codec:describe() == description_fixture(), codec:describe())
+  test.assert(codec:describe() == codec:describe(), "cached description changed")
+  local fresh = protobuf.portable(description_fields(), {descriptor(Dynamic(nil))})
+  test.assert(fresh:describe() == codec:describe(), "fresh codec changed its description")
+  test.assert(protobuf.portable({}):describe() == '{"fields":[],"nominals":{}}')
+  local labels: {string} = {}
+  labels[1], labels[3] = "x", "y"
+  local integers: const {integer} = {1, 2}
+  local strings: {string} = {"z"}
+  local bytes = codec:encode(nil, false, -7, 1.5, "A\0B", nil, labels, integers,
+      strings, Dynamic(7), Choice.pair(Point(3, "x"), "n"), PublicView(nil, 12, nil),
+      PublicUnion.empty(), Node(Node(nil, 2), 1))
+  context:log("portable fixture schema: " .. codec:describe())
+  context:log("portable fixture bytes: " .. fixture_hex(bytes))
+end
+
+function test_describe_sorts_dynamic_nominals_independent_of_walk_order(_: test.Context)
+  local point = descriptor(Point(0, ""))
+  local choice = descriptor(Choice.empty())
+  local first = protobuf.portable({reflect.Type.is_value()}, {point, choice})
+  local second = protobuf.portable({reflect.Type.is_value()}, {choice, point})
+  test.assert(first:describe() == second:describe(), "nominal order followed the walk")
+end
+
+record TextFields
+  items: {string?}
+end
+
+union TextChoice
+  words(items: {string?})
+end
+
+function test_text_paths_describe_wrapped_root_record_and_union_strings(_: test.Context)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+        reflect.Type.is_option(reflect.Type.is_string())),
+    descriptor(TextFields({})), descriptor(TextChoice.words({})),
+  }
+  local codec = protobuf.portable(fields, nil, {"1", "protobuf.portable_tests.TextFields.items",
+      "protobuf.portable_tests.TextChoice.words.items"})
+  local wrapped = '["array","mutable",["option","text"]]'
+  -- Source {T?} normalizes to {T}; only the explicit root descriptor retains Option.
+  local canonical = '["array","mutable","text"]'
+  local expected = '{"fields":[' .. wrapped ..
+      ',["nominal","protobuf.portable_tests.TextFields"],' ..
+      '["nominal","protobuf.portable_tests.TextChoice"]],"nominals":{' ..
+      '"protobuf.portable_tests.TextChoice":{"module":"protobuf.portable_tests",' ..
+      '"union":[["words",[["items",' .. canonical .. ']]]]},' ..
+      '"protobuf.portable_tests.TextFields":{"module":"protobuf.portable_tests",' ..
+      '"record":[["items",' .. canonical .. ']]}}}'
+  test.assert(codec:describe() == expected, codec:describe())
+end
+
+function test_text_marks_dynamic_only_nominal_fields_and_duplicate_paths(_: test.Context)
+  local fields: const {reflect.Type} = {reflect.Type.is_value()}
+  local dynamic: const {reflect.Type} = {descriptor(Point(0, ""))}
+  local codec = protobuf.portable(fields, dynamic,
+      {"protobuf.portable_tests.Point.label", "protobuf.portable_tests.Point.label"})
+  test.assert(codec:describe() == '{"fields":["value"],"nominals":{' ..
+      '"protobuf.portable_tests.Point":{"module":"protobuf.portable_tests",' ..
+      '"record":[["x","integer"],["label","text"]]}}}')
+  test.assert(protobuf.portable(fields, dynamic, {}):describe() ==
+      protobuf.portable(fields, dynamic):describe())
+end
+
+local function reject_text_path(context: test.Context, name: string, path: string,
+    fields: const {reflect.Type})
+  context:run(name, function(_: test.Context)
+    expect_error(function() protobuf.portable(fields, nil, {path}) end, "text path " .. path .. ":")
+  end)
+end
+
+function test_text_rejects_unresolved_private_and_non_string_positions(context: test.Context)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_integer(), reflect.Type.is_value(), descriptor(Point(0, "")),
+    descriptor(Choice.empty()), reflect.Type.is_string(),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_integer()),
+    reflect.Type.is_option(reflect.Type.is_integer()), descriptor(PublicView(nil, 0, nil)),
+    descriptor(PublicUnion.empty()),
+  }
+  reject_text_path(context, "empty", "", fields)
+  reject_text_path(context, "zero", "0", fields)
+  reject_text_path(context, "leading_zero", "05", fields)
+  reject_text_path(context, "out_of_range", "10", fields)
+  reject_text_path(context, "integer", "1", fields)
+  reject_text_path(context, "value", "2", fields)
+  reject_text_path(context, "nominal", "3", fields)
+  reject_text_path(context, "integer_array", "6", fields)
+  reject_text_path(context, "integer_option", "7", fields)
+  reject_text_path(context, "unknown_nominal", "missing.Point.label", fields)
+  reject_text_path(context, "unlisted_nominal", "protobuf.portable_tests.TextFields.items", fields)
+  reject_text_path(context, "unknown_field", "protobuf.portable_tests.Point.missing", fields)
+  reject_text_path(context, "integer_field", "protobuf.portable_tests.Point.x", fields)
+  reject_text_path(context, "private_field", "protobuf.portable_tests.PublicView.secret", fields)
+  reject_text_path(context, "unknown_variant", "protobuf.portable_tests.Choice.missing.value", fields)
+  reject_text_path(context, "unknown_part", "protobuf.portable_tests.Choice.scalar.missing", fields)
+  reject_text_path(context, "integer_part", "protobuf.portable_tests.Choice.scalar.value", fields)
+  reject_text_path(context, "private_variant", "protobuf.portable_tests.PublicUnion.hidden.value", fields)
+end
+
+function test_text_changes_no_wire_bytes_or_utf8_validation(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local fields: const {reflect.Type} = {reflect.Type.is_string(),
+        descriptor(Point(0, "")), descriptor(Choice.empty())}
+    local plain = protobuf.portable(fields)
+    local text = protobuf.portable(fields, nil,
+        {"1", "protobuf.portable_tests.Point.label", "protobuf.portable_tests.Choice.pair.note"})
+    local invalid_utf8 = "\255\0B"
+    local point = Point(3, invalid_utf8)
+    local choice = Choice.pair(point, invalid_utf8)
+    local bytes = plain:encode(invalid_utf8, point, choice)
+    test.assert(text:encode(invalid_utf8, point, choice) == bytes)
+    local root: string, restored: Point, arm: Choice = text:decode(bytes)
+    test.assert(root == invalid_utf8 and restored.label == invalid_utf8)
+    case arm
+    when pair{note} then test.assert(note == invalid_utf8)
+    else test.assert(false, "text changed the union variant")
+    end
+  end)
+end
+
+local function nominal_arm_module(bytes: string): string
+  local carrier: string = protobuf.deserialize_fields(bytes, {reflect.Type.is_string()})
+  -- Every dynamic nominal, record or union, uses TitanValue arm 5.
+  local _, _, _, _, arm: string = protobuf.deserialize_fields(carrier, {
+    reflect.Type.is_nil(), reflect.Type.is_nil(), reflect.Type.is_nil(),
+    reflect.Type.is_nil(), reflect.Type.is_string(),
+  })
+  return protobuf.deserialize_fields(arm, {reflect.Type.is_string()})
+end
+
+function test_described_record_module_matches_dynamic_nominal_wire(_: test.Context)
+  local point = Point(3, "x")
+  local codec = protobuf.portable({reflect.Type.is_value()}, {descriptor(point)})
+  local module = nominal_arm_module(codec:encode(point))
+  test.assert(codec:describe() == '{"fields":["value"],"nominals":{' ..
+      '"protobuf.portable_tests.Point":{"module":"' .. module .. '",' ..
+      '"record":[["x","integer"],["label","bytes"]]}}}')
+end
+
+function test_described_union_module_matches_dynamic_nominal_wire(_: test.Context)
+  local choice = Choice.empty()
+  local codec = protobuf.portable({reflect.Type.is_value()}, {descriptor(choice)})
+  local module = nominal_arm_module(codec:encode(choice))
+  test.assert(string.find(codec:describe(), '"module":"' .. module .. '"', 1, true) ~= nil)
+  test.assert(module == "protobuf.portable_tests")
+end

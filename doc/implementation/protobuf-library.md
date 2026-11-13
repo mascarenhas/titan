@@ -579,6 +579,33 @@ public fields and a public union's public variants without requiring
 `all_public`. Creation errors use JSON-style paths, with root-field indices,
 quoted field/part names, and representative Array index 1.
 
+The walk also collects each first-seen nominal name in a transient Array.
+Creation sorts it in unsigned byte order with bottom-up mergesort and builds
+the description with `string.writer()`. The codec retains only the finished
+JSON string; `describe` returns that cached value. Root descriptors, public
+record fields, public union variants and their named parts retain their wire
+order. Options and Array constness are explicit wrappers, while nominal
+references name entries in the closed table rather than recursively expanding
+them. Name emission escapes JSON quotes, backslashes and control bytes without
+adding a `json` import.
+
+`portable_module` obtains the module name from `resource_nominals`, the traced
+canonical-metatable registry already used for resource exclusion. A borrowed
+`Table *` enters the existing `titan_codec_module` inline; the module's
+`TitanModuleData.symbols` resolver supplies the immutable transfer manifest.
+Its name is the same one `titan_codec_nominal_module` uses for a dynamic
+nominal's wire arm. The registry retains the metatable and declaring module
+through the borrow, and the name is copied immediately to a Titan string.
+No Lua stack transaction or new C helper is involved.
+
+When `text` is nonempty, a temporary path Map records requested and resolved
+positions. Description construction visits each canonical root, public field
+and public variant part and resolves a marked position through its Option and
+Array wrappers to a string. It rejects non-string positions immediately and
+unresolved paths before returning the codec. The Map is not retained. Text
+marks affect only the cached schema, never encoding, decoding or UTF-8
+validation.
+
 The traversal distinguishes a portable context:
 
 - `Encoder:record_value` and `Encoder:union_value` skip their ordinary

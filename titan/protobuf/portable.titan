@@ -45,14 +45,151 @@ catch
   raise "protobuf: " .. path .. ": " .. message
 end
 
+local function portable_quoted(output: string.StringWriter, subject: string)
+  output:write('"')
+  local bytes = subject as foreign const *uint8_t
+  local first = 1
+  for position = 1, #subject do
+    local byte: integer = bytes[position - 1]
+    if byte == 34 or byte == 92 or byte < 32 then
+      if position > first then output:write(string.sub(subject, first, position - 1)) end
+      if byte == 34 then output:write('\\"')
+      elseif byte == 92 then output:write('\\\\')
+      elseif byte == 8 then output:write('\\b')
+      elseif byte == 9 then output:write('\\t')
+      elseif byte == 10 then output:write('\\n')
+      elseif byte == 12 then output:write('\\f')
+      elseif byte == 13 then output:write('\\r')
+      else output:write(string.format('\\u%04x', byte)) end
+      first = position + 1
+    end
+  end
+  if first <= #subject then output:write(string.sub(subject, first)) end
+  output:write('"')
+end
+
+local function portable_name_less(left: string, right: string): boolean
+  local length = #left
+  if #right < length then length = #right end
+  local a = left as foreign const *uint8_t
+  local b = right as foreign const *uint8_t
+  for index = 0, length - 1 do
+    if a[index] ~= b[index] then return a[index] < b[index] end
+  end
+  return #left < #right
+end
+
+local function portable_sort_names(names: {string})
+  if #names < 2 then return end
+  local work: {string} = {}
+  local width = 1
+  while width < #names do
+    local first = 1
+    while first <= #names do
+      local middle = first + width
+      local ending = first + 2 * width
+      if middle > #names + 1 then middle = #names + 1 end
+      if ending > #names + 1 then ending = #names + 1 end
+      local left = first
+      local right = middle
+      for destination = first, ending - 1 do
+        if left < middle and
+            (right >= ending or not portable_name_less(names[right], names[left])) then
+          work[destination] = names[left]
+          left = left + 1
+        else
+          work[destination] = names[right]
+          right = right + 1
+        end
+      end
+      first = ending
+    end
+    for index = 1, #names do names[index] = work[index] end
+    width = width * 2
+  end
+end
+
+-- The canonical registry retains the metatable and its declaring module.
+-- Borrow their native metadata only until the immutable manifest name is copied.
+local function portable_module(name: string): string
+  local identity? = resource_nominals[name]
+  if identity == nil then raise "protobuf: " .. name .. ": no declaring module" end
+  local raw: foreign TValue = identity
+  local module = ffi.titan_codec_module(raw.value_.gc as foreign *Table)
+  if module == nil or module.len < foreign TitanModuleData.sizeof then
+    raise "protobuf: " .. name .. ": no declaring module"
+  end
+  local data = ffi.lmacro_getudatamem(module) as foreign const *TitanModuleData
+  if data.symbols == nil then raise "protobuf: " .. name .. ": no declaring module" end
+  local manifest = data.symbols(ffi.TITAN_TRANSFER_MANIFEST_SYMBOL)
+    as foreign const *TitanTransferModule
+  if manifest == nil or manifest.name == nil then
+    raise "protobuf: " .. name .. ": no declaring module"
+  end
+  return manifest.name as string
+end
+
+local function portable_text(descriptor: reflect.Type, path: string,
+    positions: {string: boolean}): boolean
+  if positions[path] == nil then return false end
+  local resolved = resolve_type(descriptor)
+  while true do
+    case resolved
+    when is_option(base) then resolved = resolve_type(base)
+    when is_array{elem_descriptor} then resolved = resolve_type(elem_descriptor)
+    when is_string() then
+      positions[path] = true
+      return true
+    else raise "protobuf: text path " .. path .. ": expected a string through Options and Arrays"
+    end
+  end
+end
+
+local function portable_describe_type(output: string.StringWriter,
+    descriptor: reflect.Type, text: boolean)
+  case resolve_type(descriptor)
+  when is_nil() then output:write('"nil"')
+  when is_boolean() then output:write('"boolean"')
+  when is_integer() then output:write('"integer"')
+  when is_float() then output:write('"float"')
+  when is_string() then
+    if text then output:write('"text"') else output:write('"bytes"') end
+  when is_value() then output:write('"value"')
+  when is_option(base) then
+    output:write('["option",')
+    portable_describe_type(output, base, text)
+    output:write(']')
+  when is_array{is_const, elem_descriptor} then
+    output:write('["array",')
+    case is_const
+    when is_mutable() then output:write('"mutable",')
+    when is_const() then output:write('"const",')
+    when is_maybe_const() then output:write('"maybe",')
+    end
+    portable_describe_type(output, elem_descriptor, text)
+    output:write(']')
+  when is_record(record_type) then
+    output:write('["nominal",')
+    portable_quoted(output, record_type.name)
+    output:write(']')
+  when is_union(union_type) then
+    output:write('["nominal",')
+    portable_quoted(output, union_type.name)
+    output:write(']')
+  else raise "protobuf: non-portable descriptor in schema description"
+  end
+end
+
 --- An ordered copied-data schema and its closed set of nominal types.
 -- @usage standard-library-protobuf.md#portable-codecs
 record PortableCodec
   local const fields: const {reflect.Type}
   local const nominals: {string: PortableNominal}
+  local description: string
 end
 
-local function PortableCodec:walk(descriptor: reflect.Type, path: string)
+local function PortableCodec:walk(descriptor: reflect.Type, path: string,
+    names: {string})
   local resolved = portable_resolve(descriptor, path)
   case resolved
   when is_nil() then
@@ -61,8 +198,8 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string)
   when is_float() then
   when is_string() then
   when is_value() then
-  when is_option(base) then self:walk(base, path)
-  when is_array{elem_descriptor} then self:walk(elem_descriptor, path .. "[1]")
+  when is_option(base) then self:walk(base, path, names)
+  when is_array{elem_descriptor} then self:walk(elem_descriptor, path .. "[1]", names)
   when is_record(record_type) then
     if self.nominals[record_type.name] ~= nil then return end
     if find_resource_codec_by_name(record_type.name) ~= nil then
@@ -77,9 +214,10 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string)
       raise "protobuf: " .. path .. ": " .. record_type.name .. " has transfer hooks"
     end
     self.nominals[record_type.name] = PortableNominal(resolved)
+    names[#names + 1] = record_type.name
     for index = 1, #record_type.fields do
       local field = record_type.fields[index]
-      self:walk(field.type, path .. "[\"" .. field.name .. "\"]")
+      self:walk(field.type, path .. "[\"" .. field.name .. "\"]", names)
     end
   when is_union(union_type) then
     if self.nominals[union_type.name] ~= nil then return end
@@ -87,11 +225,12 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string)
       raise "protobuf: " .. path .. ": " .. union_type.name .. " is not public data"
     end
     self.nominals[union_type.name] = PortableNominal(resolved)
+    names[#names + 1] = union_type.name
     for index = 1, #union_type.variants do
       local variant = union_type.variants[index]
       for part = 1, #variant.parts do
         local member = variant.parts[part]
-        self:walk(member.type, path .. "[\"" .. member.name .. "\"]")
+        self:walk(member.type, path .. "[\"" .. member.name .. "\"]", names)
       end
     end
   when is_map() then raise "protobuf: " .. path .. ": Map is not portable"
@@ -102,16 +241,95 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string)
   end
 end
 
+local function PortableCodec:build_description(names: {string},
+    text: const {string}?): string
+  portable_sort_names(names)
+  local positions: {string: boolean}? = nil
+  if text ~= nil and #text > 0 then
+    positions = {}
+    for index = 1, #text do positions[text[index]] = false end
+  end
+  local output = string.writer()
+  defer output:close()
+  output:write('{"fields":[')
+  for index = 1, #self.fields do
+    if index > 1 then output:write(',') end
+    local marked = false
+    if positions ~= nil then marked = portable_text(self.fields[index], "" .. index, positions) end
+    portable_describe_type(output, self.fields[index], marked)
+  end
+  output:write('],"nominals":{')
+  for index = 1, #names do
+    if index > 1 then output:write(',') end
+    local name = names[index]
+    portable_quoted(output, name)
+    output:write(':{"module":')
+    portable_quoted(output, portable_module(name))
+    case self.nominals[name].descriptor
+    when is_record(record_type) then
+      output:write(',"record":[')
+      for field = 1, #record_type.fields do
+        if field > 1 then output:write(',') end
+        local member = record_type.fields[field]
+        output:write('[')
+        portable_quoted(output, member.name)
+        output:write(',')
+        local marked = false
+        if positions ~= nil then
+          marked = portable_text(member.type, name .. "." .. member.name, positions)
+        end
+        portable_describe_type(output, member.type, marked)
+        output:write(']')
+      end
+    when is_union(union_type) then
+      output:write(',"union":[')
+      for variant = 1, #union_type.variants do
+        if variant > 1 then output:write(',') end
+        local arm = union_type.variants[variant]
+        output:write('[')
+        portable_quoted(output, arm.name)
+        output:write(',[')
+        for part = 1, #arm.parts do
+          if part > 1 then output:write(',') end
+          local member = arm.parts[part]
+          output:write('[')
+          portable_quoted(output, member.name)
+          output:write(',')
+          local marked = false
+          if positions ~= nil then
+            marked = portable_text(member.type, name .. "." .. arm.name .. "." .. member.name, positions)
+          end
+          portable_describe_type(output, member.type, marked)
+          output:write(']')
+        end
+        output:write(']]')
+      end
+    end
+    output:write(']}')
+  end
+  output:write('}}')
+  if text ~= nil then
+    for index = 1, #text do
+      if positions[text[index]] ~= true then
+        raise "protobuf: text path " .. text[index] .. ": no such portable position"
+      end
+    end
+  end
+  return output:drain()
+end
+
 --- Create a codec after validating every declared field and dynamic nominal.
 -- @param fields Ordered root field descriptors.
 -- @param dynamic Additional record and union descriptors allowed in value slots.
+-- @param text String positions described as UTF-8 text to external peers.
 -- @return A codec that never loads modules or invokes transfer hooks.
 -- @usage standard-library-protobuf.md#portable-codecs
 function portable(fields: const {reflect.Type},
-    dynamic: const {reflect.Type}?): PortableCodec
-  local codec = PortableCodec(fields, {})
+    dynamic: const {reflect.Type}?, text: const {string}?): PortableCodec
+  local codec = PortableCodec{fields = fields, nominals = {}, description = ""}
+  local names: {string} = {}
   for index = 1, #fields do
-    codec:walk(fields[index], "$[" .. index .. "]")
+    codec:walk(fields[index], "$[" .. index .. "]", names)
   end
   if dynamic ~= nil then
     for index = 1, #dynamic do
@@ -122,10 +340,18 @@ function portable(fields: const {reflect.Type},
       when is_union() then
       else raise "protobuf: " .. path .. ": expected a record or union"
       end
-      codec:walk(descriptor, path)
+      codec:walk(descriptor, path, names)
     end
   end
+  codec.description = codec:build_description(names, text)
   return codec
+end
+
+--- Return this codec's cached, deterministic JSON schema for external peers.
+-- @return JSON text describing ordered fields and the closed nominal table.
+-- @usage standard-library-protobuf.md#portable-codecs
+function PortableCodec:describe(): string
+  return self.description
 end
 
 local function PortableCodec:nominal(name: string): PortableNominal

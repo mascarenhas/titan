@@ -37,9 +37,10 @@ deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
 
 record PortableCodec  -- private state
 portable(fields: const {reflect.Type},
-         dynamic: const {reflect.Type}?): PortableCodec
+         dynamic: const {reflect.Type}?, text: const {string}?): PortableCodec
 PortableCodec:encode(...: value): string
 PortableCodec:decode(bytes: string): (...: value)
+PortableCodec:describe(): string
 
 serialize_to_buffer(buf: foreign *void, candidate: value)
 serialize_fields_to_buffer(buf: foreign *void,
@@ -300,6 +301,67 @@ an Array element schema uses the representative index 1. Field and part names
 are quoted. For example, a hooked record reports
 `protobuf: $[1]: <name> has transfer hooks`, and a resource reports
 `protobuf: $[1]: <name> is a packet resource and is not portable`.
+
+### Schema descriptions and text positions
+
+`codec:describe()` returns cached JSON text for an external peer. The format is
+target-neutral and deterministic: root fields retain their order, and nominal
+entries are sorted by qualified name. It contains no version field.
+
+```json
+{"fields":[["nominal","app.Point"],"value"],"nominals":{"app.Point":{"module":"app","record":[["x","integer"],["label","bytes"]]}}}
+```
+
+The top-level object has `fields`, an Array of type descriptions, and
+`nominals`, an object keyed by qualified nominal name. Each nominal entry has
+`module`, the declaring module name also carried by a dynamic nominal's wire
+arm, and exactly one of:
+
+| Entry | Ordered contents |
+| --- | --- |
+| `"record"` | `[fieldName, T]` pairs for public fields in declaration order |
+| `"union"` | `[variantName, parts]` pairs for public variants in public-ordinal order |
+
+A variant's `parts` is an Array of `[partName, T]` pairs. A part name is always
+a string: the declared name, or `"value"` for a single-type shorthand such as
+`count(integer)`. An empty variant has an empty parts Array. Local fields and
+private variants never appear. The nominal table includes every reachable and
+additional `dynamic` nominal, including recursive types.
+
+| Type description `T` | Meaning |
+| --- | --- |
+| `"nil"`, `"boolean"`, `"integer"`, `"float"` | Corresponding scalar |
+| `"bytes"` | Titan string, interpreted as bytes by the peer |
+| `"text"` | Titan string marked as UTF-8 text for the peer |
+| `"value"` | Self-describing dynamic value |
+| `["option", T]` | Optional `T` |
+| `["array", constness, T]` | Array of `T`; constness is `"mutable"`, `"const"`, or `"maybe"` |
+| `["nominal", qualifiedName]` | Reference to an entry in `nominals` |
+
+The optional `text` argument to `portable` lists string positions whose
+description should use `"text"` instead of `"bytes"`:
+
+| Path | Position |
+| --- | --- |
+| `"<n>"` | Root field `n`, written as its 1-based decimal index |
+| `"<Nominal>.<field>"` | Public record field, using the qualified nominal name |
+| `"<Nominal>.<variant>.<part>"` | Named part of a public union variant |
+
+A position may be a string inside any number of Options and Arrays; the
+wrappers remain in the description and the string leaf becomes `"text"`.
+For example, an explicit descriptor
+`reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+reflect.Type.is_option(reflect.Type.is_string()))`
+becomes `["array","mutable",["option","text"]]` when marked. Source `{T?}`
+is canonicalized to `{T}`, so its reflected Array element has no Option
+wrapper. Marking a field affects that field wherever its nominal occurs in
+the codec. Repeated paths are harmless.
+
+Creation raises an error naming the text path if it does not resolve, names
+an unlisted nominal, or designates anything other than a string through
+Options and Arrays. A `value` position cannot be marked as text. Text marks
+change only the description: Titan encoding and decoding remain byte-for-byte
+unchanged and do not validate UTF-8.
 
 ## Eligible values
 
