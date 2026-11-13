@@ -9,13 +9,13 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests websocket.tests \
 	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests protobuf.tests thread.tests \
-	test.host_tests reflect.lua_tests json.lua_tests protobuf.resource_tests transfer.tests
+	test.host_tests reflect.lua_tests json.lua_tests protobuf.resource_tests protobuf.portable_tests transfer.tests
 
 # The delivered browser subset uses the same portable cases as the native suite.
 TITAN_STDLIB_BROWSER_TEST_ROOTS := \
 	coroutine.tests iteration.tests gc.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test url.tests path.tests \
-	test.tests reflect.tests json.tests protobuf.tests transfer.tests async.tests timer.tests
+	test.tests reflect.tests json.tests protobuf.tests protobuf.portable_tests transfer.tests async.tests timer.tests
 
 # One JSPI image holds the complete portable suite. titanc owns the general
 # Wasm body/module bounds; this manifest has no separate image-size policy.

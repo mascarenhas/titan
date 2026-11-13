@@ -2,10 +2,11 @@
 
 The public contract is [Protocol Buffers standard
 library](../language/standard-library-protobuf.md). The logical `titan.protobuf`
-module has four source contributors in `titan/protobuf/`: `protobuf.titan` owns
-the public API, resource-codec registry and shared scalar/type helpers,
+module has five source contributors in `titan/protobuf/`: `protobuf.titan` owns
+the ordinary public API, resource-codec registry and shared scalar/type helpers,
 `encoder.titan` owns graph traversal, `decoder.titan` owns wire parsing and
-reconstruction, and `schema.titan` owns proto3 declarations. `native.h` holds
+reconstruction, `portable.titan` owns copied-data codecs, and `schema.titan`
+owns proto3 declarations. `native.h` holds
 the reflective decoder's directory entry and includes the SDK header
 `titan-runtime/transfer.h`, which owns the shared buffer and the generated-codec
 runtime. The module imports `reflect`, `string` and `gc`; it does not depend on
@@ -561,6 +562,47 @@ already-resolved `ResourceScope` to
 payloads are already byte strings, so this use does not introduce a recursive
 native transfer representation or a separate field codec.
 
+## Portable copied-data policy
+
+`PortableCodec` owns the ordered root descriptors and a closed nominal-name
+table. Creation walks descriptors only, resolving named references through
+`resolve_type`, and enters each accepted nominal before descending into its
+members so recursive types terminate. Entries retain the resolved descriptor
+and an optional registered conversion. The state-local conversion registry
+stores synchronous record/bytes callables; each codec captures the entries it
+uses rather than consulting that registry during value traversal.
+
+Four existing dispatch sites test whether their traversal context is a
+`PortableCodec`. `Encoder:field` and `decode_field` consult its record entry
+before resource or hook dispatch and use an opaque conversion when present.
+The encoder validates the candidate record, enters the existing cycle guard,
+and defers its removal around the conversion. The decoder validates the
+conversion's result nominal. `Encoder:dynamic_nominal` requires a listed name;
+`decode_dynamic_nominal` obtains the descriptor from the closed table and
+returns before the ordinary nominal lookup and demand-loader path. Every
+other context follows the existing code unchanged.
+
+The creation walk excludes packet resources, foreign types, and hooked
+records without conversions. Conversions are limited to public records with
+hooks or private fields: ordinary public-data records cannot register one,
+because a generated parent could call their generated codec without a
+reflective handoff. Hooked and private-field records have no generated codec,
+so their fields always hand back to the two record dispatch sites, including
+inside generated parents. Generated nominal `value` arms and Arrays likewise
+hand back to the reflective field machinery, where the closed-name policy
+applies.
+
+`PortableCodec:encode` owns one heap buffer and immediately defers its release,
+then calls `serialize_fields_to_buffer_with_context` with itself as context.
+`decode` calls `deserialize_fields_slice` with that same context and the input
+string as holder. Generated frames preserve the non-nil context and never
+request lazy packet-context resolution. No transfer hook, resource callback,
+new Lua C API call, or host-specific bridge is needed for this policy.
+
+The wire mapping is unchanged. Conversion-free graphs produce the same bytes
+as ordinary anonymous messages; converted records carry the conversion's
+bytes, which may differ from ordinary transfer-hook payloads.
+
 ## Schema generation
 
 The schema builder walks declared descriptors, separately from optimistic value
@@ -592,10 +634,11 @@ their defining modules, nominal names, and bytes. Closure reconstruction uses
 the codec to decode its snapshot against the receiving state's initialized types;
 no operation reads another state's reflection descriptors.
 
-Tests belong in `spec/stdlib/titan/protobuf/`: `protobuf.tests` imports only
-the browser subset and runs on both targets, including the raw index writers
-and their reservation failure, while `protobuf.resource_tests` holds the
-`thread` endpoint cases. Same-instance packet cases are in `transfer.tests`,
+Tests belong in `spec/stdlib/titan/protobuf/`: `protobuf.tests` and
+`protobuf.portable_tests` import only the browser subset and run on both
+targets, including raw index writers and portable codec policy, while
+`protobuf.resource_tests` holds the `thread` endpoint cases. Same-instance
+packet cases are in `transfer.tests`,
 cross-state transfer lifecycle cases in the Lua/async/thread native owners,
 and reflection/code-generation tests in their existing layers. Keep depth
 cases derived from `ffi.TITAN_CODEC_DEPTH_LIMIT` and cover full-width

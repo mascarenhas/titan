@@ -35,6 +35,15 @@ schema(descriptor: reflect.Type): string
 serialize_fields(fields: const {reflect.Type}, ...: value): string
 deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
 
+record PortableCodec  -- private state
+portable(fields: const {reflect.Type},
+         dynamic: const {reflect.Type}?): PortableCodec
+PortableCodec:encode(...: value): string
+PortableCodec:decode(bytes: string): (...: value)
+register_portable(descriptor: reflect.Type,
+                 encode: function (value): (string),
+                 decode: function (string): (value))
+
 serialize_to_buffer(buf: foreign *void, candidate: value)
 serialize_fields_to_buffer(buf: foreign *void,
                            fields: const {reflect.Type}, ...: value)
@@ -223,6 +232,71 @@ and public members. Pointer fields use
 `reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {})` and retain
 the same borrowed-address semantics as nominal pointer fields. No extra public
 record type is needed to define an anonymous root.
+
+## Portable codecs
+
+`portable` creates a reusable codec for copied data shared by native and browser
+targets. Its ordered `fields` describe an anonymous root, just as for
+`serialize_fields`. Creation checks the complete declared type graph before
+visiting any values, even for absent Options, empty Arrays, and inactive union
+variants.
+
+| Declared type | Portable policy |
+| --- | --- |
+| Nil, boolean, integer, float, string, `value` | Accepted |
+| Option or mutable, const, maybe-const Array | Accepted when its element is portable |
+| Public record or union with only public members | Accepted when every member type is portable |
+| Public record with a registered portable conversion | Accepted as opaque copied bytes |
+| Record with transfer hooks but no portable conversion | Rejected |
+| Packet resource | Rejected, even with a portable conversion |
+| Local nominal or a nominal with private members and no conversion | Rejected |
+| Map, Interface, callable, or any foreign type | Rejected |
+
+The codec closes over every record and union reachable through `fields` and the
+optional `dynamic` Array. Each `dynamic` entry must resolve to a record or
+union. A `value` position may contain the supported scalars, Arrays, and only
+those nominals in this closed set; include additional nominal descriptors in
+`dynamic` when they occur only inside `value` positions. Unknown or unlisted
+names raise `protobuf: <name> is not in this portable codec`. Decoding never
+loads modules on demand, calls transfer hooks, or attaches or claims packet
+resources. A `transfer.TransferValue` is not a portable type because some of
+its declared variants contain foreign values.
+
+`codec:encode(...)` requires exactly one argument per field, including nil
+positions. `codec:decode(bytes)` returns exactly that many results. The
+ordinary protobuf wire validation, graph-cycle rejection, nesting bound, Array
+holes, and constness rules apply. Repeated acyclic references are copied
+independently. The codec retains its input string during decoding and returns
+independent values, not views into the input bytes.
+
+For a graph that meets no registered conversion, portable encoding is
+byte-for-byte identical to `serialize_fields(fields, ...)`. A conversion keeps
+the same length-delimited field framing but supplies its own payload bytes;
+those need not equal the record's transfer-hook payload.
+
+### Portable conversions
+
+`register_portable` installs a synchronous pair of record-to-bytes and
+bytes-to-record functions in the current Lua state. The descriptor must resolve
+to a public record with private fields or transfer hooks. Public data records
+are already portable and cannot register a conversion. Local records, unions,
+non-record descriptors, packet resources, and duplicate registrations raise.
+A codec captures the conversions it uses at creation; later registrations do
+not expand its nominal set.
+
+The encode function must return copied bytes. The decode function must return
+the exact registered record type; another type raises
+`protobuf: record type mismatch`. Raised conversion errors propagate. These
+functions acquire no packet authority, have no cleanup callback, and must not
+retain borrowed input or transport ownership. A conversion's bytes are opaque
+to the codec: its fields are not inspected. Use ordinary copied data inside
+the payload, not native addresses or managed handles.
+
+Creation errors identify the rejected nominal, or a descriptor path such as
+`fields[1].items[]` and its unsupported kind. Hooked records without a
+conversion report `protobuf: <name> has transfer hooks and no portable
+conversion`; packet resources report `protobuf: <name> is a packet resource
+and is not portable`.
 
 ## Eligible values
 
