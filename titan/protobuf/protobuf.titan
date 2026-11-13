@@ -516,6 +516,9 @@ local function codec_handoff(request_value: value, item: value, context: value,
     if request.lazy_context ~= 0 then context = packet_context(true) end
     local codec? = find_resource_codec_by_name(owner)
     if codec == nil then raise "protobuf: unknown nominal type " .. owner end
+    if context is PortableCodec then
+      raise "protobuf: " .. owner .. " is a packet resource and is not portable"
+    end
     encode_resource_field(request.buf, codec, number, item, context)
     return nil
   elseif op == ffi.TITAN_CODEC_ENCODE_FIELD then
@@ -537,6 +540,9 @@ local function codec_handoff(request_value: value, item: value, context: value,
   elseif op == ffi.TITAN_CODEC_DECODE_RESOURCE then
     local codec? = find_resource_codec_by_name(owner)
     if codec == nil then raise "protobuf: unknown nominal type " .. owner end
+    if context is PortableCodec then
+      raise "protobuf: " .. owner .. " is a packet resource and is not portable"
+    end
     return codec.decode(context, request.data as foreign const *void,
         request.length as integer)
   end

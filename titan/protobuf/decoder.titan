@@ -466,6 +466,10 @@ local function decode_field(message: Message, number: integer,
   when is_record(record_type) then
     local codec? = find_resource_codec_by_name(record_type.name)
     if codec ~= nil then
+      if message.context is PortableCodec then
+        raise "protobuf: " .. record_type.name ..
+            " is a packet resource and is not portable"
+      end
       require_wire(field, 2)
       return codec.decode(message.context,
           (message.base + field.offset) as foreign const *void, field.length)

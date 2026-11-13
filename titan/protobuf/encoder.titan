@@ -173,6 +173,10 @@ local function Encoder:field(
   when is_record(expected) then
     local codec? = find_resource_codec_by_name(expected.name)
     if codec ~= nil then
+      if self.context is PortableCodec then
+        raise "protobuf: " .. expected.name ..
+            " is a packet resource and is not portable"
+      end
       encode_resource_field(buf, codec, number, candidate, self.context)
       return
     end

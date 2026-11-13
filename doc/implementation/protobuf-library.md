@@ -579,7 +579,7 @@ public fields and a public union's public variants without requiring
 `all_public`. Creation errors use JSON-style paths, with root-field indices,
 quoted field/part names, and representative Array index 1.
 
-Six traversal sites distinguish a portable context:
+The traversal distinguishes a portable context:
 
 - `Encoder:record_value` and `Encoder:union_value` skip their ordinary
   complete-public-visibility guards; the creation walk already checked the
@@ -594,6 +594,10 @@ Six traversal sites distinguish a portable context:
 - `Encoder:dynamic_nominal` requires a listed name; `decode_dynamic_nominal`
   obtains its descriptor from the closed table and returns before nominal
   lookup or demand loading.
+- The record arms of `Encoder:field` and `decode_field`, and the resource
+  operations of `codec_handoff`, reject packet resources before invoking either
+  callback. The registry remains live, so registrations made after codec
+  creation are rejected too.
 
 Constructor compatibility comes from `RecordType:public_constructor` in
 `reflect`, also used by `json`. Protobuf additionally requires each parameter

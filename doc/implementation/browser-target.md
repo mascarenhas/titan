@@ -614,7 +614,7 @@ delivered.
 | `test` | yes | none | `test.tests`, and every other owner through the runner | loads the Lua trace and pattern helpers when the Lua `string` library is open | none |
 | `reflect` | yes | none | `reflect.tests` | metatable, hydration, brand, and tag tables | none |
 | `json` | yes | none | `json.tests` | builds the JSON pattern | none |
-| `protobuf` | yes | none | `protobuf.tests`, including both raw index writers and the reservation failure | caches the nominal registry, sets up the ephemeron, validates the codec handoff | `write_resource_index`, `write_resource_index_bytes` |
+| `protobuf` | yes | none | `protobuf.tests`, including both raw index writers and the reservation failure; `protobuf.portable_tests` for copied-data policy | caches the nominal registry, sets up the ephemeron, validates the codec handoff | `write_resource_index`, `write_resource_index_bytes` |
 | `transfer` | yes | none | `transfer.tests` (same-instance behavior), including all three raw exports | installs protobuf's packet-context provider and nominal loader, the ephemerons, and `closure_fields` | `copy_message`, `discard_message`, `transfer_load_module` |
 | `peg` | yes | none | `peg.tests` | `_initialize_native()` | none |
 | `string` | yes | none | `string.core_test`, `string.format_pack_test`, `string.regex_test` | target size, length-modifier, endianness, and alignment facts; the format and regex parsers | none |
@@ -3634,7 +3634,7 @@ hosts`).
   check](#the-dependency-closure-check) and its negative fixtures, the
   interface-derived [member inventory](#interface-derived-member-inventory)
   (raw foreign functions, nominal members, named-call metadata, unrecorded
-  differences, exact recorded omissions and opaque records), the seventeen-owner
+  differences, exact recorded omissions and opaque records), the eighteen-owner
   root inventory and its rejection of empty or
   duplicate inventories before build setup, the cold and warm single-image
   layout and filtered runs, the CI failure artifact's image and per-engine log

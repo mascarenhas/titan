@@ -255,8 +255,10 @@ those nominals in this closed set; include additional nominal descriptors in
 `dynamic` when they occur only inside `value` positions. Unknown or unlisted
 names raise `protobuf: <name> is not in this portable codec`. Decoding never
 loads modules on demand, calls transfer hooks, or attaches or claims packet
-resources. A `transfer.TransferValue` is not a portable type because some of
-its declared variants contain foreign values.
+resources. Registering a packet-resource codec after creation still makes
+encoding and decoding reject that nominal; neither resource callback runs
+under a portable codec. A `transfer.TransferValue` is not a portable type
+because some of its declared variants contain foreign values.
 
 `codec:encode(...)` requires exactly one argument per field, including nil
 positions. `codec:decode(bytes)` returns exactly that many results. The
