@@ -274,6 +274,12 @@ local function Message:generated_nominal(number: integer,
       holder, depth)
 end
 
+-- This lookup runs after the child has returned, not in a retained traversal
+-- frame. In particular its Map-access temporaries must not multiply by depth.
+local function CodecTrace:frame_incomplete(): boolean
+  return self.incomplete[self.level + 1]
+end
+
 -- Each result below is a standalone `local frozen = ... as const {value}` of a
 -- fresh builder local, or of decode_array_entries' linear call result, so the
 -- checker retags the proxy in place instead of shallow-copying it. A cast nested
@@ -290,25 +296,23 @@ local function decode_record(message: Message, descriptor: reflect.RecordType,
   end
   local fields: {value} = {}
   for index = 1, #descriptor.fields do
-    if codec_trace ~= nil then codec_trace:member(descriptor.fields[index].name) end
-    fields[index] = decode_field(message, field_number(index),
-                                 descriptor.fields[index].type, depth + 1)
-    if codec_trace ~= nil then codec_trace:leave() end
+    local field = descriptor.fields[index]
+    trace_member(field.name)
+    fields[index] = decode_field(message, field_number(index), field.type, depth + 1)
+    trace_leave()
   end
-  if codec_trace ~= nil and codec_trace.incomplete[codec_trace.level + 1] then return nil end
+  if trace_incomplete() then return nil end
   local frozen = fields as const {value}
   return descriptor:construct(frozen)
 end
 
-local function decode_union(message: Message, descriptor: reflect.UnionType,
-                             depth: integer): value
-  require_depth(depth)
-  if not (message.context is PortableCodec) then require_union(descriptor) end
+local function Message:union_variant(descriptor: reflect.UnionType):
+    (reflect.VariantType, Message)
   local selected = 0
   local selected_field = 0
   local extra_chunks: {integer}? = nil
-  for index = 1, message.count do
-    local field = message:entry(index)
+  for index = 1, self.count do
+    local field = self:entry(index)
     local ordinal = field_ordinal(field.number)
     if ordinal >= 1 and ordinal <= #descriptor.variants then
       require_wire(field, 2)
@@ -328,28 +332,33 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
     raise "protobuf: union has no recognized variant"
   end
   local variant = descriptor.variants[selected]
-  local parts_message = (function (): Message
-    if extra_chunks ~= nil then
-      local payload = string.writer()
-      for index = 1, #extra_chunks do
-        local chunk = message:entry(extra_chunks[index])
-        payload:write(slice_to_string(message.base, chunk.offset, chunk.length))
-      end
-      local merged = payload:drain()
-      return read_message_slice(merged, 0, #merged, merged, message.context)
+  if extra_chunks ~= nil then
+    local payload = string.writer()
+    for index = 1, #extra_chunks do
+      local chunk = self:entry(extra_chunks[index])
+      payload:write(slice_to_string(self.base, chunk.offset, chunk.length))
     end
-    local field = message:entry(selected_field)
-    return read_message_slice(
-        message.base, field.offset, field.length, message.holder, message.context)
-  end)()
+    local merged = payload:drain()
+    return variant, read_message_slice(merged, 0, #merged, merged, self.context)
+  end
+  local field = self:entry(selected_field)
+  return variant, read_message_slice(
+      self.base, field.offset, field.length, self.holder, self.context)
+end
+
+local function decode_union(message: Message, descriptor: reflect.UnionType,
+                             depth: integer): value
+  require_depth(depth)
+  if not (message.context is PortableCodec) then require_union(descriptor) end
+  local variant, parts_message = message:union_variant(descriptor)
   local parts: {value} = {}
   for index = 1, #variant.parts do
-    if codec_trace ~= nil then codec_trace:member(variant.parts[index].name) end
-    parts[index] = decode_field(parts_message, field_number(index),
-                                variant.parts[index].type, depth + 1)
-    if codec_trace ~= nil then codec_trace:leave() end
+    local part = variant.parts[index]
+    trace_member(part.name)
+    parts[index] = decode_field(parts_message, field_number(index), part.type, depth + 1)
+    trace_leave()
   end
-  if codec_trace ~= nil and codec_trace.incomplete[codec_trace.level + 1] then return nil end
+  if trace_incomplete() then return nil end
   local frozen = parts as const {value}
   return descriptor:construct(variant.tag, frozen)
 end
@@ -363,7 +372,7 @@ local function decode_array_entries(message: Message, element: reflect.Type,
   for index = 1, message.count do
     local field = message:entry(index)
     if field.number == 1 then
-      if codec_trace ~= nil then codec_trace:index(count + 1) end
+      trace_index(count + 1)
       require_wire(field, 2)
       count = count + 1
       local slot = read_message_slice(
@@ -371,7 +380,7 @@ local function decode_array_entries(message: Message, element: reflect.Type,
       if slot:last(1) ~= nil then
         entries[count] = decode_field(slot, 1, element, depth + 1)
       end
-      if codec_trace ~= nil then codec_trace:leave() end
+      trace_leave()
     elseif field.number == 2 then
       require_wire(field, 0)
       if field.bits ~= 0 and field.bits ~= 1 then raise "protobuf: invalid boolean" end
@@ -413,13 +422,13 @@ local function decode_foreign_array(message: Message, element: reflect.Type,
   for index = 1, message.count do
     local field = message:entry(index)
     if field.number == 1 then
-      if codec_trace ~= nil then codec_trace:index(count + 1) end
+      trace_index(count + 1)
       require_wire(field, 2)
       count = count + 1
       local slot = read_message_slice(
           message.base, field.offset, field.length, message.holder, message.context)
       entries[count] = decode_field(slot, 1, element, depth + 1)
-      if codec_trace ~= nil then codec_trace:leave() end
+      trace_leave()
     end
   end
   local frozen = entries as const {value}
@@ -433,33 +442,99 @@ local function decode_foreign_struct(message: Message,
   require_struct(descriptor)
   local fields: {value} = {}
   for index = 1, #descriptor.fields do
-    if codec_trace ~= nil then codec_trace:member(descriptor.fields[index].name) end
-    fields[index] = decode_field(message, field_number(index),
-                                 descriptor.fields[index].type, depth + 1)
-    if codec_trace ~= nil then codec_trace:leave() end
+    local field = descriptor.fields[index]
+    trace_member(field.name)
+    fields[index] = decode_field(message, field_number(index), field.type, depth + 1)
+    trace_leave()
   end
   local frozen = fields as const {value}
   return frozen
 end
 
-local function decode_field(message: Message, number: integer,
-                              descriptor: reflect.Type, depth: integer): value
-  require_depth(depth)
-  local resolved = resolve_type(descriptor)
-  local field = message:last(number)
-  case resolved
-  when is_option(base) then
-    if field == nil then return nil end
-    return decode_field(message, number, base, depth)
-  when is_nil() then
-    if field ~= nil then message:merged_message(number) end
-    return nil
-  when is_value() then
-    if field == nil then return nil end
-    return decode_dynamic(message:merged_message(number), depth)
+local function Message:value_field(number: integer, depth: integer): value
+  return decode_dynamic(self:merged_message(number), depth)
+end
+
+local function Message:array_field(number: integer,
+    constness: reflect.ArrayTypeConstness, element: reflect.Type,
+    depth: integer): value
+  return decode_array(self:merged_message(number), constness, element, depth)
+end
+
+local function Message:resource_field(field: foreign *titan_protobuf_field,
+    name: string, codec: ResourceCodec): value
+  require_wire(field, 2)
+  if self.context is PortableCodec then
+    raise "protobuf: " .. name .. " is a packet resource and is not portable"
   end
-  if field == nil then raise "protobuf: missing required field " .. number end
-  case resolved
+  if codec_trace ~= nil then
+    codec_trace:skip_value()
+    return nil
+  end
+  return codec.decode(self.context,
+      (self.base + field.offset) as foreign const *void, field.length)
+end
+
+local function Message:hook_field(field: foreign *titan_protobuf_field,
+    record_type: reflect.RecordType, decode: reflect.StaticFunctionType): value
+  require_wire(field, 2)
+  if codec_trace ~= nil then
+    codec_trace:skip_value()
+    return nil
+  end
+  local restored: value = decode.callable(
+      slice_to_string(self.base, field.offset, field.length))
+  case reflect.inspect(restored)
+  when is_record(record_value) then
+    if record_value.type.name == record_type.name then return restored end
+  end
+  raise "protobuf: record type mismatch"
+end
+
+-- Callback paths are leaves of the structural traversal. Their lookup,
+-- validation and invocation finish before any recursive record payload call.
+-- The flag distinguishes a skipped callback's nil from an unhandled record.
+local function Message:record_callback(field: foreign *titan_protobuf_field,
+    record_type: reflect.RecordType): (boolean, value)
+  local codec? = find_resource_codec_by_name(record_type.name)
+  if codec ~= nil then
+    return true, self:resource_field(field, record_type.name, codec)
+  end
+  local _?, decode? = trace_checked_hooks(record_type)
+  if decode ~= nil then return true, self:hook_field(field, record_type, decode) end
+  return false, nil
+end
+
+local function Message:record_field(number: integer,
+    field: foreign *titan_protobuf_field, record_type: reflect.RecordType,
+    depth: integer): value
+  local handled, restored = self:record_callback(field, record_type)
+  if handled then return restored end
+  local generated, metatable = find_named_codec(record_type.name, 0)
+  if generated ~= nil then
+    return self:generated_nominal(number, generated, metatable, depth)
+  end
+  return decode_record(self:merged_message(number), record_type, depth)
+end
+
+local function Message:union_field(number: integer,
+    union_type: reflect.UnionType, depth: integer): value
+  local generated, metatable = find_named_codec(union_type.name, 1)
+  if generated ~= nil then
+    return self:generated_nominal(number, generated, metatable, depth)
+  end
+  return decode_union(self:merged_message(number), union_type, depth)
+end
+
+-- Foreign composites use a secondary dispatch, leaving only the four common
+-- recursive shapes in decode_field. Scalar conversions finish here too.
+local function Message:other_field(number: integer,
+    field: foreign *titan_protobuf_field, descriptor: reflect.Type,
+    depth: integer): value
+  case descriptor
+  when is_nil() then
+    self:merged_message(number)
+    return nil
   when is_boolean() then
     require_wire(field, 0)
     if field.bits ~= 0 and field.bits ~= 1 then raise "protobuf: invalid boolean" end
@@ -469,55 +544,10 @@ local function decode_field(message: Message, number: integer,
     return unzigzag(field.bits)
   when is_float() then
     require_wire(field, 1)
-    return ffi.titan_protobuf_read_double(message.base, field.offset as foreign size_t)
+    return ffi.titan_protobuf_read_double(self.base, field.offset as foreign size_t)
   when is_string() then
     require_wire(field, 2)
-    return slice_to_string(message.base, field.offset, field.length)
-  when is_array{is_const, elem_descriptor} then
-    return decode_array(message:merged_message(number), is_const, elem_descriptor, depth)
-  when is_record(record_type) then
-    local codec? = find_resource_codec_by_name(record_type.name)
-    if codec ~= nil then
-      require_wire(field, 2)
-      if message.context is PortableCodec then
-        raise "protobuf: " .. record_type.name ..
-            " is a packet resource and is not portable"
-      end
-      if codec_trace ~= nil then
-        codec_trace:skip_value()
-        return nil
-      end
-      return codec.decode(message.context,
-          (message.base + field.offset) as foreign const *void, field.length)
-    end
-    if codec_trace ~= nil then codec_trace.validating_hooks = true end
-    local _?, decode? = find_transfer_hooks(record_type, "protobuf")
-    if codec_trace ~= nil then codec_trace.validating_hooks = false end
-    if decode ~= nil then
-      require_wire(field, 2)
-      if codec_trace ~= nil then
-        codec_trace:skip_value()
-        return nil
-      end
-      local restored: value = decode.callable(
-          slice_to_string(message.base, field.offset, field.length))
-      case reflect.inspect(restored)
-      when is_record(record_value) then
-        if record_value.type.name == record_type.name then return restored end
-      end
-      raise "protobuf: record type mismatch"
-    end
-    local generated, metatable = find_named_codec(record_type.name, 0)
-    if generated ~= nil then
-      return message:generated_nominal(number, generated, metatable, depth)
-    end
-    return decode_record(message:merged_message(number), record_type, depth)
-  when is_union(union_type) then
-    local generated, metatable = find_named_codec(union_type.name, 1)
-    if generated ~= nil then
-      return message:generated_nominal(number, generated, metatable, depth)
-    end
-    return decode_union(message:merged_message(number), union_type, depth)
+    return slice_to_string(self.base, field.offset, field.length)
   when is_foreign_integer{spelling, is_signed, bits} then
     require_wire(field, 0)
     local result = field.bits
@@ -527,72 +557,130 @@ local function decode_field(message: Message, number: integer,
   when is_foreign_float(spelling) then
     if spelling == "long double" then
       require_wire(field, 2)
-      return slice_to_string(message.base, field.offset, field.length)
+      return slice_to_string(self.base, field.offset, field.length)
     elseif spelling == "float" then
       require_wire(field, 5)
-      return read_float32(message.base, field.offset)
+      return read_float32(self.base, field.offset)
     elseif spelling == "double" then
       require_wire(field, 1)
-      return ffi.titan_protobuf_read_double(message.base, field.offset as foreign size_t)
+      return ffi.titan_protobuf_read_double(self.base, field.offset as foreign size_t)
     end
     raise "protobuf: unsupported foreign floating type " .. spelling
   when is_foreign_pointer() then
     require_wire(field, 1)
     local bits: integer = ffi.titan_protobuf_read_fixed64(
-        message.base, field.offset as foreign size_t)
+        self.base, field.offset as foreign size_t)
     local address = ffi.titan_protobuf_bits_pointer(bits)
     local recovered: integer = ffi.titan_protobuf_pointer_bits(address)
     if recovered ~= bits then raise "protobuf: pointer address out of range" end
     return address
   when is_foreign_struct(structure) then
-    return decode_foreign_struct(message:merged_message(number), structure, depth)
+    return decode_foreign_struct(self:merged_message(number), structure, depth)
   when is_foreign_array{elem_descriptor, len} then
     require_foreign_array(len)
-    return decode_foreign_array(message:merged_message(number), elem_descriptor, depth)
+    return decode_foreign_array(self:merged_message(number), elem_descriptor, depth)
   else raise "protobuf: unsupported field type"
+  end
+end
+
+-- Resolve aliases before looking up the wire field, then unwrap Options and
+-- handle absence in a frame that returns before the value graph is descended.
+local function Message:resolved_field(number: integer, descriptor: reflect.Type):
+    (reflect.Type, foreign *titan_protobuf_field, boolean)
+  local resolved = resolve_type(descriptor)
+  local field = self:last(number)
+  while true do
+    case resolved
+    when is_option(base) then
+      if field == nil then return resolved, field, true end
+      resolved = resolve_type(base)
+    else break
+    end
+  end
+  if field == nil then
+    case resolved
+    when is_nil() then return resolved, field, true
+    when is_value() then return resolved, field, true
+    end
+    raise "protobuf: missing required field " .. number
+  end
+  return resolved, field, false
+end
+
+-- Options reuse this frame; each arm owns its temporaries in a separate
+-- callee so the recursive traversal does not reserve every arm's C locals.
+local function decode_field(message: Message, number: integer,
+                              descriptor: reflect.Type, depth: integer): value
+  require_depth(depth)
+  local resolved, field, absent = message:resolved_field(number, descriptor)
+  if absent then return nil end
+  case resolved
+  when is_value() then return message:value_field(number, depth)
+  when is_array{is_const, elem_descriptor} then
+    return message:array_field(number, is_const, elem_descriptor, depth)
+  when is_record(record_type) then
+    return message:record_field(number, field, record_type, depth)
+  when is_union(union_type) then
+    return message:union_field(number, union_type, depth)
+  else return message:other_field(number, field, resolved, depth)
   end
 end
 
 -- A TitanValue message: its last recognized arm selects the value; with no
 -- recognized arm it is nil. Arms decode with the ordinary field rules.
-local function decode_dynamic(message: Message, depth: integer): value
+local function Message:dynamic_arm(): integer
   local selected = 0
-  for index = 1, message.count do
-    local number: integer = message:entry(index).number
+  for index = 1, self.count do
+    local number: integer = self:entry(index).number
     if number >= 1 and number <= 6 then selected = number end
   end
-  if selected == 1 then return decode_field(message, 1, dynamic_boolean, depth)
-  elseif selected == 2 then return decode_field(message, 2, dynamic_integer, depth)
-  elseif selected == 3 then return decode_field(message, 3, dynamic_float, depth)
-  elseif selected == 4 then return decode_field(message, 4, dynamic_string, depth)
+  return selected
+end
+
+local function Message:dynamic_scalar(selected: integer, depth: integer): value
+  local descriptor = dynamic_boolean
+  if selected == 2 then descriptor = dynamic_integer
+  elseif selected == 3 then descriptor = dynamic_float
+  elseif selected == 4 then descriptor = dynamic_string
+  end
+  return decode_field(self, selected, descriptor, depth)
+end
+
+local function decode_dynamic(message: Message, depth: integer): value
+  local selected = message:dynamic_arm()
+  if selected == 0 then return nil end
+  if selected <= 4 then
+    return message:dynamic_scalar(selected, depth)
   elseif selected == 5 then
     return decode_dynamic_nominal(message:merged_message(5), depth)
-  elseif selected == 6 then
-    return decode_array(message:merged_message(6), dynamic_constness, dynamic_value, depth)
   end
-  return nil
+  return decode_array(message:merged_message(6), dynamic_constness, dynamic_value, depth)
+end
+
+-- Identity parsing and lookup finish before the recursive payload call. This
+-- includes portable membership checks, without a second forwarding frame.
+local function Message:dynamic_descriptor(depth: integer): reflect.Type
+  local module: string = decode_field(self, 1, dynamic_string, depth)
+  local name: string = decode_field(self, 2, dynamic_string, depth)
+  if self.context is PortableCodec then
+    return (self.context as PortableCodec):nominal(name).descriptor
+  end
+  local found? = reflect.find_nominal(name)
+  if found == nil and self.context ~= nil and nominal_loader ~= nil and codec_trace == nil then
+    nominal_loader(module, name)
+    found = reflect.find_nominal(name)
+  end
+  if found == nil then raise "protobuf: unknown nominal type " .. name end
+  case found
+  when is_record(record_type) then return reflect.Type.is_record(record_type)
+  when is_union(union_type) then return reflect.Type.is_union(union_type)
+  end
+  raise "protobuf: nominal kind mismatch for " .. name
 end
 
 -- Resolve the qualified name, loading its module only inside a packet decode
 -- (a transfer-installed loader with a carried context), then decode the
 -- payload exactly as a field of that nominal type.
 local function decode_dynamic_nominal(message: Message, depth: integer): value
-  local module: string = decode_field(message, 1, dynamic_string, depth)
-  local name: string = decode_field(message, 2, dynamic_string, depth)
-  if message.context is PortableCodec then
-    return (message.context as PortableCodec):decode_nominal(message, name, depth)
-  end
-  local found? = reflect.find_nominal(name)
-  if found == nil and message.context ~= nil and nominal_loader ~= nil and codec_trace == nil then
-    nominal_loader(module, name)
-    found = reflect.find_nominal(name)
-  end
-  if found == nil then raise "protobuf: unknown nominal type " .. name end
-  case found
-  when is_record(record_type) then
-    return decode_field(message, 3, reflect.Type.is_record(record_type), depth)
-  when is_union(union_type) then
-    return decode_field(message, 3, reflect.Type.is_union(union_type), depth)
-  end
-  raise "protobuf: nominal kind mismatch for " .. name
+  return decode_field(message, 3, message:dynamic_descriptor(depth), depth)
 end

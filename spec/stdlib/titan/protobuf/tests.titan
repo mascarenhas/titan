@@ -2276,12 +2276,10 @@ function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Co
   for _ = 2, CODEC_DEPTH_LIMIT do
     too_deep_value = codec_boundary_record(too_deep_value)
   end
-  -- Keep both reflective oracles on the host stack: deep reflective decoding
-  -- has little coroutine-stack headroom, and traceback capture can exhaust it.
-  local reflective_error = decode_outcome(too_deep, target, false)
-  test.assert(reflective_serialize(reflective_deserialize(bytes, target)) == bytes)
   local co = coroutine.create(function (_: value): value
     test.assert(coroutine.running() ~= nil, "codec depth test did not use a coroutine stack")
+    local reflective_error = decode_outcome(too_deep, target, false)
+    test.assert(reflective_serialize(reflective_deserialize(bytes, target)) == bytes)
     local decoded: CodecBoundaryRecord64 = generated_decode(bytes, target)
     local count = 1
     local current = decoded
@@ -2786,6 +2784,267 @@ function test_error_paths_leave_caller_buffer_untouched(context: test.Context)
     end, "protobuf: record type mismatch at $[3]")
     test.assert(path_hook_encodes == 1)
     test.assert(buf.length == baseline.length and buffer_bytes(buf) == buffer_bytes(baseline))
+  end)
+end
+
+local function on_codec_coroutine(generated: boolean, action: function (): ())
+  local co = coroutine.create(function (_: value): value
+    test.assert(coroutine.running() ~= nil, "codec test needs a coroutine stack")
+    local previous = protobuf.use_generated_codecs(generated)
+    defer protobuf.use_generated_codecs(previous)
+    action()
+    return true
+  end, "reflective-codec")
+  test.assert(co:resume(nil) == true and co:status() == "dead")
+end
+
+local function codec_stack_case(context: test.Context, name: string, action: function (): ())
+  context:run(name, function (_: test.Context) on_codec_coroutine(false, action) end)
+end
+
+-- Parameters give each registered child its own depth and codec mode.
+local function record_stack_failure(context: test.Context, count: integer,
+    wide: boolean, generated: boolean)
+  local name = "narrow"
+  if wide then name = "wide" end
+  if generated then name = name .. "_generated_" else name = name .. "_reflective_" end
+  context:run(name .. count, function (_: test.Context)
+    on_codec_coroutine(generated, function ()
+      local target = descriptor(Node("", nil))
+      local fields = backpatch_field(1, "n")
+      local next_field = 2
+      local leaf_name = "name"
+      if wide then
+        target = descriptor(codec_boundary_record(nil))
+        fields = codec_boundary_scalar_fields()
+        next_field, leaf_name = 64, "f1"
+      end
+      local bytes = ""
+      for _ = 2, count do bytes = fields .. backpatch_field(next_field, bytes) end
+      local expected = "protobuf: missing required field 1"
+      if count == CODEC_DEPTH_LIMIT then expected = CODEC_DEPTH_ERROR end
+      if generated and count > 16 then
+        expected = expected .. " at $" .. string.rep("[\"next\"]", 16) .. "..."
+      else
+        expected = expected .. " at $" .. string.rep("[\"next\"]", count - 1) ..
+            "[\"" .. leaf_name .. "\"]"
+      end
+      expect_path(function () protobuf.deserialize(bytes, target) end, expected)
+    end)
+  end)
+end
+
+local function record_stack_accepted(context: test.Context, generated: boolean)
+  local name = "narrow_reflective_accepted"
+  if generated then name = "narrow_generated_accepted" end
+  context:run(name, function (_: test.Context)
+    on_codec_coroutine(generated, function ()
+      local bytes = node_chain_bytes(CODEC_ACCEPTED_DEPTH)
+      local restored: Node = protobuf.deserialize(bytes, descriptor(Node("", nil)))
+      test.assert(chain_length(restored) == CODEC_ACCEPTED_DEPTH)
+      test.assert(protobuf.serialize(restored) == bytes)
+      test.assert(protobuf.serialize(node_chain(CODEC_ACCEPTED_DEPTH)) == bytes)
+    end)
+  end)
+end
+
+function test_record_failures_at_every_coroutine_depth(context: test.Context)
+  record_stack_accepted(context, false)
+  record_stack_accepted(context, true)
+  for count = 1, CODEC_DEPTH_LIMIT do
+    record_stack_failure(context, count, false, false)
+    record_stack_failure(context, count, true, false)
+    record_stack_failure(context, count, false, true)
+    record_stack_failure(context, count, true, true)
+  end
+end
+
+local function wide_stack_fixture(count: integer): (CodecBoundaryRecord64, string)
+  local candidate = codec_boundary_record(nil)
+  local fields = codec_boundary_scalar_fields()
+  local bytes = fields
+  for _ = 2, count do
+    candidate = codec_boundary_record(candidate)
+    bytes = fields .. backpatch_field(64, bytes)
+  end
+  return candidate, bytes
+end
+
+function test_reflective_record_coroutine_stack(context: test.Context)
+  codec_stack_case(context, "accepted", function ()
+    local candidate, bytes = wide_stack_fixture(CODEC_ACCEPTED_DEPTH)
+    local restored = protobuf.deserialize(bytes, descriptor(candidate))
+    test.assert(protobuf.serialize(restored) == bytes)
+    test.assert(protobuf.serialize(candidate) == bytes)
+  end)
+  codec_stack_case(context, "decode_limit", function ()
+    local candidate, bytes = wide_stack_fixture(CODEC_DEPTH_LIMIT)
+    expect_path(function () protobuf.deserialize(bytes, descriptor(candidate)) end,
+        CODEC_DEPTH_ERROR .. " at $" .. string.rep("[\"next\"]", CODEC_ACCEPTED_DEPTH) ..
+        "[\"f1\"]")
+  end)
+  codec_stack_case(context, "encode_limit", function ()
+    local candidate = wide_stack_fixture(CODEC_DEPTH_LIMIT)
+    expect_path(function () protobuf.serialize(candidate) end,
+        CODEC_DEPTH_ERROR .. " at $" .. string.rep("[\"next\"]", CODEC_ACCEPTED_DEPTH) ..
+        "[\"f1\"]")
+  end)
+  codec_stack_case(context, "cycle", function ()
+    local candidate = codec_boundary_record(nil)
+    candidate.next = candidate
+    expect_path(function () protobuf.serialize(candidate) end,
+        "protobuf: cyclic object graph at $[\"next\"]")
+  end)
+end
+
+record CoroutineUnionOwner
+  next: CoroutineUnion?
+end
+
+union CoroutineUnion
+  empty()
+  link(next: CoroutineUnion)
+  cycle(owner: CoroutineUnionOwner)
+end
+
+local function union_stack_fixture(count: integer, malformed: boolean): (CoroutineUnion, string)
+  local candidate = CoroutineUnion.empty()
+  local bytes = backpatch_field(1, "")
+  if malformed then bytes = string.char(8, 0) end
+  for _ = 2, count do
+    candidate = CoroutineUnion.link(candidate)
+    bytes = backpatch_field(2, backpatch_field(1, bytes))
+  end
+  return candidate, bytes
+end
+
+function test_reflective_union_coroutine_stack(context: test.Context)
+  codec_stack_case(context, "accepted", function ()
+    local candidate, bytes = union_stack_fixture(CODEC_DEPTH_LIMIT, false)
+    local restored = protobuf.deserialize(bytes, descriptor(candidate))
+    test.assert(protobuf.serialize(restored) == bytes)
+    test.assert(protobuf.serialize(candidate) == bytes)
+  end)
+  codec_stack_case(context, "innermost_failure", function ()
+    local candidate, bytes = union_stack_fixture(CODEC_DEPTH_LIMIT, true)
+    expect_path(function () protobuf.deserialize(bytes, descriptor(candidate)) end,
+        "protobuf: unexpected wire type at $" ..
+        string.rep("[\"next\"]", CODEC_ACCEPTED_DEPTH))
+  end)
+  codec_stack_case(context, "decode_limit", function ()
+    local candidate, bytes = union_stack_fixture(CODEC_DEPTH_LIMIT + 1, false)
+    expect_path(function () protobuf.deserialize(bytes, descriptor(candidate)) end,
+        CODEC_DEPTH_ERROR .. " at $" .. string.rep("[\"next\"]", CODEC_DEPTH_LIMIT))
+  end)
+  codec_stack_case(context, "encode_limit", function ()
+    local candidate = union_stack_fixture(CODEC_DEPTH_LIMIT + 1, false)
+    expect_path(function () protobuf.serialize(candidate) end,
+        CODEC_DEPTH_ERROR .. " at $" .. string.rep("[\"next\"]", CODEC_DEPTH_LIMIT))
+  end)
+  codec_stack_case(context, "cycle", function ()
+    local owner = CoroutineUnionOwner(nil)
+    local candidate = CoroutineUnion.cycle(owner)
+    owner.next = candidate
+    expect_path(function () protobuf.serialize(candidate) end,
+        "protobuf: cyclic object graph at $[\"owner\"][\"next\"]")
+  end)
+end
+
+local function array_stack_fixture(count: integer, malformed: boolean):
+    (reflect.Type, {value}, string)
+  local target = reflect.Type.is_integer()
+  local candidate: {value} = {}
+  local bytes = string.char(16, 0)
+  if malformed then bytes = string.char(16, 2) end
+  for index = 1, count do
+    target = reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), target)
+    if index > 1 then
+      candidate = {candidate}
+      bytes = backpatch_field(1, backpatch_field(1, bytes)) .. string.char(16, 0)
+    end
+  end
+  return target, candidate, backpatch_field(1, bytes)
+end
+
+function test_reflective_array_coroutine_stack(context: test.Context)
+  codec_stack_case(context, "accepted", function ()
+    -- The anonymous root consumes one level before its first Array.
+    local target, candidate, bytes = array_stack_fixture(CODEC_ACCEPTED_DEPTH, false)
+    local fields: const {reflect.Type} = {target}
+    local restored = protobuf.deserialize_fields(bytes, fields)
+    test.assert(protobuf.serialize_fields(fields, restored) == bytes)
+    test.assert(protobuf.serialize_fields(fields, candidate) == bytes)
+  end)
+  codec_stack_case(context, "innermost_failure", function ()
+    local target, _, bytes = array_stack_fixture(CODEC_ACCEPTED_DEPTH, true)
+    local fields: const {reflect.Type} = {target}
+    expect_path(function () protobuf.deserialize_fields(bytes, fields) end,
+        "protobuf: invalid boolean at $" .. string.rep("[1]", CODEC_ACCEPTED_DEPTH))
+  end)
+  codec_stack_case(context, "decode_limit", function ()
+    local target, _, bytes = array_stack_fixture(CODEC_DEPTH_LIMIT, false)
+    local fields: const {reflect.Type} = {target}
+    expect_path(function () protobuf.deserialize_fields(bytes, fields) end,
+        CODEC_DEPTH_ERROR .. " at $" .. string.rep("[1]", CODEC_DEPTH_LIMIT))
+  end)
+  codec_stack_case(context, "encode_limit", function ()
+    local target, candidate = array_stack_fixture(CODEC_DEPTH_LIMIT, false)
+    local fields: const {reflect.Type} = {target}
+    expect_path(function () protobuf.serialize_fields(fields, candidate) end,
+        CODEC_DEPTH_ERROR .. " at $" .. string.rep("[1]", CODEC_DEPTH_LIMIT))
+  end)
+  codec_stack_case(context, "cycle", function ()
+    local candidate: {value} = {}
+    candidate[1] = candidate
+    local fields: const {reflect.Type} = {
+      reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_value()),
+    }
+    expect_path(function () protobuf.serialize_fields(fields, candidate) end,
+        "protobuf: cyclic object graph at $[1][1]")
+  end)
+end
+
+local function dynamic_stack_fixture(count: integer, malformed: boolean): (AnyValue, string)
+  local candidate = AnyValue(1)
+  local scalar = string.char(16, 2)
+  if malformed then scalar = string.char(8, 2) end
+  local bytes = backpatch_field(1, scalar)
+  local identity = backpatch_field(1, "protobuf.tests") ..
+      backpatch_field(2, "protobuf.tests.AnyValue")
+  for _ = 2, count do
+    candidate = AnyValue(candidate)
+    bytes = backpatch_field(1, backpatch_field(5, identity .. backpatch_field(3, bytes)))
+  end
+  return candidate, bytes
+end
+
+function test_reflective_dynamic_coroutine_stack(context: test.Context)
+  codec_stack_case(context, "accepted", function ()
+    local candidate, bytes = dynamic_stack_fixture(CODEC_ACCEPTED_DEPTH, false)
+    local restored = protobuf.deserialize(bytes, descriptor(candidate))
+    test.assert(protobuf.serialize(restored) == bytes)
+    test.assert(protobuf.serialize(candidate) == bytes)
+  end)
+  codec_stack_case(context, "innermost_failure", function ()
+    local candidate, bytes = dynamic_stack_fixture(CODEC_ACCEPTED_DEPTH, true)
+    expect_path(function () protobuf.deserialize(bytes, descriptor(candidate)) end,
+        "protobuf: invalid boolean at $" .. string.rep("[\"item\"]", CODEC_ACCEPTED_DEPTH))
+  end)
+  codec_stack_case(context, "decode_limit", function ()
+    local candidate, bytes = dynamic_stack_fixture(CODEC_DEPTH_LIMIT, false)
+    expect_path(function () protobuf.deserialize(bytes, descriptor(candidate)) end,
+        CODEC_DEPTH_ERROR .. " at $" .. string.rep("[\"item\"]", CODEC_DEPTH_LIMIT))
+  end)
+  codec_stack_case(context, "encode_limit", function ()
+    local candidate = dynamic_stack_fixture(CODEC_DEPTH_LIMIT, false)
+    expect_path(function () protobuf.serialize(candidate) end,
+        CODEC_DEPTH_ERROR .. " at $" .. string.rep("[\"item\"]", CODEC_DEPTH_LIMIT))
+  end)
+  codec_stack_case(context, "cycle", function ()
+    local candidate = AnyValue(nil)
+    candidate.item = candidate
+    expect_path(function () protobuf.serialize(candidate) end,
+        "protobuf: cyclic object graph at $[\"item\"]")
   end)
 end
 

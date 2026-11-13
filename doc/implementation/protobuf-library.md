@@ -182,6 +182,51 @@ The boundary tests derive their depths and messages from the macro:
 `encode_127_accepted`, `decode_128_rejected_by_both`, and
 `partless_union_at_128` apply on both targets.
 
+### Reflective frame budget
+
+The same nesting boundary holds on a Task or coroutine stack, not just on the
+main stack. Keep `decode_field` and `Encoder:field` thin: normalize the
+descriptor, check depth and presence, and dispatch to the appropriate arm.
+Each arm owns its temporaries. Unwrap Options in a loop at the same depth;
+recursing through the dispatcher would retain a second frame for every
+optional link.
+
+Union selection and dynamic nominal identity lookup finish before child
+traversal. Resource and hook callbacks likewise live outside the structural
+record traversal. Portable public-field constructor invocation runs after
+all child fields have decoded, in its own short-lived frame. Conditional
+trace updates use small helpers rather than adding temporary root slots to
+every retained traversal frame.
+
+The native x86-64 validation (`-O0`) budget is a sum of at most 6 KiB of
+generated C frame reservations per nesting level for each recursive shape.
+At 128 levels this reserves at most 768 KiB of a 2 MiB coroutine stack,
+leaving more than 1 MiB for the caller, raising, and failure-only replay.
+The measured dispatcher reservations, in bytes, are:
+
+| Dispatcher | Monolithic dispatch | Thin dispatch |
+| --- | ---: | ---: |
+| `decode_field` | 8656 | 1200 |
+| `Encoder:field` | 6128 | 816 |
+
+The complete retained chains include the arm and traversal functions, not
+just the dispatcher. A dynamic nominal retains two dispatchers: one for the
+`value` field and one for its nominal payload. The optional-record chain
+retained two dispatchers with monolithic dispatch, but now retains only one.
+
+| Shape | Monolithic decode | Thin decode | Monolithic encode | Thin encode |
+| --- | ---: | ---: | ---: | ---: |
+| Optional record | 19456 | 3568 | 14144 | 3392 |
+| Union part | 13200 | 3264 | 8576 | 3520 |
+| Array of Arrays | 10848 | 3424 | 8288 | 2912 |
+| `value` holding a nominal | 23504 | 6016 | 16240 | 5664 |
+
+These are installed-provider C-body frame reservations, not a portable ABI
+property. Coroutine tests exercise accepted values, innermost failures,
+over-limit values and cycles on native and browser targets; the sanitizer
+lane exercises the same boundary with its larger frames. The nesting budget
+bounds the codec's traversal, not stack already consumed by its caller.
+
 ## Generated nominal codecs
 
 The compiler emits a codec pair for every public record or union that the

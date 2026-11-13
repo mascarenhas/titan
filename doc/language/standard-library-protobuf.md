@@ -445,7 +445,8 @@ when a replay in trace mode reproduces the failure.
 Nesting is limited on every encoding, decoding, and schema path, generated or
 reflective. Levels count nested messages and the fields of the innermost one:
 a chain of records whose innermost record has a field holds at most 127 records
-on native and browser targets. Deeper input raises the ordinary catchable
+on native and browser targets, on the main stack or inside a Task or
+coroutine. Deeper input raises the ordinary catchable
 error `protobuf: nesting exceeds 128 levels`, with an error-path suffix for
 located encoding or decoding failures. This bounds the codec's own traversal,
 not stack already used by its caller.

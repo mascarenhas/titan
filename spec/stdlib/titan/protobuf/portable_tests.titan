@@ -3,6 +3,7 @@ local protobuf = import "protobuf"
 local reflect = import "reflect"
 local string = import "string"
 local transfer = import "transfer"
+local coroutine = import "coroutine"
 foreign import "protobuf_fixture.h"
 
 local function descriptor(candidate: value): reflect.Type
@@ -607,5 +608,89 @@ function test_error_paths_do_not_repeat_public_constructors(context: test.Contex
     expect_exact_error(function () codec:decode(string.char(10, 2, 8, 2)) end,
         "protobuf: missing required field 2 at $[2]")
     test.assert(path_constructor_calls == 1)
+  end)
+end
+
+local function on_portable_coroutine(action: function (): ())
+  local co = coroutine.create(function (_: value): value
+    test.assert(coroutine.running() ~= nil, "portable codec test needs a coroutine stack")
+    local previous = protobuf.use_generated_codecs(true)
+    defer protobuf.use_generated_codecs(previous)
+    action()
+    return true
+  end, "portable-codec")
+  test.assert(co:resume(nil) == true and co:status() == "dead")
+end
+
+local coroutine_view_constructions = 0
+
+record CoroutinePublicView
+  local secret: integer
+  next: CoroutinePublicView?
+  number: integer
+end
+
+function CoroutinePublicView.new(next: CoroutinePublicView?, number: integer): CoroutinePublicView
+  coroutine_view_constructions = coroutine_view_constructions + 1
+  return {secret = 99, next = next, number = number}
+end
+
+function test_deep_public_view_on_coroutine_stack(_: test.Context)
+  on_portable_coroutine(function ()
+    -- The anonymous root and the innermost fields each consume one level.
+    local count: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 2
+    local candidate = CoroutinePublicView(nil, 1)
+    candidate.secret = -1
+    for number = 2, count do
+      candidate = CoroutinePublicView(candidate, number)
+      candidate.secret = -1
+    end
+    test.assert(protobuf.find_generated_codec(candidate) == nil)
+    local codec = protobuf.portable({descriptor(candidate)})
+    local bytes = codec:encode(candidate)
+    coroutine_view_constructions = 0
+    local restored: CoroutinePublicView = codec:decode(bytes)
+    test.assert(coroutine_view_constructions == count)
+    test.assert(codec:encode(restored) == bytes)
+    local current = restored
+    for number = count, 1, -1 do
+      test.assert(current.number == number and current.secret == 99)
+      if number > 1 then
+        test.assert(current.next ~= nil)
+        current = current.next
+      else
+        test.assert(current.next == nil)
+      end
+    end
+  end)
+end
+
+union CoroutinePublicUnion
+  empty()
+  link(next: CoroutinePublicUnion)
+  local hidden(integer)
+end
+
+function test_deep_public_union_on_coroutine_stack(_: test.Context)
+  on_portable_coroutine(function ()
+    -- A partless leaf needs no field probe, but the anonymous root costs one.
+    local count: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 1
+    local candidate = CoroutinePublicUnion.empty()
+    for _ = 2, count do candidate = CoroutinePublicUnion.link(candidate) end
+    test.assert(protobuf.find_generated_codec(candidate) == nil)
+    local codec = protobuf.portable({descriptor(candidate)})
+    local bytes = codec:encode(candidate)
+    local restored: CoroutinePublicUnion = codec:decode(bytes)
+    test.assert(codec:encode(restored) == bytes)
+    local current = restored
+    for index = 1, count do
+      case current
+      when link(next) then
+        test.assert(index < count)
+        current = next
+      when empty() then test.assert(index == count)
+      else raise "decoded a private union variant"
+      end
+    end
   end)
 end

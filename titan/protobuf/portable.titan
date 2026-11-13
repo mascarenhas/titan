@@ -134,6 +134,12 @@ local function PortableCodec:nominal(name: string): PortableNominal
   return entry
 end
 
+-- Callable adjustment and spread preparation happen only after every field
+-- has returned, so their temporaries do not consume stack per decoded level.
+local function PortableConstructor:construct(arguments: {value}): value
+  return self.descriptor.callable(...arguments[1, #self.descriptor.param_descriptors])
+end
+
 local function PortableCodec:decode_public_record(message: Message,
     descriptor: reflect.RecordType, depth: integer): value
   local constructor? = self:nominal(descriptor.name).constructor
@@ -142,23 +148,15 @@ local function PortableCodec:decode_public_record(message: Message,
   end
   local arguments: {value} = {}
   for index = 1, #descriptor.fields do
-    if codec_trace ~= nil then codec_trace:member(descriptor.fields[index].name) end
-    local decoded = decode_field(message, field_number(index),
-        descriptor.fields[index].type, depth + 1)
+    local field = descriptor.fields[index]
+    trace_member(field.name)
+    local decoded = decode_field(message, field_number(index), field.type, depth + 1)
     local parameter? = constructor.positions[index]
     if parameter ~= nil then arguments[parameter] = decoded end
-    if codec_trace ~= nil then codec_trace:leave() end
+    trace_leave()
   end
-  if codec_trace ~= nil then
-    codec_trace:skip_value()
-    return nil
-  end
-  return constructor.descriptor.callable(...arguments[1, #constructor.descriptor.param_descriptors])
-end
-
-local function PortableCodec:decode_nominal(message: Message, name: string,
-    depth: integer): value
-  return decode_field(message, 3, self:nominal(name).descriptor, depth)
+  if trace_skip_value() then return nil end
+  return constructor:construct(arguments)
 end
 
 --- Encode exactly one value per root field, including nil positions.

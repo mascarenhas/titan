@@ -788,6 +788,8 @@ the innermost field consumes one level, so a structural record chain accepts
 127 records. Generated and reflective protobuf paths, `protobuf.schema`,
 `TransferValue`, and packet encode/decode share that policy and ordinary
 error string. The browser descriptor no longer overrides it.
+Reflective coroutine-stack boundary tests exercise the shared budget on
+both targets.
 
 JSON encoding uses only the call's validated `max_depth` (default 32);
 there is no additional target cap or cached writer clamp. The owning native
