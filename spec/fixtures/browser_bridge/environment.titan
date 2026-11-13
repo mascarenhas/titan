@@ -37,7 +37,7 @@ local function unset(...: Value): Value
   return Value.is_integer(ffi.unsetenv(argument(args, 1)))
 end
 
-function main(): integer
+function main(_: {string}): integer
   local publish = browser.binding("environment")
   defer publish:close()
   publish:call(Value.is_callable(read), Value.is_callable(count),
