@@ -156,6 +156,7 @@ local function PortableCodec:decode_nominal(message: Message, name: string,
 end
 
 --- Encode exactly one value per root field, including nil positions.
+-- @param ... Exactly one value per field, including explicit nil values.
 -- @return Protocol Buffers bytes, with the same mapping as serialize_fields.
 -- @usage standard-library-protobuf.md#portable-codecs
 function PortableCodec:encode(...: value): string

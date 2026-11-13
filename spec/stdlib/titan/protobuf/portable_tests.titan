@@ -219,18 +219,20 @@ function test_value_arms_and_closed_dynamic_nominals(context: test.Context)
   end)
 end
 
-function test_missing_dynamic_module_is_never_loaded(_: test.Context)
-  local nominal_fields: const {reflect.Type} = {
-    reflect.Type.is_string(), reflect.Type.is_string(), reflect.Type.is_string(),
-  }
-  local name = "portable_uninitialized.Token"
-  test.assert(reflect.find_nominal(name) == nil)
-  local nominal = protobuf.serialize_fields(nominal_fields, "portable_uninitialized", name, "")
-  local wrapped = string.char(42, #nominal) .. nominal
-  local bytes = string.char(10, #wrapped) .. wrapped
-  local codec = protobuf.portable({reflect.Type.is_value()})
-  expect_error(function() codec:decode(bytes) end, name .. " is not in this portable codec")
-  test.assert(reflect.find_nominal(name) == nil)
+function test_missing_dynamic_module_is_never_loaded(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local nominal_fields: const {reflect.Type} = {
+      reflect.Type.is_string(), reflect.Type.is_string(), reflect.Type.is_string(),
+    }
+    local name = "portable_uninitialized.Token"
+    test.assert(reflect.find_nominal(name) == nil)
+    local nominal = protobuf.serialize_fields(nominal_fields, "portable_uninitialized", name, "")
+    local wrapped = string.char(42, #nominal) .. nominal
+    local bytes = string.char(10, #wrapped) .. wrapped
+    local codec = protobuf.portable({reflect.Type.is_value()})
+    expect_error(function() codec:decode(bytes) end, name .. " is not in this portable codec")
+    test.assert(reflect.find_nominal(name) == nil)
+  end)
 end
 
 function test_creation_rejects_ineligible_types_before_values(context: test.Context)
@@ -296,18 +298,26 @@ function test_hooks_never_run_in_any_portable_position(context: test.Context)
   end)
 end
 
-function test_packet_resources_are_rejected_without_callbacks(_: test.Context)
-  local resource = Resource(1)
-  case descriptor(resource)
-  when is_record(record_type) then
-    protobuf.register_resource_codec(resource, record_type,
-      function(_context: value, _candidate: value): integer raise "resource encoder ran" end,
-      function(_context: value, _data: foreign const *void, _length: integer): value
-        raise "resource decoder ran"
-      end)
-  end
-  expect_error(function() protobuf.portable({descriptor(resource)}) end,
-      "$[1]: protobuf.portable_tests.Resource is a packet resource and is not portable")
+function test_packet_resources_are_rejected_without_callbacks(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local resource = Resource(1)
+    local encodes, decodes = 0, 0
+    case descriptor(resource)
+    when is_record(record_type) then
+      protobuf.register_resource_codec(resource, record_type,
+        function(_context: value, _candidate: value): integer
+          encodes = encodes + 1
+          return 0
+        end,
+        function(_context: value, _data: foreign const *void, _length: integer): value
+          decodes = decodes + 1
+          return resource
+        end)
+    end
+    expect_error(function() protobuf.portable({descriptor(resource)}) end,
+        "$[1]: protobuf.portable_tests.Resource is a packet resource and is not portable")
+    test.assert(encodes == 0 and decodes == 0, "creation called a resource callback")
+  end)
 end
 
 function test_resources_registered_after_creation_never_run_callbacks(context: test.Context)
