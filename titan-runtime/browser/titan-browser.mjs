@@ -200,7 +200,6 @@ class OutputChannel {
     this.stream = stream;
     this.host = host;
     this.queue = [];
-    this.tail = [];
     this.inflight = undefined;
     this.terminal = false;
     this.firstFailure = undefined;
@@ -208,29 +207,16 @@ class OutputChannel {
     this.pumped = undefined;
   }
 
-  byte(byte) {
-    if (byte === null || byte === undefined) return;
+  admit(bytes, settled) {
     if (this.terminal) {
       this.firstFailure ||= {error: failure('DISPOSED', `browser ${this.stream} stream is disposed`)};
-      return;
-    }
-    this.tail.push(byte & 255);
-    if (this.tail.length === 1024) this.seal();
+    } else this.queue.push({bytes, settled});
   }
 
-  seal() {
-    if (this.tail.length) {
-      this.queue.push({bytes: Uint8Array.from(this.tail)});
-      this.tail = [];
-    }
-  }
-
-  // A parked relinquish gate publishes the buffered tail and starts at most
-  // one runner without awaiting it, so a slow sink never stalls the drive.
+  // A parked relinquish gate starts at most one runner without awaiting it.
   // Pump failures wait for the operation's final flush.
   pump(token) {
     if (this.terminal) return;
-    this.seal();
     if (this.running || !this.queue.length) return;
     const runner = {token, done: undefined};
     this.running = runner;
@@ -262,7 +248,6 @@ class OutputChannel {
 
   // The final flush, after the operation's entries retired, drains the rest.
   async flushQueue(token) {
-    this.seal();
     let failures;
     for (let entry = this.take(token, true); entry; entry = this.take(token, true)) {
       const current = await this.send(token, entry);
@@ -325,15 +310,13 @@ class OutputChannel {
   }
 
   discard(error, fault) {
-    if (error.code === 'TITAN_BROWSER_DISPOSED' && (this.tail.length || this.queue.length)) {
+    if (error.code === 'TITAN_BROWSER_DISPOSED' && this.queue.length) {
       this.firstFailure ||= fault || {error};
     }
-    this.tail = [];
     this.queue = [];
   }
 
   takeDrain() {
-    this.seal();
     const drain = {
       sink: this.terminal ? undefined : this.sink,
       stream: this.stream,
@@ -342,7 +325,6 @@ class OutputChannel {
     };
     this.sink = undefined;
     this.queue = [];
-    this.tail = [];
     this.firstFailure = undefined;
     return drain;
   }
@@ -597,6 +579,10 @@ class BrowserOwner {
     return promise;
   }
 
+  output(stream, pointer, length) {
+    (stream === 2 ? this.err : this.out).admit(this.bytesAt(pointer, length));
+  }
+
   async instantiate() {
     if (typeof WebAssembly.promising !== 'function' ||
         typeof WebAssembly.Suspending !== 'function') {
@@ -605,9 +591,6 @@ class BrowserOwner {
     // Avoid AllocationSite -> literal boilerplate -> instance-bound accessor -> Module.
     // Emscripten mutates this input, so it must not share a cached literal map.
     const incoming = Object.create(null);
-    incoming.stdin = () => null;
-    incoming.stdout = byte => this.out.byte(byte);
-    incoming.stderr = byte => this.err.byte(byte);
     incoming.onAbort = cause => { this.abortSeen = true; this.poison(cause, this.originalTrap ? 'trap' : 'abort'); };
     incoming.titanBrowserAttach = backend => { this.backend = backend; };
     incoming.titanBrowserSafePoint = () => this.scheduleSafePoint();
@@ -636,8 +619,8 @@ class BrowserOwner {
       if (trace.state !== 'ready') {
         const bytes = new TextEncoder().encode(`degraded browser trace: ${trace.reason ?? 'metadata is not ready'}`);
         result = {failed: true, status: 1, bytes};
-        for (const byte of bytes) this.err.byte(byte);
-        this.err.byte(10);
+        this.err.admit(bytes);
+        this.err.admit(Uint8Array.of(10));
       }
     }
     if (!result) result = await this.entry('initialize');

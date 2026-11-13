@@ -240,6 +240,23 @@ describe("browser image profile and SDK readiness", function()
         assert.truthy(err:find("run 'make browser-sdk PREFIX=/prefix'", 1, true))
     end)
 
+    it("renders native stdio and unavailable file syscalls in every launcher", function()
+        local source = driver.browser_c_image_contents(
+            "static int titan_browser_worker(lua_State *L) { return 0; }")
+        for _, header in ipairs({ "errno.h", "wasi/api.h", "emscripten/syscalls.h" }) do
+            assert.truthy(source:find("#include <" .. header .. ">", 1, true), header)
+        end
+        for _, name in ipairs({ "__wasi_fd_write", "__wasi_fd_read", "__wasi_fd_close", "__wasi_fd_seek",
+            "__syscall_openat", "__syscall_unlinkat", "__syscall_renameat", "__syscall_rmdir",
+            "__syscall_stat64", "__syscall_lstat64", "__syscall_fstat64", "__syscall_newfstatat",
+            "__syscall_getcwd", "__syscall_readlinkat", "__syscall_ioctl", "__syscall_fcntl64",
+            "__syscall_dup3", "_emscripten_system" }) do
+            assert.truthy(source:find(name .. "(", 1, true), name)
+        end
+        assert.truthy(source:find("titan_browser_host_output(fd, iovs[i].buf, iovs[i].buf_len)", 1, true))
+        assert.truthy(source:find("*nwritten = total;", 1, true))
+    end)
+
     it("exports private current HEAPU8 and exact production marshalling exports", function()
         local descriptor = fixtures.descriptor()
         local profile = assert(browserlink.profile(descriptor, { purpose = "program", assertions = 2 }))
@@ -254,12 +271,12 @@ describe("browser image profile and SDK readiness", function()
             "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
+            "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
                 '"_titan_browser_release_callable","_titan_browser_close",' ..
                 '"_malloc","_free","_titan_browser_trace_identity"]',
             '-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]',
-            '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
+            '-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]',
             "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
             "--js-library", browserlink.sdk_assets(descriptor.paths).bridge_library,
             "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
@@ -284,12 +301,12 @@ describe("browser image profile and SDK readiness", function()
             "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sFORCE_FILESYSTEM=1", "-sPRINTF_LONG_DOUBLE=1",
+            "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
                 '"_titan_browser_release_callable","_titan_browser_close",' ..
                 '"_malloc","_free","_titan_browser_trace_identity"]',
             '-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]',
-            '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]',
+            '-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]',
             "--js-library", browserlink.sdk_assets(descriptor.paths).js_library,
             "--js-library", browserlink.sdk_assets(descriptor.paths).bridge_library,
             "--js-library", browserlink.sdk_assets(descriptor.paths).trace_library,
@@ -370,12 +387,17 @@ describe("browser image profile and SDK readiness", function()
         end
     end)
 
-    it("preserves byte-oriented FS and TTY for every purpose including the interpreter baseline", function()
+    it("disables the launcher filesystem while preserving the interpreter baseline", function()
         for _, purpose in ipairs({ "program", "test", "protocol", "gate", "minicoro", "budget", "baseline" }) do
             for _, entry in ipairs(purpose == "baseline" and { "titan", "lua-main" } or { "titan" }) do
                 local plan = assert(browserlink.profile(fixtures.descriptor(),
                     { purpose = purpose, assertions = 2, entry = entry }))
-                assert.truthy(table.concat(plan.link_flags, " "):find("-sFORCE_FILESYSTEM=1", 1, true))
+                local flags = table.concat(plan.link_flags, " ")
+                assert.truthy(flags:find(entry == "titan" and "-sFILESYSTEM=0" or "-sFORCE_FILESYSTEM=1", 1, true))
+                assert.is_nil(flags:find(entry == "titan" and "-sFORCE_FILESYSTEM=" or "-sFILESYSTEM=", 1, true))
+                assert.truthy(flags:find(entry == "titan" and
+                    '-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]' or
+                    '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]', 1, true))
                 assert.same(plan.link_flags, plan.identity_inputs.link_flags)
             end
         end
@@ -860,30 +882,19 @@ describe("real browser test image", function()
         end
     end)
 
-    it("delivers pure-C stdio-only binary tails to Chromium byte sinks", function()
+    it("delivers native C stdio batches and rejects file calls under Node and Chromium", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
-        c_image(info, "stdio-image", [[
-static int titan_browser_worker(lua_State *L) {
-    static const unsigned char out[] = {65, 0, 255, 195, 40};
-    static const unsigned char err[] = {66, 0, 254, 226, 40};
-    static char out_buffer[BUFSIZ], err_buffer[BUFSIZ];
-    if (setvbuf(stdout, out_buffer, _IOFBF, sizeof out_buffer) != 0 ||
-        setvbuf(stderr, err_buffer, _IOFBF, sizeof err_buffer) != 0)
-        return luaL_error(L, "cannot buffer stdio fixture");
-    if (fwrite(out, 1, sizeof out, stdout) != sizeof out ||
-        fwrite(err, 1, sizeof err, stderr) != sizeof err)
-        return luaL_error(L, "cannot write stdio fixture");
-    lua_pushinteger(L, 0);
-    return 1;
-}
-]])
+        c_image(info, "stdio-image", read(repository .. "/spec/fixtures/browser_images/stdio-only.c"))
         local fixture = workspace .. "/out/stdio-only.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/stdio-only.mjs"))
-        local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", "chromium",
-            "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--", "stdio-image.mjs" })
-        assert.is_true(result.ok, result.output or result.diagnostic)
+        for _, engine in ipairs({ "node", "chromium" }) do
+            local result = run({ info.sdk_root .. "/titan-browser-run", "--engine", engine,
+                "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--", "stdio-image.mjs" })
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            assert.is_nil(result.output:find("TITAN_UNEXPECTED_HOST_SHELL", 1, true), result.output)
+        end
     end)
 
     it("permits objects without the SDK and diagnoses image readiness and suffixes precisely", function()

@@ -151,7 +151,7 @@ function M.profile(descriptor, options)
     add("-sMODULARIZE=1")
     add("-sEXPORT_ES6=1")
     add("-sENVIRONMENT=web,node")
-    add("-sFORCE_FILESYSTEM=1")
+    add(entry == "titan" and "-sFILESYSTEM=0" or "-sFORCE_FILESYSTEM=1")
     add("-sPRINTF_LONG_DOUBLE=1")
     local exports = entry == "titan" and
         '"_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
@@ -163,7 +163,8 @@ function M.profile(descriptor, options)
     end
     add("-sEXPORTED_FUNCTIONS=[" .. exports .. "]")
     add('-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]')
-    add('-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]')
+    add(entry == "titan" and '-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]' or
+        '-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]')
     if entry == "titan" then
         add("--js-library")
         add(M.sdk_assets(descriptor.paths).js_library)

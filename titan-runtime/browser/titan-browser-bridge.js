@@ -21,6 +21,10 @@ addToLibrary({
   titan_browser_complete__sig: 'vp',
   titan_browser_complete: pointer => TitanBridge.trusted('receiveCompletion', pointer >>> 0),
 
+  titan_browser_host_output__deps: ['$TitanBridge'],
+  titan_browser_host_output__sig: 'vipi',
+  titan_browser_host_output: (stream, bytes, length) => TitanBridge.trusted('output', stream >>> 0, bytes >>> 0, length >>> 0),
+
   titan_browser_host_state_open__deps: ['$TitanBridge'],
   titan_browser_host_state_open__sig: 'ip',
   titan_browser_host_state_open: record => TitanBridge.trusted('openState', record >>> 0),

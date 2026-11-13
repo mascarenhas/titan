@@ -678,7 +678,7 @@ otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 
 **Output.** Each stream has one FIFO and at most one actual sink invocation in
 flight. The loader flushes after all entries in the containing operation,
-including unterminated C-stdio tails, and during a drive also whenever the
+including unterminated C-stdio output, and during a drive also whenever the
 drive relinquishes the event loop, without waiting there for a pending sink
 call: output queued behind that call reaches the sink once the call settles,
 if the drive is still relinquished, and otherwise at its next relinquish or
@@ -689,6 +689,8 @@ cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
 message and trace remain primary while deliverable output is still flushed.
 There is no cross-stream ordering guarantee.
+C output is copied before the C write returns; sinks do not see a view into
+the Wasm heap. Chunk boundaries are not part of the C-stdio contract.
 A C-stdio sink failure is returned by the operation that flushes it, or by
 disposal if the operation already failed in Titan; empty flushes and unrelated
 output-free operations do not fail again with that error, and observing it does
@@ -1009,8 +1011,12 @@ Main completes when it returns or fails, and its output (including an
 unterminated last line) is delivered then. The state and callable handles
 remain alive until explicit disposal. The runner awaits disposal and its
 finalizer output before reporting completion. Output is binary: NUL, `0xFF`,
-and invalid UTF-8 pass through unchanged. C standard input is always at end of
-file.
+and invalid UTF-8 pass through unchanged. C standard input fails with an
+`ENOSYS` error: `fread` returns zero with `ferror` set, not EOF, and opens no
+input dialog. There is no filesystem: C file operations such as `fopen`,
+`remove`, `rename`, `tmpfile`, and `tmpnam` fail. `system(NULL)` reports no
+shell, and `system(command)` fails without executing a host command, under
+Node as well as in a web page.
 
 ### Traces
 
@@ -1352,6 +1358,9 @@ Flags that change the Wasm feature set, such as `--cflag=-msimd128`, are
 reported separately from Lua record errors. The diagnostic lists the supplied
 compile flags and the actual versus required target features. Remove the
 feature-changing flag; reinstalling browser Lua does not repair that mismatch.
+
+Launcher images disable Emscripten's filesystem; this does not affect binary
+standard output and standard error.
 
 Titan also owns the settings that the runtime and the traceback backend depend
 on. The [build profile](#build-profiles) owns the optimization level, inlining,

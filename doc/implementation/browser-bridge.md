@@ -40,7 +40,7 @@ shipped file is justified by the capability in its last column.
 | File | Owns | Host capability |
 | --- | --- | --- |
 | `titan-browser-library.js` (`--js-library`) | The execution owner of one Module: the pending entry, the promising wrappers of the state-entering exports, one promise per coroutine context with its saved linear stack, the suspending imports (`titan_mco_transfer`, `titan_mco_destroy`, `titan_browser_relinquish`), the synchronous-callback depth, and poison | JSPI suspension and resumption; engine failure |
-| `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner. It keeps no state | Emscripten import glue |
+| `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner, including `titan_browser_host_output` for C stdio. It keeps no state | Emscripten import glue |
 | `titan-browser.mjs` (embedded in each image) | The loader: `create` and `BrowserOwner`, in the parts listed below | See below |
 | `titan-browser-trace.js` (`--js-library`) | The index built from the fetched `.wasm.map`, stack capture into C-owned records, and symbolization ([trace metadata](browser-target.md#eager-map-loader-and-trace-metadata)) | Engine stack capture; fetching and parsing the map outside the Wasm heap |
 
@@ -55,7 +55,7 @@ The loader's parts:
 | Pending Task-form calls (`openTasks`) | Delivered Task-form calls whose Task has not reported its outcome, with each call's promise | The embedder-facing promise API; promises waiting for a Titan-reported outcome |
 | Requests | The detachable cell of each promise or listener continuation, the host cancel function, the ownership form, the completion and failure targets, and the terminal promise that disposal awaits; no callable hold accounting | Promise and listener continuations |
 | Drive | The gate promise of the suspending import, the turn source, the owner token, and the exit latch | JSPI resumption; macrotask scheduling |
-| `OutputChannel` and `drainOutput` | One FIFO of copied chunks per stream, at most one sink call in flight, and the drains that run after the image is released | The embedder's sinks and their promises |
+| `OutputChannel`, `output`, and `drainOutput` | One FIFO of copied iovec batches per stream, at most one sink call in flight, and the drains that run after the image is released; no per-byte buffer | Copying bytes out of the Wasm heap; the embedder's sinks and their promises |
 | SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | One bounded host timer per arm, and the two driver callables; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs |
 
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
@@ -534,6 +534,11 @@ The installed header is the sole C/JavaScript layout contract. C layout
 assertions check sizes and offsets for wasm32. There is no native packet
 serialization, schema codec, attachment index, or per-call JSON/protobuf step.
 
+The header also declares `titan_browser_host_output(stream, bytes, length)`.
+The generated launcher's libc adapter passes descriptor 1 or 2 and one
+nonempty iovec. The import copies the counted bytes into that stream's queue
+before returning, never starts a sink, and retains no borrowed Wasm pointer.
+
 Kinds are `NIL = 0`, `BOOLEAN = 1`, `INTEGER = 2`, `FLOAT = 3`, `STRING = 4`,
 `BYTES = 5`, `HANDLE = 6`, `CALLABLE = 7`, and `REQUEST = 8`. `REQUEST` is the
 import result kind for `host_start`. Statuses are `OK = 0`, `TITAN_ERROR = 1`,
@@ -760,7 +765,7 @@ coroutine hops), Task-form calls with `AbortSignal`, the SDK timer sources,
 output at relinquish points (on both streams, a sink call still pending when
 the next gate publishes output and released at swept points around the pump
 runner's retirement, no sink call started by a held call that settles during
-a later turn's coroutine switches, including over full 1024-byte chunks, and
+a later turn's coroutine switches, including over large C-output batches, and
 no sink during the coroutine switches that follow an `IDLE` relinquish),
 disposal with a running, cleanup and shutdown drive, the exit latch, an open
 `BrowserPin` keeping a waiting drive parked until a C callback settles its job,

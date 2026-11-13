@@ -442,8 +442,8 @@ The subset has no raise-on-invoke members and no complete-interface parity
 gate; `titan.async`'s recorded omissions are the one absence list. Output goes
 through Emscripten stdio only: `titan.test` writes with `putchar`/`fflush` and
 imports no Titan module, the generated runner imports only `titan.test` and the
-test owners, and the [loader](#the-loader)'s per-byte
-`Module.stdout`/`Module.stderr` hooks carry the bytes unchanged. A program that
+test owners, and the launcher's native `__wasi_fd_write` forwards nonempty
+iovecs to the [loader](#the-loader)'s copied-byte queues. A program that
 links `titan.async` runs `main` through the async bootstrap hook, as natively,
 unless it is built with `--no-uv-bootstrap`; otherwise the
 [entrypoint](#the-browser-entrypoint) calls `main` directly.
@@ -1618,11 +1618,11 @@ flag list.
 | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | initial memory is the image's static data and main stack plus a 15 MiB heap, so static data never outgrows a fixed initial size (15 MiB is the heap a data-free image had under the former fixed 16 MiB; [measured sizes](#budgets)); coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
 | `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
-| `-sFORCE_FILESYSTEM=1` | keeps Emscripten's filesystem and TTY layer in every image (see below) |
+| `-sFILESYSTEM=0` | no Emscripten filesystem in launcher images; `lua-main` keeps `-sFORCE_FILESYSTEM=1` because it has no launcher |
 | `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
 | `-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke","_titan_browser_release_callable","_titan_browser_close","_malloc","_free","_titan_browser_trace_identity"]` | the four promised bridge entries, synchronous wrapper release, the C buffer allocation and release used for argument marshalling, and the 64-hex image identity export; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
 | `-sEXPORTED_RUNTIME_METHODS=["HEAPU8"]` | the current heap view used by the loader, which calls the owner-wrapped exports directly rather than through `ccall` |
-| `-sINCOMING_MODULE_JS_API=["stdin","stdout","stderr","locateFile","onAbort"]` | the only Emscripten module options the loader passes; the owner callbacks read by Titan's own JavaScript libraries are private Module properties |
+| `-sINCOMING_MODULE_JS_API=["locateFile","onAbort"]` | the Emscripten options for launcher images; `lua-main` also keeps `stdin`, `stdout`, and `stderr`; the owner callbacks read by Titan's own JavaScript libraries are private Module properties |
 | `--js-library <sdk>/titan-browser-library.js`, `--js-library <sdk>/titan-browser-bridge.js`, `--js-library <sdk>/titan-browser-trace.js` | the completion/admission owner, the typed bridge imports, and the eager trace-map/stack-capture imports (all omitted for `lua-main`) |
 | `-sASSERTIONS=<0\|2> -sSTACK_OVERFLOW_CHECK=2` | assertions are selectable; linear-stack bounds/cookies are restored on every JSPI context transition in either mode |
 
@@ -1635,15 +1635,17 @@ all three effective sizes. Image certificates hash it together with the content
 of the referenced SDK assets, so a budget, profile, or JavaScript library
 change relinks, and incompatible variants use separate output trees.
 
-**Filesystem.** `-sFORCE_FILESYSTEM=1` is set for every purpose, including
-`lua-main`. Emscripten 6.0.13 otherwise drops its filesystem for an image whose
-only stdio import is `fd_write`, such as a pure-C image, and its WASI
-`fd_write` then decodes the bytes as UTF-8 and writes them to the console,
-bypassing the per-byte `Module.stdout`/`Module.stderr` hooks. Node happened to
-capture that console text, but Chromium did not, and neither kept the bytes
-exact. The flag restores the TTY layer, at no `.wasm` cost and 457 more `.mjs`
-bytes for images that already use stdio ([Baseline](#baseline)). User
-`FORCE_FILESYSTEM`, `FILESYSTEM`, and `MINIMAL_RUNTIME` settings are rejected.
+**Filesystem.** Launcher images use `-sFILESYSTEM=0`. The generated launcher
+defines the WASI stdio functions and the file syscalls libc needs, so output
+goes directly to the copied-byte queues without a filesystem or TTY layer.
+File calls return `ENOSYS`, rather than reaching Emscripten's filesystem-free
+JavaScript stubs, which can report success without doing the work.
+`_emscripten_system` reports no shell for a null command and fails with
+`ENOSYS` for any command, including under Node. The interpreter baseline
+(`lua-main`) has no launcher and keeps `-sFORCE_FILESYSTEM=1` and its stdio
+hooks. User `FORCE_FILESYSTEM`, `FILESYSTEM`, and `MINIMAL_RUNTIME` settings
+remain rejected. The standard-library image closure check rejects function
+imports named `__syscall_*`, `fd_*`, or `_emscripten_system`.
 
 **Long-double formatting.** `-sPRINTF_LONG_DOUBLE=1` is set for every purpose
 and entry, including `lua-main`. Clang's wasm32 `long double` is IEEE
@@ -2157,6 +2159,19 @@ state-allocation status. The installed
 [`titan/browser.h`](browser-bridge.md#fixed-wasm32-layout) defines the four
 promised export signatures, synchronous wrapper release, shared struct layouts,
 and JS imports.
+
+The launcher also defines the exact libc symbols that every image needs,
+including images without a Titan standard module. `__wasi_fd_write` accepts
+only descriptors 1 and 2, forwards each nonempty iovec synchronously through
+`titan_browser_host_output`, stores the total length, and succeeds. Other
+descriptors return `BADF`. `__wasi_fd_read` returns `NOSYS`, so C stdin fails
+with an error rather than EOF; `__wasi_fd_close` succeeds only for descriptors
+0–2, and `__wasi_fd_seek` returns `SPIPE`. The file `__syscall_*` definitions
+return `-ENOSYS`, with prototypes checked by `<emscripten/syscalls.h>`.
+`_emscripten_system` returns zero for a null command and `-ENOSYS` otherwise.
+These are compiler-generated image glue, not runtime C bindings: libc requires
+their unmangled names before any Titan module can own them. The iovec walk
+stays on the C side; the host import only copies a counted byte span.
 
 Initialization creates the owner Lua state and enters the image initializer
 under the shared protected gateway. `titan.browser` initializes and publishes
@@ -2713,8 +2728,10 @@ and values. The promised export's fulfillment proves engine retirement, not
 Titan success: the loader waits for both and never substitutes a promise
 value, `onExit`, or Emscripten keepalive state.
 
-**Output.** Per-byte stdout/stderr hooks only buffer bytes, ignoring null
-flush notifications. C `stdin` returns null, which is end of file. No user
+**Output.** Native `__wasi_fd_write` forwards one entry per nonempty iovec
+through `titan_browser_host_output`; the loader copies the bytes before the
+import returns. Entries from one call are adjacent; C chunk boundaries are
+not a contract. C stdin fails with `ENOSYS`, without prompting. No user
 sink or unrelated notification runs during an internal coroutine transfer,
 including a collector finalizer's cleanup. `safe()` means that the contained
 C entry has released its owner. Every sink call starts either from the
@@ -3103,21 +3120,21 @@ work-announcement failure uses `requestDrain`.
 
 ### Output, disposal, and observation
 
-Each `OutputChannel` has a copied-byte FIFO, a coalesced C-byte tail, and at
-most one actual sink invocation. C hooks append synchronously and never invoke
-the sink. A logical operation flushes both streams after all its C entries
-retire; later entries still run after a throw/rejection. During a drive, each
-parked relinquish gate also publishes both streams' C-byte tails into their
-FIFOs and starts a single-runner pump without awaiting it, so a slow or
-forever-pending sink never stalls the drive. One invariant governs every sink
+Each `OutputChannel` has a copied-byte FIFO and at most one actual sink
+invocation. The output import admits each copied iovec synchronously and never
+invokes the sink. A logical operation flushes both streams after all its C
+entries retire; later entries still run after a throw/rejection. During a
+drive, each parked relinquish gate starts a single-runner pump without
+awaiting it, so a slow or forever-pending sink never stalls the drive.
+One invariant governs every sink
 call: `OutputChannel.take`, the only place a chunk leaves the FIFO, gives the
 final flush every chunk and gives a pump a chunk only while the drive is
 parked on a relinquish gate. A runner whose sink call settles while the drive
 is parked takes the next published chunk; one whose call settles while the
 drive runs (a turn, an internal coroutine handoff) stops there, and the next
 gate starts a runner again. A runner retires in the same step as its last
-take, so the next gate either feeds it or starts another. Chunks published or
-sealed after a gate therefore wait for the next gate or the final flush, never
+take, so the next gate either feeds it or starts another. Chunks admitted
+after a gate therefore wait for the next gate or the final flush, never
 only for a sink call to resolve. The operation's final flush awaits a running
 pump, then flushes again and drains everything left, and the pump's failures
 join that flush's. A sink call increments `inHost`.

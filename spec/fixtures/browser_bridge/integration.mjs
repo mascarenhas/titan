@@ -1253,7 +1253,7 @@ async function stdio(context, host) {
   alias.fill(90);
   await host.instance.drain();
   context.equalBytes(host.stdout.at(-1), binary(), 'notification argument slice-as-view escaped snapshot ownership');
-  const payloads = [new Uint8Array(1024).fill(65), new Uint8Array(1024).fill(66), encode('unterminated-tail')];
+  const payloads = [new Uint8Array(17).fill(65), new Uint8Array(5000).fill(66), encode('unterminated-tail')];
   let pending = 0, maximum = 0, calls = 0;
   const output = gate();
   host.sinks.stdout = () => {

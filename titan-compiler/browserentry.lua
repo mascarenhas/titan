@@ -51,6 +51,41 @@ local template = [[
 #include "lualib.h"
 #include "titan.h"
 #include "titan/browser.h"
+#include <errno.h>
+#include <wasi/api.h>
+#include <emscripten/syscalls.h>
+
+/* libc requires these exact symbols even in images without Titan modules.
+ * The launcher owns the filesystem-free image; only output crosses to JS. */
+__wasi_errno_t __wasi_fd_write(__wasi_fd_t fd, const __wasi_ciovec_t *iovs,
+        size_t iovs_len, __wasi_size_t *nwritten) {
+    if (fd != 1 && fd != 2) return __WASI_ERRNO_BADF;
+    __wasi_size_t total = 0;
+    for (size_t i = 0; i < iovs_len; i++) {
+        if (iovs[i].buf_len)
+            titan_browser_host_output(fd, iovs[i].buf, iovs[i].buf_len);
+        total += iovs[i].buf_len;
+    }
+    *nwritten = total;
+    return __WASI_ERRNO_SUCCESS;
+}
+__wasi_errno_t __wasi_fd_read(__wasi_fd_t fd, const __wasi_iovec_t *iovs, size_t iovs_len, __wasi_size_t *nread) { return __WASI_ERRNO_NOSYS; }
+__wasi_errno_t __wasi_fd_close(__wasi_fd_t fd) { return fd <= 2 ? __WASI_ERRNO_SUCCESS : __WASI_ERRNO_BADF; }
+__wasi_errno_t __wasi_fd_seek(__wasi_fd_t fd, __wasi_filedelta_t offset, __wasi_whence_t whence, __wasi_filesize_t *newoffset) { return __WASI_ERRNO_SPIPE; }
+int __syscall_openat(int dirfd, const char *path, int flags, ...) { return -ENOSYS; }
+int __syscall_unlinkat(int dirfd, const char *path, int flags) { return -ENOSYS; }
+int __syscall_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) { return -ENOSYS; }
+int __syscall_rmdir(const char *path) { return -ENOSYS; }
+int __syscall_stat64(const char *path, struct stat *buf) { return -ENOSYS; }
+int __syscall_lstat64(const char *path, struct stat *buf) { return -ENOSYS; }
+int __syscall_fstat64(int fd, struct stat *buf) { return -ENOSYS; }
+int __syscall_newfstatat(int dirfd, const char *path, struct stat *buf, int flags) { return -ENOSYS; }
+int __syscall_getcwd(char *buf, size_t size) { return -ENOSYS; }
+int __syscall_readlinkat(int dirfd, const char *path, char *buf, size_t bufsize) { return -ENOSYS; }
+int __syscall_ioctl(int fd, int request, ...) { return -ENOSYS; }
+int __syscall_fcntl64(int fd, int cmd, ...) { return -ENOSYS; }
+int __syscall_dup3(int oldfd, int newfd, int flags) { return -ENOSYS; }
+int _emscripten_system(const char *command) { return command ? -ENOSYS : 0; }
 
 struct titan_browser_arguments {
     int argc;
