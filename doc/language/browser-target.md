@@ -1236,15 +1236,20 @@ that the `async` driver uses but schedules nothing itself. See
 The other standard modules are absent from the browser target: `uv`,
 `io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
 `sqlite3`, and `thread`. Each of them uses libuv, directly or through its
-imports. Their sources exist only as native variants (such as
-`titan/os.native.titan`; see [target source
+imports. Most have only native variants (such as
+`titan/fs.native.titan`; see [target source
 selection](target-source-selection.md)), so a browser build finds no source and
-no browser archive for them. Importing one fails with the ordinary
-missing-module error, the same as for a module that does not exist:
+no browser archive for them. Their imports fail with the ordinary
+missing-module error:
 
 ```text
-module 'titan.os' not found
+module 'titan.fs' not found
 ```
+
+The shared mains of `os` and `io` resolve on the browser target, but `os`
+has no browser contributors defining its private stream type and operations.
+It therefore fails type-checking; `io` reaches the same failure through its
+`os` import.
 
 There are no stand-in modules for them, and their folder contributors, such as
 `titan.uv.tcp`, are not importable on their own. A test module that imports one
