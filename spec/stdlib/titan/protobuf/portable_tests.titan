@@ -354,7 +354,7 @@ function test_resources_registered_after_creation_never_run_callbacks(context: t
     test.assert(encodes == 0 and decodes == 0, "portable resource callback ran")
 
     local ordinary = protobuf.serialize_fields(fields, resource)
-    local restored: LateResource = protobuf.deserialize_fields(fields, ordinary)
+    local restored: LateResource = protobuf.deserialize_fields(ordinary, fields)
     test.assert(restored.number == 7 and encodes == 1 and decodes == 1,
         "ordinary resource dispatch changed")
   end)
