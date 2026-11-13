@@ -1,0 +1,19 @@
+--- Return consumed process CPU time in seconds.
+-- @return CPU seconds, rather than elapsed wall time.
+-- @usage standard-library-os.md
+function clock(): float
+  return os_clock()
+end
+
+local function os_clock(): float
+  local status, usage? = uv.getrusage()
+  check_status(status, "os.clock")
+  return usage.ru_utime.tv_sec as float + (usage.ru_utime.tv_usec as float) / 1000000.0 +
+    usage.ru_stime.tv_sec as float + (usage.ru_stime.tv_usec as float) / 1000000.0
+end
+
+local function os_time(): integer
+  local status, current? = uv.gettimeofday()
+  check_status(status, "os.current_time")
+  return current.tv_sec
+end

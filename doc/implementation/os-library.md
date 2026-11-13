@@ -1,12 +1,29 @@
 # Operating-system library implementation
 
-`titan/os.native.titan` implements the [OS API](../language/standard-library-os.md):
+The folder module `titan/os/` implements the [OS API](../language/standard-library-os.md):
 environment and host queries, calendars, parent standard streams, process
 configuration, captured streams, the `popen` shell facade, signals, and
-graceful exit. It uses ordinary compiled imports of public `uv` and `async`.
-UV owns native storage and callback lifetimes and async owns Task waits and
-subscriptions ([runtime](libuv-runtime.md)); all OS-specific process and stdio
-policy stays here.
+graceful exit. Its native contributors use ordinary compiled imports of public
+`uv` and `async`. UV owns native storage and callback lifetimes and async owns
+Task waits and subscriptions ([runtime](libuv-runtime.md)); all OS-specific
+process and stdio policy stays here.
+
+| Source | Responsibility |
+| --- | --- |
+| `os.titan` | Shared main: `Date`, `InputStream`, `OutputStream`, the stable parent-stream variables, calendar and locale operations, text and delimiter helpers, and the environment and exit facades. Its C imports are `time.h`, `locale.h`, and `string.h`; it imports no `uv` and names no libuv type. |
+| `clock.native.titan` | CPU clock and current timestamp queries through public UV. |
+| `environment.native.titan` | Process environment queries and mutations. |
+| `stdio.native.titan` | Native `Stdio` owners, parent descriptor probes and caches, stream operations and transfer hooks, and native status translation. |
+| `process.native.titan` | Child processes, shell streams, signals, host identity, graceful exit, and the sized-buffer helper shared with environment queries. |
+| `os_platform.h`, `os_environment.h` | Native platform operations, beside the canonical main; imported only by native contributors. |
+
+Contributors share the module's private namespace. The main calls `os_time`,
+`os_getenv`, `os_setenv`, `os_unsetenv`, `os_exit`, `read_stream`, and
+`captured_input_is_closed`; native contributors define those operations and
+the private `Stdio` named by the unchanged stream fields. Shared imports
+precede the stream variables and transfer-field initializers. No browser
+contributors are present, so the shared main alone cannot type-check for that
+target; `io` reaches the same incomplete composition through its `os` import.
 
 Calendar, formatting, locale, and time-difference operations keep their ISO C
 implementation, adapted from Lua 5.5.1 `loslib.c`, with Lua-compatible

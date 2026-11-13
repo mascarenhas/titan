@@ -421,14 +421,16 @@ periods and chain `titan:timeout` requests for longer ones
 methods but holds a host request instead of a uv timer, so the member
 inventory records it as an opaque record.
 
-The other eleven standard modules are absent at compile time: their
-canonical mains are the `native` variants `titan/{io,fs,net,ssl,os}.native.titan`
-and `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
+Nine standard modules have only native mains and are absent at compile time:
+the flat `titan/{fs,net,ssl}.native.titan` and the folder mains
+`titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`
 ([Make inventories](target-source-selection.md#make-inventories-and-audits)).
 For `browser` the resolver finds no main, so an import reports the ordinary
 `module 'titan.<name>' not found`, and a contributor of a folder whose main is
-unselected stays blocked rather than resolving as a flat module. The plan for
-them is provisional:
+unselected stays blocked rather than resolving as a flat module.
+`os` and `io` also remain unavailable: their shared mains resolve, but `os`
+has no browser contributors defining its private types and operations, and
+`io` imports `os`. The plan for these eleven modules is provisional:
 
 | Modules | Browser plan (provisional) |
 | --- | --- |
@@ -1523,10 +1525,11 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
 sixteen [browser stdlib](#the-browser-standard-library) modules resolve from it,
-ahead of the Titan path and source. The native-only standard modules have no
-browser source either, so their imports fail with the ordinary
-`module 'titan.<name>' not found` diagnostic ([target source
-selection](target-source-selection.md#make-inventories-and-audits)).
+ahead of the Titan path and source. Modules with native-only mains have no
+browser source, so their imports fail with the ordinary
+`module 'titan.<name>' not found` diagnostic. The shared `os` main is not
+complete without target contributors, and `io` imports it
+([target source selection](target-source-selection.md#make-inventories-and-audits)).
 
 ## Library mode and structural validation
 

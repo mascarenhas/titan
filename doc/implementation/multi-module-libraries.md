@@ -277,13 +277,15 @@ invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):
 `titan.math`, `titan.lua`, `titan.iteration`, `titan.gc`, `titan.test`,
 `titan.reflect`, `titan.sqlite3`, `titan.json`, `titan.protobuf`,
 `titan.transfer`, and `titan.thread`. `titan.uv`, `titan.async`, `titan.http`,
-`titan.websocket`, `titan.peg`, `titan.string`, `titan.sqlite3`,
+`titan.websocket`, `titan.os`, `titan.peg`, `titan.string`, `titan.sqlite3`,
 `titan.json`, `titan.lua`, `titan.protobuf`, and `titan.thread` are folder
-ensembles; the others are flat sources. The mains of `titan.io`, `titan.fs`,
-`titan.net`, `titan.ssl`, `titan.os`, `titan.uv`, `titan.http`,
-`titan.websocket`, `titan.sqlite3`, `titan.lua`, and `titan.thread` are
-`native` variants (`titan/os.native.titan`, `titan/uv/uv.native.titan`), so
-the browser target has none of them. `titan.timer` has a `native` and a
+ensembles; the others are flat sources. The mains of `titan.fs`,
+`titan.net`, `titan.ssl`, `titan.uv`, `titan.http`, `titan.websocket`,
+`titan.sqlite3`, `titan.lua`, and `titan.thread` are `native` variants
+(`titan/fs.native.titan`, `titan/uv/uv.native.titan`), so the browser target
+has none of them. `titan.os` has a shared main with native-only contributors;
+`titan.io` has a shared main but imports `os`. Neither has a complete browser
+composition. `titan.timer` has a `native` and a
 `browser` variant (`titan/timer.native.titan`, `titan/timer.browser.titan`)
 with one public interface. The other thirteen roots, `titan.async` through
 its shared main and browser contributors, and `titan.timer` through its

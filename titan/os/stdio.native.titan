@@ -1,0 +1,1226 @@
+local uv = import "uv"
+local async = import "async"
+
+local protobuf = import "protobuf"
+
+foreign import "os_platform.h"
+foreign import "os_environment.h"
+foreign type ParentStdioProbe = titan_parent_stdio_probe
+
+local const output_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_option(reflect.Type.is_string()),
+}
+local const input_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_string(), reflect.Type.is_integer(),
+  reflect.Type.is_option(reflect.Type.is_named(reflect.NamedType("titan.async.OperationError"))),
+  reflect.Type.is_option(reflect.Type.is_string()),
+  reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_string()),
+}
+
+local function parent_stdio(descriptor: integer): Stdio
+  if descriptor < 0 or descriptor > 2 then
+    raise "internal parent stdio descriptor is invalid"
+  end
+  return os_parent_stdio(descriptor)
+end
+
+local function input_handle(stream: InputStream): Stdio
+  if stream.parent_descriptor < 0 then
+    local captured? = stream.handle
+    if not captured then raise "InputStream is closed" end
+    return captured as Stdio
+  end
+  local previous? = stream.handle
+  if previous ~= nil then
+    async.running()
+    -- EOF may retire the native duplicate before the subscription and this
+    -- facade have delivered their buffered bytes. Keep that read owner for
+    -- this Runtime; a later Runtime gets a fresh wrapper and empty excess.
+    if previous.loop == async.current_loop() then return previous end
+  end
+  local handle = parent_stdio(stream.parent_descriptor)
+  if not previous or previous ~= handle then
+    stream.excess = ""
+  end
+  stream.handle = handle
+  return handle
+end
+
+local function output_handle(stream: OutputStream): Stdio
+  if stream.parent_descriptor < 0 then
+    local captured? = stream.handle
+    if not captured then raise "OutputStream is closed" end
+    return captured as Stdio
+  end
+  local handle = parent_stdio(stream.parent_descriptor)
+  stream.handle = handle
+  return handle
+end
+
+local function captured_input_is_closed(stream: InputStream): boolean
+  return stream.parent_descriptor < 0 and not stream.handle
+end
+
+local function read_stream(stream: InputStream): string?
+  if captured_input_is_closed(stream) then return nil end
+  local handle = input_handle(stream)
+  if #stream.excess > 0 then
+    local result = stream.excess
+    stream.excess = ""
+    return result
+  end
+  return os_stdio_read(handle)
+end
+
+--- Write all bytes to the process or standard-output stream.
+-- @param data Complete binary byte string.
+-- @usage standard-library-os.md
+function OutputStream:write(data: string)
+  os_stdio_write(output_handle(self), data)
+end
+
+--- Finish earlier writes and half-close TCP-backed parent output; other kinds raise ENOTSUP.
+-- @usage standard-library-os.md#tcp-backed-parent-streams
+function OutputStream:shutdown()
+  os_stdio_shutdown(output_handle(self))
+end
+
+--- Close the writable stream; accepted cleanup completes despite Task cancellation.
+-- @usage standard-library-os.md
+function OutputStream:close()
+  if self.parent_descriptor >= 0 then return end
+  local captured? = self.handle
+  if not captured then return end
+  self.handle = nil
+  os_stdio_close(captured as Stdio)
+end
+
+--- Check whether the writable stream is a terminal.
+-- @return True for a TTY endpoint.
+-- @usage standard-library-os.md
+function OutputStream:is_tty(): boolean
+  return os_stdio_is_tty(output_handle(self))
+end
+
+--- Return the writable stream's descriptor backing kind.
+-- @return "tty", "pipe", "file", or "tcp".
+-- @usage standard-library-os.md
+function OutputStream:kind(): string
+  return os_stdio_kind(output_handle(self))
+end
+
+--- Read a binary chunk from the process or standard-input stream.
+-- @return Bytes or nil at EOF or after terminal close.
+-- @usage standard-library-os.md
+function InputStream:read(): string?
+  return read_stream(self)
+end
+
+--- Read a process stream through a binary delimiter across chunk boundaries.
+-- @param delimiter Nonempty delimiter bytes.
+-- @param chop True removes the delimiter.
+-- @return Delimited bytes or final suffix, or nil at EOF.
+-- @usage standard-library-os.md
+function InputStream:read_until(delimiter: string,
+                                chop: boolean?): string?
+  return read_input_until(self, delimiter, chop)
+end
+
+--- Close the readable stream and discard its buffered suffix.
+-- @usage standard-library-os.md
+function InputStream:close()
+  -- Main-process stdin is a borrowed stable facade; closing it is a no-op.
+  if self.parent_descriptor >= 0 then return end
+  local captured? = self.handle
+  if not captured then return end
+  self.handle = nil
+  self.excess = ""
+  os_stdio_close(captured as Stdio)
+end
+
+--- Check whether the readable stream is a terminal.
+-- @return True for a TTY endpoint.
+-- @usage standard-library-os.md
+function InputStream:is_tty(): boolean
+  return os_stdio_is_tty(input_handle(self))
+end
+
+--- Return the readable stream's descriptor backing kind.
+-- @return "tty", "pipe", "file", or "tcp".
+-- @usage standard-library-os.md
+function InputStream:kind(): string
+  return os_stdio_kind(input_handle(self))
+end
+
+-- Domain ownership stays here. Public uv owns native callback storage; async
+-- owns waits and subscription queues, never process or stdio policy.
+local FILE_READ_CHUNK_BYTES = 64 * 1024
+
+local record StreamStdio
+  native: uv.stream_t
+  handle: uv.handle_t
+  alloc_read: uv.alloc_cb?
+  deliver_read: uv.read_cb?
+end
+
+local record FileStdio
+  descriptor: integer
+  read_request: uv.fs_t
+  read_buffer: uv.buf_t?
+  reading: boolean
+  deliver_read: (function (uv.fs_t): ())?
+  publish_read: (function (string): (boolean))?
+  fail_read: (function (async.OperationError): (boolean))?
+  finish_read: (function (): (boolean))?
+  write_request: uv.fs_t
+  writing: boolean
+  deliver_write: (function (uv.fs_t): ())?
+  write_head: FileWriteOperation?
+  write_tail: FileWriteOperation?
+end
+
+local union StdioBacking
+  stream(StreamStdio)
+  file(FileStdio)
+end
+
+local record Stdio
+  backing: StdioBacking
+  loop: uv.loop_t
+  reads: async.BufferedSubscription<|string, async.OperationError|>?
+  pending_writes: integer
+end
+
+local record CloseOperation
+  handle: uv.handle_t
+  completion: async.Completion<|CloseOperation, nil, async.OperationError|>?
+  number: integer
+end
+
+local record StreamWriteOperation
+  stream: Stdio
+  backing: StreamStdio
+  data: string
+  completion: async.Completion<|StreamWriteOperation, nil, async.OperationError|>?
+  number: integer
+end
+
+local record StreamShutdownOperation
+  stream: Stdio
+  backing: StreamStdio
+  completion: async.Completion<|StreamShutdownOperation, nil, async.OperationError|>?
+  number: integer
+end
+
+local record FileWriteOperation
+  stream: Stdio
+  file: FileStdio
+  data: string
+  buffer: uv.buf_t?
+  offset: integer
+  completion: async.Completion<|FileWriteOperation, nil, async.OperationError|>?
+  number: integer
+  next: FileWriteOperation?
+  result: integer
+  failure_error: value
+  failure_trace: string?
+end
+
+local parent_loop: uv.loop_t? = nil
+local cached_parent_stdio: {Stdio} = {}
+
+local function make_error(code: integer, operation: string): async.OperationError
+  return async.OperationError(code, uv.err_name(code), uv.strerror(code), operation)
+end
+
+local function check_status(code: integer, operation: string)
+  if code < 0 then raise make_error(code, operation) end
+end
+
+local function platform_status(code: integer): integer
+  if code >= 0 then return uv.translate_sys_error(code) end
+  if code == ffi.TITAN_OS_ENOBUFS then return uv.ENOBUFS end
+  if code == ffi.TITAN_OS_ENOMEM then return uv.ENOMEM end
+  if code == ffi.TITAN_OS_EINVAL then return uv.EINVAL end
+  if code == ffi.TITAN_OS_ENAMETOOLONG then return uv.ENAMETOOLONG end
+  if code == ffi.TITAN_OS_EBADF then return uv.EBADF end
+  if code == ffi.TITAN_OS_EMFILE then return uv.EMFILE end
+  if code == ffi.TITAN_OS_ENOTSUP then return uv.ENOTSUP end
+  if code == ffi.TITAN_OS_ENOSYS then return uv.ENOSYS end
+  return uv.UNKNOWN
+end
+
+local function validate_stdio(stream: Stdio)
+  async.running()
+  if stream.loop ~= async.current_loop() then raise "stdio stream belongs to a different async Runtime" end
+end
+
+local function native_closed(handle: uv.handle_t)
+  local context = uv.handle_get_data(handle) as CloseOperation
+  local completion = context.completion as async.Completion<|CloseOperation, nil, async.OperationError|>
+  local number = context.number
+  uv.handle_set_data(handle, nil)
+  context.completion = nil
+  do completion:resolve(number, nil)
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_close(
+    completion: async.Completion<|CloseOperation, nil, async.OperationError|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  context.completion = completion
+  context.number = number
+  uv.handle_set_data(context.handle, context)
+  uv.close(context.handle, native_closed)
+  return nil
+end
+
+local function close_native(handle: uv.handle_t)
+  if stream_is_closed(handle) then return end
+  case async.await_cleanup_with<|CloseOperation, nil, async.OperationError|>(
+    CloseOperation(handle, nil, 0), start_close)
+  when success() then
+  when error(failure) then raise failure
+  end
+end
+
+local function StreamStdio:is_closed(): boolean
+  return stream_is_closed(self.handle)
+end
+
+local function Stdio:is_closed(): boolean
+  case self.backing
+  when stream(backing) then return backing:is_closed()
+  when file() then return false
+  end
+end
+
+local function discard_unpublished_stdio(stream: Stdio?)
+  if stream == nil then return end
+  case stream.backing
+  when stream(backing) then
+    if not backing:is_closed() then uv.close(backing.handle, nil) end
+  when file() then
+  end
+end
+
+local function new_pipe_stdio(loop: uv.loop_t): (integer, Stdio?)
+  local pipe = uv.pipe_t.new()
+  local backing = StreamStdio(pipe:as_stream_t(), pipe:as_handle_t(), nil, nil)
+  local stream = Stdio(StdioBacking.stream(backing), loop, nil, 0)
+  local status = uv.pipe_init(loop, pipe, 0)
+  if status < 0 then return status, nil end
+  return 0, stream
+end
+
+local function new_tcp_stdio(loop: uv.loop_t): (integer, Stdio?)
+  local tcp = uv.tcp_t.new()
+  local backing = StreamStdio(tcp:as_stream_t(), tcp:as_handle_t(), nil, nil)
+  local stream = Stdio(StdioBacking.stream(backing), loop, nil, 0)
+  local status = uv.tcp_init(loop, tcp)
+  if status < 0 then return status, nil end
+  return 0, stream
+end
+
+local function StreamStdio:resume_read(operation: string)
+  check_status(uv.read_start(self.native, self.alloc_read, self.deliver_read), operation)
+end
+
+local function StreamStdio:start_read(
+    stream: Stdio, operation: string,
+    initial: {string}?,
+    terminal: async.SubscriptionResult<|string, async.OperationError|>?)
+  if stream.reads ~= nil then return end
+  local backing = self
+  stream.reads = async.BufferedSubscription<|string, async.OperationError|>.new(function (publish, fail, finish)
+    local actions = async.SubscriptionActions<|string|>(function ()
+      if not backing:is_closed() then uv.read_stop(backing.native) end
+    end, function (drain)
+      drain()
+      close_native(backing.handle)
+    end)
+    if initial ~= nil then
+      for index = 1, #initial do publish(initial[index]) end
+    end
+    if terminal ~= nil then
+      case terminal
+      when error(failure) then fail(failure)
+      else finish()
+      end
+      return actions
+    end
+    if backing:is_closed() then finish(); return actions end
+    backing.alloc_read = function (_: uv.handle_t, size: integer): uv.buf_t
+      return uv.buf_t.allocate(size)
+    end
+    backing.deliver_read = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      if count == 0 then return end
+      if count > 0 then publish(buffer:to_string(count)); return end
+      uv.read_stop(backing.native)
+      discard_unpublished_stdio(stream)
+      if count == uv.EOF then finish() else fail(make_error(count, "stdio.read")) end
+    end
+    local status = uv.read_start(backing.native, backing.alloc_read, backing.deliver_read)
+    if status < 0 then
+      discard_unpublished_stdio(stream)
+      fail(make_error(status, operation))
+    end
+    return actions
+  end)
+end
+
+local function start_stream_read(stream: Stdio, operation: string,
+    initial: {string}?, terminal: async.SubscriptionResult<|string, async.OperationError|>?)
+  case stream.backing
+  when stream(backing) then
+    backing:start_read(stream, operation, initial, terminal)
+  when file() then
+    raise "expected stream-backed stdio"
+  end
+end
+
+local function FileStdio:complete_read(request: uv.fs_t)
+  self.reading = false
+  local count = 0
+  local chunk = ""
+  do
+    count = uv.fs_get_result(request)
+    if count > 0 then
+      chunk = self.read_buffer:to_string(count)
+    end
+    uv.fs_req_cleanup(request)
+  catch
+    uv.fs_req_cleanup(request)
+    raise
+  end
+  if count > 0 then
+    self.publish_read(chunk)
+    return
+  end
+  if count == 0 then
+    self.finish_read()
+    return
+  end
+  self.fail_read(make_error(count, "stdio.read"))
+end
+
+local function FileStdio:ensure_reads(stream: Stdio)
+  if stream.reads ~= nil then return end
+  local file = self
+  self.deliver_read = function (request: uv.fs_t)
+    file:complete_read(request)
+  end
+  stream.reads = async.BufferedSubscription<|string, async.OperationError|>.new(
+    function (publish, fail, finish)
+      file.publish_read = publish
+      file.fail_read = fail
+      file.finish_read = finish
+      return async.SubscriptionActions<|string|>(
+        function () end,
+        function (drain) drain() end)
+    end)
+end
+
+local function FileStdio:demand_read(stream: Stdio)
+  local reads = stream.reads
+  if self.reading or reads:has_pending() then return end
+  local buffer? = self.read_buffer
+  if buffer == nil then
+    buffer = uv.buf_t.allocate(FILE_READ_CHUNK_BYTES)
+    self.read_buffer = buffer
+  end
+  local status = uv.fs_read(
+    stream.loop, self.read_request, self.descriptor,
+    {buffer}, -1, self.deliver_read)
+  if status < 0 then
+    uv.fs_req_cleanup(self.read_request)
+    self.fail_read(make_error(status, "stdio.read"))
+  else
+    self.reading = true
+  end
+end
+
+local function os_stdio_read(stream: Stdio): string?
+  validate_stdio(stream)
+  async.checkpoint()
+  case stream.backing
+  when stream(backing) then
+    backing:start_read(stream, "stdio.read.start", nil, nil)
+    if stream.reads:has_waiter() then raise "stream already has a waiting reader" end
+  when file(backing) then
+    backing:ensure_reads(stream)
+    if stream.reads:has_waiter() then raise "stream already has a waiting reader" end
+    backing:demand_read(stream)
+  end
+  case stream.reads:next()
+  when item(chunk) then return chunk
+  when error(failure) then raise failure
+  when ended() then return nil
+  when closed() then return nil
+  end
+end
+
+local function stdio_written(request: uv.write_t, status: integer)
+  local context = request:get_data() as StreamWriteOperation
+  context.stream.pending_writes = context.stream.pending_writes - 1
+  local completion = context.completion as async.Completion<|StreamWriteOperation, nil, async.OperationError|>
+  local number = context.number
+  request:set_data(nil)
+  context.completion = nil
+  do
+    if status < 0 then completion:reject(number, make_error(status, "stdio.write"))
+    else completion:resolve(number, nil) end
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_stream_write(
+    completion: async.Completion<|StreamWriteOperation, nil, async.OperationError|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  if context.backing:is_closed() then raise "cannot write to a closed stream" end
+  if not uv.is_writable(context.backing.native) then
+    completion:reject(number, make_error(uv.EPIPE, "stdio.write"))
+    return nil
+  end
+  if #context.data == 0 then completion:resolve(number, nil); return nil end
+  local request = uv.write_t.new()
+  context.completion = completion
+  context.number = number
+  request:set_data(context)
+  local status = uv.write_string(request, context.backing.native, context.data, stdio_written)
+  if status < 0 then
+    request:set_data(nil)
+    context.completion = nil
+    completion:reject(number, make_error(status, "stdio.write"))
+  else
+    context.stream.pending_writes = context.stream.pending_writes + 1
+  end
+  return nil
+end
+
+local function stdio_shut_down(request: uv.shutdown_t, status: integer)
+  local context = request:get_data() as StreamShutdownOperation
+  context.stream.pending_writes = context.stream.pending_writes - 1
+  local completion = context.completion as async.Completion<|StreamShutdownOperation, nil, async.OperationError|>
+  local number = context.number
+  request:set_data(nil)
+  context.completion = nil
+  do
+    if status < 0 then completion:reject(number, make_error(status, "stdio.shutdown"))
+    else completion:resolve(number, nil) end
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_stream_shutdown(
+    completion: async.Completion<|StreamShutdownOperation, nil, async.OperationError|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  if context.backing:is_closed() then raise "cannot shut down a closed stream" end
+  if not uv.is_writable(context.backing.native) then
+    completion:resolve(number, nil)
+    return nil
+  end
+  local request = uv.shutdown_t.new()
+  context.completion = completion
+  context.number = number
+  request:set_data(context)
+  local status = uv.shutdown(request, context.backing.native, stdio_shut_down)
+  if status < 0 then
+    request:set_data(nil)
+    context.completion = nil
+    completion:reject(number, make_error(status, "stdio.shutdown"))
+  else
+    context.stream.pending_writes = context.stream.pending_writes + 1
+  end
+  return nil
+end
+
+local function FileStdio:pop_write(stream: Stdio, entry: FileWriteOperation)
+  local next_entry? = entry.next
+  entry.next = nil
+  self.write_head = next_entry
+  if next_entry == nil then self.write_tail = nil end
+  stream.pending_writes = stream.pending_writes - 1
+  entry.buffer = nil
+end
+
+local function FileStdio:pump_writes(stream: Stdio, retired: FileWriteOperation?)
+  local retired_head? = retired
+  local retired_tail? = retired
+  local failure_error: value = nil
+  local failure_trace: string? = nil
+  if retired ~= nil then
+    failure_error = retired.failure_error
+    failure_trace = retired.failure_trace
+  end
+  -- Recovery only links preallocated entries: no heap allocation or settlement
+  -- before the accepted tail is submitted or the FIFO is empty.
+  while not self.writing and self.write_head ~= nil do
+    local entry = self.write_head
+    local status = 0
+    do
+      local buffer = entry.buffer
+      local slice = buffer
+      if entry.offset > 0 then
+        slice = buffer:slice(entry.offset + 1, #entry.data - entry.offset)
+      end
+      status = uv.fs_write(
+        stream.loop, self.write_request, self.descriptor,
+        {slice}, -1, self.deliver_write)
+      if status < 0 then
+        uv.fs_req_cleanup(self.write_request)
+      else
+        self.writing = true
+      end
+    catch
+      entry.failure_error = error
+      entry.failure_trace = traceback
+      if failure_trace == nil then
+        failure_error = error
+        failure_trace = traceback
+      end
+      do uv.fs_req_cleanup(self.write_request) catch end
+    end
+    if self.writing then break end
+    self:pop_write(stream, entry)
+    entry.result = status
+    if retired_tail == nil then retired_head = entry
+    else retired_tail.next = entry end
+    retired_tail = entry
+  end
+
+  while retired_head ~= nil do
+    local entry = retired_head
+    retired_head = entry.next
+    entry.next = nil
+    local completion = entry.completion
+    local number = entry.number
+    entry.completion = nil
+    local trace? = entry.failure_trace
+    if trace ~= nil then
+      do completion:fatal(number, entry.failure_error, trace) catch end
+    else
+      do
+        if entry.result < 0 then
+          completion:reject(number, make_error(entry.result, "stdio.write"))
+        else
+          completion:resolve(number, nil)
+        end
+      catch
+        if failure_trace == nil then
+          failure_error = error
+          failure_trace = traceback
+        end
+        do completion:fatal(number, error, traceback) catch end
+      end
+    end
+  end
+  if failure_trace ~= nil then async.Error(failure_error, failure_trace):raise() end
+end
+
+local function FileStdio:complete_write(stream: Stdio, request: uv.fs_t)
+  self.writing = false
+  local entry = self.write_head
+  local result = 0
+  do
+    result = uv.fs_get_result(request)
+    uv.fs_req_cleanup(request)
+  catch
+    entry.failure_error = error
+    entry.failure_trace = traceback
+    do uv.fs_req_cleanup(request) catch end
+  end
+  if entry.failure_trace == nil and result > 0 then
+    entry.offset = entry.offset + result
+    if entry.offset < #entry.data then
+      self:pump_writes(stream, nil)
+      return
+    end
+    result = 0
+  elseif result == 0 then
+    result = uv.EIO
+  end
+  self:pop_write(stream, entry)
+  entry.result = result
+  self:pump_writes(stream, entry)
+end
+
+local function start_file_write(
+    completion: async.Completion<|FileWriteOperation, nil, async.OperationError|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  if #context.data == 0 then
+    completion:resolve(number, nil)
+    return nil
+  end
+  local buffer = uv.buf_t.from_string(context.data)
+  local file = context.file
+  local stream = context.stream
+  if file.write_head == nil then
+    local status = uv.fs_write(
+      stream.loop, file.write_request, file.descriptor,
+      {buffer}, -1, file.deliver_write)
+    if status < 0 then
+      uv.fs_req_cleanup(file.write_request)
+      completion:reject(number, make_error(status, "stdio.write"))
+      return nil
+    end
+    context.buffer = buffer
+    context.offset = 0
+    context.completion = completion
+    context.number = number
+    context.next = nil
+    file.writing = true
+    file.write_head = context
+    file.write_tail = context
+    stream.pending_writes = stream.pending_writes + 1
+    return nil
+  end
+  context.buffer = buffer
+  context.offset = 0
+  context.completion = completion
+  context.number = number
+  context.next = nil
+  file.write_tail.next = context
+  file.write_tail = context
+  stream.pending_writes = stream.pending_writes + 1
+  return nil
+end
+
+local function os_stdio_write(stream: Stdio, data: string)
+  validate_stdio(stream)
+  case stream.backing
+  when stream(backing) then
+    case async.await_with<|StreamWriteOperation, nil, async.OperationError|>(
+      StreamWriteOperation(stream, backing, data, nil, 0), start_stream_write)
+    when success() then
+    when error(failure) then raise failure
+    end
+  when file(backing) then
+    case async.await_with<|FileWriteOperation, nil, async.OperationError|>(
+      FileWriteOperation(stream, backing, data, nil, 0, nil, 0, nil, 0, nil, nil), start_file_write)
+    when success() then
+    when error(failure) then raise failure
+    end
+  end
+end
+
+local function os_stdio_shutdown(stream: Stdio)
+  validate_stdio(stream)
+  async.checkpoint()
+  case stream.backing
+  when stream(backing) then
+    case backing.native
+    when tcp() then
+      case async.await_with<|StreamShutdownOperation, nil, async.OperationError|>(
+        StreamShutdownOperation(stream, backing, nil, 0), start_stream_shutdown)
+      when success() then
+      when error(failure) then raise failure
+      end
+    else
+      raise make_error(uv.ENOTSUP, "stdio.shutdown")
+    end
+  when file() then
+    raise make_error(uv.ENOTSUP, "stdio.shutdown")
+  end
+end
+
+local function os_stdio_close(stream: Stdio)
+  validate_stdio(stream)
+  if stream.reads ~= nil then
+    stream.reads:close()
+    return
+  end
+  case stream.backing
+  when stream(backing) then close_native(backing.handle)
+  when file() then
+  end
+end
+
+local function os_stdio_kind(stream: Stdio): string
+  validate_stdio(stream)
+  case stream.backing
+  when stream(backing) then
+    case backing.native
+    when tty() then return "tty"
+    when tcp() then return "tcp"
+    when pipe() then return "pipe"
+    end
+  when file() then
+    return "file"
+  end
+end
+
+local function os_stdio_is_tty(stream: Stdio): boolean
+  return os_stdio_kind(stream) == "tty"
+end
+
+local function new_file_stdio(loop: uv.loop_t, descriptor: integer): Stdio
+  local file = FileStdio(
+    descriptor,
+    uv.fs_t.new(), nil, false, nil, nil, nil, nil,
+    uv.fs_t.new(), false, nil, nil, nil)
+  local stream = Stdio(StdioBacking.file(file), loop, nil, 0)
+  file.deliver_write = function (request: uv.fs_t)
+    file:complete_write(stream, request)
+  end
+  return stream
+end
+
+local function duplicate_descriptor(
+    descriptor: foreign int): foreign int
+  local duplicate = foreign int.new_array(1)
+  local cloexec_failed = foreign int.new_array(1)
+  local status = platform_status(ffi.titan_duplicate_parent_descriptor(
+      descriptor, duplicate, cloexec_failed))
+  if status < 0 then
+    ffi.titan_close_parent_duplicate(duplicate[0])
+    local operation = "stdio.parent.duplicate"
+    if cloexec_failed[0] ~= 0 then
+      operation = "stdio.parent.duplicate.cloexec"
+    end
+    raise make_error(status, operation)
+  end
+  return duplicate[0]
+end
+
+local function parent_stdio_kind_error(code: integer, descriptor: integer,
+                                       probe: string): async.OperationError
+  local failure = make_error(code, "stdio.parent.kind")
+  failure.message = "fd " .. descriptor .. ": " .. probe .. ": " ..
+                    failure.message
+  return failure
+end
+
+local function parent_stdio_pipe_hint(descriptor: integer): boolean
+  local configured? = os_getenv("TITAN_STDIO_PIPE_FDS")
+  if not configured then return false end
+  local hint = configured as string
+  if #hint == 0 or #hint % 2 == 0 then return false end
+  local bytes = hint as foreign const *char
+  local selected = false
+  for index = 0, #hint - 1 do
+    local byte = bytes[index] as integer
+    if index % 2 == 0 then
+      -- Only single ASCII fd digits 0, 1, and 2 are valid tokens. Validate
+      -- the whole list before trusting any selected descriptor.
+      if byte < 48 or byte > 50 then return false end
+      if byte == descriptor + 48 then selected = true end
+    elseif byte ~= 44 then
+      return false
+    end
+  end
+  return selected
+end
+
+local function parent_stdio_kind(descriptor: integer): uv.handle_type
+  local fd = descriptor as foreign int
+  local guessed = uv.guess_handle(descriptor)
+  case guessed
+  when tty() then return guessed
+  when named_pipe() then
+    if ffi.TITAN_OS_WINDOWS ~= 0 then
+      local probe = foreign ParentStdioProbe.new()
+      ffi.titan_probe_parent_stdio(fd, probe)
+      if probe.status ~= 0 then
+        raise parent_stdio_kind_error(platform_status(probe.status), descriptor,
+                                       probe.operation as string)
+      end
+      if probe.is_socket ~= 0 then
+        raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+          "socket-backed parent stdio is not supported on Windows")
+      end
+    end
+    return guessed
+  when file() then return guessed
+  when tcp() then
+    local probe = foreign ParentStdioProbe.new()
+    ffi.titan_inspect_parent_tcp(fd, probe)
+    if probe.status ~= 0 then
+      raise parent_stdio_kind_error(platform_status(probe.status), descriptor,
+                                     probe.operation as string)
+    end
+    if probe.is_listening ~= 0 then
+      raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+                                     "listening TCP socket")
+    end
+    if probe.is_connected == 0 then
+      raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+                                     "unconnected TCP socket")
+    end
+    return guessed
+  when unknown() then
+  else
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "uv_guess_handle classified unsupported kind " .. (uv.handle_type_name(guessed) or "unknown"))
+  end
+
+  -- uv_guess_handle does not promise errno; its isatty probe can leave an
+  -- unrelated value behind. Inspect this UNKNOWN fd explicitly.
+  local probe = foreign ParentStdioProbe.new()
+  ffi.titan_probe_parent_stdio(fd, probe)
+  if probe.status ~= 0 then
+    raise parent_stdio_kind_error(platform_status(probe.status), descriptor,
+                                   probe.operation as string)
+  end
+  if ffi.TITAN_OS_WINDOWS ~= 0 and probe.is_socket ~= 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "socket-backed parent stdio is not supported on Windows")
+  end
+  if probe.is_socket == 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+                                   "fstat did not identify a socket")
+  end
+  local name_errno = probe.name_errno as integer
+  local type_errno = probe.type_errno as integer
+
+  -- Both probes run even when the first fails: any available contradiction
+  -- defeats launcher knowledge about the missing metadata.
+  if name_errno == 0 and probe.is_unix == 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "getsockname reported family " .. (probe.family as integer))
+  end
+  if type_errno == 0 and probe.is_stream == 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "getsockopt(SO_TYPE) did not identify SOCK_STREAM")
+  end
+  if name_errno ~= 0 and name_errno ~= ffi.EPERM and
+     name_errno ~= ffi.EACCES then
+    raise parent_stdio_kind_error(uv.translate_sys_error(name_errno),
+                                   descriptor, "getsockname")
+  end
+  if type_errno ~= 0 and type_errno ~= ffi.EPERM and
+     type_errno ~= ffi.EACCES then
+    raise parent_stdio_kind_error(uv.translate_sys_error(type_errno),
+                                   descriptor, "getsockopt(SO_TYPE)")
+  end
+  if name_errno == 0 and type_errno == 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "uv_guess_handle remained unknown with inspectable socket metadata")
+  end
+  if parent_stdio_pipe_hint(descriptor) then return uv.NAMED_PIPE end
+
+  local missing_probe = "getsockname"
+  local denied_errno = name_errno
+  if denied_errno == 0 then
+    missing_probe = "getsockopt(SO_TYPE)"
+    denied_errno = type_errno
+  end
+  raise parent_stdio_kind_error(uv.translate_sys_error(denied_errno),
+    descriptor, missing_probe ..
+      " denied without a valid TITAN_STDIO_PIPE_FDS hint for this fd")
+end
+
+
+local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): Stdio
+  if parent_loop ~= loop then parent_loop = loop; cached_parent_stdio = {} end
+  local cached? = cached_parent_stdio[descriptor + 1]
+  if cached ~= nil and not cached:is_closed() then return cached end
+  cached_parent_stdio[descriptor + 1] = nil
+  local kind = parent_stdio_kind(descriptor)
+  case kind
+  when file() then
+    local file_stream = new_file_stdio(loop, descriptor)
+    cached_parent_stdio[descriptor + 1] = file_stream
+    return file_stream
+  else
+  end
+  local duplicate = duplicate_descriptor(descriptor as foreign int)
+  defer ffi.titan_close_parent_duplicate(duplicate)
+  local stream: Stdio? = nil
+  local keep = false
+  defer if not keep then discard_unpublished_stdio(stream) end
+  case kind
+  when tty() then
+    local native = uv.tty_t.new()
+    local backing = StreamStdio(native:as_stream_t(), native:as_handle_t(), nil, nil)
+    local owner = Stdio(StdioBacking.stream(backing), loop, nil, 0)
+    check_status(uv.tty_init(loop, native, duplicate as integer, 0), "stdio.parent.init")
+    stream = owner
+    local status, actual? = uv.fileno(backing.handle)
+    check_status(status, "stdio.parent.fileno")
+    if actual:to_integer() ~= uv.get_osfhandle(duplicate as integer):to_integer() then
+      check_status(platform_status(ffi.titan_close_parent_duplicate(duplicate)), "stdio.parent.duplicate.close")
+    end
+    duplicate = -1 as foreign int
+  when tcp() then
+    local status = 0
+    status, stream = new_tcp_stdio(loop)
+    check_status(status, "stdio.parent.init")
+    case stream.backing
+    when stream(backing) then
+      case backing.native
+      when tcp(native) then
+        status = uv.tcp_open(native, uv.os_sock_t.from_integer(duplicate as integer))
+      else raise "expected TCP stream"
+      end
+    when file() then raise "expected TCP stream"
+    end
+    check_status(status, "stdio.parent.open")
+    duplicate = -1 as foreign int
+  else
+    local status = 0
+    status, stream = new_pipe_stdio(loop)
+    check_status(status, "stdio.parent.init")
+    local handle: uv.handle_t? = nil
+    case stream.backing
+    when stream(backing) then
+      handle = backing.handle
+      case backing.native
+      when pipe(native) then status = uv.pipe_open(native, duplicate as integer)
+      else raise "expected pipe stream"
+      end
+    when file() then raise "expected pipe stream"
+    end
+    check_status(status, "stdio.parent.open")
+    if ffi.TITAN_OS_WINDOWS ~= 0 then
+      local actual: uv.os_fd_t? = nil
+      status, actual = uv.fileno(handle)
+      check_status(status, "stdio.parent.fileno")
+      if actual:to_integer() ~= uv.get_osfhandle(duplicate as integer):to_integer() then
+        check_status(platform_status(ffi.titan_close_parent_duplicate(duplicate)), "stdio.parent.duplicate.close")
+      end
+    end
+    duplicate = -1 as foreign int
+  end
+  cached_parent_stdio[descriptor + 1] = stream
+  keep = true
+  return stream
+end
+
+local function os_parent_stdio(descriptor: integer): Stdio
+  async.running()
+  return initialize_parent_stdio(async.current_loop(), descriptor)
+end
+
+local function stream_is_closed(handle: uv.handle_t): boolean
+  return not handle:is_initialized() or uv.is_closing(handle)
+end
+
+--- Dispose an unadopted captured output payload without a Runtime or Task.
+-- @param payload Exactly-once manual capability; parent identities are no-ops.
+-- @return Native close status; a close attempt consumes ownership even on error.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream.discard_transfer_payload(payload: string): integer
+  local descriptor: integer, native: string? =
+    protobuf.deserialize_fields(payload, output_transfer_fields)
+  if descriptor == 1 or descriptor == 2 then
+    if native ~= nil then raise "invalid standard output transfer payload" end
+    return 0
+  end
+  if descriptor ~= -1 then raise "invalid retained output stream descriptor" end
+  if native == nil then return 0 end
+  return uv.pipe_t.discard_transfer_payload(native)
+end
+
+local function decode_input_transfer_payload(payload: string):
+    (integer, string, integer, async.OperationError?, string?, {string})
+  local descriptor: integer, excess: string, terminal_kind: integer,
+    failure: async.OperationError?, native: string?, initial: {string} =
+    protobuf.deserialize_fields(payload, input_transfer_fields)
+  if terminal_kind < 0 or terminal_kind > 3 or
+      (terminal_kind == 2) ~= (failure ~= nil) then
+    raise "invalid input stream terminal payload"
+  end
+  if descriptor == 0 then
+    if #excess ~= 0 or native ~= nil or #initial ~= 0 or terminal_kind ~= 3 then
+      raise "invalid standard input transfer payload"
+    end
+  elseif descriptor ~= -1 then
+    raise "invalid input stream descriptor"
+  elseif terminal_kind == 0 and native == nil then
+    raise "live input stream transfer has no pipe"
+  end
+  return descriptor, excess, terminal_kind, failure, native, initial
+end
+
+--- Dispose an unadopted captured input payload without a Runtime or Task.
+-- @param payload Exactly-once manual capability; parent identities are no-ops.
+-- @return Native close status; a close attempt consumes ownership even on error.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream.discard_transfer_payload(payload: string): integer
+  local _, _, _, _?, native? = decode_input_transfer_payload(payload)
+  if native == nil then return 0 end
+  return uv.pipe_t.discard_transfer_payload(native)
+end
+
+-- Implementation notes: doc/implementation/os-library.md#process-stream-transfer
+local function stream_transfer_preflight(stream: Stdio, reading: boolean)
+  if stream.loop ~= async.current_loop() then
+    raise "stdio stream belongs to a different async Runtime"
+  end
+  if async.is_closing() then raise "cannot transfer a stream while async Runtime is shutting down" end
+  if stream.pending_writes ~= 0 then raise "stream has pending output" end
+  if stream.reads ~= nil and stream.reads:has_waiter() then
+    raise "stream has a pending read"
+  end
+  if not stream:is_closed() then
+    case stream.backing
+    when stream(backing) then
+      case backing.native
+      when pipe() then
+      else raise "only pipe streams support native handoff"
+      end
+      check_status(uv.stream_transfer_status(backing.native, reading), "stdio.transfer")
+    when file() then
+      raise "only pipe streams support native handoff"
+    end
+  end
+end
+
+local function stdio_native_payload(stream: Stdio): string
+  case stream.backing
+  when stream(backing) then
+    case backing.native
+    when pipe(native) then return native:to_transfer_payload()
+    else raise "only pipe streams support native handoff"
+    end
+  when file() then
+    raise "only pipe streams support native handoff"
+  end
+end
+
+local function restored_stdio(packet: string?): Stdio
+  local loop = async.current_loop()
+  if async.is_closing() then raise "cannot transfer a stream while async Runtime is shutting down" end
+  local native = uv.pipe_t.new()
+  local backing = StreamStdio(native:as_stream_t(), native:as_handle_t(), nil, nil)
+  local stream = Stdio(StdioBacking.stream(backing), loop, nil, 0)
+  if packet == nil then return stream end
+  native = uv.pipe_t.from_transfer_payload(packet)
+  local adopted = false
+  defer if not adopted then uv.close(native:as_handle_t()) end
+  backing.native = native:as_stream_t()
+  backing.handle = native:as_handle_t()
+  adopted = true
+  return stream
+end
+
+--- Move an idle captured output pipe, or copy a stable stdout/stderr facade.
+-- The caller owns exactly-once payload delivery and recovery after detachment.
+-- The child Process and its exit watcher remain in the originating Runtime.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream:to_transfer_payload(): string
+  local stream? = self.handle
+  if self.parent_descriptor >= 0 then
+    if stream ~= nil and stream.pending_writes ~= 0 then
+      raise "stream has pending output"
+    end
+    return protobuf.serialize_fields(output_transfer_fields, self.parent_descriptor, nil)
+  end
+  local native_packet: string? = nil
+  if stream ~= nil then
+    stream_transfer_preflight(stream, false)
+    if not stream:is_closed() then native_packet = stdio_native_payload(stream) end
+  end
+  self.handle = nil
+  local exported = false
+  defer if not exported and native_packet ~= nil then
+    uv.pipe_t.discard_transfer_payload(native_packet)
+  end
+  local payload = protobuf.serialize_fields(output_transfer_fields, -1, native_packet)
+  exported = true
+  return payload
+end
+
+--- Reconstruct an output facade or adopt its captured pipe on this Runtime.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream.from_transfer_payload(payload: string): OutputStream
+  local descriptor: integer, native: string? =
+    protobuf.deserialize_fields(payload, output_transfer_fields)
+  if descriptor == 1 or descriptor == 2 then
+    if native ~= nil then raise "invalid standard output transfer payload" end
+    return OutputStream(nil, descriptor)
+  end
+  if descriptor ~= -1 then raise "invalid output stream descriptor" end
+  local result = OutputStream(nil, -1)
+  if native ~= nil then result.handle = restored_stdio(native) end
+  return result
+end
+
+--- Move an idle captured input pipe together with buffered bytes and outcome.
+-- Unused standard-input facades copy descriptor identity. A pending native
+-- read, reader reservation, or write is rejected before changing the source.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream:to_transfer_payload(): string
+  local stream? = self.handle
+  local terminal_kind = 3
+  local failure: async.OperationError? = nil
+  local initial: {string} = {}
+  if self.parent_descriptor >= 0 then
+    if #self.excess ~= 0 or (stream ~= nil and stream.reads ~= nil) then
+      raise "standard input has active or buffered read state"
+    end
+    return protobuf.serialize_fields(input_transfer_fields,
+      self.parent_descriptor, self.excess, terminal_kind, nil, nil, initial)
+  end
+  local native_packet: string? = nil
+  if stream ~= nil then
+    stream_transfer_preflight(stream, true)
+    local reads? = stream.reads
+    if reads ~= nil then
+      local batch, terminal? = reads:snapshot_pending()
+      if terminal == nil then terminal_kind = 0
+      else
+        case terminal
+        when error(reason) then
+          terminal_kind = 2
+          failure = reason
+        when ended() then terminal_kind = 1
+        when closed() then
+        when item() then raise "invalid input stream terminal outcome"
+        end
+      end
+      for index = 1, batch.count do initial[index] = batch:get(index) end
+    elseif not stream:is_closed() then terminal_kind = 0 end
+    if not stream:is_closed() then
+      case stream.backing
+      when stream(backing) then
+        if reads ~= nil then check_status(uv.read_stop(backing.native), "stdio.transfer.read_stop") end
+        do
+          native_packet = stdio_native_payload(stream)
+        catch
+          if reads ~= nil and not backing:is_closed() then
+            backing:resume_read("stdio.transfer.read_resume")
+          end
+          raise
+        end
+      when file() then
+        raise "only pipe streams support native handoff"
+      end
+    end
+  end
+  local excess = self.excess
+  self.handle = nil
+  self.excess = ""
+  local exported = false
+  defer if not exported and native_packet ~= nil then
+    uv.pipe_t.discard_transfer_payload(native_packet)
+  end
+  local payload = protobuf.serialize_fields(input_transfer_fields,
+    -1, excess, terminal_kind, failure, native_packet, initial)
+  exported = true
+  return payload
+end
+
+--- Reconstruct buffered input and adopt its optional pipe on this Runtime.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream.from_transfer_payload(payload: string): InputStream
+  local descriptor, excess, terminal_kind, failure?, native?, initial =
+    decode_input_transfer_payload(payload)
+  if descriptor == 0 then return InputStream(nil, 0, "") end
+  local terminal: async.SubscriptionResult<|string, async.OperationError|>? = nil
+  if terminal_kind == 1 then terminal = async.SubscriptionResult<|string, async.OperationError|>.ended()
+  elseif terminal_kind == 2 then terminal = async.SubscriptionResult<|string, async.OperationError|>.error(failure)
+  elseif terminal_kind == 3 then terminal = async.SubscriptionResult<|string, async.OperationError|>.closed()
+  end
+  local result = InputStream(nil, -1, excess)
+  local stream = restored_stdio(native)
+  local published = false
+  defer if not published then discard_unpublished_stdio(stream) end
+  start_stream_read(stream, "stdio.transfer.read_start", initial, terminal)
+  result.handle = stream
+  published = true
+  return result
+end

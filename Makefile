@@ -374,6 +374,10 @@ ASYNC_TITAN_SOURCES := titan/async/async.titan \
 	titan/async/foreign.native.titan titan/async/receiver.native.titan \
 	titan/async/runtime.native.titan titan/async/runtime.browser.titan
 ASYNC_TITAN_HEADERS := titan/async/async_receiver_native.h titan/async/async_signal_platform.h
+OS_TITAN_SOURCES := titan/os/os.titan titan/os/clock.native.titan \
+	titan/os/environment.native.titan titan/os/process.native.titan \
+	titan/os/stdio.native.titan
+OS_TITAN_HEADERS := titan/os/os_platform.h titan/os/os_environment.h
 STDLIB_HTTP_SOURCES := titan/http/http.native.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan titan/http/pool.titan \
 	titan/http/server.titan titan/http/transfer.titan titan/http/upgrade.titan
@@ -402,9 +406,9 @@ STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer titan.thread
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
-	$(ASYNC_TITAN_SOURCES) titan/timer.native.titan titan/timer.browser.titan titan/io.native.titan titan/fs.native.titan \
+	$(ASYNC_TITAN_SOURCES) titan/timer.native.titan titan/timer.browser.titan titan/io.titan titan/fs.native.titan \
 	titan/net.native.titan titan/ssl.native.titan titan/url.titan \
-	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.native.titan titan/path.titan \
+	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) $(OS_TITAN_SOURCES) titan/path.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
 	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
@@ -416,8 +420,8 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES) \
 	$(JSON_TITAN_SOURCES) $(PROTOBUF_TITAN_SOURCES) titan/transfer.titan $(THREAD_TITAN_SOURCES)
 STDLIB_GENERATED_FFI_HEADERS := $(addprefix $(TITAN_OUTPUT_DIR)/,$(addsuffix .ffi.h, \
-	$(addprefix titan/,$(filter-out uv async http websocket peg string sqlite3 json lua protobuf thread,$(STDLIB_MODULES))) \
-	titan/uv/uv titan/async/async titan/http/http titan/websocket/websocket titan/peg/peg titan/string/string \
+	$(addprefix titan/,$(filter-out uv async os http websocket peg string sqlite3 json lua protobuf thread,$(STDLIB_MODULES))) \
+	titan/uv/uv titan/async/async titan/os/os titan/http/http titan/websocket/websocket titan/peg/peg titan/string/string \
 	titan/sqlite3/sqlite3 titan/json/json titan/lua/lua titan/protobuf/protobuf titan/thread/thread))
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	$(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.titan.h \

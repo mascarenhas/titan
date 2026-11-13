@@ -382,7 +382,7 @@ private variants may change.
 
 The regex parser (`titan/string/regex_parser.titan`) stores variant-specific
 syntax data directly in named `RegexNode` parts, and its passes bind only the
-parts they need. The private `SpawnSlot.merged` variant in `titan/os.native.titan`
+parts they need. The private `SpawnSlot.merged` variant in `titan/os/process.native.titan`
 holds its child/parent stream pair directly. Records that own behavior,
 mutable shared state, or a reused domain type remain records, including libuv
 request owners and TCP state.

@@ -56,9 +56,9 @@ difference between the native and browser interfaces that it does not record.
 Read a target-dependent constant from a target C define through `ffi`, as
 `coroutine`, `protobuf`,
 `json`, and `path` do, rather than adding a `.browser.titan` copy; reserve a
-variant for a real behavioral difference. The native-only modules keep their
-canonical mains as `<name>.native.titan`, so a later browser composition adds
-a selected `.browser.titan` main or contributors without renaming them back.
+variant for a real behavioral difference. Native-only modules with no shared
+main keep their canonical mains as `<name>.native.titan`. The shared mains
+of `os` and `io` do not yet provide a complete browser composition.
 
 `titan.async` is a browser module through its own browser composition: its
 shared main and the `runtime.browser.titan` and `external.browser.titan`
@@ -147,7 +147,7 @@ JavaScript](#the-same-rules-for-browser-javascript) follow the six pairs.
    ordinary function (`reserve_resource` in `titan/transfer.titan`).
    Platform-conditional work is a `static inline` helper that returns a
    status or fills a plain struct, as `titan_probe_parent_stdio` in
-   `titan/os_platform.h` does for `titan.os`, which keeps the classification;
+   `titan/os/os_platform.h` does for `titan.os`, which keeps the classification;
    a platform flag is a macro (`TITAN_UV_NETWORK_WINDOWS` in
    `titan/uv/network-native.h`), not a function.
 2. **Plain C stays plain C.** Wrong (`titan-browser.c` at `843b446e`):
