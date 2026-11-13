@@ -153,10 +153,10 @@ reserves and appends four bytes into an owned `titan_protobuf_buffer`) and
 `transfer.attach_resource` (which builds the four-byte index string for opaque
 hooks).
 
+Outside a [portable codec](#portable-copied-data-policy),
 `Encoder:record_value` and `union_value` enforce public nominal and complete
-member visibility, active-path cycle detection, the [nesting
-limit](#nesting-limit), and the normal field and variant traversal with
-nested custom-hook dispatch. The
+member visibility. Both contexts retain active-path cycle detection, the
+[nesting limit](#nesting-limit), and normal field and variant traversal. The
 inspected-root helpers check the 2 GiB message limit after encoding. Root
 custom-hook and root resource-codec selection belong to `titan.transfer`;
 ordinary `protobuf.serialize` keeps its structural public-data rules. See the
@@ -356,10 +356,11 @@ which native differential tests use as the oracle.
 The encoder keeps an active-path Map keyed by the original nominal or Array
 value. A deferred removal accompanies every entry, so exceptions unwind the
 cycle detector. Shared values outside the active path are encoded again. The
-encoder does not prevalidate the entire declared type graph; it resolves and
-checks descriptors as their values are visited. Union traversal visits the
-active payload only; the all-public type flag still rejects private variants
-anywhere on that nominal declaration.
+ordinary encoder does not prevalidate the entire declared type graph; it
+resolves and checks descriptors as their values are visited. Union traversal
+visits the active payload only; ordinary protobuf's all-public type flag still
+rejects private variants anywhere on that nominal declaration. Portable codecs
+instead validate the public schema at creation.
 
 All wire accumulation writes into a pluggable, expandable native buffer,
 `titan_protobuf_buffer` (`data`, `length`, `capacity`, a `context` pointer and a
@@ -565,32 +566,42 @@ native transfer representation or a separate field codec.
 ## Portable copied-data policy
 
 `PortableCodec` owns the ordered root descriptors and a closed nominal-name
-table. Creation walks descriptors only, resolving named references through
-`resolve_type`, and enters each accepted nominal before descending into its
-members so recursive types terminate. Entries retain the resolved descriptor
-and an optional registered conversion. The state-local conversion registry
-stores synchronous record/bytes callables; each codec captures the entries it
-uses rather than consulting that registry during value traversal.
+table. Creation walks public descriptors only, resolving named references
+through `resolve_type`, and enters each accepted nominal before descending so
+recursive types terminate. Each entry retains its resolved descriptor.
+Private-field records additionally retain a compatible public constructor and
+a public-field-ordinal to parameter-position mapping, when available. The
+mapping is computed once at creation, not during each decode.
 
-Four existing dispatch sites test whether their traversal context is a
-`PortableCodec`. `Encoder:field` and `decode_field` consult its record entry
-before resource or hook dispatch and use an opaque conversion when present.
-The encoder validates the candidate record, enters the existing cycle guard,
-and defers its removal around the conversion. The decoder validates the
-conversion's result nominal. `Encoder:dynamic_nominal` requires a listed name;
-`decode_dynamic_nominal` obtains the descriptor from the closed table and
-returns before the ordinary nominal lookup and demand-loader path. Every
-other context follows the existing code unchanged.
+The creation walk excludes packet resources, foreign types, hooked records,
+local nominals, Maps, Interfaces and functions. It accepts a public record's
+public fields and a public union's public variants without requiring
+`all_public`. Creation errors use JSON-style paths, with root-field indices,
+quoted field/part names, and representative Array index 1.
 
-The creation walk excludes packet resources, foreign types, and hooked
-records without conversions. Conversions are limited to public records with
-hooks or private fields: ordinary public-data records cannot register one,
-because a generated parent could call their generated codec without a
-reflective handoff. Hooked and private-field records have no generated codec,
-so their fields always hand back to the two record dispatch sites, including
-inside generated parents. Generated nominal `value` arms and Arrays likewise
-hand back to the reflective field machinery, where the closed-name policy
-applies.
+Six traversal sites distinguish a portable context:
+
+- `Encoder:record_value` and `Encoder:union_value` skip their ordinary
+  complete-public-visibility guards; the creation walk already checked the
+  public schema. Private active union arms still raise.
+- `decode_record` preserves direct default construction for all-public records.
+  For a record with local fields, `PortableCodec:decode_public_record` requires
+  the captured constructor before decoding fields. Every public field is
+  validated, including discarded ones; mapped values enter an argument Array
+  in parameter order and an explicit fixed arity preserves nil positions.
+- `decode_union` skips only its complete-public-visibility guard. Unknown
+  ordinals retain ordinary wire rejection.
+- `Encoder:dynamic_nominal` requires a listed name; `decode_dynamic_nominal`
+  obtains its descriptor from the closed table and returns before nominal
+  lookup or demand loading.
+
+Constructor compatibility comes from `RecordType:public_constructor` in
+`reflect`, also used by `json`. Protobuf additionally requires each parameter
+name to match a public field. An unavailable constructor makes that record
+encode-only. Private-field records and private-variant unions have no generated
+codec; generated parents hand them back to these reflective paths. Generated
+nominal `value` arms and Arrays likewise preserve the closed-name check.
+Every non-portable context follows its existing behavior unchanged.
 
 `PortableCodec:encode` owns one heap buffer and immediately defers its release,
 then calls `serialize_fields_to_buffer_with_context` with itself as context.
@@ -599,9 +610,9 @@ string as holder. Generated frames preserve the non-nil context and never
 request lazy packet-context resolution. No transfer hook, resource callback,
 new Lua C API call, or host-specific bridge is needed for this policy.
 
-The wire mapping is unchanged. Conversion-free graphs produce the same bytes
-as ordinary anonymous messages; converted records carry the conversion's
-bytes, which may differ from ordinary transfer-hook payloads.
+The wire mapping is unchanged. Values accepted by both the portable codec and
+ordinary anonymous messages produce the same bytes; the portable context only
+relaxes the nominal public-view policy.
 
 ## Schema generation
 

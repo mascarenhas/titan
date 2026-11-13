@@ -43,7 +43,7 @@ local function Encoder:record_value(
     candidate: reflect.RecordValue,
     depth: integer)
   require_depth(depth)
-  require_record(candidate.type)
+  if not (self.context is PortableCodec) then require_record(candidate.type) end
   self:enter(candidate.value)
   defer self.active[candidate.value] = nil
   for index = 1, #candidate.type.fields do
@@ -57,7 +57,7 @@ local function Encoder:union_value(
     candidate: reflect.UnionValue,
     depth: integer)
   require_depth(depth)
-  require_union(candidate.type)
+  if not (self.context is PortableCodec) then require_union(candidate.type) end
   self:enter(candidate.value)
   defer self.active[candidate.value] = nil
   for index = 1, #candidate.type.variants do
@@ -171,10 +171,6 @@ local function Encoder:field(
     self:array(buf, candidate, elem_descriptor, depth)
     end_nested(buf, mark)
   when is_record(expected) then
-    if self.context is PortableCodec then
-      if (self.context as PortableCodec):encode_record(
-          self, buf, number, candidate, expected) then return end
-    end
     local codec? = find_resource_codec_by_name(expected.name)
     if codec ~= nil then
       encode_resource_field(buf, codec, number, candidate, self.context)

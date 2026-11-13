@@ -130,26 +130,8 @@ end
 local function Decoder:decode_record(node: Node, descriptor: reflect.RecordType,
                               path: Path): value
   self:require_kind(node, "object", path)
-  local constructor: reflect.StaticFunctionType? = (function (
-      descriptor: reflect.RecordType): reflect.StaticFunctionType?
-    for index = 1, #descriptor.statics do
-      local candidate = descriptor.statics[index]
-      if candidate.name == "new" then return candidate end
-    end
-    return nil
-  end)(descriptor)
-  local compatible = false
-  if constructor ~= nil and constructor.vararg_descriptor == nil and
-      constructor.flexret_descriptor == nil and
-      #constructor.return_descriptors == 1 then
-    case constructor.return_descriptors[1]
-    when is_named(named) then
-      compatible = named.name == descriptor.name
-    when is_record(record_type) then
-      compatible = record_type.name == descriptor.name
-    end
-  end
-  if not compatible then
+  local constructor? = descriptor:public_constructor()
+  if constructor == nil then
     json_fail("constructor_unavailable", "record has no compatible public constructor: " ..
               descriptor.name, path, self.source, node.position)
   end

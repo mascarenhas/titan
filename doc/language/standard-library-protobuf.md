@@ -40,9 +40,6 @@ portable(fields: const {reflect.Type},
          dynamic: const {reflect.Type}?): PortableCodec
 PortableCodec:encode(...: value): string
 PortableCodec:decode(bytes: string): (...: value)
-register_portable(descriptor: reflect.Type,
-                 encode: function (value): (string),
-                 decode: function (string): (value))
 
 serialize_to_buffer(buf: foreign *void, candidate: value)
 serialize_fields_to_buffer(buf: foreign *void,
@@ -237,19 +234,18 @@ record type is needed to define an anonymous root.
 
 `portable` creates a reusable codec for copied data shared by native and browser
 targets. Its ordered `fields` describe an anonymous root, just as for
-`serialize_fields`. Creation checks the complete declared type graph before
-visiting any values, even for absent Options, empty Arrays, and inactive union
-variants.
+`serialize_fields`. Creation checks the complete public type graph before
+visiting any values, even for absent Options, empty Arrays, and inactive public
+union variants.
 
 | Declared type | Portable policy |
 | --- | --- |
 | Nil, boolean, integer, float, string, `value` | Accepted |
 | Option or mutable, const, maybe-const Array | Accepted when its element is portable |
-| Public record or union with only public members | Accepted when every member type is portable |
-| Public record with a registered portable conversion | Accepted as opaque copied bytes |
-| Record with transfer hooks but no portable conversion | Rejected |
-| Packet resource | Rejected, even with a portable conversion |
-| Local nominal or a nominal with private members and no conversion | Rejected |
+| Public record | Accepted when every public field type is portable |
+| Public union | Accepted when every public variant's parts are portable |
+| Record with transfer hooks, or a packet resource | Rejected |
+| Local nominal | Rejected |
 | Map, Interface, callable, or any foreign type | Rejected |
 
 The codec closes over every record and union reachable through `fields` and the
@@ -269,41 +265,48 @@ holes, and constness rules apply. Repeated acyclic references are copied
 independently. The codec retains its input string during decoding and returns
 independent values, not views into the input bytes.
 
-For a graph that meets no registered conversion, portable encoding is
-byte-for-byte identical to `serialize_fields(fields, ...)`. A conversion keeps
-the same length-delimited field framing but supplies its own payload bytes;
-those need not equal the record's transfer-hook payload.
+For values accepted by both entries, portable encoding is byte-for-byte
+identical to `serialize_fields(fields, ...)`. Public views also use the
+ordinary field framing; plain protobuf entries retain their stricter
+visibility checks.
 
-### Portable conversions
+### Public views and construction
 
-`register_portable` installs a synchronous pair of record-to-bytes and
-bytes-to-record functions in the current Lua state. The descriptor must resolve
-to a public record with private fields or transfer hooks. Public data records
-are already portable and cannot register a conversion. Local records, unions,
-non-record descriptors, packet resources, and duplicate registrations raise.
-A codec captures the conversions it uses at creation; later registrations do
-not expand its nominal set.
+A public record with local fields crosses as its public fields, in declaration
+order; local storage is not serialized. Decoding uses a compatible public
+`new`, found by [`RecordType:public_constructor()`](standard-library-reflect.md#public-nominal-members).
+Every fixed constructor parameter must be named after a public field. Each
+field is decoded and validated against its declared field type, and the
+same-named values are passed in constructor parameter order, preserving nil
+positions. Public fields not taken by the constructor are validated and
+dropped. Constructor errors propagate.
 
-The encode function must return copied bytes. The decode function must return
-the exact registered record type; another type raises
-`protobuf: record type mismatch`. Raised conversion errors propagate. These
-functions acquire no packet authority, have no cleanup callback, and must not
-retain borrowed input or transport ownership. A conversion's bytes are opaque
-to the codec: its fields are not inspected. Use ordinary copied data inside
-the payload, not native addresses or managed handles.
+Without such a constructor, the record is encode-only: decoding raises
+`protobuf: <name> has no public constructor over its public fields` before
+constructing that record. All-public records instead retain ordinary protobuf
+construction: fields are initialized directly, without invoking `new`.
 
-Creation errors identify the rejected nominal, or a descriptor path such as
-`fields[1].items[]` and its unsupported kind. Hooked records without a
-conversion report `protobuf: <name> has transfer hooks and no portable
-conversion`; packet resources report `protobuf: <name> is a packet resource
-and is not portable`.
+A public union may have private variants. A public active arm crosses normally;
+encoding a private active arm raises `protobuf: private union variant`.
+Decoding an ordinal with no recognized public variant raises.
+
+Creation errors identify the descriptor path and rejected kind or nominal.
+Paths use JSON's syntax: `$[1]` selects the first root field,
+`$[1]["items"][1]` its Array element schema, and
+`$["dynamic"][2]` the second additional nominal. Options add no path component;
+an Array element schema uses the representative index 1. Field and part names
+are quoted. For example, a hooked record reports
+`protobuf: $[1]: <name> has transfer hooks`, and a resource reports
+`protobuf: $[1]: <name> is a packet resource and is not portable`.
 
 ## Eligible values
 
-Every encountered Titan nominal type must be public and have only public
-fields or variants. A local record or union is rejected even if all its
-members are public. Const fields are supported: reconstruction initializes a
-new value rather than assigning an existing field.
+For ordinary protobuf entries, every encountered Titan nominal type must be
+public and have only public fields or variants. A local record or union is
+rejected even if all its members are public. Const fields are supported:
+reconstruction initializes a new value rather than assigning an existing
+field. [Portable codecs](#portable-codecs) instead accept the public views
+described above.
 
 Eligible field and payload types are:
 

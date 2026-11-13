@@ -238,26 +238,25 @@ function test_creation_rejects_ineligible_types_before_values(context: test.Cont
     local name = names[index]
     context:run("kind_" .. index, function(_: test.Context)
       expect_error(function() protobuf.portable({reflect.Type.is_option(rejected)}) end,
-          "fields[1]?: " .. name .. " is not portable")
+          "$[1]: " .. name .. " is not portable")
       expect_error(function()
         protobuf.portable({reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), rejected)})
-      end, "fields[1][]: " .. name .. " is not portable")
+      end, "$[1][1]: " .. name .. " is not portable")
     end)
   end
   expect_error(function() protobuf.portable({reflect.Type.is_named(reflect.NamedType("missing.Type"))}) end,
-      "unknown nominal type missing.Type")
+      "$[1]: unknown nominal type missing.Type")
   expect_error(function() protobuf.portable({}, {reflect.Type.is_integer()}) end,
-      "dynamic[1] must be a record or union")
+      "$[\"dynamic\"][1]: expected a record or union")
   expect_error(function() protobuf.portable({reflect.Type.is_named(reflect.NamedType(
-      "protobuf.portable_tests.View"))}) end, "Interface protobuf.portable_tests.View is not portable")
+      "protobuf.portable_tests.View"))}) end,
+      "$[1]: Interface protobuf.portable_tests.View is not portable")
   expect_error(function() protobuf.portable({descriptor(LocalRecord(1))}) end,
-      "LocalRecord is not public data")
-  expect_error(function() protobuf.portable({descriptor(Hidden(1))}) end,
-      "Hidden is not public data")
+      "$[1]: protobuf.portable_tests.LocalRecord is not public data")
   local embedded = foreign titan_protobuf_pair.new()
   local embedded_type = descriptor(Embedded(embedded))
   expect_error(function() protobuf.portable({embedded_type}) end,
-      "fields[1].data: foreign type is not portable")
+      "$[1][\"data\"]: foreign type is not portable")
   expect_error(function() protobuf.portable({descriptor(transfer.TransferValue.is_nil())}) end,
       "foreign type is not portable")
 end
@@ -268,14 +267,14 @@ function test_hooks_never_run_in_any_portable_position(context: test.Context)
     local hooked = Hooked(5)
     local hooked_type = descriptor(hooked)
     expect_error(function() protobuf.portable({hooked_type}) end,
-        "Hooked has transfer hooks and no portable conversion")
+        "$[1]: protobuf.portable_tests.Hooked has transfer hooks")
     expect_error(function() protobuf.portable({descriptor(HookParent(hooked))}) end,
-        "Hooked has transfer hooks and no portable conversion")
+        "$[1][\"item\"]: protobuf.portable_tests.Hooked has transfer hooks")
     expect_error(function() protobuf.portable({reflect.Type.is_array(
         reflect.ArrayTypeConstness.is_mutable(), hooked_type)}) end,
-        "Hooked has transfer hooks and no portable conversion")
+        "$[1][1]: protobuf.portable_tests.Hooked has transfer hooks")
     expect_error(function() protobuf.portable({}, {hooked_type}) end,
-        "Hooked has transfer hooks and no portable conversion")
+        "$[\"dynamic\"][1]: protobuf.portable_tests.Hooked has transfer hooks")
     local fields: const {reflect.Type} = {descriptor(Dynamic(nil))}
     local codec = protobuf.portable(fields)
     expect_error(function() codec:encode(Dynamic(hooked)) end,
@@ -300,119 +299,162 @@ function test_packet_resources_are_rejected_without_callbacks(_: test.Context)
       end)
   end
   expect_error(function() protobuf.portable({descriptor(resource)}) end,
-      "Resource is a packet resource and is not portable")
+      "$[1]: protobuf.portable_tests.Resource is a packet resource and is not portable")
 end
 
-local conversion_encodes = 0
-local conversion_decodes = 0
-local conversion_registered = false
+local public_view_constructions = 0
 
-record Converted
-  local number: integer
+record PublicView
+  local secret: integer
+  number: integer
+  note: string?
+  last: string?
+  dropped: integer
 end
 
-function Converted:to_transfer_payload(): string
-  raise "conversion invoked transfer encoder"
+function PublicView.new(note: string?, number: integer, last: string?): PublicView
+  public_view_constructions = public_view_constructions + 1
+  if number < 0 then raise "public constructor failed" end
+  return {secret = 99, number = number, note = note, last = last, dropped = 17}
 end
 
-function Converted.from_transfer_payload(_: string): Converted
-  raise "conversion invoked transfer decoder"
-end
-
-record ConvertedParent
-  field: Converted
-  entries: {Converted}
+record ViewParent
+  field: PublicView
+  entries: {PublicView}
   dynamic: value
 end
 
-record PrivateConverted
-  local text: string
+record RenamedView
+  number: integer
+  local secret: integer
 end
 
-local function register_conversion()
-  if conversion_registered then return end
-  protobuf.register_portable(descriptor(Converted(0)),
-    function(candidate: value): string
-      conversion_encodes = conversion_encodes + 1
-      local converted: Converted = candidate
-      if converted.number == -1 then raise "portable encode failed" end
-      return protobuf.serialize_fields({reflect.Type.is_integer()}, converted.number)
-    end,
-    function(bytes: string): value
-      conversion_decodes = conversion_decodes + 1
-      if bytes == "raise" then raise "portable decode failed" end
-      if bytes == "wrong" then return Point(1, "wrong") end
-      local number: integer = protobuf.deserialize_fields(bytes, {reflect.Type.is_integer()})
-      return Converted(number)
-    end)
-  protobuf.register_portable(descriptor(PrivateConverted("")),
-    function(candidate: value): string
-      local converted: PrivateConverted = candidate
-      return converted.text
-    end,
-    function(bytes: string): value return PrivateConverted(bytes) end)
-  conversion_registered = true
+function RenamedView.new(source: integer): RenamedView
+  return {number = source, secret = 0}
 end
 
-function test_conversions_reach_fields_arrays_and_dynamic_generated_handoffs(context: test.Context)
-  register_conversion()
+local all_public_constructions = 0
+
+record AllPublic
+  number: integer
+end
+
+function AllPublic.new(number: integer): AllPublic
+  all_public_constructions = all_public_constructions + 1
+  return {number = number}
+end
+
+union PublicUnion
+  shown(integer)
+  local hidden(string)
+  empty()
+end
+
+record UnionParent
+  field: PublicUnion
+end
+
+function test_public_views_reach_fields_arrays_and_dynamic_handoffs(context: test.Context)
   with_generated(context, function(generated: boolean)
-    conversion_encodes, conversion_decodes = 0, 0
-    local converted = Converted(12)
-    local entries: {Converted} = {}
-    entries[1], entries[3] = converted, converted
-    local parent = ConvertedParent(converted, entries, converted)
+    local original = PublicView(nil, 12, nil)
+    original.secret, original.dropped = -50, 91
+    local entries: {PublicView} = {}
+    entries[1], entries[3] = original, original
+    local parent = ViewParent(original, entries, original)
     test.assert((protobuf.find_generated_codec(parent) ~= nil) == generated)
     local codec = protobuf.portable({descriptor(parent)})
-    local restored: ConvertedParent = codec:decode(codec:encode(parent))
-    local dynamic: Converted = restored.dynamic
+    local bytes = codec:encode(parent)
+    public_view_constructions = 0
+    local restored: ViewParent = codec:decode(bytes)
+    local dynamic: PublicView = restored.dynamic
     test.assert(restored.field.number == 12 and #restored.entries == 3)
-    test.assert(restored.entries[2] == nil and restored.entries[3].number == 12 and dynamic.number == 12)
-    test.assert(conversion_encodes == 4 and conversion_decodes == 4)
+    test.assert(restored.field.note == nil and restored.field.last == nil)
+    test.assert(restored.entries[2] == nil and restored.entries[3].number == 12)
+    test.assert(dynamic.number == 12 and public_view_constructions == 4)
+    test.assert(restored.field.secret == 99 and restored.field.dropped == 17)
     test.assert(restored.field ~= restored.entries[1] and restored.field ~= dynamic)
-    local hidden_codec = protobuf.portable({descriptor(PrivateConverted(""))})
-    local hidden: PrivateConverted = hidden_codec:decode(hidden_codec:encode(PrivateConverted("x\0y")))
-    test.assert(hidden.text == "x\0y")
+    expect_error(function() protobuf.serialize_fields({descriptor(original)}, original) end,
+        "record must be public with only public fields")
   end)
 end
 
-function test_conversion_errors_and_registration_contract(_: test.Context)
-  register_conversion()
-  local fields: const {reflect.Type} = {descriptor(Converted(0))}
-  local codec = protobuf.portable(fields)
-  expect_error(function() codec:encode(Point(1, "wrong")) end, "record type mismatch")
-  expect_error(function() codec:encode(1) end, "expected a record")
-  expect_error(function() codec:encode(Converted(-1)) end, "portable encode failed")
-  expect_error(function() codec:decode(string.char(10, 5) .. "wrong") end, "record type mismatch")
-  expect_error(function() codec:decode(string.char(10, 5) .. "raise") end, "portable decode failed")
-  expect_error(function()
-    protobuf.register_portable(fields[1], function(_: value): string return "" end,
-        function(_: string): value return Converted(0) end)
-  end, "already has a portable conversion")
-  expect_error(function()
-    protobuf.register_portable(descriptor(Point(0, "")), function(_: value): string return "" end,
-        function(_: string): value return Point(0, "") end)
-  end, "Point is already portable")
-  expect_error(function()
-    protobuf.register_portable(descriptor(LocalRecord(0)), function(_: value): string return "" end,
-        function(_: string): value return LocalRecord(0) end)
-  end, "LocalRecord is not public data")
+function test_public_view_decode_validates_unused_fields_before_construction(_: test.Context)
+  local codec = protobuf.portable({descriptor(PublicView(nil, 1, nil))})
+  -- The fourth public field is discarded by new but must still be an integer.
+  local malformed = string.char(10, 5, 8, 2, 34, 1, 0)
+  public_view_constructions = 0
+  expect_error(function() codec:decode(malformed) end, "unexpected wire type")
+  test.assert(public_view_constructions == 0)
+end
+
+function test_records_without_a_public_field_constructor_are_encode_only(_: test.Context)
+  local hidden = Hidden(1)
+  local codec = protobuf.portable({descriptor(hidden)})
+  test.assert(codec:encode(hidden) == string.char(10, 0))
+  expect_error(function() codec:decode(string.char(10, 0)) end,
+      "Hidden has no public constructor over its public fields")
+  local renamed = RenamedView(3)
+  local renamed_codec = protobuf.portable({descriptor(renamed)})
+  local bytes = renamed_codec:encode(renamed)
+  test.assert(bytes == string.char(10, 2, 8, 6))
+  expect_error(function() renamed_codec:decode(bytes) end,
+      "RenamedView has no public constructor over its public fields")
+end
+
+function test_all_public_records_still_bypass_new(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local original = AllPublic(7)
+    local fields: const {reflect.Type} = {descriptor(original)}
+    local codec = protobuf.portable(fields)
+    local bytes = codec:encode(original)
+    test.assert(bytes == protobuf.serialize_fields(fields, original))
+    all_public_constructions = 0
+    local restored: AllPublic = codec:decode(bytes)
+    test.assert(restored.number == 7 and all_public_constructions == 0)
+  end)
+end
+
+function test_unions_with_private_variants_expose_only_the_public_arms(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local original = PublicUnion.shown(3)
+    local codec = protobuf.portable({descriptor(original)})
+    local restored: PublicUnion = codec:decode(codec:encode(original))
+    case restored
+    when shown(number) then test.assert(number == 3)
+    else raise "wrong public variant"
+    end
+    test.assert(codec:encode(PublicUnion.empty()) == string.char(10, 2, 18, 0))
+    expect_error(function() codec:encode(PublicUnion.hidden("private")) end,
+        "private union variant")
+    expect_error(function() codec:decode(string.char(10, 2, 26, 0)) end,
+        "union has no recognized variant")
+    local parent = UnionParent(original)
+    local parents = protobuf.portable({descriptor(parent)})
+    local restored_parent: UnionParent = parents:decode(parents:encode(parent))
+    case restored_parent.field
+    when shown(number) then test.assert(number == 3)
+    else raise "wrong nested public variant"
+    end
+    expect_error(function() protobuf.serialize_fields({descriptor(original)}, original) end,
+        "union must be public with only public variants")
+  end)
 end
 
 function test_error_unwind_reuses_the_same_codec(context: test.Context)
-  register_conversion()
   with_generated(context, function(_: boolean)
-    local codec = protobuf.portable({descriptor(Converted(0)), reflect.Type.is_integer()})
-    local converted = Converted(8)
-    local expected = string.char(10, 2, 8, 16, 16, 6)
+    local original = PublicView(nil, 8, nil)
+    local codec = protobuf.portable({descriptor(original), reflect.Type.is_integer()})
+    local expected = string.char(10, 4, 8, 16, 32, 34, 16, 6)
     for _ = 1, 1024 do
-      expect_error(function() codec:encode(converted, "not an integer") end, "expected integer")
-      expect_error(function() codec:decode(string.char(10, 2, 8, 16, 18, 1, 0)) end,
+      expect_error(function() codec:encode(original, "not an integer") end, "expected integer")
+      expect_error(function() codec:decode(string.char(10, 4, 8, 16, 32, 34, 18, 1, 0)) end,
           "unexpected wire type")
-      test.assert(codec:encode(converted, 3) == expected)
-      local restored: Converted, number: integer = codec:decode(expected)
+      test.assert(codec:encode(original, 3) == expected)
+      local restored: PublicView, number: integer = codec:decode(expected)
       test.assert(restored.number == 8 and number == 3)
     end
+    expect_error(function() codec:decode(string.char(10, 4, 8, 1, 32, 34, 16, 6)) end,
+        "public constructor failed")
   end)
 end
 

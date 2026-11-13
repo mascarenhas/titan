@@ -137,8 +137,8 @@ compiler mechanics belong in the corresponding compiler layer.
 | Numeric functions, random, number parsing | [Math library](doc/implementation/math-library.md) |
 | Independent Lua states, exclusive worker execution, native preload snapshots, source loading and `require` cache | [Lua-state and loading library](doc/implementation/lua-library.md); public [Lua states and loading](doc/language/standard-library-lua.md) contract |
 | Map/Array iteration, weak Maps, finalizers, collector controls | [Iteration](doc/implementation/iteration-library.md), [GC library](doc/implementation/gc-library.md) |
-| Runtime reflection, native projections/default construction, typed JSON mapping, asynchronous SQLite | [Reflection](doc/implementation/standard-library-reflect.md), [JSON](doc/implementation/json-library.md), [SQLite](doc/implementation/sqlite3-library.md) |
-| Protocol Buffers encoding/decoding, portable copied-data codecs and conversions, proto3 schemas, anonymous messages, reflected native fields | [Protocol Buffers](doc/implementation/protobuf-library.md); public [protobuf API](doc/language/standard-library-protobuf.md) |
+| Runtime reflection, public-constructor lookup, native projections/default construction, typed JSON mapping, asynchronous SQLite | [Reflection](doc/implementation/standard-library-reflect.md), [JSON](doc/implementation/json-library.md), [SQLite](doc/implementation/sqlite3-library.md) |
+| Protocol Buffers encoding/decoding, portable copied-data codecs and public views, proto3 schemas, anonymous messages, reflected native fields | [Protocol Buffers](doc/implementation/protobuf-library.md); public [protobuf API](doc/language/standard-library-protobuf.md) |
 | Native case discovery, subtests, cleanup, reporting | [Test runner](doc/implementation/test-runner.md), public [test API](doc/language/standard-library-test.md) |
 
 Only `titan.uv` owns libuv FFI; adapters use ordinary compiled public UV imports

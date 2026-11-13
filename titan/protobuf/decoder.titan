@@ -281,7 +281,13 @@ end
 local function decode_record(message: Message, descriptor: reflect.RecordType,
                               depth: integer): value
   require_depth(depth)
-  require_record(descriptor)
+  if message.context is PortableCodec then
+    if not descriptor.all_public then
+      return (message.context as PortableCodec):decode_public_record(message, descriptor, depth)
+    end
+  else
+    require_record(descriptor)
+  end
   local fields: {value} = {}
   for index = 1, #descriptor.fields do
     fields[index] = decode_field(message, field_number(index),
@@ -294,7 +300,7 @@ end
 local function decode_union(message: Message, descriptor: reflect.UnionType,
                              depth: integer): value
   require_depth(depth)
-  require_union(descriptor)
+  if not (message.context is PortableCodec) then require_union(descriptor) end
   local selected = 0
   local selected_field = 0
   local extra_chunks: {integer}? = nil
@@ -458,11 +464,6 @@ local function decode_field(message: Message, number: integer,
   when is_array{is_const, elem_descriptor} then
     return decode_array(message:merged_message(number), is_const, elem_descriptor, depth)
   when is_record(record_type) then
-    if message.context is PortableCodec then
-      local converted, restored = (message.context as PortableCodec):decode_record(
-          message, field, record_type)
-      if converted then return restored end
-    end
     local codec? = find_resource_codec_by_name(record_type.name)
     if codec ~= nil then
       require_wire(field, 2)

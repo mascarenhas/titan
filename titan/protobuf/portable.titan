@@ -1,17 +1,49 @@
 --- Closed, target-neutral codecs for copied Titan data.
 -- @module titan.protobuf
 
-local record PortableConversion
-  const encode: function (value): (string)
-  const decode: function (string): (value)
+local record PortableConstructor
+  const descriptor: reflect.StaticFunctionType
+  const positions: const {integer}
 end
 
 local record PortableNominal
   const descriptor: reflect.Type
-  const conversion: PortableConversion?
+  const constructor: PortableConstructor?
 end
 
-local portable_conversions: {string: PortableConversion} = {}
+local function PortableNominal.new(descriptor: reflect.Type): PortableNominal
+  local constructor: PortableConstructor? = nil
+  case descriptor
+  when is_record(record_type) then
+    if not record_type.all_public then
+      local candidate? = record_type:public_constructor()
+      if candidate ~= nil then
+        local positions: {integer} = {}
+        for parameter = 1, #candidate.param_descriptors do
+          local found = false
+          for field = 1, #record_type.fields do
+            if record_type.fields[field].name == candidate.param_names[parameter] then
+              positions[field] = parameter
+              found = true
+              break
+            end
+          end
+          if not found then return {descriptor = descriptor, constructor = nil} end
+        end
+        constructor = PortableConstructor(candidate, positions as const {integer})
+      end
+    end
+  end
+  return {descriptor = descriptor, constructor = constructor}
+end
+
+local function portable_resolve(descriptor: reflect.Type, path: string): reflect.Type
+  return resolve_type(descriptor)
+catch
+  local message: string = error
+  if string.sub(message, 1, 10) == "protobuf: " then message = string.sub(message, 11) end
+  raise "protobuf: " .. path .. ": " .. message
+end
 
 --- An ordered copied-data schema and its closed set of nominal types.
 -- @usage standard-library-protobuf.md#portable-codecs
@@ -21,7 +53,7 @@ record PortableCodec
 end
 
 local function PortableCodec:walk(descriptor: reflect.Type, path: string)
-  local resolved = resolve_type(descriptor)
+  local resolved = portable_resolve(descriptor, path)
   case resolved
   when is_nil() then
   when is_boolean() then
@@ -29,44 +61,37 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string)
   when is_float() then
   when is_string() then
   when is_value() then
-  when is_option(base) then self:walk(base, path .. "?")
-  when is_array{elem_descriptor} then self:walk(elem_descriptor, path .. "[]")
+  when is_option(base) then self:walk(base, path)
+  when is_array{elem_descriptor} then self:walk(elem_descriptor, path .. "[1]")
   when is_record(record_type) then
     if self.nominals[record_type.name] ~= nil then return end
     if find_resource_codec_by_name(record_type.name) ~= nil then
-      raise "protobuf: " .. record_type.name .. " is a packet resource and is not portable"
+      raise "protobuf: " .. path .. ": " .. record_type.name ..
+          " is a packet resource and is not portable"
     end
     if not record_type.is_public then
-      raise "protobuf: " .. record_type.name .. " is not public data"
-    end
-    local conversion? = portable_conversions[record_type.name]
-    if conversion ~= nil then
-      self.nominals[record_type.name] = PortableNominal(resolved, conversion)
-      return
+      raise "protobuf: " .. path .. ": " .. record_type.name .. " is not public data"
     end
     local hooks? = find_transfer_hooks(record_type, "protobuf")
     if hooks ~= nil then
-      raise "protobuf: " .. record_type.name .. " has transfer hooks and no portable conversion"
+      raise "protobuf: " .. path .. ": " .. record_type.name .. " has transfer hooks"
     end
-    if not record_type.all_public then
-      raise "protobuf: " .. record_type.name .. " is not public data"
-    end
-    self.nominals[record_type.name] = PortableNominal(resolved, nil)
+    self.nominals[record_type.name] = PortableNominal(resolved)
     for index = 1, #record_type.fields do
       local field = record_type.fields[index]
-      self:walk(field.type, path .. "." .. field.name)
+      self:walk(field.type, path .. "[\"" .. field.name .. "\"]")
     end
   when is_union(union_type) then
     if self.nominals[union_type.name] ~= nil then return end
-    if not union_type.is_public or not union_type.all_public then
-      raise "protobuf: " .. union_type.name .. " is not public data"
+    if not union_type.is_public then
+      raise "protobuf: " .. path .. ": " .. union_type.name .. " is not public data"
     end
-    self.nominals[union_type.name] = PortableNominal(resolved, nil)
+    self.nominals[union_type.name] = PortableNominal(resolved)
     for index = 1, #union_type.variants do
       local variant = union_type.variants[index]
       for part = 1, #variant.parts do
         local member = variant.parts[part]
-        self:walk(member.type, path .. "." .. variant.name .. "." .. member.name)
+        self:walk(member.type, path .. "[\"" .. member.name .. "\"]")
       end
     end
   when is_map() then raise "protobuf: " .. path .. ": Map is not portable"
@@ -86,47 +111,21 @@ function portable(fields: const {reflect.Type},
     dynamic: const {reflect.Type}?): PortableCodec
   local codec = PortableCodec(fields, {})
   for index = 1, #fields do
-    codec:walk(fields[index], "fields[" .. index .. "]")
+    codec:walk(fields[index], "$[" .. index .. "]")
   end
   if dynamic ~= nil then
     for index = 1, #dynamic do
-      local descriptor = resolve_type(dynamic[index])
+      local path = "$[\"dynamic\"][" .. index .. "]"
+      local descriptor = portable_resolve(dynamic[index], path)
       case descriptor
       when is_record() then
       when is_union() then
-      else raise "protobuf: dynamic[" .. index .. "] must be a record or union"
+      else raise "protobuf: " .. path .. ": expected a record or union"
       end
-      codec:walk(descriptor, "dynamic[" .. index .. "]")
+      codec:walk(descriptor, path)
     end
   end
   return codec
-end
-
---- Register a synchronous byte conversion for a public opaque record.
--- @param descriptor A public record with private fields or transfer hooks.
--- @param encode Copy the record into an owned byte string.
--- @param decode Construct that same record from its copied bytes.
--- @usage standard-library-protobuf.md#portable-codecs
-function register_portable(descriptor: reflect.Type,
-    encode: function (value): (string), decode: function (string): (value))
-  case resolve_type(descriptor)
-  when is_record(record_type) then
-    if not record_type.is_public then
-      raise "protobuf: " .. record_type.name .. " is not public data"
-    end
-    if find_resource_codec_by_name(record_type.name) ~= nil then
-      raise "protobuf: " .. record_type.name .. " is a packet resource and is not portable"
-    end
-    if portable_conversions[record_type.name] ~= nil then
-      raise "protobuf: " .. record_type.name .. " already has a portable conversion"
-    end
-    local hooks? = find_transfer_hooks(record_type, "protobuf")
-    if record_type.all_public and hooks == nil then
-      raise "protobuf: " .. record_type.name .. " is already portable"
-    end
-    portable_conversions[record_type.name] = PortableConversion(encode, decode)
-  else raise "protobuf: portable conversion requires a public record"
-  end
 end
 
 local function PortableCodec:nominal(name: string): PortableNominal
@@ -135,36 +134,20 @@ local function PortableCodec:nominal(name: string): PortableNominal
   return entry
 end
 
--- Hooked and private-field records have no generated codec, so generated
--- parents hand their fields back here before any transfer policy can run.
-local function PortableCodec:encode_record(encoder: Encoder,
-    buf: foreign *titan_protobuf_buffer, number: integer,
-    candidate: value, expected: reflect.RecordType): boolean
-  local conversion? = self:nominal(expected.name).conversion
-  if conversion == nil then return false end
-  case reflect.inspect(candidate)
-  when is_record(actual) then
-    if actual.type.name ~= expected.name then raise "protobuf: record type mismatch" end
-  else raise "protobuf: expected a record"
+local function PortableCodec:decode_public_record(message: Message,
+    descriptor: reflect.RecordType, depth: integer): value
+  local constructor? = self:nominal(descriptor.name).constructor
+  if constructor == nil then
+    raise "protobuf: " .. descriptor.name .. " has no public constructor over its public fields"
   end
-  encoder:enter(candidate)
-  defer encoder.active[candidate] = nil
-  write_bytes(buf, number, conversion.encode(candidate))
-  return true
-end
-
-local function PortableCodec:decode_record(message: Message,
-    field: foreign const *titan_protobuf_field,
-    expected: reflect.RecordType): (boolean, value)
-  local conversion? = self:nominal(expected.name).conversion
-  if conversion == nil then return false, nil end
-  require_wire(field, 2)
-  local restored = conversion.decode(slice_to_string(message.base, field.offset, field.length))
-  case reflect.inspect(restored)
-  when is_record(actual) then
-    if actual.type.name == expected.name then return true, restored end
+  local arguments: {value} = {}
+  for index = 1, #descriptor.fields do
+    local decoded = decode_field(message, field_number(index),
+        descriptor.fields[index].type, depth + 1)
+    local parameter? = constructor.positions[index]
+    if parameter ~= nil then arguments[parameter] = decoded end
   end
-  raise "protobuf: record type mismatch"
+  return constructor.descriptor.callable(...arguments[1, #constructor.descriptor.param_descriptors])
 end
 
 local function PortableCodec:decode_nominal(message: Message, name: string,
