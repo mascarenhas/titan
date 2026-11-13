@@ -1490,7 +1490,7 @@ The browser uses the native library nesting policies:
 
 | Operation | Every target | Error |
 | --- | --- | --- |
-| `protobuf` encoding, decoding, and `protobuf.schema`; `transfer` packets and structural records/unions | 127 nested levels with the shared 128-level codec budget | `protobuf: nesting exceeds 128 levels` |
+| `protobuf` encoding, decoding, and `protobuf.schema`; `transfer` packets and structural records/unions | 127 nested levels with the shared 128-level codec budget | `protobuf: nesting exceeds 128 levels`, with a [position suffix](standard-library-protobuf.md#errors) for located encoding or decoding failures |
 | `json.encode` | configured `max_depth` (default 32), with no additional browser cap | `json.Error` with code `limit_exceeded` and message `value exceeds max_depth` |
 
 These limits bound the library traversal, not stack already used by its caller.

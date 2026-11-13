@@ -3077,6 +3077,7 @@ int main(void) {
                 "titan/protobuf/protobuf.titan", "titan/protobuf/encoder.titan",
                 "titan/protobuf/decoder.titan", "titan/protobuf/portable.titan",
                 "titan/protobuf/schema.titan",
+                "titan/protobuf/trace.titan",
                 "titan/transfer.titan",
                 "titan/thread/thread.native.titan", "titan/thread/channel.titan",
                 "titan/thread/group.titan", "titan/thread/spawn.titan",

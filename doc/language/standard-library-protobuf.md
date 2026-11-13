@@ -93,7 +93,7 @@ protobuf: missing required field 2 at $["items"][3]["label"]
 protobuf: unsupported dynamic value at $[1]["payload"]
 ```
 
-The suffix is a debugging aid: it is added only when a reflective replay
+The suffix is a debugging aid: it is added only when a replay in trace mode
 reproduces the complete original message at a nested position. Root-level
 errors, schema errors, hook-validation errors and registration errors remain
 unchanged. The replay never calls a transfer hook, resource callback or public
@@ -440,7 +440,7 @@ fields, and unrecognized union selections raise. Messages must fit the
 protobuf 2 GiB size bound.
 
 Nested encoding and decoding failures use the [error paths](#errors) above
-when the reflective replay reproduces the failure.
+when a replay in trace mode reproduces the failure.
 
 Nesting is limited on every encoding, decoding, and schema path, generated or
 reflective. Levels count nested messages and the fields of the innermost one:

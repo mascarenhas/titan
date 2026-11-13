@@ -389,12 +389,9 @@ for complete frames, but cannot receive a fabricated nil in place of an opaque
 callback result. Following fields are still visited. Hook-validation failures
 are not attributed.
 
-The bound preserves the small generated frames of the first attempt. At the
-base validation build, a reflective optional-record level used about 16.5 KB
-of native coroutine stack (18.9 KB including a raise); 127 levels could exhaust
-the 2 MiB stack. The browser used under 2 KB per level on its 256 KiB Task
-stack. Sixteen reflective levels add about 300 KB natively or 32 KB in the
-browser instead of replacing the whole generated chain. The worst-case
+The replay retains generated codecs below its 16-segment reflective prefix
+instead of replacing the whole generated chain with reflective frames. This
+keeps the replay's added reflective portion bounded. The worst-case
 64-field, 128-level failure must raise without crashing in native, sanitizer
 and browser validation: replay must not turn the first attempt's raised error
 into a crash. These are codec bounds, not a guarantee about stack the caller
