@@ -404,7 +404,7 @@ These nine families have no default and no `browser` member, so for
 reports `module 'titan.<name>' not found`), and the folder's contributors are
 neither composed nor resolvable as flat modules. Native selection, logical
 names, and canonical output stems (such as `titan/uv/uv.titan.h`) are
-unchanged; only the physical main is a variant. The other thirteen standard
+unchanged; only the physical main is a variant. Thirteen further standard
 modules have no variants and form the shared part of the [browser standard
 library](browser-target.md#the-browser-standard-library). `titan.timer`'s
 flat family has a `native` and a `browser` member (`titan/timer.native.titan`,

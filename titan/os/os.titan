@@ -3,7 +3,6 @@
 -- @usage standard-library-os.md
 
 local reflect = import "reflect"
-
 local string = import "string"
 foreign import "time.h"
 foreign import "locale.h"

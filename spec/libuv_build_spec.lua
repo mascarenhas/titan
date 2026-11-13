@@ -1191,7 +1191,7 @@ esac
                 assert(lfs.mkdir(root .. "/titan"))
                 -- The consumer's selected sources and the headers they import,
                 -- at their checkout-relative paths; async is a folder module.
-                local inputs = { "titan/io.titan" }
+                local inputs = { "titan/" .. consumer .. ".titan" }
                 if consumer == "async" then
                     assert(lfs.mkdir(root .. "/titan/async"))
                     inputs = discovered_async_sources()

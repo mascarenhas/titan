@@ -1,6 +1,5 @@
 local uv = import "uv"
 local async = import "async"
-
 local protobuf = import "protobuf"
 
 foreign import "os_platform.h"
