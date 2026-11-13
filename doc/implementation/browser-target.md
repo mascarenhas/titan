@@ -57,7 +57,8 @@ The implementation is spread over:
   `titan-browser-trace.h`, the Emscripten JavaScript libraries
   `titan-browser-library.js`, `titan-browser-bridge.js`, and
   `titan-browser-trace.js`, the loader source `titan-browser.mjs` that
-  `browserlink.embed` places in every image, and the runner
+  `browserlink.embed` places in every image, the standalone portable peer
+  `titan-protobuf.mjs`, and the runner
   `titan-browser-run` with `titan-browser-run.mjs`,
   `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`; and
 * the Make targets `lua-browser` (`scripts/lua_browser.sh`), `browser-sdk`

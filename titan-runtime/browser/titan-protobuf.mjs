@@ -252,8 +252,10 @@ export function portable(description, types = Object.create(null)) {
     if (kind === 'option') return last ? decode(type[1], chunks, depth, path) : null;
     if (kind === 'nil') { message(chunks, path); return null; }
     if (!last) { if (kind === 'value') return null; fail(path, 'missing_field', 'missing required field'); }
-    const expected = kind === 'integer' || kind === 'boolean' ? 0 : kind === 'float' ? 1 : 2;
-    for (const chunk of chunks) wire(chunk, expected, path);
+    if (kind !== 'value' && kind !== 'array' && kind !== 'nominal') {
+      const expected = kind === 'integer' || kind === 'boolean' ? 0 : kind === 'float' ? 1 : 2;
+      for (const chunk of chunks) wire(chunk, expected, path);
+    }
     const value = last[2];
     switch (kind) {
       case 'boolean': if (value !== 0n && value !== 1n) fail(path, 'malformed_wire', 'invalid boolean'); return value === 1n;
@@ -280,7 +282,7 @@ export function portable(description, types = Object.create(null)) {
           } else if (entry[0] === 2) frozen = decode('boolean', [entry], depth, path);
         }
         while (result.length && result.at(-1) === null) result.pop();
-        return frozen ? Object.freeze(result) : result;
+        return type[1] === 'const' || type[1] === 'maybe' && frozen ? Object.freeze(result) : result;
       }
       case 'nominal': {
         const name = type[1], entry = nominals[name]; let Class = classes.get(name);

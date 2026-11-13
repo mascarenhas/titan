@@ -232,7 +232,9 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         if not info then pending(why) return end
         local peer = paths.join(info.sdk_root, "titan-protobuf.mjs")
         local source = assert(strategy:read_file(paths.join(repository, "titan-runtime/browser/titan-protobuf.mjs")))
-        assert.equal(source, assert(strategy:read_file(peer)))
+        local rebuild = "staged portable peer is missing or stale; run 'make browser-sdk PREFIX=" .. info.prefix .. "'"
+        local staged = assert(strategy:read_file(peer), rebuild)
+        assert.equal(source, staged, rebuild)
         local result = strategy:run({
             info.node.path, "--input-type=module", "-e", [[
 import { pathToFileURL } from 'node:url';
@@ -241,7 +243,8 @@ console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} a
 ]], paths.join(repository, "spec/fixtures/browser_bridge/portable-peer.mjs"), peer,
         }, { stderr_to_stdout = true })
         assert.is_true(result.ok, result.output)
-        contains(result.output, "assertions passed")
+        local passed = result.output:match("(%d+) assertions passed")
+        assert.truthy(passed and tonumber(passed) > 0, result.output)
     end)
 
     it("writes and reloads browser sdk-digests with schema 1 and invalidates modified entries", function()
@@ -859,6 +862,7 @@ end
         local expected_digest_files = {
             browser_paths.liblua,
             browser_paths.lua_record,
+            paths.join(browser_paths.titan_bin, "titan-protobuf.mjs"),
         }
         local staged_lua_headers = assert(strategy:list(browser_paths.lua_source))
         table.sort(staged_lua_headers)

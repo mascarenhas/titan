@@ -177,8 +177,10 @@ export async function peerTests(peerURL = new URL('./titan-protobuf.mjs', import
   scalarRound(['array', 'maybe', 'integer'], sparse, [null, null, 1n]);
   const arrayGolden = hex('0a0e0a0208020a000a04088180011001');
   equal(scalarRound(['array', 'maybe', 'integer'], Object.freeze([1n, null, -8193n])), arrayGolden, 'hand-derived array golden');
-  equal(codec([['array', 'mutable', 'integer']]).decode(hex('0a021001')), [Object.freeze([])], 'wire constness wins');
-  equal(codec([['array', 'const', 'integer']]).decode(hex('0a021000')), [[]], 'wire mutable wins');
+  equal(codec([['array', 'mutable', 'integer']]).decode(hex('0a021001')), [[]], 'declared mutable ignores const flag');
+  equal(codec([['array', 'const', 'integer']]).decode(hex('0a021000')), [Object.freeze([])], 'declared const ignores mutable flag');
+  equal(codec([['array', 'mutable', 'integer']]).decode(hex('0a060a0208021001')), [[1n]], 'declared mutable payload with const flag');
+  equal(codec([['array', 'const', 'integer']]).decode(hex('0a060a0208021000')), [Object.freeze([1n])], 'declared const payload with mutable flag');
   for (const value of [null, false, true, 0n, -1n, 9007199254740993n, 1, -0, NaN, Infinity, -Infinity, bytes(0, 255), [false, null, 2n], Object.freeze([1])]) scalarRound('value', value);
   scalarRound('value', undefined);
   const cyclicArray = []; cyclicArray[0] = cyclicArray;

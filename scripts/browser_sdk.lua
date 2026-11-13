@@ -347,6 +347,7 @@ elseif action == "finalize" then
     local digest_inputs = {
         descriptor.paths.liblua,
         descriptor.paths.lua_record,
+        paths.join(descriptor.paths.titan_bin, "titan-protobuf.mjs"),
     }
     local lua_headers, list_err = strategy:list(descriptor.paths.lua_source)
     if not lua_headers then fail(list_err) end

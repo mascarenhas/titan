@@ -20,7 +20,7 @@ runner, deployment, and fatal engine classifications.
 | Installed C layout and JS import contract | `titan-runtime/titan/browser.h` |
 | Browser-only Titan API, pin table, foreign trampolines, and protected entries | `titan/browser.browser.titan` |
 | Generated image launcher and weak C export forwards | `titan-compiler/browserentry.lua` and `driver.browser_entrypoint_contents` |
-| JSPI owner, bridge imports, loader, and trace adapter | the four [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
+| JSPI owner, bridge imports, loader, trace adapter, and standalone portable peer | the five [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
 | Browser runtime/provider staging | `Makefile` and `scripts/browser_sdk.lua` |
 
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
