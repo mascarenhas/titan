@@ -267,6 +267,12 @@ prefix`.
 | `provider` | `titan.a` | the browser standard provider: thirteen shared core roots, `titan.async` and `titan.timer` with browser variants, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
 
+The SDK also installs `titan-protobuf.mjs` in `titan_bin`. This standalone ES
+module encodes and decodes copied JavaScript values using a portable protobuf
+description. Pages deploy and import it separately; the compiler neither
+links it nor embeds it in an image, so it is not a `browserlink.sdk_assets`
+entry.
+
 None of the five runtime sources is compiled with `-fPIC`, LTO, or
 libbacktrace; their host-only paths compile out under the browser target
 define ([Runtime guards](#runtime-guards)). Neither the native `lib/titan/<ver>`

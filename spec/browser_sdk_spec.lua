@@ -227,6 +227,23 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         assert.same(descriptor_assets, ready, ready_err)
     end)
 
+    it("runs the portable peer tests against the staged SDK module under Node", function()
+        local info, why = toolchain.require({ node = true, sdk = true })
+        if not info then pending(why) return end
+        local peer = paths.join(info.sdk_root, "titan-protobuf.mjs")
+        local source = assert(strategy:read_file(paths.join(repository, "titan-runtime/browser/titan-protobuf.mjs")))
+        assert.equal(source, assert(strategy:read_file(peer)))
+        local result = strategy:run({
+            info.node.path, "--input-type=module", "-e", [[
+import { pathToFileURL } from 'node:url';
+const { peerTests } = await import(pathToFileURL(process.argv[1]));
+console.log(`portable peer: ${await peerTests(pathToFileURL(process.argv[2]))} assertions passed`);
+]], paths.join(repository, "spec/fixtures/browser_bridge/portable-peer.mjs"), peer,
+        }, { stderr_to_stdout = true })
+        assert.is_true(result.ok, result.output)
+        contains(result.output, "assertions passed")
+    end)
+
     it("writes and reloads browser sdk-digests with schema 1 and invalidates modified entries", function()
         local root = new_workspace("-sdk-digests-unit")
         local browser_paths = driver.installed_paths(root, "browser")
@@ -769,6 +786,9 @@ end
 
         -- Inspect libtitan.a, libtitan-lpeglabel.a, and titan.a.
         local assets = browserlink.sdk_assets(browser_paths)
+        assert.equal(
+            assert(strategy:read_file(paths.join(repository, "titan-runtime/browser/titan-protobuf.mjs"))),
+            assert(strategy:read_file(paths.join(browser_paths.titan_bin, "titan-protobuf.mjs"))))
         local expected_fp = fixtures.fingerprint()
 
         local runtime_ar = assert(staticmetadata.scan_archive(assets.runtime, { target = expected_fp }))
