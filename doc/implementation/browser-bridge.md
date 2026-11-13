@@ -56,8 +56,8 @@ The loader's parts:
 | Pending Task-form calls (`openTasks`) | Delivered Task-form calls whose Task has not reported its outcome, with each call's promise | The embedder-facing promise API; promises waiting for a Titan-reported outcome |
 | Requests | The detachable cell of each promise or listener continuation, the host cancel function, the ownership form, the completion and failure targets, and the terminal promise that disposal awaits; no callable hold accounting | Promise and listener continuations |
 | Drive | The gate promise of the suspending import, the turn source, the owner token, and the exit latch | JSPI resumption; macrotask scheduling |
-| `OutputChannel`, `output`, and `drainOutput` | One FIFO of copied iovec batches per stream, at most one sink call in flight, and the drains that run after the image is released; no per-byte buffer | Copying bytes out of the Wasm heap; the embedder's sinks and their promises |
-| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | One bounded host timer per arm, and the two driver callables; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs |
+| `OutputChannel`, `output`, and `drainOutput` | One FIFO of copied C iovec batches and Titan write/end entries per stream, each Titan entry's settlement promise, one latched C sink error, at most one sink or end hook in flight, and C-only drains after image release; no per-byte buffer | Copying bytes out of the Wasm heap; the embedder's sinks/end hooks and their promise continuations |
+| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`, `titan:stdout`, `titan:stderr`, `titan:stdin`, `titan:stdio`) | One bounded host timer per arm, the two driver callables, output-entry settlement promises, the optional input function, and declared backings; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs; the embedder's byte source, sinks, end hooks, declared backings and promises |
 
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
 `titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
@@ -690,6 +690,14 @@ and host invocation. The loader then queues one event per outcome:
 Detachable mailbox and guaranteed-terminal retained ownership, cancellation,
 listener removal, late-settlement dropping, FIFO batching, and disposal all
 remain with the JS bridge owner. No C import awaits host work.
+
+The SDK stream sources use this same boundary. Output sources return a
+retained promise tied to their FIFO entry; the optional stdin source calls
+the embedder synchronously under `hostInvoke` and turns either a return or
+throw into a detachable promise outcome. `valuesAt` already copies a bytes
+argument, so output admission does not copy it again. A missing SDK source
+(`titan:stdin` without an option) yields the ordinary unknown-binding error.
+`titan:stdio` is an ordinary synchronous call returning an option value.
 
 `drain()` and a drive's `deliver` each work on a detached batch, so both
 recheck an entry's request before invoking it. Cancellation removes the

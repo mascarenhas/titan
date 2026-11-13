@@ -1,0 +1,19 @@
+local browser = import "browser"
+foreign import "stdio.h"
+
+function main(args: {string}): integer
+  local source = browser.binding("titan:stdio")
+  defer source:close()
+  for index = 1, #args do
+    local name = args[index]
+    local text = ""
+    case source:call(browser.BrowserValue.is_string(name))
+    when is_string(kind) then text = name .. "=" .. kind .. "\n"
+    when is_nil() then text = name .. "=unknown\n"
+    else raise "runner declared a non-string stream kind"
+    end
+    ffi.fputs(text, ffi.stdout)
+    ffi.fputs(text, ffi.stderr)
+  end
+  return 0
+end

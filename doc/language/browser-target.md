@@ -659,6 +659,9 @@ Options are:
 | Option | Contract |
 | --- | --- |
 | `stdout`, `stderr` | Functions receiving copied `Uint8Array` chunks, which they may keep. A sink returns `undefined` or a promise; anything else is a sink failure. An absent sink discards its stream. |
+| `stdin` | A function called once per `titan:stdin` read, synchronously as a binding is. Returns a `Uint8Array` chunk (including an empty chunk), `null` or `undefined`, or a promise of one of those values. Without it, `titan:stdin` is an unknown binding. |
+| `stdinKind`, `stdoutKind`, `stderrKind` | Declared stream backings, passed through unchanged by `titan:stdio`. The loader supplies no default and does not validate these values. |
+| `stdoutEnd`, `stderrEnd` | Functions called by argumentless `titan:stdout` or `titan:stderr` requests, after earlier entries on that stream. Like sinks, they return `undefined` or a promise. A missing hook rejects the request with `TypeError`. |
 | `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
 | `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
 | `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. Names starting with `titan:` are [reserved for the SDK](standard-library-browser.md#reserved-sdk-bindings) and rejected with `TypeError`. |
@@ -685,8 +688,15 @@ libc environment; Titan's C FFI reaches those same functions. C `setenv` and
 `TZ` is an ordinary environment variable: Emscripten's `localtime` follows
 the JavaScript host's time zone regardless of its value.
 
-**Output.** Each stream has one FIFO and at most one actual sink invocation in
-flight. The loader flushes after all entries in the containing operation,
+The `stdin` option serves the SDK request source, not C stdio's fd 0. Its
+result is marshalled by runtime type; Titan decides which values are valid
+input. Calling back into the instance from `stdin` rejects with
+`TITAN_BROWSER_REENTRY`, just as from another binding. When supplied, `stdin`,
+`stdoutEnd`, and `stderrEnd` must be functions; other values raise `TypeError`
+at `create`.
+
+**Output.** Each stream has one FIFO and at most one sink or end-hook call
+in flight. The loader flushes after all entries in the containing operation,
 including unterminated C-stdio output, and during a drive also whenever the
 drive relinquishes the event loop, without waiting there for a pending sink
 call: output queued behind that call reaches the sink once the call settles,
@@ -700,13 +710,23 @@ message and trace remain primary while deliverable output is still flushed.
 There is no cross-stream ordering guarantee.
 C output is copied before the C write returns; sinks do not see a view into
 the Wasm heap. Chunk boundaries are not part of the C-stdio contract.
+A Titan write through `titan:stdout` or `titan:stderr` is one FIFO entry. Its
+request completes only after that entry's sink settles. An argumentless
+request is an end entry: its end hook uses the same FIFO and in-flight gate.
+A Titan entry's sink or hook failure goes to its failure callable, not also
+to the containing operation or cleanup observer.
+
 A C-stdio sink failure is returned by the operation that flushes it, or by
-disposal if the operation already failed in Titan; empty flushes and unrelated
-output-free operations do not fail again with that error, and observing it does
-not report the same failure twice.
+disposal if the operation already failed in Titan. It is also returned once
+by the next Titan write request on that stream, after that entry's sink
+settles; later writes are unaffected. Empty flushes and unrelated
+output-free operations do not fail again with that error, and observing the
+operation's failure does not report it again as cleanup.
 
 Disposal interrupts a pending sink by detaching its continuation and making
 that stream terminal; it never overlaps the old sink with a finalizer write.
+Queued and in-flight Titan entries reject with `TITAN_BROWSER_DISPOSED`
+during the cleanup drive, before disposal waits for retained requests.
 An operation whose failure was already captured keeps that failure if disposal
 interrupts its report flush; the interruption is reported once as cleanup,
 even when both streams are interrupted. Only an operation not yet failed

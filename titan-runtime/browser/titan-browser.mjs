@@ -166,6 +166,13 @@ const sdkBindings = Object.freeze(Object.assign(Object.create(null), {
   'titan:timeout': () => timeoutSource,
   'titan:interval': () => intervalSource,
   'titan:driver': (owner, state) => owner.registerDriver.bind(owner, state),
+  'titan:stdout': owner => owner.out.write.bind(owner.out),
+  'titan:stderr': owner => owner.err.write.bind(owner.err),
+  // The embedder's byte source runs under hostInvoke, including synchronous throws.
+  'titan:stdin': owner => owner.options.stdin && (() => ({
+    kind: 'detachable', promise: new Promise(resolve => resolve(owner.options.stdin())),
+  })),
+  'titan:stdio': owner => name => owner.options[name + 'Kind'],
 }));
 
 function observe(promise) {
@@ -195,22 +202,32 @@ function captureFailure(token, error, fault) {
 }
 
 class OutputChannel {
-  constructor(sink, stream, host) {
+  constructor(sink, stream, host, end) {
     this.sink = sink;
+    this.end = end;
     this.stream = stream;
     this.host = host;
     this.queue = [];
     this.inflight = undefined;
     this.terminal = false;
     this.firstFailure = undefined;
+    this.latched = undefined;
     this.running = undefined;
     this.pumped = undefined;
   }
 
   admit(bytes, settled) {
     if (this.terminal) {
-      this.firstFailure ||= {error: failure('DISPOSED', `browser ${this.stream} stream is disposed`)};
+      const error = failure('DISPOSED', `browser ${this.stream} stream is disposed`);
+      if (settled) settled.reject(error); else this.firstFailure ||= {error};
     } else this.queue.push({bytes, settled});
+  }
+
+  // The embedder's sink promise settles this retained SDK write request.
+  write(bytes) {
+    const settled = deferred();
+    this.admit(bytes, settled);
+    return {kind: 'retained', promise: settled.promise};
   }
 
   // A parked relinquish gate starts at most one runner without awaiting it.
@@ -266,11 +283,12 @@ class OutputChannel {
     return this.queue.shift();
   }
 
-  // One sink call. Its failure is captured for the operation and returned.
+  // A Titan entry settles its request; only C entries fail the operation.
   async send(token, entry) {
     let current;
     try {
-      if (this.sink) {
+      if (entry.bytes === undefined && !this.end) throw new TypeError(`browser ${this.stream} has no end hook`);
+      if (this.sink || entry.bytes === undefined) {
         // A separate gate lets disposal detach a forever-pending host sink.
         // The stream then becomes terminal: it can never overlap that call.
         const gate = deferred();
@@ -280,7 +298,7 @@ class OutputChannel {
           // A sink is host code: an immediate reverse call from it rejects.
           let result;
           this.host.inHost++;
-          try { result = this.sink(entry.bytes); }
+          try { result = entry.bytes === undefined ? this.end() : this.sink(entry.bytes); }
           finally { this.host.inHost--; }
           relayPromise(sinkResult(result, this.stream), cell);
           await gate.promise;
@@ -290,10 +308,16 @@ class OutputChannel {
         }
       }
     } catch (cause) {
-      const error = ownFailure(cause, 'DISPOSED') || ownFailure(cause, 'SINK') ? cause :
+      const error = entry.settled || ownFailure(cause, 'DISPOSED') || ownFailure(cause, 'SINK') ? cause :
         failure('SINK', `browser ${this.stream} sink failed`, cause, this.stream);
       current = error === token.interrupted?.error ? token.interrupted : {error};
-      captureFailure(token, error, current);
+      if (!entry.settled) { captureFailure(token, error, current); this.latched ||= current; }
+    }
+    if (entry.settled) {
+      const fault = this.latched || current;
+      this.latched = undefined;
+      if (fault) entry.settled.reject(fault.error); else entry.settled.resolve();
+      return;
     }
     if (current && current !== token.primaryFault) this.firstFailure ||= current;
     return current;
@@ -310,8 +334,9 @@ class OutputChannel {
   }
 
   discard(error, fault) {
-    if (error.code === 'TITAN_BROWSER_DISPOSED' && this.queue.length) {
-      this.firstFailure ||= fault || {error};
+    for (const entry of this.queue) {
+      if (entry.settled) entry.settled.reject(error);
+      else if (error.code === 'TITAN_BROWSER_DISPOSED' && entry.bytes.length) this.firstFailure ||= fault || {error};
     }
     this.queue = [];
   }
@@ -320,10 +345,14 @@ class OutputChannel {
     const drain = {
       sink: this.terminal ? undefined : this.sink,
       stream: this.stream,
-      entries: this.queue,
+      entries: this.queue.filter(entry => {
+        if (!entry.settled) return true;
+        entry.settled.reject(failure('DISPOSED', `browser ${this.stream} stream is disposed`));
+        return false;
+      }),
       failure: this.firstFailure,
     };
-    this.sink = undefined;
+    this.sink = this.end = this.latched = undefined;
     this.queue = [];
     this.firstFailure = undefined;
     return drain;
@@ -450,8 +479,8 @@ class BrowserOwner {
     this.retainOwnerWork = false;
     this.disposalDriven = false;
     this.callsScheduled = false;
-    this.out = new OutputChannel(options.stdout, 'stdout', this);
-    this.err = new OutputChannel(options.stderr, 'stderr', this);
+    this.out = new OutputChannel(options.stdout, 'stdout', this, options.stdoutEnd);
+    this.err = new OutputChannel(options.stderr, 'stderr', this, options.stderrEnd);
   }
 
   // Every application method rejects after exit; a host invocation in flight
@@ -1610,9 +1639,9 @@ class BrowserOwner {
     const name = new TextDecoder('utf-8', {fatal: true}).decode(this.bytesAt(pointer, length));
     // Reserved `titan:` names resolve only to SDK sources, never to user bindings.
     if (name.startsWith('titan:')) {
-      const source = sdkBindings[name];
-      if (!source) throw new Error(`unknown browser binding ${name}`);
-      return {kind: kind.handle, value: source(this, state), state};
+      const value = sdkBindings[name]?.(this, state);
+      if (value === undefined) throw new Error(`unknown browser binding ${name}`);
+      return {kind: kind.handle, value, state};
     }
     const bindings = this.options.bindings;
     if (!bindings || !Object.hasOwn(bindings, name)) throw new Error(`unknown browser binding ${name}`);
@@ -1975,7 +2004,8 @@ async function retireOwner(owner) {
 /** Create one persistent instance; the image supplies its private factory. */
 export function create(factory, options = {}) {
   if (typeof factory !== 'function') throw new TypeError('browser factory must be a function');
-  for (const name of ['stdout', 'stderr', 'locateFile', 'onNotificationError', 'requestDrain', 'onEngineFailure']) {
+  for (const name of ['stdin', 'stdout', 'stderr', 'stdoutEnd', 'stderrEnd', 'locateFile',
+      'onNotificationError', 'requestDrain', 'onEngineFailure']) {
     if (options[name] !== undefined && typeof options[name] !== 'function') {
       throw new TypeError(`browser ${name} must be a function`);
     }

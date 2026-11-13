@@ -3133,11 +3133,13 @@ work-announcement failure uses `requestDrain`.
 
 ### Output, disposal, and observation
 
-Each `OutputChannel` has a copied-byte FIFO and at most one actual sink
-invocation. The output import admits each copied iovec synchronously and never
-invokes the sink. A logical operation flushes both streams after all its C
-entries retire; later entries still run after a throw/rejection. During a
-drive, each parked relinquish gate starts a single-runner pump without
+Each `OutputChannel` has a FIFO of copied C bytes and Titan write/end entries,
+with at most one actual sink or end-hook invocation. The output import admits
+each copied iovec synchronously and never invokes the sink. SDK output sources
+admit an entry with its settlement promise through that same queue. A logical
+operation flushes both streams after all its C entries retire; later entries
+still run after a throw/rejection. During a drive, each parked relinquish
+gate starts a single-runner pump without
 awaiting it, so a slow or forever-pending sink never stalls the drive.
 One invariant governs every sink
 call: `OutputChannel.take`, the only place a chunk leaves the FIFO, gives the
@@ -3159,11 +3161,30 @@ pending for disposal, while an unrelated or empty flush does not return it
 again. Its observed bit tracks delivery, not consumption, so later disposal
 cannot notify the same failure twice.
 
-Disposal closes admission before awaiting any work, interrupts an in-flight
-sink through a detachable gate, and makes that stream terminal so it can never
-overlap the pending sink. Accepted C work retires, retained host work settles,
-and close runs as the last legitimate owner-held promised entry. The backend's
-permanent block is installed only after close, or immediately on poison.
+Titan entries and C entries have different completion owners:
+
+1. A terminal stream rejects an admitted Titan entry with its disposal error;
+   a C entry retains the existing `firstFailure` accounting.
+2. A C sink failure keeps operation-level reporting and latches the first
+   unconsumed error on that stream.
+3. After a Titan entry's sink settles, its request rejects with the latched
+   C error and clears it, otherwise with its own failure, otherwise resolves.
+   Its own failure is never captured for the operation, recorded as
+   `firstFailure`, or returned as a cleanup failure.
+4. An end entry has no bytes. At the head of the same FIFO it calls the
+   embedder's end hook under the same gate, or rejects with
+   `TypeError('browser <stream> has no end hook')`. JavaScript owns no
+   shutdown or EOF policy.
+
+Disposal closes admission before awaiting any work, rejects queued Titan
+entries, and interrupts an in-flight sink through a detachable gate. Its
+Titan entry rejects through the normal settlement path, before retirement
+waits for retained requests. A discarded queue counts only C bytes for the
+existing `firstFailure` rule. The interrupted stream becomes terminal, so it
+can never overlap the pending sink. Accepted C work retires, retained host
+work settles, and close runs as the last legitimate owner-held promised entry.
+The backend's permanent block is installed only after close, or immediately
+on poison.
 Capture the first failure where the action or sink fails, not
 after awaiting both streams. Disposal cannot replace an already captured
 failure while interrupting its flush. One shared interruption record is
@@ -3171,8 +3192,9 @@ reported once as cleanup even if both streams are interrupted. Only an
 operation not yet failed rejects `DISPOSED`; disposal keeps its own output/error
 outcome, including `DISPOSED` for undeliverable interrupted or discarded bytes.
 
-Deliverable finalizer bytes are moved into JS-only drain records containing
+Deliverable C finalizer bytes are moved into JS-only drain records containing
 only sinks, copied bytes, failure status, and the notification observer.
+`takeDrain` rejects and removes any Titan entry instead of carrying it.
 Their module-scope continuation reports secondary disposal failures without
 capturing the owner. `retireOwner` clears Module, backend,
 bindings, wrappers, and instance callbacks before its promise fulfills with
@@ -3253,6 +3275,14 @@ The supervisor owns the wall-clock deadline and the grace period, so a busy
 WebAssembly loop cannot prevent a timeout; it never infers success from the
 worker's exit, and a worker that exits or disconnects before shutdown is a
 harness failure. Output pipes are drained before the runner returns.
+
+For a plain program, the supervisor declares stdout/stderr backings from
+its own descriptors, not the worker's pipes: `isTTY` gives `"tty"`, otherwise
+`fstat` gives `"file"` for a regular file or `"pipe"` for a FIFO or socket.
+Other backings remain undeclared. The page code passes these two options to
+`create`. Plain Chromium programs declare no backings; a `--js-test` driver
+continues to own all its `create` options. Neither runner engine supplies
+stdin, end hooks, or environment options.
 
 **Chromium engine.** The supervisor serves the root under `/root/` and the
 read-only SDK directory under `/sdk/` on `127.0.0.1` with an ephemeral port,

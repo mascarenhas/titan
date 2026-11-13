@@ -127,10 +127,12 @@ describe("browser drive interface", function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
             if not info then pending(why) return end
             fixture = files.new()
-            for _, name in ipairs({ "support.mjs", "scheduler.mjs" }) do
+            for _, name in ipairs({ "support.mjs", "scheduler.mjs", "streams.mjs", "runner-kinds.mjs" }) do
                 files.copy(source .. "/" .. name, fixture.source .. "/" .. name)
             end
             local image = build_scheduler(info, assertions)
+            local kinds = build_image(info, assertions, "program", "stream-kinds",
+                { "--tree", source, "stream_kinds" })
             for _, engine in ipairs({ "node", "chromium" }) do
                 local result = execute(info, engine, { "--js-test", fixture.source .. "/scheduler.mjs", "--", image })
                 io.stdout:write(string.format("\nSCHEDULER assertions=%d engine=%s node=%s chrome=%s\n%s\n",
@@ -140,7 +142,30 @@ describe("browser drive interface", function()
                 assert.truthy(result.output:find('"verdict":"PASS"', 1, true), result.output)
                 assert.truthy(result.output:find('"gate":21', 1, true), result.output)
                 assert.truthy(result.output:find('"crowd":2000', 1, true), result.output)
+                local streams = execute(info, engine, { "--js-test", fixture.source .. "/streams.mjs", "--", image })
+                io.stdout:write(string.format("\nSTREAMS assertions=%d engine=%s\n%s\n",
+                    assertions, engine, streams.output))
+                io.stdout:flush()
+                assert.is_true(streams.ok, streams.output)
+                assert.truthy(streams.output:find('STREAMS {"verdict":"PASS"', 1, true), streams.output)
+                assert.truthy(streams.output:find('"disposal":3,"stdin":8,"declarations":22', 1, true), streams.output)
+                if engine == "chromium" then
+                    local undeclared = execute(info, engine, { fixture.root .. "/" .. kinds, "--",
+                        "stdin", "stdout", "stderr" })
+                    assert.is_true(undeclared.ok, undeclared.output)
+                    for _, name in ipairs({ "stdin", "stdout", "stderr" }) do
+                        assert.truthy(undeclared.output:find(name .. "=unknown", 1, true), undeclared.output)
+                    end
+                end
             end
+            local descriptors = fixture:run({ info.node.path, fixture.source .. "/runner-kinds.mjs",
+                info.sdk_root .. "/titan-browser-run.mjs", fixture.root, fixture.root .. "/" .. kinds },
+                { TITAN_NODE = info.node.path, TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "" })
+            io.stdout:write(string.format("\nRUNNER-KINDS assertions=%d\n%s\n", assertions, descriptors.output))
+            io.stdout:flush()
+            assert.is_true(descriptors.ok, descriptors.output)
+            assert.truthy(descriptors.output:find('RUNNER-KINDS {"verdict":"PASS","cases":3}', 1, true),
+                descriptors.output)
         end)
     end
 

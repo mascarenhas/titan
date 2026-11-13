@@ -1,0 +1,108 @@
+-- SDK stream sources use the ordinary request callbacks and Task waits.
+-- The host harness records callback values before their handles are closed.
+
+local function stream_text(item: Value): string
+  case item
+  when is_string(text) then return text
+  end
+  raise "expected a stream fixture string"
+end
+
+local function await_stream(name: string, label: string, data: Value?): Value
+  local source = browser.binding("titan:" .. name)
+  defer source:close()
+  local report = browser.binding("stream_result")
+  defer report:close()
+  local request: browser.BrowserRequest? = nil
+  defer do
+    if request ~= nil then request:close() end
+  end
+  -- Shield admitted requests so disposal delivers their failure callbacks
+  -- during the cleanup drive rather than cancelling the fixture's await.
+  local result = async.await_cleanup<|Value, string|>(function (resolve, reject, _fatal)
+    local completion = function (...: Value): Value
+      report:call(Value.is_string(label), Value.is_boolean(true), ...[1])
+      resolve(...[1])
+      return Value.is_nil()
+    end
+    local failure = function (...: Value): Value
+      case ...[2]
+      when is_handle(thrown) then
+        defer thrown:close()
+        report:call(Value.is_string(label), Value.is_boolean(false), Value.is_handle(thrown))
+      else
+        raise "stream failure did not provide its thrown value"
+      end
+      reject(stream_text(...[1]))
+      return Value.is_nil()
+    end
+    if data == nil then
+      request = source:start(completion, failure)
+    else
+      request = source:start(completion, failure, data)
+    end
+  end)
+  case result
+  when success(item) then return item
+  when error(message) then return Value.is_string(message)
+  end
+end
+
+local function stream_write(...: Value): Value
+  return await_stream(stream_text(...[1]), stream_text(...[2]), ...[3])
+end
+
+local function stream_end(...: Value): Value
+  return await_stream(stream_text(...[1]), stream_text(...[2]))
+end
+
+local function stream_read(...: Value): Value
+  return await_stream("stdin", stream_text(...[1]))
+end
+
+local function stream_kind(...: Value): Value
+  return call_binding("titan:stdio", ...[1])
+end
+
+local function stream_lookup(...: Value): Value
+  local source = browser.binding("titan:" .. stream_text(...[1]))
+  defer source:close()
+  return Value.is_boolean(true)
+catch
+  if error is browser.BrowserError then
+    local failure: browser.BrowserError = error
+    defer failure:close()
+    return Value.is_string(failure.message)
+  end
+  raise
+end
+
+-- All three Tasks admit their writes before the parked gate starts the sink.
+local function stream_batch(...: Value): Value
+  local name = stream_text(...[1])
+  local tasks: {async.Task<|Value, string|>} = {}
+  for index = 1, 3 do
+    local label = "" .. index
+    tasks[#tasks + 1] = async.run<|Value, string|>(function (): Value
+      return await_stream(name, label, Value.is_bytes("chunk" .. label))
+    end)
+  end
+  for index = 1, #tasks do async.join(tasks[index]) end
+  return Value.is_nil()
+end
+
+local function stream_interleave(...: Value): Value
+  await_stream("stdout", "titan-first", Value.is_bytes("A\0\255"))
+  ffi.fwrite("C\0\255", 1, 3, ffi.stdout)
+  ffi.fflush(ffi.stdout)
+  await_stream("stdout", "titan-last", Value.is_bytes("Z\0\255"))
+  await_stream("stderr", "titan-error", Value.is_bytes("\255\0E"))
+  return Value.is_nil()
+end
+
+local function stream_c_latch(...: Value): Value
+  ffi.fputs("C-stdio", ffi.stdout)
+  ffi.fflush(ffi.stdout)
+  await_stream("stdout", "after-C", Value.is_bytes("first"))
+  return await_stream("stdout", "after-latch", Value.is_bytes("second"))
+end
