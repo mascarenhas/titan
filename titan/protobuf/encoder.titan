@@ -171,6 +171,10 @@ local function Encoder:field(
     self:array(buf, candidate, elem_descriptor, depth)
     end_nested(buf, mark)
   when is_record(expected) then
+    if self.context is PortableCodec then
+      if (self.context as PortableCodec):encode_record(
+          self, buf, number, candidate, expected) then return end
+    end
     local codec? = find_resource_codec_by_name(expected.name)
     if codec ~= nil then
       encode_resource_field(buf, codec, number, candidate, self.context)
@@ -297,6 +301,9 @@ local function Encoder:dynamic_nominal(
     name: string,
     descriptor: reflect.Type,
     depth: integer)
+  if self.context is PortableCodec then
+    (self.context as PortableCodec):nominal(name)
+  end
   local raw: foreign TValue = candidate
   local module = ffi.titan_codec_nominal_module(raw)
   if module == nil then raise "protobuf: unsupported dynamic value" end

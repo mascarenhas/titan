@@ -458,6 +458,11 @@ local function decode_field(message: Message, number: integer,
   when is_array{is_const, elem_descriptor} then
     return decode_array(message:merged_message(number), is_const, elem_descriptor, depth)
   when is_record(record_type) then
+    if message.context is PortableCodec then
+      local converted, restored = (message.context as PortableCodec):decode_record(
+          message, field, record_type)
+      if converted then return restored end
+    end
     local codec? = find_resource_codec_by_name(record_type.name)
     if codec ~= nil then
       require_wire(field, 2)
@@ -547,6 +552,9 @@ end
 local function decode_dynamic_nominal(message: Message, depth: integer): value
   local module: string = decode_field(message, 1, dynamic_string, depth)
   local name: string = decode_field(message, 2, dynamic_string, depth)
+  if message.context is PortableCodec then
+    return (message.context as PortableCodec):decode_nominal(message, name, depth)
+  end
   local found? = reflect.find_nominal(name)
   if found == nil and message.context ~= nil and nominal_loader ~= nil then
     nominal_loader(module, name)

@@ -1,0 +1,192 @@
+--- Closed, target-neutral codecs for copied Titan data.
+-- @module titan.protobuf
+
+local record PortableConversion
+  const encode: function (value): (string)
+  const decode: function (string): (value)
+end
+
+local record PortableNominal
+  const descriptor: reflect.Type
+  const conversion: PortableConversion?
+end
+
+local portable_conversions: {string: PortableConversion} = {}
+
+--- An ordered copied-data schema and its closed set of nominal types.
+-- @usage standard-library-protobuf.md#portable-codecs
+record PortableCodec
+  local const fields: const {reflect.Type}
+  local const nominals: {string: PortableNominal}
+end
+
+local function PortableCodec:walk(descriptor: reflect.Type, path: string)
+  local resolved = resolve_type(descriptor)
+  case resolved
+  when is_nil() then
+  when is_boolean() then
+  when is_integer() then
+  when is_float() then
+  when is_string() then
+  when is_value() then
+  when is_option(base) then self:walk(base, path .. "?")
+  when is_array{elem_descriptor} then self:walk(elem_descriptor, path .. "[]")
+  when is_record(record_type) then
+    if self.nominals[record_type.name] ~= nil then return end
+    if find_resource_codec_by_name(record_type.name) ~= nil then
+      raise "protobuf: " .. record_type.name .. " is a packet resource and is not portable"
+    end
+    if not record_type.is_public then
+      raise "protobuf: " .. record_type.name .. " is not public data"
+    end
+    local conversion? = portable_conversions[record_type.name]
+    if conversion ~= nil then
+      self.nominals[record_type.name] = PortableNominal(resolved, conversion)
+      return
+    end
+    local hooks? = find_transfer_hooks(record_type, "protobuf")
+    if hooks ~= nil then
+      raise "protobuf: " .. record_type.name .. " has transfer hooks and no portable conversion"
+    end
+    if not record_type.all_public then
+      raise "protobuf: " .. record_type.name .. " is not public data"
+    end
+    self.nominals[record_type.name] = PortableNominal(resolved, nil)
+    for index = 1, #record_type.fields do
+      local field = record_type.fields[index]
+      self:walk(field.type, path .. "." .. field.name)
+    end
+  when is_union(union_type) then
+    if self.nominals[union_type.name] ~= nil then return end
+    if not union_type.is_public or not union_type.all_public then
+      raise "protobuf: " .. union_type.name .. " is not public data"
+    end
+    self.nominals[union_type.name] = PortableNominal(resolved, nil)
+    for index = 1, #union_type.variants do
+      local variant = union_type.variants[index]
+      for part = 1, #variant.parts do
+        local member = variant.parts[part]
+        self:walk(member.type, path .. "." .. variant.name .. "." .. member.name)
+      end
+    end
+  when is_map() then raise "protobuf: " .. path .. ": Map is not portable"
+  when is_interface(interface_type) then
+    raise "protobuf: " .. path .. ": Interface " .. interface_type.name .. " is not portable"
+  when is_function() then raise "protobuf: " .. path .. ": function is not portable"
+  else raise "protobuf: " .. path .. ": foreign type is not portable"
+  end
+end
+
+--- Create a codec after validating every declared field and dynamic nominal.
+-- @param fields Ordered root field descriptors.
+-- @param dynamic Additional record and union descriptors allowed in value slots.
+-- @return A codec that never loads modules or invokes transfer hooks.
+-- @usage standard-library-protobuf.md#portable-codecs
+function portable(fields: const {reflect.Type},
+    dynamic: const {reflect.Type}?): PortableCodec
+  local codec = PortableCodec(fields, {})
+  for index = 1, #fields do
+    codec:walk(fields[index], "fields[" .. index .. "]")
+  end
+  if dynamic ~= nil then
+    for index = 1, #dynamic do
+      local descriptor = resolve_type(dynamic[index])
+      case descriptor
+      when is_record() then
+      when is_union() then
+      else raise "protobuf: dynamic[" .. index .. "] must be a record or union"
+      end
+      codec:walk(descriptor, "dynamic[" .. index .. "]")
+    end
+  end
+  return codec
+end
+
+--- Register a synchronous byte conversion for a public opaque record.
+-- @param descriptor A public record with private fields or transfer hooks.
+-- @param encode Copy the record into an owned byte string.
+-- @param decode Construct that same record from its copied bytes.
+-- @usage standard-library-protobuf.md#portable-codecs
+function register_portable(descriptor: reflect.Type,
+    encode: function (value): (string), decode: function (string): (value))
+  case resolve_type(descriptor)
+  when is_record(record_type) then
+    if not record_type.is_public then
+      raise "protobuf: " .. record_type.name .. " is not public data"
+    end
+    if find_resource_codec_by_name(record_type.name) ~= nil then
+      raise "protobuf: " .. record_type.name .. " is a packet resource and is not portable"
+    end
+    if portable_conversions[record_type.name] ~= nil then
+      raise "protobuf: " .. record_type.name .. " already has a portable conversion"
+    end
+    local hooks? = find_transfer_hooks(record_type, "protobuf")
+    if record_type.all_public and hooks == nil then
+      raise "protobuf: " .. record_type.name .. " is already portable"
+    end
+    portable_conversions[record_type.name] = PortableConversion(encode, decode)
+  else raise "protobuf: portable conversion requires a public record"
+  end
+end
+
+local function PortableCodec:nominal(name: string): PortableNominal
+  local entry? = self.nominals[name]
+  if entry == nil then raise "protobuf: " .. name .. " is not in this portable codec" end
+  return entry
+end
+
+-- Hooked and private-field records have no generated codec, so generated
+-- parents hand their fields back here before any transfer policy can run.
+local function PortableCodec:encode_record(encoder: Encoder,
+    buf: foreign *titan_protobuf_buffer, number: integer,
+    candidate: value, expected: reflect.RecordType): boolean
+  local conversion? = self:nominal(expected.name).conversion
+  if conversion == nil then return false end
+  case reflect.inspect(candidate)
+  when is_record(actual) then
+    if actual.type.name ~= expected.name then raise "protobuf: record type mismatch" end
+  else raise "protobuf: expected a record"
+  end
+  encoder:enter(candidate)
+  defer encoder.active[candidate] = nil
+  write_bytes(buf, number, conversion.encode(candidate))
+  return true
+end
+
+local function PortableCodec:decode_record(message: Message,
+    field: foreign const *titan_protobuf_field,
+    expected: reflect.RecordType): (boolean, value)
+  local conversion? = self:nominal(expected.name).conversion
+  if conversion == nil then return false, nil end
+  require_wire(field, 2)
+  local restored = conversion.decode(slice_to_string(message.base, field.offset, field.length))
+  case reflect.inspect(restored)
+  when is_record(actual) then
+    if actual.type.name == expected.name then return true, restored end
+  end
+  raise "protobuf: record type mismatch"
+end
+
+local function PortableCodec:decode_nominal(message: Message, name: string,
+    depth: integer): value
+  return decode_field(message, 3, self:nominal(name).descriptor, depth)
+end
+
+--- Encode exactly one value per root field, including nil positions.
+-- @return Protocol Buffers bytes, with the same mapping as serialize_fields.
+-- @usage standard-library-protobuf.md#portable-codecs
+function PortableCodec:encode(...: value): string
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  serialize_fields_to_buffer_with_context(buf as foreign *void, self.fields, self, ...)
+  return buffer_to_string(buf)
+end
+
+--- Decode fresh copied values, retaining the input throughout reconstruction.
+-- @param bytes Protocol Buffers bytes encoded with this codec's field schema.
+-- @return Exactly one result per root field, preserving nil positions.
+-- @usage standard-library-protobuf.md#portable-codecs
+function PortableCodec:decode(bytes: string): (...: value)
+  return deserialize_fields_slice(bytes, #bytes, self.fields, self, bytes)
+end
