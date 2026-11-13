@@ -1638,8 +1638,9 @@ change relinks, and incompatible variants use separate output trees.
 **Filesystem.** Launcher images use `-sFILESYSTEM=0`. The generated launcher
 defines the WASI stdio functions and the file syscalls libc needs, so output
 goes directly to the copied-byte queues without a filesystem or TTY layer.
-File calls return `ENOSYS`, rather than reaching Emscripten's filesystem-free
-JavaScript stubs, which can report success without doing the work.
+File syscalls return `-ENOSYS`, rather than reaching Emscripten's filesystem-free
+JavaScript stubs, which can report success without doing the work. Libc file
+operations fail; `tmpnam` returns `NULL` without changing `errno`.
 `_emscripten_system` reports no shell for a null command and fails with
 `ENOSYS` for any command, including under Node. The interpreter baseline
 (`lua-main`) has no launcher and keeps `-sFORCE_FILESYSTEM=1` and its stdio
@@ -2200,8 +2201,8 @@ invalidates its state exactly once at its natural finalization point, after
 finalizers of values created after `titan.browser` initialized. An earlier
 finalizer can therefore see an invalidated state: close and release are inert,
 and binding calls raise a Lua finalizer warning on stderr. The state keeps
-`luaL_newstate`'s warning callback. Both libc streams are flushed, preserving
-an earlier application error; the loader owns final copied stream drainage.
+`luaL_newstate`'s warning callback. Both libc streams are flushed before
+completion; the loader owns final copied stream drainage.
 Scope defers run when main returns or raises; state finalizers run at explicit
 disposal.
 

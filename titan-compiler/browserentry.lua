@@ -115,19 +115,6 @@ lua_State *titan_browser_owner_thread(void) { return titan_browser_owner; }
 
 $ERROR_HELPERS
 
-static void titan_browser_flush_completion(titan_browser_completion *completion) {
-    int out = fflush(stdout), err = fflush(stderr);
-    if (completion->status == TITAN_BROWSER_OK && (out || err)) {
-        static const unsigned char out_error[] = "cannot flush browser stdout";
-        static const unsigned char err_error[] = "cannot flush browser stderr";
-        completion->status = TITAN_BROWSER_TITAN_ERROR;
-        completion->application_status = 1;
-        completion->message = out ? out_error : err_error;
-        completion->message_length = (uint32_t)(out ? sizeof(out_error) - 1 : sizeof(err_error) - 1);
-    }
-    titan_browser_complete(completion);
-}
-
 int titan_browser_invalid_entry(uint64_t id, uint32_t operation, const char *message) {
     titan_browser_completion completion = {0};
     completion.operation_id = id;
@@ -136,7 +123,9 @@ int titan_browser_invalid_entry(uint64_t id, uint32_t operation, const char *mes
     completion.application_status = 1;
     completion.message = (const unsigned char *)message;
     completion.message_length = (uint32_t)strlen(message);
-    titan_browser_flush_completion(&completion);
+    fflush(stdout);
+    fflush(stderr);
+    titan_browser_complete(&completion);
     return 0;
 }
 
@@ -199,7 +188,9 @@ static void titan_browser_complete_failure(lua_State *L,
             fputc('\n', stderr);
         }
     }
-    titan_browser_flush_completion(completion);
+    fflush(stdout);
+    fflush(stderr);
+    titan_browser_complete(completion);
 }
 
 static int titan_browser_protected_entry(uint64_t id, uint32_t operation,
@@ -220,7 +211,9 @@ static int titan_browser_protected_entry(uint64_t id, uint32_t operation,
             completion.application_status = low <= INT32_MAX ? (int32_t)low :
                 -1 - (int32_t)(UINT32_MAX - low);
         }
-        titan_browser_flush_completion(&completion);
+        fflush(stdout);
+        fflush(stderr);
+        titan_browser_complete(&completion);
     }
     lua_settop(L, top);
     return 0;
@@ -255,7 +248,9 @@ int titan_browser_initialize(uint64_t operation_id) {
         completion.application_status = $STATE_STATUS;
         completion.message = message;
         completion.message_length = sizeof(message) - 1;
-        titan_browser_flush_completion(&completion);
+        fflush(stdout);
+        fflush(stderr);
+        titan_browser_complete(&completion);
         return 0;
     }
     return titan_browser_protected_entry(operation_id, TITAN_BROWSER_INITIALIZE,
@@ -318,7 +313,9 @@ int titan_browser_close(uint64_t operation_id) {
         lua_close(L);
         if (token) titan_browser_host_state_closed(token);
     }
-    titan_browser_flush_completion(&completion);
+    fflush(stdout);
+    fflush(stderr);
+    titan_browser_complete(&completion);
     return 0;
 }
 ]]

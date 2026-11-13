@@ -20,6 +20,7 @@ static int titan_browser_worker(lua_State *L) {
     __wasi_size_t count = 99;
     CHECK_STDIO(__wasi_fd_write(1, iovs, 3, &count) == __WASI_ERRNO_SUCCESS && count == 9);
     CHECK_STDIO(__wasi_fd_write(2, NULL, 0, &count) == __WASI_ERRNO_SUCCESS && count == 0);
+    CHECK_STDIO(fflush(stdout) == 0 && fflush(stderr) == 0);
     CHECK_STDIO(__wasi_fd_write(3, NULL, 0, &count) == __WASI_ERRNO_BADF);
     CHECK_STDIO(__wasi_fd_close(0) == __WASI_ERRNO_SUCCESS);
     CHECK_STDIO(__wasi_fd_close(1) == __WASI_ERRNO_SUCCESS);
@@ -32,7 +33,8 @@ static int titan_browser_worker(lua_State *L) {
     CHECK_STDIO(remove("missing.txt") == -1 && errno == ENOSYS);
     CHECK_STDIO(rename("old.txt", "new.txt") == -1 && errno == ENOSYS);
     CHECK_STDIO(tmpfile() == NULL && errno == ENOSYS);
-    CHECK_STDIO(tmpnam(NULL) == NULL && errno == ENOSYS);
+    errno = 0;
+    CHECK_STDIO(tmpnam(NULL) == NULL && errno == 0);
     unsigned char input;
     CHECK_STDIO(fread(&input, 1, 1, stdin) == 0 && ferror(stdin) && !feof(stdin) && errno == ENOSYS);
     CHECK_STDIO(system(NULL) == 0);

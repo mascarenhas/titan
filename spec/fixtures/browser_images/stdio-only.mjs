@@ -1,5 +1,5 @@
 export async function run(context) {
-  const {create, locateFile} = await context.image(context.args[0]);
+  const { create, locateFile } = await context.image(context.args[0]);
   const stdout = [], stderr = [];
   let prompts = 0;
   const originalPrompt = globalThis.prompt;

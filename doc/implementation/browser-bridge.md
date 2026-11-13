@@ -118,9 +118,9 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    `invoke_entry` is a function-scope `catch` wrapper whose preamble fits
    inside the trampoline's `LUA_MINSTACK` reservation. Argument decoding,
    execution, rollback, and formatted error reporting run in `invoke_work`.
-   A failed completion flush rolls back the provisional wrapper inline into
-   `free_slots`, pre-grown during `allocate_pin`. The inner `catch` performs
-   the same rollback before calling `complete_titan_failure`. If work raises
+   The inner `catch` rolls back a provisional wrapper into `free_slots`,
+   pre-grown during `allocate_pin`, before calling `complete_titan_failure`.
+   If work raises
    at its own preamble or while reporting an error, the outer `catch` writes
    `"not enough memory"` into `state_record.fallback` through inline FFI
    writes, flushes both streams, and calls `titan_browser_complete`, without
@@ -162,8 +162,8 @@ held, never a `lua_pcall` on the state being freed. The browser record's Titan
 finalizer handles invalidation; C-only images close their bare host token
 around `lua_close`. Lua's per-finalizer protection remains authoritative.
 Warnings alone do not convert successful close into an application failure.
-Both libc streams are flushed, preserving the first error while attempting
-both; the loader then handles copied stream queues and disposal outcomes.
+Both libc streams are flushed before completion; the loader then handles
+copied stream queues and disposal outcomes.
 
 The launcher also defines `titan_browser_owner_thread()`, a C function that
 returns its owner `lua_State *` (set before any initializer runs, cleared
