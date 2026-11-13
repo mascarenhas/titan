@@ -243,3 +243,48 @@ function test_lua_independent_async_runs_its_own_titan_runtime(
                 "worker-created string did not survive independent-state close")
   end)
 end
+
+function test_lua_independent_preserves_borrowed_state_stack(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    local transferred: async.TransferValue = state:run(
+      "local thread = coroutine.running(); return thread")
+    case transferred
+    when is_lua_state(remote) then
+      local top: integer = ffi.lua_gettop(remote)
+      test.assert(ffi.lua_checkstack(remote, 1) ~= 0)
+      ffi.lua_pushinteger(remote, 73)
+      defer ffi.lua_settop(remote, top)
+      local results: {async.TransferValue} = { state:run("return 1, 'copied'") }
+      test.assert(#results == 2 and transfer_integer(results[1]) == 1 and
+                  transfer_string(results[2]) == "copied")
+      test.assert(ffi.lua_gettop(remote) as integer == top + 1 and
+                  ffi.lua_tointegerx(remote, -1, nil) == 73,
+                  "successful call changed a preexisting remote stack value")
+      common.assert_raises_contains(function ()
+        state:run_async("error('saved remote stack')")
+      end, "saved remote stack")
+      test.assert(ffi.lua_gettop(remote) as integer == top + 1 and
+                  ffi.lua_tointegerx(remote, -1, nil) == 73,
+                  "failed asynchronous call changed the saved remote stack")
+      local result: async.TransferValue = state:run_async("return 42")
+      test.assert(transfer_integer(result) == 42)
+      test.assert(ffi.lua_gettop(remote) as integer == top + 1 and
+                  ffi.lua_tointegerx(remote, -1, nil) == 73,
+                  "successful asynchronous call changed the saved remote stack")
+    else raise "could not borrow the independent main Lua state"
+    end
+  end)
+end
+
+function test_lua_independent_async_rejects_closed_state(_: test.Context)
+  local closed = tlua.new()
+  closed:close()
+  runtime_test.run(function ()
+    common.assert_raises_contains(function ()
+      closed:run_async("return 1")
+    end, "closed")
+  end)
+end

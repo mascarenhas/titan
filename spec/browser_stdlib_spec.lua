@@ -28,7 +28,7 @@ plan:
         return strategy:run(argv, {stderr_to_stdout = true})
     end
 
-    it("keeps all nineteen portable owners in the single-image root inventory", function()
+    it("keeps all twenty portable owners in the single-image root inventory", function()
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local result = root_plan()
         assert.is_true(result.ok, result.output)
@@ -37,13 +37,14 @@ plan:
             assert.is_nil(roots[root], root)
             roots[root], count = true, count + 1
         end
-        assert.equal(19, count, "the audited browser inventory has 19 owners; change this deliberately")
+        assert.equal(20, count, "the audited browser inventory has 20 owners; change this deliberately")
         assert.is_true(roots["transfer.tests"])
         assert.is_true(roots["protobuf.tests"])
         assert.is_true(roots["async.tests"])
         assert.is_true(roots["timer.tests"])
         assert.is_true(roots["os.tests"])
         assert.is_true(roots["io.tests"])
+        assert.is_true(roots["lua.tests"])
     end)
 
     it("rejects empty and duplicate owner inventories before build setup", function()
@@ -322,6 +323,45 @@ plan:
             local ok, err = checks.inventory(provider(false), provider(true), case[1])
             assert.is_nil(ok)
             assert.truthy(err:find(case[2], 1, true), err)
+        end
+    end)
+
+    it("records the Lua owner but compares every retained method", function()
+        assert.same({
+            omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" },
+            opaque = { "Lua" },
+        }, checks.browser_differences["titan.lua"])
+        local retained = { "close", "detach", "run", "run_from_loader" }
+        local function provider(browser, changed)
+            local owner, methods = "titan.lua.Lua", {}
+            for _, name in ipairs(retained) do
+                methods[name] = types.Method(owner, name, {},
+                    name == changed and {types.String()} or {}, nil, nil, {})
+            end
+            if not browser then
+                for _, name in ipairs({ "run_async", "run_async_from_loader" }) do
+                    methods[name] = types.Method(owner, name, {}, {}, nil, nil, {})
+                end
+            end
+            local members = {
+                types.ModuleMember("titan.lua", "Lua", types.Record(owner, {}, {}, methods, 2), nil),
+            }
+            if not browser then
+                members[#members + 1] = types.ModuleMember("titan.lua", "dofile",
+                    types.Function({}, {}, false, nil, nil), {})
+            end
+            return { key_order = { "titan.lua" }, entries = {
+                ["titan.lua"] = { types = types.serialize(types.Module("titan.lua", members, {})) },
+            } }
+        end
+        local rows, modules, differences = checks.inventory(provider(false), provider(true))
+        assert.equal(1, modules)
+        assert.equal(#retained, #rows)
+        assert.equal(4, #differences)
+        for _, name in ipairs(retained) do
+            local ok, err = checks.inventory(provider(false), provider(true, name))
+            assert.is_nil(ok)
+            assert.truthy(err:find("titan.lua.Lua:" .. name, 1, true), err)
         end
     end)
 

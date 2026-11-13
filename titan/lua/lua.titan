@@ -8,7 +8,6 @@ foreign import "stddef.h"
 foreign import "titan/ffi.h"
 
 local async = import "async"
-local fs = import "fs"
 local gc = import "gc"
 local io = import "io"
 -- The static dependency makes its native loader available to new states.
@@ -108,79 +107,6 @@ function load_from_reader(reader: io.Reader, name: string?, env: value):
   return load(builder:drain(), name, env)
 end
 
-local function replace_literal(subject: string, needle: string,
-                               replacement: string): string
-  local builder = string.writer()
-  local position = 1
-  while position <= #subject do
-    local found: integer? = string.find(subject, needle, position)
-    if not found then break end
-    local first = found as integer
-    if first > position then
-      builder:write(string.sub(subject, position, first - 1))
-    end
-    builder:write(replacement)
-    position = first + #needle
-  end
-  if position <= #subject then
-    builder:write(string.sub(subject, position))
-  end
-  return builder:drain()
-end
-
-local function open_source_candidate(filename: string): fs.File?
-  local opened: fs.File? = nil
-  do
-    opened = fs.open(filename, "r")
-  catch
-    -- Lua's source searcher treats every failure to open a candidate as a
-    -- non-match. Cancellation and non-filesystem errors still propagate.
-    if error is async.OperationError then return nil end
-    raise
-  end
-  return opened
-end
-
-local function source_search(modname: string, path: string):
-    (value, value, string)
-  local module_path = replace_literal(modname, ".", "/")
-  local messages = string.writer()
-  local position = 1
-  local finished = false
-
-  while not finished do
-    local separator: integer? = string.find(path, ";", position)
-    local template = ""
-    if separator then
-      local separator_position = separator as integer
-      template = string.sub(path, position, separator_position - 1)
-      position = separator_position + 1
-    else
-      template = string.sub(path, position)
-      finished = true
-    end
-
-    local filename = replace_literal(template, "?", module_path)
-    local maybe_file: fs.File? = open_source_candidate(filename)
-    if maybe_file then
-      local file = maybe_file as fs.File
-      defer file:close()
-      local loaded = (function (file: fs.File, modname: string,
-                                filename: string): LuaChunk
-        return load_from_reader(file, "@" .. filename, nil)
-      catch
-        raise "error loading module '" .. modname ..
-              "' from file '" .. filename .. "':\n\t" ..
-              string.tostring(error)
-      end)(file, modname, filename)
-      return loaded, filename, ""
-    end
-
-    messages:write("\n\tno file '" .. filename .. "'")
-  end
-
-  return nil, nil, messages:drain()
-end
 
 local function call_searcher(candidate: value, modname: string):
     (value, value, string)
@@ -270,18 +196,6 @@ function require(modname: string): value
   return installed
 end
 
---- Read and execute a Lua file, closing its File on every exit.
--- @param filename Path loaded within an async Task.
--- @param ... Arguments forwarded to the chunk.
--- @return Every result returned by the chunk, including nil slots.
--- @usage standard-library-lua.md
-function dofile(filename: string, ...: value): (...: value)
-  local file = fs.open(filename, "r")
-  defer file:close()
-  local chunk: LuaChunk =
-    load_from_reader(file, "@" .. filename, nil)
-  return chunk(...)
-end
 
 --- An independent Lua state with its own globals, registry, and collector.
 -- @usage standard-library-lua.md#independent-lua-states
@@ -426,28 +340,6 @@ local function LuaCall:finish()
   self.owner.busy = false
 end
 
--- Implementation notes: doc/implementation/lua-library.md#host-state-close-during-run_async
--- Lua state close unwinds a Task parked here without completing the wait, and
--- catch never runs during that unwind, so `pending` stays set. run_foreign
--- then hands the independent state to lua_state_release_abandoned, which the
--- host Runtime runs after its worker returns; the wrapper behaves as closed.
-local function LuaCall:abandon_if_pending()
-  if not self.pending then return end
-  self.owner.handle = nil
-  self.owner.busy = false
-end
-
-local function LuaCall:run_worker()
-  self.pending = true
-  defer self:abandon_if_pending()
-  do
-    async.run_foreign(lua_state_run, self.packet, lua_state_release_abandoned)
-  catch
-    self.pending = false
-    raise
-  end
-  self.pending = false
-end
 
 local function LuaCall:prepare()
   self.packet.state = self.owner.handle
@@ -597,18 +489,6 @@ function Lua:run(chunk: string, name: string?, ...: async.TransferValue):
   return ...call:values()
 end
 
---- Execute Lua or required Titan code on a worker while other Tasks continue.
--- @usage standard-library-lua.md#asynchronous-execution
-function Lua:run_async(chunk: string, name: string?, ...: async.TransferValue):
-    (...: async.TransferValue)
-  local call = self:prepare_call(chunk, name, {...})
-  self:reserve()
-  call.stack_top = ffi.lua_gettop(self.handle)
-  defer call:finish()
-  call:prepare()
-  call:run_worker()
-  return ...call:values()
-end
 
 --- Drain a borrowed Reader, then execute its bytes in this state.
 -- @usage standard-library-lua.md#independent-lua-states
@@ -619,11 +499,3 @@ function Lua:run_from_loader(reader: io.Reader, name: string?,
   return self:run(builder:drain(), name, ...)
 end
 
---- Drain a borrowed Reader, then execute its bytes on a worker.
--- @usage standard-library-lua.md#asynchronous-execution
-function Lua:run_async_from_loader(reader: io.Reader, name: string?,
-                                         ...: async.TransferValue): (...: async.TransferValue)
-  local builder = string.writer()
-  for chunk in reader:read do builder:write(chunk) end
-  return self:run_async(builder:drain(), name, ...)
-end

@@ -2972,7 +2972,8 @@ int main(void) {
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
-            assert.same({ "titan/lua/lua.native.titan", "titan/lua/worker.titan" },
+            assert.same({ "titan/lua/lua.titan", "titan/lua/background.native.titan",
+                "titan/lua/loading.browser.titan", "titan/lua/loading.native.titan", "titan/lua/worker.titan" },
                 makefile_words("LUA_TITAN_SOURCES"))
             assert.same({ "titan/lua/native.h" },
                 makefile_words("LUA_TITAN_HEADERS"))
@@ -3079,7 +3080,8 @@ int main(void) {
                 "titan/string/pack.titan", "titan/string/regex_api.titan",
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
-                "titan/math.titan", "titan/lua/lua.native.titan", "titan/lua/worker.titan",
+                "titan/math.titan", "titan/lua/lua.titan", "titan/lua/background.native.titan",
+                "titan/lua/loading.browser.titan", "titan/lua/loading.native.titan", "titan/lua/worker.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
                 "titan/reflect.titan",
                 "titan/sqlite3/sqlite3.native.titan", "titan/sqlite3/bindings.titan",

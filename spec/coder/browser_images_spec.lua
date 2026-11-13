@@ -164,6 +164,22 @@ assert(driver.close_resolver_context(context))
     return result.output
 end
 
+describe("browser stock Lua initialization", function()
+    it("applies the profile inside initialization but never in a native entrypoint", function()
+        local browser = driver.browser_entrypoint_contents("profile_app", "profile-app")
+        local opened = assert(browser:find("luaL_openlibs(L);", 1, true))
+        local searcher = assert(browser:find("titan_install_searcher(L);", opened, true))
+        local profile = assert(browser:find(
+            "if (luaL_loadstring(L, TITAN_LUA_BROWSER_PROFILE) != LUA_OK) return lua_error(L);",
+            searcher, true))
+        local called = assert(browser:find("lua_call(L, 0, 0);", profile, true))
+        local root = assert(browser:find('lua_pushliteral(L, "profile_app");', called, true))
+        assert.is_true(opened < searcher and searcher < profile and profile < called and called < root)
+        assert.is_nil(driver.entrypoint_contents("profile_app", "profile-app"):find(
+            "TITAN_LUA_BROWSER_PROFILE", 1, true))
+    end)
+end)
+
 describe("browser image profile and SDK readiness", function()
     it("embeds one private factory and exposes only the persistent image creator", function()
         local image = "async function Module(options) { return options; }\n" ..

@@ -342,6 +342,10 @@ M.browser_differences = {
         },
         opaque = { "InputStream", "OutputStream" },
     },
+    ["titan.lua"] = {
+        omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" },
+        opaque = { "Lua" },
+    },
 }
 
 -- Every other member must keep its native kind, rendered signature and

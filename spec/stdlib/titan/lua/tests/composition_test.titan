@@ -1,0 +1,59 @@
+function test_lua_requires_initialized_module_once_in_each_state(_: test.Context)
+  local original = independent_preload.counter
+  defer independent_preload.counter = original
+  independent_preload.counter = 700
+  local first = tlua.require("lua.preload_fixture")
+  test.assert(tlua.require("lua.preload_fixture") == first)
+  test.assert(independent_preload.counter == 700)
+  local state = tlua.new()
+  defer state:close()
+  local result = state:run([[
+    local first = require('lua.preload_fixture')
+    assert(first.counter == 41)
+    first.increment(1)
+    assert(require('lua.preload_fixture') == first)
+    return first.counter
+  ]])
+  test.assert(transfer_integer(result) == 42)
+  test.assert(independent_preload.counter == 700)
+end
+
+function test_lua_independent_synchronous_reader_is_borrowed(_: test.Context)
+  local state = tlua.new()
+  defer state:close()
+  local reader = TrackingReader({ "", "return ", "...", "" }, 0, false)
+  local results: {async.TransferValue} = { state:run_from_loader(reader,
+    "=portable-state-reader", async.TransferValue.is_integer(29),
+    async.TransferValue.is_nil(), async.TransferValue.is_string("a\0b")) }
+  test.assert(not reader.closed and #results == 3)
+  test.assert(transfer_integer(results[1]) == 29)
+  assert_transfer_nil(results[2])
+  test.assert(transfer_string(results[3]) == "a\0b")
+end
+
+function test_lua_require_calls_custom_searcher_and_reserves_slot_two(_: test.Context)
+  local configure = tlua.load([[
+    return function()
+      local name = 'lua.tests.portable_custom'
+      local searchers = package.searchers
+      local index = #searchers + 1
+      local second = searchers[2]
+      searchers[2] = function() error('reserved slot was called') end
+      searchers[index] = function(actual)
+        if actual ~= name then return 'custom miss' end
+        return function(loaded, data)
+          assert(loaded == name and data == 'portable-data')
+          return 'portable-result'
+        end, 'portable-data'
+      end
+      return function()
+        searchers[2], searchers[index], package.loaded[name] = second, nil, nil
+      end
+    end
+  ]])() as function (): (function (): ())
+  local restore = configure()
+  defer restore()
+  runtime_test.run(function ()
+    test.assert(tlua.require("lua.tests.portable_custom") == "portable-result")
+  end)
+end

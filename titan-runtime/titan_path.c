@@ -82,6 +82,7 @@ static int titan_path_is_separator(char c) {
 #endif
 }
 
+#if !defined(TITAN_TARGET_BROWSER)
 static int titan_path_is_absolute(const char *path) {
 #if defined(_WIN32)
     if (titan_path_is_separator(path[0]) && titan_path_is_separator(path[1]))
@@ -93,6 +94,7 @@ static int titan_path_is_absolute(const char *path) {
     return path[0] == '/';
 #endif
 }
+#endif
 
 /* ======================================================================== */
 /* Platform primitives. Each "push" helper that can fail returns 1 with its  */
@@ -433,6 +435,7 @@ static void titan_path_push_expanded(lua_State *L, const char *value,
     if (dir != NULL) lua_remove(L, top + 1);
 }
 
+#if !defined(TITAN_TARGET_BROWSER)
 /* Iterate the non-empty `;`-separated entries of a path. */
 static const char *titan_path_next_entry(const char *cursor, const char *limit,
                                          size_t *length) {
@@ -815,10 +818,6 @@ static char **titan_path_push_query_environ(lua_State *L) {
 ** missing-module query again. Push the root it prints, or a diagnostic. No
 ** Lua allocation happens while descriptors, handles, or the child are live. */
 static int titan_path_query_root(lua_State *L) {
-#if defined(TITAN_TARGET_BROWSER)
-    lua_pushliteral(L, "browser target cannot query a host compiler");
-    return 0;
-#else
     char output[TITAN_ROOT_QUERY_CAP];
     size_t length = 0;
     int overflow = 0;
@@ -1091,7 +1090,6 @@ cleanup:
     }
     return titan_path_push_query_output(L, program, output, length);
 #endif
-#endif
 }
 
 /* Push the SDK provider directory: `<TITAN_ROOT>/lib/titan/0.6` for a
@@ -1209,6 +1207,7 @@ static int titan_path_push_sdk_fallback(lua_State *L, int path_index) {
     lua_settop(L, record);
     return ok;
 }
+#endif
 
 /* ======================================================================== */
 /* Native preloads and canonical modules                                     */
@@ -1331,6 +1330,7 @@ static int titan_path_push_canonical_module(lua_State *L, const char *name,
 /* Opening providers                                                         */
 /* ======================================================================== */
 
+#if !defined(TITAN_TARGET_BROWSER)
 /* Clear the libbacktrace snapshot after mapping a new image. This is the same
 ** registry slot titan_invalidate_backtrace_state clears; the support module
 ** does not link titan.c, so the operation stays local. */
@@ -1379,6 +1379,7 @@ static void titan_path_push_libs(lua_State *L) {
         lua_rawset(L, LUA_REGISTRYINDEX);
     }
 }
+#endif
 
 #if !defined(_WIN32) && !defined(TITAN_TARGET_BROWSER)
 /* Push the canonical spelling of an occupied candidate: the per-state cache
@@ -1592,6 +1593,7 @@ TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
 /* The Titan package searcher                                                */
 /* ======================================================================== */
 
+#if !defined(TITAN_TARGET_BROWSER)
 /* Count the components of a logical Titan module name, or return 0 for a
 ** name this searcher never resolves: an invalid name, a dotted name ending in
 ** the reserved `.titan` source marker, or the support module `titan`. */
@@ -1619,6 +1621,7 @@ static int titan_path_module_components(const char *name, size_t length) {
         return 0;
     return count;
 }
+#endif
 
 /* The loader returned for a canonical hit hands back the existing module. */
 static int titan_path_canonical_loader(lua_State *L) {
@@ -1626,6 +1629,7 @@ static int titan_path_canonical_loader(lua_State *L) {
     return 1;
 }
 
+#if !defined(TITAN_TARGET_BROWSER)
 /* Append one "no file" line to the miss message at index msg. */
 static void titan_path_add_miss(lua_State *L, int message, int filename) {
     if (lua_rawlen(L, message) > 0) lua_pushliteral(L, "\n\tno file '");
@@ -1647,10 +1651,6 @@ static void titan_path_add_miss(lua_State *L, int message, int filename) {
 ** plain-C `_abi_value` query). */
 static int titan_path_try_candidate(lua_State *L, const char *filename,
     const char *module, const char *prefix, int exact) {
-#if defined(TITAN_TARGET_BROWSER)
-    (void)filename; (void)module; (void)prefix; (void)exact;
-    return luaL_error(L, "browser target does not support dynamic provider loading");
-#else
     int top = lua_gettop(L);
     const char *abi_name, *types_name, *opener_name, *provider;
     void *lib, *abi, *types;
@@ -1710,7 +1710,6 @@ static int titan_path_try_candidate(lua_State *L, const char *filename,
     lua_replace(L, top + 1);
     lua_settop(L, top + 2);
     return 1;
-#endif
 }
 
 /* Search one directory's candidates not yet occupied in an earlier root. */
@@ -1749,18 +1748,16 @@ static int titan_path_search_dir(lua_State *L, const char *dir,
     }
     return 0;
 }
+#endif
 
-/* package.searchers entry. Order: this state's canonical module, a matching
-** native preload, then root-major and shallow-to-exact candidates (`a.so`,
-** `a/b.so`, `a/b/c.so`) in the effective Titan path, then the lazy SDK
-** fallback. Returns the opener and the provider path, or a miss message. */
+/* package.searchers entry: canonical module, then matching native preload.
+** The browser stops there with a miss. Native targets continue root-major and
+** shallow-to-exact (`a.so`, `a/b.so`, `a/b/c.so`) through the effective Titan
+** path and lazy SDK fallback, returning the opener/path or a miss message. */
 static int titan_path_searcher(lua_State *L) {
-    size_t length, path_length, entry_length, index;
+    size_t length;
     const char *name = luaL_checklstring(L, 1, &length);
-    const char *path, *limit, *entry;
     lua_CFunction preload = NULL;
-    int count, candidates, occupied, message, path_index;
-    luaL_Buffer buffer;
     lua_settop(L, 1);
     if (titan_path_push_canonical_module(L, name, length)) {
         lua_pushcclosure(L, titan_path_canonical_loader, 1);
@@ -1771,6 +1768,14 @@ static int titan_path_searcher(lua_State *L) {
         lua_pushliteral(L, ":preload:");
         return 2;
     }
+#if defined(TITAN_TARGET_BROWSER)
+    lua_pushliteral(L, "no Titan provider search: the browser target has no dynamic providers");
+    return 1;
+#else
+    size_t path_length, entry_length, index;
+    const char *path, *limit, *entry;
+    int count, candidates, occupied, message, path_index;
+    luaL_Buffer buffer;
     count = titan_path_module_components(name, length);
     if (count == 0) return 0;
     luaL_checkstack(L, 12, "searching for a Titan module");
@@ -1839,6 +1844,7 @@ static int titan_path_searcher(lua_State *L) {
     }
     lua_pushvalue(L, message);
     return 1;
+#endif
 }
 
 void titan_install_searcher(lua_State *L) {

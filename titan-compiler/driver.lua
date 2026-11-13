@@ -10385,6 +10385,8 @@ function driver.browser_entrypoint_contents(modname, program_name, options)
 static int titan_browser_initialize_worker(lua_State *L) {
     luaL_openlibs(L);
     titan_install_searcher(L);
+    if (luaL_loadstring(L, TITAN_LUA_BROWSER_PROFILE) != LUA_OK) return lua_error(L);
+    lua_call(L, 0, 0);
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "preload");
     lua_pushcfunction(L, luaopen_titan);

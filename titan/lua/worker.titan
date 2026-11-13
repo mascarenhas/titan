@@ -9,9 +9,8 @@ foreign import "stdlib.h"
 foreign import "string.h"
 foreign import "native.h"
 
--- Every independent state, including each thread child, gets the Titan
--- searcher after its libraries and copied native preloads. It computes its own
--- Titan path on first use; nothing about the creator's path is inherited.
+-- Every independent state gets the Titan searcher and the target's stock-Lua
+-- profile inside its existing protected opener. Native profile text is empty.
 local foreign function lua_state_open_libraries(state: *lua_State): int
   local initialization = ffi.lua_touserdata(state, 1) as *titan_lua_open
   ffi.luaL_openselectedlibs(state, ~0, 0)
@@ -21,6 +20,13 @@ local foreign function lua_state_open_libraries(state: *lua_State): int
       state, entry.name, entry.length, entry.loader, entry.symbols)
   end
   ffi.titan_install_searcher(state)
+  local profile = ffi.TITAN_LUA_BROWSER_PROFILE
+  if profile[0] ~= 0 then
+    if ffi.luaL_loadstring(state, profile) ~= ffi.LUA_OK then
+      return ffi.lua_error(state)
+    end
+    ffi.lua_callk(state, 0, 0, 0, nil)
+  end
   return 0
 end
 
@@ -341,15 +347,3 @@ local foreign function lua_state_run(argument: *void)
   end
 end
 
--- Implementation notes: doc/implementation/lua-library.md#host-state-close-during-run_async
--- run_async's abandoned-wait release. The host Runtime calls it on the closing
--- host thread once the worker has returned and no pool thread runs an
--- abandoned job, because closing the independent state may itself wait for
--- that state's queued pool work.
-local foreign function lua_state_release_abandoned(argument: *void)
-  local call = argument as *titan_lua_call
-  ffi.free(call.results)
-  call.results = nil
-  ffi.lua_close(call.state)
-  call.state = nil
-end

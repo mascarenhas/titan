@@ -291,7 +291,7 @@ TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
 BROWSER_RUNTIME_SOURCES := $(TITAN_RUNTIME_SOURCES)
 BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
 	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser \
-	titan.async titan.timer titan.os titan.io
+	titan.async titan.timer titan.os titan.io titan.lua
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -384,7 +384,8 @@ STDLIB_HTTP_SOURCES := titan/http/http.native.titan titan/http/client.titan \
 SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.native.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan
 SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
-LUA_TITAN_SOURCES := titan/lua/lua.native.titan titan/lua/worker.titan
+LUA_TITAN_SOURCES := titan/lua/lua.titan titan/lua/background.native.titan \
+	titan/lua/loading.browser.titan titan/lua/loading.native.titan titan/lua/worker.titan
 LUA_TITAN_HEADERS := titan/lua/native.h
 STRING_TITAN_HEADERS := titan/string/format_native.h
 WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.native.titan titan/websocket/handshake.titan \
