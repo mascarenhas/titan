@@ -2719,6 +2719,9 @@ per instantiated Module. An initialization callback attaches it through
 and `titanBrowserComplete` are the other internal owner callbacks.
 `titan-browser-bridge.js` keeps no instance state of its own: each import
 reaches its Module's `titanBrowserBridge` loader owner.
+Its one-line `$getEnvStrings` override also supplies the embedder's environment
+snapshot to Emscripten's libc environment initialization, without adding state
+to the bridge library or exporting Emscripten's `ENV`.
 
 **Completion.** The bridge library's `titan_browser_complete(pointer)` passes
 the [completion record](browser-bridge.md#fixed-wasm32-layout) to the loader
@@ -2863,6 +2866,15 @@ with the image.
 by `browserlink.embed`; the image exports only default `create(options)`.
 There is no public raw Emscripten factory, Module, memory view, or separate
 loader entry point. The source has no Node-specific imports.
+
+`create` validates `env` and builds its `NAME=value` string array once from the
+object's own enumerable string-named properties. The owner keeps only that
+snapshot in its private options, not the embedding's mutable environment
+object. Emscripten's `environ_sizes_get` and `environ_get` consume the array
+through `$getEnvStrings`, sizing and writing UTF-8 bytes into libc's environment.
+No Emscripten defaults, `preRun` hook, or native `environ` override is involved.
+C `getenv` and Lua `os.getenv` share that environment; C mutations stay in the
+instance. `TZ` does not change Emscripten's host-derived local time.
 
 The owner's private mutable Module input is a fresh null-prototype dictionary
 with the existing channels and bridge callbacks assigned explicitly.

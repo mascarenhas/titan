@@ -5,7 +5,7 @@ local toolchain = require "spec.support.browser_toolchain"
 local repository = assert(lfs.currentdir())
 local fixture
 
-local function build(info, assertions, tree, module, name, is_test, c_source, wrap)
+local function build(info, assertions, tree, module, name, is_test, c_source, wrap, cppflags)
     local output = fixture.output .. "/assertions-" .. assertions
     files.mkdir(output)
     -- The ordinary fixture collector instruments the copied compiler child;
@@ -29,7 +29,8 @@ local function build(info, assertions, tree, module, name, is_test, c_source, wr
     end
     if is_test then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = module
-    local result = fixture:run(argv, { TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
+    local result = fixture:run(argv, { TITAN_EXTRA_CPPFLAGS = cppflags or "",
+        TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
     fixture.collector:collect()
     assert.is_true(result.ok, result.output)
     for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map" }) do
@@ -69,8 +70,10 @@ describe("persistent core JavaScript bridge", function()
                 "counter", "counter", false)
             local responsive = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "responsive", "responsive", false)
+            local environment = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
+                "environment", "environment", false, nil, nil, "-D_GNU_SOURCE")
             for _, engine in ipairs({ "node", "chromium" }) do
-                local result = execute(info, engine, "integration.mjs", { native, failure })
+                local result = execute(info, engine, "integration.mjs", { native, failure, environment })
                 io.stdout:write(string.format("\nBRIDGE assertions=%d engine=%s node=%s chrome=%s\n%s\n",
                     assertions, engine, info.node.version, info.chrome.version, result.output))
                 io.stdout:flush()

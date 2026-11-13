@@ -40,7 +40,7 @@ shipped file is justified by the capability in its last column.
 | File | Owns | Host capability |
 | --- | --- | --- |
 | `titan-browser-library.js` (`--js-library`) | The execution owner of one Module: the pending entry, the promising wrappers of the state-entering exports, one promise per coroutine context with its saved linear stack, the suspending imports (`titan_mco_transfer`, `titan_mco_destroy`, `titan_browser_relinquish`), the synchronous-callback depth, and poison | JSPI suspension and resumption; engine failure |
-| `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner, including `titan_browser_host_output` for C stdio. It keeps no state | Emscripten import glue |
+| `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner, including `titan_browser_host_output` for C stdio; the one-line `$getEnvStrings` override supplies the instance's environment snapshot. It keeps no state | Emscripten import glue; the embedder's libc environment input |
 | `titan-browser.mjs` (embedded in each image) | The loader: `create` and `BrowserOwner`, in the parts listed below | See below |
 | `titan-browser-trace.js` (`--js-library`) | The index built from the fetched `.wasm.map`, stack capture into C-owned records, and symbolization ([trace metadata](browser-target.md#eager-map-loader-and-trace-metadata)) | Engine stack capture; fetching and parsing the map outside the Wasm heap |
 
@@ -49,6 +49,7 @@ The loader's parts:
 | Part | Holds | Host capability |
 | --- | --- | --- |
 | Public object, admission, `operate`, `entry`, `initialize`, `run`, `dispose` | One promise per operation, the lifecycle state, the pending completion, which failure an operation reports, and the references that disposal must drop | The embedder-facing promise API; entering Wasm through a promising export |
+| `create` environment snapshot | The embedder's `NAME=value` strings, empty by default, for Emscripten's later libc initialization | Holding and validating the embedder's option data |
 | Slot table and `CallableView` wrappers | JavaScript values with their state, generation, and units; one wrapper per pin with its logical-release flag | Holding JavaScript values and host objects |
 | Marshalling (`snapshotArguments`, `writeValue`, `valuesAt`, `completionAt`, `importResponse`) | Nothing between calls | Converting JavaScript values to and from the records of `titan/browser.h` |
 | Queue (`queue`, `batch`) | Notifications, request events, and calls that wait for `drain()` or a drive, with each queued call's promise | JavaScript values that have no slot yet; items that wait for a point where Wasm can be entered |

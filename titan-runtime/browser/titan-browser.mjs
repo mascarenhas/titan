@@ -1988,7 +1988,12 @@ export function create(factory, options = {}) {
   for (const name of Object.keys(options.bindings ?? {})) {
     if (name.startsWith('titan:')) throw new TypeError(`browser binding name ${name} is reserved for the Titan SDK`);
   }
-  const owner = new BrowserOwner(factory, {...options});
+  if (options.env !== undefined && (options.env === null || typeof options.env !== 'object')) throw new TypeError('browser env must be an object');
+  const env = Object.entries(options.env ?? {}).map(([name, value]) => {
+    if (!name || /[=\0]/.test(name) || typeof value !== 'string' || value.includes('\0')) throw new TypeError('browser env must contain valid names and string values without NUL');
+    return `${name}=${value}`;
+  });
+  const owner = new BrowserOwner(factory, {...options, env});
   return Object.freeze({
     initialize: () => owner.initialize(),
     run: (args = []) => owner.run(args),

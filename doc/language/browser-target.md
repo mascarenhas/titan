@@ -662,6 +662,7 @@ Options are:
 | `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
 | `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
 | `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. Names starting with `titan:` are [reserved for the SDK](standard-library-browser.md#reserved-sdk-bindings) and rejected with `TypeError`. |
+| `env` | An object whose own enumerable string-named properties have string values, snapshotted at `create`. Absent means empty. Empty names, `=` or NUL in a name, NUL in a value, and non-string values are rejected with `TypeError`. |
 | `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks, a request failure event that cannot be delivered, and secondary cleanup failures. A host Promise rejection instead goes to its mandatory failure callable. |
 | `requestDrain()` | A coalesced announcement of queued work at a complete logical safe point; the application chooses when to call and await `drain()`. |
 | `onEngineFailure({kind, cause})` | Observes a terminal engine failure after the instance has been poisoned; `kind` is `"abort"`, `"trap"`, or `"protocol"`. Observer exceptions cannot replace that failure. |
@@ -675,6 +676,14 @@ observer, the loader logs each event with `console.error`. An observer that
 throws cannot replace a captured or
 terminal failure; the current operation, or else the next one that would
 otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
+
+**Environment.** Each instance starts with exactly its `env` snapshot, empty
+by default, without Emscripten's invented environment variables. Names and
+values are encoded as UTF-8. C `getenv` and stock Lua `os.getenv` read the same
+libc environment; Titan's C FFI reaches those same functions. C `setenv` and
+`unsetenv` change later reads in that instance, not its peers or the host.
+`TZ` is an ordinary environment variable: Emscripten's `localtime` follows
+the JavaScript host's time zone regardless of its value.
 
 **Output.** Each stream has one FIFO and at most one actual sink invocation in
 flight. The loader flushes after all entries in the containing operation,
