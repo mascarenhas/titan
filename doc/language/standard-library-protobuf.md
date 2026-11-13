@@ -363,6 +363,13 @@ Options and Arrays. A `value` position cannot be marked as text. Text marks
 change only the description: Titan encoding and decoding remain byte-for-byte
 unchanged and do not validate UTF-8.
 
+For JavaScript classes, text and byte representations, shared class tables,
+and peer error codes and paths, see
+[Copying typed values](standard-library-browser.md#copying-typed-values).
+The standalone SDK peer accepts canonical Titan output; it is stricter than
+the native decoder about groups, wrong wire kinds in repeated scalars, and
+invalid UTF-8 in dynamic nominal names.
+
 ## Eligible values
 
 For ordinary protobuf entries, every encountered Titan nominal type must be
@@ -469,11 +476,13 @@ fields, and unrecognized union selections raise. Messages must fit the
 protobuf 2 GiB size bound.
 
 Nesting is limited on every encoding, decoding, and schema path, generated or
-reflective. Levels count nested messages and the fields of the innermost one:
-a chain of records whose innermost record has a field holds at most 127 records
-on native and browser targets. Deeper input raises the ordinary catchable
-error `protobuf: nesting exceeds 128 levels`. This bounds the codec's own
-traversal, not stack already used by its caller.
+reflective. Levels count nested messages and the fields of the innermost one.
+A nominal-root chain whose innermost record has a field holds at most 127
+records; putting that chain in an anonymous root field adds a level, allowing
+126 records and rejecting 127. These bounds apply on native and browser
+targets. Deeper input raises the ordinary catchable error
+`protobuf: nesting exceeds 128 levels`. This bounds the codec's own traversal,
+not stack already used by its caller.
 
 String entry points keep their input alive throughout decoding, including
 while a custom decoder runs after the caller has dropped its last reference to

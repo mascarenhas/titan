@@ -104,6 +104,179 @@ Holding the handle does not observe the Promise's rejection; the binding must
 attach a rejection handler when appropriate, or the host can report an
 unhandled rejection.
 
+## Copying typed values
+
+Use [`protobuf.portable`](standard-library-protobuf.md#portable-codecs) when
+JavaScript needs a copy of structured Titan data rather than an opaque handle.
+Pass the codec's `describe()` text and its encoded bytes to a binding. The
+SDK's standalone `titan-protobuf.mjs` generates JavaScript classes from that
+description; it does not load Titan modules or require a running image.
+
+Save this complete program as `app.titan`:
+
+```titan
+local browser = import "browser"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+foreign import "stdio.h"
+
+local type Value = browser.BrowserValue
+
+record Point
+  x: float
+  y: float
+end
+
+local codec = protobuf.portable({
+  reflect.Type.is_named(reflect.NamedType("app.Point")),
+  reflect.Type.is_string(),
+}, nil, {"2"})
+
+function main(_: {string}): integer
+  local target = browser.binding("publish")
+  defer target:close()
+  local result = target:call(Value.is_string(codec:describe()),
+      Value.is_bytes(codec:encode(Point(1.0, 2.0), "origin")))
+  case result
+  when is_bytes(bytes) then
+    local point: Point, label: string = codec:decode(bytes)
+    ffi.printf("%g %g\n", point.x, point.y)
+    ffi.puts(label)
+  else raise "publish must return encoded bytes"
+  end
+  return 0
+end
+```
+
+Compile it and copy the peer from your installation, with `PREFIX` set to the
+Titan installation root:
+
+```sh
+titanc --target browser --tree . -o out --exe out/app.mjs app
+cp "$PREFIX/lib/titan-browser/0.6/titan-protobuf.mjs" .
+```
+
+Save this page as `index.html` beside `app.titan` and serve the directory over
+HTTP with a JSPI-capable browser:
+
+```html
+<!doctype html>
+<meta charset="utf-8">
+<title>Copied Titan values</title>
+<pre id="output"></pre>
+<script type="module">
+  import create from "./out/app.mjs";
+  import { portable } from "./titan-protobuf.mjs";
+
+  const output = document.getElementById("output");
+  const text = new TextDecoder();
+  let codec;
+  const instance = create({
+    stdout: chunk => { output.textContent += text.decode(chunk); },
+    bindings: {
+      publish(description, bytes) {
+        codec ??= portable(description);
+        const [point, label] = codec.decode(bytes);
+        const Point = codec.types["app.Point"];
+        if (!(point instanceof Point)) throw new TypeError("expected Point");
+        return codec.encode(new Point(point.x + 1, point.y), label);
+      },
+    },
+  });
+  try { await instance.run([]); }
+  finally { await instance.dispose(); }
+</script>
+```
+
+The root is one anonymous field message, not a JavaScript object: `encode`
+takes one argument per declared field, including nil positions, and `decode`
+returns an Array in that order.
+
+| Titan value or declared position | JavaScript representation |
+| --- | --- |
+| Nil or absent Option | `null` |
+| Boolean | boolean |
+| Integer | signed i64 `BigInt`, including small integers |
+| Float | `Number`, including integral floats, NaN, and `-0` |
+| Unmarked string | `Uint8Array` of arbitrary bytes |
+| String marked as text | string, with strict UTF-8/UTF-16 validation |
+| Array | Array; absent slots decode as `null` |
+| Public record | instance of `codec.types[qualifiedName]` |
+| Public union variant | instance of `codec.types[qualifiedName].variants[variantName]` |
+
+Record constructors take public fields in declaration order. Variant
+constructors take their parts in declaration order; an empty variant takes no
+arguments, and a single-type shorthand has a part named `value`. The union's
+base class is not directly constructible. Class identity identifies a nominal:
+a plain object with the same properties is not a record or variant.
+
+Each call to `portable(description)` creates its own class table. To share
+classes between codecs, pass the first codec's `types` as the second argument:
+
+```javascript
+const first = portable(description);
+const second = portable(description, first.types);
+const values = first.decode(bytes);
+const copied = second.encode(...values);
+```
+
+An existing nominal entry must have the same description, including its text
+marks. Shared classes do not make an otherwise unlisted nominal acceptable.
+
+Const Arrays decode as frozen Arrays; mutable Arrays are not frozen.
+Maybe-const Arrays and Arrays in `value` positions preserve the encoded
+constness. When encoding those positions, `Object.isFrozen(array)` selects the
+flag. A declared mutable or const position instead selects its declared flag.
+Freezing is shallow: each nested Array has its own constness.
+
+Strings are bytes unless marked in `portable`'s third argument. Text paths are
+root indices such as `"2"`, qualified record fields such as
+`"app.Caption.label"`, or union parts such as `"app.Notice.text.value"`.
+Options and Arrays may wrap the string leaf. A `value` position cannot be
+marked as text, so a dynamic string remains bytes. Text marks change only the
+description, not Titan's wire bytes or its own UTF-8 validation policy.
+
+The codec accepts the portable scalar, Option, Array, record, and union graph
+described in the [protobuf chapter](standard-library-protobuf.md#portable-codecs).
+Repeated acyclic references become independent copies; cycles are rejected.
+Records expose only public fields, and unions only public variants. A record
+with local storage needs a compatible public `new` for Titan decoding; without
+one it is encode-only. All-public records decode without calling `new`.
+Transfer hooks, packet resources, Maps, Interfaces, callables, and foreign
+types are not portable. Additional nominals used only in `value` positions
+must be listed in the codec's `dynamic` argument.
+
+Copies do not convey a live JavaScript capability or a Titan callable. Send
+those as separate `Value.is_handle(handle)` or `Value.is_callable(callback)`
+arguments beside `Value.is_bytes(bytes)`, not inside the encoded data.
+
+### Copy errors
+
+The peer raises `TypeError` with a `code` and a JSON-style `path`, for example
+`invalid_utf8` at `$[1]["label"]`. Other codes include `type_mismatch`,
+`integer_range`, `missing_field`, `unknown_type`, `unknown_variant`, `cycle`,
+`limit_exceeded`, `malformed_wire`, and `invalid_description`. Invalid UTF-8
+text from Titan and unpaired UTF-16 surrogates from JavaScript are rejected,
+not replaced.
+
+The peer accepts canonical Titan output but is stricter about non-canonical
+input: it rejects protobuf groups, a wrong wire kind in any occurrence of a
+repeated scalar, and invalid UTF-8 in a dynamic nominal name. Do not use it as
+a general-purpose decoder for every message the native protobuf decoder
+accepts.
+
+A peer error thrown by a JavaScript binding reaches Titan as `BrowserError`;
+its `thrown` handle retains the original error and its `code` and `path`.
+Close that error as usual. A Titan codec error rejects the JavaScript callable
+with `TITAN_BROWSER_TITAN`. Neither kind of ordinary failure disposes the
+instance: a following valid call can succeed.
+
+Native codec errors name the rejected type or a JSON-style position when it
+can be recovered; a deep generated subtree may end its path in `...`.
+The `protobuf: ` prefix is reserved for codec diagnostics. A constructor or
+other callback raising that prefix can receive a path suffix naming a later
+position; other user messages remain unchanged.
+
 ## JavaScript values
 
 `BrowserHandle` owns one state-local JavaScript reference unit. Its identity

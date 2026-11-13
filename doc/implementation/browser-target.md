@@ -790,11 +790,12 @@ instead of this gate.
 
 ### Nesting limits
 
-Browser and native builds share the 128-level codec budget in `transfer.h`:
-the innermost field consumes one level, so a structural record chain accepts
-127 records. Generated and reflective protobuf paths, `protobuf.schema`,
-`TransferValue`, and packet encode/decode share that policy and ordinary
-error string. The browser descriptor no longer overrides it.
+Browser and native builds share the 128-level codec budget in `transfer.h`.
+The innermost field consumes one level: a nominal-root structural record
+chain accepts 127 records, while protobuf's anonymous field root adds a level
+and accepts 126, rejecting 127. Generated and reflective protobuf paths,
+`protobuf.schema`, `TransferValue`, and packet encode/decode share the budget
+and ordinary error string. The browser descriptor does not override it.
 
 JSON encoding uses only the call's validated `max_depth` (default 32);
 there is no additional target cap or cached writer clamp. The owning native

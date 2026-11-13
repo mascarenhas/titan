@@ -749,6 +749,28 @@ fixture wraps `malloc` to fail one call).
 Initializer failure has a separate real Titan image with a
 suspended cleanup coroutine and `main` error-conversion checks.
 
+`browser.portable_tests`, in
+`spec/stdlib/titan/browser/portable_tests.browser.titan`, is a second native
+owner requiring host bindings rather than the ordinary browser stdlib gate.
+`spec/fixtures/browser_bridge/portable.mjs` first runs `peerTests()` from
+`portable-peer.mjs`, then exchanges real-image `BrowserValue.is_bytes` values
+with the SDK's standalone `titan-protobuf.mjs`. The bridge spec stages the
+installed peer beside the driver; neither the loader nor bridge libraries
+import it.
+
+The driver checks both directions against independently constructed values
+and Titan-produced golden bytes: generated record and variant classes, i64
+and float tags, binary and marked text, Array holes and constness, dynamic
+arms and closed nominal sets, repeated and recursive graphs, public record
+construction, encode-only views, private variants, and refusal without
+running transfer hooks. It checks shared class tables and recovery after
+both peer and Titan errors. Separate fresh instances exercise payloads larger
+than the initial heap in each direction. A fixture callable reports the
+public Emscripten `emscripten_get_heap_size()` result before and after, so the
+driver asserts actual memory growth without exposing the loader's private
+Module. Encode/decode timings for 10,000 integers are informational. All rows
+run under Node and Chromium with both assertion profiles.
+
 Drives themselves are exercised by `spec/coder/browser_scheduler_spec.lua`
 with the fixture `spec/fixtures/browser_scheduler/`: a test-owned mini driver
 (`mini_driver.titan`) runs "jobs" in place of Tasks over the drive interface
