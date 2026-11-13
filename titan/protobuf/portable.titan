@@ -62,7 +62,7 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string)
   when is_string() then
   when is_value() then
   when is_option(base) then self:walk(base, path)
-  when is_array{elem_descriptor} then self:walk(elem_descriptor, path .. "[1]")
+  when is_array{elem_descriptor} then self:walk(elem_descriptor, path_index(path, 1))
   when is_record(record_type) then
     if self.nominals[record_type.name] ~= nil then return end
     if find_resource_codec_by_name(record_type.name) ~= nil then
@@ -79,7 +79,7 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string)
     self.nominals[record_type.name] = PortableNominal(resolved)
     for index = 1, #record_type.fields do
       local field = record_type.fields[index]
-      self:walk(field.type, path .. "[\"" .. field.name .. "\"]")
+      self:walk(field.type, path_member(path, field.name))
     end
   when is_union(union_type) then
     if self.nominals[union_type.name] ~= nil then return end
@@ -91,7 +91,7 @@ local function PortableCodec:walk(descriptor: reflect.Type, path: string)
       local variant = union_type.variants[index]
       for part = 1, #variant.parts do
         local member = variant.parts[part]
-        self:walk(member.type, path .. "[\"" .. member.name .. "\"]")
+        self:walk(member.type, path_member(path, member.name))
       end
     end
   when is_map() then raise "protobuf: " .. path .. ": Map is not portable"
@@ -111,11 +111,11 @@ function portable(fields: const {reflect.Type},
     dynamic: const {reflect.Type}?): PortableCodec
   local codec = PortableCodec(fields, {})
   for index = 1, #fields do
-    codec:walk(fields[index], "$[" .. index .. "]")
+    codec:walk(fields[index], path_index("$", index))
   end
   if dynamic ~= nil then
     for index = 1, #dynamic do
-      local path = "$[\"dynamic\"][" .. index .. "]"
+      local path = path_index(path_member("$", "dynamic"), index)
       local descriptor = portable_resolve(dynamic[index], path)
       case descriptor
       when is_record() then
@@ -142,10 +142,16 @@ local function PortableCodec:decode_public_record(message: Message,
   end
   local arguments: {value} = {}
   for index = 1, #descriptor.fields do
+    if codec_trace ~= nil then codec_trace:member(descriptor.fields[index].name) end
     local decoded = decode_field(message, field_number(index),
         descriptor.fields[index].type, depth + 1)
     local parameter? = constructor.positions[index]
     if parameter ~= nil then arguments[parameter] = decoded end
+    if codec_trace ~= nil then codec_trace:leave() end
+  end
+  if codec_trace ~= nil then
+    codec_trace:skip_value()
+    return nil
   end
   return constructor.descriptor.callable(...arguments[1, #constructor.descriptor.param_descriptors])
 end

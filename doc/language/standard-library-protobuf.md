@@ -76,8 +76,39 @@ bytes at `data`.
 
 The serialized result of `serialize` and `serialize_fields` is a binary string.
 Names, filenames, and schemas are ordinary strings too, but wire bytes need not
-be text and may contain NULs. Errors are strings identifying the rejected type,
-value, or wire condition.
+be text and may contain NULs. Codec errors are strings identifying the rejected
+type, value, or wire condition.
+
+### Errors
+
+A nested encoding or decoding error can end with ` at <path>`. The text before
+that suffix is unchanged. Paths use the same syntax as
+[`json.Error.path`](standard-library-json.md#diagnostics-and-limits): `$` is the
+root, `["name"]` names a record field or union payload part, and `[n]` is a
+one-based Array element or anonymous root field. A `value` slot adds no segment
+of its own. For example:
+
+```text
+protobuf: missing required field 2 at $["items"][3]["label"]
+protobuf: unsupported dynamic value at $[1]["payload"]
+```
+
+The suffix is a debugging aid: it is added only when a reflective replay
+reproduces the complete original message at a nested position. Root-level
+errors, schema errors, hook-validation errors and registration errors remain
+unchanged. The replay never calls a transfer hook, resource callback or public
+`new`, and never loads a module.
+
+The path names at most 16 nesting levels of values that generated codecs
+handle; a deeper position is reported as the path of its sixteenth level
+followed by `...`. Values traversed entirely by the reflective codec are
+reported in full.
+
+The `protobuf: ` prefix is reserved for codec diagnostics. A callback,
+including a transfer hook, resource callback or public `new`, that raises a
+message beginning with that prefix may receive a suffix naming a later
+position if the replay encounters the same message there. User errors without
+that prefix, including non-string error values, propagate unchanged.
 
 ### Transfer collaboration entries
 
@@ -187,7 +218,9 @@ describes the allocation profile.
 
 `use_generated_codecs(false)` makes later codec lookups in the current Lua
 state choose the reflective codec, and returns the previous setting. It is a
-diagnostic for comparing the two codecs and changes no observable result.
+diagnostic for comparing the two codecs. Bytes, decoded values and diagnostics
+before the optional position suffix are unchanged; deep generated positions
+can be abbreviated as described under [Errors](#errors).
 Codec handles obtained before the call still run generated code when passed to
 `serialize_generated_to_buffer`.
 
@@ -406,12 +439,16 @@ lengths, groups, wire kinds, out-of-range native integers, missing required
 fields, and unrecognized union selections raise. Messages must fit the
 protobuf 2 GiB size bound.
 
+Nested encoding and decoding failures use the [error paths](#errors) above
+when the reflective replay reproduces the failure.
+
 Nesting is limited on every encoding, decoding, and schema path, generated or
 reflective. Levels count nested messages and the fields of the innermost one:
 a chain of records whose innermost record has a field holds at most 127 records
 on native and browser targets. Deeper input raises the ordinary catchable
-error `protobuf: nesting exceeds 128 levels`. This bounds the codec's own
-traversal, not stack already used by its caller.
+error `protobuf: nesting exceeds 128 levels`, with an error-path suffix for
+located encoding or decoding failures. This bounds the codec's own traversal,
+not stack already used by its caller.
 
 String entry points keep their input alive throughout decoding, including
 while a custom decoder runs after the caller has dropped its last reference to

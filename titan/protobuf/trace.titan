@@ -1,0 +1,146 @@
+--- Failure-only positions shared by structural and portable codecs.
+-- @module titan.protobuf
+
+-- Member names come from Titan or C declarations and are identifiers.
+local function path_member(path: string, name: string): string
+  return path .. "[\"" .. name .. "\"]"
+end
+
+local function path_index(path: string, index: integer): string
+  return path .. "[" .. index .. "]"
+end
+
+-- Reflective frames are larger than generated frames. Preserve the latter
+-- below this many path segments, including their reflective field handoffs.
+local CODEC_TRACE_DEPTH_LIMIT = 16
+
+local record CodecTrace
+  const trail: {string}
+  const incomplete: {boolean}
+  const generated_codecs: boolean
+  level: integer
+  validating_hooks: boolean
+  hand_back_depth: integer
+end
+
+-- A trace calls no user code and cannot suspend or start another trace.
+local codec_trace: CodecTrace? = nil
+
+local function CodecTrace:bypass_generated(): boolean
+  return not self.generated_codecs or self.level < CODEC_TRACE_DEPTH_LIMIT
+end
+
+-- Restore only on normal return: an error must retain its hand-back position.
+local function CodecTrace:enter_generated()
+  self.hand_back_depth = self.hand_back_depth + 1
+end
+
+local function CodecTrace:leave_generated()
+  self.hand_back_depth = self.hand_back_depth - 1
+end
+
+local function CodecTrace:member(name: string)
+  if self.hand_back_depth ~= 0 then return end
+  self.level = self.level + 1
+  self.trail[self.level] = path_member("", name)
+  self.incomplete[self.level + 1] = nil
+end
+
+local function CodecTrace:index(index: integer)
+  if self.hand_back_depth ~= 0 then return end
+  self.level = self.level + 1
+  self.trail[self.level] = path_index("", index)
+  self.incomplete[self.level + 1] = nil
+end
+
+local function CodecTrace:leave()
+  if self.hand_back_depth ~= 0 then return end
+  self.level = self.level - 1
+end
+
+-- A skipped callback has no decoded value. Do not construct its enclosing
+-- records/unions with a fabricated nil; unrelated following fields still run.
+local function CodecTrace:skip_value()
+  for index = 1, self.level + 1 do self.incomplete[index] = true end
+end
+
+local function CodecTrace:path(): string
+  local output = string.writer()
+  output:write("$")
+  for index = 1, self.level do output:write(self.trail[index]) end
+  if self.hand_back_depth ~= 0 then output:write("...") end
+  return output:drain()
+end
+
+local function CodecTrace:attributed(original: string, replayed: value): string?
+  if replayed ~= original or self.validating_hooks or self.level == 0 then return nil end
+  return original .. " at " .. self:path()
+end
+
+local function CodecTrace:encode(original: string, candidate: value,
+    fields: const {reflect.Type}?, context: value, ...: value): string?
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  if fields ~= nil then
+    serialize_fields_to_buffer_with_context(buf as foreign *void, fields, context, ...)
+  else
+    case reflect.inspect(candidate)
+    when is_record(record_value) then
+      serialize_inspected_record_to_buffer(buf as foreign *void, record_value, context)
+    when is_union(union_value) then
+      serialize_inspected_union_to_buffer(buf as foreign *void, union_value, context)
+    else return nil
+    end
+  end
+  return nil
+catch
+  return self:attributed(original, error)
+end
+
+local function locate_encoding(original: value, candidate: value,
+    fields: const {reflect.Type}?, context: value, generated_root: boolean, ...: value): string?
+  if codec_trace ~= nil or not (original is string) then return nil end
+  local message: string = original
+  if string.sub(message, 1, 10) ~= "protobuf: " then return nil end
+  local trace = CodecTrace { trail = {}, incomplete = {}, level = 0,
+      generated_codecs = generated_codecs_enabled or generated_root,
+      validating_hooks = false, hand_back_depth = 0 }
+  codec_trace = trace
+  defer codec_trace = nil
+  return trace:encode(message, candidate, fields, context, ...)
+catch
+  -- Diagnostic allocation or a different replay failure never masks the error.
+  return nil
+end
+
+local function CodecTrace:decode(original: string, data: foreign const *void,
+    length: integer, record_type: reflect.RecordType?, union_type: reflect.UnionType?,
+    fields: const {reflect.Type}?, context: value, holder: string?): string?
+  if fields ~= nil then
+    deserialize_fields_slice(data as foreign const *uint8_t, length, fields, context, holder)
+  elseif record_type ~= nil then
+    deserialize_record_buffer(data, length, record_type, context, holder)
+  else
+    deserialize_union_buffer(data, length, union_type, context, holder)
+  end
+  return nil
+catch
+  return self:attributed(original, error)
+end
+
+local function locate_decoding(original: value, data: foreign const *void,
+    length: integer, record_type: reflect.RecordType?, union_type: reflect.UnionType?,
+    fields: const {reflect.Type}?, context: value, holder: string?): string?
+  if codec_trace ~= nil or not (original is string) then return nil end
+  local message: string = original
+  if string.sub(message, 1, 10) ~= "protobuf: " then return nil end
+  local trace = CodecTrace { trail = {}, incomplete = {}, level = 0,
+      generated_codecs = generated_codecs_enabled,
+      validating_hooks = false, hand_back_depth = 0 }
+  codec_trace = trace
+  defer codec_trace = nil
+  return trace:decode(message, data, length, record_type, union_type, fields, context, holder)
+catch
+  return nil
+end

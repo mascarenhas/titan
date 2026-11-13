@@ -1414,13 +1414,24 @@ local function reflective_message(action: function (): ()): string
   return raised_message(action)
 end
 
--- The generated and reflective outcomes of an action must be identical.
+-- A generated subtree can abbreviate its position, but not its message or
+-- the recorded prefix of the reflective path.
+local function codec_errors_agree(generated: string, reflective: string): boolean
+  if generated == reflective then return true end
+  if string.sub(generated, 1, 10) ~= "protobuf: " and
+      string.sub(generated, 1, 16) ~= "error protobuf: " then return false end
+  if string.sub(generated, -3) ~= "..." or
+      string.find(generated, " at $", 1, true) == nil then return false end
+  return string.sub(generated, 1, -4) == string.sub(reflective, 1, #generated - 3)
+end
+
+-- Messages agree; positions may use the generated hand-back suffix.
 local function check_same_error(context: test.Context, name: string,
     action: function (): (), expected: string)
   context:run(name, function (_: test.Context)
     local generated = raised_message(action)
     local reflective = reflective_message(action)
-    test.assert(generated == reflective, generated .. " ~= " .. reflective)
+    test.assert(codec_errors_agree(generated, reflective), generated .. " ~= " .. reflective)
     test.assert(string.find(generated, expected, 1, true) ~= nil, generated)
   end)
 end
@@ -1759,7 +1770,7 @@ local function check_decode_outcome(context: test.Context, name: string,
   context:run(name, function (_: test.Context)
     local generated = decode_outcome(bytes, target, true)
     local reflective = decode_outcome(bytes, target, false)
-    test.assert(generated == reflective, generated .. " ~= " .. reflective)
+    test.assert(codec_errors_agree(generated, reflective), generated .. " ~= " .. reflective)
   end)
 end
 
@@ -2000,8 +2011,8 @@ function test_generated_codecs_depth_boundaries(context: test.Context)
   end)
   context:run("decode_" .. CODEC_DEPTH_LIMIT .. "_rejected_by_both", function (_: test.Context)
     local generated = decode_outcome(node_chain_bytes(CODEC_DEPTH_LIMIT), node_type, true)
-    test.assert(generated ==
-        decode_outcome(node_chain_bytes(CODEC_DEPTH_LIMIT), node_type, false), generated)
+    test.assert(codec_errors_agree(generated,
+        decode_outcome(node_chain_bytes(CODEC_DEPTH_LIMIT), node_type, false)), generated)
     test.assert(string.find(generated, CODEC_DEPTH_ERROR, 1, true) ~= nil, generated)
   end)
   context:run("partless_union_at_" .. CODEC_DEPTH_LIMIT, function (_: test.Context)
@@ -2255,11 +2266,16 @@ end
 function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Context)
   local leaf = codec_boundary_record(nil)
   local target = descriptor(leaf)
-  test.assert(protobuf.find_generated_codec(leaf) ~= nil)
+  local saved_codec = protobuf.find_generated_codec(leaf)
+  test.assert(saved_codec ~= nil)
   local fields = codec_boundary_scalar_fields()
   local bytes = fields
   for _ = 2, CODEC_ACCEPTED_DEPTH do bytes = fields .. backpatch_field(64, bytes) end
   local too_deep = fields .. backpatch_field(64, bytes)
+  local too_deep_value = leaf
+  for _ = 2, CODEC_DEPTH_LIMIT do
+    too_deep_value = codec_boundary_record(too_deep_value)
+  end
   -- Keep both reflective oracles on the host stack: deep reflective decoding
   -- has little coroutine-stack headroom, and traceback capture can exhaust it.
   local reflective_error = decode_outcome(too_deep, target, false)
@@ -2279,11 +2295,498 @@ function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Co
     -- Scalar fields just past the accepted record depth exceed the shared
     -- budget. The generated path must reject safely on this coroutine stack.
     local generated = decode_outcome(too_deep, target, true)
-    test.assert(generated == reflective_error, generated)
-    test.assert(string.find(generated, CODEC_DEPTH_ERROR, 1, true) ~= nil, generated)
+    test.assert(codec_errors_agree(generated, reflective_error), generated)
+    local truncated = CODEC_DEPTH_ERROR .. " at $" .. string.rep("[\"next\"]", 16) .. "..."
+    test.assert(generated == "error " .. truncated, generated)
+    local previous = protobuf.use_generated_codecs(false)
+    defer protobuf.use_generated_codecs(previous)
+    local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+    ffi.titan_protobuf_buf_init_heap(buf, 0)
+    defer ffi.titan_protobuf_buf_free_heap(buf)
+    local explicit = raised_message(function ()
+      test.assert(protobuf.serialize_generated_to_buffer(
+          buf as foreign *void, saved_codec, too_deep_value, nil))
+    end)
+    test.assert(explicit == truncated, explicit)
     return count
   end, "codec-boundary")
   test.assert(co:resume(nil) == CODEC_ACCEPTED_DEPTH and co:status() == "dead")
+end
+
+local function with_path_codecs(context: test.Context, action: function (): ())
+  context:run("generated", function (_: test.Context)
+    local previous = protobuf.use_generated_codecs(true)
+    defer protobuf.use_generated_codecs(previous)
+    action()
+  end)
+  context:run("reflective", function (_: test.Context)
+    local previous = protobuf.use_generated_codecs(false)
+    defer protobuf.use_generated_codecs(previous)
+    action()
+  end)
+end
+
+local function expect_path(action: function (): (), expected: string)
+  local actual = raised_message(action)
+  test.assert(actual == expected, actual .. " ~= " .. expected)
+end
+
+record PathRecord
+  child: IntegerValue
+end
+
+union PathChoice
+  part(payload: value)
+end
+
+record PathEnvelope
+  items: {PathChoice}
+end
+
+local path_hook_failure: value = nil
+local path_hook_encodes = 0
+local path_hook_decodes = 0
+
+record PathHooked
+  number: integer
+end
+
+function PathHooked:to_transfer_payload(): string
+  path_hook_encodes = path_hook_encodes + 1
+  if path_hook_failure ~= nil then raise path_hook_failure end
+  return "opaque"
+end
+
+function PathHooked.from_transfer_payload(_: string): PathHooked
+  path_hook_decodes = path_hook_decodes + 1
+  if path_hook_failure ~= nil then raise path_hook_failure end
+  return PathHooked(1)
+end
+
+record PathHookBox
+  hook: PathHooked
+end
+
+record PathAfterHook
+  first: PathHookBox
+  tail: Node
+end
+
+record PathResource
+  number: integer
+end
+
+record PathResourceParent
+  item: PathResource
+end
+
+record PathDeepSibling
+  first: Node
+  tail: Node
+end
+
+record PathReflectiveNode
+  name: string
+  next: PathReflectiveNode?
+  excluded: {string: integer}?
+end
+
+record PathTraceResource
+  number: integer
+end
+
+record PathTraceNode
+  next: PathTraceNode?
+  hook: PathHooked?
+  resource: PathTraceResource?
+  tail: value
+end
+
+function test_error_paths_encode_segments(context: test.Context)
+  with_path_codecs(context, function ()
+    local unsupported = function () end
+    expect_path(function () protobuf.serialize(AnyValue(unsupported)) end,
+        "protobuf: unsupported dynamic value at $[\"item\"]")
+    expect_path(function () protobuf.serialize(PathChoice.part(unsupported)) end,
+        "protobuf: unsupported dynamic value at $[\"payload\"]")
+    local dynamic: const {reflect.Type} = {reflect.Type.is_value()}
+    expect_path(function () protobuf.serialize_fields(dynamic, unsupported) end,
+        "protobuf: unsupported dynamic value at $[1]")
+    local arrays: const {reflect.Type} = {
+      reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_value()),
+    }
+    local items: {value} = {nil, unsupported}
+    expect_path(function () protobuf.serialize_fields(arrays, items) end,
+        "protobuf: unsupported dynamic value at $[1][2]")
+    expect_path(function () protobuf.serialize(AnyValue(AnyValue(unsupported))) end,
+        "protobuf: unsupported dynamic value at $[\"item\"][\"item\"]")
+    local envelope = PathEnvelope {
+      items = {PathChoice.part(nil), PathChoice.part(AnyValue(unsupported))},
+    }
+    local fields: const {reflect.Type} = {descriptor(envelope)}
+    expect_path(function () protobuf.serialize_fields(fields, envelope) end,
+        "protobuf: unsupported dynamic value at $[1][\"items\"][2][\"payload\"][\"item\"]")
+  end)
+end
+
+function test_error_paths_decode_segments(context: test.Context)
+  with_path_codecs(context, function ()
+    local target = descriptor(PathRecord(IntegerValue(0)))
+    expect_path(function () protobuf.deserialize(backpatch_field(1, ""), target) end,
+        "protobuf: missing required field 1 at $[\"child\"][\"number\"]")
+    local choice = descriptor(PathChoice.part(nil))
+    local invalid_boolean = backpatch_field(1, backpatch_field(1, string.char(8, 2)))
+    expect_path(function () protobuf.deserialize(invalid_boolean, choice) end,
+        "protobuf: invalid boolean at $[\"payload\"]")
+    local fields: const {reflect.Type} = {reflect.Type.is_integer()}
+    expect_path(function () protobuf.deserialize_fields("", fields) end,
+        "protobuf: missing required field 1 at $[1]")
+    local arrays: const {reflect.Type} = {
+      reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), descriptor(IntegerValue(0))),
+    }
+    local slot = backpatch_field(1, "")
+    local entries = backpatch_field(1, "") .. backpatch_field(1, slot)
+    expect_path(function () protobuf.deserialize_fields(backpatch_field(1, entries), arrays) end,
+        "protobuf: missing required field 1 at $[1][2][\"number\"]")
+    local names: const {reflect.Type} = {
+      reflect.Type.is_string(), reflect.Type.is_string(), reflect.Type.is_string(),
+    }
+    local nominal = protobuf.serialize_fields(
+        names, "protobuf.tests", "protobuf.tests.IntegerValue", "")
+    local dynamic = backpatch_field(5, nominal)
+    expect_path(function ()
+      protobuf.deserialize(backpatch_field(1, dynamic), descriptor(AnyValue(nil)))
+    end, "protobuf: missing required field 1 at $[\"item\"][\"number\"]")
+    local selected = backpatch_field(1, backpatch_field(1, dynamic))
+    local mixed = backpatch_field(1, "") .. backpatch_field(1, backpatch_field(1, selected))
+    local envelope = backpatch_field(1, mixed)
+    local roots: const {reflect.Type} = {descriptor(PathEnvelope({}))}
+    expect_path(function () protobuf.deserialize_fields(backpatch_field(1, envelope), roots) end,
+        "protobuf: missing required field 1 at $[1][\"items\"][2][\"payload\"][\"number\"]")
+  end)
+end
+
+function test_error_paths_wire_and_nominal_failures(context: test.Context)
+  with_path_codecs(context, function ()
+    local target = descriptor(PathRecord(IntegerValue(0)))
+    expect_path(function ()
+      protobuf.deserialize(backpatch_field(1, string.char(10, 0)), target)
+    end, "protobuf: unexpected wire type at $[\"child\"][\"number\"]")
+    expect_path(function ()
+      protobuf.deserialize(backpatch_field(1, string.char(8, 128)), target)
+    end, "protobuf: truncated varint at $[\"child\"]")
+    expect_path(function ()
+      protobuf.deserialize(backpatch_field(1, string.char(10, 2, 1)), target)
+    end, "protobuf: truncated field at $[\"child\"]")
+    local union_fields: const {reflect.Type} = {descriptor(PathChoice.part(nil))}
+    expect_path(function () protobuf.deserialize_fields(backpatch_field(1, ""), union_fields) end,
+        "protobuf: union has no recognized variant at $[1]")
+    local record_fields: const {reflect.Type} = {descriptor(Node("", nil))}
+    expect_path(function () protobuf.serialize_fields(record_fields, IntegerValue(1)) end,
+        "protobuf: record type mismatch at $[1]")
+    local cycle = Node("cycle", nil)
+    cycle.next = cycle
+    expect_path(function () protobuf.serialize(Shared(cycle, cycle)) end,
+        "protobuf: cyclic object graph at $[\"left\"][\"next\"]")
+  end)
+end
+
+function test_error_paths_portable_policy(context: test.Context)
+  with_path_codecs(context, function ()
+    local codec = protobuf.portable({reflect.Type.is_value()})
+    expect_path(function () codec:encode(IntegerValue(1)) end,
+        "protobuf: protobuf.tests.IntegerValue is not in this portable codec at $[1]")
+    local bytes = protobuf.serialize_fields({reflect.Type.is_value()}, IntegerValue(1))
+    expect_path(function () codec:decode(bytes) end,
+        "protobuf: protobuf.tests.IntegerValue is not in this portable codec at $[1]")
+    local variants = protobuf.portable({descriptor(PrivateVariants.visible())})
+    expect_path(function () variants:encode(PrivateVariants.hidden()) end,
+        "protobuf: private union variant at $[1]")
+  end)
+end
+
+function test_error_paths_depth(context: test.Context)
+  with_path_codecs(context, function ()
+    local candidate = Node("x", nil)
+    local bytes = string.char(10, 1, 120)
+    local path = "$"
+    for _ = 2, CODEC_DEPTH_LIMIT do
+      candidate = Node("x", candidate)
+      bytes = string.char(10, 1, 120) .. backpatch_field(2, bytes)
+      path = path .. "[\"next\"]"
+    end
+    local expected = CODEC_DEPTH_ERROR .. " at " .. path .. "[\"name\"]"
+    if protobuf.find_generated_codec(candidate) ~= nil then
+      expected = CODEC_DEPTH_ERROR .. " at $" .. string.rep("[\"next\"]", 16) .. "..."
+    end
+    expect_path(function () protobuf.serialize(candidate) end, expected)
+    local target = descriptor(candidate)
+    expect_path(function () protobuf.deserialize(bytes, target) end, expected)
+  end)
+end
+
+function test_error_paths_generated_handback_boundary(context: test.Context)
+  local previous = protobuf.use_generated_codecs(true)
+  defer protobuf.use_generated_codecs(previous)
+  for level = 16, 17 do
+    context:run("level_" .. level, function (_: test.Context)
+      local candidate = AnyValue(function () end)
+      local bytes = ""
+      for _ = 2, level do
+        candidate = AnyValue(candidate)
+        bytes = string.char(10, 1, 120) .. backpatch_field(2, bytes)
+      end
+      local encode_path = "$" .. string.rep("[\"item\"]", level)
+      local decode_path = "$" .. string.rep("[\"next\"]", level - 1) .. "[\"name\"]"
+      if level == 17 then
+        encode_path = "$" .. string.rep("[\"item\"]", 16) .. "..."
+        decode_path = "$" .. string.rep("[\"next\"]", 16) .. "..."
+      end
+      expect_path(function () protobuf.serialize(candidate) end,
+          "protobuf: unsupported dynamic value at " .. encode_path)
+      expect_path(function () protobuf.deserialize(bytes, descriptor(Node("", nil))) end,
+          "protobuf: missing required field 1 at " .. decode_path)
+    end)
+  end
+end
+
+function test_error_paths_deep_valid_sibling(context: test.Context)
+  with_path_codecs(context, function ()
+    local first = node_chain(24)
+    local tail = Node("cycle", nil)
+    tail.next = tail
+    expect_path(function () protobuf.serialize(PathDeepSibling(first, tail)) end,
+        "protobuf: cyclic object graph at $[\"tail\"][\"next\"]")
+    local bytes = backpatch_field(1, protobuf.serialize(first)) .. backpatch_field(2, "")
+    expect_path(function ()
+      protobuf.deserialize(bytes, descriptor(PathDeepSibling(first, tail)))
+    end, "protobuf: missing required field 1 at $[\"tail\"][\"name\"]")
+  end)
+end
+
+function test_error_paths_without_generated_codec(context: test.Context)
+  local previous = protobuf.use_generated_codecs(true)
+  defer protobuf.use_generated_codecs(previous)
+  test.assert(protobuf.find_generated_codec(PathReflectiveNode("", nil, nil)) == nil)
+  with_path_codecs(context, function ()
+    local leaf = PathReflectiveNode("cycle", nil, nil)
+    leaf.next = leaf
+    local candidate = leaf
+    local bytes = ""
+    for _ = 2, 24 do
+      candidate = PathReflectiveNode("parent", candidate, nil)
+      bytes = string.char(10, 1, 120) .. backpatch_field(2, bytes)
+    end
+    expect_path(function () protobuf.serialize(candidate) end,
+        "protobuf: cyclic object graph at $" .. string.rep("[\"next\"]", 24))
+    expect_path(function () protobuf.deserialize(bytes, descriptor(candidate)) end,
+        "protobuf: missing required field 1 at $" ..
+        string.rep("[\"next\"]", 23) .. "[\"name\"]")
+  end)
+end
+
+function test_error_paths_handback_skips_callbacks(context: test.Context)
+  local resource_encodes = 0
+  local resource_decodes = 0
+  local resource = PathTraceResource(1)
+  case descriptor(resource)
+  when is_record(record_type) then
+    protobuf.register_resource_codec(resource, record_type,
+        function (_context: value, _candidate: value): integer
+          resource_encodes = resource_encodes + 1
+          return 1
+        end,
+        function (_context: value, _data: foreign const *void, _length: integer): value
+          resource_decodes = resource_decodes + 1
+          return PathTraceResource(1)
+        end)
+  else raise "expected a resource descriptor"
+  end
+  with_path_codecs(context, function ()
+    path_hook_failure = nil
+    for resource_case = 0, 1 do
+      path_hook_encodes = 0
+      path_hook_decodes = 0
+      resource_encodes = 0
+      resource_decodes = 0
+      local hook: PathHooked? = nil
+      local capability: PathTraceResource? = nil
+      local callback_fields = ""
+      if resource_case == 0 then
+        hook = PathHooked(1)
+        callback_fields = backpatch_field(2, "opaque")
+      else
+        capability = resource
+        callback_fields = backpatch_field(3, string.char(1, 0, 0, 0))
+      end
+      local candidate = PathTraceNode(nil, hook, capability, function () end)
+      local bytes = callback_fields .. backpatch_field(4, string.char(8, 2))
+      for _ = 2, 24 do
+        candidate = PathTraceNode(candidate, nil, nil, nil)
+        bytes = backpatch_field(1, bytes)
+      end
+      local path = "$" .. string.rep("[\"next\"]", 23) .. "[\"tail\"]"
+      if protobuf.find_generated_codec(candidate) ~= nil then
+        path = "$" .. string.rep("[\"next\"]", 16) .. "..."
+      end
+      expect_path(function () protobuf.serialize(candidate) end,
+          "protobuf: unsupported dynamic value at " .. path)
+      expect_path(function () protobuf.deserialize(bytes, descriptor(candidate)) end,
+          "protobuf: invalid boolean at " .. path)
+      if resource_case == 0 then
+        test.assert(path_hook_encodes == 1 and path_hook_decodes == 1)
+        test.assert(resource_encodes == 0 and resource_decodes == 0)
+      else
+        test.assert(resource_encodes == 1 and resource_decodes == 1)
+        test.assert(path_hook_encodes == 0 and path_hook_decodes == 0)
+      end
+    end
+  end)
+end
+
+function test_error_paths_leave_root_errors_unchanged(context: test.Context)
+  with_path_codecs(context, function ()
+    expect_path(function () protobuf.serialize(1) end,
+        "protobuf: root must be a public record or union")
+    expect_path(function ()
+      protobuf.deserialize(string.char(128), descriptor(IntegerValue(0)))
+    end, "protobuf: truncated varint")
+    expect_path(function () protobuf.deserialize("", descriptor(Choice.empty())) end,
+        "protobuf: union has no recognized variant")
+  end)
+end
+
+function test_error_paths_do_not_repeat_hooks(context: test.Context)
+  with_path_codecs(context, function ()
+    path_hook_failure = nil
+    path_hook_encodes = 0
+    local cycle = Node("cycle", nil)
+    cycle.next = cycle
+    local candidate = PathAfterHook(PathHookBox(PathHooked(1)), cycle)
+    expect_path(function () protobuf.serialize(candidate) end,
+        "protobuf: cyclic object graph at $[\"tail\"][\"next\"]")
+    test.assert(path_hook_encodes == 1)
+    path_hook_decodes = 0
+    local first = backpatch_field(1, backpatch_field(1, "opaque"))
+    local bytes = first .. backpatch_field(2, "")
+    expect_path(function () protobuf.deserialize(bytes, descriptor(candidate)) end,
+        "protobuf: missing required field 1 at $[\"tail\"][\"name\"]")
+    test.assert(path_hook_decodes == 1)
+  end)
+end
+
+function test_error_paths_reserve_protobuf_prefix(context: test.Context)
+  with_path_codecs(context, function ()
+    path_hook_failure = "protobuf: cyclic object graph"
+    defer path_hook_failure = nil
+    path_hook_encodes = 0
+    local cycle = Node("cycle", nil)
+    cycle.next = cycle
+    local candidate = PathAfterHook(PathHookBox(PathHooked(1)), cycle)
+    expect_path(function () protobuf.serialize(candidate) end,
+        "protobuf: cyclic object graph at $[\"tail\"][\"next\"]")
+    test.assert(path_hook_encodes == 1)
+    path_hook_failure = "protobuf: cyclic object graph from hook"
+    path_hook_encodes = 0
+    expect_path(function () protobuf.serialize(candidate) end,
+        "protobuf: cyclic object graph from hook")
+    test.assert(path_hook_encodes == 1)
+    path_hook_failure = "hook: original message"
+    path_hook_encodes = 0
+    expect_path(function () protobuf.serialize(candidate) end, "hook: original message")
+    test.assert(path_hook_encodes == 1)
+    path_hook_decodes = 0
+    local first = backpatch_field(1, backpatch_field(1, "opaque"))
+    expect_path(function ()
+      protobuf.deserialize(first .. backpatch_field(2, ""), descriptor(candidate))
+    end, "hook: original message")
+    test.assert(path_hook_decodes == 1)
+  end)
+end
+
+function test_error_paths_preserve_non_string_hook_errors(context: test.Context)
+  with_path_codecs(context, function ()
+    local markers: const {value} = {IntegerValue(7), false}
+    defer path_hook_failure = nil
+    local candidate = PathHookBox(PathHooked(1))
+    local target = descriptor(candidate)
+    for index = 1, #markers do
+      local marker: value = markers[index]
+      path_hook_failure = marker
+      path_hook_encodes = 0
+      local caught = false
+      do
+        protobuf.serialize(candidate)
+      catch
+        caught = true
+        test.assert(error == marker)
+      end
+      test.assert(caught and path_hook_encodes == 1)
+      path_hook_decodes = 0
+      caught = false
+      do
+        protobuf.deserialize(backpatch_field(1, "opaque"), target)
+      catch
+        caught = true
+        test.assert(error == marker)
+      end
+      test.assert(caught and path_hook_decodes == 1)
+    end
+  end)
+end
+
+function test_error_paths_preserve_resource_errors(context: test.Context)
+  with_path_codecs(context, function ()
+    local sample = PathResource(1)
+    local resource = (function (): reflect.RecordType
+      case reflect.inspect(sample)
+      when is_record(record_value) then return record_value.type
+      else raise "expected a resource record"
+      end
+    end)()
+    local encodes = 0
+    local decodes = 0
+    protobuf.register_resource_codec(sample, resource,
+        function (_context: value, _candidate: value): integer
+          encodes = encodes + 1
+          raise "resource: original message"
+        end,
+        function (_context: value, _data: foreign const *void, _length: integer): value
+          decodes = decodes + 1
+          raise "resource: original message"
+        end)
+    local candidate = PathResourceParent(sample)
+    expect_path(function () protobuf.serialize(candidate) end, "resource: original message")
+    test.assert(encodes == 1)
+    expect_path(function ()
+      protobuf.deserialize(string.char(10, 4, 0, 0, 0, 0), descriptor(candidate))
+    end, "resource: original message")
+    test.assert(decodes == 1)
+  end)
+end
+
+function test_error_paths_leave_caller_buffer_untouched(context: test.Context)
+  with_path_codecs(context, function ()
+    path_hook_failure = nil
+    local hooked = PathHooked(1)
+    local prefix: const {reflect.Type} = {reflect.Type.is_string(), descriptor(hooked)}
+    local baseline: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+    ffi.titan_protobuf_buf_init_heap(baseline, 0)
+    defer ffi.titan_protobuf_buf_free_heap(baseline)
+    protobuf.serialize_fields_to_buffer(baseline as foreign *void, prefix, "prefix", hooked)
+    local fields: const {reflect.Type} = {
+      reflect.Type.is_string(), descriptor(hooked), descriptor(Node("", nil)),
+    }
+    local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+    ffi.titan_protobuf_buf_init_heap(buf, 0)
+    defer ffi.titan_protobuf_buf_free_heap(buf)
+    path_hook_encodes = 0
+    expect_path(function ()
+      protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, "prefix", hooked, IntegerValue(0))
+    end, "protobuf: record type mismatch at $[3]")
+    test.assert(path_hook_encodes == 1)
+    test.assert(buf.length == baseline.length and buffer_bytes(buf) == buffer_bytes(baseline))
+  end)
 end
 
 do

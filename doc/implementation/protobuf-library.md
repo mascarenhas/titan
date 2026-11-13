@@ -2,11 +2,11 @@
 
 The public contract is [Protocol Buffers standard
 library](../language/standard-library-protobuf.md). The logical `titan.protobuf`
-module has five source contributors in `titan/protobuf/`: `protobuf.titan` owns
+module has six source contributors in `titan/protobuf/`: `protobuf.titan` owns
 the ordinary public API, resource-codec registry and shared scalar/type helpers,
 `encoder.titan` owns graph traversal, `decoder.titan` owns wire parsing and
-reconstruction, `portable.titan` owns copied-data codecs, and `schema.titan`
-owns proto3 declarations. `native.h` holds
+reconstruction, `portable.titan` owns copied-data codecs, `trace.titan` locates
+failed traversals, and `schema.titan` owns proto3 declarations. `native.h` holds
 the reflective decoder's directory entry and includes the SDK header
 `titan-runtime/transfer.h`, which owns the shared buffer and the generated-codec
 runtime. The module imports `reflect`, `string` and `gc`; it does not depend on
@@ -252,8 +252,9 @@ A generated codec *is* the reflective codec specialized to one storage plan,
 sharing one root state with it (`TitanCodecState`): the buffer, the packet
 context, the reflective `Encoder`'s active Map, a C-stack path of the open
 generated frames, and one Lua stack slot holding the root's reusable
-`Encoder`. It writes identical bytes and raises the identical error string at
-the identical point; it never declines or reruns. Booleans, integers, floats,
+`Encoder`. It writes identical bytes and raises the same diagnostics before
+failure-only position attribution; a generated subtree's position can be
+abbreviated. Booleans, integers, floats,
 strings, their Options, nested records and unions, and the nil and scalar arms
 of `value` fields are encoded natively, nested nominals through their own bound
 codec after the same registered-resource check by expected type. Every other
@@ -310,7 +311,7 @@ generated encoder writes the nil and scalar arms and hands a nominal or Array
 to the state's `Encoder`.
 
 The generated decoder mirrors `read_message_slice` and `decode_field`: it
-validates the complete message first with the same error strings (keys,
+validates the complete message first with the same pre-suffix error strings (keys,
 varints, lengths, groups and their depth, wire kinds), recording the latest
 occurrence of each declared field, then checks depth and decodes the declared
 fields in order with the reflective missing-field, wire, and boolean checks.
@@ -347,9 +348,82 @@ Generated codecs serve `serialize_to_buffer` (before `reflect.inspect`), the
 inspected-root entries, `deserialize`, `deserialize_nominal*`, transfer
 packets, and every nested record or union reached by either codec; a nominal
 with a codec always decodes through it. The collaboration entry
-`serialize_generated_to_buffer` runs only the generated root, and the
-diagnostic `use_generated_codecs(false)` makes the whole state reflective,
-which native differential tests use as the oracle.
+`serialize_generated_to_buffer` runs the supplied generated root even when
+the diagnostic `use_generated_codecs(false)` disables ordinary generated
+lookup. Native differential tests use that diagnostic as the reflective
+oracle, comparing error messages up to the optional abbreviated suffix.
+
+## Error positions
+
+Encoding and decoding locate failures only after the original traversal raises.
+The execution roots have function-level `catch` clauses:
+`encode_generated_root`, `encode_record_root`, `encode_union_root`,
+`serialize_fields_to_buffer_with_context`, `deserialize_record_buffer`,
+`deserialize_union_buffer` and `deserialize_fields_slice`. Public entries that
+forward to these roots, including `PortableCodec:encode` and `decode`, do not
+add a second catch.
+
+`locate_encoding` and `locate_decoding` ignore non-string errors and strings
+without the reserved `protobuf: ` prefix. They install one module-local
+`CodecTrace` for a synchronous replay, then clear it with `defer`. The trace
+bypasses generated codecs until its trail has 16 segments. At that point a
+nominal with a generated codec hands back to it; a nominal without one stays
+reflective at every depth. `CODEC_TRACE_DEPTH_LIMIT` is the one named bound.
+No generated-codec structure, function pointer or inline helper in
+`transfer.h` changes.
+
+The reflective frames append a quoted member or one-based index before
+descending. They remove it only after a normal return, not with `defer`, so
+an error leaves the trail. A generated hand-back freezes the trail, including
+through reflective field handoffs below it. Normal return resumes recording
+for following siblings. An error inside that subtree adds `...` to the
+hand-back path. A `value` wrapper adds no segment.
+Portable creation paths and runtime traces share `path_member` and
+`path_index`, with the [JSON path spelling](../language/standard-library-protobuf.md#errors).
+
+Trace mode retains structural checks but skips transfer-hook and resource
+callbacks and public constructors. It never performs an ambient packet-context
+lookup or calls the demand module loader. Decoding marks skipped values and
+their enclosing frames incomplete: default storage construction still runs
+for complete frames, but cannot receive a fabricated nil in place of an opaque
+callback result. Following fields are still visited. Hook-validation failures
+are not attributed.
+
+The bound preserves the small generated frames of the first attempt. At the
+base validation build, a reflective optional-record level used about 16.5 KB
+of native coroutine stack (18.9 KB including a raise); 127 levels could exhaust
+the 2 MiB stack. The browser used under 2 KB per level on its 256 KiB Task
+stack. Sixteen reflective levels add about 300 KB natively or 32 KB in the
+browser instead of replacing the whole generated chain. The worst-case
+64-field, 128-level failure must raise without crashing in native, sanitizer
+and browser validation: replay must not turn the first attempt's raised error
+into a crash. These are codec bounds, not a guarantee about stack the caller
+has already used.
+
+The trace retains whether the first attempt used generated code. In
+particular, a saved codec passed to `serialize_generated_to_buffer` can run
+while ordinary generated lookup is disabled; its replay still hands back
+below the bound. An ordinary reflective traversal with lookup disabled stays
+reflective and retains its complete path.
+
+Encoding replays into its own initialized heap buffer, acquired immediately
+before a deferred `titan_protobuf_buf_free_heap`; it never writes into the
+caller's buffer. Decoding retains the supplied context, string holder and raw
+buffer borrow. The trace appends ` at <path>` only if the replay raises the
+whole original message at a non-root position. A successful replay, a different
+error or a diagnostic allocation failure leaves the original error and
+traceback intact through bare `raise`; an attributed message preserves the
+original traceback explicitly.
+
+The prefix is a diagnostic namespace, not provenance. A transfer hook,
+resource callback or public `new` that raises a message beginning with
+`protobuf: ` can acquire a suffix naming a later position if the replay
+reproduces that message there. Errors without the prefix and non-string errors
+are unchanged. Callbacks are never repeated to obtain a position.
+
+The successful traversal adds one protected region at its execution root and
+nil checks in reflective frames and codec lookup. It allocates no trail,
+formatted path or replay buffer and performs no second traversal.
 
 ## Encoding
 

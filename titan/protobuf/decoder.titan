@@ -290,9 +290,12 @@ local function decode_record(message: Message, descriptor: reflect.RecordType,
   end
   local fields: {value} = {}
   for index = 1, #descriptor.fields do
+    if codec_trace ~= nil then codec_trace:member(descriptor.fields[index].name) end
     fields[index] = decode_field(message, field_number(index),
                                  descriptor.fields[index].type, depth + 1)
+    if codec_trace ~= nil then codec_trace:leave() end
   end
+  if codec_trace ~= nil and codec_trace.incomplete[codec_trace.level + 1] then return nil end
   local frozen = fields as const {value}
   return descriptor:construct(frozen)
 end
@@ -341,9 +344,12 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
   end)()
   local parts: {value} = {}
   for index = 1, #variant.parts do
+    if codec_trace ~= nil then codec_trace:member(variant.parts[index].name) end
     parts[index] = decode_field(parts_message, field_number(index),
                                 variant.parts[index].type, depth + 1)
+    if codec_trace ~= nil then codec_trace:leave() end
   end
+  if codec_trace ~= nil and codec_trace.incomplete[codec_trace.level + 1] then return nil end
   local frozen = parts as const {value}
   return descriptor:construct(variant.tag, frozen)
 end
@@ -357,6 +363,7 @@ local function decode_array_entries(message: Message, element: reflect.Type,
   for index = 1, message.count do
     local field = message:entry(index)
     if field.number == 1 then
+      if codec_trace ~= nil then codec_trace:index(count + 1) end
       require_wire(field, 2)
       count = count + 1
       local slot = read_message_slice(
@@ -364,6 +371,7 @@ local function decode_array_entries(message: Message, element: reflect.Type,
       if slot:last(1) ~= nil then
         entries[count] = decode_field(slot, 1, element, depth + 1)
       end
+      if codec_trace ~= nil then codec_trace:leave() end
     elseif field.number == 2 then
       require_wire(field, 0)
       if field.bits ~= 0 and field.bits ~= 1 then raise "protobuf: invalid boolean" end
@@ -405,11 +413,13 @@ local function decode_foreign_array(message: Message, element: reflect.Type,
   for index = 1, message.count do
     local field = message:entry(index)
     if field.number == 1 then
+      if codec_trace ~= nil then codec_trace:index(count + 1) end
       require_wire(field, 2)
       count = count + 1
       local slot = read_message_slice(
           message.base, field.offset, field.length, message.holder, message.context)
       entries[count] = decode_field(slot, 1, element, depth + 1)
+      if codec_trace ~= nil then codec_trace:leave() end
     end
   end
   local frozen = entries as const {value}
@@ -423,8 +433,10 @@ local function decode_foreign_struct(message: Message,
   require_struct(descriptor)
   local fields: {value} = {}
   for index = 1, #descriptor.fields do
+    if codec_trace ~= nil then codec_trace:member(descriptor.fields[index].name) end
     fields[index] = decode_field(message, field_number(index),
                                  descriptor.fields[index].type, depth + 1)
+    if codec_trace ~= nil then codec_trace:leave() end
   end
   local frozen = fields as const {value}
   return frozen
@@ -471,12 +483,22 @@ local function decode_field(message: Message, number: integer,
         raise "protobuf: " .. record_type.name ..
             " is a packet resource and is not portable"
       end
+      if codec_trace ~= nil then
+        codec_trace:skip_value()
+        return nil
+      end
       return codec.decode(message.context,
           (message.base + field.offset) as foreign const *void, field.length)
     end
+    if codec_trace ~= nil then codec_trace.validating_hooks = true end
     local _?, decode? = find_transfer_hooks(record_type, "protobuf")
+    if codec_trace ~= nil then codec_trace.validating_hooks = false end
     if decode ~= nil then
       require_wire(field, 2)
+      if codec_trace ~= nil then
+        codec_trace:skip_value()
+        return nil
+      end
       local restored: value = decode.callable(
           slice_to_string(message.base, field.offset, field.length))
       case reflect.inspect(restored)
@@ -561,7 +583,7 @@ local function decode_dynamic_nominal(message: Message, depth: integer): value
     return (message.context as PortableCodec):decode_nominal(message, name, depth)
   end
   local found? = reflect.find_nominal(name)
-  if found == nil and message.context ~= nil and nominal_loader ~= nil then
+  if found == nil and message.context ~= nil and nominal_loader ~= nil and codec_trace == nil then
     nominal_loader(module, name)
     found = reflect.find_nominal(name)
   end

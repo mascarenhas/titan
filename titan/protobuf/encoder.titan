@@ -34,8 +34,10 @@ local function Encoder:generated(
   local encoder: foreign TValue = self as value
   local handoff: foreign TValue = codec_handoff_entry
   local raw: foreign TValue = candidate
+  if codec_trace ~= nil then codec_trace:enter_generated() end
   ffi.titan_codec_encode_field(L, resources, context, active, encoder, handoff, buf,
       self.path, codec, raw, number, depth)
+  if codec_trace ~= nil then codec_trace:leave_generated() end
 end
 
 local function Encoder:record_value(
@@ -47,8 +49,10 @@ local function Encoder:record_value(
   self:enter(candidate.value)
   defer self.active[candidate.value] = nil
   for index = 1, #candidate.type.fields do
+    if codec_trace ~= nil then codec_trace:member(candidate.type.fields[index].name) end
     self:field(buf, field_number(index), candidate:project(index),
                candidate.type.fields[index].type, depth + 1)
+    if codec_trace ~= nil then codec_trace:leave() end
   end
 end
 
@@ -65,8 +69,10 @@ local function Encoder:union_value(
     if variant.tag == candidate.tag then
       local mark = begin_nested(buf, field_number(index))
       for part = 1, #variant.parts do
+        if codec_trace ~= nil then codec_trace:member(variant.parts[part].name) end
         self:field(buf, field_number(part), candidate:project(part),
                    variant.parts[part].type, depth + 1)
+        if codec_trace ~= nil then codec_trace:leave() end
       end
       end_nested(buf, mark)
       return
@@ -92,11 +98,13 @@ local function Encoder:array(
       end
     end)(candidate)
   for index = 1, #entries do
+    if codec_trace ~= nil then codec_trace:index(index) end
     local item: value = entries[index]
     local slot_mark = begin_nested(buf, 1)
     -- A missing Array slot is legal independently of its element descriptor.
     if item ~= nil then self:field(buf, 1, item, element, depth + 1) end
     end_nested(buf, slot_mark)
+    if codec_trace ~= nil then codec_trace:leave() end
   end
   write_key(buf, 2, 0)
   if is_const_arr then write_varint(buf, 1) else write_varint(buf, 0) end
@@ -110,9 +118,11 @@ local function Encoder:foreign_array(
   require_depth(depth)
   local entries: const {value} = candidate
   for index = 1, #entries do
+    if codec_trace ~= nil then codec_trace:index(index) end
     local slot_mark = begin_nested(buf, 1)
     self:field(buf, 1, entries[index], element, depth + 1)
     end_nested(buf, slot_mark)
+    if codec_trace ~= nil then codec_trace:leave() end
   end
 end
 
@@ -126,8 +136,10 @@ local function Encoder:foreign_struct(
   local fields: const {value} = candidate
   for index = 1, #descriptor.fields do
     local field = descriptor.fields[index]
+    if codec_trace ~= nil then codec_trace:member(field.name) end
     if field.is_flexible_array then raise "protobuf: flexible foreign array" end
     self:field(buf, field_number(index), fields[index], field.type, depth + 1)
+    if codec_trace ~= nil then codec_trace:leave() end
   end
 end
 
@@ -188,10 +200,13 @@ local function Encoder:field(
     case reflect.inspect(candidate)
     when is_record(actual) then
       if actual.type.name ~= expected.name then raise "protobuf: record type mismatch" end
+      if codec_trace ~= nil then codec_trace.validating_hooks = true end
       local encode? = find_transfer_hooks(expected, "protobuf")
+      if codec_trace ~= nil then codec_trace.validating_hooks = false end
       if encode ~= nil then
         self:enter(actual.value)
         defer self.active[actual.value] = nil
+        if codec_trace ~= nil then return end
         local payload = encode_transfer_payload(
             actual.value, encode, "protobuf: cyclic object graph")
         write_bytes(buf, number, payload)

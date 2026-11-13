@@ -90,7 +90,12 @@ local function add_transfer_depth_cases(context: test.Context, generated: boolea
       transfer.decode_message(raw)
     catch
       caught = true
-      test.assert(error == TRANSFER_DEPTH_ERROR, "wrong packet depth error")
+      local expected = TRANSFER_DEPTH_ERROR .. " at $" ..
+          depth_string.rep("[\"next\"]", TRANSFER_DEPTH_LIMIT - 1) .. "[\"name\"]"
+      if generated then
+        expected = TRANSFER_DEPTH_ERROR .. " at $" .. depth_string.rep("[\"next\"]", 16) .. "..."
+      end
+      test.assert(error == expected, "wrong packet depth error")
     end
     test.assert(caught and raw == nil, "depth rejection did not consume the packet")
     local recovered: TransferDepthNode = transfer_depth_policy(2):to_value()

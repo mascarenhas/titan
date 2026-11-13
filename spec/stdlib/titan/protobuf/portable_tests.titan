@@ -554,3 +554,58 @@ function test_golden_wire_literals(_: test.Context)
   local dynamic = protobuf.portable({reflect.Type.is_value()})
   test.assert(dynamic:encode(7) == string.char(10, 2, 16, 14))
 end
+
+local path_constructor_failure: value = nil
+local path_constructor_calls = 0
+
+record PathConstructor
+  number: integer
+  local hidden: integer
+end
+
+function PathConstructor.new(number: integer): PathConstructor
+  path_constructor_calls = path_constructor_calls + 1
+  if path_constructor_failure ~= nil then raise path_constructor_failure end
+  return { number = number, hidden = 0 }
+end
+
+local function expect_exact_error(action: function (): (), expected: value)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+    test.assert(error == expected, "the original error value was replaced")
+  end
+  test.assert(caught, "expected an error")
+end
+
+function test_error_paths_preserve_public_constructor_errors(context: test.Context)
+  with_generated(context, function (_: boolean)
+    local sample: PathConstructor = { number = 1, hidden = 0 }
+    local codec = protobuf.portable({descriptor(sample), reflect.Type.is_integer()})
+    local bytes = string.char(10, 2, 8, 2, 16, 6)
+    path_constructor_failure = "constructor: original message"
+    defer path_constructor_failure = nil
+    path_constructor_calls = 0
+    expect_exact_error(function () codec:decode(bytes) end, "constructor: original message")
+    test.assert(path_constructor_calls == 1)
+    local marker = Point(7, "marker")
+    path_constructor_failure = marker
+    path_constructor_calls = 0
+    expect_exact_error(function () codec:decode(bytes) end, marker)
+    test.assert(path_constructor_calls == 1)
+  end)
+end
+
+function test_error_paths_do_not_repeat_public_constructors(context: test.Context)
+  with_generated(context, function (_: boolean)
+    local sample: PathConstructor = { number = 1, hidden = 0 }
+    local codec = protobuf.portable({descriptor(sample), reflect.Type.is_integer()})
+    path_constructor_failure = nil
+    path_constructor_calls = 0
+    expect_exact_error(function () codec:decode(string.char(10, 2, 8, 2)) end,
+        "protobuf: missing required field 2 at $[2]")
+    test.assert(path_constructor_calls == 1)
+  end)
+end
