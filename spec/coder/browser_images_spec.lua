@@ -847,7 +847,8 @@ describe("real browser test image", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
         files.mkdir(workspace .. "/src")
-        c_image(info, "entry-flush", read(repository .. "/spec/fixtures/browser_images/entry-flush.c"))
+        c_image(info, "entry-flush", read(repository .. "/spec/fixtures/browser_images/entry-flush.c"),
+            { "-Wl,--wrap=fflush" })
         local fixture = workspace .. "/out/flush-results.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/flush-results.mjs"))
         for _, engine in ipairs({ "node", "chromium" }) do

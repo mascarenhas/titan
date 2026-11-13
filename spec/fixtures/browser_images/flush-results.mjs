@@ -7,9 +7,11 @@ export async function run(context) {
     [3, 'cannot flush browser stdout'],
     [7, 'original failure'],
   ]) {
-    let records;
+    const records = {order: [], stdout: [], stderr: []};
     const instance = create({locateFile,
-      bindings: {fixtureDrains(value) { records = value; }}});
+      stdout(bytes) { records.stdout.push(...bytes); },
+      stderr(bytes) { records.stderr.push(...bytes); },
+      bindings: {fixtureDrains(stream) { records.order.push(stream === 1 ? 'stdout' : 'stderr'); }}});
     try {
       const result = await instance.run([new Uint8Array([mask])]);
       context.assert(result.kind === 'failed' && result.status === 1, `flush mask ${mask}: completion`);
@@ -20,7 +22,6 @@ export async function run(context) {
       context.equalBytes(new Uint8Array(records.stderr).subarray(0, 8), encode('err-tail'), `flush mask ${mask}: stderr FILE buffer`);
     } finally {
       await instance.dispose();
-      records = undefined;
     }
   }
 }
