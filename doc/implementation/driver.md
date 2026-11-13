@@ -245,6 +245,14 @@ For `require(name)` the searcher, in order:
    through a loader closure, without opening another image; `require` then
    returns the module and no loader data;
 2. returns a matching native preload loader with loader data `":preload:"`;
+
+On the browser the search ends here with
+`no Titan provider search: the browser target has no dynamic providers`.
+Canonical modules and published preload loaders remain usable; an
+uninitialized linked module has no published loader. This branch never
+reads `TITAN_PATH_0_6` or `TITAN_PATH`, computes an effective path, queries an
+SDK fallback, or probes files. The remaining steps are native-only:
+
 3. ignores invalid logical names, a dotted name ending in `.titan`, and the
    bare support name `titan` (it returns nothing);
 4. probes `a.so`, `a/b.so`, `a/b/c.so` (`.dll` on Windows) root-major and

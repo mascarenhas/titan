@@ -1209,10 +1209,10 @@ bare `raise`.
 
 ## The browser standard library
 
-The browser SDK's `titan.a` holds eighteen standard modules that need no libuv
-or other native-only library: fourteen shared modules compiled from the same
-sources as the native standard library, browser contributors for `async`,
-`timer`, and the `os` subset, and the browser-only `titan.browser`:
+The browser SDK's `titan.a` holds nineteen standard modules that need no libuv
+or other native-only library: fourteen complete shared modules, browser
+compositions of `async`, `timer`, `os`, and `lua`, and the browser-only
+`titan.browser`:
 
 | Module | Contents |
 | --- | --- |
@@ -1233,6 +1233,7 @@ sources as the native standard library, browser contributors for `async`,
 | [`async`](async-io.md#the-browser-target) | Tasks, cancellation, waits, channels, combinators, and subscriptions, driven between browser macrotasks |
 | [`timer`](standard-library-timer.md#on-the-browser) | Task delays, yields, and coalescing tickers on JavaScript timers |
 | [`os`](standard-library-os.md#on-the-browser) | calendars, wall time, locale, instance environment, Task exit, and embedding-provided parent streams |
+| [`lua`](standard-library-lua.md) | string and Reader loading, preload/custom-searcher `require`, and synchronous independent states |
 | [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
 
 Each of the fourteen shared modules keeps its complete interface. Every public
@@ -1242,8 +1243,8 @@ declaration, including the raw C functions `protobuf.write_resource_index`,
 signature as on a native target and behaves as its chapter describes, apart
 from the target facts [below](#what-the-browser-target-changes). There are no
 stand-in implementations; errors from concrete `io` streams propagate
-unchanged. `transfer` encodes and decodes packets within one instance; the
-modules that carry packets to another Lua state or thread are not available.
+unchanged. `transfer` encodes and decodes packets within one instance.
+`lua` uses its own synchronous cross-state carrier, not packet attachments.
 
 `async` shares its scheduling core with the native module and keeps its
 public signatures, except for the members that the browser cannot provide:
@@ -1268,6 +1269,16 @@ input source. CPU time, host paths and identity, child processes, and signals
 are absent. See the [per-member availability table](standard-library-os.md#on-the-browser)
 and [browser parent streams](standard-library-os.md#browser-parent-streams).
 
+`lua` keeps string and Reader loading, `require`, and independent-state
+ownership and synchronous execution. `dofile`, `Lua:run_async`, and
+`Lua:run_async_from_loader` are absent. File searches miss, while initialized
+linked modules and custom searchers work; the Titan searcher never reads
+provider-path environment variables or probes files. Each new state belongs
+to the same instance and cannot drive browser Tasks. Stock Lua's `os.clock`
+raises instead of reporting CPU time, and its `os.exit` uses Titan's Task exit
+or raises outside a Task. See [the Lua chapter](standard-library-lua.md),
+including its stock-library table.
+
 `titan.browser` is the reviewed target-only exception. It has no native
 placeholder and imports only the portable core. Its byte/scalar ABI is not the
 native transfer packet format, and schema copies are a separate feature. It
@@ -1278,7 +1289,7 @@ that the `async` driver uses but schedules nothing itself. See
 ### Modules that are not available
 
 The other standard modules are absent from the browser target: `uv`,
-`fs`, `net`, `ssl`, `http`, `websocket`, `lua`, `sqlite3`, and `thread`.
+`fs`, `net`, `ssl`, `http`, `websocket`, `sqlite3`, and `thread`.
 Each of them uses libuv, directly or through its imports. Most have only
 native variants (such as
 `titan/fs.native.titan`; see [target source
@@ -1553,10 +1564,10 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 ## Current limits
 
-* The browser standard library has [eighteen standard
-  modules](#the-browser-standard-library), including `io` and the `os` subset.
-  Files, networking, child processes, host paths and identity, CPU time,
-  independent-state `lua`, `thread`, and `sqlite3` remain unavailable.
+* The browser standard library has [nineteen standard
+  modules](#the-browser-standard-library), including `io`, the `os` subset,
+  and synchronous `lua` states. Files, networking, child processes, host
+  paths and identity, CPU time, `thread`, and `sqlite3` remain unavailable.
 * `async` Tasks run only in the instance's owner state and only while a drive
   runs: the program's `main`, a call that calls `async.loop()`, or a
   Task-form call. Receivers, `run_foreign`, and external waits are

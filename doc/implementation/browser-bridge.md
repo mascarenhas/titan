@@ -26,9 +26,9 @@ runner, deployment, and fatal engine classifications.
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
 contains the same four objects (`titan.o`, `minicoro.o`, `titan_path.o`,
 `ltitanlib.o`) on both native and browser targets. The native standard provider
-has no `titan.browser`, while the eighteen-module browser provider includes
+has no `titan.browser`, while the nineteen-module browser provider includes
 it alongside fourteen shared modules and the browser compositions of `async`,
-`timer`, and `os`. It imports only `gc`, and the [member
+`timer`, `os`, and `lua`. It imports only `gc`, and the [member
 inventory](browser-target.md#interface-derived-member-inventory) skips it
 because it has no native interface to compare.
 
@@ -204,10 +204,10 @@ callable release are no-ops, while binding lookup and calls raise. An uncaught
 raise becomes a Lua finalizer warning on stderr. A zero token in a record that
 has not finalized remains an admission failure, not a successful close.
 
-The launcher does not initialize `titan.browser` specially. C-created
-independent states load modules normally too: no `attach` operation or
-pre-`luaL_openlibs` bootstrap is required. `titan.lua` is native-only, so no
-standard-library API creates independent browser states.
+The launcher does not initialize `titan.browser` specially. Independent states
+created by `lua.new()` or C load it normally too: no `attach` operation or
+pre-`luaL_openlibs` bootstrap is required. A `lua.new()` state shares the
+WebAssembly instance but owns its own module records.
 `state_closing()` and `current_state()` check `titan_state_closing(L)`
 (`G(L)->gcstp & GCSTPCLS`) before imports, so a direct `lua_close` of an
 independent state refuses new requests and reverse calls before a finalizer's

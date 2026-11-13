@@ -773,10 +773,10 @@ response, completion, and state-registry boundary. Apart from
 same instance execution owner as the generated gateway; it is not a raw
 `lua_State *` application gateway. `titan_browser_callback_enter` and
 `titan_browser_callback_leave` bracket a standard library's hand-written
-trampolines and are not an application API. C-created states load `titan.browser`
-normally; there is no attachment operation or special bootstrap order.
-`titan.lua` is native-only, so no standard-library API creates independent
-browser states. See [the bridge implementation](../implementation/browser-bridge.md)
+trampolines and are not an application API. Independent states created by
+[`lua.new()`](standard-library-lua.md#independent-lua-states) or C load
+`titan.browser` normally; there is no attachment operation or special
+bootstrap order. See [the bridge implementation](../implementation/browser-bridge.md)
 for layout, ownership, initialization, and close rules. Native SDKs may
 install the header, but native providers contain no `titan.browser` or fake
 bridge runtime.
