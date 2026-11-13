@@ -20,7 +20,7 @@ runner, deployment, and fatal engine classifications.
 | Installed C layout and JS import contract | `titan-runtime/titan/browser.h` |
 | Browser-only Titan API, pin table, foreign trampolines, and protected entries | `titan/browser.browser.titan` |
 | Generated image launcher and weak C export forwards | `titan-compiler/browserentry.lua` and `driver.browser_entrypoint_contents` |
-| JSPI owner, bridge imports, loader, and trace adapter | the four [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
+| JSPI owner, bridge imports, loader, trace adapter, and standalone portable peer | the five [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
 | Browser runtime/provider staging | `Makefile` and `scripts/browser_sdk.lua` |
 
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
@@ -43,6 +43,7 @@ shipped file is justified by the capability in its last column.
 | `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner. It keeps no state | Emscripten import glue |
 | `titan-browser.mjs` (embedded in each image) | The loader: `create` and `BrowserOwner`, in the parts listed below | See below |
 | `titan-browser-trace.js` (`--js-library`) | The index built from the fetched `.wasm.map`, stack capture into C-owned records, and symbolization ([trace metadata](browser-target.md#eager-map-loader-and-trace-metadata)) | Engine stack capture; fetching and parsing the map outside the Wasm heap |
+| `titan-protobuf.mjs` (standalone SDK module) | The portable protobuf peer: retains no per-call state, shares a class table only when the caller supplies one, and is not part of any image | Building and reading JavaScript values and classes: records, union variants, Arrays, BigInts, byte arrays, and strings |
 
 The loader's parts:
 

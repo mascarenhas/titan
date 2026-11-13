@@ -478,7 +478,7 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs \
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs sdk-digests; do
+              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 
@@ -946,7 +946,7 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs \
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs sdk-digests; do
+              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 

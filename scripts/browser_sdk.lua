@@ -281,6 +281,7 @@ elseif action == "stage-runtime" then
     copy_file_atomic(browser_src .. "/titan-browser-bridge.js", assets.bridge_library, false)
     copy_file_atomic(browser_src .. "/titan-browser-trace.js", assets.trace_library, false)
     copy_file_atomic(browser_src .. "/titan-browser.mjs", assets.loader, false)
+    copy_file_atomic(browser_src .. "/titan-protobuf.mjs", paths.join(descriptor.paths.titan_bin, "titan-protobuf.mjs"), false)
     copy_file_atomic(browser_src .. "/titan-browser-run", assets.runner, true)
     copy_file_atomic(browser_src .. "/titan-browser-run.mjs", assets.runner_module, false)
     copy_file_atomic(browser_src .. "/titan-browser-node-worker.mjs", assets.node_worker, false)
@@ -346,6 +347,7 @@ elseif action == "finalize" then
     local digest_inputs = {
         descriptor.paths.liblua,
         descriptor.paths.lua_record,
+        paths.join(descriptor.paths.titan_bin, "titan-protobuf.mjs"),
     }
     local lua_headers, list_err = strategy:list(descriptor.paths.lua_source)
     if not lua_headers then fail(list_err) end

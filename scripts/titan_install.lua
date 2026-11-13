@@ -347,6 +347,7 @@ local browser_sdk_owned = {
     "libtitan-lpeglabel.a",
     "titan.a",
     "titan-browser.mjs",
+    "titan-protobuf.mjs",
     "titan-browser-library.js",
     "titan-browser-bridge.js",
     "titan-browser-trace.js",
