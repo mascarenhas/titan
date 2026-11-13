@@ -161,7 +161,7 @@ unchanged.
 The standard library uses immediate calls to compute values such as
 `math.randomseed`'s seed pair, reflection descriptor selection
 (`titan/reflect.titan`), JSON descriptor searches (`titan/json/decoder.titan`,
-`titan/json/writer.titan`), and spawn stdio preparation (`titan/os.native.titan`).
+`titan/json/writer.titan`), and spawn stdio preparation (`titan/os/process.native.titan`).
 These sites pass their inputs explicitly and return the selected values
 instead of mutating captured placeholders. Optional result slots keep explicit
 annotations where absence is meaningful. Stored callbacks and returned

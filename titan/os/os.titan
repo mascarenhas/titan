@@ -1,0 +1,408 @@
+--- Clocks, calendars, environment, process streams, signals, and child-process lifecycle.
+-- @module titan.os
+-- @usage standard-library-os.md
+
+local reflect = import "reflect"
+local string = import "string"
+foreign import "time.h"
+foreign import "locale.h"
+foreign import "string.h"
+
+-- Time/date behavior is translated and adapted from src/loslib.c in the
+-- immutable Lua 5.5.1 release:
+-- https://www.lua.org/ftp/lua-5.5.1.tar.gz
+-- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
+-- LICENSES/lua-LICENSE.
+
+-- Portable operating-system helpers. The low-level uv module owns native
+-- resources plus portable current/CPU clock queries. The ISO C surface above
+-- remains only for calendar, difference, formatting, and locale operations
+-- that libuv does not provide; this facade exposes ordinary Titan values.
+
+--- Calendar date returned by date with the *t format.
+-- @field year Calendar year.
+-- @field month Month in 1..12.
+-- @field day Day of month in 1..31.
+-- @field hour Hour in 0..23.
+-- @field min Minute in 0..59.
+-- @field sec Second, including a host-reported leap second.
+-- @field wday Weekday in 1..7, with Sunday as 1.
+-- @field yday Day of year beginning at 1.
+-- @field isdst Daylight-saving indication, or nil when unknown.
+-- @usage standard-library-os.md
+record Date
+  year: integer
+  month: integer
+  day: integer
+  hour: integer
+  min: integer
+  sec: integer
+  wday: integer
+  yday: integer
+  isdst: boolean?
+end
+
+--- Parent-facing readable process or standard-input stream.
+-- @usage standard-library-os.md
+record InputStream
+  local handle: Stdio?
+  local parent_descriptor: integer
+  local excess: string
+end
+
+--- Parent-facing writable process or standard-output stream.
+-- @usage standard-library-os.md
+record OutputStream
+  local handle: Stdio?
+  local parent_descriptor: integer
+end
+
+--- Stable readable standard-input stream of the Titan process.
+-- @usage standard-library-os.md
+stdin: InputStream = InputStream { handle = nil, parent_descriptor = 0, excess = "" }
+--- Stable writable standard-output stream of the Titan process.
+-- @usage standard-library-os.md
+stdout: OutputStream = OutputStream { handle = nil, parent_descriptor = 1 }
+--- Stable writable standard-error stream of the Titan process.
+-- @usage standard-library-os.md
+stderr: OutputStream = OutputStream { handle = nil, parent_descriptor = 2 }
+
+local function byte_at(text: string, index: integer): integer
+  local bytes = text as foreign const *unsigned char
+  return bytes[index - 1] as integer
+end
+
+local function reject_embedded_nul(text: string, subject: string)
+  local index = 1
+  while index <= #text do
+    if byte_at(text, index) == 0 then
+      raise subject .. " contains an embedded NUL"
+    end
+    index = index + 1
+  end
+end
+
+local function contains_conversion(options: string,
+                                   conversion: integer): boolean
+  local index = 1
+  while index <= #options do
+    if byte_at(options, index) == conversion then return true end
+    index = index + 1
+  end
+  return false
+end
+
+local function validate_date_format(format: string)
+  -- This is Lua 5.5's C99 conversion set. Keeping the validation here avoids
+  -- silently accepting host extensions that the corresponding Lua build
+  -- rejects before calling strftime.
+  local ordinary = "aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%"
+  local after_e = "cCxXyY"
+  local after_o = "deHImMSuUVwWy"
+  local index = 1
+  while index <= #format do
+    if byte_at(format, index) == 37 then
+      index = index + 1
+      if index > #format then
+        raise "invalid conversion specifier '%'"
+      end
+      local conversion = byte_at(format, index)
+      if conversion == 69 or conversion == 79 then
+        local modifier = conversion
+        index = index + 1
+        if index > #format then
+          raise "invalid conversion specifier '%" ..
+                string.sub(format, index - 1) .. "'"
+        end
+        conversion = byte_at(format, index)
+        local choices = after_e
+        if modifier == 79 then choices = after_o end
+        if not contains_conversion(choices, conversion) then
+          raise "invalid conversion specifier '%" ..
+                string.sub(format, index - 1, index) .. "'"
+        end
+      elseif not contains_conversion(ordinary, conversion) then
+        raise "invalid conversion specifier '%" ..
+              string.sub(format, index, index) .. "'"
+      end
+    end
+    index = index + 1
+  end
+end
+
+local function formatted_date(format: string,
+                              calendar: foreign *tm): string
+  if #format == 0 then return "" end
+  validate_date_format(format)
+
+  -- Lua renders each conversion into a 250-byte scratch fragment. A complete
+  -- result that every one of those fragments can represent is therefore
+  -- bounded by 250 bytes per format byte. Grow up to that compatibility
+  -- bound; zero at the bound means the valid format expanded to empty.
+  if #format > (9223372036854775807 - 1) // 250 then
+    raise "date result is too large"
+  end
+  local maximum = #format * 250 + 1
+  local capacity = 128
+  if maximum < capacity then maximum = capacity end
+
+  while true do
+    local buffer = foreign char.new_array(capacity)
+    local written = ffi.strftime(
+      buffer, capacity as foreign size_t, format, calendar)
+    if written ~= 0 then
+      local length = written as integer
+      local result = foreign char.new_array(length)
+      ffi.memcpy(
+        result as foreign *char,
+        buffer as foreign const *char,
+        written as foreign size_t)
+      return result as string
+    end
+    if capacity >= maximum then return "" end
+    if capacity > maximum // 2 then
+      capacity = maximum
+    else
+      capacity = capacity * 2
+    end
+  end
+  return ""
+end
+
+local function checked_time_field(number: integer, delta: integer,
+                                  name: string): foreign int
+  if number >= 0 then
+    if number > 2147483647 + delta then
+      raise "time field '" .. name .. "' is out of range"
+    end
+  elseif number < -2147483648 + delta then
+    raise "time field '" .. name .. "' is out of range"
+  end
+  return (number - delta) as foreign int
+end
+
+local function locale_category(name: string): foreign int
+  if name == "all" then return ffi.LC_ALL end
+  if name == "collate" then return ffi.LC_COLLATE end
+  if name == "ctype" then return ffi.LC_CTYPE end
+  if name == "monetary" then return ffi.LC_MONETARY end
+  if name == "numeric" then return ffi.LC_NUMERIC end
+  if name == "time" then return ffi.LC_TIME end
+  raise "invalid locale category '" .. name .. "'"
+end
+
+local function read_input_until(stream: InputStream, delimiter: string,
+                                chop: boolean?): string?
+  if captured_input_is_closed(stream) then return nil end
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
+
+  local builder = string.writer()
+  local tail = ""
+  while true do
+    local chunk? = read_stream(stream)
+    if not chunk then
+      if captured_input_is_closed(stream) then return nil end
+      if #tail > 0 then builder:write(tail) end
+      local result = builder:drain()
+      if #result == 0 then return nil end
+      return result
+    end
+    local bytes = chunk as string
+    local boundary = bytes
+    if #tail > 0 then boundary = tail .. bytes end
+    local match: integer? = string.find(boundary, delimiter)
+    if match then
+      local match_first = match as integer
+      local match_end = match_first + #delimiter - 1
+      local result_end = match_end
+      if chop then result_end = match_first - 1 end
+      if result_end > 0 then
+        builder:write(string.sub(boundary, 1, result_end))
+      end
+      stream.excess = string.sub(boundary, match_end + 1)
+      return builder:drain()
+    end
+    local keep = #delimiter - 1
+    if keep > #boundary then keep = #boundary end
+    local committed = #boundary - keep
+    if committed > 0 then
+      if committed == #boundary then
+        builder:write(boundary)
+      else
+        builder:write(string.sub(boundary, 1, committed))
+      end
+    end
+    tail = string.sub(boundary, committed + 1)
+  end
+  return nil
+end
+
+--- Return the difference between two timestamps in seconds.
+-- @param later Later timestamp.
+-- @param earlier Earlier timestamp.
+-- @return Floating-point second difference.
+-- @usage standard-library-os.md
+function difftime(later: integer, earlier: integer): float
+  return ffi.difftime(
+    later as foreign time_t,
+    earlier as foreign time_t) as float
+end
+
+--- Format a timestamp or return a Date record using the *t format.
+-- @param format C-style format; nil selects %c and leading ! selects UTC.
+-- @param timestamp Timestamp; nil selects the current time.
+-- @return Formatted string or Date record boxed as value.
+-- @usage standard-library-os.md
+function date(format: string?, timestamp: integer?): value
+  local actual_format = "%c"
+  if format then actual_format = format as string end
+  reject_embedded_nul(actual_format, "date format")
+
+  local utc = false
+  if #actual_format > 0 and byte_at(actual_format, 1) == 33 then
+    utc = true
+    actual_format = string.sub(actual_format, 2)
+  end
+
+  local instant = os_time() as foreign time_t
+  if timestamp then
+    instant = (timestamp as integer) as foreign time_t
+  end
+  local calendar = ffi.localtime(instant)
+  if utc then calendar = ffi.gmtime(instant) end
+  if not calendar then
+    raise "date result cannot be represented in this installation"
+  end
+
+  if actual_format == "*t" then
+    local isdst: boolean? = nil
+    if calendar.tm_isdst >= 0 then
+      isdst = calendar.tm_isdst ~= 0
+    end
+    return Date {
+      year = (calendar.tm_year as integer) + 1900,
+      month = (calendar.tm_mon as integer) + 1,
+      day = calendar.tm_mday as integer,
+      hour = calendar.tm_hour as integer,
+      min = calendar.tm_min as integer,
+      sec = calendar.tm_sec as integer,
+      wday = (calendar.tm_wday as integer) + 1,
+      yday = (calendar.tm_yday as integer) + 1,
+      isdst = isdst,
+    }
+  end
+  return formatted_date(actual_format, calendar)
+end
+
+--- Query or change the process-wide locale category.
+-- @param locale Locale name, empty for environment selection, or nil to query.
+-- @param category Locale category; nil selects all.
+-- @return Selected locale name, or nil if unavailable.
+-- @usage standard-library-os.md
+function setlocale(locale: string?, category: string?): string?
+  local actual_category = "all"
+  if category then actual_category = category as string end
+  reject_embedded_nul(actual_category, "locale category")
+  local category_id = locale_category(actual_category)
+
+  local selected = ffi.setlocale(category_id, nil)
+  if locale then
+    local requested = locale as string
+    reject_embedded_nul(requested, "locale name")
+    selected = ffi.setlocale(category_id, requested)
+  end
+  if not selected then return nil end
+  return selected as string
+end
+
+--- Return the current timestamp or normalize a supplied local calendar date.
+-- @param year Calendar year; omit all calendar fields for the current timestamp.
+-- @param month Month number, required with a calendar year.
+-- @param day Day of month, required with a calendar year.
+-- @param hour Hour; nil defaults to noon.
+-- @param min Minute; nil defaults to zero.
+-- @param sec Second; nil defaults to zero.
+-- @param isdst Daylight-saving hint, or nil to let the host decide.
+-- @return Integer timestamp.
+-- @usage standard-library-os.md
+function time(year: integer?, month: integer?, day: integer?,
+              hour: integer?, min: integer?, sec: integer?,
+              isdst: boolean?): integer
+  if not year and not month and not day then
+    if hour then
+      raise "time requires year, month, and day together"
+    end
+    if min then
+      raise "time requires year, month, and day together"
+    end
+    if sec then
+      raise "time requires year, month, and day together"
+    end
+    if isdst == true or isdst == false then
+      raise "time requires year, month, and day together"
+    end
+    return os_time()
+  end
+  if not year or not month or not day then
+    raise "time requires year, month, and day together"
+  end
+
+  local actual_hour = 12
+  local actual_minute = 0
+  local actual_second = 0
+  if hour then actual_hour = hour as integer end
+  if min then actual_minute = min as integer end
+  if sec then actual_second = sec as integer end
+
+  local calendar = foreign tm.new()
+  calendar.tm_year = checked_time_field(year as integer, 1900, "year")
+  calendar.tm_mon = checked_time_field(month as integer, 1, "month")
+  calendar.tm_mday = checked_time_field(day as integer, 0, "day")
+  calendar.tm_hour = checked_time_field(actual_hour, 0, "hour")
+  calendar.tm_min = checked_time_field(actual_minute, 0, "min")
+  calendar.tm_sec = checked_time_field(actual_second, 0, "sec")
+  calendar.tm_isdst = -1 as foreign int
+  if isdst == false then
+    calendar.tm_isdst = 0 as foreign int
+  elseif isdst == true then
+    calendar.tm_isdst = 1 as foreign int
+  end
+
+  local instant = ffi.mktime(calendar)
+  if instant == (-1 as foreign time_t) then
+    raise "time result cannot be represented in this installation"
+  end
+  return instant as integer
+end
+
+--- Read a process environment variable.
+-- @param name Variable name.
+-- @return Value, or nil when absent.
+-- @usage standard-library-os.md
+function getenv(name: string): string?
+  return os_getenv(name)
+end
+
+--- Set a process-wide environment variable.
+-- @param name Variable name.
+-- @param contents New value.
+-- @usage standard-library-os.md
+function setenv(name: string, contents: string)
+  os_setenv(name, contents)
+end
+
+--- Remove a process-wide environment variable.
+-- @param name Variable name.
+-- @usage standard-library-os.md
+function unsetenv(name: string)
+  os_unsetenv(name)
+end
+
+--- Request graceful program exit after Task and native ownership cleanup.
+-- @param code Exit code; nil selects zero.
+-- @usage standard-library-os.md
+function exit(code: integer?)
+  local actual_code = 0
+  if code then actual_code = code as integer end
+  os_exit(actual_code)
+end

@@ -657,7 +657,7 @@ pairs each rule with a wrong and a right example.
      `*-native.h` header. It takes formals and returns a status or fills a
      plain struct (rule 2), and its comment names the platform difference.
      Classification, mapping to public errors, retries, and ownership stay in
-     Titan (`titan/os_platform.h` and its callers in `titan.os`). A platform
+     Titan (`titan/os/os_platform.h` and its callers in `titan.os`). A platform
      fact that takes no argument is not a function: define a macro on every
      platform (`TITAN_PATH_WINDOWS` in `titan/path_platform.h`) and read it
      through `ffi` as a constant.
