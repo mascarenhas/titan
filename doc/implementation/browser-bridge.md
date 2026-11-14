@@ -20,7 +20,7 @@ runner, deployment, and fatal engine classifications.
 | Installed C layout and JS import contract | `titan-runtime/titan/browser.h` |
 | Browser-only Titan API, pin table, foreign trampolines, and protected entries | `titan/browser.browser.titan` |
 | Generated image launcher and weak C export forwards | `titan-compiler/browserentry.lua` and `driver.browser_entrypoint_contents` |
-| JSPI owner, bridge imports, loader, and trace adapter | the four [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
+| JSPI owner, bridge imports, loader, trace adapter, and standalone portable peer | the five [JavaScript files](#javascript-files) under `titan-runtime/browser/` |
 | Browser runtime/provider staging | `Makefile` and `scripts/browser_sdk.lua` |
 
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
@@ -43,6 +43,7 @@ shipped file is justified by the capability in its last column.
 | `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner. It keeps no state | Emscripten import glue |
 | `titan-browser.mjs` (embedded in each image) | The loader: `create` and `BrowserOwner`, in the parts listed below | See below |
 | `titan-browser-trace.js` (`--js-library`) | The index built from the fetched `.wasm.map`, stack capture into C-owned records, and symbolization ([trace metadata](browser-target.md#eager-map-loader-and-trace-metadata)) | Engine stack capture; fetching and parsing the map outside the Wasm heap |
+| `titan-protobuf.mjs` (standalone SDK module) | The portable protobuf peer: retains no per-call state, shares a class table only when the caller supplies one, and is not part of any image | Building and reading JavaScript values and classes: records, union variants, Arrays, BigInts, byte arrays, and strings |
 
 The loader's parts:
 
@@ -747,6 +748,28 @@ closed or collected, callable results that follow their holders, and
 fixture wraps `malloc` to fail one call).
 Initializer failure has a separate real Titan image with a
 suspended cleanup coroutine and `main` error-conversion checks.
+
+`browser.portable_tests`, in
+`spec/stdlib/titan/browser/portable_tests.browser.titan`, is a second native
+owner requiring host bindings rather than the ordinary browser stdlib gate.
+`spec/fixtures/browser_bridge/portable.mjs` first runs `peerTests()` from
+`portable-peer.mjs`, then exchanges real-image `BrowserValue.is_bytes` values
+with the SDK's standalone `titan-protobuf.mjs`. The bridge spec stages the
+installed peer beside the driver; neither the loader nor bridge libraries
+import it.
+
+The driver checks both directions against independently constructed values
+and Titan-produced golden bytes: generated record and variant classes, i64
+and float tags, binary and marked text, Array holes and constness, dynamic
+arms and closed nominal sets, repeated and recursive graphs, public record
+construction, encode-only views, private variants, and refusal without
+running transfer hooks. It checks shared class tables and recovery after
+both peer and Titan errors. Separate fresh instances exercise payloads larger
+than the initial heap in each direction. A fixture callable reports the
+public Emscripten `emscripten_get_heap_size()` result before and after, so the
+driver asserts actual memory growth without exposing the loader's private
+Module. Encode/decode timings for 10,000 integers are informational. All rows
+run under Node and Chromium with both assertion profiles.
 
 Drives themselves are exercised by `spec/coder/browser_scheduler_spec.lua`
 with the fixture `spec/fixtures/browser_scheduler/`: a test-owned mini driver

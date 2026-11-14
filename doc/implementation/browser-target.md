@@ -57,7 +57,8 @@ The implementation is spread over:
   `titan-browser-trace.h`, the Emscripten JavaScript libraries
   `titan-browser-library.js`, `titan-browser-bridge.js`, and
   `titan-browser-trace.js`, the loader source `titan-browser.mjs` that
-  `browserlink.embed` places in every image, and the runner
+  `browserlink.embed` places in every image, the standalone portable peer
+  `titan-protobuf.mjs`, and the runner
   `titan-browser-run` with `titan-browser-run.mjs`,
   `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`; and
 * the Make targets `lua-browser` (`scripts/lua_browser.sh`), `browser-sdk`
@@ -266,6 +267,12 @@ prefix`.
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
 | `provider` | `titan.a` | the browser standard provider: thirteen shared core roots, `titan.async` and `titan.timer` with browser variants, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
+
+The SDK also installs `titan-protobuf.mjs` in `titan_bin`. This standalone ES
+module encodes and decodes copied JavaScript values using a portable protobuf
+description. Pages deploy and import it separately; the compiler neither
+links it nor embeds it in an image, so it is not a `browserlink.sdk_assets`
+entry.
 
 None of the five runtime sources is compiled with `-fPIC`, LTO, or
 libbacktrace; their host-only paths compile out under the browser target
@@ -783,11 +790,12 @@ instead of this gate.
 
 ### Nesting limits
 
-Browser and native builds share the 128-level codec budget in `transfer.h`:
-the innermost field consumes one level, so a structural record chain accepts
-127 records. Generated and reflective protobuf paths, `protobuf.schema`,
-`TransferValue`, and packet encode/decode share that policy and ordinary
-error string. The browser descriptor no longer overrides it.
+Browser and native builds share the 128-level codec budget in `transfer.h`.
+The innermost field consumes one level: a nominal-root structural record
+chain accepts 127 records, while protobuf's anonymous field root adds a level
+and accepts 126, rejecting 127. Generated and reflective protobuf paths,
+`protobuf.schema`, `TransferValue`, and packet encode/decode share the budget
+and ordinary error string. The browser descriptor does not override it.
 Reflective coroutine-stack boundary tests exercise the shared budget on
 both targets.
 

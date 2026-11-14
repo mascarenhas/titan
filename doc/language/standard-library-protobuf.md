@@ -37,9 +37,10 @@ deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
 
 record PortableCodec  -- private state
 portable(fields: const {reflect.Type},
-         dynamic: const {reflect.Type}?): PortableCodec
+         dynamic: const {reflect.Type}?, text: const {string}?): PortableCodec
 PortableCodec:encode(...: value): string
 PortableCodec:decode(bytes: string): (...: value)
+PortableCodec:describe(): string
 
 serialize_to_buffer(buf: foreign *void, candidate: value)
 serialize_fields_to_buffer(buf: foreign *void,
@@ -334,6 +335,74 @@ are quoted. For example, a hooked record reports
 `protobuf: $[1]: <name> has transfer hooks`, and a resource reports
 `protobuf: $[1]: <name> is a packet resource and is not portable`.
 
+### Schema descriptions and text positions
+
+`codec:describe()` returns cached JSON text for an external peer. The format is
+target-neutral and deterministic: root fields retain their order, and nominal
+entries are sorted by qualified name. It contains no version field.
+
+```json
+{"fields":[["nominal","app.Point"],"value"],"nominals":{"app.Point":{"module":"app","record":[["x","integer"],["label","bytes"]]}}}
+```
+
+The top-level object has `fields`, an Array of type descriptions, and
+`nominals`, an object keyed by qualified nominal name. Each nominal entry has
+`module`, the declaring module name also carried by a dynamic nominal's wire
+arm, and exactly one of:
+
+| Entry | Ordered contents |
+| --- | --- |
+| `"record"` | `[fieldName, T]` pairs for public fields in declaration order |
+| `"union"` | `[variantName, parts]` pairs for public variants in public-ordinal order |
+
+A variant's `parts` is an Array of `[partName, T]` pairs. A part name is always
+a string: the declared name, or `"value"` for a single-type shorthand such as
+`count(integer)`. An empty variant has an empty parts Array. Local fields and
+private variants never appear. The nominal table includes every reachable and
+additional `dynamic` nominal, including recursive types.
+
+| Type description `T` | Meaning |
+| --- | --- |
+| `"nil"`, `"boolean"`, `"integer"`, `"float"` | Corresponding scalar |
+| `"bytes"` | Titan string, interpreted as bytes by the peer |
+| `"text"` | Titan string marked as UTF-8 text for the peer |
+| `"value"` | Self-describing dynamic value |
+| `["option", T]` | Optional `T` |
+| `["array", constness, T]` | Array of `T`; constness is `"mutable"`, `"const"`, or `"maybe"` |
+| `["nominal", qualifiedName]` | Reference to an entry in `nominals` |
+
+The optional `text` argument to `portable` lists string positions whose
+description should use `"text"` instead of `"bytes"`:
+
+| Path | Position |
+| --- | --- |
+| `"<n>"` | Root field `n`, written as its 1-based decimal index |
+| `"<Nominal>.<field>"` | Public record field, using the qualified nominal name |
+| `"<Nominal>.<variant>.<part>"` | Named part of a public union variant |
+
+A position may be a string inside any number of Options and Arrays; the
+wrappers remain in the description and the string leaf becomes `"text"`.
+For example, an explicit descriptor
+`reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+reflect.Type.is_option(reflect.Type.is_string()))`
+becomes `["array","mutable",["option","text"]]` when marked. Source `{T?}`
+is canonicalized to `{T}`, so its reflected Array element has no Option
+wrapper. Marking a field affects that field wherever its nominal occurs in
+the codec. Repeated paths are harmless.
+
+Creation raises an error naming the text path if it does not resolve, names
+an unlisted nominal, or designates anything other than a string through
+Options and Arrays. A `value` position cannot be marked as text. Text marks
+change only the description: Titan encoding and decoding remain byte-for-byte
+unchanged and do not validate UTF-8.
+
+For JavaScript classes, text and byte representations, shared class tables,
+and peer error codes and paths, see
+[Copying typed values](standard-library-browser.md#copying-typed-values).
+The standalone SDK peer accepts canonical Titan output; it is stricter than
+the native decoder about groups, wrong wire kinds in repeated scalars, and
+invalid UTF-8 in dynamic nominal names.
+
 ## Eligible values
 
 For ordinary protobuf entries, every encountered Titan nominal type must be
@@ -443,13 +512,14 @@ Nested encoding and decoding failures use the [error paths](#errors) above
 when a replay in trace mode reproduces the failure.
 
 Nesting is limited on every encoding, decoding, and schema path, generated or
-reflective. Levels count nested messages and the fields of the innermost one:
-a chain of records whose innermost record has a field holds at most 127 records
-on native and browser targets, on the main stack or inside a Task or
-coroutine. Deeper input raises the ordinary catchable
-error `protobuf: nesting exceeds 128 levels`, with an error-path suffix for
-located encoding or decoding failures. This bounds the codec's own traversal,
-not stack already used by its caller.
+reflective. Levels count nested messages and the fields of the innermost one.
+A nominal-root chain whose innermost record has a field holds at most 127
+records; putting that chain in an anonymous root field adds a level, allowing
+126 records and rejecting 127. These bounds apply on native and browser
+targets, on the main stack or inside a Task or coroutine. Deeper input raises
+the ordinary catchable error `protobuf: nesting exceeds 128 levels`, with an
+error-path suffix for located encoding or decoding failures. This bounds the
+codec's own traversal, not stack already used by its caller.
 
 String entry points keep their input alive throughout decoding, including
 while a custom decoder runs after the caller has dropped its last reference to
