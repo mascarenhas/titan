@@ -6481,6 +6481,8 @@ printf '%s\n' "${schedule[@]}"
             for _, contract in ipairs({
                 "for (const assertions of [2, 0])",
                 "['integration.mjs', 0,",
+                "`assertions-${assertions}/public-states.mjs`",
+                "status === 0 ? images : images.slice(0, 1)",
                 "['unhandled.mjs', 74,",
                 "['unhandled-result.mjs', 74,",
                 "['poison-retirement.mjs', 70, 'poison-retirement-complete']",
@@ -6496,6 +6498,11 @@ printf '%s\n' "${schedule[@]}"
             }) do
                 assert.truthy(bridge_gate:find(contract, 1, true), contract)
             end
+            -- integration.mjs requires its third image; the CI builder makes it
+            -- exactly as browser_bridge_spec.lua does.
+            local bridge_builder = read_file("spec/browser/build-bridge.lua")
+            assert.truthy(bridge_builder:find(
+                '{name="public-states", owner="browser.public_state_tests", testing=true,', 1, true), bridge_builder)
             local vite_install = named_step(playwright_job,
                 "Install the pinned Vite deployment dependency")
             assert.truthy(vite_install:find("if: matrix.engine == 'chromium'", 1, true))

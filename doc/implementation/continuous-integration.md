@@ -464,10 +464,13 @@ runner with a 60-minute timeout after `build-compiler`:
 7. **Persistent bridge gate (all six cells).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
    `browser.tests` image with its independent-state C helper, the failed
-   initializer image, the html5 click counter of synchronous C callbacks
-   with its C helper, and the async driver's responsiveness program
-   (`responsive.titan`), each with assertions 2 and 0. It stages those images
-   and the portable JavaScript fixtures in `out/browser/bridge-<profile>-<engine>`.
+   initializer image, the `browser.public_state_tests` image of public
+   `lua.new` lifetimes (same C helper), the html5 click counter of
+   synchronous C callbacks with its C helper, and the async driver's
+   responsiveness program (`responsive.titan`), each with assertions 2 and 0.
+   It stages those images and the portable JavaScript fixtures in
+   `out/browser/bridge-<profile>-<engine>`. `integration.mjs` receives the
+   first three images, and the negative scripts only the legacy bridge image.
    The cell's managed engine runs the full lifecycle, typed values, callbacks,
    notification, request, stdio, state-close and collection suite;
    `counter.mjs` clicks the counter's buttons on the page (`COUNTER

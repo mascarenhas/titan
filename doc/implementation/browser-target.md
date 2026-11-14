@@ -3871,9 +3871,11 @@ hosts`).
   `spec/fixtures/browser_bridge/`, and the browser-only owner
   `spec/stdlib/titan/browser/` — the persistent bridge gate in both assertion
   modes under Node and Chromium: the native `browser.tests` image with its
-  independent-state C helper and the failed-initializer image, driven by
+  independent-state C helper, the failed-initializer image and the
+  `browser.public_state_tests` image of public `lua.new` lifetimes, driven by
   `integration.mjs` through lifecycle, typed values, callbacks, notifications,
-  requests, stdio, state close, and WeakRef collection, plus the
+  requests, stdio, state close, public-state invalidation, and WeakRef
+  collection, plus the
   unhandled-rejection (74) and poisoned-retirement (70) diagnostics, and, on
   Chromium, the html5 click counter of synchronous C callbacks and the async
   driver's responsiveness page test (`responsive.mjs`, titan#334)
