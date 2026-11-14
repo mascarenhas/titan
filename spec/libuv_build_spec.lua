@@ -2975,6 +2975,8 @@ int main(void) {
             assert.same({ "titan/lua/lua.titan", "titan/lua/background.native.titan",
                 "titan/lua/loading.browser.titan", "titan/lua/loading.native.titan", "titan/lua/worker.titan" },
                 makefile_words("LUA_TITAN_SOURCES"))
+            assert.same({}, undeclared_folder_sources(
+                makefile_words("LUA_TITAN_SOURCES"), "titan/lua", "titan/lua/"))
             assert.same({ "titan/lua/native.h" },
                 makefile_words("LUA_TITAN_HEADERS"))
             assert.same({
