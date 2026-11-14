@@ -1,0 +1,9 @@
+function send_closure(handle: value)
+  async.send(handle as foreign *void,
+    async.TransferValue.from_value(closure_shared_boxes()))
+end
+
+function send_custom_record(handle: value)
+  async.send(handle as foreign *void,
+    async.TransferValue.from_value(payload_record_value(97)))
+end

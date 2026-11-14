@@ -116,11 +116,6 @@ function closure_shared_boxes(): function (): integer
   end
 end
 
-function send_closure(handle: value)
-  async.send(handle as foreign *void,
-    async.TransferValue.from_value(closure_shared_boxes()))
-end
-
 function closure_nominal(): function (): integer
   local const item = record_value(53)
   return function (): integer return item.number + item.entries[3] end
@@ -226,6 +221,13 @@ function closure_optional_managed_pointer(present: boolean): function (): boolea
   return function (): boolean return pointer == nil end
 end
 
+local payload_encodes = 0
+local payload_decodes = 0
+
+function payload_hook_counts(): (integer, integer)
+  return payload_encodes, payload_decodes
+end
+
 record PayloadRecord
   local number: integer
   local text: string
@@ -237,11 +239,13 @@ local function payload_fields(): const {reflect.Type}
 end
 
 function PayloadRecord:to_transfer_payload(): string
+  payload_encodes = payload_encodes + 1
   gc.collect()
   return protobuf.serialize_fields(payload_fields(), self.number, self.text, false, nil)
 end
 
 function PayloadRecord.from_transfer_payload(payload: string): PayloadRecord
+  payload_decodes = payload_decodes + 1
   local number: integer, text: string, flag: boolean, empty: value =
     protobuf.deserialize_fields(payload, payload_fields())
   gc.collect()
@@ -334,11 +338,6 @@ function closure_custom_policy(): function (): integer
       return restored:number_value()
     else raise "captured custom TransferValue policy was unwrapped" end
   end
-end
-
-function send_custom_record(handle: value)
-  async.send(handle as foreign *void,
-    async.TransferValue.from_value(payload_record_value(97)))
 end
 
 record EnvelopeWithPayload
