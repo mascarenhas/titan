@@ -1,0 +1,6 @@
+local test = import "test"
+local asynclib = import "async"
+
+function test_initializer_completed(_: test.Context)
+  test.assert(test.testing(), "async initialized without an active runner")
+end

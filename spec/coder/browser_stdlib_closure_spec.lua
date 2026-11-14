@@ -31,9 +31,11 @@ describe("browser stdlib real-toolchain closure", function()
         assert.is_true(result.ok, result.output)
         return result.output
     end
-    local function closure(info, output)
-        return strategy:run({ info.prefix .. "/bin/lua", "-E", "scripts/check_browser_stdlib.lua", "closure",
-            output, info.sdk_root .. "/titan.a", output .. "/intruder.wasm" }, { stderr_to_stdout = true })
+    local function closure(info, output, source_tree)
+        local argv = { info.prefix .. "/bin/lua", "-E", "scripts/check_browser_stdlib.lua", "closure",
+            output, info.sdk_root .. "/titan.a", output .. "/intruder.wasm" }
+        if source_tree then argv[#argv + 1] = source_tree end
+        return strategy:run(argv, { stderr_to_stdout = true })
     end
 
     local function compile(info, output, extra)
@@ -113,6 +115,82 @@ describe("browser stdlib real-toolchain closure", function()
         local empty = strategy:run(argv, { stderr_to_stdout = true })
         assert.is_false(empty.ok, empty.output)
         assert.truthy(empty.output:find("selected no cases", 1, true), empty.output)
+    end)
+
+    it("rejects every absent standard module at compile time by its module name", function()
+        local info = fixture({ sdk = true })
+        if not info then return end
+        for _, module in ipairs(checks.absent_modules) do
+            local name = "missing_" .. module:sub(7)
+            write(name .. ".titan", "local missing = import " .. string.format("%q", module:sub(7)) .. "\n")
+            local result = strategy:run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser",
+                "--tree", workspace, "--output", workspace .. "/missing-out", name },
+                { stderr_to_stdout = true })
+            assert.is_true(result.started, result.output)
+            assert.is_false(result.ok, result.output)
+            assert.truthy(result.output:find(module, 1, true), result.output)
+        end
+    end)
+
+    it("checks real-tree sources and rejects injected absent imports through the closure command", function()
+        local info = fixture({ sdk = true })
+        if not info then return end
+        write("intruder.titan", "function main(_: {string}): integer return 0 end\n")
+        local output = workspace .. "/source-out"
+        compile(info, output)
+        local control = closure(info, output)
+        assert.is_true(control.ok, control.output)
+        files.mkdir(workspace .. "/titan")
+        for _, module in ipairs(checks.absent_modules) do
+            write("titan/source_intruder.browser.titan",
+                "local missing = import " .. string.format("%q", module:sub(7)) .. "\n")
+            local result = closure(info, output, workspace)
+            assert.is_true(result.started, result.output)
+            assert.is_false(result.ok, result.output)
+            assert.truthy(result.output:find(module, 1, true), result.output)
+        end
+    end)
+
+    it("keeps absent modules out of SDK objects and archives even with neutral member names", function()
+        local info = fixture({ sdk = true })
+        if not info then return end
+        assert(checks.check_archive(info.sdk_root .. "/titan.a"))
+        files.mkdir(workspace .. "/titan")
+        local argv = { info.prefix .. "/bin/titanc", "-q", "--target", "browser",
+            "--tree", workspace, "--output", workspace .. "/absent-out" }
+        local wanted = {}
+        for _, module in ipairs(checks.absent_modules) do
+            write("titan/" .. module:sub(7) .. ".titan", "function marker(): integer return 7 end\n")
+            argv[#argv + 1] = module
+            wanted[module] = true
+        end
+        run(argv)
+        local archive = workspace .. "/absent-out/titan.a"
+        local metadata = require "titan-compiler.staticmetadata"
+        local scanned = assert(metadata.scan_archive(archive))
+        local ok, err = checks.check_archive(archive, scanned)
+        assert.is_nil(ok)
+        assert.truthy(err:find("forbidden browser stdlib module", 1, true), err)
+        local found = {}
+        for _, member in ipairs(scanned.members) do
+            local module = member.object.metadata and member.object.metadata.module
+            if wanted[module] then
+                found[module] = true
+                local objects = workspace .. "/objects-" .. module:sub(7)
+                files.mkdir(objects)
+                local object = objects .. "/neutral.o"
+                assert(strategy:write_file(object, member.bytes))
+                ok, err = checks.check_output(strategy, objects)
+                assert.is_nil(ok)
+                assert.truthy(err:find(module, 1, true), err)
+                local neutral = workspace .. "/neutral-" .. module:sub(7) .. ".a"
+                run({ info.tools.ar[1], "rcs", neutral, object })
+                ok, err = checks.check_archive(neutral)
+                assert.is_nil(ok)
+                assert.truthy(err:find(module, 1, true), err)
+            end
+        end
+        assert.same(wanted, found)
     end)
 
     it("rejects a certified injected libuv header, an archive payload and an authored-C output symbol", function()

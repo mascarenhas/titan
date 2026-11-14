@@ -1,0 +1,6 @@
+local test = import "test"
+local lualib = import "lua"
+
+function test_initializer_completed(_: test.Context)
+  test.assert(test.testing(), "lua initialized without an active runner")
+end

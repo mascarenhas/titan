@@ -6,6 +6,8 @@ local coder = require "titan-compiler.coder"
 local coder_names = require "titan-compiler.coder.names"
 local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
+local browser_checks = dofile("scripts/browser_stdlib.lua")
+local browser_fixtures = require "spec.support.browser_fixtures"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local module_symbols = require "spec.support.module_symbols"
@@ -1152,6 +1154,18 @@ esac
                 end
             end
         end
+    end)
+
+    it("keeps every compiler-selected browser stdlib source free of absent-module imports", function()
+        if platform.windows then pending("browser source resolution requires a supported host"); return end
+        assert.same(makefile_words("BROWSER_STDLIB_ROOTS"), assert(browser_checks.browser_roots(compiler_io.new_sync())))
+        local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
+        local context = driver._new_resolver_context({ target = "browser" }, descriptor)
+        local called, ok, err = pcall(browser_checks.check_sources, context, ".")
+        local closed, close_error = driver.close_resolver_context(context)
+        assert.is_true(called, ok)
+        assert.is_true(closed, close_error)
+        assert.is_true(ok, err)
     end)
 
     it("gates identical SDK reinstalls on certified module, native and final hits", function()

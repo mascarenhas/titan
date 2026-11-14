@@ -1,0 +1,6 @@
+local test = import "test"
+local oslib = import "os"
+
+function test_initializer_completed(_: test.Context)
+  test.assert(test.testing(), "os initialized without an active runner")
+end

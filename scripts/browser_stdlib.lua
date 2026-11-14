@@ -6,7 +6,95 @@ local depfile = require "titan-compiler.depfile"
 local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
+local build = require "titan-compiler.build"
 local M = {}
+
+M.absent_modules = {
+    "titan.uv", "titan.net", "titan.ssl", "titan.thread", "titan.sqlite3",
+    "titan.websocket", "titan.fs", "titan.http",
+}
+local absent_modules = {}
+for _, name in ipairs(M.absent_modules) do absent_modules[name] = true end
+
+-- The Make inventory is literal, with the same continuation convention as the
+-- native source audits. Gates consume it instead of keeping another root list.
+function M.browser_roots(strategy, filename)
+    local contents, err = strategy:read_file(filename or "Makefile")
+    if not contents then return nil, err end
+    local roots, collecting, found = {}, false, false
+    for line in (contents .. "\n"):gmatch("(.-)\n") do
+        local value = collecting and line or
+            line:match("^BROWSER_STDLIB_ROOTS%s*:=%s*(.*)$")
+        if value then
+            found = true
+            collecting = value:match("\\%s*$") ~= nil
+            for root in value:gsub("\\%s*$", ""):gmatch("%S+") do
+                roots[#roots + 1] = root
+            end
+            if not collecting then break end
+        end
+    end
+    if not found or collecting or #roots == 0 then
+        return nil, "missing, empty or unterminated BROWSER_STDLIB_ROOTS"
+    end
+    return roots
+end
+
+-- Discover logical candidates, but let the compiler choose their actual files:
+-- defaults shadowed by variants and constituents of absent folders stay unread.
+-- The caller owns an activated browser resolver context.
+function M.check_sources(context, tree)
+    local strategy, modules, sources = context.io, {}, {}
+    local function inspect(name)
+        if modules[name] or not staticmetadata.valid_module_name(name) then return true end
+        modules[name] = true
+        local source, err = driver.resolve_source(context, name, tree)
+        if err then return nil, err end
+        if not source or source.kind == "blocked" then return true end
+        for _, file in ipairs(source.files or { source.main }) do
+            if not sources[file] then
+                sources[file] = true
+                local imports
+                imports, err = build.imports_for(strategy, { main = file })
+                if not imports then return nil, err end
+                for _, import in ipairs(imports) do
+                    if absent_modules[import.name] then
+                        return nil, file .. ": forbidden browser stdlib import " .. import.name
+                    end
+                end
+            end
+        end
+        return true
+    end
+    local function visit(directory, prefix)
+        local entries, err = strategy:list(directory)
+        if not entries then return nil, err end
+        table.sort(entries, util.bytewise_less)
+        if prefix ~= "titan" then
+            local ok
+            ok, err = inspect(prefix)
+            if not ok then return nil, err end
+        end
+        for _, name in ipairs(entries) do
+            local filename = directory .. "/" .. name
+            local info
+            info, err = strategy:stat(filename)
+            if not info then return nil, err end
+            local ok = true
+            if info.kind == "directory" then
+                ok, err = visit(filename, prefix .. "." .. name)
+            elseif info.kind == "file" then
+                local logical = driver.classify_source_filename(name)
+                if logical then
+                    ok, err = inspect(prefix .. "." .. logical:gsub("%.titan$", ""))
+                end
+            end
+            if not ok then return nil, err end
+        end
+        return true
+    end
+    return visit(tree .. "/titan", "titan")
+end
 
 function M.check_path(path)
     local normalized = "/" .. path:gsub("\\", "/"):lower()
@@ -42,6 +130,10 @@ function M.check_headers(record)
 end
 
 local function check_object(object, bytes, origin)
+    local module = object.metadata and object.metadata.module
+    if absent_modules[module] then
+        return nil, origin .. ": forbidden browser stdlib module " .. module
+    end
     for _, symbol in ipairs(object.symbols or {}) do
         local ok, err = M.check_symbol(symbol.name, origin)
         if not ok then return nil, err end

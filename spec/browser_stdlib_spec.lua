@@ -5,11 +5,15 @@ local strategy = require("titan-compiler.io").new_sync()
 local temporary = require "spec.support.temporary"
 local installed_prefix = require "spec.support.installed_prefix"
 local platform = require "titan-compiler.platform"
+local files = require "spec.fixtures.target_selection.support"
+local parser = require "titan-compiler.parser"
+local driver = require "titan-compiler.driver"
+local browser_fixtures = require "spec.support.browser_fixtures"
 
 describe("browser core stdlib build checks", function()
     local scratch = {}
     after_each(function()
-        for _, path in ipairs(scratch) do os.remove(path) end
+        for _, path in ipairs(scratch) do files.remove(path) end
         scratch = {}
     end)
 
@@ -26,6 +30,25 @@ plan:
             "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-f", file, "plan"}
         for _, option in ipairs(overrides or {}) do argv[#argv + 1] = option end
         return strategy:run(argv, {stderr_to_stdout = true})
+    end
+
+    local function source_fixture()
+        local root = temporary.name("-browser-source-closure")
+        scratch[#scratch + 1] = root
+        files.mkdir(root .. "/titan")
+        return root
+    end
+
+    local function source_check(root)
+        -- Restore a validated descriptor exactly as a worker does: source
+        -- resolution needs no Emscripten discovery or compiler invocation.
+        local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
+        local context = driver._new_resolver_context({ io = strategy, target = "browser" }, descriptor)
+        local called, ok, err = pcall(checks.check_sources, context, root)
+        local closed, close_error = driver.close_resolver_context(context)
+        assert.is_true(called, ok)
+        assert.is_true(closed, close_error)
+        return ok, err
     end
 
     it("keeps all twenty-one portable owners in the single-image root inventory", function()
@@ -123,6 +146,52 @@ plan:
         -- the exact native archive members instead of pinning recipe spelling.
     end)
 
+    it("keeps every initializer fixture and child-state root equal to the browser Make inventory", function()
+        local roots = assert(checks.browser_roots(strategy))
+        local wanted = {}
+        for _, root in ipairs(roots) do
+            assert.is_nil(wanted[root], "duplicate browser root " .. root)
+            wanted[root] = true
+        end
+        local function imports(module)
+            local filename = "spec/fixtures/browser_stdlib/" .. module .. ".titan"
+            local seen = {}
+            for _, import in ipairs(assert(parser.scan_imports(assert(strategy:read_file(filename))))) do
+                assert.is_false(import.source_required, filename)
+                assert.is_nil(seen[import.name], filename .. ": duplicate import")
+                seen[import.name] = true
+            end
+            return seen
+        end
+        for _, root in ipairs(roots) do
+            assert.same({ ["titan.test"] = true, [root] = true }, imports("init_" .. root:sub(7)))
+        end
+        assert.same(wanted, imports("init_subset"))
+        assert.same(wanted, imports("init_lua_states"))
+        local filename = "spec/fixtures/browser_stdlib/init_lua_states.titan"
+        local nodes = assert(parser.parse(filename, assert(strategy:read_file(filename))))
+        local list
+        for _, node in ipairs(nodes) do
+            if node._tag == "Ast.TopLevelFunc" and node.name == "test_initializers_in_independent_states" then
+                for _, statement in ipairs(node.block.stats) do
+                    if statement._tag == "Ast.StatDecl" and statement.decls[1].name == "modules" then
+                        assert.is_nil(list, "duplicate child-state root list")
+                        list = statement.exps[1]
+                    end
+                end
+            end
+        end
+        assert.truthy(list, "missing child-state root list")
+        assert.equal("Ast.ExpInitList", list._tag)
+        local seen = {}
+        for _, field in ipairs(list.fields) do
+            assert.equal("Ast.ExpString", field.exp._tag)
+            assert.is_nil(seen[field.exp.value], "duplicate child-state root")
+            seen[field.exp.value] = true
+        end
+        assert.same(wanted, seen)
+    end)
+
     it("rejects forbidden header and archive dependencies including injected libuv headers", function()
         for _, path in ipairs({ "/fixture/uv.h", "/fixture/uv/unix.h", "/fixture/openssl/ssl.h",
             "/fixture/llhttp.h", "/fixture/sqlite3.h", "/fixture/sqlite3ext.h",
@@ -185,6 +254,69 @@ plan:
         local ok, err = checks.check_image(image("uv_closure_intruder"), "intruder.wasm")
         assert.is_nil(ok)
         assert.equal("intruder.wasm: forbidden browser stdlib symbol uv_closure_intruder", err)
+    end)
+
+    it("rejects every absent import only from compiler-selected browser files", function()
+        if platform.windows then pending("browser source resolution requires a supported host"); return end
+        for _, module in ipairs(checks.absent_modules) do
+            local bad = "local missing = import " .. string.format("%q", module:sub(7)) .. "\n"
+            local good = "function value(): integer return 1 end\n"
+            local root = source_fixture()
+            files.write(root .. "/titan/intruder.titan", bad)
+            local function rejected(tree)
+                local ok, err = source_check(tree)
+                assert.is_nil(ok, module)
+                assert.truthy(err:find(module, 1, true), err)
+            end
+            rejected(root)
+            files.write(root .. "/titan/intruder.browser.titan", good)
+            files.write(root .. "/titan/intruder.native.titan", bad)
+            assert(source_check(root))
+            files.write(root .. "/titan/intruder.browser.titan", bad)
+            rejected(root)
+
+            local folder = source_fixture()
+            files.write(folder .. "/titan/owner/owner.native.titan", good)
+            files.write(folder .. "/titan/owner/member.titan", bad)
+            assert(source_check(folder))
+            files.write(folder .. "/titan/owner/owner.browser.titan", good)
+            rejected(folder)
+            files.write(folder .. "/titan/owner/member.browser.titan", good)
+            assert(source_check(folder))
+            -- A bare native.titan is an unlabeled contributor, not a variant.
+            files.write(folder .. "/titan/owner/native.titan", bad)
+            rejected(folder)
+        end
+    end)
+
+    it("uses folder-before-flat and inactive-main fallback in the source audit", function()
+        if platform.windows then pending("browser source resolution requires a supported host"); return end
+        local root = source_fixture()
+        files.write(root .. "/titan/owner.titan", 'local missing = import "fs"\n')
+        files.write(root .. "/titan/owner/owner.titan", "function value(): integer return 1 end\n")
+        assert(source_check(root))
+        assert(os.rename(root .. "/titan/owner/owner.titan", root .. "/titan/owner/owner.native.titan"))
+        local ok, err = source_check(root)
+        assert.is_nil(ok)
+        assert.truthy(err:find("titan.fs", 1, true), err)
+    end)
+
+    it("rejects absent-module artifacts and metadata even under neutral archive member names", function()
+        for _, module in ipairs(checks.absent_modules) do
+            local ok, err = checks.check_archive("provider.a", { members = {
+                { display_name = "neutral.o", bytes = "", object = { metadata = { module = module } } },
+            } })
+            assert.is_nil(ok)
+            assert.truthy(err:find(module, 1, true), err)
+            -- Physical basenames do not confer the titan namespace.
+            assert(checks.check_archive("provider.a", { members = {
+                { display_name = module:sub(7) .. ".o", bytes = "",
+                    object = { metadata = { module = "app." .. module:sub(7) } } },
+            } }))
+        end
+        assert(checks.check_archive("provider.a", { members = {
+            { display_name = "portable.o", bytes = "", object = { metadata = { module = "titan.math" } } },
+        } }))
     end)
 
     it("derives raw foreign entries and fails on any unrecorded member change", function()

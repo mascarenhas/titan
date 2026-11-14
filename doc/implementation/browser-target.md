@@ -507,6 +507,20 @@ members.
 `scripts/browser_stdlib.lua` rejects libuv, OpenSSL, llhttp, and SQLite by
 path, by symbol, and through the evidence each certified input carries:
 
+* **Titan imports** (`check_sources`): logical source candidates below `titan/`
+  are resolved through `driver.resolve_source` with a browser context. Only
+  its selected `source.files` are scanned, through the compiler's
+  `build.imports_for`; a replaced default, an inactive native contributor, or
+  a constituent whose folder main is absent is not read. An import of
+  `uv`, `net`, `ssl`, `thread`, `sqlite3`, `websocket`, `fs`, or `http` fails.
+  This also covers explicit source imports. The native Make audit uses a
+  validated frozen browser descriptor, as worker restoration does, so source
+  selection needs no Emscripten installation there.
+* **Module identity**: the parsed module metadata of each standalone object
+  and archive member must not name any of those eight absent modules. A neutral
+  member filename cannot hide one, while an unrelated application module such
+  as `app.fs` is not mistaken for `titan.fs`.
+
 * **Paths** (`check_path`): a header named `uv.h`, `llhttp.h`, `sqlite3.h`, or
   `sqlite3ext.h`, or below a `uv`, `libuv`, `openssl`, `llhttp`, or `sqlite3`
   directory; and an archive named `libuv`, `libssl`, `libcrypto`,
@@ -547,9 +561,10 @@ archive whose members carry different feature vectors; provider lookup and
 target selection keep their strict scans ([relocatable
 WebAssembly](static-compiled-modules.md#relocatable-webassembly)).
 
-`check_archive` applies the path, symbol, and header checks to an archive and
-every member, `check_output` applies the generated-object, authored-C, and
-link-certificate checks to everything below an output root, and `check_image`
+`check_archive` applies the path, module-identity, symbol, and header checks to
+an archive and every member, `check_output` applies the generated-object,
+authored-C, and link-certificate checks to everything below an output root,
+and `check_image`
 checks a final `.wasm`: its imports, its exports, and every internal function
 name from the `name` section, so a dependency that dead-stripping left only
 internally is still found, and a missing name inventory fails. The check is
@@ -591,6 +606,15 @@ evidence. `spec/browser_sdk_spec.lua` builds the SDK with poisoned ambient
 `CPPFLAGS` and `TITAN_EXTRA_CPPFLAGS` (both name a missing forced header, so
 appending either fails) and requires the provider's non-compiler members to be
 exactly the five LPegLabel objects.
+
+The closure command also checks the selected Titan source tree (the repository
+by default; an optional source-tree argument supports isolated injection
+fixtures). The real-toolchain closure spec requires every absent module's
+import to fail with a diagnostic naming it, and rejects compiled objects and
+neutral-name archives whose metadata claims each absent module. Its source
+injections exercise the command itself; the emsdk-free unit cases also cover
+default and browser contributors, inactive native-only folders,
+folder-before-flat selection, and a bare `native.titan` contributor.
 
 ### Interface-derived member inventory
 
@@ -636,7 +660,7 @@ delivered.
 
 ### Inventory record
 
-| Module | Delivered | Omitted members | Browser test owners | Final initializer (core modules also have init fixtures) | Raw exports |
+| Module | Delivered | Omitted members | Browser test owners | Final initializer (all delivered modules have init fixtures) | Raw exports |
 | --- | --- | --- | --- | --- | --- |
 | `coroutine` | yes | none | `coroutine.tests` (the Lua-host cases are in the native contributor `tests/lua_boundary_test.native.titan`) | allocates the module's `mco_runtime` | none |
 | `gc` | yes | none | `gc.tests` | none | none |
@@ -667,7 +691,35 @@ The browser composition of `titan.async` imports `coroutine`, `gc`, `string`,
 native contributors. `transfer` covers verified same-instance data behavior
 only; no thread, native-resource, or JavaScript-handle feature is implied.
 
-Initialization audit:
+### Initializer audit
+
+The loader opens the stock Lua libraries before module initialization. The
+same ordering holds for independent states created by `lua.new()`. Module-local
+initialization remains state-local; loading `async` in an independent state
+does not register a second driver.
+
+| Module | Browser initialization | Source site |
+| --- | --- | --- |
+| `async` | Builds the nil-result caches and stores the bootstrap hook. The browser backend registers `titan:driver` only in the owner state; it performs no signal or process-argument setup. The launcher reads the same bootstrap registry key. | [`async.titan`](../../titan/async/async.titan#L4070-L4081), [`initialize_backend`](../../titan/async/runtime.browser.titan#L209-L216), [launcher lookup](../../titan-compiler/driver.lua#L10439-L10445) |
+| `timer` | Initializes optional source handles to nil; timeout and interval bindings are opened on first use. | [`timer.browser.titan`](../../titan/timer.browser.titan#L24-L42) |
+| `io` | Imports the selected OS facade and string helpers; no explicit initializer or host operation. | [`io.titan`](../../titan/io.titan) |
+| `os` | Constructs stable parent facades and transfer descriptors, with empty lazy Stdio storage. Sources and kind metadata are acquired only by later stream operations. | [facades](../../titan/os/os.titan#L60-L68), [storage and lazy bindings](../../titan/os/stdio.browser.titan#L7-L119) |
+| `lua` | Creates its loading Map; creating and opening an independent state happens only in `new`, not at module load. The protected state opener installs the same stock profile and searcher as the launcher. | [module storage](../../titan/lua/lua.titan#L21-L24), [`new`](../../titan/lua/lua.titan#L310-L321), [state opener](../../titan/lua/worker.titan#L12-L41) |
+| `browser` | Allocates and registers its state record, callback thread and handlers. Both owner and independent states initialize without an embedding attach step; only the owner identifies itself as the driver owner. | [state allocation](../../titan/browser.browser.titan#L113-L114), [initializer](../../titan/browser.browser.titan#L1494-L1525) |
+| `math` | Seeds its generator. | [initializer](../../titan/math.titan#L571-L573) |
+| `transfer` | Installs protobuf packet-context and nominal-loader callbacks, configures ephemerons, and builds closure-field descriptors. | [initializer](../../titan/transfer.titan#L1390-L1401) |
+| `coroutine` | Allocates its per-state `mco_runtime` in module storage. | [module storage](../../titan/coroutine.titan#L11-L19) |
+| `reflect` | Initializes metatable, hydration, brand and tag tables. | [initializer](../../titan/reflect.titan#L1358-L1363) |
+| `json` | Builds its parsing pattern. | [initializer](../../titan/json/json.titan#L198-L200) |
+| `protobuf` | Retains the state's canonical nominal table, configures the payload ephemeron, and validates its codec handoff. | [initializer](../../titan/protobuf/protobuf.titan#L911-L933) |
+| `peg` | Opens one private LPegLabel engine for the state. | [initializer](../../titan/peg/peg.titan#L855-L857), [engine bootstrap](../../titan/peg/native.titan#L7-L18) |
+| `string` | Computes target facts, builds format and regex parsers and byte tables, and makes the regex cache weak. | [initializer](../../titan/string/string.titan#L972-L982) |
+| `url` | Builds its URL and request-target patterns. | [initializer](../../titan/url.titan#L443-L448) |
+| `path` | Selects the POSIX separator from the target macro, without querying a host path. | [initializer](../../titan/path.titan#L416-L419) |
+| `test` | Eagerly loads the Lua trace scanner and pattern matcher when the stock helpers are available. | [initializer](../../titan/test.titan#L664-L671) |
+| `gc` | No explicit module initializer. | [`gc.titan`](../../titan/gc.titan) |
+| `iteration` | No explicit module initializer. | [`iteration.titan`](../../titan/iteration.titan) |
+| `uv`, `net`, `ssl`, `thread`, `sqlite3`, `websocket`, `fs`, `http` | No browser main is selected. Their imports and SDK module metadata are rejected by the closure checks. | [native-only mains](target-source-selection.md#make-inventories-and-audits), [selection policy](../../titan-compiler/source_selection.lua#L23-L34), [absence checks](../../scripts/browser_stdlib.lua) |
 
 * **`math`.** The automatic seed has two components: `time(NULL) ~ clock()`
   and a value drawn from the generator with `next_random()`, and
@@ -825,17 +877,25 @@ protobuf-startup footprint is not a requirement of current JSPI images.
 ### Initialization and fidelity gate
 
 `spec/coder/browser_stdlib_gate_spec.lua` (a real-toolchain gate file) builds
-fifteen `--test` images from `spec/fixtures/browser_stdlib/` with the `test`
+twenty-three `--test` images from `spec/fixtures/browser_stdlib/` with the `test`
 purpose and assertions 2, and runs them through `gate.mjs` under
-`titan-browser-run --js-test` on Node and Chromium:
+`titan-browser-run --js-test` on Node and Chromium. The isolated fixture list
+comes from `BROWSER_STDLIB_ROOTS`; the emsdk-free inventory spec checks each
+fixture's direct imports, both combined fixtures, and the child-state module
+list against those same roots:
 
-* `init_<module>.titan`, one for each of the thirteen core modules, imports
+* `init_<module>.titan`, one for each of the nineteen delivered roots, imports
   only that module (and the `titan.test` runner every test image has) and must
-  return status 0, run and pass exactly one case, and write nothing to stderr;
-* `init_subset.titan` imports all thirteen core modules and is initialized,
-  run, and
+  return status 0, run and pass exactly one case, and write nothing to stderr.
+  These images use `--no-uv-bootstrap`;
+* a second image of `init_async` omits `--no-uv-bootstrap`, so the same one-case
+  proof also runs through the registered async bootstrap;
+* `init_subset.titan` imports all nineteen roots and is initialized, run, and
   disposed three times through one cached image creator, with a tick and a
-  collection between cycles; and
+  collection between cycles;
+* `init_lua_states.titan` requires each root in a fresh `lua.new()` state, then
+  requires all nineteen in one more fresh state. Every state is explicitly
+  closed; `async` only loads in the child, without trying to drive it; and
 * `fidelity_test.titan` imports the real `coroutine.tests` owner, so its
   browser cases create coroutines first, then writes a marker with NUL, `0xFF`,
   and invalid UTF-8 bytes to stderr and fails a child case whose name and
@@ -844,9 +904,9 @@ purpose and assertions 2, and runs them through `gate.mjs` under
   summary lines, the exact message, and exactly the expected stderr bytes.
 
 The deliberately failing case lives outside every suite root. The browser-only
-`titan.browser` needs explicit JavaScript bindings, so the
-[bridge gates](browser-bridge.md#test-layers) initialize and exercise it
-instead of this gate.
+`titan.browser` participates in the initializer matrix without custom bindings;
+the [bridge gates](browser-bridge.md#test-layers) separately exercise its
+embedding bindings and request lifecycle.
 
 ### Nesting limits
 
