@@ -1,4 +1,5 @@
 local support = import "io.test_support.titan"
+local print_values = import "io.print_values.titan"
 local process_support = import "os.process_test_support.titan"
 
 local function cleanup_print_process(process: system.Process)
@@ -33,7 +34,7 @@ function test_io_print_formats_left_to_right_and_is_atomic(
     _context: test.Context)
   runtime_test.run(function ()
     do
-      local make_printable, conversions = support.load_print_helpers()
+      local make_printable, conversions = print_values.load_print_helpers()
       local read_descriptor, saved_stdout = support.begin_stdout_capture()
       defer support.end_stdout_capture(read_descriptor, saved_stdout)
 

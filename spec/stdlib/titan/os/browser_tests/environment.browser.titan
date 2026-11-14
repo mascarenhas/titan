@@ -1,0 +1,32 @@
+local function outside_exit(...: Value): Value
+  expect_text(function () system.exit(19) end,
+    "os.exit is unavailable outside an async Task on the browser target")
+  return Value.is_boolean(true)
+end
+
+local function wall_time(...: Value): Value
+  return Value.is_integer(system.time())
+end
+
+local function calendar(...: Value): Value
+  local format = text_of(...[1])
+  local date: system.Date = system.date(format, 1700000000)
+  return Value.is_string(date.year .. "," .. date.month .. "," .. date.day .. "," ..
+    date.hour .. "," .. date.min .. "," .. date.sec)
+end
+
+local function environment(...: Value): Value
+  test.assert(system.getenv("FOO") == "bar" and system.getenv("TZ") == "Asia/Tokyo",
+    "create environment did not reach Titan")
+  local original = ffi.getenv("FOO")
+  test.assert(original ~= nil and original as string == "bar", "C getenv differs from Titan")
+  system.setenv("FOO", "changed")
+  local changed = ffi.getenv("FOO")
+  test.assert(changed ~= nil and changed as string == "changed" and
+    system.getenv("FOO") == "changed", "C getenv did not observe Titan setenv")
+  system.unsetenv("FOO")
+  test.assert(ffi.getenv("FOO") == nil and system.getenv("FOO") == nil,
+    "C getenv did not observe Titan unsetenv")
+  test.assert(system.getenv("TZ") == "Asia/Tokyo", "environment mutation changed TZ")
+  return Value.is_boolean(true)
+end
