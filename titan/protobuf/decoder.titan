@@ -274,26 +274,25 @@ local function Message:generated_nominal(number: integer,
       holder, depth)
 end
 
--- This lookup runs after the child has returned, not in a retained traversal
--- frame. In particular its Map-access temporaries must not multiply by depth.
-local function CodecTrace:frame_incomplete(): boolean
-  return self.incomplete[self.level + 1]
-end
-
 -- Each result below is a standalone `local frozen = ... as const {value}` of a
 -- fresh builder local, or of decode_array_entries' linear call result, so the
 -- checker retags the proxy in place instead of shallow-copying it. A cast nested
 -- in a call argument or an implicitly converted return would copy instead.
-local function decode_record(message: Message, descriptor: reflect.RecordType,
-                              depth: integer): value
-  require_depth(depth)
-  if message.context is PortableCodec then
+-- Visibility and constructor lookup finish before either field traversal.
+local function Message:record_constructor(descriptor: reflect.RecordType):
+    PortableConstructor?
+  if self.context is PortableCodec then
     if not descriptor.all_public then
-      return (message.context as PortableCodec):decode_public_record(message, descriptor, depth)
+      return (self.context as PortableCodec):record_constructor(descriptor)
     end
   else
     require_record(descriptor)
   end
+  return nil
+end
+
+local function decode_record_fields(message: Message, descriptor: reflect.RecordType,
+    depth: integer): value
   local fields: {value} = {}
   for index = 1, #descriptor.fields do
     local field = descriptor.fields[index]
@@ -304,6 +303,16 @@ local function decode_record(message: Message, descriptor: reflect.RecordType,
   if trace_incomplete() then return nil end
   local frozen = fields as const {value}
   return descriptor:construct(frozen)
+end
+
+-- Bare record roots have no field arm. Recursive fields select their traversal
+-- directly, without retaining this root selector alongside the fields loop.
+local function decode_record(message: Message, descriptor: reflect.RecordType,
+    depth: integer): value
+  require_depth(depth)
+  local constructor? = message:record_constructor(descriptor)
+  if constructor ~= nil then return constructor:decode_record(message, descriptor, depth) end
+  return decode_record_fields(message, descriptor, depth)
 end
 
 local function Message:union_variant(descriptor: reflect.UnionType):
@@ -491,30 +500,35 @@ local function Message:hook_field(field: foreign *titan_protobuf_field,
   raise "protobuf: record type mismatch"
 end
 
--- Callback paths are leaves of the structural traversal. Their lookup,
--- validation and invocation finish before any recursive record payload call.
+-- Try codec-backed paths before reflective traversal. If none handles the
+-- record, their lookup and invocation temporaries do not survive into a child.
 -- The flag distinguishes a skipped callback's nil from an unhandled record.
-local function Message:record_callback(field: foreign *titan_protobuf_field,
-    record_type: reflect.RecordType): (boolean, value)
+local function Message:record_codec(number: integer,
+    field: foreign *titan_protobuf_field, record_type: reflect.RecordType,
+    depth: integer): (boolean, value)
   local codec? = find_resource_codec_by_name(record_type.name)
   if codec ~= nil then
     return true, self:resource_field(field, record_type.name, codec)
   end
   local _?, decode? = trace_checked_hooks(record_type)
   if decode ~= nil then return true, self:hook_field(field, record_type, decode) end
+  local generated, metatable = find_named_codec(record_type.name, 0)
+  if generated ~= nil then
+    return true, self:generated_nominal(number, generated, metatable, depth)
+  end
   return false, nil
 end
 
 local function Message:record_field(number: integer,
     field: foreign *titan_protobuf_field, record_type: reflect.RecordType,
     depth: integer): value
-  local handled, restored = self:record_callback(field, record_type)
+  local handled, restored = self:record_codec(number, field, record_type, depth)
   if handled then return restored end
-  local generated, metatable = find_named_codec(record_type.name, 0)
-  if generated ~= nil then
-    return self:generated_nominal(number, generated, metatable, depth)
-  end
-  return decode_record(self:merged_message(number), record_type, depth)
+  local message = self:merged_message(number)
+  require_depth(depth)
+  local constructor? = message:record_constructor(record_type)
+  if constructor ~= nil then return constructor:decode_record(message, record_type, depth) end
+  return decode_record_fields(message, record_type, depth)
 end
 
 local function Message:union_field(number: integer,

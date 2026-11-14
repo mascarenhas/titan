@@ -140,23 +140,28 @@ local function PortableConstructor:construct(arguments: {value}): value
   return self.descriptor.callable(...arguments[1, #self.descriptor.param_descriptors])
 end
 
-local function PortableCodec:decode_public_record(message: Message,
-    descriptor: reflect.RecordType, depth: integer): value
+local function PortableCodec:record_constructor(descriptor: reflect.RecordType):
+    PortableConstructor
   local constructor? = self:nominal(descriptor.name).constructor
   if constructor == nil then
     raise "protobuf: " .. descriptor.name .. " has no public constructor over its public fields"
   end
+  return constructor
+end
+
+local function PortableConstructor:decode_record(message: Message,
+    descriptor: reflect.RecordType, depth: integer): value
   local arguments: {value} = {}
   for index = 1, #descriptor.fields do
     local field = descriptor.fields[index]
     trace_member(field.name)
     local decoded = decode_field(message, field_number(index), field.type, depth + 1)
-    local parameter? = constructor.positions[index]
+    local parameter? = self.positions[index]
     if parameter ~= nil then arguments[parameter] = decoded end
     trace_leave()
   end
   if trace_skip_value() then return nil end
-  return constructor:construct(arguments)
+  return self:construct(arguments)
 end
 
 --- Encode exactly one value per root field, including nil positions.

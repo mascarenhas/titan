@@ -40,30 +40,6 @@ local function Encoder:generated(
   if codec_trace ~= nil then codec_trace:leave_generated() end
 end
 
--- Keep optional-observer tests and receiver unwrapping in frames that return
--- before recursion. Their C temporaries otherwise multiply by nesting depth.
-local function trace_member(name: string)
-  if codec_trace ~= nil then codec_trace:member(name) end
-end
-
-local function trace_index(index: integer)
-  if codec_trace ~= nil then codec_trace:index(index) end
-end
-
-local function trace_leave()
-  if codec_trace ~= nil then codec_trace:leave() end
-end
-
-local function trace_incomplete(): boolean
-  return codec_trace ~= nil and codec_trace:frame_incomplete()
-end
-
-local function trace_skip_value(): boolean
-  if codec_trace == nil then return false end
-  codec_trace:skip_value()
-  return true
-end
-
 local function Encoder:record_value(
     buf: foreign *titan_protobuf_buffer,
     candidate: reflect.RecordValue,
@@ -186,16 +162,6 @@ local function Encoder:array_field(
   local mark = begin_nested(buf, number)
   self:array(buf, candidate, element, depth)
   end_nested(buf, mark)
-end
-
--- Validation must finish before recursion; its trace bookkeeping therefore
--- belongs in this short-lived frame rather than either record arm.
-local function trace_checked_hooks(descriptor: reflect.RecordType):
-    (reflect.MethodType?, reflect.StaticFunctionType?)
-  if codec_trace ~= nil then codec_trace.validating_hooks = true end
-  local encode?, decode? = find_transfer_hooks(descriptor, "protobuf")
-  if codec_trace ~= nil then codec_trace.validating_hooks = false end
-  return encode, decode
 end
 
 local function inspected_record(candidate: value, expected: string): reflect.RecordValue

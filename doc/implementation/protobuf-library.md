@@ -192,11 +192,12 @@ recursing through the dispatcher would retain a second frame for every
 optional link.
 
 Union selection and dynamic nominal identity lookup finish before child
-traversal. Resource and hook callbacks likewise live outside the structural
-record traversal. Portable public-field constructor invocation runs after
-all child fields have decoded, in its own short-lived frame. Conditional
-trace updates use small helpers rather than adding temporary root slots to
-every retained traversal frame.
+traversal. Record codec lookup and constructor eligibility likewise finish
+before reflective children. The record arm selects ordinary or public-view
+field traversal directly; neither traversal forwards to the other. Portable
+public-field constructor invocation runs after all child fields have decoded,
+in its own short-lived frame. Conditional trace updates use small helpers
+rather than adding temporary root slots to every retained traversal frame.
 
 The native x86-64 validation (`-O0`) budget is a sum of at most 6 KiB of
 generated C frame reservations per nesting level for each recursive shape.
@@ -216,10 +217,11 @@ retained two dispatchers with monolithic dispatch, but now retains only one.
 
 | Shape | Monolithic decode | Thin decode | Monolithic encode | Thin encode |
 | --- | ---: | ---: | ---: | ---: |
-| Optional record | 19456 | 3568 | 14144 | 3392 |
+| Optional record | 19456 | 3360 | 14144 | 3392 |
 | Union part | 13200 | 3264 | 8576 | 3520 |
 | Array of Arrays | 10848 | 3424 | 8288 | 2912 |
-| `value` holding a nominal | 23504 | 6016 | 16240 | 5664 |
+| `value` holding a nominal | 23504 | 5808 | 16240 | 5664 |
+| `value` holding a portable public-view record | 30224 | 6016 | 16240 | 5664 |
 
 These are installed-provider C-body frame reservations, not a portable ABI
 property. Coroutine tests exercise accepted values, innermost failures,
@@ -248,8 +250,7 @@ occurrence; zero, repeated, replaced, or non-message variants hand back to the
 reflective decoder after that validation. One shared parts directory serves
 the selected variant, so variant count does not grow that directory. Wider
 records or payloads stay reflective, whose per-level C stack does not grow
-with field count. Deep reflective decoding and its error traceback can still
-exhaust a coroutine's C stack in unoptimized (`-O0`) builds.
+with field count.
 
 The declaring module emits one `TitanTransferCodec` entry per codec and
 binds the nominal's canonical metatable to it under `TITAN_MT_CODEC`

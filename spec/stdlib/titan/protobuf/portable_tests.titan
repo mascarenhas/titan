@@ -611,10 +611,10 @@ function test_error_paths_do_not_repeat_public_constructors(context: test.Contex
   end)
 end
 
-local function on_portable_coroutine(action: function (): ())
+local function on_portable_coroutine(generated: boolean, action: function (): ())
   local co = coroutine.create(function (_: value): value
     test.assert(coroutine.running() ~= nil, "portable codec test needs a coroutine stack")
-    local previous = protobuf.use_generated_codecs(true)
+    local previous = protobuf.use_generated_codecs(generated)
     defer protobuf.use_generated_codecs(previous)
     action()
     return true
@@ -636,7 +636,7 @@ function CoroutinePublicView.new(next: CoroutinePublicView?, number: integer): C
 end
 
 function test_deep_public_view_on_coroutine_stack(_: test.Context)
-  on_portable_coroutine(function ()
+  on_portable_coroutine(true, function ()
     -- The anonymous root and the innermost fields each consume one level.
     local count: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 2
     local candidate = CoroutinePublicView(nil, 1)
@@ -672,7 +672,7 @@ union CoroutinePublicUnion
 end
 
 function test_deep_public_union_on_coroutine_stack(_: test.Context)
-  on_portable_coroutine(function ()
+  on_portable_coroutine(true, function ()
     -- A partless leaf needs no field probe, but the anonymous root costs one.
     local count: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 1
     local candidate = CoroutinePublicUnion.empty()
@@ -693,4 +693,115 @@ function test_deep_public_union_on_coroutine_stack(_: test.Context)
       end
     end
   end)
+end
+
+local coroutine_dynamic_constructions = 0
+
+record CoroutinePublicDynamic
+  local secret: integer
+  item: value
+end
+
+function CoroutinePublicDynamic.new(item: value): CoroutinePublicDynamic
+  coroutine_dynamic_constructions = coroutine_dynamic_constructions + 1
+  return {secret = 99, item = item}
+end
+
+local function public_dynamic_chain(count: integer, leaf: value): CoroutinePublicDynamic
+  local candidate = CoroutinePublicDynamic(leaf)
+  candidate.secret = -1
+  for _ = 2, count do
+    candidate = CoroutinePublicDynamic(candidate)
+    candidate.secret = -1
+  end
+  return candidate
+end
+
+local function portable_varint(number: integer): string
+  local bytes = ""
+  while number >= 128 do
+    bytes = bytes .. string.char((number & 127) | 128)
+    number = number >> 7
+  end
+  return bytes .. string.char(number)
+end
+
+local function portable_field(number: integer, bytes: string): string
+  return portable_varint((number << 3) | 2) .. portable_varint(#bytes) .. bytes
+end
+
+local function public_dynamic_bytes(count: integer, leaf: string): string
+  local identity = portable_field(1, "protobuf.portable_tests") ..
+      portable_field(2, "protobuf.portable_tests.CoroutinePublicDynamic")
+  local bytes = portable_field(1, leaf)
+  for _ = 2, count do
+    bytes = portable_field(1, portable_field(5, identity .. portable_field(3, bytes)))
+  end
+  return portable_field(1, bytes)
+end
+
+function test_dynamic_public_view_limit_on_coroutine_stack(context: test.Context)
+  with_generated(context, function (generated: boolean)
+    on_portable_coroutine(generated, function ()
+      -- The anonymous root starts at depth 2; its last value field must fit too.
+      local count: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 2
+      local candidate = public_dynamic_chain(count, 1)
+      test.assert(protobuf.find_generated_codec(candidate) == nil)
+      local codec = protobuf.portable({descriptor(candidate)})
+      local bytes = public_dynamic_bytes(count, string.char(16, 2))
+      test.assert(codec:encode(candidate) == bytes)
+      coroutine_dynamic_constructions = 0
+      local restored: CoroutinePublicDynamic = codec:decode(bytes)
+      test.assert(coroutine_dynamic_constructions == count)
+      test.assert(codec:encode(restored) == bytes)
+      local current: value = restored
+      for _ = 1, count do
+        local node: CoroutinePublicDynamic = current
+        test.assert(node.secret == 99)
+        current = node.item
+      end
+      test.assert(current == 1)
+      local too_deep = public_dynamic_chain(count + 1, 1)
+      local over_bytes = public_dynamic_bytes(count + 1, string.char(16, 2))
+      local expected = "protobuf: nesting exceeds 128 levels at $[1]" ..
+          string.rep("[\"item\"]", count + 1)
+      coroutine_dynamic_constructions = 0
+      expect_exact_error(function () codec:decode(over_bytes) end, expected)
+      expect_exact_error(function () codec:encode(too_deep) end, expected)
+      test.assert(coroutine_dynamic_constructions == 0)
+    end)
+  end)
+end
+
+-- Parameters keep each named child bound to its own depth and codec mode.
+local function public_dynamic_failure(context: test.Context, count: integer, generated: boolean)
+  local name = "reflective_"
+  if generated then name = "generated_" end
+  context:run(name .. count, function (_: test.Context)
+    on_portable_coroutine(generated, function ()
+      local candidate = public_dynamic_chain(count, function (): integer return 1 end)
+      test.assert(protobuf.find_generated_codec(candidate) == nil)
+      local codec = protobuf.portable({descriptor(candidate)})
+      local bytes = public_dynamic_bytes(count, string.char(8, 2))
+      local decoding = "protobuf: invalid boolean"
+      local encoding = "protobuf: unsupported dynamic value"
+      if count == ffi.TITAN_CODEC_DEPTH_LIMIT - 1 then
+        decoding = "protobuf: nesting exceeds 128 levels"
+        encoding = decoding
+      end
+      local path = " at $[1]" .. string.rep("[\"item\"]", count)
+      coroutine_dynamic_constructions = 0
+      expect_exact_error(function () codec:decode(bytes) end, decoding .. path)
+      expect_exact_error(function () codec:encode(candidate) end, encoding .. path)
+      test.assert(coroutine_dynamic_constructions == 0)
+    end)
+  end)
+end
+
+function test_dynamic_public_view_failures_at_every_coroutine_depth(context: test.Context)
+  local limit: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 1
+  for count = 1, limit do
+    public_dynamic_failure(context, count, false)
+    public_dynamic_failure(context, count, true)
+  end
 end
