@@ -869,6 +869,29 @@ for a cancelled main, and `exited`, including after main failed. It also
 checks that output reaches stdout while the drive waits. Plain runs check the
 runner's exit statuses.
 
+The same spec builds `os.browser_tests` as a normal program and runs
+`os-streams.mjs` separately from the async owner's SDK-source `streams.mjs`.
+It supplies held or failing sinks, input chunks, declared stream kinds, TCP
+end hooks, and an environment through public `create` options. Its named
+cases cover print conversion and redirection, exact binary output and FIFO
+completion, cancellation, disposal and graceful exit, C-stdio ordering and
+failure latching, shutdown and kind errors, input buffering and reader
+ownership, line-iterator cleanup, wall time, calendars, and C/Titan environment
+agreement. Both engines run both assertion builds.
+Disposal preserves native cancellation precedence: admitted writers and new
+cleanup writes observe the nominal `instance disposed` cancellation, while
+their public Task-form calls reject `TITAN_BROWSER_DISPOSED`. The disposal case
+holds the original sink promise through retirement and checks that every
+cleanup runs without calling a later sink.
+
+These drive-sensitive fixtures deliberately use private published
+`BrowserValue` callbacks with `test.assert`, rather than ordinary
+`test.Context` cases: the test runner's own C-stdio reports would contaminate
+the observed streams. The JavaScript driver names, counts, and asserts each
+case. A small normal `main` retains the async bootstrap to check `run()` return
+flushing and exit. Native captured printing and this owner share the portable
+test-only `io.print_values` conversion fixture.
+
 Busted owns provider/header/runtime inventories, native-target absence,
 generated bootstrap mechanics, final artifacts, and link integration. The
 JavaScript integration driver exercises public promises, two instances,

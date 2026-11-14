@@ -704,6 +704,22 @@ CPU clocks, and forced time zones in native contributors; shared cases cover
 portable calendars and environment mutations, and browser contributors cover
 SDK parent streams and target-specific libc behavior. `os.process_tests`
 remains native-only.
+
+The separate embedding-sensitive owner `os.browser_tests` stays outside this
+root inventory, like `async.browser_tests`. `browser_scheduler_spec.lua`
+builds it as a normal program and runs `os-streams.mjs` under Node and
+Chromium in both assertion builds. Public embedding options supply delayed
+and failing streams, input, kinds, end hooks, and environment values. The
+cases check binary printing and writes, C-stdio interleaving and return
+flushing, cancellation and disposal, TCP shutdown, input and `io.lines`
+cleanup, graceful exit, time, and environment agreement with C.
+Private published callbacks use `test.assert` without `test.Context` runner
+reports, which would pollute the streams under observation; the JavaScript
+driver names, counts, and asserts every case. Its normal `main` covers `run()`
+return and exit. The async owner's existing `streams.mjs` remains a separate
+SDK-source gate, and `io.print_values` shares the Lua conversion probes with
+native captured printing.
+
 `spec/support/stdlib_test_modules.mk` lists the browser
 roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
 `TITAN_STDLIB_TEST_ROOTS`:

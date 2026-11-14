@@ -170,6 +170,29 @@ describe("browser drive interface", function()
     end
 
     for _, assertions in ipairs({ 2, 0 }) do
+        it("checks embedding OS streams with ASSERTIONS=" .. assertions, function()
+            local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
+            if not info then pending(why) return end
+            fixture = files.new()
+            for _, name in ipairs({ "support.mjs", "os-streams.mjs" }) do
+                files.copy(source .. "/" .. name, fixture.source .. "/" .. name)
+            end
+            local image = build_image(info, assertions, "program", "os-streams",
+                { "--tree", stdlib_tree, "os.browser_tests" })
+            for _, engine in ipairs({ "node", "chromium" }) do
+                local result = execute(info, engine,
+                    { "--js-test", fixture.source .. "/os-streams.mjs", "--", image })
+                io.stdout:write(string.format("\nOS-STREAMS assertions=%d engine=%s\n%s\n",
+                    assertions, engine, result.output))
+                io.stdout:flush()
+                assert.is_true(result.ok, result.output)
+                assert.truthy(result.output:find('OS-STREAMS {"verdict":"PASS","cases":66,"dialogs":0',
+                    1, true), result.output)
+            end
+        end)
+    end
+
+    for _, assertions in ipairs({ 2, 0 }) do
         it("drives main as the async bootstrap Task with ASSERTIONS=" .. assertions, function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
             if not info then pending(why) return end

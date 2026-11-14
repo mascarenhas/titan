@@ -1,0 +1,160 @@
+local function read_chunks(...: Value): Value
+  test.assert(system.stdin:read() == "A\0\255", "stdin changed binary bytes")
+  test.assert(system.stdin:read() == "", "empty stdin chunk became EOF")
+  test.assert(system.stdin:read() == "Z", "stdin skipped a chunk")
+  test.assert(system.stdin:read() == nil and system.stdin:read() == nil,
+    "stdin EOF is not sticky")
+  return Value.is_boolean(true)
+end
+
+local function lines(...: Value): Value
+  local expected = {"first", "", "second", "tail"}
+  local count = 0
+  for line in stream.lines(system.stdin) do
+    count = count + 1
+    test.assert(line == expected[count], "io.lines changed a line or repeated its tail")
+  end
+  test.assert(count == #expected, "io.lines omitted a line or its final tail")
+  return Value.is_boolean(true)
+end
+
+-- Instrument close delegation, not input: every byte still comes from the
+-- actual browser parent stream, whose own close is deliberately a no-op.
+local record TrackedInput
+  local parent: system.InputStream
+  local closes: integer
+  local closed: boolean
+end
+
+local function TrackedInput:read(): string?
+  return self.parent:read()
+end
+
+local function TrackedInput:read_until(delimiter: string, chop: boolean?): string?
+  test.assert(delimiter == "\n" and chop == true, "io.lines changed its delimiter")
+  return self.parent:read_until(delimiter, chop)
+end
+
+local function TrackedInput:close()
+  if self.closed then return end
+  self.closed = true
+  self.closes = self.closes + 1
+  self.parent:close()
+end
+
+local function return_from_lines(reader: TrackedInput): string
+  for line in stream.lines(reader) do return line end
+  raise "io.lines did not produce its first line"
+end
+
+local function tracked_lines(...: Value): Value
+  local mode = text_of(...[1])
+  local reader = TrackedInput.new(system.stdin, 0, false)
+  local count = 0
+  local caught = false
+  do
+    if mode == "return" then
+      test.assert(return_from_lines(reader) == "first", "io.lines return changed")
+    else
+      for line in stream.lines(reader) do
+        count = count + 1
+        if mode == "break" then break end
+        if mode == "body-error" then raise "line body failure" end
+        test.assert(line == "first" or line == "second", "tracked line changed")
+      end
+    end
+  catch
+    caught = true
+    if mode == "body-error" then
+      test.assert(error == "line body failure", "io.lines replaced a body error")
+    elseif mode == "read-error" then
+      test.assert(error is async.OperationError, "io.lines replaced a read error")
+      local failure: async.OperationError = error
+      test.assert(failure.operation == "stdio.read" and failure.name == "EIO")
+    else
+      raise
+    end
+  end
+  test.assert(caught == (mode == "body-error" or mode == "read-error"),
+    "io.lines swallowed an error")
+  test.assert(reader.closes == 1, "io.lines did not close exactly once on " .. mode)
+  if mode == "normal" then test.assert(count == 2, "io.lines normal end changed") end
+  return Value.is_boolean(true)
+end
+
+local function read_delimiter(...: Value): Value
+  test.assert(system.stdin:read_until("<->", true) == "ab", "split delimiter changed")
+  test.assert(system.stdin:read_until("<->", true) == "cd", "delimiter excess was lost")
+  test.assert(system.stdin:read() == "tail", "read did not receive delimiter excess")
+  test.assert(system.stdin:read() == nil and system.stdin:read() == nil)
+  return Value.is_boolean(true)
+end
+
+local function sticky_read_error(...: Value): Value
+  local first = expect_operation(function () system.stdin:read() end, "stdio.read", "EIO")
+  local second = expect_operation(function () system.stdin:read() end, "stdio.read", "EIO")
+  test.assert(first == second, "stdin did not retain its failure")
+  return Value.is_string(first)
+end
+
+local function cancelled_reader_handoff(...: Value): Value
+  local first = async.run<|string?, value|>(function (): string?
+    return system.stdin:read()
+  end)
+  defer retire(first)
+  async.yield()
+  suspend_on("held")
+  first:cancel(async.CancellationReason<|value|>.simple("reader cancelled"))
+  case async.join(first)
+  when cancelled() then
+  else raise "waiting reader was not cancelled"
+  end
+  note("reader-retired")
+  test.assert(system.stdin:read() == "late\0\255", "cancelled reader lost its pending chunk")
+  test.assert(system.stdin:read() == nil)
+  return Value.is_boolean(true)
+end
+
+local function contending_readers(...: Value): Value
+  local first = async.run<|string?, value|>(function (): string?
+    return system.stdin:read()
+  end)
+  defer retire(first)
+  async.yield()
+  expect_text(function () system.stdin:read() end, "stream already has a waiting reader")
+  note("second-reader-rejected")
+  local ok, chunk? = async.join(first):has_succeeded()
+  test.assert(ok and chunk == "one", "first waiting reader lost its chunk")
+  return Value.is_boolean(true)
+end
+
+local function read_eof(...: Value): Value
+  test.assert(system.stdin:read() == nil and system.stdin:read() == nil)
+  return Value.is_boolean(true)
+end
+
+local function read_again(...: Value): Value
+  test.assert(system.stdin:read() == "again" and system.stdin:read() == nil,
+    "a later Runtime retained the prior Runtime's EOF")
+  return Value.is_boolean(true)
+end
+
+local function missing_input(...: Value): Value
+  local read_message = expect_operation(function () system.stdin:read() end,
+    "os.InputStream.read", "ENOSYS")
+  local until_message = expect_operation(function () system.stdin:read_until("\n", true) end,
+    "os.InputStream.read_until", "ENOSYS")
+  test.assert(read_message == "os.InputStream.read is unavailable on the browser target" and
+    until_message == "os.InputStream.read_until is unavailable on the browser target")
+  return Value.is_boolean(true)
+end
+
+local function c_read_error(...: Value): Value
+  local storage = foreign char.new_array(1)
+  ffi.clearerr(ffi.stdin)
+  local count = ffi.fread(storage as foreign *char, 1, 1, ffi.stdin)
+  test.assert(count == 0 and ffi.ferror(ffi.stdin) ~= 0 and ffi.feof(ffi.stdin) == 0,
+    "C stdin reported EOF instead of an input error")
+  ffi.clearerr(ffi.stdin)
+  return Value.is_boolean(true)
+end
