@@ -374,10 +374,13 @@ ASYNC_TITAN_SOURCES := titan/async/async.titan \
 	titan/async/foreign.native.titan titan/async/receiver.native.titan \
 	titan/async/runtime.native.titan titan/async/runtime.browser.titan
 ASYNC_TITAN_HEADERS := titan/async/async_receiver_native.h titan/async/async_signal_platform.h
-OS_TITAN_SOURCES := titan/os/os.titan titan/os/clock.native.titan \
-	titan/os/environment.native.titan titan/os/process.native.titan \
-	titan/os/stdio.native.titan
-OS_TITAN_HEADERS := titan/os/os_platform.h titan/os/os_environment.h
+OS_TITAN_SOURCES := titan/os/os.titan \
+	titan/os/clock.native.titan titan/os/clock.browser.titan \
+	titan/os/environment.native.titan titan/os/environment.browser.titan \
+	titan/os/process.native.titan titan/os/process.browser.titan \
+	titan/os/stdio.native.titan titan/os/stdio.browser.titan
+OS_TITAN_HEADERS := titan/os/os_platform.h titan/os/os_environment.h \
+	titan/os/environment.browser.h
 STDLIB_HTTP_SOURCES := titan/http/http.native.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan titan/http/pool.titan \
 	titan/http/server.titan titan/http/transfer.titan titan/http/upgrade.titan

@@ -3724,7 +3724,7 @@ hosts`).
   check](#the-dependency-closure-check) and its negative fixtures, the
   interface-derived [member inventory](#interface-derived-member-inventory)
   (raw foreign functions, nominal members, named-call metadata, unrecorded
-  differences, exact recorded omissions and opaque records), the seventeen-owner
+  differences, exact recorded omissions and opaque records), the nineteen-owner
   root inventory and its rejection of empty or
   duplicate inventories before build setup, the cold and warm single-image
   layout and filtered runs, the CI failure artifact's image and per-engine log

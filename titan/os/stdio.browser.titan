@@ -262,6 +262,7 @@ local function read_stream(stream: InputStream): string?
 end
 
 --- Write a complete binary chunk to the embedding's standard-output sink.
+-- @param data Complete binary byte string.
 -- @usage standard-library-os.md
 function OutputStream:write(data: string)
   if #data == 0 then
@@ -289,12 +290,14 @@ function OutputStream:close()
 end
 
 --- Check the embedding's declared output kind without yielding.
+-- @return True when the embedding declares "tty"; false when undeclared.
 -- @usage standard-library-os.md
 function OutputStream:is_tty(): boolean
   return self:stdio():kind() == "tty"
 end
 
 --- Return the embedding's declared output kind, or raise when undeclared.
+-- @return "tty", "pipe", "file", or "tcp".
 -- @usage standard-library-os.md
 function OutputStream:kind(): string
   local kind? = self:stdio():kind()
@@ -303,12 +306,16 @@ function OutputStream:kind(): string
 end
 
 --- Read a binary chunk from the embedding's standard-input source.
+-- @return Bytes or nil at EOF.
 -- @usage standard-library-os.md
 function InputStream:read(): string?
   return read_stream(self)
 end
 
 --- Read through a binary delimiter, retaining the suffix for the next read.
+-- @param delimiter Nonempty delimiter bytes.
+-- @param chop True removes the delimiter.
+-- @return Delimited bytes or final suffix, or nil at EOF.
 -- @usage standard-library-os.md
 function InputStream:read_until(delimiter: string, chop: boolean?): string?
   return read_input_until(self, delimiter, chop)
@@ -328,12 +335,14 @@ function InputStream:close()
 end
 
 --- Check the embedding's declared input kind without yielding.
+-- @return True when the embedding declares "tty"; false when undeclared.
 -- @usage standard-library-os.md
 function InputStream:is_tty(): boolean
   return self:stdio():kind() == "tty"
 end
 
 --- Return the embedding's declared input kind, or raise when undeclared.
+-- @return "tty", "pipe", "file", or "tcp".
 -- @usage standard-library-os.md
 function InputStream:kind(): string
   local kind? = self:stdio():kind()

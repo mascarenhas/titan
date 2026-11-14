@@ -404,7 +404,7 @@ These nine families have no default and no `browser` member, so for
 reports `module 'titan.<name>' not found`), and the folder's contributors are
 neither composed nor resolvable as flat modules. Native selection, logical
 names, and canonical output stems (such as `titan/uv/uv.titan.h`) are
-unchanged; only the physical main is a variant. Thirteen further standard
+unchanged; only the physical main is a variant. Fourteen further standard
 modules have no variants and form the shared part of the [browser standard
 library](browser-target.md#the-browser-standard-library). `titan.timer`'s
 flat family has a `native` and a `browser` member (`titan/timer.native.titan`,
@@ -417,13 +417,14 @@ browser drops the native-only families. The browser-only
 family has only a `browser` member, so native targets select no main for
 `titan.browser`.
 
-`titan.os` has the shared main `titan/os/os.titan` with native-only
-`clock`, `environment`, `process`, and `stdio` contributor families.
-`OS_TITAN_SOURCES` enumerates the main and all four contributors, and
-`OS_TITAN_HEADERS` names the two sibling native headers. The browser selects
-only the main, whose target-defined private types and operations are
-unresolved. `titan.io` has the shared flat main `titan/io.titan`, but its
-`os` import prevents a browser build until that composition is complete.
+`titan.os` has the shared main `titan/os/os.titan`; its `clock`,
+`environment`, `process`, and `stdio` contributor families each have `native`
+and `browser` members. `OS_TITAN_SOURCES` enumerates the main and both
+members of every family. `OS_TITAN_HEADERS` names the two sibling native
+headers and the browser-only `environment.browser.h` declarations. Each
+target composes its matching four contributors. `titan.io` has the shared
+flat main `titan/io.titan` and uses that target's `os` composition for its
+standard streams.
 
 * The native Makefile source lists (`UV_TITAN_SOURCES` and the other stdlib
   lists under `STDLIB_TITAN_SOURCES`) name every source of a native module
