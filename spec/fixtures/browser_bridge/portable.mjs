@@ -5,6 +5,12 @@ const prefix = 'browser.portable_tests.';
 const bytes = text => Uint8Array.from(text, character => character.charCodeAt(0));
 const hex = text => Uint8Array.from(text.match(/../g) ?? [], pair => parseInt(pair, 16));
 const write = (context, text) => context.stdout(new TextEncoder().encode(text));
+// More than twice browserlink.lua's default `initial_heap` (15 MiB), so one copy
+// cannot fit in the image's initial memory. portable_tests.browser.titan builds
+// a payload of the same length.
+const LARGE_PAYLOAD = 33554433;
+const grew = (context, before, after, direction) => context.assert(before < LARGE_PAYLOAD && after >= LARGE_PAYLOAD,
+  `${direction} memory did not grow past the payload: ${before} -> ${after}`);
 
 function equal(context, actual, expected, label) {
   if (Object.is(actual, expected)) return;
@@ -182,21 +188,21 @@ export async function run(context) {
     const before = await controls.get('heap').call();
     const large = await controls.get('grow_out').call();
     const after = await controls.get('heap').call();
-    context.assert(after > before, `Titan to JavaScript memory did not grow: ${before} -> ${after}`);
+    grew(context, before, after, 'Titan to JavaScript');
     const byteCodec = portable(JSON.stringify({ fields: ['bytes'], nominals: {} }));
     const [payload] = byteCodec.decode(large);
-    context.assert(payload.length === 33554433 && payload[0] === 0 && payload[1] === 255 && payload.at(-1) === 65, 'large Titan payload');
+    context.assert(payload.length === LARGE_PAYLOAD && payload[0] === 0 && payload[1] === 255 && payload.at(-1) === 65, 'large Titan payload');
     context.equalBytes(byteCodec.encode(payload), large, 'large Titan to JavaScript round trip');
     context.equalBytes(point.encoded, hex(golden.get('point')), 'copied bytes survive memory growth');
     context.assert(await point.receive.call(point.encoded), 'small call after outbound growth');
   });
   await withInstance(context, image, async (records, controls) => {
     const codec = portable(JSON.stringify({ fields: ['bytes'], nominals: {} }));
-    const payload = new Uint8Array(33554433);
+    const payload = new Uint8Array(LARGE_PAYLOAD);
     for (let index = 0; index < payload.length; index += 3) { payload[index + 1] = 255; payload[index + 2] = 65; }
     const encoded = codec.encode(payload), before = await controls.get('heap').call();
     const returned = await controls.get('grow_in').call(encoded), after = await controls.get('heap').call();
-    context.assert(after > before, `JavaScript to Titan memory did not grow: ${before} -> ${after}`);
+    grew(context, before, after, 'JavaScript to Titan');
     context.equalBytes(returned, encoded, 'large JavaScript to Titan round trip');
     const point = records.get('point');
     context.assert(await point.receive.call(point.encoded), 'small call after inbound growth');
