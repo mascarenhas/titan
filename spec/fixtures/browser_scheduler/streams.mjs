@@ -160,16 +160,23 @@ async function endHooks(context, image) {
     } finally { await host.close(); }
   }
   const original = new Error('end hook rejection');
-  for (const options of [{}, {stdoutEnd() { return Promise.reject(original); }}]) {
-    const host = makeHost(context, image, options);
+  const rows = [
+    {options: {}, message: 'missing end hook did not reject with TypeError',
+      check: value => value instanceof TypeError && value.message === 'browser stdout has no end hook'},
+    {options: {stdoutEnd() { return Promise.reject(original); }},
+      message: 'end-hook rejection lost its thrown value', check: value => value === original},
+    {options: {stdoutEnd() { return 42; }}, message: 'an invalid end-hook result was not reported as one',
+      check: value => value?.code === 'TITAN_BROWSER_SINK' &&
+        value.message === 'browser stdout end hook must return undefined or a promise'},
+  ];
+  for (const row of rows) {
+    const host = makeHost(context, image, row.options);
     try {
       await host.instance.initialize();
       await host.task('stream_end', 'stdout', 'end');
       const result = host.results[0];
       context.assert(host.results.length === 1 && !result.ok, 'a failing end hook completed successfully');
-      if (options.stdoutEnd) context.assert(result.value === original, 'end-hook rejection lost its thrown value');
-      else context.assert(result.value instanceof TypeError &&
-        result.value.message === 'browser stdout has no end hook', 'missing end hook did not reject with TypeError');
+      context.assert(row.check(result.value), row.message);
       await host.task('stream_write', 'stdout', 'after-end-failure', encode('still writable'));
       context.assert(host.results[1].ok, 'the loader imposed shutdown state after a failed end request');
       completed++;

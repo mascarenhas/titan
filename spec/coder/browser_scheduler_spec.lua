@@ -148,7 +148,9 @@ describe("browser drive interface", function()
                 io.stdout:flush()
                 assert.is_true(streams.ok, streams.output)
                 assert.truthy(streams.output:find('STREAMS {"verdict":"PASS"', 1, true), streams.output)
-                assert.truthy(streams.output:find('"disposal":3,"stdin":8,"declarations":22', 1, true), streams.output)
+                for _, count in ipairs({ '"endHooks":5', '"disposal":3', '"stdin":8', '"declarations":22' }) do
+                    assert.truthy(streams.output:find(count, 1, true), streams.output)
+                end
                 if engine == "chromium" then
                     local undeclared = execute(info, engine, { fixture.root .. "/" .. kinds, "--",
                         "stdin", "stdout", "stderr" })

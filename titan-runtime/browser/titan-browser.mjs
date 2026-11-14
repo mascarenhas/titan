@@ -69,11 +69,11 @@ function messageBytes(cause) {
   return new TextEncoder().encode(message);
 }
 
-function sinkResult(result, stream) {
+function sinkResult(result, stream, role = 'sink') {
   if (result === undefined) return result;
   const then = result !== null && (typeof result === 'object' || typeof result === 'function') && result.then;
   if (typeof then !== 'function') {
-    throw failure('SINK', `browser ${stream} sink must return undefined or a promise`, undefined, stream);
+    throw failure('SINK', `browser ${stream} ${role} must return undefined or a promise`, undefined, stream);
   }
   return new Promise((resolve, reject) => { then.call(result, resolve, reject); });
 }
@@ -172,7 +172,7 @@ const sdkBindings = Object.freeze(Object.assign(Object.create(null), {
   'titan:stdin': owner => owner.options.stdin && (() => ({
     kind: 'detachable', promise: new Promise(resolve => resolve(owner.options.stdin())),
   })),
-  'titan:stdio': owner => name => owner.options[name + 'Kind'],
+  'titan:stdio': owner => name => owner.options[name + 'Kind'], // The embedder's declared backings; Titan validates them.
 }));
 
 function observe(promise) {
@@ -300,7 +300,7 @@ class OutputChannel {
           this.host.inHost++;
           try { result = entry.bytes === undefined ? this.end() : this.sink(entry.bytes); }
           finally { this.host.inHost--; }
-          relayPromise(sinkResult(result, this.stream), cell);
+          relayPromise(sinkResult(result, this.stream, entry.bytes === undefined ? 'end hook' : 'sink'), cell);
           await gate.promise;
         } finally {
           cell.target = undefined;
@@ -345,11 +345,7 @@ class OutputChannel {
     const drain = {
       sink: this.terminal ? undefined : this.sink,
       stream: this.stream,
-      entries: this.queue.filter(entry => {
-        if (!entry.settled) return true;
-        entry.settled.reject(failure('DISPOSED', `browser ${this.stream} stream is disposed`));
-        return false;
-      }),
+      entries: this.queue,
       failure: this.firstFailure,
     };
     this.sink = this.end = this.latched = undefined;

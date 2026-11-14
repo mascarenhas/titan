@@ -251,6 +251,8 @@ async function retireGroup(child) {
     if (!await waitExit(child, 1000)) throw new Error(`engine leader ${child.pid} did not exit`);
 }
 
+// Classify the supervisor's own descriptors: the worker's stdout and stderr
+// are always pipes into them, so a redirect to a file is visible only here.
 function streamKind(stream) {
     if (stream.isTTY) return "tty";
     const status = fstatSync(stream.fd);

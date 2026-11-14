@@ -3335,7 +3335,8 @@ outcome, including `DISPOSED` for undeliverable interrupted or discarded bytes.
 
 Deliverable C finalizer bytes are moved into JS-only drain records containing
 only sinks, copied bytes, failure status, and the notification observer.
-`takeDrain` rejects and removes any Titan entry instead of carrying it.
+No Titan entry reaches them: disposal's interrupt already rejected the queued
+ones, and `newRequest` refuses SDK requests once disposal begins.
 Their module-scope continuation reports secondary disposal failures without
 capturing the owner. `retireOwner` clears Module, backend,
 bindings, wrappers, and instance callbacks before its promise fulfills with
