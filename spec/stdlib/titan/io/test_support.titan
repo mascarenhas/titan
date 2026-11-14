@@ -6,9 +6,6 @@ foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "print_capture.h"
 
-local type PrintableFactory = function (string, string, boolean): (value)
-local type ConversionLog = function (): (string)
-
 local function begin_stdout_capture(): (integer, integer)
   local read_descriptor = -1
   local write_descriptor = -1
@@ -71,40 +68,4 @@ local function captured_bytes(read_descriptor: integer,
                       count as foreign titan_spec_size)
   local result: value = ffi.lua_totvalue(L, -1)
   return result as string
-end
-
-local function load_print_helpers(): (PrintableFactory, ConversionLog)
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  test.assert(ffi.lua_checkstack(L, 3) ~= 0,
-              "cannot reserve Lua stack for print fixtures")
-  local source = [[
-local conversions = {}
-return
-  function(label, rendered, should_fail)
-    return setmetatable({}, {
-      __tostring = function()
-        conversions[#conversions + 1] = label
-        if should_fail then error("conversion failure", 0) end
-        return rendered
-      end,
-    })
-  end,
-  function()
-    return table.concat(conversions, "|")
-  end
-]]
-  local status = ffi.luaL_loadstring(L, source)
-  if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
-    raise failure
-  end
-  status = ffi.lua_pcallk(L, 0, 2, 0, 0, nil)
-  if status ~= ffi.LUA_OK then
-    local failure: value = ffi.lua_totvalue(L, -1)
-    raise failure
-  end
-  local factory_value: value = ffi.lua_totvalue(L, -2)
-  local log_value: value = ffi.lua_totvalue(L, -1)
-  return factory_value as PrintableFactory, log_value as ConversionLog
 end
