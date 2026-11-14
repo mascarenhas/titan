@@ -578,6 +578,11 @@ resolves them to sources the loader owns, never to a `create({bindings})`
 entry, and `create` rejects a `bindings` key with that prefix with
 `TypeError`. An unknown `titan:` name raises like any unknown binding.
 
+These sources are SDK-internal. Applications use
+[`timer`](standard-library-timer.md#on-the-browser) and the
+[`os` parent streams](standard-library-os.md#browser-parent-streams), not the
+reserved binding protocol.
+
 | Name | Use | Behavior |
 | --- | --- | --- |
 | `titan:timeout` | `start(completion, failure, is_float(ms))` | One detachable host timer: `completion` receives `is_nil()` after `ms` milliseconds. `cancel` clears the host timer. A delay outside 0 through 2,147,483,647 ms, or a non-`Number` delay, makes `start` raise a `browser.BrowserError` holding a `TypeError`. |

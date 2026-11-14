@@ -3,7 +3,7 @@
 The `titan.lua` module creates independent Lua states, compiles Lua chunks,
 reads chunks through Titan I/O, and loads modules into the current Lua state.
 Native targets also execute Lua files asynchronously and search for Lua, C,
-and Titan provider files. Import it by its qualified name:
+and Titan provider files. Import it by its short name:
 
 ```titan
 local lua = import "lua"

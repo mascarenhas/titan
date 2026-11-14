@@ -19,25 +19,25 @@ SDK.
 The program, `hello.titan`, prints a greeting and three counting lines:
 
 ```titan
-foreign import "stdio.h"
+local io = import "io"
 
 local function greeting(name: string): string
   return "Hello, " .. name .. ", from Titan!"
 end
 
 function main(args: {string}): integer
-  ffi.puts(greeting(args[1] or "web page"))
+  io.print(greeting(args[1] or "web page"))
   for count = 1, 3 do
-    ffi.puts("Titan counts " .. count)
+    io.print("Titan counts " .. count)
   end
   return 0
 end
 ```
 
-The browser standard library has no `io` module (see [the browser standard
-library](#the-browser-standard-library)), so the program writes its lines with
-C's `puts` through the [C FFI](ffi.md). Whatever a program writes to standard
-output or standard error reaches the page through the loader's output sinks.
+The shared `io` module writes through the embedding's standard streams.
+`io.print` converts its arguments, appends a newline, and submits one write
+to the current `os.stdout`. Standard output and standard error reach the
+page through the loader's output sinks.
 
 Build it for the browser:
 
@@ -1023,14 +1023,16 @@ A browser program completes in one of three ways:
 * **Returned.** `main` returned an integer. The status is its low 32 bits read
   as a signed 32-bit integer, so `-1` stays `-1` and `4294967297` becomes `1`.
   The runner then exits with `status & 255`.
-* **Failed.** An error escaped `main` or the module initializers. The program
-  writes the standard report to stderr, as a native program does:
-  `<progname>: <message>`, then `stack traceback:`, then one tab-indented line
-  per frame. The status is 1. `<progname>` is the last component of the main
-  module's name, or of the first test root's name for a test image. A
-  required trace map that is missing or invalid also fails initialization
-  with status 1: stderr receives `degraded browser trace: <reason>`, without
-  a traceback because no Titan code ran.
+* **Failed.** An error escaped `main` or the module initializers. With the
+  async bootstrap, a failed main Task writes its uncaught Task report to
+  stderr. An initializer error or a directly called main writes the standalone
+  report: `<progname>: <message>`, then `stack traceback:`, then one
+  tab-indented line per frame. The status is 1. `<progname>` is the last
+  component of the main module's name, or of the first test root's name for a
+  test image. A required trace map that is missing or invalid also fails
+  initialization with status 1: stderr receives
+  `degraded browser trace: <reason>`, without a traceback because no Titan
+  code ran.
 * **Exited.** A drive ended with an exit status (`request_exit` in an `async`
   Task) and `main` then completed without an error. The status is the exit
   status's low 32 bits read as a signed 32-bit integer, and the runner exits
@@ -1308,7 +1310,7 @@ of them cannot be built into a browser test image either; keep such cases in
 native-only test modules.
 
 Programs can write through `io.print` and `os.stdout`/`os.stderr`, or through
-C's `stdio.h` as in [the first web page](#a-first-web-page).
+C's `stdio.h` as in [the program example](#programs).
 Both routes reach the loader's sinks byte for byte; Titan stream writes also
 await each sink's completion ([status and output semantics](#status-and-output-semantics)).
 

@@ -44,8 +44,8 @@ Thirteen shared core modules form the dependency-free part of the [browser
 standard library](browser-target.md#the-browser-standard-library):
 `coroutine`, `gc`, `iteration`, `math`, `test`, `reflect`, `json`, `protobuf`,
 `transfer`, `peg`, `string`, `url`, and `path`. None may gain an import path
-to `io`, `os`, `uv`, `async`, `timer`, `titan.browser`, or a native-only module
-(`fs`, `net`, `ssl`, `http`, `websocket`, `lua`, `sqlite3`, `thread`), and
+to `io`, `os`, `lua`, `uv`, `async`, `timer`, `titan.browser`, or a native-only
+module (`fs`, `net`, `ssl`, `http`, `websocket`, `sqlite3`, `thread`), and
 their only native payload and include path is LPegLabel: a libuv, OpenSSL,
 llhttp, or SQLite header, archive, or symbol fails the [dependency-closure
 check](browser-target.md#the-dependency-closure-check) in `make browser-sdk`
@@ -60,6 +60,9 @@ variant for a real behavioral difference. Native-only modules with no shared
 main keep their canonical mains as `<name>.native.titan`. The complete shared
 `io` facade instead imports `os`, whose shared main composes with native or
 browser clock, environment, process, and stdio contributors.
+The `lua` composition shares its main and worker; the browser selects a
+no-filesystem loading contributor and omits native background execution
+([Lua composition](lua-library.md#browser-states-and-stock-profile)).
 
 `titan.async` is a browser module through its own browser composition: its
 shared main and the `runtime.browser.titan` and `external.browser.titan`
@@ -305,9 +308,10 @@ See [test placement](test-runner.md#regression-placement).
 
 A case for a browser-subset module belongs in an owner that the browser suite
 runs (`TITAN_STDLIB_BROWSER_TEST_ROOTS`), which imports only subset modules,
-owner-local support, and `support.common.titan`. A case that needs `lua`,
-`fs`, `thread`, a host command, or another native-only facility goes to the
-module's native-only owner (`test.host_tests`, `reflect.lua_tests`,
+owner-local support, and the portable `support.common`, `support.runtime`,
+and `support.async` helpers. A case that needs native Lua file or worker
+execution, `fs`, `thread`, a host command, or another native-only facility
+goes to the module's native-only owner (`test.host_tests`, `reflect.lua_tests`,
 `json.lua_tests`, `protobuf.resource_tests`) or a `.native.titan` contributor,
 never to a browser copy. Express target facts (sizes, endianness, locale,
 pointer width) as target-derived expectations instead of skipping them; see

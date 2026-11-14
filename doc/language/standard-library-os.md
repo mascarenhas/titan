@@ -160,11 +160,11 @@ function unsetenv(name: string)
 empty value as `""`. `setenv` creates or replaces a variable. `unsetenv` is
 successful even when the variable is already absent.
 
-Names and values are text. An embedded NUL is rejected before libuv is called.
-These operations change process-global state and, like the underlying libuv
-functions, are not thread-safe; Titan's v1 async runtime itself executes all
-callbacks serially on one loop thread. An embedding host must likewise avoid
-racing these helpers from another operating-system thread.
+Names and values are text. An embedded NUL is rejected before accessing the
+environment. On native targets these operations change process-global state
+and are not thread-safe; an embedding host must avoid racing them from another
+operating-system thread. On the browser they affect only the instance's
+environment, as described [above](#on-the-browser).
 
 ## Directories and host identity
 
@@ -301,12 +301,12 @@ function OutputStream:is_tty(): boolean
 function OutputStream:kind(): string
 ```
 
-Spawning, stream I/O, parent-stdio access, signalling, and waiting must run
-inside an async Task. `is_running`, `is_tty`, and `kind` do not yield, but
-still validate the exact Runtime that owns the resource. A Titan standalone
-program that imports `os` gets the automatic async bootstrap; a Lua host should
-call these APIs from a function passed to `async.run`, then drive that Task
-with `async.loop` after loading `require "titan.async"`.
+On native targets, spawning, stream I/O, parent-stdio access, signalling, and
+waiting must run inside an async Task. `is_running`, `is_tty`, and `kind` do not
+yield, but still validate the exact Runtime that owns the resource. A Titan
+standalone program that imports `os` gets the automatic async bootstrap; a Lua
+host should call these APIs from a function passed to `async.run`, then drive
+that Task with `async.loop` after loading `require "titan.async"`.
 
 `InputStream` and `OutputStream` are ordinary records with private fields.
 They represent process standard streams only: the Titan process's own stdio
@@ -576,10 +576,12 @@ Missing input and undeclared kinds raise `async.OperationError` with code
 The member is `os.InputStream.read`, `os.InputStream.read_until`,
 `os.InputStream.kind`, or `os.OutputStream.kind`, respectively.
 
-Explicit instance disposal is not graceful Runtime exit: queued and in-flight
-output rejects with `TITAN_BROWSER_DISPOSED`, and already called sinks cannot
-be recalled. See [output and disposal](browser-target.md#status-and-output-semantics)
-for interruption and finalizer-output rules.
+Explicit instance disposal is not graceful Runtime exit: the SDK retires queued
+and in-flight output requests with `TITAN_BROWSER_DISPOSED`, while waiting
+Tasks and their cleanup writes receive the sticky `"instance disposed"`
+cancellation. Already called sinks cannot be recalled. See the
+[loader's output contract](browser-target.md#the-loader-api) for interruption
+and finalizer-output rules.
 
 ### TCP-backed parent streams
 
@@ -995,10 +997,11 @@ that type.
 
 ## Errors
 
-Libuv failures raise [`async.OperationError`](async-io.md#errors-and-cancellation)
+Native libuv failures raise [`async.OperationError`](async-io.md#errors-and-cancellation)
 with an operation name identifying the failed helper. A platform
 `UV_ENOSYS` result is exposed as that error; the library does not silently
-fall back to a POSIX-specific implementation.
+fall back to a POSIX-specific implementation. Browser stream errors follow
+the [parent-stream contract](#browser-parent-streams).
 
 Process and pipe setup, I/O, spawn, and signal failures use operation names
 that identify the failed transition. Immediate validation and asynchronous

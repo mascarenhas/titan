@@ -382,9 +382,10 @@ After step 7, `browser-stdlib` runs:
    fixture, and minicoro specs run both engines. The bridge uses its dedicated
    native Titan test owner with explicit JavaScript bindings, rather than
    adding it to the ordinary core aggregate; the scheduler spec drives the
-   bridge's drive interface with a test-owned mini driver and runs the real
-   `async` driver's scheduler gate owner and an async bootstrap program with
-   their own harnesses.
+   bridge's drive interface with a test-owned mini driver, runs the real
+   `async` driver's scheduler gate and bootstrap program, and drives the
+   embedding-sensitive `os.browser_tests` program with its separate
+   stream/environment harness.
 10. **Browser SDK and stdlib compiler coverage.** The same report commands
     produce `luacov.codecov.out`, which uploads with `name: browser-stdlib`
     and otherwise the same options, so the real provider, image, SDK, and
