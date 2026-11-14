@@ -302,11 +302,12 @@ function OutputStream:kind(): string
 ```
 
 On native targets, spawning, stream I/O, parent-stdio access, signalling, and
-waiting must run inside an async Task. `is_running`, `is_tty`, and `kind` do not
-yield, but still validate the exact Runtime that owns the resource. A Titan
-standalone program that imports `os` gets the automatic async bootstrap; a Lua
-host should call these APIs from a function passed to `async.run`, then drive
-that Task with `async.loop` after loading `require "titan.async"`.
+waiting must run inside an async Task. `is_running`, `is_tty`, and `kind`
+do not yield, but still require a Task and validate the exact Runtime that owns
+the resource. A Titan standalone program that imports `os` gets the automatic
+async bootstrap; a Lua host should call these APIs from a function passed to
+`async.run`, then drive that Task with `async.loop` after loading
+`require "titan.async"`.
 
 `InputStream` and `OutputStream` are ordinary records with private fields.
 They represent process standard streams only: the Titan process's own stdio
@@ -576,10 +577,9 @@ Missing input and undeclared kinds raise `async.OperationError` with code
 The member is `os.InputStream.read`, `os.InputStream.read_until`,
 `os.InputStream.kind`, or `os.OutputStream.kind`, respectively.
 
-Explicit instance disposal is not graceful Runtime exit: the SDK retires queued
-and in-flight output requests with `TITAN_BROWSER_DISPOSED`, while waiting
-Tasks and their cleanup writes receive the sticky `"instance disposed"`
-cancellation. Already called sinks cannot be recalled. See the
+Explicit instance disposal is not graceful Runtime exit: waiting writers and
+their cleanup writes receive the sticky `"instance disposed"` cancellation.
+Already called sinks cannot be recalled. See the
 [loader's output contract](browser-target.md#the-loader-api) for interruption
 and finalizer-output rules.
 
