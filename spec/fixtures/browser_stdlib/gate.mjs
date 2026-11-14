@@ -17,8 +17,10 @@ function occurrences(haystack, needle) {
 }
 
 export async function run(context) {
-  const [subsetPath, fidelityPath, ...isolatedPaths] = context.args;
-  context.assert(isolatedPaths.length === 13, "all thirteen isolated module images are required");
+  const [rootCountText, subsetPath, fidelityPath, childPath, bootstrapPath, ...isolatedPaths] = context.args;
+  const rootCount = Number(rootCountText);
+  context.assert(Number.isInteger(rootCount) && rootCount > 0 && isolatedPaths.length === rootCount,
+    "every browser root requires an isolated initializer image");
   const emit = record => context.stdout(text(JSON.stringify({engine: context.engine, ...record}) + "\n"));
   async function execute(image) {
     const stdout = [], stderr = [];
@@ -60,6 +62,13 @@ export async function run(context) {
     passed(await execute(await context.image(path)));
     emit({isolatedInitializer: path, passed: 1});
   }
+  passed(await execute(await context.image(bootstrapPath)));
+  emit({asyncBootstrap: "enabled", passed: 1});
+  const child = await execute(await context.image(childPath));
+  passed(child);
+  context.assert(occurrences(child.stdout, text("independent-state roots=" + rootCount)) === 1,
+    "child-state initializer list does not cover every browser root");
+  emit({independentStateRoots: rootCount, separateStates: rootCount, combinedStates: 1});
   const subset = await context.image(subsetPath);
   for (let cycle = 0; cycle < 3; cycle++) {
     passed(await execute(subset));
