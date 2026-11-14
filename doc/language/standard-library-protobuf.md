@@ -294,6 +294,15 @@ encoding and decoding reject that nominal; neither resource callback runs
 under a portable codec. A `transfer.TransferValue` is not a portable type
 because some of its declared variants contain foreign values.
 
+Creation errors identify the descriptor path and rejected kind or nominal.
+Paths use JSON's syntax: `$[1]` selects the first root field,
+`$[1]["items"][1]` its Array element schema, and
+`$["dynamic"][2]` the second additional nominal. Options add no path component;
+an Array element schema uses the representative index 1. Field and part names
+are quoted. For example, a hooked record reports
+`protobuf: $[1]: <name> has transfer hooks`, and a resource reports
+`protobuf: $[1]: <name> is a packet resource and is not portable`.
+
 `codec:encode(...)` requires exactly one argument per field, including nil
 positions. `codec:decode(bytes)` returns exactly that many results. The
 ordinary protobuf wire validation, graph-cycle rejection, nesting bound, Array
@@ -325,15 +334,6 @@ construction: fields are initialized directly, without invoking `new`.
 A public union may have private variants. A public active arm crosses normally;
 encoding a private active arm raises `protobuf: private union variant`.
 Decoding an ordinal with no recognized public variant raises.
-
-Creation errors identify the descriptor path and rejected kind or nominal.
-Paths use JSON's syntax: `$[1]` selects the first root field,
-`$[1]["items"][1]` its Array element schema, and
-`$["dynamic"][2]` the second additional nominal. Options add no path component;
-an Array element schema uses the representative index 1. Field and part names
-are quoted. For example, a hooked record reports
-`protobuf: $[1]: <name> has transfer hooks`, and a resource reports
-`protobuf: $[1]: <name> is a packet resource and is not portable`.
 
 ### Schema descriptions and text positions
 

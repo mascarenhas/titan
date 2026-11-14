@@ -785,11 +785,13 @@ and float tags, binary and marked text, Array holes and constness, dynamic
 arms and closed nominal sets, repeated and recursive graphs, public record
 construction, encode-only views, private variants, and refusal without
 running transfer hooks. It checks shared class tables and recovery after
-both peer and Titan errors. Separate fresh instances exercise payloads larger
-than the initial heap in each direction. A fixture callable reports the
-public Emscripten `emscripten_get_heap_size()` result before and after, so the
-driver asserts actual memory growth without exposing the loader's private
-Module. Encode/decode timings for 10,000 integers are informational. All rows
+both peer and Titan errors. A 33,554,433-byte payload, more than twice
+`browserlink.lua`'s default `initial_heap`, crosses in each direction, the
+inbound one in a fresh instance. A fixture callable reports the public
+Emscripten `emscripten_get_heap_size()` result before and after, so the
+driver asserts that memory grew from below the payload length to at least it,
+without exposing the loader's private Module. Encode/decode timings for
+10,000 integers are informational. All rows
 run under Node and Chromium with both assertion profiles.
 
 The same gate uses a separate ordinary owner, `browser.public_state_tests`,

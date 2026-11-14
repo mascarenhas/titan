@@ -207,8 +207,14 @@ returns an Array in that order.
 Record constructors take public fields in declaration order. Variant
 constructors take their parts in declaration order; an empty variant takes no
 arguments, and a single-type shorthand has a part named `value`. The union's
-base class is not directly constructible. Class identity identifies a nominal:
-a plain object with the same properties is not a record or variant.
+base class is not directly constructible. Missing constructor arguments become
+`null`; more arguments than fields or parts throw a `TypeError` with code
+`type_mismatch`. Instances are ordinary mutable objects: encoding reads only
+the declared public fields or parts, so any other property is ignored and is
+not copied. Class identity identifies a nominal: a plain object with the same
+properties is not a record or variant. An instance of an application subclass
+of a generated class encodes as that class's nominal; decoding always creates
+instances of the generated classes themselves.
 
 Each call to `portable(description)` creates its own class table. To share
 classes between codecs, pass the first codec's `types` as the second argument:
@@ -271,11 +277,11 @@ Close that error as usual. A Titan codec error rejects the JavaScript callable
 with `TITAN_BROWSER_TITAN`. Neither kind of ordinary failure disposes the
 instance: a following valid call can succeed.
 
-Native codec errors name the rejected type or a JSON-style position when it
-can be recovered; a deep generated subtree may end its path in `...`.
-The `protobuf: ` prefix is reserved for codec diagnostics. A constructor or
-other callback raising that prefix can receive a path suffix naming a later
-position; other user messages remain unchanged.
+Titan codec error messages follow the protobuf chapter's
+[error rules](standard-library-protobuf.md#errors): a nested failure can end
+with a JSON-style ` at <path>` suffix, and a public `new` or other callback
+that raises a message beginning with the reserved `protobuf: ` prefix can
+receive a suffix naming a later position.
 
 ## JavaScript values
 

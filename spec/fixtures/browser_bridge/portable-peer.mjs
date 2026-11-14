@@ -105,6 +105,9 @@ export async function peerTests(peerURL = new URL('./titan-protobuf.mjs', import
   class ApplicationPoint extends Point {}
   const subclass = new ApplicationPoint(3n, bytes(120));
   equal(pointCodec.encode(subclass), pointGolden, 'application record subclass');
+  const extended = new Point(3n, bytes(120));
+  extended.note = bytes(1);
+  equal(pointCodec.encode(extended), pointGolden, 'extra instance properties are ignored');
   class ApplicationCount extends Count {}
   equal(choiceCodec.encode(new ApplicationCount(7n)), choiceCodec.encode(new Count(7n)), 'application variant subclass');
   round(choiceCodec, [new Count(7n)]);

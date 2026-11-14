@@ -174,13 +174,19 @@ generated codecs' `titan_codec_depth` (also used when their field reader skips
 a group) raise when a depth exceeds the budget, with `protobuf: nesting
 exceeds <budget> levels` built from the macro in both. The budget is raw:
 each record or union with fields probes them one level deeper, so 128 accepts
-a 127-record chain, while a union whose selected variant has
-no parts probes nothing deeper and is accepted at the budget itself. There is
+a 127-record chain at a nominal root, while a union whose selected variant has
+no parts probes nothing deeper and is accepted at the budget itself. An
+anonymous field root (`serialize_fields_to_buffer_with_context` and
+`deserialize_fields_slice`, so also `PortableCodec`) starts its fields at
+depth 2, so a chain in one of its fields holds at most 126 records and 127
+raise; the SDK peer counts the same way. There is
 no reflective-only limit and no separate `transfer` constant: `transfer`
 encodes and decodes through these paths, so the one define bounds it too.
 The boundary tests derive their depths and messages from the macro:
 `encode_127_accepted`, `decode_128_rejected_by_both`, and
-`partless_union_at_128` apply on both targets.
+`partless_union_at_128` apply on both targets, and
+`test_dynamic_public_view_limit_on_coroutine_stack` in `protobuf.portable_tests`
+checks the anonymous-root maximum and its rejection one record deeper.
 
 ### Reflective frame budget
 
@@ -728,18 +734,23 @@ The traversal distinguishes a portable context:
 - `Encoder:record_value` and `Encoder:union_value` skip their ordinary
   complete-public-visibility guards; the creation walk already checked the
   public schema. Private active union arms still raise.
-- `decode_record` preserves direct default construction for all-public records.
-  For a record with local fields, `PortableCodec:decode_public_record` requires
-  the captured constructor before decoding fields. Every public field is
-  validated, including discarded ones; mapped values enter an argument Array
-  in parameter order and an explicit fixed arity preserves nil positions.
+- `Message:record_constructor` serves both the root `decode_record` and the
+  field arm `Message:record_field`. It returns nil for an all-public record,
+  which keeps direct default construction in `decode_record_fields`. For a
+  record with local fields, `PortableCodec:record_constructor` returns the
+  captured `PortableConstructor` or raises before any field is decoded.
+  `PortableConstructor:decode_record` validates every public field, including
+  discarded ones, and places mapped values in an argument Array in parameter
+  order; `PortableConstructor:construct` then calls `new` with an explicit
+  fixed arity, preserving nil positions.
 - `decode_union` skips only its complete-public-visibility guard. Unknown
   ordinals retain ordinary wire rejection.
-- `Encoder:dynamic_nominal` requires a listed name; `decode_dynamic_nominal`
-  obtains its descriptor from the closed table and returns before nominal
-  lookup or demand loading.
-- The record arms of `Encoder:field` and `decode_field`, and the resource
-  operations of `codec_handoff`, reject packet resources before invoking either
+- `Encoder:begin_dynamic_nominal` requires a listed name, and
+  `Message:dynamic_descriptor` obtains its descriptor from the closed table
+  and returns before nominal lookup or demand loading.
+- `Encoder:resource_field` and `Message:resource_field`, reached from the
+  record arms of `Encoder:field` and `decode_field`, and the resource
+  operations of `codec_handoff` reject packet resources before invoking either
   callback. The registry remains live, so registrations made after codec
   creation are rejected too.
 

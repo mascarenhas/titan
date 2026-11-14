@@ -352,6 +352,10 @@ function test_resources_registered_after_creation_never_run_callbacks(context: t
     expect_error(function() direct:decode(direct_bytes) end, rejected)
     expect_error(function() nested:encode(parent) end, rejected)
     expect_error(function() nested:decode(nested_bytes) end, rejected)
+    -- A wrong wire kind is reported before the resource is refused.
+    expect_error(function() direct:decode(string.char(8, 1)) end, "unexpected wire type")
+    expect_error(function() nested:decode(string.char(10, 2, 8, 1)) end,
+        "unexpected wire type")
     test.assert(encodes == 0 and decodes == 0, "portable resource callback ran")
 
     local ordinary = protobuf.serialize_fields(fields, resource)
