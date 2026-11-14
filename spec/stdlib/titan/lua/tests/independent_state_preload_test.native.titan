@@ -1,4 +1,3 @@
-
 function test_lua_independent_async_requires_executable_only_titan_module(
     _context: test.Context)
   runtime_test.run(function ()
@@ -69,4 +68,3 @@ function test_lua_independent_nested_state_keeps_uninitialized_native_providers(
                 "nested native provider reused its host module instance")
   end)
 end
-

@@ -14,7 +14,6 @@ local foreign function state_userdata(state: *lua_State): int
   return 1
 end
 
-
 local foreign function state_count_finalizer(state: *lua_State): int
   local counter = ffi.lua_touserdata(state, 1) as *int
   counter[0] = counter[0] + 1

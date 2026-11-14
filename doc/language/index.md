@@ -250,7 +250,8 @@ remains rejected.
   facade, [`async`](async-io.md#the-browser-target) with a browser driver,
   [`timer`](standard-library-timer.md#on-the-browser) on JavaScript timers,
   an [`os` subset](standard-library-os.md#on-the-browser) with embedding-provided
-  parent streams, and typed [JavaScript bindings](standard-library-browser.md).
+  parent streams, synchronous [`lua` states](standard-library-lua.md), and
+  typed [JavaScript bindings](standard-library-browser.md).
   Files, networking, child processes, and native host queries remain absent
   ([browser target](browser-target.md#the-browser-standard-library)).
 

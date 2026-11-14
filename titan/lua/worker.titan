@@ -346,4 +346,3 @@ local foreign function lua_state_run(argument: *void)
     end
   end
 end
-

@@ -107,7 +107,6 @@ function load_from_reader(reader: io.Reader, name: string?, env: value):
   return load(builder:drain(), name, env)
 end
 
-
 local function call_searcher(candidate: value, modname: string):
     (value, value, string)
   local searcher = candidate as Searcher
@@ -195,7 +194,6 @@ function require(modname: string): value
   end
   return installed
 end
-
 
 --- An independent Lua state with its own globals, registry, and collector.
 -- @usage standard-library-lua.md#independent-lua-states
@@ -339,7 +337,6 @@ local function LuaCall:finish()
   ffi.lua_settop(self.owner.handle, self.stack_top)
   self.owner.busy = false
 end
-
 
 local function LuaCall:prepare()
   self.packet.state = self.owner.handle
@@ -489,7 +486,6 @@ function Lua:run(chunk: string, name: string?, ...: async.TransferValue):
   return ...call:values()
 end
 
-
 --- Drain a borrowed Reader, then execute its bytes in this state.
 -- @usage standard-library-lua.md#independent-lua-states
 function Lua:run_from_loader(reader: io.Reader, name: string?,
@@ -498,4 +494,3 @@ function Lua:run_from_loader(reader: io.Reader, name: string?,
   for chunk in reader:read do builder:write(chunk) end
   return self:run(builder:drain(), name, ...)
 end
-

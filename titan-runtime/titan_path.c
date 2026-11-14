@@ -1426,13 +1426,9 @@ static void *titan_path_open_global(lua_State *L, int canonical) {
 }
 #endif
 
+#if !defined(TITAN_TARGET_BROWSER)
 /* Open an occupied provider candidate for this state; raises on failure. */
 static void *titan_path_open_provider(lua_State *L, const char *filename) {
-#if defined(TITAN_TARGET_BROWSER)
-    (void)filename;
-    luaL_error(L, "browser target does not support dynamic provider loading");
-    return NULL;
-#else
     int top = lua_gettop(L);
     void *lib;
 #if defined(_WIN32)
@@ -1444,19 +1440,16 @@ static void *titan_path_open_provider(lua_State *L, const char *filename) {
 #endif
     lua_settop(L, top);
     return lib;
-#endif
 }
 
 static void *titan_path_symbol(void *lib, const char *symbol) {
-#if defined(TITAN_TARGET_BROWSER)
-    (void)lib; (void)symbol;
-    return NULL;  /* The dynamic admission path raises before symbol lookup. */
-#elif defined(_WIN32)
+#if defined(_WIN32)
     return titan_cast_func(void *, GetProcAddress((HMODULE)lib, symbol));
 #else
     return dlsym(lib, symbol);
 #endif
 }
+#endif
 
 /* Implementation notes: doc/implementation/binary-compatibility.md#generated-exports-and-runtime-verification */
 void titan_check_abi_entry(lua_State *L, void *raw, const char *sym,
