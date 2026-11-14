@@ -123,9 +123,20 @@ function test_browser_exit_outside_a_task_keeps_the_instance_usable(_context: te
   runtime_test.run(function () system.stdout:write("") end)
 end
 
+local function browser_output_payload(stream: system.OutputStream): string
+  case async.TransferValue.from_value(stream)
+  when is_record_payload(module, name, payload) then
+    test.assert(module == "titan.os" and name == "titan.os.OutputStream",
+      "parent output used a different record payload")
+    return payload
+  else raise "parent output did not use its transfer payload hook"
+  end
+end
+
 function test_browser_parent_output_adoption_names_its_descriptor(_context: test.Context)
   local original_stdout = system.stdout
   local original_stderr = system.stderr
+  local stdout_bytes = browser_output_payload(original_stdout)
   local stdout_payload = async.TransferValue.from_value(original_stdout)
   local stderr_payload = async.TransferValue.from_value(original_stderr)
   defer do
@@ -138,6 +149,11 @@ function test_browser_parent_output_adoption_names_its_descriptor(_context: test
   local restored_stderr: system.OutputStream = stderr_payload:to_value()
   test.assert(restored_stdout == original_stdout and restored_stderr == original_stderr,
     "parent output adoption followed a reassigned module variable")
+  system.stderr = original_stderr
+  local unbound: system.OutputStream =
+    async.TransferValue.from_value(original_stdout):to_value()
+  test.assert(unbound ~= original_stderr and browser_output_payload(unbound) == stdout_bytes,
+    "adoption without a bound stdout facade changed its descriptor")
 end
 
 function test_browser_environment_starts_empty_and_reports_invalid_names(_context: test.Context)

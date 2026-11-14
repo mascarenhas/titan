@@ -35,11 +35,6 @@ end
 -- Parent descriptors use positive Array positions: descriptor 0 is slot 1.
 local parent_streams: {Stdio} = {}
 local input_runtime_registered = false
--- Adoption names a descriptor, so it returns this state's facade even after
--- the assignable stdin/stdout/stderr variables change. Contributors
--- initialize after the main, before any importer can reassign them.
-local stdin_facade = stdin
-local output_facades: {OutputStream} = {stdout, stderr}
 
 local function unavailable(member: string): async.OperationError
   return make_error(ffi.ENOSYS, member,
@@ -388,7 +383,13 @@ end
 --- Return the receiving state's standard-output facade.
 -- @usage standard-library-os.md#transferring-process-streams
 function OutputStream.from_transfer_payload(payload: string): OutputStream
-  return output_facades[output_descriptor(payload)]
+  local descriptor = output_descriptor(payload)
+  -- Prefer the stable facade still bound to that descriptor. After the
+  -- assignable variables change, a new facade shares the same state-owned
+  -- Stdio; output facades hold no other state.
+  if stdout.parent_descriptor == descriptor then return stdout end
+  if stderr.parent_descriptor == descriptor then return stderr end
+  return OutputStream(nil, descriptor)
 end
 
 --- Validate a parent identity; there is no native ownership to release.
@@ -413,7 +414,7 @@ end
 -- @usage standard-library-os.md#transferring-process-streams
 function InputStream.from_transfer_payload(payload: string): InputStream
   check_input_payload(payload)
-  return stdin_facade
+  return stdin
 end
 
 --- Validate a parent identity; there is no native ownership to release.

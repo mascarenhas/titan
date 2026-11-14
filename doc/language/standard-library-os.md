@@ -578,10 +578,12 @@ The member is `os.InputStream.read`, `os.InputStream.read_until`,
 `os.InputStream.kind`, or `os.OutputStream.kind`, respectively.
 
 The [transfer payloads](#transferring-process-streams) of these streams carry
-only the descriptor. Adoption returns the receiving state's own `stdin`,
-`stdout`, or `stderr` record, even after a module variable was reassigned, and
-applies the same refusals as on native targets: standard input that has
-started reading, and output with an accepted write or shutdown still pending.
+only the descriptor. Adoption returns the receiving state's `stdin`, `stdout`,
+or `stderr` record for that descriptor. If `os.stdout` and `os.stderr` were
+reassigned so that neither holds it, an output payload adopts as a new record
+for the same descriptor. The hooks apply the same refusals as on native
+targets: standard input that has started reading, and output with an accepted
+write or shutdown still pending.
 
 Explicit instance disposal is not graceful Runtime exit: waiting writers and
 their cleanup writes receive the sticky `"instance disposed"` cancellation.
