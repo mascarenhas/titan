@@ -715,10 +715,12 @@ CPU clocks, and forced time zones in native contributors; shared cases cover
 portable calendars and environment mutations, and browser contributors cover
 SDK parent streams and target-specific libc behavior. `os.process_tests`
 remains native-only.
-`lua.tests` keeps synchronous loading and independent-state cases shared;
-native contributors own source files, C-module fixtures, worker execution,
-Receivers and resource handoff. Its browser contributor checks stock Lua
-failures in the launcher and child states and fixed searcher misses.
+`lua.tests` keeps synchronous loading and independent-state cases shared,
+including transfer-policy, nominal, custom-hook and closure assertions run
+through both chunk and borrowed-Reader entry points. Native contributors own
+source files, C-module fixtures, asynchronous worker execution, Receivers and
+resource handoff. Browser contributors check destination-stable parent-stream
+transfers, stock Lua failures in both state kinds and fixed searcher misses.
 
 The separate embedding-sensitive owner `os.browser_tests` stays outside this
 root inventory, like `async.browser_tests`. `browser_scheduler_spec.lua`
@@ -727,7 +729,9 @@ Chromium in both assertion builds. Public embedding options supply delayed
 and failing streams, input, kinds, end hooks, and environment values. The
 cases check binary printing and writes, C-stdio interleaving and return
 flushing, cancellation and disposal, TCP shutdown, input and `io.lines`
-cleanup, graceful exit, time, and environment agreement with C.
+cleanup, graceful exit, time, and environment agreement with C and stock Lua.
+Stock Lua checks repeat in public child states; owner-Task `os.exit` also
+checks numeric and boolean statuses, while child exit remains unavailable.
 Private published callbacks use `test.assert` without `test.Context` runner
 reports, which would pollute the streams under observation; the JavaScript
 driver names, counts, and asserts every case. Its normal `main` covers `run()`

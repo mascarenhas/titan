@@ -14,6 +14,7 @@ local runtime_test = import "support.runtime.titan"
 local string = import "string"
 local task_support = import "support.async.titan"
 local timer = import "timer"
+local ownership_lua = import "lua"
 local _ = import "async.browser_child"
 foreign import "child.h"
 

@@ -18,3 +18,34 @@ function test_child_state_refuses_to_drive(_: test.Context)
     test.assert(ok and item == 5, "the owner drive did not progress after the child's refusal")
   end)
 end
+
+local function check_public_child_state(child: ownership_lua.Lua)
+  child:run("require('async.browser_child').check()")
+  local result = child:run("return 6 * 7")
+  test.assert(result:to_value() == 42,
+    "synchronous public child work failed while the owner was waiting")
+end
+
+function test_public_child_state_refuses_to_drive_and_preserves_owner(
+    _: test.Context)
+  local child = ownership_lua.new()
+  defer child:close()
+  check_public_child_state(child)
+  runtime_test.run(function ()
+    local waiter = async.run<|integer, value|>(function (): integer
+      return await_delay(10, 5, false)
+    end)
+    task_support.cleanup_task(waiter, "public child owner waiter cleanup")
+    async.yield()
+    test.assert(waiter:status():as_string() == "waiting",
+      "the public child case had no owner wait pending")
+    -- Initialize another async module instance while its owner request is live.
+    local second = ownership_lua.new()
+    defer second:close()
+    check_public_child_state(second)
+    check_public_child_state(child)
+    local ok, item? = async.join(waiter):has_succeeded()
+    test.assert(ok and item == 5,
+      "the owner request did not progress after the public child's refusal")
+  end)
+end

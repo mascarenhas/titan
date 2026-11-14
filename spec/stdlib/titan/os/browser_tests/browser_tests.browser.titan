@@ -7,6 +7,7 @@ local browser = import "browser"
 local system = import "os"
 local stream = import "io"
 local print_values = import "io.print_values.titan"
+local stock_lua = import "lua"
 foreign import "stdio.h"
 foreign import "stdlib.h"
 
@@ -158,6 +159,10 @@ local function publish_entries()
   publish(target, "wall_time", wall_time)
   publish(target, "calendar", calendar)
   publish(target, "environment", environment)
+  publish(target, "stock_stdin", stock_stdin)
+  publish(target, "stock_environment", stock_environment)
+  publish(target, "stock_output", stock_output)
+  publish(target, "stock_child_exit", stock_child_exit)
 end
 
 local function publish(target: browser.BrowserHandle, name: string,
@@ -166,6 +171,10 @@ local function publish(target: browser.BrowserHandle, name: string,
 end
 
 function main(args: {string}): integer
+  if args[1] == "stock-exit" or args[1] == "native-import-exit" then
+    buffered_exit(args[2], args[1] == "stock-exit")
+    return 0
+  end
   if args[1] == "return-c" then
     local data = "main\0\128\255tail"
     ffi.fwrite(data, 1, #data, ffi.stdout)

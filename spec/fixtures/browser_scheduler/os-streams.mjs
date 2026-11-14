@@ -1,4 +1,4 @@
-import {encode, makeHost, observe, rejection, settledMarker, until} from './support.mjs';
+import {decode, encode, makeHost, observe, rejection, settledMarker, until} from './support.mjs';
 
 // These are test-owned host capabilities: copied-byte observations and held
 // sink/source/end promises. No private loader or scheduler state is inspected.
@@ -18,7 +18,8 @@ export async function run(context) {
     actual.length === expected.length && expected.every((byte, index) => actual[index] === byte),
     `${label}: ${JSON.stringify([...actual])} != ${JSON.stringify(expected)}`);
   const chunks = (actual, expected, label) => {
-    context.assert(actual.length === expected.length, `${label}: wrong chunk count ${actual.length}`);
+    context.assert(actual.length === expected.length,
+      `${label}: wrong chunk count ${actual.length}: ${JSON.stringify(actual.map(chunk => [...chunk]))}`);
     expected.forEach((value, index) => bytes(actual[index], value, `${label} chunk ${index}`));
   };
   const joined = list => list.flatMap(chunk => [...chunk]);
@@ -391,7 +392,47 @@ export async function run(context) {
       async host => {
         context.assert(await host.task('calendar', ['*t']) === local, 'TZ changed the host calendar');
       });
-    context.assert(cases.length === 66 && dialogs === 0, 'embedding acceptance matrix is incomplete');
+    for (const state of ['owner', 'child']) {
+      let reads = 0;
+      await check(`stock-stdin-errors-with-configured-source:${state}`,
+        {stdin: () => { reads++; return encode('not stock stdin'); }}, async host => {
+          await task(host, 'stock_stdin', [state]);
+          context.assert(reads === 0, 'stock Lua consumed the embedding stdin source');
+        });
+      await check(`stock-getenv-sees-embedding-and-titan-mutations:${state}`,
+        {env: {FOO: 'bar', TZ: 'Asia/Tokyo'}},
+        host => task(host, 'stock_environment', [state]));
+      await check(`stock-print-io-write-interleave-and-flush:${state}`, {}, async host => {
+        await task(host, 'stock_output', [state]);
+        chunks(host.stdout, [ascii('T\0'), ascii('w\0za\0b'), [10], ascii('M\0'),
+          ascii('i\0o'), ascii('Z\0')], 'stock Lua stdout');
+        context.assert(host.notes.join('|') === 'stock-print-flushed|stock-io-flushed',
+          'stock output did not reach its observed flush points');
+      });
+    }
+    await check('stock-child-exit-is-unavailable-inside-owner-task', {},
+      host => task(host, 'stock_child_exit'));
+    const exitOutput = [ascii('native-before\0'), ascii('lua-exit\0')];
+    await check('native-import-exit-buffered-output-baseline', {}, async host => {
+      const result = await host.instance.run(['native-import-exit', '3']);
+      context.assert(result.kind === 'exited' && result.status === 3 && result.bytes.length === 0,
+        'native import exit did not report status 3');
+      chunks(host.stdout, exitOutput, 'native import exit flush');
+    });
+    for (const [literal, status] of [['3', 3], ['true', 0], ['false', 1]]) {
+      await check(`stock-owner-task-exit:${literal}`, {}, async host => {
+        const result = await host.instance.run(['stock-exit', literal]);
+        context.assert(result.kind === 'exited' && result.status === status && result.bytes.length === 0,
+          `stock Lua exit result: ${JSON.stringify({kind: result.kind, status: result.status,
+            message: decode(result.bytes), stderr: decode(new Uint8Array(joined(host.stderr)))})}`);
+        chunks(host.stdout, exitOutput, 'stock Lua exit flush');
+        context.assert(host.notes.join('|') === 'stock-module-instance-verified',
+          'stock exit skipped the same-instance cleanup assertion');
+        const latched = await rejection(context, host.task('wall_time'), 'EXITED');
+        context.assert(latched.status === status, 'stock Lua exit changed its latched status');
+      });
+    }
+    context.assert(cases.length === 77 && dialogs === 0, 'embedding acceptance matrix is incomplete');
     context.assert(failures.length === 0, failures.join('\n'));
     context.stdout(encode('OS-STREAMS ' + JSON.stringify({verdict: 'PASS', cases: cases.length,
       dialogs, names: cases}) + '\n'));

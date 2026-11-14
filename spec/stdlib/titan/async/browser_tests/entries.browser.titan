@@ -4,6 +4,8 @@
 foreign import "stdio.h"
 
 local child_state: value = nil
+local public_child_state: ownership_lua.Lua?
+local owner_notifications = 0
 -- Kept until the state closes, so its finalizer runs in dispose().
 local exit_witness: {string}? = nil
 
@@ -239,6 +241,30 @@ local function make_child(...: Value): Value
   return Value.is_nil()
 end
 
+local function make_public_child(...: Value): Value
+  if public_child_state ~= nil then public_child_state:close() end
+  public_child_state = ownership_lua.new()
+  public_child_state:run("require('async.browser_child').publication()")
+  return Value.is_nil()
+end
+
+local function public_owner_notification(...: Value): Value
+  owner_notifications = owner_notifications + 1
+  note("public owner notification")
+  return Value.is_nil()
+end
+
+local function public_child_probe(...: Value): Value
+  call_binding("queue_owner_notification")
+  local before = owner_notifications
+  local child = ownership_lua.new()
+  defer child:close()
+  check_public_child_state(child)
+  test.assert(owner_notifications == before,
+    "initializing or rejecting a child drained an owner notification")
+  return Value.is_integer(42)
+end
+
 local function publish(target: browser.BrowserHandle, name: string,
     callable: function (...: Value): Value)
   target:call(Value.is_string(name), Value.is_callable(callable))
@@ -262,6 +288,9 @@ local function publish_entries()
   publish(target, "exit_drive", exit_drive)
   publish(target, "exit_and_fail", exit_and_fail)
   publish(target, "make_child", make_child)
+  publish(target, "make_public_child", make_public_child)
+  publish(target, "public_child_probe", public_child_probe)
+  publish(target, "public_owner_notification", public_owner_notification)
   publish(target, "stream_write", stream_write)
   publish(target, "stream_end", stream_end)
   publish(target, "stream_read", stream_read)
