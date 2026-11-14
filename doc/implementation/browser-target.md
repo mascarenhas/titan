@@ -2361,9 +2361,9 @@ The browser `libtitan.a` contains the same four runtime objects (`titan.o`,
 `minicoro.o`, `titan_path.o`, and `ltitanlib.o`); no archive or image
 references `dlopen`, `dlsym`, `dlerror`, or libbacktrace. Static images resolve modules through
 provider symbol tables (`TitanModuleProvider.symbols`, the explicit-provider
-discipline Windows also uses) and `package.preload`. Under
-`TITAN_TARGET_BROWSER` the host-only paths compile out and raise a browser
-error instead of calling a stub:
+discipline Windows also uses) and `package.preload`. `TITAN_TARGET_BROWSER`
+excludes host-only discovery helpers; retained runtime entries reject operations
+that require unavailable host services:
 
 | Path | Browser behavior |
 | --- | --- |
@@ -2372,7 +2372,7 @@ error instead of calling a stub:
 | `ltitanlib.c` `_loadlib`, `_loadlibglobal`, lazy loading | `browser target does not support dynamic provider loading` |
 | `titan_path.c` provider open and ABI-checked entry lookup | `browser target does not support dynamic provider loading` |
 | `titan_path.c` executable discovery (`/proc/self/exe` and its OS branches) | fails with `browser target cannot locate a host executable` |
-| `titan_path.c` compiler-root query (`titanc --print-root`) | fails with `browser target cannot query a host compiler` |
+| `titan_path.c` native compiler-root query (`titanc --print-root`) | compiled out |
 | `ltitanlib.c` `SIGPIPE` guard, its restore, and the POSIX-only support functions | compiled out |
 | the libbacktrace and `execinfo` trace backends | replaced by the [browser trace backend](error-handling.md#trace-backends) |
 
