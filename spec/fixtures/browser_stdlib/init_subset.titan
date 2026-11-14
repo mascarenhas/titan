@@ -11,6 +11,12 @@ local peglib = import "peg"
 local stringlib = import "string"
 local urllib = import "url"
 local pathlib = import "path"
+local browserlib = import "browser"
+local asynclib = import "async"
+local timerlib = import "timer"
+local oslib = import "os"
+local iolib = import "io"
+local lualib = import "lua"
 
 function test_initializers_completed(_context: test.Context)
   test.assert(test.testing(), "subset initializers did not reach their test")

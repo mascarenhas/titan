@@ -1,0 +1,279 @@
+local function printing(...: Value): Value
+  local make_printable, conversions = print_values.load_print_helpers()
+  stream.print(make_printable("first", "A\0\128\255", false),
+               make_printable("second", "B", false))
+  test.assert(conversions() == "first|second", "print conversion order changed")
+  stream.print()
+  expect_text(function ()
+    stream.print(make_printable("before", "not written", false),
+                 make_printable("failure", "not written", true),
+                 make_printable("after", "not converted", false))
+  end, "conversion failure")
+  test.assert(conversions() == "first|second|before|failure",
+    "print converted past a failure")
+  stream.print("survivor\0\255")
+  local original = system.stdout
+  do
+    defer system.stdout = original
+    system.stdout = system.stderr
+    stream.print("redirected\0\128")
+  end
+  stream.print("restored")
+  return Value.is_boolean(true)
+end
+
+local function write_three(...: Value): Value
+  local target = output(text_of(...[1]))
+  for index = 1, 3 do
+    note("before-" .. index)
+    target:write("W" .. index)
+    note("after-" .. index)
+  end
+  return Value.is_boolean(true)
+end
+
+local function write_recovery(...: Value): Value
+  local target = output(text_of(...[1]))
+  local message = expect_operation(function () target:write("rejected") end,
+    "stdio.write", "EIO")
+  note("write-error")
+  target:write("survivor")
+  return Value.is_string(message)
+end
+
+local function cancelled_write(...: Value): Value
+  defer note("write-cleanup")
+  output(text_of(...[1])):write("accepted\0\255")
+  note("write-returned")
+  return Value.is_nil()
+catch
+  test.assert(error is async.CancellationReason<|value|>,
+    "an admitted write did not deliver its Task cancellation")
+  note("write-cancelled")
+  raise
+end
+
+local function expect_disposed(action: Action): string
+  do
+    action()
+  catch
+    test.assert(error is async.CancellationReason<|value|>,
+      "disposed Task did not retain its nominal cancellation")
+    local reason: async.CancellationReason<|value|> = error
+    case reason
+    when simple(message) then
+      test.assert(message == "instance disposed", "disposal changed the cancellation reason")
+      return message
+    end
+    raise "disposal supplied a complex cancellation reason"
+  end
+  raise "disposed write unexpectedly succeeded"
+end
+
+local function queued_writers(disposal: boolean): {async.Task<|nil, value|>}
+  local tasks: {async.Task<|nil, value|>} = {}
+  local transferred = false
+  defer do
+    if not transferred then
+      for index = 1, #tasks do retire(tasks[index]) end
+    end
+  end
+  for index = 1, 3 do
+    local task = async.run<|nil, value|>(function (): nil
+      defer do
+        note("queued-cleanup-" .. index)
+        if disposal then
+          local message = expect_disposed(function ()
+            system.stdout:write("writer-cleanup-" .. index)
+          end)
+          note("disposed-writer-cleanup-" .. index .. ":" .. message)
+        end
+      end
+      note("queued-before-" .. index)
+      if disposal then
+        local message = expect_disposed(function ()
+          system.stdout:write("Q" .. index)
+        end)
+        note("disposed-write-" .. index .. ":" .. message)
+      else
+        system.stdout:write("Q" .. index)
+      end
+      return nil
+    end)
+    tasks[index] = task
+  end
+  transferred = true
+  return tasks
+end
+
+local function queued_exit(...: Value): Value
+  local tasks = queued_writers(false)
+  defer do
+    for index = 1, #tasks do retire(tasks[index]) end
+  end
+  local exiting = async.run<|nil, value|>(function (): nil
+    suspend_on("held")
+    system.exit(9)
+    return nil
+  end)
+  defer retire(exiting)
+  for index = 1, #tasks do async.join(tasks[index]) end
+  async.join(exiting)
+  return Value.is_nil()
+end
+
+local function queued_disposal(...: Value): Value
+  defer do
+    local message = expect_disposed(function () system.stdout:write("cleanup-write") end)
+    note("disposed-cleanup:" .. message)
+  end
+  local tasks = queued_writers(true)
+  defer do
+    for index = 1, #tasks do retire(tasks[index]) end
+  end
+  for index = 1, #tasks do async.join(tasks[index]) end
+  return Value.is_nil()
+end
+
+local function c_interleave(...: Value): Value
+  system.stdout:write("T\0\255")
+  ffi.fputs("C-prefix", ffi.stdout)
+  local bytes = "\0\128\255tail"
+  ffi.fwrite(bytes, 1, #bytes, ffi.stdout)
+  test.assert(ffi.fflush(ffi.stdout) == 0, "C stdout flush failed")
+  system.stdout:write("Z\0\128")
+  system.stderr:write("E\0\255")
+  return Value.is_boolean(true)
+end
+
+local function c_return(...: Value): Value
+  local bytes = "task\0\128\255tail"
+  ffi.fwrite(bytes, 1, #bytes, ffi.stdout)
+  return Value.is_boolean(true)
+end
+
+local function c_latch(...: Value): Value
+  ffi.fputs("C-failure", ffi.stdout)
+  ffi.fflush(ffi.stdout)
+  local message = expect_operation(function () system.stdout:write("latched") end,
+    "stdio.write", "EIO")
+  note("c-latch:" .. message)
+  system.stdout:write("after-latch")
+  note("c-latch-recovered")
+  return Value.is_boolean(true)
+end
+
+local function c_no_yield(...: Value): Value
+  local counter = 0
+  local peer = async.run<|nil, value|>(function (): nil
+    counter = counter + 1
+    async.yield()
+    counter = counter + 1
+    return nil
+  end)
+  defer retire(peer)
+  async.yield()
+  test.assert(counter == 1, "counter peer was not parked between turns")
+  local before = counter
+  ffi.fputs("no-yield", ffi.stdout)
+  ffi.fflush(ffi.stdout)
+  test.assert(counter == before, "C stdio suspended the current Task")
+  test.assert(async.join(peer):has_succeeded(), "counter peer failed")
+  return Value.is_boolean(true)
+end
+
+local function declared_kinds(...: Value): Value
+  local expected = text_of(...[1])
+  test.assert(system.stdin:kind() == expected and
+    system.stdin:is_tty() == (expected == "tty"), "input kind or TTY changed")
+  for index = 1, 2 do
+    local target = system.stdout
+    if index == 2 then target = system.stderr end
+    test.assert(target:kind() == expected and target:is_tty() == (expected == "tty"),
+      "output kind or TTY changed")
+  end
+  -- The driver compares this observation, not its own argument echoed back.
+  return Value.is_string(system.stdout:kind())
+end
+
+local function undeclared_kinds(...: Value): Value
+  expect_operation(function () system.stdin:kind() end, "os.InputStream.kind", "ENOSYS")
+  test.assert(not system.stdin:is_tty(), "undeclared input is a TTY")
+  for index = 1, 2 do
+    local target = system.stdout
+    if index == 2 then target = system.stderr end
+    expect_operation(function () target:kind() end, "os.OutputStream.kind", "ENOSYS")
+    test.assert(not target:is_tty(), "undeclared output is a TTY")
+  end
+  return Value.is_boolean(true)
+end
+
+local function invalid_kind(...: Value): Value
+  local name = text_of(...[1])
+  do
+    if name == "stdinKind" then
+      system.stdin:kind()
+    elseif name == "stdoutKind" then
+      system.stdout:kind()
+    else
+      test.assert(name == "stderrKind", "invalid_kind received an unknown option name")
+      system.stderr:kind()
+    end
+  catch
+    test.assert(error is string, "invalid kind did not raise a plain error")
+    return Value.is_string(error as string)
+  end
+  raise "invalid kind was accepted"
+end
+
+local function unsupported_shutdown(...: Value): Value
+  local target = output(text_of(...[1]))
+  expect_operation(function () target:shutdown() end, "stdio.shutdown", "ENOTSUP")
+  target:write("still-open")
+  return Value.is_boolean(true)
+end
+
+local function tcp_shutdown(...: Value): Value
+  local target = output(text_of(...[1]))
+  local first = async.run<|nil, value|>(function (): nil
+    target:write("tcp-first")
+    return nil
+  end)
+  defer retire(first)
+  local second = async.run<|nil, value|>(function (): nil
+    target:write("tcp-second")
+    return nil
+  end)
+  defer retire(second)
+  async.yield()
+  local repeated = async.run<|nil, value|>(function (): nil
+    target:shutdown()
+    expect_operation(function () target:write("late") end, "stdio.write", "EPIPE")
+    expect_operation(function () target:write("") end, "stdio.write", "EPIPE")
+    note("shutdown-repeated")
+    return nil
+  end)
+  defer retire(repeated)
+  note("shutdown-start")
+  target:shutdown()
+  note("shutdown-returned")
+  test.assert(async.join(first):has_succeeded() and async.join(second):has_succeeded() and
+    async.join(repeated):has_succeeded(), "TCP peer failed")
+  target:shutdown()
+  return Value.is_boolean(true)
+catch
+  test.assert(error is async.CancellationReason<|value|>,
+    "shutdown did not deliver its Task cancellation")
+  note("shutdown-cancelled")
+  raise
+end
+
+local function failed_shutdown(...: Value): Value
+  local target = output(text_of(...[1]))
+  local message = expect_operation(function () target:shutdown() end,
+    "stdio.shutdown", "EIO")
+  target:shutdown()
+  expect_operation(function () target:write("late") end, "stdio.write", "EPIPE")
+  expect_operation(function () target:write("") end, "stdio.write", "EPIPE")
+  return Value.is_string(message)
+end

@@ -1,6 +1,8 @@
 // JavaScript half of titan/browser.h. Offsets and widths are asserted there.
 // This library owns no instance singleton: every import reaches its Module's owner.
 addToLibrary({
+  // Libc reads only the embedder's per-instance environment snapshot.
+  $getEnvStrings: () => Module['titanBrowserBridge'].options.env,
   $TitanBridge__deps: ['$TitanBrowser'],
   $TitanBridge: {
     trusted(method, ...args) {
@@ -20,6 +22,10 @@ addToLibrary({
   titan_browser_complete__deps: ['$TitanBridge'],
   titan_browser_complete__sig: 'vp',
   titan_browser_complete: pointer => TitanBridge.trusted('receiveCompletion', pointer >>> 0),
+
+  titan_browser_host_output__deps: ['$TitanBridge'],
+  titan_browser_host_output__sig: 'vipi',
+  titan_browser_host_output: (stream, bytes, length) => TitanBridge.trusted('output', stream >>> 0, bytes >>> 0, length >>> 0),
 
   titan_browser_host_state_open__deps: ['$TitanBridge'],
   titan_browser_host_state_open__sig: 'ip',

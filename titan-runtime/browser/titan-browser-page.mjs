@@ -103,7 +103,7 @@ export async function execute(config, host) {
         return;
     }
     const { create, locateFile } = await context.image(config.file);
-    const instance = create({ stdout, stderr, locateFile });
+    const instance = create({ stdout, stderr, locateFile, stdoutKind: config.stdoutKind, stderrKind: config.stderrKind });
     try {
         try { await instance.initialize(); }
         catch (error) {

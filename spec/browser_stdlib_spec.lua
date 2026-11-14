@@ -5,11 +5,15 @@ local strategy = require("titan-compiler.io").new_sync()
 local temporary = require "spec.support.temporary"
 local installed_prefix = require "spec.support.installed_prefix"
 local platform = require "titan-compiler.platform"
+local files = require "spec.fixtures.target_selection.support"
+local parser = require "titan-compiler.parser"
+local driver = require "titan-compiler.driver"
+local browser_fixtures = require "spec.support.browser_fixtures"
 
 describe("browser core stdlib build checks", function()
     local scratch = {}
     after_each(function()
-        for _, path in ipairs(scratch) do os.remove(path) end
+        for _, path in ipairs(scratch) do files.remove(path) end
         scratch = {}
     end)
 
@@ -28,7 +32,26 @@ plan:
         return strategy:run(argv, {stderr_to_stdout = true})
     end
 
-    it("keeps all eighteen portable owners in the single-image root inventory", function()
+    local function source_fixture()
+        local root = temporary.name("-browser-source-closure")
+        scratch[#scratch + 1] = root
+        files.mkdir(root .. "/titan")
+        return root
+    end
+
+    local function source_check(root)
+        -- Restore a validated descriptor exactly as a worker does: source
+        -- resolution needs no Emscripten discovery or compiler invocation.
+        local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
+        local context = driver._new_resolver_context({ io = strategy, target = "browser" }, descriptor)
+        local called, ok, err = pcall(checks.check_sources, context, root)
+        local closed, close_error = driver.close_resolver_context(context)
+        assert.is_true(called, ok)
+        assert.is_true(closed, close_error)
+        return ok, err
+    end
+
+    it("keeps all twenty-one portable owners in the single-image root inventory", function()
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local result = root_plan()
         assert.is_true(result.ok, result.output)
@@ -37,12 +60,15 @@ plan:
             assert.is_nil(roots[root], root)
             roots[root], count = true, count + 1
         end
-        assert.equal(18, count, "the audited browser inventory has 18 owners; change this deliberately")
+        assert.equal(21, count, "the audited browser inventory has 21 owners; change this deliberately")
         assert.is_true(roots["transfer.tests"])
         assert.is_true(roots["protobuf.tests"])
         assert.is_true(roots["protobuf.portable_tests"])
         assert.is_true(roots["async.tests"])
         assert.is_true(roots["timer.tests"])
+        assert.is_true(roots["os.tests"])
+        assert.is_true(roots["io.tests"])
+        assert.is_true(roots["lua.tests"])
     end)
 
     it("rejects empty and duplicate owner inventories before build setup", function()
@@ -120,6 +146,60 @@ plan:
         -- the exact native archive members instead of pinning recipe spelling.
     end)
 
+    it("keeps every initializer fixture and child-state root equal to the browser Make inventory", function()
+        local roots = assert(checks.browser_roots(strategy))
+        local wanted = {}
+        for _, root in ipairs(roots) do
+            assert.is_nil(wanted[root], "duplicate browser root " .. root)
+            wanted[root] = true
+        end
+        local function imports(module)
+            local filename = "spec/fixtures/browser_stdlib/" .. module .. ".titan"
+            local seen = {}
+            for _, import in ipairs(assert(parser.scan_imports(assert(strategy:read_file(filename))))) do
+                assert.is_false(import.source_required, filename)
+                assert.is_nil(seen[import.name], filename .. ": duplicate import")
+                seen[import.name] = true
+            end
+            return seen
+        end
+        for _, root in ipairs(roots) do
+            assert.same({ ["titan.test"] = true, [root] = true }, imports("init_" .. root:sub(7)))
+        end
+        -- The directory holds no initializer fixture that the gate would skip.
+        local expected, present = { init_subset = true, init_lua_states = true }, {}
+        for _, root in ipairs(roots) do expected["init_" .. root:sub(7)] = true end
+        for _, name in ipairs(assert(strategy:list("spec/fixtures/browser_stdlib"))) do
+            local fixture = name:match("^(init_[%w_]+)%.titan$")
+            if fixture then present[fixture] = true end
+        end
+        assert.same(expected, present)
+        assert.same(wanted, imports("init_subset"))
+        assert.same(wanted, imports("init_lua_states"))
+        local filename = "spec/fixtures/browser_stdlib/init_lua_states.titan"
+        local nodes = assert(parser.parse(filename, assert(strategy:read_file(filename))))
+        local list
+        for _, node in ipairs(nodes) do
+            if node._tag == "Ast.TopLevelFunc" and node.name == "test_initializers_in_independent_states" then
+                for _, statement in ipairs(node.block.stats) do
+                    if statement._tag == "Ast.StatDecl" and statement.decls[1].name == "modules" then
+                        assert.is_nil(list, "duplicate child-state root list")
+                        list = statement.exps[1]
+                    end
+                end
+            end
+        end
+        assert.truthy(list, "missing child-state root list")
+        assert.equal("Ast.ExpInitList", list._tag)
+        local seen = {}
+        for _, field in ipairs(list.fields) do
+            assert.equal("Ast.ExpString", field.exp._tag)
+            assert.is_nil(seen[field.exp.value], "duplicate child-state root")
+            seen[field.exp.value] = true
+        end
+        assert.same(wanted, seen)
+    end)
+
     it("rejects forbidden header and archive dependencies including injected libuv headers", function()
         for _, path in ipairs({ "/fixture/uv.h", "/fixture/uv/unix.h", "/fixture/openssl/ssl.h",
             "/fixture/llhttp.h", "/fixture/sqlite3.h", "/fixture/sqlite3ext.h",
@@ -146,6 +226,9 @@ plan:
         assert.truthy(err:find("/injected/libuv/include/uv.h", 1, true))
         assert(checks.check_path("/vendor/lpeglabel/titan_lpeglabel.h"))
         assert(checks.check_path("/sdk/libtitan-lpeglabel.a"))
+        for _, header in ipairs({ "time.h", "locale.h", "stdlib.h", "errno.h" }) do
+            assert(checks.check_headers({ c_header_dependencies = { { path = "/libc/" .. header } } }))
+        end
     end)
 
     it("rejects defined and undefined symbols from every excluded C library", function()
@@ -179,6 +262,69 @@ plan:
         local ok, err = checks.check_image(image("uv_closure_intruder"), "intruder.wasm")
         assert.is_nil(ok)
         assert.equal("intruder.wasm: forbidden browser stdlib symbol uv_closure_intruder", err)
+    end)
+
+    it("rejects every absent import only from compiler-selected browser files", function()
+        if platform.windows then pending("browser source resolution requires a supported host"); return end
+        for _, module in ipairs(checks.absent_modules) do
+            local bad = "local missing = import " .. string.format("%q", module:sub(7)) .. "\n"
+            local good = "function value(): integer return 1 end\n"
+            local root = source_fixture()
+            files.write(root .. "/titan/intruder.titan", bad)
+            local function rejected(tree)
+                local ok, err = source_check(tree)
+                assert.is_nil(ok, module)
+                assert.truthy(err:find(module, 1, true), err)
+            end
+            rejected(root)
+            files.write(root .. "/titan/intruder.browser.titan", good)
+            files.write(root .. "/titan/intruder.native.titan", bad)
+            assert(source_check(root))
+            files.write(root .. "/titan/intruder.browser.titan", bad)
+            rejected(root)
+
+            local folder = source_fixture()
+            files.write(folder .. "/titan/owner/owner.native.titan", good)
+            files.write(folder .. "/titan/owner/member.titan", bad)
+            assert(source_check(folder))
+            files.write(folder .. "/titan/owner/owner.browser.titan", good)
+            rejected(folder)
+            files.write(folder .. "/titan/owner/member.browser.titan", good)
+            assert(source_check(folder))
+            -- A bare native.titan is an unlabeled contributor, not a variant.
+            files.write(folder .. "/titan/owner/native.titan", bad)
+            rejected(folder)
+        end
+    end)
+
+    it("uses folder-before-flat and inactive-main fallback in the source audit", function()
+        if platform.windows then pending("browser source resolution requires a supported host"); return end
+        local root = source_fixture()
+        files.write(root .. "/titan/owner.titan", 'local missing = import "fs"\n')
+        files.write(root .. "/titan/owner/owner.titan", "function value(): integer return 1 end\n")
+        assert(source_check(root))
+        assert(os.rename(root .. "/titan/owner/owner.titan", root .. "/titan/owner/owner.native.titan"))
+        local ok, err = source_check(root)
+        assert.is_nil(ok)
+        assert.truthy(err:find("titan.fs", 1, true), err)
+    end)
+
+    it("rejects absent-module artifacts and metadata even under neutral archive member names", function()
+        for _, module in ipairs(checks.absent_modules) do
+            local ok, err = checks.check_archive("provider.a", { members = {
+                { display_name = "neutral.o", bytes = "", object = { metadata = { module = module } } },
+            } })
+            assert.is_nil(ok)
+            assert.truthy(err:find(module, 1, true), err)
+            -- Physical basenames do not confer the titan namespace.
+            assert(checks.check_archive("provider.a", { members = {
+                { display_name = module:sub(7) .. ".o", bytes = "",
+                    object = { metadata = { module = "app." .. module:sub(7) } } },
+            } }))
+        end
+        assert(checks.check_archive("provider.a", { members = {
+            { display_name = "portable.o", bytes = "", object = { metadata = { module = "titan.math" } } },
+        } }))
     end)
 
     it("derives raw foreign entries and fails on any unrecorded member change", function()
@@ -238,6 +384,31 @@ plan:
         assert.equal("method", members["Box:get"].kind)
     end)
 
+    it("inventories Interface members once despite their ordered and named views", function()
+        local function provider(parameter)
+            local owner = "fixture.View"
+            local view = types.Interface(owner, {
+                types.Field(owner, "size", types.Integer(), 0, true),
+            }, {
+                types.Method(owner, "read", {}, {types.String()}, nil, nil, {}),
+                types.Method(owner, "write", {parameter}, {}, nil, nil, {"data"}),
+            })
+            local modtype = types.Module("fixture", {}, {View = view})
+            return { key_order = {"fixture"},
+                entries = { fixture = {types = types.serialize(modtype)} } }
+        end
+        local rows = assert(checks.inventory(provider(types.String()), provider(types.String())))
+        local members = {}
+        for _, row in ipairs(rows) do members[row.name] = row.kind end
+        assert.equal(4, #rows)
+        assert.equal("field", members["View.size"])
+        assert.equal("method", members["View:read"])
+        assert.equal("method", members["View:write"])
+        local ok, err = checks.inventory(provider(types.String()), provider(types.Integer()))
+        assert.is_nil(ok)
+        assert.truthy(err:find("View:write", 1, true), err)
+    end)
+
     it("compares named-call parameter metadata as well as rendered function types", function()
         local function provider(parameter_name)
             local modtype = types.Module("fixture", {
@@ -293,6 +464,45 @@ plan:
             local ok, err = checks.inventory(provider(false), provider(true), case[1])
             assert.is_nil(ok)
             assert.truthy(err:find(case[2], 1, true), err)
+        end
+    end)
+
+    it("records the Lua owner but compares every retained method", function()
+        assert.same({
+            omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" },
+            opaque = { "Lua" },
+        }, checks.browser_differences["titan.lua"])
+        local retained = { "close", "detach", "run", "run_from_loader" }
+        local function provider(browser, changed)
+            local owner, methods = "titan.lua.Lua", {}
+            for _, name in ipairs(retained) do
+                methods[name] = types.Method(owner, name, {},
+                    name == changed and {types.String()} or {}, nil, nil, {})
+            end
+            if not browser then
+                for _, name in ipairs({ "run_async", "run_async_from_loader" }) do
+                    methods[name] = types.Method(owner, name, {}, {}, nil, nil, {})
+                end
+            end
+            local members = {
+                types.ModuleMember("titan.lua", "Lua", types.Record(owner, {}, {}, methods, 2), nil),
+            }
+            if not browser then
+                members[#members + 1] = types.ModuleMember("titan.lua", "dofile",
+                    types.Function({}, {}, false, nil, nil), {})
+            end
+            return { key_order = { "titan.lua" }, entries = {
+                ["titan.lua"] = { types = types.serialize(types.Module("titan.lua", members, {})) },
+            } }
+        end
+        local rows, modules, differences = checks.inventory(provider(false), provider(true))
+        assert.equal(1, modules)
+        assert.equal(#retained, #rows)
+        assert.equal(4, #differences)
+        for _, name in ipairs(retained) do
+            local ok, err = checks.inventory(provider(false), provider(true, name))
+            assert.is_nil(ok)
+            assert.truthy(err:find("titan.lua.Lua:" .. name, 1, true), err)
         end
     end)
 

@@ -2,15 +2,18 @@
 
 The user-facing contract is in the
 [Lua states and loading standard-library chapter](../language/standard-library-lua.md).
-`titan.lua` is a folder module built against the pinned Lua 5.5 API. It uses
-`titan.fs` for cooperative file access, `titan.io` for the Reader interface,
-and `string.StringWriter` for binary-safe accumulation. The public operations
-need no compiler intrinsic. The module has three files:
+`titan.lua` is a folder module built against the pinned Lua 5.5 API. Shared
+code uses `titan.io` for the Reader interface and `string.StringWriter` for
+binary-safe accumulation; native contributors add `titan.fs` and background
+execution. The public operations need no compiler intrinsic.
 
 | File | Owns |
 | --- | --- |
-| `titan/lua/lua.native.titan` | current-state `load`, `load_from_reader`, `dofile` and `require`; the public `Lua` owner, its `LuaCall` operation record, admission, argument preparation and host-side result copy |
-| `titan/lua/worker.titan` | source-defined foreign entries that run on the independent state: `lua_state_open`, `lua_state_run`, `lua_state_execute` and the result converters |
+| `titan/lua/lua.titan` | shared current-state loading and `require`; the public `Lua` owner, `LuaCall`, synchronous execution, admission, argument preparation and host-side result copy |
+| `titan/lua/loading.native.titan` | the `fs` import, source-file search and `dofile` |
+| `titan/lua/loading.browser.titan` | the fixed no-filesystem source miss |
+| `titan/lua/background.native.titan` | `Lua:run_async`, `Lua:run_async_from_loader`, worker submission and abandoned-call release |
+| `titan/lua/worker.titan` | shared source-defined foreign entries on the independent state: `lua_state_open`, `lua_state_run`, `lua_state_execute` and result converters |
 | `titan/lua/native.h` | the `titan_lua_open`/`titan_lua_preload` initialization packet and the `titan_lua_call`/`titan_lua_value` call carrier |
 
 `titan.transfer` owns the canonical `TransferValue` union;
@@ -43,8 +46,9 @@ Shared provider code does not make module values shared objects.
    `titan_install_searcher`, so every independent state, including each
    `titan.thread` child, has exactly one [Titan package
    searcher](driver.md#the-titan-package-searcher) at the end of
-   `package.searchers`. A failure closes the new state and raises the copied
-   message.
+   `package.searchers`. On the browser it then applies the stock Lua profile
+   described below, inside the same protected opener. A failure closes the
+   new state and raises the copied message.
 
 How generated initialization publishes the loader and its descriptor is
 described in [the module protocol](codegen-overview.md#the-module-protocol);
@@ -54,11 +58,12 @@ the registry keys are listed in the
 Only native code pointers cross: module names become new destination strings,
 and no `package.loaded` entry, module userdata, metatable or resolved binding is
 copied. Later changes to either state's preload table are independent. Lua
-search paths come from the destination's own standard-library initialization;
-the Titan searcher computes the destination's own effective Titan path on its
-first lookup, so neither the creator's `TITAN_PATH_KEY` string nor its SDK
-fallback outcome is inherited. Invoking a copied loader performs ordinary
-per-state module
+search paths come from the destination's own standard-library initialization.
+On native targets the Titan searcher computes the destination's own effective
+Titan path on its first lookup; neither the creator's `TITAN_PATH_KEY` nor its
+SDK fallback outcome is inherited. On the browser it reads no environment
+variables and probes no provider files. Invoking a copied loader performs
+ordinary per-state module
 initialization. Loader and resolver addresses are borrowed code pointers;
 runtime-loaded Titan providers stay mapped for the process lifetime under the
 [native-image binding rule](foreign-functions.md#source-collaboration-and-binary-isolation),
@@ -95,7 +100,50 @@ before calling `run`/`run_async`. They add no reservation or reader-close
 policy. If reading suspends, another Task may use or close the state; admission
 is checked against the state that exists when reading completes.
 
+### Browser states and stock profile
+
+Browser independent states use synchronous `run` and `run_from_loader` in the
+same WebAssembly instance and on its owner thread. The native background
+contributor is not selected; there are no declarations for either async
+method or `dofile`. A child cannot create or drive browser Tasks: the browser
+driver belongs to the original instance state.
+
+`titan/ffi.h` defines `TITAN_LUA_BROWSER_PROFILE` as a Lua source string on the
+browser and an empty string on native targets. The one chunk replaces only
+stock `os.clock` and `os.exit`; filesystem, process, environment and stdio
+behavior comes from the existing Lua/libc build and launcher definitions.
+The chunk first binds `error`, `package.loaded`, `package.preload` and
+`require` to locals, so its closures behave like C functions: replacing those
+globals later changes neither replacement. Lua's own `require` reads the same
+registry tables, so the captured tables are the ones it uses.
+`os.clock` raises the no-CPU-clock diagnostic. `os.exit` first consults the
+loaded table's `titan.os` entry. When that entry is absent but the linked
+preload loader exists, it calls the captured `require`; loader
+errors propagate. The generated opener reuses the canonical per-state module
+userdata already created by a native import, without rerunning initialization
+or creating another stdin/stdout/stderr set. The profile maps boolean
+statuses and delegates to Titan's exit request. Without a linked module or
+an owner Task it raises the outside-Task diagnostic. Requiring `titan.os` in
+a child does not grant driver ownership, so its `os.exit` still raises. It
+never reaches C `exit()`.
+
+The [browser initializer](browser-target.md#the-browser-entrypoint) runs the
+same chunk immediately after `luaL_openlibs` and `titan_install_searcher`.
+`lua_state_open_libraries` applies it after installing the independent state's
+searcher, only when the macro is nonempty:
+
+| Step | Stack obligation |
+| --- | --- |
+| `luaL_loadstring` | Push one rooted chunk or one error; the enclosing `lua_state_open` call is already protected. |
+| Failed compilation | `lua_error` propagates the existing error object to that protected call; initialization closes the state. |
+| `lua_callk(..., 0, 0, ...)` | Consume the chunk, keep no results, and propagate a runtime failure to the same protected call. |
+
+No temporary stack values survive successful application and no host-state
+value crosses into the child. Native openers skip the empty macro.
+
 ### Receiver bootstrap and teardown
+
+This section is native-only.
 
 A `Lua:run` or `Lua:run_async` bootstrap chunk may require `titan.async`,
 construct an `async.Receiver` outside a Task, root it in that state's module or
@@ -217,14 +265,20 @@ the Lua code made to globals, module state or external data.
 
 ### Worker ownership and cancellation
 
+This section and host-state-close handling are native-only.
+
 `run_async` builds a `LuaCall` holding the `Lua` owner, chunk and name strings,
 the argument Array, the owned `titan_lua_value[]` inputs, and an embedded
 `titan_lua_call` packet. The packet carries the independent state, chunk bytes
 and length, the diagnostic name (`name or chunk`, passed as `const char *`),
 argument data, and result and status storage. It then calls
-`async.run_foreign(lua_state_run, call.packet, lua_state_release_abandoned)`
+`async.run_foreign(lua_state_run_worker, call.packet, lua_state_release_abandoned)`
 through `LuaCall:run_worker`; the third argument is the
-[host-state-close release](#host-state-close-during-run_async). Result slots borrow strings
+[host-state-close release](#host-state-close-during-run_async).
+`lua_state_run_worker` restores the pool thread's x87 precision on Windows
+([worker floating-point state](libuv-runtime.md#worker-floating-point-state);
+the call is empty on other targets) and then calls `lua_state_run`, which
+synchronous `run` calls directly. Result slots borrow strings
 from the rooted independent stack and own no further allocation, so freeing the
 single result buffer also handles a partially converted run.
 
@@ -324,7 +378,7 @@ truthy registry cache
 same-name loading guard
         |
         v
-searcher 1 ---> async package.path pass ---> searchers 3..first nil
+searcher 1 ---> selected source pass ---> searchers 3..first nil
         |                 |                         |
         +---------- selected loader + loader data --+
                                   |
@@ -345,8 +399,9 @@ Lua's own `require`; a reassigned public `package.loaded` field does not
 redirect it. `package`, `package.searchers` and `package.path` are read for
 each uncached load and validated at their dynamic boundary.
 
-The source pass (`source_search`) maps dots to slashes, substitutes every
-literal `?` in each semicolon-separated template, and attempts `fs.open`. An
+The native source pass (`loading.native.titan`'s `source_search`) maps dots to
+slashes, substitutes every literal `?` in each semicolon-separated template,
+and attempts `fs.open`. An
 `async.OperationError` from the open is a candidate miss
 (`open_source_candidate`); cancellation and other errors keep their types and
 propagate. After a candidate opens, a read or load error is wrapped with the
@@ -354,6 +409,11 @@ module and filename and ends the search. A deferred close owns the opened
 candidate on every path. Even when that wrapper transforms an injected
 `async.CancellationReason`, the Task's stored cancellation request is
 authoritative and terminalizes the Task as cancelled with the original reason.
+
+The browser contributor has the same private signature and returns only the
+miss line `no source search: the browser target has no filesystem`; it does
+not inspect templates or perform I/O. The rest of `find_loader` and `require`
+is shared.
 
 Name substitution, Reader chunk loading, and source-miss and cross-searcher
 diagnostics all use `string.StringWriter`, preserving binary strings and
@@ -363,7 +423,7 @@ diagnostic assembly add no scheduler turns.
 Slot 2 is reserved by position, not identified by closure identity, so Lua's
 private built-in searcher is never compared, captured or wrapped: slot 1 and
 slots 3 onward are the mutable callable policy, and source lookup always runs
-as the asynchronous middle pass. Built-in C searchers, custom searchers and
+as the selected middle pass. Built-in C searchers, custom searchers and
 returned loaders are called through the ordinary typed function-value path,
 which uses the generated non-yieldable Lua-call boundary: safe with respect to
 Titan native frames, but it cannot suspend.
@@ -378,8 +438,12 @@ Compiled Titan modules therefore need no special branch: in every state Titan
 creates, and in a host after `require "titan"`, the [Titan package
 searcher](driver.md#the-titan-package-searcher) occupies a slot after Lua's
 C searchers (normally slot 5) and runs in the synchronous tail of this
-traversal. Its probing, `dlopen` calls, and any one-time SDK-fallback query
-block the calling thread without yielding.
+traversal. On native targets its probing, `dlopen` calls, and any one-time
+SDK-fallback query block without yielding. On the browser it keeps canonical
+and preload lookup, then returns
+`no Titan provider search: the browser target has no dynamic providers`.
+The filesystem, environment and SDK-fallback helpers are compiled out with
+their callers; there is no browser dynamic-provider search.
 
 The module-level `loading: {string: boolean}` Map is set before any yielding
 search and cleared by `defer`, so cancellation also clears it. It is not a
@@ -414,17 +478,40 @@ loader-data, package, searcher and cache values likewise stay in traced locals
 across filesystem yields and Lua calls. No borrowed raw pointer and no stack
 index is retained across an operation that can reallocate the stack.
 
-The behavior suite is the native `lua.tests` owner under
-`spec/stdlib/titan/lua/`. It covers text and binary chunks, embedded zeros,
-Reader ownership, File-error descriptor accounting (through the shared native
-`titan_uv_test_stdio_open_fd_count` fixture), cache states, asynchronous source
-loads, duplicate-load rejection, preload/C/Titan/custom loaders, diagnostics,
-and the independent-state preload, transfer, receiver and async paths. Its
-cancellation case cancels a Task reading an unbounded FIFO source candidate,
-checks the cancelled status, and then requires the same name from a finite
-source to prove guard cleanup. `state_close_test.titan` closes host states
-with a Task parked in `run_async`: with the wrapper newer or older than the
-Task, with the worker still running or already returned, and, in a compiled
-child with a SIGALRM watchdog, with four abandoned jobs occupying the default
-pool while each independent state has queued pool work. Direct `package` table access and FIFO creation
-go through the test-only helpers in `spec/stdlib/titan/lua/test_support.titan`.
+The `lua.tests` owner under `spec/stdlib/titan/lua/` runs on native and browser
+targets. Shared cases cover text and binary chunks, embedded zeros, borrowed
+Reader ownership, custom searchers, cache states, linked initialized imports,
+independent-state preload snapshots, close and detach. Transfer case bodies
+run through both `run` and a borrowed `run_from_loader`: scalars and binary
+strings, C functions and borrowed pointers, explicit policies, records,
+unions, custom record payloads, and closures. They check hook execution in
+the source and destination, native hook-error text, destination preload
+loading, captured cells, module globals, and survival after source close.
+Native `run_async` cases use the same assertions rather than duplicate them.
+Browser cases also check destination-stable stdin/stdout/stderr identities
+and repeated payload discard returning zero. The stock Lua profile runs in
+both state kinds, including exit without a published `titan.os` loader and
+both replacements after `require`, `package` and `error` are cleared, with
+fixed miss diagnostics immune to `TITAN_PATH` changes.
+
+Native-only contributors retain File-error descriptor accounting (through
+`titan_uv_test_stdio_open_fd_count`), asynchronous source loads, duplicate-load
+rejection, C loaders, receivers and worker execution. The cancellation case
+cancels a Task reading an unbounded FIFO source, then retries the same name
+from a finite source to prove guard cleanup. `state_close_test.native.titan`
+closes hosts with a Task parked in `run_async`: wrapper newer or older than the
+Task, worker still running or already returned, and a SIGALRM-guarded child
+with four abandoned jobs while each child state has queued pool work. Direct
+`package` access and FIFO creation use
+`spec/stdlib/titan/lua/test_support.native.titan`.
+
+Embedding-sensitive public-state cases live in the
+[bridge and scheduler gates](browser-bridge.md#test-layers), not this plain
+owner. They cover bridge invalidation after explicit close, collection or
+detach followed by test-owned `lua_close`; non-owner driver and Task
+refusals; and stock Lua input, exit, environment and binary output with real
+embedding options. Stock exit checks the first normal Lua load against the
+native import's stable streams and buffered-output flush order. In the output
+case, short buffered `io.write` bytes share print's body chunk; the newline
+arrives as a second chunk at that flush. A later `io.flush` publishes the
+next buffered write before the following Titan write.

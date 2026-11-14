@@ -350,10 +350,10 @@ After step 7, `browser-stdlib` runs:
 8. **Complete browser core stdlib suite.** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
    unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
-   builds all eighteen browser-portable owners into one validation-profile
+   builds all twenty-one browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
    checks dependency closure and the native/browser member inventory of the
-   thirteen shared modules, `async` and `timer` (with their recorded
+   fourteen shared modules, `async`, `timer`, `os`, and `lua` (with their recorded
    differences), then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
    `TITAN_CHROME`. Each engine must execute every owner with complete nonzero
@@ -382,9 +382,10 @@ After step 7, `browser-stdlib` runs:
    fixture, and minicoro specs run both engines. The bridge uses its dedicated
    native Titan test owner with explicit JavaScript bindings, rather than
    adding it to the ordinary core aggregate; the scheduler spec drives the
-   bridge's drive interface with a test-owned mini driver and runs the real
-   `async` driver's scheduler gate owner and an async bootstrap program with
-   their own harnesses.
+   bridge's drive interface with a test-owned mini driver, runs the real
+   `async` driver's scheduler gate and bootstrap program, and drives the
+   embedding-sensitive `os.browser_tests` program with its separate
+   stream/environment harness.
 10. **Browser SDK and stdlib compiler coverage.** The same report commands
     produce `luacov.codecov.out`, which uploads with `name: browser-stdlib`
     and otherwise the same options, so the real provider, image, SDK, and
@@ -463,10 +464,13 @@ runner with a 60-minute timeout after `build-compiler`:
 7. **Persistent bridge gate (all six cells).** `lua -E
    spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT"` builds the real
    `browser.tests` image with its independent-state C helper, the failed
-   initializer image, the html5 click counter of synchronous C callbacks
-   with its C helper, and the async driver's responsiveness program
-   (`responsive.titan`), each with assertions 2 and 0. It stages those images
-   and the portable JavaScript fixtures in `out/browser/bridge-<profile>-<engine>`.
+   initializer image, the `browser.public_state_tests` image of public
+   `lua.new` lifetimes (same C helper), the html5 click counter of
+   synchronous C callbacks with its C helper, and the async driver's
+   responsiveness program (`responsive.titan`), each with assertions 2 and 0.
+   It stages those images and the portable JavaScript fixtures in
+   `out/browser/bridge-<profile>-<engine>`. `integration.mjs` receives the
+   first three images, and the negative scripts only the legacy bridge image.
    The cell's managed engine runs the full lifecycle, typed values, callbacks,
    notification, request, stdio, state-close and collection suite;
    `counter.mjs` clicks the counter's buttons on the page (`COUNTER

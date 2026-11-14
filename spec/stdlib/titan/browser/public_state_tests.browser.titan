@@ -1,0 +1,99 @@
+-- Public Lua lifetime cases use their own image: importing lua registers async's
+-- owner driver, which must not change the legacy C fixture's no-driver profile.
+local browser = import "browser"
+local gc = import "gc"
+local state_lua = import "lua"
+local test = import "test"
+local _ = import "browser.public_state"
+foreign import "native.h"
+foreign import "lua.h"
+
+local type Value = browser.BrowserValue
+local type Callable = function (...: Value): Value
+
+local function publish(name: string, callback: Callable)
+  local target = browser.binding("publish")
+  defer target:close()
+  target:call(Value.is_string(name), Value.is_callable(callback))
+end
+
+local function expect_integer(item: Value): integer
+  case item
+  when is_integer(number) then return number
+  end
+  raise "expected a public-state fixture integer"
+end
+
+local function force_gc(...: Value): Value
+  gc.collect()
+  gc.collect()
+  return Value.is_nil()
+end
+
+local function parent_probe(...: Value): Value
+  return Value.is_integer(42)
+end
+
+local public_state_owners: {integer: state_lua.Lua} = {}
+local public_detached_state: foreign *lua_State = nil
+
+local function create_public_state(...: Value): Value
+  local index = expect_integer(...[1])
+  local child = state_lua.new()
+  local stored = false
+  defer if not stored then child:close() end
+  local token = child:run("return require('browser.public_state').prepare(" .. index .. ")")
+  public_state_owners[index] = child
+  stored = true
+  return Value.is_integer(token:to_value() as integer)
+end
+
+local function close_public_state(...: Value): Value
+  local index = expect_integer(...[1])
+  local child? = public_state_owners[index]
+  public_state_owners[index] = nil
+  if child ~= nil then
+    child:close()
+    child:close()
+  end
+  return Value.is_nil()
+end
+
+local function drop_public_state(...: Value): Value
+  public_state_owners[expect_integer(...[1])] = nil
+  return Value.is_nil()
+end
+
+local function detach_public_state(...: Value): Value
+  local index = expect_integer(...[1])
+  local child = public_state_owners[index]
+  test.assert(public_detached_state == nil, "a detached public child is already owned")
+  public_detached_state = child:detach()
+  child:close()
+  child:close()
+  public_state_owners[index] = nil
+  return Value.is_nil()
+end
+
+local function close_public_detached(...: Value): Value
+  if public_detached_state ~= nil then
+    local state = public_detached_state
+    public_detached_state = nil
+    ffi.titan_bridge_test_close_detached(state)
+  end
+  return Value.is_nil()
+end
+
+function test_public_lua_state_controls(_: test.Context)
+  publish("public_create", create_public_state)
+  publish("public_close", close_public_state)
+  publish("public_drop", drop_public_state)
+  publish("public_detach", detach_public_state)
+  publish("public_close_detached", close_public_detached)
+  publish("force_gc", force_gc)
+  publish("valid_after_failure", parent_probe)
+end
+
+do
+  ffi.gate_test_publish()
+end

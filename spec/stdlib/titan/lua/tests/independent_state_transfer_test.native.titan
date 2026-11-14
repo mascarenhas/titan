@@ -1,0 +1,104 @@
+local nominal_thread = import "thread"
+
+local function run_state_async(state: tlua.Lua, chunk: string, name: string?,
+                              ...: async.TransferValue): (...: async.TransferValue)
+  return state:run_async(chunk, name, ...)
+end
+
+local function check_async_transfer(context: test.Context, name: string,
+                                   check: function (IndependentRun): ())
+  context:run(name, function (_: test.Context)
+    runtime_test.run(function () check(run_state_async) end)
+  end)
+end
+
+function test_lua_independent_async_transfer_variants(context: test.Context)
+  check_async_transfer(context, "policies", check_origin_transfer_policies)
+  check_async_transfer(context, "nominals", check_nominal_transfers)
+  check_async_transfer(context, "nominal_failure", check_nominal_failure)
+  check_async_transfer(context, "defaults", check_nominal_defaults)
+  check_async_transfer(context, "closure_arguments", check_closure_arguments)
+  check_async_transfer(context, "closure_preload", check_closure_preload)
+  check_async_transfer(context, "unrelated_preload", check_unrelated_closure_preload)
+  check_async_transfer(context, "closure_failures", check_closure_capture_failures)
+  check_async_transfer(context, "native_numbers", check_closure_native_numbers)
+  check_async_transfer(context, "destination_globals", check_closure_destination_globals)
+  check_async_transfer(context, "managed_pointers", check_closure_managed_pointers)
+  local modes = {"incremental", "generational"}
+  for index = 1, #modes do
+    local mode = modes[index]
+    check_async_transfer(context, mode, function (run: IndependentRun)
+      check_closure_snapshots(run, mode)
+    end)
+  end
+end
+
+function test_lua_independent_receiver_copies_closure_before_origin_close(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local state = tlua.new()
+    defer state:close()
+    state:run_async([[
+      local handle = ...
+      local fixture = require('lua.transfer_fixture')
+      fixture.send_closure(handle)
+      collectgarbage('collect')
+    ]], nil, async.TransferValue.is_pointer(receiver:handle()))
+    state:close()
+    gclib.collect()
+    local callback: function (): integer = receiver:wait()
+    test.assert(callback() == 105 and callback() == 205)
+  end)
+end
+
+function test_lua_worker_registers_a_missed_nominal_when_its_packet_decodes(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local tx, rx = nominal_thread.channel<|value|>(1)
+    defer tx:close()
+    defer rx:close()
+    -- The entry's module never imports lua.transfer_fixture, so the worker
+    -- resolves this name before any packet has loaded its declaring module.
+    local worker = lua_support.spawn_late_nominal_probe(rx,
+      "lua.transfer_fixture.TransferRecord")
+    tx:send(transfer_fixture.record_value(23))
+    case worker:join()
+    when succeeded(number) then
+      test.assert(number == 23, "worker reconstructed a different record")
+    when failed(failure) then failure:raise()
+    else raise "late nominal worker did not finish normally"
+    end
+  end)
+end
+
+-- The same late registration for a nominal held by a `value` field and by an
+-- erased generic field: the worker has loaded the holder's module, and decoding
+-- the held value loads the record's declaring module on demand.
+local function check_late_held(boxed: boolean, number: integer)
+  runtime_test.run(function ()
+    local tx, rx = nominal_thread.channel<|value|>(1)
+    defer tx:close()
+    defer rx:close()
+    local worker = lua_support.spawn_late_held_probe(rx,
+      "lua.transfer_fixture.TransferRecord")
+    if boxed then
+      tx:send(lua_support.LateBox.new(transfer_fixture.record_value(number)))
+    else
+      tx:send(lua_support.LateHolder(transfer_fixture.record_value(number)))
+    end
+    case worker:join()
+    when succeeded(received) then
+      test.assert(received == number, "worker reconstructed a different held record")
+    when failed(failure) then failure:raise()
+    else raise "late held nominal worker did not finish normally"
+    end
+  end)
+end
+
+function test_lua_worker_registers_a_missed_nominal_held_by_a_value_field(
+    context: test.Context)
+  context:run("value_field", function (_: test.Context) check_late_held(false, 29) end)
+  context:run("generic_field", function (_: test.Context) check_late_held(true, 31) end)
+end

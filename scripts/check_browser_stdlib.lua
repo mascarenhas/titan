@@ -16,10 +16,16 @@ local function need(ok, err)
 end
 if action == "closure" then
     assert(first and second and third, "closure requires output root, provider and Wasm image")
+    local driver = require "titan-compiler.driver"
+    local context = driver.new_resolver_context({ io = strategy, target = "browser" })
+    local source_ok, source_error = checks.check_sources(context, arguments[5] or ".")
+    local closed, close_error = driver.close_resolver_context(context)
+    need(source_ok, source_error)
+    need(closed, close_error)
     need(checks.check_output(strategy, first))
     need(checks.check_archive(second))
     need(checks.check_image(need(strategy:read_file(third)), third))
-    print("Browser stdlib closure: provider, certified headers, objects and image have no forbidden dependencies.")
+    print("Browser stdlib closure: selected sources, provider, certified headers, objects and image have no forbidden dependencies.")
 elseif action == "inventory" then
     assert(first and second, "inventory requires native and browser providers")
     local native = need(staticmetadata.scan_archive(first))
@@ -84,5 +90,5 @@ elseif action == "output" then
     end
     need(result, err)
 else
-    error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM | inventory NATIVE BROWSER [TABLE] | output ROOTS FILTER LOG")
+    error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | output ROOTS FILTER LOG")
 end

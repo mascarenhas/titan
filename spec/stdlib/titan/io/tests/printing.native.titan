@@ -1,0 +1,94 @@
+local support = import "io.test_support.titan"
+local print_values = import "io.print_values.titan"
+local process_support = import "os.process_test_support.titan"
+
+local function cleanup_print_process(process: system.Process)
+  local input? = process.stdin
+  if input then do (input as system.OutputStream):close() catch end end
+  local output? = process.stdout
+  if output then do (output as system.InputStream):close() catch end end
+  local diagnostics? = process.stderr
+  if diagnostics then
+    do (diagnostics as system.InputStream):close() catch end
+  end
+  do
+    if process:is_running() then process:kill("term") end
+  catch
+  end
+  do process:wait() catch end
+end
+
+local function required_print_input(candidate: system.InputStream?):
+    system.InputStream
+  if not candidate then raise "print child stdout was not captured" end
+  return candidate as system.InputStream
+end
+
+local function required_print_output(candidate: system.OutputStream?):
+    system.OutputStream
+  if not candidate then raise "print child stdin was not captured" end
+  return candidate as system.OutputStream
+end
+
+function test_io_print_formats_left_to_right_and_is_atomic(
+    _context: test.Context)
+  runtime_test.run(function ()
+    do
+      local make_printable, conversions = print_values.load_print_helpers()
+      local read_descriptor, saved_stdout = support.begin_stdout_capture()
+      defer support.end_stdout_capture(read_descriptor, saved_stdout)
+
+      stream.print(make_printable("first", "<first>", false),
+                   make_printable("second", "<second>", false),
+                   make_printable("third", "<third>", false))
+      test.assert(conversions() == "first|second|third",
+                  "io.print did not convert values from left to right")
+      test.assert(support.captured_bytes(read_descriptor, 128) ==
+                  "<first>\t<second>\t<third>\n",
+                  "io.print changed separators or the final newline")
+
+      stream.print()
+      test.assert(support.captured_bytes(read_descriptor, 128) == "\n",
+                  "zero-argument io.print did not emit one newline")
+
+      local failed = false
+      do
+        stream.print(make_printable("before", "<before>", false),
+                     make_printable("failure", "<failure>", true),
+                     make_printable("after", "<after>", false))
+      catch
+        failed = error == "conversion failure"
+      end
+      test.assert(failed,
+                  "io.print did not propagate a conversion failure")
+      test.assert(conversions() ==
+                  "first|second|third|before|failure",
+                  "io.print converted past a failed value")
+
+      stream.print(make_printable("survivor", "<survivor>", false))
+      test.assert(support.captured_bytes(read_descriptor, 128) == "<survivor>\n",
+                  "io.print emitted a prefix before conversion completed")
+    end
+
+    local process = system.spawn(process_support.child_path(), {"echo"})
+    defer cleanup_print_process(process)
+    local input = required_print_output(process.stdin)
+    local output = required_print_input(process.stdout)
+    local diagnostics = required_print_input(process.stderr)
+    local original = system.stdout
+    do
+      defer system.stdout = original
+      system.stdout = input
+      stream.print("current stdout")
+    end
+    input:close()
+    local rendered = ""
+    for chunk in output:read do rendered = rendered .. chunk end
+    local diagnostic = ""
+    for chunk in diagnostics:read do diagnostic = diagnostic .. chunk end
+    local status = process:wait()
+    test.assert(status.code == 0 and not status.signal and
+                rendered == "current stdout\n" and diagnostic == "",
+                "io.print did not use the current os.stdout")
+  end)
+end

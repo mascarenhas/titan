@@ -1,4 +1,4 @@
--- Linked into the native test executable; no provider or Lua shim is installed.
+-- Linked into the test executable; no provider or Lua shim is installed.
 local independent_preload_math = import "math"
 
 counter: integer = 41

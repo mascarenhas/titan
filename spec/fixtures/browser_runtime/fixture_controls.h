@@ -41,6 +41,79 @@ EM_JS(void, gate_test_publish, (), {
       requests: owner.requests.size,
       states: Object.freeze([...owner.states.entries()].map(([token, state]) =>
         Object.freeze({token, closing: state === 'closing', closed: state === 'closed'})))}),
+    stateLedger: state => Object.freeze({
+      callables: [...owner.callables.values()].filter(item => item.state === state)
+        .map(item => item.key),
+      slots: [...owner.slots].filter(([, item]) => item.state === state)
+        .map(([slot, item]) => ({slot, generation: item.generation, kind: item.kind, units: item.units})),
+      requests: [...owner.requests].filter(item => item.state === state).length,
+      notifications: [...owner.queue, ...owner.batch].filter(item => item.target.state === state).length,
+      duplicateFrees: owner.freeSlots.filter((item, index, list) =>
+        list.findIndex(other => other.slot === item.slot && other.generation === item.generation) !== index).length,
+    }),
+    watchStateLedger() {
+      var allocated = [], retired = [], registered = [], invalidated = [], units = [], closed = [];
+      var originals = {};
+      var wrap = (name, body) => {
+        originals[name] = owner[name];
+        owner[name] = body;
+      };
+      wrap('newSlot', function(state, ...args) {
+        var identity = originals.newSlot.call(this, state, ...args);
+        allocated.push({state, ...identity, kind: this.slots.get(identity.slot).kind});
+        units.push({state, delta: 1});
+        return identity;
+      });
+      wrap('retainSlot', function(state, slot, generation) {
+        var result = originals.retainSlot.call(this, state, slot, generation);
+        units.push({state, delta: 1});
+        return result;
+      });
+      wrap('releaseSlot', function(slot, generation) {
+        var entry = this.slots.get(slot);
+        var matches = entry && entry.generation === generation;
+        var before = matches ? entry.units : 0;
+        var result = originals.releaseSlot.call(this, slot, generation);
+        if (matches) {
+          var after = this.slots.get(slot) === entry ? entry.units : 0;
+          units.push({state: entry.state, delta: after - before});
+          if (after === 0) retired.push({state: entry.state, slot, generation, kind: entry.kind});
+        }
+        return result;
+      });
+      wrap('registerCallable', function(state, slot, generation) {
+        var result = originals.registerCallable.call(this, state, slot, generation);
+        if (result) registered.push({state, key: state + ':' + slot + ':' + generation});
+        return result;
+      });
+      wrap('invalidateCallable', function(state, slot, generation) {
+        var key = state + ':' + slot + ':' + generation;
+        var before = this.callables.has(key);
+        var result = originals.invalidateCallable.call(this, state, slot, generation);
+        if (before && !this.callables.has(key)) invalidated.push({state, key});
+        return result;
+      });
+      wrap('closeState', function(state) {
+        var keys = [...this.callables.values()].filter(item => item.state === state).map(item => item.key);
+        var before = [...this.slots.values()].filter(item => item.state === state)
+          .reduce((total, item) => total + item.units, 0);
+        var start = units.length;
+        var result = originals.closeState.call(this, state);
+        var released = -units.slice(start).filter(item => item.state === state)
+          .reduce((total, item) => total + item.delta, 0);
+        // closeState drops all remaining owners, even if a slot had several units.
+        if (before > released) units.push({state, delta: released - before});
+        for (var key of keys) if (!this.callables.has(key)) invalidated.push({state, key});
+        closed.push(state);
+        return result;
+      });
+      return Object.freeze({
+        snapshot: () => ({allocated: allocated.slice(), retired: retired.slice(),
+          registered: registered.slice(), invalidated: invalidated.slice(),
+          units: units.slice(), closed: closed.slice()}),
+        restore() { for (var name of Object.keys(originals)) owner[name] = originals[name]; },
+      });
+    },
     observe: () => Module['_titan_browser_gate_observe'](),
     guarded: () => {
       var error = owner.admission();

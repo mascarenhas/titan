@@ -337,7 +337,10 @@ pointer, closes a detached child state and releases `ctrl`. The fixed-arity
 helpers wrap the target and its arguments in `function (): R return entry(...) end`
 so transfer snapshots them as one closure.
 
-Worker sequence:
+Worker sequence, after `thread_worker_main` restores the new thread's x87
+precision on Windows ([worker floating-point
+state](libuv-runtime.md#worker-floating-point-state); empty elsewhere; Group
+threads use the same entry):
 
 1. `thread_worker_protected` loads `titan.thread` in the child with
    `transfer.transfer_load_module` and calls the `child_thread_bootstrap`

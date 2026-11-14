@@ -1,0 +1,8 @@
+local function os_exit(code: integer)
+  do
+    async.running()
+  catch
+    raise "os.exit is unavailable outside an async Task on the browser target"
+  end
+  async.request_exit(code)
+end

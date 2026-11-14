@@ -495,6 +495,7 @@ BrowserHandle:listen(
     ...: BrowserValue): BrowserRequest
 BrowserRequest:cancel()
 BrowserRequest:close()
+function failure_text(message: BrowserValue, thrown: BrowserValue): string?
 ```
 
 Both methods invoke the host binding synchronously with the supplied
@@ -518,6 +519,12 @@ pinning](#callables-and-pinning)).
   only at delivery, such as a wrapper released in the meantime, joins the
   queue behind the events already waiting, so `failure` runs in a later
   batch.
+
+`failure_text(message, thrown)` consumes the failure's thrown-value handle
+when `thrown` is `is_handle`, and returns the message only when `message` is
+`is_string`; otherwise it returns nil. Use it when the diagnostic is enough
+and the exact thrown value is no longer needed. The caller supplies any
+default text and chooses its own error type and operation name.
 
 Because callables are not signature-checked at registration time, type errors
 move from registration to call time: if `completion` or `failure` raises when
@@ -577,14 +584,30 @@ resolves them to sources the loader owns, never to a `create({bindings})`
 entry, and `create` rejects a `bindings` key with that prefix with
 `TypeError`. An unknown `titan:` name raises like any unknown binding.
 
+These sources are SDK-internal. Applications use
+[`timer`](standard-library-timer.md#on-the-browser) and the
+[`os` parent streams](standard-library-os.md#browser-parent-streams), not the
+reserved binding protocol.
+
 | Name | Use | Behavior |
 | --- | --- | --- |
 | `titan:timeout` | `start(completion, failure, is_float(ms))` | One detachable host timer: `completion` receives `is_nil()` after `ms` milliseconds. `cancel` clears the host timer. A delay outside 0 through 2,147,483,647 ms, or a non-`Number` delay, makes `start` raise a `browser.BrowserError` holding a `TypeError`. |
 | `titan:interval` | `listen(tick, failure, is_float(ms))` | One host interval: `tick` receives no arguments every `ms` milliseconds. Unregistering clears the host interval. A non-positive period, a period above 2,147,483,647 ms, or a non-`Number` period makes `listen` raise a `browser.BrowserError` holding a `TypeError`. |
 | `titan:driver` | reserved | The registration point for the `async` runtime's Task entry points. Only the instance owner state's registration is used; others are ignored. |
+| `titan:stdout` | `start(completion, failure, is_bytes(data))`, or no data argument | One retained output request in stdout's FIFO. Completion receives `is_nil()` after its sink settles. With no argument, calls `stdoutEnd` after earlier entries; a missing hook rejects with `TypeError`. |
+| `titan:stderr` | `start(completion, failure, is_bytes(data))`, or no data argument | The same output-request contract for stderr and `stderrEnd`. |
+| `titan:stdin` | `start(completion, failure)` | One detachable read from `create({stdin})`. The function is invoked synchronously as a binding is; its result or promise settles through the ordinary runtime-type marshalling path. Chunks may be empty; `null` and `undefined` complete with `is_nil()`. Without the option, this is an unknown binding. |
+| `titan:stdio` | `call(is_string(name))`, for `stdin`, `stdout`, or `stderr` | Returns the corresponding declared `*Kind` option unchanged, or `is_nil()` when undeclared. The loader does not validate kinds. |
 
 Their callbacks are ordinary queued notifications, delivered by `drain()` or
 a drive.
+
+Output requests have no host cancel function: cancelling or closing a
+request withdraws its callbacks, not bytes already admitted to the stream.
+A Titan sink or end-hook failure reaches only that request's failure
+callable. A C-stdio sink failure keeps its operation-level reporting and is
+also delivered once to the next Titan write on the same stream. See the
+[loader's output contract](browser-target.md#the-loader-api).
 
 ## Driver interface (low-level)
 
@@ -703,8 +726,10 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
   the slot its JavaScript wrapper also uses. `identity()` returns the
   `(state, slot, generation)` that C copies into a `titan_browser_identity`
   for the callback's user data. `close()` drops the hold; closing again does
-  nothing, and an unreachable pin closes itself. `pin` raises `"browser state
-  is closing"` while its state closes.
+  nothing, and an unreachable pin closes itself. After `close()`,
+  `identity()` reports slot 0 with the same state and generation, which names
+  no callable. `pin` raises `"browser state is closing"` while its state
+  closes.
 - Keep the pin and the identity's storage reachable, for example an `owned
   *titan_browser_identity` in a module variable, until the C callback is
   unregistered. Unregister it before closing the pin or releasing anything else
@@ -934,10 +959,10 @@ response, completion, and state-registry boundary. Apart from
 same instance execution owner as the generated gateway; it is not a raw
 `lua_State *` application gateway. `titan_browser_callback_enter` and
 `titan_browser_callback_leave` bracket a standard library's hand-written
-trampolines and are not an application API. C-created states load `titan.browser`
-normally; there is no attachment operation or special bootstrap order.
-`titan.lua` is native-only, so no standard-library API creates independent
-browser states. See [the bridge implementation](../implementation/browser-bridge.md)
+trampolines and are not an application API. Independent states created by
+[`lua.new()`](standard-library-lua.md#independent-lua-states) or C load
+`titan.browser` normally; there is no attachment operation or special
+bootstrap order. See [the bridge implementation](../implementation/browser-bridge.md)
 for layout, ownership, initialization, and close rules. Native SDKs may
 install the header, but native providers contain no `titan.browser` or fake
 bridge runtime.

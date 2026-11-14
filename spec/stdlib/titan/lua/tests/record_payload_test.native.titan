@@ -1,0 +1,25 @@
+function test_lua_record_payload_async_variants(context: test.Context)
+  check_async_transfer(context, "source_close", check_record_payload_source_close)
+  check_async_transfer(context, "arguments", check_record_payload_arguments)
+  check_async_transfer(context, "registered_owner", check_registered_payload_owner)
+  check_async_transfer(context, "failures", check_record_payload_failures)
+  check_async_transfer(context, "nested", check_nested_record_payload)
+  check_async_transfer(context, "hook_states", check_payload_hook_states)
+end
+
+function test_lua_record_payload_receiver_reconstructs_after_sender_close(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local inbox = async.receiver()
+    defer inbox:close()
+    local state = tlua.new()
+    defer state:close()
+    state:run("require('lua.transfer_fixture').send_custom_record(...)", nil,
+      async.TransferValue.is_pointer(inbox:handle()))
+    state:close()
+    gclib.collect()
+    local restored: transfer_fixture.PayloadRecord = inbox:wait()
+    test.assert(restored:number_value() == 97)
+    test.assert(restored:text_value() == strings.rep("payload\0bytes", 1024))
+  end)
+end

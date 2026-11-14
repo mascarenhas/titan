@@ -241,6 +241,8 @@ TValue titan_entry_error_message(lua_State *L, int index);
  * Every JS slot unit is charged to state, including allocations during close. */
 int titan_browser_entry_allowed(uint64_t operation_id, uint32_t operation);
 void titan_browser_complete(const titan_browser_completion *completion);
+/* Copy one nonempty libc iovec before returning; never enter a host sink. */
+void titan_browser_host_output(uint32_t stream, const unsigned char *bytes, uint32_t length);
 uint32_t titan_browser_host_state_open(titan_browser_state_record *record);
 titan_browser_state_record *titan_browser_host_state_record(uint32_t state);
 void titan_browser_host_state_closing(uint32_t state);

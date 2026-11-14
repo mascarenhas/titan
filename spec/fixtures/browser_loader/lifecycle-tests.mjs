@@ -48,7 +48,7 @@ export async function lifecycle(context, paths) {
       await Promise.all(checks);
       if (failures.length) throw failures[0];
       const snapshot = controls.snapshot();
-      context.assert(result.status === 23 && snapshot.safe && !snapshot.owner && deliveries === 2,
+      context.assert(result.status === 23 && snapshot.safe && !snapshot.owner && deliveries === 4,
         'main completion did not wait for promised entry and both sink queues');
       context.assert(completions.length === 1 && completions[0].kind === 2, 'main emitted more than one completion');
       await rejection(context, loaderControls.privateEntry(), {code: 'TITAN_BROWSER_REENTRY'});
@@ -56,7 +56,7 @@ export async function lifecycle(context, paths) {
       await internal.dispose();
       await Promise.all(checks);
       if (failures.length) throw failures[0];
-      context.assert(handoffs >= 4 && terminalHandoffs >= 2 && deliveries === 4,
+      context.assert(handoffs >= 4 && terminalHandoffs >= 2 && deliveries === 6,
         'separate main/close entries did not exercise parked, terminal and finalizer transitions');
       context.assert(completions.length === 2 && completions[1].kind === 5 &&
         completions[1].id > completions[0].id && completions[0].id > 0n,
@@ -155,7 +155,7 @@ export async function lifecycle(context, paths) {
       const result = await second;
       context.equalBytes(join(captures[1].stdout), join([prefixes.stdout, tail]), 'main closed the peer state early');
       await instances[1].dispose();
-      context.assert(result.kind === 'returned' && result.status === 23 && failedCalls === 2,
+      context.assert(result.kind === 'returned' && result.status === 23 && failedCalls === 3,
         'one failed/disposed instance poisoned its overlapping peer or skipped close output');
       context.equalBytes(join(captures[0].stderr), expectedBytes('stderr'), 'failed peer cleanup did not complete');
       context.equalBytes(join(captures[1].stdout), expectedBytes('stdout'));

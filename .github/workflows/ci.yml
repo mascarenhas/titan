@@ -1248,8 +1248,11 @@ jobs:
               ? [resolve(sdk, 'titan-browser-run.mjs'), ...common, '--js-test']
               : [resolve('spec/browser/playwright-run.mjs'), ...common, '--sdk', sdk];
             for (const assertions of [2, 0]) {
+              // integration.mjs takes all three images; the negative scripts
+              // take only the legacy bridge image.
               const images = [`assertions-${assertions}/bridge.mjs`,
-                `assertions-${assertions}/initializer-failure.mjs`];
+                `assertions-${assertions}/initializer-failure.mjs`,
+                `assertions-${assertions}/public-states.mjs`];
               // Page tests run their own image and need a page's DOM: the html5
               // click counter's synchronous C callbacks and the driver's
               // responsiveness while Tasks wait and yield.

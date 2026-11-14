@@ -99,7 +99,7 @@ export async function fidelity(context, paths) {
           closing = true;
           await rejection(context, instance.dispose(), expected);
           await Promise.all(admissions);
-          context.assert(safe && calls === 2, 'sink failure suppressed a later close entry or ran inside Wasm');
+          context.assert(safe && calls === 3, 'sink failure suppressed a later C batch or close entry or ran inside Wasm');
           context.equalBytes(join(chunks), expectedBytes(healthy), 'sink failure abandoned/duplicated Lua cleanup');
         } finally {
           closing = true;
@@ -117,10 +117,10 @@ export async function fidelity(context, paths) {
       stderr: () => { first.push('stderr'); throw causes.stderr; }});
     try {
       const error = await rejection(context, both.run(['fidelity']), {code: 'TITAN_BROWSER_SINK'});
-      context.assert(first.length === 2 && error.stream === first[0] && error.cause === causes[first[0]],
+      context.assert(first.length === 4 && error.stream === first[0] && error.cause === causes[first[0]],
         'secondary sink failure replaced the first');
       await rejection(context, both.dispose(), {code: error.code, stream: error.stream, cause: error.cause});
-      context.assert(first.length === 4, 'first failure suppressed a later entry on either stream');
+      context.assert(first.length === 6, 'first failure suppressed a later entry on either stream');
     } finally { await both.dispose().catch(() => {}); runs++; }
 
     let entered, release, stdoutCalls = 0, stderrCalls = 0;
@@ -146,7 +146,7 @@ export async function fidelity(context, paths) {
         'a later stream interruption replaced or duplicated the already captured sink failure');
       release();
       await context.tick();
-      context.assert(stdoutCalls === 2 && stderrCalls === 1 && cleanup.length === 1,
+      context.assert(stdoutCalls === 3 && stderrCalls === 1 && cleanup.length === 1,
         'interrupted stream overlapped finalizer output or a late settlement repeated cleanup');
     } finally {
       release();
@@ -170,12 +170,12 @@ export async function fidelity(context, paths) {
       const result = await mutable.run(['fidelity']);
       context.assert(result.kind === 'returned' && result.status === 23);
       for (const stream of ['stdout', 'stderr']) {
-        context.assert(retained[stream].length === 1, 'internal transfers exposed an early sink delivery');
+        context.assert(retained[stream].length === 2, 'an explicitly flushed C batch was lost or merged');
         context.equalBytes(join(copies[stream]), join([prefixes[stream], tail]));
       }
       await mutable.dispose();
       for (const stream of ['stdout', 'stderr']) {
-        context.assert(retained[stream].length === 2, 'explicit close omitted finalizer output');
+        context.assert(retained[stream].length === 3, 'explicit close omitted finalizer output');
         context.equalBytes(join(copies[stream]), expectedBytes(stream));
         context.assert(retained[stream].every(bytes => bytes.every(byte => byte === 90)), 'retained sink chunk changed later');
       }

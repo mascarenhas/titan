@@ -397,14 +397,14 @@ effect, and the extension adds no target setting.
 ## Make inventories and audits
 
 The standard library's native-only modules keep their canonical mains as
-target variants: the flat `titan/{io,fs,net,ssl,os}.native.titan`
-and the folder mains `titan/{uv,http,websocket,sqlite3,lua,thread}/<name>.native.titan`.
-These eleven families have no default and no `browser` member, so for
+target variants: the flat `titan/{fs,net,ssl}.native.titan`
+and the folder mains `titan/{uv,http,websocket,sqlite3,thread}/<name>.native.titan`.
+These eight families have no default and no `browser` member, so for
 `browser` the resolver selects no main: the module is absent (an import
 reports `module 'titan.<name>' not found`), and the folder's contributors are
 neither composed nor resolvable as flat modules. Native selection, logical
 names, and canonical output stems (such as `titan/uv/uv.titan.h`) are
-unchanged; only the physical main is a variant. The other thirteen standard
+unchanged; only the physical main is a variant. Fourteen further standard
 modules have no variants and form the shared part of the [browser standard
 library](browser-target.md#the-browser-standard-library). `titan.timer`'s
 flat family has a `native` and a `browser` member (`titan/timer.native.titan`,
@@ -417,13 +417,29 @@ browser drops the native-only families. The browser-only
 family has only a `browser` member, so native targets select no main for
 `titan.browser`.
 
+`titan.os` has the shared main `titan/os/os.titan`; its `clock`,
+`environment`, `process`, and `stdio` contributor families each have `native`
+and `browser` members. `OS_TITAN_SOURCES` enumerates the main and both
+members of every family. `OS_TITAN_HEADERS` names the two sibling native
+headers and the browser-only `environment.browser.h` declarations. Each
+target composes its matching four contributors. The complete shared
+`titan.io` facade has the flat main `titan/io.titan` and uses that target's
+`os` composition for its standard streams.
+
+`titan.lua` has the shared main `titan/lua/lua.titan` and `worker.titan`, native
+and browser `loading` contributors, and a native-only `background` family.
+`LUA_TITAN_SOURCES` lists all five sources. Native composition preserves file
+loading and worker execution; browser composition keeps synchronous states
+and a no-filesystem source-search pass.
+
 * The native Makefile source lists (`UV_TITAN_SOURCES` and the other stdlib
   lists under `STDLIB_TITAN_SOURCES`) name every source of a native module
   explicitly. A variant follows its default when the family has one; a
   variant-only family lists just its variants, as each native-only main does,
-  `STDLIB_TITAN_SOURCES` lists both `timer` variants, and `ASYNC_TITAN_SOURCES`
-  lists both members of each `async` family, so the
-  list-versus-disk audit sees every folder file. There are no wildcards. The
+  `STDLIB_TITAN_SOURCES` lists both `timer` variants, `ASYNC_TITAN_SOURCES`
+  lists both members of each `async` family, and `OS_TITAN_SOURCES` lists
+  every `os` source, so the list-versus-disk audit sees every folder file.
+  There are no wildcards. The
   lists are audit inventories, not Make prerequisites: `titanc --incremental`
   certifies the module graph. The browser provider instead names logical
   roots in `BROWSER_STDLIB_ROOTS`, so the browser-only

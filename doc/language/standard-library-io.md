@@ -30,6 +30,12 @@ not read or close the Reader. A standalone Titan program that imports `io`
 gets the async bootstrap transitively; a Lua host should call the yielding
 operations from `async.run` and drive them with `async.loop`.
 
+The complete module is available on the browser target with the same
+Interfaces and operations. `print` writes through the current `os.stdout`,
+whose browser implementation awaits the embedding's output sink; `lines`
+also works with in-memory Readers. Concrete streams keep their own target
+availability and errors.
+
 ## Interface inventory
 
 The module declares exactly seven nonempty Interfaces:
@@ -179,6 +185,13 @@ Satisfaction is structural at each coercion site; none of these records has an
 | `http.Server` | `Closer` | exact |
 | `websocket.Connection` | `Closer` | exact |
 | `timer.Ticker` | `Closer` | exact |
+
+On the browser, the table's `os.InputStream`, `os.OutputStream`,
+`string.StringReader`, `string.StringWriter`, `async.ChannelReader`,
+`async.ChannelWriter`, and `timer.Ticker` are available with the listed
+Interface shapes. OS streams are embedding-provided parent streams, not
+captured child endpoints. The filesystem, network, HTTP, WebSocket, and shell
+stream types remain native-only.
 
 These Interface relations do not create a universal stream class.
 `os.InputStream` and `os.OutputStream` are concrete process-stdio records,

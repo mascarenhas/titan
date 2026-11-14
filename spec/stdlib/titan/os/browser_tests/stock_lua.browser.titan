@@ -1,0 +1,102 @@
+local function stock_state(mode: Value): stock_lua.Lua?
+  local name = text_of(mode)
+  if name == "child" then return stock_lua.new() end
+  test.assert(name == "owner", "unknown stock Lua state")
+  return nil
+end
+
+local function run_stock(state: stock_lua.Lua?, chunk: string)
+  if state ~= nil then state:run(chunk, "=embedded-stock")
+  else stock_lua.load(chunk, "=embedded-stock")() end
+end
+
+local function stock_stdin(...: Value): Value
+  local state? = stock_state(...[1])
+  defer if state ~= nil then state:close() end
+  run_stock(state, [[
+    local result, message, code = io.read()
+    assert(result == nil and type(message) == 'string' and type(code) == 'number',
+      'stock io.read returned EOF instead of an unavailable error')
+    result, message, code = io.stdin:read()
+    assert(result == nil and type(message) == 'string' and type(code) == 'number',
+      'stock io.stdin:read returned EOF instead of an unavailable error')
+  ]])
+  return Value.is_boolean(true)
+end
+
+local function stock_environment(...: Value): Value
+  local state? = stock_state(...[1])
+  defer if state ~= nil then state:close() end
+  run_stock(state, [[
+    assert(os.getenv('FOO') == 'bar' and os.getenv('TZ') == 'Asia/Tokyo',
+      'stock getenv missed the embedding environment')
+  ]])
+  system.setenv("FOO", "changed")
+  run_stock(state, [[
+    assert(os.getenv('FOO') == 'changed', 'stock getenv missed Titan setenv')
+  ]])
+  system.unsetenv("FOO")
+  run_stock(state, [[assert(os.getenv('FOO') == nil, 'stock getenv missed Titan unsetenv')]])
+  return Value.is_boolean(true)
+end
+
+local function stock_output(...: Value): Value
+  local state? = stock_state(...[1])
+  defer if state ~= nil then state:close() end
+  system.stdout:write("T\0")
+  -- io.write stays in the C buffer until print's newline/flush.
+  run_stock(state, [[io.write('w\0z'); print('a\0b')]])
+  note("stock-print-flushed")
+  system.stdout:write("M\0")
+  run_stock(state, [[io.write('i\0o'); assert(io.flush())]])
+  note("stock-io-flushed")
+  system.stdout:write("Z\0")
+  return Value.is_boolean(true)
+end
+
+local function stock_child_exit(...: Value): Value
+  local state = stock_lua.new()
+  defer state:close()
+  state:run([[
+    for _, status in ipairs({3, true, false}) do
+      local ok, message = pcall(os.exit, status)
+      assert(not ok and message ==
+        'os.exit is unavailable outside an async Task on the browser target')
+    end
+  ]], "=embedded-child-exit")
+  return Value.is_boolean(true)
+end
+
+local function buffered_exit(status: string, use_stock: boolean)
+  local literal = status
+  local code = 3
+  if status ~= "3" then
+    test.assert(status == "true" or status == "false", "unknown stock exit status")
+    if status == "true" then code = 0 else code = 1 end
+  end
+  local input, output, errors = system.stdin, system.stdout, system.stderr
+  output:write("native-before\0")
+  stock_lua.load([[
+    assert(package.loaded['titan.os'] == nil, 'stock exit was not the first Lua load')
+    io.write('lua-exit\0')
+  ]], "=embedded-exit-buffer")()
+  if not use_stock then
+    system.exit(code)
+    raise "native exit returned to its owner Task"
+  end
+  defer do
+    local matches = stock_lua.load([[
+      local input, output, errors = ...
+      local linked = package.loaded['titan.os']
+      return linked ~= nil and linked.stdin == input and linked.stdout == output
+        and linked.stderr == errors
+    ]], "=embedded-exit-instance")
+    test.assert(matches(input, output, errors) == true,
+      "stock exit did not reuse the native import's stream instances")
+    test.assert(system.stdin == input and system.stdout == output and system.stderr == errors,
+      "stock exit reinitialized the native import's stream instances")
+    note("stock-module-instance-verified")
+  end
+  stock_lua.load("os.exit(" .. literal .. ")", "=embedded-stock-exit")()
+  raise "stock os.exit returned to its owner Task"
+end

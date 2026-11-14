@@ -5,7 +5,7 @@ local toolchain = require "spec.support.browser_toolchain"
 local repository = assert(lfs.currentdir())
 local fixture
 
-local function build(info, assertions, tree, module, name, is_test, c_source, wrap)
+local function build(info, assertions, tree, module, name, is_test, c_source, wrap, cppflags)
     local output = fixture.output .. "/assertions-" .. assertions
     files.mkdir(output)
     -- The ordinary fixture collector instruments the copied compiler child;
@@ -29,7 +29,8 @@ local function build(info, assertions, tree, module, name, is_test, c_source, wr
     end
     if is_test then argv[#argv + 1] = "--test" end
     argv[#argv + 1] = module
-    local result = fixture:run(argv, { TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
+    local result = fixture:run(argv, { TITAN_EXTRA_CPPFLAGS = cppflags or "",
+        TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
     fixture.collector:collect()
     assert.is_true(result.ok, result.output)
     for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map" }) do
@@ -65,12 +66,15 @@ describe("persistent core JavaScript bridge", function()
                 repository .. "/spec/fixtures/browser_bridge/independent_states.c", true)
             local failure = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "initializer_failure", "initializer-failure", false)
+            local public = build(info, assertions, repository .. "/spec/stdlib/titan",
+                "browser.public_state_tests", "public-states", true,
+                repository .. "/spec/fixtures/browser_bridge/independent_states.c", true)
             local counter = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "counter", "counter", false)
             local responsive = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "responsive", "responsive", false)
             for _, engine in ipairs({ "node", "chromium" }) do
-                local result = execute(info, engine, "integration.mjs", { native, failure })
+                local result = execute(info, engine, "integration.mjs", { native, failure, public })
                 io.stdout:write(string.format("\nBRIDGE assertions=%d engine=%s node=%s chrome=%s\n%s\n",
                     assertions, engine, info.node.version, info.chrome.version, result.output))
                 io.stdout:flush()
@@ -103,6 +107,7 @@ describe("persistent core JavaScript bridge", function()
                 end
             end
         end)
+
         it("copies portable values through real browser images with ASSERTIONS=" .. assertions, function()
             local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
             if not info then pending(why) return end
@@ -121,6 +126,24 @@ describe("persistent core JavaScript bridge", function()
                 assert.is_true(result.ok, result.output)
                 assert.truthy(result.output:find("PASS portable bridge", 1, true), result.output)
                 assert.truthy(result.output:find("[  PASSED  ] 17 tests", 1, true), result.output)
+            end
+        end)
+
+        it("provides exact libc environments with ASSERTIONS=" .. assertions, function()
+            local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
+            if not info then pending(why) return end
+            fixture = files.new()
+            files.copy(repository .. "/spec/fixtures/browser_bridge/environment.mjs",
+                fixture.source .. "/environment.mjs")
+            local image = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
+                "environment", "environment", false, nil, nil, "-D_GNU_SOURCE")
+            for _, engine in ipairs({ "node", "chromium" }) do
+                local result = execute(info, engine, "environment.mjs", { image })
+                io.stdout:write(string.format("\nENVIRONMENT assertions=%d engine=%s node=%s chrome=%s\n%s\n",
+                    assertions, engine, info.node.version, info.chrome.version, result.output))
+                io.stdout:flush()
+                assert.is_true(result.ok, result.output)
+                assert.truthy(result.output:find('ENVIRONMENT {"verdict":"PASS"', 1, true), result.output)
             end
         end)
     end

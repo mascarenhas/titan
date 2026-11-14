@@ -1,0 +1,198 @@
+-- Embedding-sensitive OS/IO cases, driven through public create options by
+-- os-streams.mjs. Private callbacks use test.assert without runner output;
+-- main retains the normal async bootstrap for run() return and exit cases.
+local test = import "test"
+local async = import "async"
+local browser = import "browser"
+local system = import "os"
+local stream = import "io"
+local print_values = import "io.print_values.titan"
+local stock_lua = import "lua"
+foreign import "stdio.h"
+foreign import "stdlib.h"
+
+local type Value = browser.BrowserValue
+local type Action = function (): ()
+
+local function text_of(item: Value): string
+  case item
+  when is_string(text) then return text
+  end
+  raise "expected a stream fixture string"
+end
+
+local function note(text: string)
+  local target = browser.binding("noted")
+  defer target:close()
+  target:call(Value.is_string(text))
+end
+
+local function suspend_on(name: string)
+  local task = async.running()
+  local token = async.ResumeToken(name)
+  local source = browser.binding(name)
+  defer source:close()
+  local wake = function (...: Value): Value
+    task:resume(token)
+    return Value.is_nil()
+  end
+  local request = source:start(wake, wake)
+  defer request:close()
+  async.suspend(token, function () request:cancel() catch end)
+end
+
+local function expect_operation(action: Action, operation: string,
+                                name: string): string
+  do
+    action()
+  catch
+    if not (error is async.OperationError) then raise end
+    local failure: async.OperationError = error
+    test.assert(failure.operation == operation and failure.name == name,
+      "stream operation changed its error fields")
+    return failure.message
+  end
+  raise "stream operation unexpectedly succeeded"
+end
+
+local function expect_text(action: Action, expected: string)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+    test.assert(error == expected, "stream operation changed its error text")
+  end
+  test.assert(caught, "stream operation unexpectedly succeeded")
+end
+
+local function output(name: string): system.OutputStream
+  if name == "stdout" then return system.stdout end
+  test.assert(name == "stderr", "unknown fixture output")
+  return system.stderr
+end
+
+-- Lexical owners also retire children while their own cancellation is sticky.
+local function retire(task: async.Task)
+  if task:status():has_finished() then return end
+  task:cancel()
+  local remove: (function (): ())? = nil
+  defer do
+    if remove ~= nil then remove() end
+  end
+  case async.await_cleanup<|nil, nil|>(function (resolve, _reject, _fatal)
+    if task:status():has_finished() then
+      resolve(nil)
+    else
+      remove = task:add_terminal_listener(function (_status: async.TaskStatus)
+        resolve(nil)
+      end)
+    end
+  end)
+  when success() then
+  when error() then raise "Task retirement failed"
+  end
+end
+
+local function context_errors(expected: string): integer
+  expect_text(function () system.stdin:read() end, expected)
+  expect_text(function () system.stdin:read_until("\n", true) end, expected)
+  expect_text(function () system.stdin:kind() end, expected)
+  expect_text(function () system.stdin:is_tty() end, expected)
+  for index = 1, 2 do
+    local target = system.stdout
+    if index == 2 then target = system.stderr end
+    expect_text(function () target:write("") end, expected)
+    expect_text(function () target:shutdown() end, expected)
+    expect_text(function () target:kind() end, expected)
+    expect_text(function () target:is_tty() end, expected)
+  end
+  return 12
+end
+
+local function outside_task(...: Value): Value
+  return Value.is_integer(context_errors("async Runtime is not active"))
+end
+
+local function registration_context(...: Value): Value
+  case async.await<|integer, string|>(function (resolve, _reject, _fatal)
+    resolve(context_errors("asynchronous operation must be called from an async Task"))
+  end)
+  when success(count) then return Value.is_integer(count)
+  when error(message) then raise message
+  end
+end
+
+local function publish_entries()
+  local target = browser.binding("publish")
+  defer target:close()
+  publish(target, "printing", printing)
+  publish(target, "write_three", write_three)
+  publish(target, "write_recovery", write_recovery)
+  publish(target, "cancelled_write", cancelled_write)
+  publish(target, "queued_exit", queued_exit)
+  publish(target, "queued_disposal", queued_disposal)
+  publish(target, "c_interleave", c_interleave)
+  publish(target, "c_return", c_return)
+  publish(target, "c_latch", c_latch)
+  publish(target, "c_no_yield", c_no_yield)
+  publish(target, "declared_kinds", declared_kinds)
+  publish(target, "undeclared_kinds", undeclared_kinds)
+  publish(target, "invalid_kind", invalid_kind)
+  publish(target, "unsupported_shutdown", unsupported_shutdown)
+  publish(target, "tcp_shutdown", tcp_shutdown)
+  publish(target, "failed_shutdown", failed_shutdown)
+  publish(target, "outside_task", outside_task)
+  publish(target, "registration_context", registration_context)
+  publish(target, "read_chunks", read_chunks)
+  publish(target, "lines", lines)
+  publish(target, "tracked_lines", tracked_lines)
+  publish(target, "read_delimiter", read_delimiter)
+  publish(target, "sticky_read_error", sticky_read_error)
+  publish(target, "cancelled_reader_handoff", cancelled_reader_handoff)
+  publish(target, "contending_readers", contending_readers)
+  publish(target, "read_eof", read_eof)
+  publish(target, "read_again", read_again)
+  publish(target, "missing_input", missing_input)
+  publish(target, "c_read_error", c_read_error)
+  publish(target, "outside_exit", outside_exit)
+  publish(target, "wall_time", wall_time)
+  publish(target, "calendar", calendar)
+  publish(target, "environment", environment)
+  publish(target, "stock_stdin", stock_stdin)
+  publish(target, "stock_environment", stock_environment)
+  publish(target, "stock_output", stock_output)
+  publish(target, "stock_child_exit", stock_child_exit)
+end
+
+local function publish(target: browser.BrowserHandle, name: string,
+                        callable: function (...: Value): Value)
+  target:call(Value.is_string(name), Value.is_callable(callable))
+end
+
+function main(args: {string}): integer
+  if args[1] == "stock-exit" or args[1] == "native-import-exit" then
+    buffered_exit(args[2], args[1] == "stock-exit")
+    return 0
+  end
+  if args[1] == "return-c" then
+    local data = "main\0\128\255tail"
+    ffi.fwrite(data, 1, #data, ffi.stdout)
+    return 0
+  end
+  test.assert(args[1] == "exit", "unknown stream main mode")
+  local peer = async.run<|nil, value|>(function (): nil
+    defer note("exit-peer-cleanup")
+    note("exit-peer-ready")
+    suspend_on("never")
+    return nil
+  end)
+  defer retire(peer)
+  async.yield()
+  system.exit(7)
+  return 0
+end
+
+do
+  publish_entries()
+end

@@ -45,6 +45,8 @@ export function makeHost(context) {
     r1Responses: [], r1Thrown: undefined,
     r1CloseCount: 0n,
     listeners: new Set(), retainedListeners: [], unregisters: 0, forbiddenRequests: 0,
+    publicStateEntries: [], publicStateFinalizers: [], publicStateRequests: new Map(),
+    publicAfterClose: 0,
     sinks: {}, hooks: {}, thrown, values,
   };
   const bindings = host.bindings = {
@@ -142,6 +144,22 @@ export function makeHost(context) {
       const closing = host.controls.snapshot().states.filter(state => state.closing && !state.closed);
       context.assert(closing.length > 0, 'independent finalizer did not observe its state closing');
       host.independentCloses.push({index, value, closingTokens: closing.map(state => state.token)});
+    },
+    public_state_handle: Object.freeze({publicState: 'held'}),
+    public_state_entry(index, kind) { host.publicStateEntries.push({index, kind}); },
+    public_state_finalizer(index) {
+      const closing = host.controls.snapshot().states.filter(state => state.closing && !state.closed);
+      context.assert(closing.length === 1, 'public child finalizer did not see its closing state');
+      host.publicStateFinalizers.push({index, token: closing[0].token});
+    },
+    public_state_after_close() { host.publicAfterClose++; },
+    public_state_request(index, name) {
+      const key = `${index}:${name}`;
+      context.assert(!host.publicStateRequests.has(key), 'public child request was started twice');
+      const source = gate();
+      source.cancels = 0;
+      host.publicStateRequests.set(key, source);
+      return {kind: 'detachable', promise: source.promise, cancel() { source.cancels++; }};
     },
     detachable_request() {
       host.forbiddenRequests++;

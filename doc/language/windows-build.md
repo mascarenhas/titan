@@ -173,6 +173,30 @@ selects an external standalone LuaRocks executable. Close Titan consumers
 first; after a locked-file cleanup failure, close them, reinstall the rock to
 restore the command, and run it again.
 
+## Long double on worker threads
+
+Windows starts every new thread with 53-bit x87 precision, while a Titan
+program's main thread computes `long double` with 64-bit precision. Titan's
+own worker code restores the main thread's precision before each work item:
+[`Lua:run_async`](standard-library-lua.md#asynchronous-execution) jobs,
+[`sqlite3`](standard-library-sqlite3.md) operations, and
+[`thread`](standard-library-thread.md#standalone-os-threads) and `Group`
+threads. A raw C function that you pass to `async.run_foreign`, or to the
+public `uv.queue_work` and `uv.thread_create`, runs with the thread's current
+state; call `_fpreset()` from `float.h` at its start if it needs the main
+thread's precision.
+
+## Symbolic links
+
+Creating a symbolic link needs Developer Mode or the symbolic-link privilege.
+Some Windows builds (26H2 build 26300, for example) also refuse to follow a
+link that a non-administrator account created: every `fs` call that follows
+it, such as `fs.stat`, `fs.realpath`, or opening a file through it, raises
+`async.OperationError` with libuv's name `UNKNOWN` and message
+`unknown error`, even for a dangling link. `fs.lstat` still describes the link
+itself. Titan's own tests detect this policy and skip their symbolic-link
+cases as a capability.
+
 ## Validate an installation
 
 Use a separate validation SDK and local NTFS workspace. In the MSYS2 shell,

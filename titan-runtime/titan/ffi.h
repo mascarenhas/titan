@@ -17,6 +17,15 @@
 #include "lua.h"
 #endif
 
+/* One stock-Lua profile for the browser launcher and independent states.
+** It captures error, the package tables and require when installed, so later
+** global replacement cannot break them. Native targets replace nothing. */
+#if defined(TITAN_TARGET_BROWSER)
+#define TITAN_LUA_BROWSER_PROFILE "local error, loaded, preload, require = error, package.loaded, package.preload, require; os.clock = function() error('os.clock is unavailable on the browser target (no process CPU-time clock)', 0) end; os.exit = function(code) local titan_os = loaded['titan.os']; if not titan_os and preload['titan.os'] then titan_os = require('titan.os') end; if titan_os then return titan_os.exit(code == true and 0 or code == false and 1 or code) end; error('os.exit is unavailable outside an async Task on the browser target', 0) end"
+#else
+#define TITAN_LUA_BROWSER_PROFILE ""
+#endif
+
 /* Runtime helpers are linked into each Titan provider. A shared Lua DLL may
 ** export Lua internals, but does not own these helpers. Keep their existing
 ** ELF/Mach-O visibility and use ordinary extern declarations elsewhere. */
@@ -141,6 +150,18 @@ static inline int titan_in_finalizer(lua_State *L) {
 static inline int titan_state_closing(lua_State *L) {
   return (G(L)->gcstp & GCSTPCLS) != 0;
 }
+
+/* Windows starts every new thread, libuv pool threads included, with x87
+** precision control at 53 bits; the MinGW CRT sets the main thread to 64.
+** Standard-library worker entries call this before each work item, so long
+** double keeps the main thread's precision. Other targets need nothing. */
+/* Implementation notes: doc/implementation/libuv-runtime.md#worker-floating-point-state */
+#if defined(_WIN32)
+#include <float.h>
+static inline void titan_worker_fp_reset(void) { _fpreset(); }
+#else
+static inline void titan_worker_fp_reset(void) {}
+#endif
 
 /* Continue an abandoned-coroutine unwind from the current frame: jump to the
 ** next finally boundary or coroutine floor on L's error-recovery chain,

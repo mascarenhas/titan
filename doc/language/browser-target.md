@@ -19,25 +19,25 @@ SDK.
 The program, `hello.titan`, prints a greeting and three counting lines:
 
 ```titan
-foreign import "stdio.h"
+local io = import "io"
 
 local function greeting(name: string): string
   return "Hello, " .. name .. ", from Titan!"
 end
 
 function main(args: {string}): integer
-  ffi.puts(greeting(args[1] or "web page"))
+  io.print(greeting(args[1] or "web page"))
   for count = 1, 3 do
-    ffi.puts("Titan counts " .. count)
+    io.print("Titan counts " .. count)
   end
   return 0
 end
 ```
 
-The browser standard library has no `io` module (see [the browser standard
-library](#the-browser-standard-library)), so the program writes its lines with
-C's `puts` through the [C FFI](ffi.md). Whatever a program writes to standard
-output or standard error reaches the page through the loader's output sinks.
+The shared `io` module writes through the embedding's standard streams.
+`io.print` converts its arguments, appends a newline, and submits one write
+to the current `os.stdout`. Standard output and standard error reach the
+page through the loader's output sinks.
 
 Build it for the browser:
 
@@ -258,7 +258,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | --- | --- |
 | `libtitan.a` | the browser runtime archive |
 | `libtitan-lpeglabel.a` | the PEG engine, built for the browser; `make browser-sdk` links it into `titan.a` |
-| `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen shared modules, `async` with a browser driver, `timer` on JavaScript timers, browser-only `titan.browser`, and the PEG engine |
+| `titan.a` | the [browser standard library](#the-browser-standard-library): fourteen shared modules including `io`, browser contributors for `async`, `timer`, synchronous `lua`, and the `os` subset, browser-only `titan.browser`, and the PEG engine |
 | `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
@@ -660,9 +660,13 @@ Options are:
 | Option | Contract |
 | --- | --- |
 | `stdout`, `stderr` | Functions receiving copied `Uint8Array` chunks, which they may keep. A sink returns `undefined` or a promise; anything else is a sink failure. An absent sink discards its stream. |
+| `stdin` | A function called once per `titan:stdin` read, synchronously as a binding is. Returns a `Uint8Array` chunk (including an empty chunk), `null` or `undefined`, or a promise of one of those values. Without it, `titan:stdin` is an unknown binding. |
+| `stdinKind`, `stdoutKind`, `stderrKind` | Declared stream backings, passed through unchanged by `titan:stdio`. The loader supplies no default and does not validate these values. |
+| `stdoutEnd`, `stderrEnd` | Functions called by argumentless `titan:stdout` or `titan:stderr` requests, after earlier entries on that stream. Like sinks, they return `undefined` or a promise. A missing hook rejects the request with `TypeError`. |
 | `locateFile(name, directory)` | Resolves both the Wasm binary and its extended map. The defaults keep bundler-recognizable `new URL(..., import.meta.url)` references to the sibling files. |
 | `requireTrace` | Boolean, default `false`. Requires a ready trace map after Wasm instantiation and before Lua is created or any initializer runs; a refusal follows the ordinary initialization-failure contract. |
 | `bindings` | An object of explicit per-instance JavaScript values and functions for `titan.browser`; there is no global-name lookup or eval. Names starting with `titan:` are [reserved for the SDK](standard-library-browser.md#reserved-sdk-bindings) and rejected with `TypeError`. |
+| `env` | An object whose own enumerable string-named properties have string values, snapshotted at `create`. Absent means empty. Non-objects (including `null`), empty names, `=` or NUL in a name, NUL in a value, and non-string values are rejected with `TypeError`. |
 | `onNotificationError({kind, operation, error})` | Observes errors that Titan cannot return to any caller: failed notification callbacks, a request failure event that cannot be delivered, and secondary cleanup failures. A host Promise rejection instead goes to its mandatory failure callable. |
 | `requestDrain()` | A coalesced announcement of queued work at a complete logical safe point; the application chooses when to call and await `drain()`. |
 | `onEngineFailure({kind, cause})` | Observes a terminal engine failure after the instance has been poisoned; `kind` is `"abort"`, `"trap"`, or `"protocol"`. Observer exceptions cannot replace that failure. |
@@ -677,9 +681,24 @@ throws cannot replace a captured or
 terminal failure; the current operation, or else the next one that would
 otherwise succeed, rejects with `TITAN_BROWSER_HOST`.
 
-**Output.** Each stream has one FIFO and at most one actual sink invocation in
-flight. The loader flushes after all entries in the containing operation,
-including unterminated C-stdio tails, and during a drive also whenever the
+**Environment.** Each instance starts with exactly its `env` snapshot, empty
+by default, without Emscripten's invented environment variables. Names and
+values are encoded as UTF-8. C `getenv` and stock Lua `os.getenv` read the same
+libc environment; Titan's C FFI reaches those same functions. C `setenv` and
+`unsetenv` change later reads in that instance, not its peers or the host.
+`TZ` is an ordinary environment variable: Emscripten's `localtime` follows
+the JavaScript host's time zone regardless of its value.
+
+The `stdin` option serves the SDK request source, not C stdio's fd 0. Its
+result is marshalled by runtime type; Titan decides which values are valid
+input. Calling back into the instance from `stdin` rejects with
+`TITAN_BROWSER_REENTRY`, just as from another binding. When supplied, `stdin`,
+`stdoutEnd`, and `stderrEnd` must be functions; other values raise `TypeError`
+at `create`.
+
+**Output.** Each stream has one FIFO and at most one sink or end-hook call
+in flight. The loader flushes after all entries in the containing operation,
+including unterminated C-stdio output, and during a drive also whenever the
 drive relinquishes the event loop, without waiting there for a pending sink
 call: output queued behind that call reaches the sink once the call settles,
 if the drive is still relinquished, and otherwise at its next relinquish or
@@ -690,13 +709,25 @@ cleanup failure; secondary failures are reported once through
 `onNotificationError`. If the operation already failed in Titan, its captured
 message and trace remain primary while deliverable output is still flushed.
 There is no cross-stream ordering guarantee.
+C output is copied before the C write returns; sinks do not see a view into
+the Wasm heap. Chunk boundaries are not part of the C-stdio contract.
+A Titan write through `titan:stdout` or `titan:stderr` is one FIFO entry. Its
+request completes only after that entry's sink settles. An argumentless
+request is an end entry: its end hook uses the same FIFO and in-flight gate.
+A Titan entry's sink or hook failure goes to its failure callable, not also
+to the containing operation or cleanup observer.
+
 A C-stdio sink failure is returned by the operation that flushes it, or by
-disposal if the operation already failed in Titan; empty flushes and unrelated
-output-free operations do not fail again with that error, and observing it does
-not report the same failure twice.
+disposal if the operation already failed in Titan. It is also returned once
+by the next Titan write request on that stream, after that entry's sink
+settles; later writes are unaffected. Empty flushes and unrelated
+output-free operations do not fail again with that error, and observing the
+operation's failure does not report it again as cleanup.
 
 Disposal interrupts a pending sink by detaching its continuation and making
 that stream terminal; it never overlaps the old sink with a finalizer write.
+Queued and in-flight Titan entries reject with `TITAN_BROWSER_DISPOSED`
+during the cleanup drive, before disposal waits for retained requests.
 An operation whose failure was already captured keeps that failure if disposal
 interrupts its report flush; the interruption is reported once as cleanup,
 even when both streams are interrupted. Only an operation not yet failed
@@ -774,7 +805,10 @@ is refused with `TITAN_BROWSER_STATE`. A method that needs none still works:
 `notify` enqueues, and a `drain` with nothing to deliver succeeds. A queued
 notification that cannot get an identity when it is delivered is reported
 through `onNotificationError` with that same error, like any other
-notification failure.
+notification failure. Disposal's `async` Task cleanup also needs ordinary
+identities. With none left, disposal skips that cleanup but still closes the
+state with the reserved identity, and `dispose()` rejects with the
+`TITAN_BROWSER_STATE` error.
 
 Byte argument snapshots for `call`, `callable.call`, `notify` and `run` read
 native `Uint8Array` storage, including subarrays, subclasses and Node Buffers.
@@ -992,14 +1026,16 @@ A browser program completes in one of three ways:
 * **Returned.** `main` returned an integer. The status is its low 32 bits read
   as a signed 32-bit integer, so `-1` stays `-1` and `4294967297` becomes `1`.
   The runner then exits with `status & 255`.
-* **Failed.** An error escaped `main` or the module initializers. The program
-  writes the standard report to stderr, as a native program does:
-  `<progname>: <message>`, then `stack traceback:`, then one tab-indented line
-  per frame. The status is 1. `<progname>` is the last component of the main
-  module's name, or of the first test root's name for a test image. A
-  required trace map that is missing or invalid also fails initialization
-  with status 1: stderr receives `degraded browser trace: <reason>`, without
-  a traceback because no Titan code ran.
+* **Failed.** An error escaped `main` or the module initializers. With the
+  async bootstrap, a failed main Task writes its uncaught Task report to
+  stderr. An initializer error or a directly called main writes the standalone
+  report: `<progname>: <message>`, then `stack traceback:`, then one
+  tab-indented line per frame. The status is 1. `<progname>` is the last
+  component of the main module's name, or of the first test root's name for a
+  test image. A required trace map that is missing or invalid also fails
+  initialization with status 1: stderr receives
+  `degraded browser trace: <reason>`, without a traceback because no Titan
+  code ran.
 * **Exited.** A drive ended with an exit status (`request_exit` in an `async`
   Task) and `main` then completed without an error. The status is the exit
   status's low 32 bits read as a signed 32-bit integer, and the runner exits
@@ -1010,8 +1046,12 @@ Main completes when it returns or fails, and its output (including an
 unterminated last line) is delivered then. The state and callable handles
 remain alive until explicit disposal. The runner awaits disposal and its
 finalizer output before reporting completion. Output is binary: NUL, `0xFF`,
-and invalid UTF-8 pass through unchanged. C standard input is always at end of
-file.
+and invalid UTF-8 pass through unchanged. C standard input fails with an
+`ENOSYS` error: `fread` returns zero with `ferror` set, not EOF, and opens no
+input dialog. There is no filesystem: C file operations such as `fopen`,
+`remove`, `rename`, `tmpfile`, and `tmpnam` fail. `system(NULL)` reports no
+shell, and `system(command)` fails without executing a host command, under
+Node as well as in a web page.
 
 ### Traces
 
@@ -1175,10 +1215,10 @@ bare `raise`.
 
 ## The browser standard library
 
-The browser SDK's `titan.a` holds sixteen standard modules that need no libuv
-or other native-only library: thirteen shared modules compiled from the same
-sources as the native standard library, `async` with a browser driver, `timer`
-on the SDK's JavaScript timers, and the browser-only `titan.browser`:
+The browser SDK's `titan.a` holds nineteen standard modules that need no libuv
+or other native-only library: fourteen complete shared modules, browser
+compositions of `async`, `timer`, `os`, and `lua`, and the browser-only
+`titan.browser`:
 
 | Module | Contents |
 | --- | --- |
@@ -1195,19 +1235,22 @@ on the SDK's JavaScript timers, and the browser-only `titan.browser`:
 | [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
 | [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
 | [`test`](standard-library-test.md) | the test API and the native test runner |
+| [`io`](standard-library-io.md) | byte-stream Interfaces, one-write printing, and ownership-safe line iteration |
 | [`async`](async-io.md#the-browser-target) | Tasks, cancellation, waits, channels, combinators, and subscriptions, driven between browser macrotasks |
 | [`timer`](standard-library-timer.md#on-the-browser) | Task delays, yields, and coalescing tickers on JavaScript timers |
+| [`os`](standard-library-os.md#on-the-browser) | calendars, wall time, locale, instance environment, Task exit, and embedding-provided parent streams |
+| [`lua`](standard-library-lua.md) | string and Reader loading, preload/custom-searcher `require`, and synchronous independent states |
 | [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
 
-Each of the thirteen shared modules is complete. Every public declaration, including the raw
-C functions `protobuf.write_resource_index`,
+Each of the fourteen shared modules keeps its complete interface. Every public
+declaration, including the raw C functions `protobuf.write_resource_index`,
 `protobuf.write_resource_index_bytes`, `transfer.copy_message`,
 `transfer.discard_message`, and `transfer.transfer_load_module`, has the same
 signature as on a native target and behaves as its chapter describes, apart
-from the target facts [below](#what-the-browser-target-changes). No member
-raises an "unavailable" error or returns a stand-in value. `transfer` encodes
-and decodes packets within one instance; the modules that carry packets to
-another Lua state or thread are not available.
+from the target facts [below](#what-the-browser-target-changes). There are no
+stand-in implementations; errors from concrete `io` streams propagate
+unchanged. `transfer` encodes and decodes packets within one instance.
+`lua` uses its own synchronous cross-state carrier, not packet attachments.
 
 `async` shares its scheduling core with the native module and keeps its
 public signatures, except for the members that the browser cannot provide:
@@ -1225,6 +1268,23 @@ between turns ([async on the browser target](async-io.md#the-browser-target)).
 JavaScript timers, with the browser's clamping and throttling; `sleep(0)` is
 a yield that arms no timer ([timer on the browser](standard-library-timer.md#on-the-browser)).
 
+`os` keeps its calendar, locale, environment, and parent-stream interfaces.
+Its time query uses the host wall clock, environment mutations stay within
+the instance, and standard streams use the embedding's byte sinks and optional
+input source. CPU time, host paths and identity, child processes, and signals
+are absent. See the [per-member availability table](standard-library-os.md#on-the-browser)
+and [browser parent streams](standard-library-os.md#browser-parent-streams).
+
+`lua` keeps string and Reader loading, `require`, and independent-state
+ownership and synchronous execution. `dofile`, `Lua:run_async`, and
+`Lua:run_async_from_loader` are absent. File searches miss, while initialized
+linked modules and custom searchers work; the Titan searcher never reads
+provider-path environment variables or probes files. Each new state belongs
+to the same instance and cannot drive browser Tasks. Stock Lua's `os.clock`
+raises instead of reporting CPU time, and its `os.exit` uses Titan's Task exit
+or raises outside a Task. See [the Lua chapter](standard-library-lua.md),
+including its stock-library table.
+
 `titan.browser` is the reviewed target-only exception. It has no native
 placeholder and imports only the portable core. Its byte/scalar ABI is not the
 native transfer packet format, and schema copies are a separate feature. It
@@ -1235,16 +1295,16 @@ that the `async` driver uses but schedules nothing itself. See
 ### Modules that are not available
 
 The other standard modules are absent from the browser target: `uv`,
-`io`, `fs`, `net`, `ssl`, `http`, `websocket`, `os`, `lua`,
-`sqlite3`, and `thread`. Each of them uses libuv, directly or through its
-imports. Their sources exist only as native variants (such as
-`titan/os.native.titan`; see [target source
+`fs`, `net`, `ssl`, `http`, `websocket`, `sqlite3`, and `thread`.
+Each of them uses libuv, directly or through its imports. Each has only a
+native main, either a flat variant such as `titan/fs.native.titan` or a
+folder main such as `titan/uv/uv.native.titan` (see [target source
 selection](target-source-selection.md)), so a browser build finds no source and
-no browser archive for them. Importing one fails with the ordinary
-missing-module error, the same as for a module that does not exist:
+no browser archive for them. Their imports fail with the ordinary
+missing-module error:
 
 ```text
-module 'titan.os' not found
+module 'titan.fs' not found
 ```
 
 There are no stand-in modules for them, and their folder contributors, such as
@@ -1252,12 +1312,10 @@ There are no stand-in modules for them, and their folder contributors, such as
 of them cannot be built into a browser test image either; keep such cases in
 native-only test modules.
 
-Browser versions of `io`, `os`, `lua`, and `http` are
-planned, and `fs` is planned together with a browser file system. Until then,
-a program writes its output through C's `stdio.h`, as in [the first web
-page](#a-first-web-page), and the test runner reports through it too. Either
-way the output reaches the loader's sinks byte for byte ([status and output
-semantics](#status-and-output-semantics)).
+Programs can write through `io.print` and `os.stdout`/`os.stderr`, or through
+C's `stdio.h` as in [the program example](#programs).
+Both routes reach the loader's sinks byte for byte; Titan stream writes also
+await each sink's completion ([status and output semantics](#status-and-output-semantics)).
 
 ### What the browser target changes
 
@@ -1353,6 +1411,9 @@ Flags that change the Wasm feature set, such as `--cflag=-msimd128`, are
 reported separately from Lua record errors. The diagnostic lists the supplied
 compile flags and the actual versus required target features. Remove the
 feature-changing flag; reinstalling browser Lua does not repair that mismatch.
+
+Launcher images disable Emscripten's filesystem; this does not affect binary
+standard output and standard error.
 
 Titan also owns the settings that the runtime and the traceback backend depend
 on. The [build profile](#build-profiles) owns the optimization level, inlining,
@@ -1509,11 +1570,10 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 ## Current limits
 
-* The browser standard library has [sixteen of the standard
-  modules](#the-browser-standard-library). Files, networking,
-  `io`, `os`, `lua`, `thread`, and `sqlite3` are not available, so programs
-  write output through C's `stdio.h`, as in [the first web
-  page](#a-first-web-page).
+* The browser standard library has [nineteen standard
+  modules](#the-browser-standard-library), including `io`, the `os` subset,
+  and synchronous `lua` states. Files, networking, child processes, host
+  paths and identity, CPU time, `thread`, and `sqlite3` remain unavailable.
 * `async` Tasks run only in the instance's owner state and only while a drive
   runs: the program's `main`, a call that calls `async.loop()`, or a
   Task-form call. Receivers, `run_foreign`, and external waits are

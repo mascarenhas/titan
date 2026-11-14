@@ -1,6 +1,5 @@
--- Loaded by spec/fixtures/browser_scheduler/scheduler_child.c in a C-created
--- child state, which never owns the browser instance: it can neither drive
--- nor create an async Runtime.
+-- Loaded in C-created and public lua.new child states. Neither owns the browser
+-- instance, so neither can drive or create an async Runtime.
 local async = import "async"
 local browser = import "browser"
 local test = import "test"
@@ -24,7 +23,7 @@ function publication()
 end
 
 function check()
-  test.assert(not browser.is_owner(), "a C-created state claimed instance ownership")
+  test.assert(not browser.is_owner(), "a child state claimed instance ownership")
   test.assert(refusal(function () async.loop() end) ==
     "async.loop must be driven by the browser instance's owner state",
     "a child state's async.loop did not refuse at once")

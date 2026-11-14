@@ -65,13 +65,13 @@ function createHost(context, image, extra = {}) {
   return host;
 }
 
-async function nativeRun(context, host, args = []) {
+async function nativeRun(context, host, args = [], minimumWrappers = 26) {
   const result = await host.instance.run(args);
   context.assert(result.kind === 'returned' && result.status === 0,
-    'native browser.tests failed:\n' + decode(join(host.stdout)) + decode(join(host.stderr)));
+    'native browser test owner failed:\n' + decode(join(host.stdout)) + decode(join(host.stderr)));
   const summary = decode(join(host.stdout)).match(/\[  PASSED  \] (\d+) tests?\./);
   context.assert(summary && Number(summary[1]) > 0, 'native test owner did not report its passing cases');
-  context.assert(host.callbacks.size >= 26, 'native owner omitted published production callable wrappers');
+  context.assert(host.callbacks.size >= minimumWrappers, 'native owner omitted published production callable wrappers');
   return Number(summary[1]);
 }
 
@@ -1253,7 +1253,7 @@ async function stdio(context, host) {
   alias.fill(90);
   await host.instance.drain();
   context.equalBytes(host.stdout.at(-1), binary(), 'notification argument slice-as-view escaped snapshot ownership');
-  const payloads = [new Uint8Array(1024).fill(65), new Uint8Array(1024).fill(66), encode('unterminated-tail')];
+  const payloads = [new Uint8Array(17).fill(65), new Uint8Array(5000).fill(66), encode('unterminated-tail')];
   let pending = 0, maximum = 0, calls = 0;
   const output = gate();
   host.sinks.stdout = () => {
@@ -1835,11 +1835,132 @@ async function disposalFromImport(context, image) {
   return targets;
 }
 
+async function publicStates(context, image) {
+  const host = createHost(context, image);
+  let watcher, detached = false;
+  try {
+    await host.instance.initialize();
+    await nativeRun(context, host, [], 7);
+    watcher = host.controls.watchStateLedger();
+    const tokens = new Map();
+    for (const index of [4n, 5n, 6n, 7n]) {
+      tokens.set(index, Number(await host.call('public_create', index)));
+      context.assert(await host.call(`public_child_${index}`, 1n) === index + 1n,
+        'a live public child wrapper failed');
+    }
+    const warningCount = () => decode(join(host.stderr)).split('\n').filter(line =>
+      line.startsWith('Lua warning: ') && line.includes('browser state is closed')).length;
+    const warnings = warningCount();
+    const reports = [];
+    for (const [index, mode] of [[4n, 'close'], [5n, 'gc'], [6n, 'detach'], [7n, 'survivor']]) {
+      const token = tokens.get(index), wrapper = host.callbacks.get(`public_child_${index}`);
+      if (mode === 'detach') {
+        const before = host.controls.stateLedger(token);
+        await host.call('public_detach', index);
+        detached = true;
+        await host.call('force_gc');
+        const after = host.controls.stateLedger(token);
+        context.assert(JSON.stringify(after) === JSON.stringify(before),
+          'detach or wrapper collection retired a live public child ledger');
+        context.assert(await host.instance.call(wrapper, 2n) === index + 2n,
+          'detaching a public child invalidated its callable');
+        host.instance.notify(wrapper, 3n);
+        await host.instance.drain();
+        context.assert(host.publicStateEntries.at(-1).index === index,
+          'a detached public child lost notification delivery');
+      }
+      host.publicStateRequests.get(`${index}:queued`).resolve(23n);
+      await context.tick();
+      host.instance.notify(wrapper, 19n);
+      context.assert(host.controls.stateLedger(token).notifications === 2,
+        'the close case had no queued notification and request settlement');
+      const entries = host.publicStateEntries.length;
+      if (mode === 'gc') {
+        await host.call('public_drop', index);
+        await host.call('force_gc');
+      } else if (mode === 'detach') {
+        await host.call('public_close_detached');
+        await host.call('public_close_detached');
+        detached = false;
+      } else {
+        await host.call('public_close', index);
+        await host.call('public_close', index);
+        await host.call('force_gc');
+      }
+      const closed = host.controls.stateLedger(token);
+      context.assert(closed.slots.length === 0 && closed.callables.length === 0 &&
+        closed.requests === 0 && closed.notifications === 0 && closed.duplicateFrees === 0,
+        `${mode}: public child left a host ledger owner or duplicated a slot free`);
+      const observations = watcher.snapshot();
+      const allocated = observations.allocated.filter(item => item.state === token);
+      const retired = observations.retired.filter(item => item.state === token);
+      const registered = observations.registered.filter(item => item.state === token);
+      const invalidated = observations.invalidated.filter(item => item.state === token);
+      context.assert(allocated.some(item => item.kind === 'value') &&
+        allocated.filter(item => item.kind === 'request').length === 2 &&
+        retired.length === allocated.length && allocated.every(item =>
+          retired.filter(other => other.slot === item.slot && other.generation === item.generation).length === 1),
+        `${mode}: handle/request slots were not retired exactly once by identity`);
+      context.assert(registered.length === 1 && invalidated.length === registered.length &&
+        registered.every(item => invalidated.filter(other => other.key === item.key).length === 1),
+        `${mode}: host callable records were not invalidated exactly once`);
+      const units = observations.units.filter(item => item.state === token);
+      const granted = units.filter(item => item.delta > 0).reduce((sum, item) => sum + item.delta, 0);
+      const released = -units.filter(item => item.delta < 0).reduce((sum, item) => sum + item.delta, 0);
+      context.assert(granted > 0 && released === granted &&
+        observations.closed.filter(state => state === token).length === 1 &&
+        host.stateInvalidations.filter(state => state === token).length === 1,
+        `${mode}: host units or state retirement were lost or duplicated`);
+      const finalizers = host.publicStateFinalizers.filter(item => item.index === index && item.token === token).length;
+      const expectedWarnings = warnings + reports.length + 1;
+      context.assert(finalizers === 1 && warningCount() === expectedWarnings && host.publicAfterClose === 0,
+        `${mode}: finalization order did not leave inert closes and a raising binding ` +
+        `(finalizers=${finalizers}, warnings=${warningCount()}/${expectedWarnings}, afterClose=${host.publicAfterClose}): ` +
+        decode(join(host.stderr)));
+      const operation = host.controls.snapshot().operationId;
+      await rejected(context, host.instance.call(wrapper, 1n), 'HANDLE');
+      let notificationError;
+      try { host.instance.notify(wrapper, 1n); } catch (error) { notificationError = error; }
+      context.assert(notificationError?.code === 'TITAN_BROWSER_HANDLE', 'dead public child notify was accepted');
+      host.publicStateRequests.get(`${index}:late`).resolve(29n);
+      await context.tick();
+      await host.instance.drain();
+      wrapper.release();
+      wrapper.release();
+      context.assert(host.controls.snapshot().operationId === operation &&
+        host.publicStateEntries.length === entries &&
+        host.publicStateRequests.get(`${index}:queued`).cancels === 0 &&
+        host.publicStateRequests.get(`${index}:late`).cancels === 1,
+        `${mode}: dead wrapper/notification/settlement/release entered Lua or repeated cancellation`);
+      context.assert(host.controls.stateLedger(token).slots.length === 0 &&
+        watcher.snapshot().closed.filter(state => state === token).length === 1,
+        `${mode}: a later release changed the retired state`);
+      context.assert(await host.call('valid_after_failure') === 42n, 'public child close poisoned its parent');
+      if (index !== 7n) context.assert(await host.call('public_child_7', 2n) === 9n,
+        'public child close poisoned the second live child');
+      reports.push({mode, hostSlots: allocated.length, hostCallableRecords: registered.length, units: granted});
+    }
+    context.assert(host.notificationErrors.length === 0, 'public state close reported a delivery error');
+    watcher.restore();
+    watcher = undefined;
+    await host.instance.dispose();
+    return reports;
+  } finally {
+    if (detached) await host.call('public_close_detached').catch(() => {});
+    watcher?.restore();
+    await host.instance?.dispose().catch(() => {});
+    host.releaseObservations();
+  }
+}
+
 export async function run(context) {
-  context.assert(context.args.length === 2, 'pass browser.tests and failed-initializer image paths');
+  context.assert(context.args.length === 3, 'pass legacy bridge, failed-initializer and public-state image paths');
   const image = await context.image(context.args[0]);
   const failedImage = await context.image(context.args[1]);
+  const publicImage = await context.image(context.args[2]);
   context.assert(!Object.hasOwn(image, 'factory') && typeof image.create === 'function', 'raw factory escaped context.image');
+  const publicStateClosures = await publicStates(context, publicImage);
+  context.stdout(encode('PUBLIC-STATES ' + JSON.stringify(publicStateClosures) + '\n'));
   const materialization = {arguments: await argumentMaterialization(context, image),
     disposal: await disposalMaterialization(context, image)};
   const listenerCancellation = await listenerBatchCancellation(context, image);
@@ -1896,7 +2017,7 @@ export async function run(context) {
     context.stdout(encode('BRIDGE ' + JSON.stringify({verdict: 'PASS', nativeCases: counts,
       instances: 2, interleavedSwitches: switches, operations: completions.length, requestDrain: announcements,
       notifications: first.notifications.length, requests: first.successes.length + first.failures.length,
-      io, repairs, cleanup, identities, materialization, listenerCancellation, sinkValues, collectedTargets,
+      io, repairs, cleanup, identities, materialization, listenerCancellation, publicStateClosures, sinkValues, collectedTargets,
       stateFinalizers: first.earlierCloses.length + second.earlierCloses.length, finalizerDrains: 2}) + '\n'));
   } finally {
     unwatchFirst?.(); unwatchSecond?.(); unwatchCompletions?.();

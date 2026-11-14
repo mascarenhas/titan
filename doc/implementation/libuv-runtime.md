@@ -883,6 +883,32 @@ waits for native timer close before returning or finishing cancellation unwind.
 A `Ticker` is a persistent coalescing subscription that uses its typed close
 callback only for ownership retirement. Neither promises an exact libuv phase.
 
+### Worker floating-point state
+
+On Windows every new thread starts with x87 precision control at 53 bits
+(`fnstcw` reads `0x027f`): `_beginthreadex`, `uv_thread_create` and libuv pool
+threads alike, so `1 + LDBL_EPSILON` rounds to 1 there. The MinGW CRT's
+startup `_fpreset` runs the main thread at 64 bits (`0x037f`).
+`_control87(0, 0)` reports the same value on both and cannot observe the
+difference. Pool threads also keep whatever state their previous job left.
+
+`titan/ffi.h` therefore defines `titan_worker_fp_reset()`, `_fpreset()` on
+Windows and empty elsewhere, and every standard-library worker entry calls it
+before its work item:
+
+| Entry | Runs |
+| --- | --- |
+| `lua_state_run_worker` (`titan/lua/background.native.titan`) | each `Lua:run_async` job, then `lua_state_run` |
+| `sqlite_run_worker` (`titan/sqlite3/worker.titan`) | each SQLite operation, through `run_foreign` or the cleanup `queue_work` |
+| `thread_worker_main` (`titan/thread/spawn.titan`) | each `thread.spawn` and `Group` thread, once at thread start |
+
+Synchronous `Lua:run` calls `lua_state_run` directly and keeps the calling
+thread's state, including any rounding mode the application chose.
+`run_foreign` itself still performs exactly `f(arg)`, and raw entries passed
+to public `uv.queue_work` or `uv.thread_create` manage their own
+floating-point state. Native Linux and macOS threads already start in the
+same state as the main thread.
+
 ### Browser timers
 
 `titan/timer.browser.titan` is the browser variant of `timer`, with the same

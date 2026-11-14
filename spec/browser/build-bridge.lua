@@ -33,6 +33,7 @@ local function write(file, bytes)
   assert(handle:close())
 end
 
+local built = 0
 for _, assertions in ipairs({2, 0}) do
   local root = path.join(output, "assertions-" .. assertions)
   mkdir(root)
@@ -41,6 +42,11 @@ for _, assertions in ipairs({2, 0}) do
       tree=path.join(repository, "spec/stdlib/titan"),
       source=path.join(fixture, "independent_states.c"), wrap=true},
     {name="initializer-failure", owner="initializer_failure", tree=fixture},
+    -- integration.mjs's third image: public lua.new lifetimes, kept apart so the
+    -- legacy bridge image stays without Lua's async owner driver.
+    {name="public-states", owner="browser.public_state_tests", testing=true,
+      tree=path.join(repository, "spec/stdlib/titan"),
+      source=path.join(fixture, "independent_states.c"), wrap=true},
     -- Page tests of their own images, which need a DOM: the html5 click
     -- counter of synchronous callbacks and the async driver's responsiveness.
     {name="counter", owner="counter", tree=fixture},
@@ -82,6 +88,7 @@ require("titan-compiler.driver").browser_link_options = {purpose=%q, assertions=
     end
     io.stdout:write(string.format("BRIDGE-IMAGE profile=%s assertions=%d owner=%s image=%s\n",
       profile, assertions, target.owner, image))
+    built = built + 1
   end
 end
 
@@ -89,4 +96,4 @@ for _, name in ipairs({"bindings.mjs", "integration.mjs", "unhandled.mjs", "unha
     "poison-retirement.mjs", "counter.mjs", "responsive.mjs"}) do
   write(path.join(output, name), read(path.join(fixture, name)))
 end
-io.stdout:write(string.format("BRIDGE-GATE %s profile=%s assertionModes=2 images=8\n", output, profile))
+io.stdout:write(string.format("BRIDGE-GATE %s profile=%s assertionModes=2 images=%d\n", output, profile, built))

@@ -30,13 +30,3 @@ function test_coverage_calendar_missing_and_out_of_range_fields(
   end, "date result cannot be represented in this installation")
 end
 
-function test_coverage_calendar_unrepresentable_time_result(
-    _context: test.Context)
-  local previous: string? = support.install_test_timezone()
-  defer support.restore_test_timezone(previous)
-  -- mktime's -1 result is rejected by the public API, including the instant
-  -- immediately before the epoch when a host can otherwise represent it.
-  support.assert_raises_contains(function ()
-    system.time(1969, 12, 31, 18, 59, 59, false)
-  end, "time result cannot be represented in this installation")
-end

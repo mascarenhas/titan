@@ -13230,13 +13230,12 @@ describe("target-aware source resolver", function()
 
     local stdlib_root = paths.to_slash(lfs.currentdir())
     local excluded_stdlib = {
-        { "io", "io" },
-        { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" }, { "os", "os" },
+        { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" },
         { "uv", "uv/uv", "tcp" },
         { "http", "http/http", "client" },
         { "websocket", "websocket/websocket", "handshake" },
         { "sqlite3", "sqlite3/sqlite3", "bindings" },
-        { "lua", "lua/lua", "worker" }, { "thread", "thread/thread", "channel" },
+        { "thread", "thread/thread", "channel" },
     }
     for _, entry in ipairs(excluded_stdlib) do
         local name = "titan." .. entry[1]
@@ -13309,6 +13308,67 @@ describe("target-aware source resolver", function()
             assert.equal(stdlib_root .. "/titan/timer." .. member .. ".titan", paths.to_slash(selected.main), target)
             assert.equal(stdlib_root .. "/titan/timer.titan", paths.to_slash(selected.native_output), target)
             assert.same({ selected.main }, selected.files, target)
+        end
+    end)
+
+    it("selects titan.io's shared main on every target", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local selected = assert(driver.resolve_source(context(target), "titan.io", stdlib_root))
+            assert.equal("flat", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/io.titan", paths.to_slash(selected.main), target)
+            assert.equal(selected.main, selected.native_output, target)
+            assert.same({ selected.main }, selected.files, target)
+        end
+    end)
+
+    it("composes titan.lua with synchronous browser and native worker contributors", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local selected = assert(driver.resolve_source(context(target), "titan.lua", stdlib_root))
+            assert.equal("folder", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/lua/lua.titan", paths.to_slash(selected.main), target)
+            assert.equal(selected.main, selected.native_output, target)
+            local files = {}
+            for index, filename in ipairs(selected.files) do files[index] = paths.basename(filename) end
+            assert.same(target == "browser" and {
+                "lua.titan", "loading.browser.titan", "worker.titan",
+            } or {
+                "lua.titan", "background.native.titan", "loading.native.titan", "worker.titan",
+            }, files, target)
+            for _, part in ipairs({ "background", "loading", "worker" }) do
+                local blocked = driver.resolve_source(context(target), "titan.lua." .. part, stdlib_root)
+                if part == "background" and target == "browser" then
+                    assert.is_nil(blocked, part)
+                else
+                    assert.equal("blocked", assert(blocked, part).kind, part)
+                    local member = part == "worker" and "" or
+                        (target == "browser" and ".browser" or ".native")
+                    assert.equal(stdlib_root .. "/titan/lua/" .. part .. member .. ".titan",
+                        paths.to_slash(blocked.contributor), target .. " " .. part)
+                end
+            end
+        end
+    end)
+
+    it("composes titan.os from its shared main and the target's contributor members", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local member = target == "browser" and "browser" or "native"
+            local selected = assert(driver.resolve_source(context(target), "titan.os", stdlib_root))
+            assert.equal("folder", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/os/os.titan", paths.to_slash(selected.main), target)
+            assert.equal(selected.main, selected.native_output, target)
+            local files = {}
+            for index, filename in ipairs(selected.files) do files[index] = paths.basename(filename) end
+            assert.same({
+                "os.titan", "clock." .. member .. ".titan",
+                "environment." .. member .. ".titan", "process." .. member .. ".titan",
+                "stdio." .. member .. ".titan",
+            }, files, target)
+            for _, part in ipairs({ "clock", "environment", "process", "stdio" }) do
+                local blocked = driver.resolve_source(context(target), "titan.os." .. part, stdlib_root)
+                assert.equal("blocked", assert(blocked, part).kind, part)
+                assert.equal(stdlib_root .. "/titan/os/" .. part .. "." .. member .. ".titan",
+                    paths.to_slash(blocked.contributor), target .. " " .. part)
+            end
         end
     end)
 

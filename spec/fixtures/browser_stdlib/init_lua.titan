@@ -1,0 +1,6 @@
+local test = import "test"
+local subject = import "lua"
+
+function test_initializer_completed(_context: test.Context)
+  test.assert(test.testing(), "lua initializer did not reach its test")
+end

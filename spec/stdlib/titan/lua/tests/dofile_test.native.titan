@@ -1,3 +1,5 @@
+local fs = import "fs"
+local lua_support = import "lua.test_support.titan"
 foreign import "uv_stdio_probe.h"
 
 function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(

@@ -1,5 +1,5 @@
 import { spawn, execFile } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, fstatSync } from "node:fs";
 import { access, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -251,6 +251,14 @@ async function retireGroup(child) {
     if (!await waitExit(child, 1000)) throw new Error(`engine leader ${child.pid} did not exit`);
 }
 
+// Classify the supervisor's own descriptors: the worker's stdout and stderr
+// are always pipes into them, so a redirect to a file is visible only here.
+function streamKind(stream) {
+    if (stream.isTTY) return "tty";
+    const status = fstatSync(stream.fd);
+    return status.isFile() ? "file" : status.isFIFO() || status.isSocket() ? "pipe" : undefined;
+}
+
 class NodeEngine {
     constructor(monitor) { this.monitor = monitor; }
     async start(config) {
@@ -268,6 +276,7 @@ class NodeEngine {
         child.on("disconnect", () => {
             if (!this.closing) this.monitor.fail("harness", "Node worker IPC disconnected before shutdown");
         });
+        config = { ...config, stdoutKind: streamKind(process.stdout), stderrKind: streamKind(process.stderr) };
         child.send({ type: "start", config }, error => { if (error && !this.closing) this.monitor.fail("harness", error.message); });
     }
     async close() {

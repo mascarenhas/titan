@@ -1,0 +1,63 @@
+local test = import "test"
+local coroutinelib = import "coroutine"
+local mathlib = import "math"
+local iterationlib = import "iteration"
+local gclib = import "gc"
+local reflectlib = import "reflect"
+local jsonlib = import "json"
+local protobuflib = import "protobuf"
+local transferlib = import "transfer"
+local peglib = import "peg"
+local stringlib = import "string"
+local urllib = import "url"
+local pathlib = import "path"
+local browserlib = import "browser"
+local asynclib = import "async"
+local timerlib = import "timer"
+local oslib = import "os"
+local iolib = import "io"
+local lualib = import "lua"
+
+local const REQUIRE_MODULES = [[
+  local names = ...
+  local count = 0
+  for name in names:gmatch('%S+') do
+    assert(require(name) ~= nil)
+    count = count + 1
+  end
+  return count
+]]
+
+local function initialize(names: string): integer
+  local state = lualib.new()
+  defer state:close()
+  local reader = stringlib.reader(REQUIRE_MODULES)
+  defer reader:close()
+  local result: transferlib.TransferValue = state:run_from_loader(
+    reader, "=browser-initializers", transferlib.TransferValue.is_string(names))
+  case result
+  when is_integer(count) then return count
+  else raise "independent initializer chunk did not return its module count"
+  end
+end
+
+function test_initializers_in_independent_states(context: test.Context)
+  local modules: {string} = {
+    "titan.test", "titan.coroutine", "titan.gc", "titan.math", "titan.iteration",
+    "titan.reflect", "titan.json", "titan.protobuf", "titan.transfer", "titan.peg",
+    "titan.string", "titan.url", "titan.path", "titan.browser", "titan.async",
+    "titan.timer", "titan.os", "titan.io", "titan.lua",
+  }
+  local seen: {string: boolean} = {}
+  local all = stringlib.writer()
+  for _, module in iterationlib.ipairs(modules) do
+    test.assert(seen[module] == nil, "duplicate initializer module")
+    seen[module] = true
+    test.assert(initialize(module) == 1, "isolated child initializer was not loaded")
+    all:write(module)
+    all:write("\n")
+  end
+  test.assert(initialize(all:drain()) == #modules,
+    "combined child initializers were not all loaded")
+  context:log("independent-state roots=" .. #modules)
+end

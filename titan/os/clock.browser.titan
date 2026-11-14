@@ -1,0 +1,4 @@
+-- libc time is the host realtime clock, not consumed CPU time.
+local function os_time(): integer
+  return ffi.time(nil)
+end

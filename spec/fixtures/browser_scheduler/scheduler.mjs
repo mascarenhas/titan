@@ -95,6 +95,7 @@ function makeHost(context, image) {
     fire_host_timer(delay) { return timers.fire(Number(delay)); },
     arm_marker() { host.marked = false; nextTurn(() => { host.marked = true; }); },
     marked() { return host.marked; },
+    queue_owner_notification() { host.instance.notify(host.fn('public_owner_notification')); },
   };
   host.instance = image.create({locateFile: image.locateFile, bindings: host.bindings,
     stdout(bytes) { host.stdout.push(bytes.slice()); },
@@ -127,7 +128,7 @@ async function gate(context, image) {
     const out = decode(join(host.stdout)), err = decode(join(host.stderr));
     context.assert(result.kind === 'returned' && result.status === 0, `scheduler gate failed:\n${out}${err}`);
     const passed = out.match(/\[  PASSED  \] (\d+) tests?\./);
-    context.assert(passed && Number(passed[1]) === 21, `the gate did not pass its twenty-one cases:\n${out}`);
+    context.assert(passed && Number(passed[1]) === 22, `the gate did not pass its twenty-two cases:\n${out}`);
     context.assert(err.includes('uncaught error in async Task: ordinary Task failure'),
       `an ordinary Task failure was not reported on stderr:\n${err}`);
     context.assert(host.notificationErrors.length === 1 &&
@@ -365,21 +366,39 @@ async function exits(context, image) {
   } finally { await host.close(); }
 }
 
-// A C-created child state is refused during the owner's drive.
+// C-created and public lua.new children are refused during the owner's drive.
 async function ownership(context, image) {
-  const host = makeHost(context, image);
-  try {
-    await host.instance.initialize();
-    await host.call('make_child');
-    context.assert(await host.call('child_echo', 3n) === 3n, 'an idle call into the child state');
-    context.assert(await host.task('echo', [1n]) === 1n, "the child replaced the owner's driver");
-    const napping = host.task('nap', [40n]);
-    await until(context, () => host.notes.includes('napping'), 'nap did not start');
-    await rejection(context, host.call('child_echo', 1n), 'REENTRY');
-    thrown(context, () => host.instance.notify(host.fn('child_echo'), 1n), 'REENTRY');
-    context.assert(await napping === 'woke', 'the drive did not progress after refusing the child');
-    context.assert(await host.call('child_echo', 2n) === 2n, 'a child call after the drive');
-  } finally { await host.close(); }
+  for (const creator of ['make_child', 'make_public_child']) {
+    const host = makeHost(context, image);
+    try {
+      await host.instance.initialize();
+      await host.call(creator);
+      context.assert(await host.call('child_echo', 3n) === 3n, `${creator}: idle child call`);
+      context.assert(await host.task('echo', [1n]) === 1n, `${creator}: child replaced the owner driver`);
+      let finishNap;
+      host.bindings.delay = (_ms, value) => ({kind: 'detachable',
+        promise: new Promise(resolve => { finishNap = () => resolve(value); })});
+      const napping = host.task('nap', [40n]);
+      await until(context, () => host.notes.includes('napping'), 'nap did not start');
+      if (creator === 'make_public_child') {
+        context.assert(await host.task('public_child_probe') === 42n,
+          'public child refused or drove synchronous work inside an owner Task');
+        context.assert(await host.task('echo', [2n]) === 2n,
+          'the public child replaced the owner callTask entry');
+        await until(context, () => host.notes.includes('public owner notification'),
+          'the child consumed or lost the owner notification');
+        context.assert(host.notes.filter(note => note === 'public owner notification').length === 1,
+          'the owner notification was delivered more than once');
+      }
+      await rejection(context, host.call('child_echo', 1n), 'REENTRY');
+      thrown(context, () => host.instance.notify(host.fn('child_echo'), 1n), 'REENTRY');
+      context.assert(typeof finishNap === 'function', 'the owner host request was not pending');
+      finishNap();
+      context.assert(await napping === 'woke', `${creator}: drive stopped after child refusal`);
+      context.assert(await host.call('child_echo', 2n) === 2n, `${creator}: child call after drive`);
+      context.assert(host.notificationErrors.length === 0, `${creator}: notification failed`);
+    } finally { await host.close(); }
+  }
 }
 
 export async function run(context) {

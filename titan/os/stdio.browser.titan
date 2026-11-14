@@ -1,0 +1,425 @@
+local async = import "async"
+local browser = import "browser"
+local protobuf = import "protobuf"
+
+local type Value = browser.BrowserValue
+
+local const output_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_option(reflect.Type.is_string()),
+}
+local const input_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_string(), reflect.Type.is_integer(),
+  reflect.Type.is_option(reflect.Type.is_named(reflect.NamedType("titan.async.OperationError"))),
+  reflect.Type.is_option(reflect.Type.is_string()),
+  reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_string()),
+}
+
+local record Stdio
+  const name: string
+  source: browser.BrowserHandle?
+  missing_source: boolean
+  kind_loaded: boolean
+  declared_kind: string?
+  kind_error: string?
+  shut_down: boolean
+  pending_writes: integer
+  request: browser.BrowserRequest?
+  chunk: string?
+  failure: async.OperationError?
+  eof: boolean
+  reader: async.Task?
+  token: async.ResumeToken?
+  reads_started: boolean
+end
+
+-- Parent descriptors use positive Array positions: descriptor 0 is slot 1.
+local parent_streams: {Stdio} = {}
+local input_runtime_registered = false
+
+local function unavailable(member: string): async.OperationError
+  return make_error(ffi.ENOSYS, member,
+    member .. " is unavailable on the browser target")
+end
+
+local function parent_stdio(descriptor: integer): Stdio
+  async.running()
+  local stream? = parent_streams[descriptor + 1]
+  if stream ~= nil then return stream end
+  local name = "stdin"
+  if descriptor == 1 then name = "stdout"
+  elseif descriptor == 2 then name = "stderr"
+  elseif descriptor ~= 0 then raise "internal parent stdio descriptor is invalid"
+  end
+  local created: Stdio = {
+    name = name, source = nil, missing_source = false,
+    kind_loaded = false, declared_kind = nil, kind_error = nil,
+    shut_down = false, pending_writes = 0, request = nil,
+    chunk = nil, failure = nil, eof = false, reader = nil,
+    token = nil, reads_started = false,
+  }
+  parent_streams[descriptor + 1] = created
+  return created
+end
+
+local function InputStream:stdio(): Stdio
+  local stream = parent_stdio(self.parent_descriptor)
+  self.handle = stream
+  return stream
+end
+
+local function OutputStream:stdio(): Stdio
+  local stream = parent_stdio(self.parent_descriptor)
+  self.handle = stream
+  return stream
+end
+
+local function Stdio:open_source(member: string): browser.BrowserHandle
+  if self.missing_source then raise unavailable(member) end
+  local source? = self.source
+  if source == nil then
+    do
+      source = browser.binding("titan:" .. self.name)
+    catch
+      if self.name ~= "stdin" or not (error is browser.BrowserError) then raise end
+      local failure: browser.BrowserError = error
+      failure:close()
+      self.missing_source = true
+      raise unavailable(member)
+    end
+    self.source = source
+  end
+  return source
+end
+
+local function Stdio:kind(): string?
+  if not self.kind_loaded then
+    local metadata = browser.binding("titan:stdio")
+    defer metadata:close()
+    local result = metadata:call(Value.is_string(self.name))
+    local invalid = false
+    case result
+    when is_nil() then
+    when is_string(kind) then
+      if kind == "tty" or kind == "pipe" or kind == "file" or kind == "tcp" then
+        self.declared_kind = kind
+      else invalid = true
+      end
+    when is_handle(handle) then
+      handle:close()
+      invalid = true
+    else invalid = true
+    end
+    if invalid then
+      self.kind_error = "browser " .. self.name .. "Kind must be \"tty\", \"pipe\", \"file\" or \"tcp\""
+    end
+    self.kind_loaded = true
+  end
+  local failure? = self.kind_error
+  if failure ~= nil then raise failure end
+  return self.declared_kind
+end
+
+-- An admitted output request keeps its wait through cancellation. The loader
+-- owns FIFO ordering and physical output; this count only guards transfer.
+local function Stdio:send(data: string?, operation: string)
+  local request: browser.BrowserRequest? = nil
+  defer if request ~= nil then request:close() end
+  local outcome = async.await<|nil, async.OperationError|>(function (resolve, reject, fatal)
+    if data ~= nil and self.shut_down then
+      reject(make_error(ffi.EPIPE, operation))
+      return
+    end
+    local completed = function (...: Value): Value
+      self.pending_writes = self.pending_writes - 1
+      resolve(nil)
+      return Value.is_nil()
+    catch
+      fatal(error, traceback)
+      raise
+    end
+    local failed = function (...: Value): Value
+      self.pending_writes = self.pending_writes - 1
+      local message? = browser.failure_text(...[1], ...[2])
+      reject(make_error(ffi.EIO, operation, message or "host stdio failed"))
+      return Value.is_nil()
+    catch
+      fatal(error, traceback)
+      raise
+    end
+    local source = self:open_source(operation)
+    if data == nil then request = source:start(completed, failed)
+    else request = source:start(completed, failed, Value.is_bytes(data))
+    end
+    self.pending_writes = self.pending_writes + 1
+    if data == nil then self.shut_down = true end
+  catch
+    if not (error is browser.BrowserError) then raise end
+    local failure: browser.BrowserError = error
+    local message = failure.message
+    failure:close()
+    reject(make_error(ffi.EIO, operation, message))
+  end)
+  case outcome
+  when success() then
+  when error(failure) then raise failure
+  end
+end
+
+local function Stdio:reset_input(stream: InputStream)
+  local request? = self.request
+  self.request = nil
+  if request ~= nil then request:close() end
+  self.chunk = nil
+  self.failure = nil
+  self.eof = false
+  self.reader = nil
+  self.reads_started = false
+  stream.excess = ""
+  input_runtime_registered = false
+end
+
+local function Stdio:finish_read()
+  local request? = self.request
+  self.request = nil
+  if request ~= nil then request:close() end
+  local reader? = self.reader
+  if reader ~= nil then reader:resume(self.token) end
+end
+
+local function Stdio:start_read(source: browser.BrowserHandle)
+  self.request = source:start(function (...: Value): Value
+    case ...[1]
+    when is_bytes(chunk) then self.chunk = chunk
+    when is_nil() then self.eof = true
+    when is_handle(handle) then
+      handle:close()
+      self.failure = make_error(ffi.EIO, "stdio.read", "stdin source returned a value that is not bytes")
+    else
+      self.failure = make_error(ffi.EIO, "stdio.read", "stdin source returned a value that is not bytes")
+    end
+    self:finish_read()
+    return Value.is_nil()
+  end, function (...: Value): Value
+    local message? = browser.failure_text(...[1], ...[2])
+    self.failure = make_error(ffi.EIO, "stdio.read", message or "host stdin failed")
+    self:finish_read()
+    return Value.is_nil()
+  end)
+catch
+  if not (error is browser.BrowserError) then raise end
+  local failure: browser.BrowserError = error
+  local message = failure.message
+  failure:close()
+  self.failure = make_error(ffi.EIO, "stdio.read", message)
+end
+
+local function Stdio:take_result(): string?
+  local chunk? = self.chunk
+  if chunk ~= nil then
+    self.chunk = nil
+    return chunk
+  end
+  local failure? = self.failure
+  if failure ~= nil then raise failure end
+  if self.eof then return nil end
+  raise "stdin request completed without a result"
+end
+
+local function Stdio:read(stream: InputStream): string?
+  async.checkpoint()
+  if self.reader ~= nil then raise "stream already has a waiting reader" end
+  if self.chunk ~= nil or self.failure ~= nil or self.eof then return self:take_result() end
+  local source = self:open_source("os.InputStream.read")
+  if not input_runtime_registered then
+    async.add_close_listener(function () self:reset_input(stream) end)
+    input_runtime_registered = true
+  end
+  self.reads_started = true
+  if self.token == nil then self.token = async.ResumeToken("stdio.read") end
+  local task = async.running()
+  self.reader = task
+  local detach = function ()
+    if self.reader == task then self.reader = nil end
+  end
+  defer detach()
+  if self.request == nil then self:start_read(source) end
+  if self.failure == nil then
+    -- Cancellation withdraws only this waiter. The stream keeps the request
+    -- and buffers its outcome for a successor, including an empty byte chunk.
+    async.suspend(self.token, detach)
+  end
+  return self:take_result()
+end
+
+local function read_stream(stream: InputStream): string?
+  local handle = stream:stdio()
+  if #stream.excess > 0 then
+    local result = stream.excess
+    stream.excess = ""
+    return result
+  end
+  return handle:read(stream)
+end
+
+--- Write a complete binary chunk to the embedding's standard-output sink.
+-- @param data Complete binary byte string.
+-- @usage standard-library-os.md
+function OutputStream:write(data: string)
+  if #data == 0 then
+    async.checkpoint()
+    local stream? = parent_streams[self.parent_descriptor + 1]
+    if stream ~= nil and stream.shut_down then raise make_error(ffi.EPIPE, "stdio.write") end
+    return
+  end
+  self:stdio():send(data, "stdio.write")
+end
+
+--- Finish earlier output and invoke the embedding's TCP end hook.
+-- @usage standard-library-os.md#tcp-backed-parent-streams
+function OutputStream:shutdown()
+  local stream = self:stdio()
+  async.checkpoint()
+  if stream:kind() ~= "tcp" then raise make_error(ffi.ENOTSUP, "stdio.shutdown") end
+  if stream.shut_down then return end
+  stream:send(nil, "stdio.shutdown")
+end
+
+--- Leave the host-owned parent stream open; repeated calls are safe.
+-- @usage standard-library-os.md
+function OutputStream:close()
+end
+
+--- Check the embedding's declared output kind without yielding.
+-- @return True when the embedding declares "tty"; false when undeclared.
+-- @usage standard-library-os.md
+function OutputStream:is_tty(): boolean
+  return self:stdio():kind() == "tty"
+end
+
+--- Return the embedding's declared output kind, or raise when undeclared.
+-- @return "tty", "pipe", "file", or "tcp".
+-- @usage standard-library-os.md
+function OutputStream:kind(): string
+  local kind? = self:stdio():kind()
+  if kind == nil then raise unavailable("os.OutputStream.kind") end
+  return kind
+end
+
+--- Read a binary chunk from the embedding's standard-input source.
+-- @return Bytes or nil at EOF.
+-- @usage standard-library-os.md
+function InputStream:read(): string?
+  return read_stream(self)
+end
+
+--- Read through a binary delimiter, retaining the suffix for the next read.
+-- @param delimiter Nonempty delimiter bytes.
+-- @param chop True removes the delimiter.
+-- @return Delimited bytes or final suffix, or nil at EOF.
+-- @usage standard-library-os.md
+function InputStream:read_until(delimiter: string, chop: boolean?): string?
+  return read_input_until(self, delimiter, chop)
+catch
+  if error is async.OperationError then
+    local failure: async.OperationError = error
+    if failure.name == "ENOSYS" and failure.operation == "os.InputStream.read" then
+      raise unavailable("os.InputStream.read_until")
+    end
+  end
+  raise
+end
+
+--- Leave the host-owned parent stream open; repeated calls are safe.
+-- @usage standard-library-os.md
+function InputStream:close()
+end
+
+--- Check the embedding's declared input kind without yielding.
+-- @return True when the embedding declares "tty"; false when undeclared.
+-- @usage standard-library-os.md
+function InputStream:is_tty(): boolean
+  return self:stdio():kind() == "tty"
+end
+
+--- Return the embedding's declared input kind, or raise when undeclared.
+-- @return "tty", "pipe", "file", or "tcp".
+-- @usage standard-library-os.md
+function InputStream:kind(): string
+  local kind? = self:stdio():kind()
+  if kind == nil then raise unavailable("os.InputStream.kind") end
+  return kind
+end
+
+local function output_descriptor(payload: string): integer
+  local descriptor: integer, native: string? =
+    protobuf.deserialize_fields(payload, output_transfer_fields)
+  if descriptor ~= 1 and descriptor ~= 2 or native ~= nil then
+    raise "invalid standard output transfer payload"
+  end
+  return descriptor
+end
+
+local function check_input_payload(payload: string)
+  local descriptor: integer, excess: string, terminal: integer,
+    failure: async.OperationError?, native: string?, initial: {string} =
+    protobuf.deserialize_fields(payload, input_transfer_fields)
+  if terminal < 0 or terminal > 3 or (terminal == 2) ~= (failure ~= nil) then
+    raise "invalid input stream terminal payload"
+  end
+  if descriptor ~= 0 then raise "invalid input stream descriptor" end
+  if #excess ~= 0 or native ~= nil or #initial ~= 0 or terminal ~= 3 then
+    raise "invalid standard input transfer payload"
+  end
+end
+
+--- Copy a parent descriptor identity, never an embedding sink or request.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream:to_transfer_payload(): string
+  local stream? = self.handle
+  if stream ~= nil and stream.pending_writes ~= 0 then raise "stream has pending output" end
+  return protobuf.serialize_fields(output_transfer_fields, self.parent_descriptor, nil)
+end
+
+--- Return the receiving state's standard-output facade.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream.from_transfer_payload(payload: string): OutputStream
+  local descriptor = output_descriptor(payload)
+  -- Prefer the stable facade still bound to that descriptor. After the
+  -- assignable variables change, a new facade shares the same state-owned
+  -- Stdio; output facades hold no other state.
+  if stdout.parent_descriptor == descriptor then return stdout end
+  if stderr.parent_descriptor == descriptor then return stderr end
+  return OutputStream(nil, descriptor)
+end
+
+--- Validate a parent identity; there is no native ownership to release.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream.discard_transfer_payload(payload: string): integer
+  output_descriptor(payload)
+  return 0
+end
+
+--- Copy untouched parent input by descriptor identity.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream:to_transfer_payload(): string
+  local stream? = self.handle
+  if #self.excess ~= 0 or stream ~= nil and stream.reads_started then
+    raise "standard input has active or buffered read state"
+  end
+  return protobuf.serialize_fields(input_transfer_fields,
+    self.parent_descriptor, "", 3, nil, nil, {} as {string})
+end
+
+--- Return the receiving state's standard-input facade.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream.from_transfer_payload(payload: string): InputStream
+  check_input_payload(payload)
+  return stdin
+end
+
+--- Validate a parent identity; there is no native ownership to release.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream.discard_transfer_payload(payload: string): integer
+  check_input_payload(payload)
+  return 0
+end

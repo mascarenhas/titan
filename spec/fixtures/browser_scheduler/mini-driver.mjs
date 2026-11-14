@@ -167,9 +167,9 @@ async function delayedSinks(context, image) {
 }
 
 // A held sink call that settles while the drive runs a later turn's
-// coroutine switches starts no further sink call: output already published
-// behind it, and full 1024-byte chunks that turn sealed before switching,
-// wait for the next parked gate. Each case parks a drive on `hang` and holds
+// coroutine switches starts no further sink call: batches already published
+// behind it, including a large write admitted before switching, wait for the
+// next parked gate. Each case parks a drive on `hang` and holds
 // the sink call for a first line; `release()` arms the next `kick` to settle
 // it from a microtask, which runs at the turn's first internal handoff.
 const heldSinkCases = {
