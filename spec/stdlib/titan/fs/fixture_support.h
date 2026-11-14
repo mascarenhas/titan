@@ -5,7 +5,8 @@
 
 /* Synchronous setup/cleanup must also work outside a Titan Runtime. */
 int titan_spec_mkdtemp(char *pattern);
-/* 1 identifies Windows' missing symbolic-link privilege; other errors < 0. */
+/* 1 identifies Windows' missing symbolic-link privilege, and 2 a created link
+** that Windows will not follow (ERROR_UNTRUSTED_MOUNT_POINT); other errors < 0. */
 int titan_spec_symlink(const char *target, const char *path, int directory);
 int titan_spec_remove_if_present(const char *path);
 

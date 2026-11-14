@@ -12,6 +12,9 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <windows.h>
+#ifndef ERROR_UNTRUSTED_MOUNT_POINT
+#define ERROR_UNTRUSTED_MOUNT_POINT 448
+#endif
 
 static wchar_t *wide_path(const char *path)
 {
@@ -70,9 +73,19 @@ int titan_spec_symlink(const char *target, const char *path, int directory)
     if (directory) flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
     int created = CreateSymbolicLinkW(wide_link, wide_target, flags);
     DWORD error = created ? ERROR_SUCCESS : GetLastError();
+    if (created) {
+        /* Redirection trust may refuse to follow links this account created,
+           dangling ones included, before it resolves the target. */
+        HANDLE handle = CreateFileW(wide_link, 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        else if (GetLastError() == ERROR_UNTRUSTED_MOUNT_POINT) error = ERROR_UNTRUSTED_MOUNT_POINT;
+    }
     free(wide_target);
     free(wide_link);
     if (error == ERROR_PRIVILEGE_NOT_HELD) return 1;
+    if (error == ERROR_UNTRUSTED_MOUNT_POINT) return 2;
     return created ? 0 : -(int)error;
 #else
     (void)directory;

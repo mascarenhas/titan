@@ -186,6 +186,17 @@ public `uv.queue_work` and `uv.thread_create`, runs with the thread's current
 state; call `_fpreset()` from `float.h` at its start if it needs the main
 thread's precision.
 
+## Symbolic links
+
+Creating a symbolic link needs Developer Mode or the symbolic-link privilege.
+Some Windows builds (26H2 build 26300, for example) also refuse to follow a
+link that a non-administrator account created: every `fs` call that follows
+it, such as `fs.stat`, `fs.realpath`, or opening a file through it, raises
+`async.OperationError` with libuv's name `UNKNOWN` and message
+`unknown error`, even for a dangling link. `fs.lstat` still describes the link
+itself. Titan's own tests detect this policy and skip their symbolic-link
+cases as a capability.
+
 ## Validate an installation
 
 Use a separate validation SDK and local NTFS workspace. In the MSYS2 shell,

@@ -44,6 +44,10 @@ local function make_symlink(context: test.Context,
   if common.is_windows() and status == 1 then
     test.skip("capability: symbolic links require Windows Developer Mode or symlink privilege")
   end
+  if common.is_windows() and status == 2 then
+    test.skip("capability: this Windows build does not traverse symbolic links " ..
+              "created by this account (ERROR_UNTRUSTED_MOUNT_POINT)")
+  end
   test.assert(status == 0, "could not create native symlink fixture")
 end
 
