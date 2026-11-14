@@ -103,5 +103,25 @@ describe("persistent core JavaScript bridge", function()
                 end
             end
         end)
+        it("copies portable values through real browser images with ASSERTIONS=" .. assertions, function()
+            local info, why = toolchain.require({ node = true, chrome = true, sdk = true })
+            if not info then pending(why) return end
+            fixture = files.new()
+            for _, name in ipairs({ "portable.mjs", "portable-peer.mjs" }) do
+                files.copy(repository .. "/spec/fixtures/browser_bridge/" .. name, fixture.source .. "/" .. name)
+            end
+            files.copy(info.sdk_root .. "/titan-protobuf.mjs", fixture.source .. "/titan-protobuf.mjs")
+            local native = build(info, assertions, repository .. "/spec/stdlib/titan",
+                "browser.portable_tests", "portable", true)
+            for _, engine in ipairs({ "node", "chromium" }) do
+                local result = execute(info, engine, "portable.mjs", { native })
+                io.stdout:write(string.format("\nPORTABLE assertions=%d engine=%s\n%s\n",
+                    assertions, engine, result.output))
+                io.stdout:flush()
+                assert.is_true(result.ok, result.output)
+                assert.truthy(result.output:find("PASS portable bridge", 1, true), result.output)
+                assert.truthy(result.output:find("[  PASSED  ] 17 tests", 1, true), result.output)
+            end
+        end)
     end
 end)

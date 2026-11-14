@@ -261,6 +261,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | `titan.a` | the [browser standard library](#the-browser-standard-library): thirteen shared modules, `async` with a browser driver, `timer` on JavaScript timers, browser-only `titan.browser`, and the PEG engine |
 | `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
+| `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
@@ -1490,7 +1491,7 @@ The browser uses the native library nesting policies:
 
 | Operation | Every target | Error |
 | --- | --- | --- |
-| `protobuf` encoding, decoding, and `protobuf.schema`; `transfer` packets and structural records/unions | 127 nested levels with the shared 128-level codec budget | `protobuf: nesting exceeds 128 levels` |
+| `protobuf` encoding, decoding, and `protobuf.schema`; `transfer` packets and structural records/unions | the shared 128-level codec budget: 127 nested records at a nominal root, or 126 in a field of an anonymous root (`serialize_fields`, `deserialize_fields`, `protobuf.portable` and the SDK peer) | `protobuf: nesting exceeds 128 levels`, with a [position suffix](standard-library-protobuf.md#errors) for located encoding or decoding failures |
 | `json.encode` | configured `max_depth` (default 32), with no additional browser cap | `json.Error` with code `limit_exceeded` and message `value exceeds max_depth` |
 
 These limits bound the library traversal, not stack already used by its caller.

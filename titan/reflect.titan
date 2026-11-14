@@ -230,6 +230,27 @@ record StaticFunctionType
   const callable: function (...: value): (...: value)
 end
 
+--- Find a public fixed-arity constructor returning exactly this record.
+-- @return The compatible public new descriptor, or nil.
+-- @usage standard-library-reflect.md#public-nominal-members
+function RecordType:public_constructor(): StaticFunctionType?
+  for index = 1, #self.statics do
+    local candidate = self.statics[index]
+    if candidate.name == "new" then
+      if candidate.vararg_descriptor ~= nil or candidate.flexret_descriptor ~= nil or
+          #candidate.return_descriptors ~= 1 then return nil end
+      case candidate.return_descriptors[1]
+      when is_named(named) then
+        if named.name == self.name then return candidate end
+      when is_record(record_type) then
+        if record_type.name == self.name then return candidate end
+      end
+      return nil
+    end
+  end
+  return nil
+end
+
 --- One named union payload part and its erased type descriptor.
 -- @field name Declared payload-part name, or its generated name when unnamed.
 -- @field type Erased declared type descriptor.

@@ -35,6 +35,13 @@ schema(descriptor: reflect.Type): string
 serialize_fields(fields: const {reflect.Type}, ...: value): string
 deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
 
+record PortableCodec  -- private state
+portable(fields: const {reflect.Type},
+         dynamic: const {reflect.Type}?, text: const {string}?): PortableCodec
+PortableCodec:encode(...: value): string
+PortableCodec:decode(bytes: string): (...: value)
+PortableCodec:describe(): string
+
 serialize_to_buffer(buf: foreign *void, candidate: value)
 serialize_fields_to_buffer(buf: foreign *void,
                            fields: const {reflect.Type}, ...: value)
@@ -70,8 +77,39 @@ bytes at `data`.
 
 The serialized result of `serialize` and `serialize_fields` is a binary string.
 Names, filenames, and schemas are ordinary strings too, but wire bytes need not
-be text and may contain NULs. Errors are strings identifying the rejected type,
-value, or wire condition.
+be text and may contain NULs. Codec errors are strings identifying the rejected
+type, value, or wire condition.
+
+### Errors
+
+A nested encoding or decoding error can end with ` at <path>`. The text before
+that suffix is unchanged. Paths use the same syntax as
+[`json.Error.path`](standard-library-json.md#diagnostics-and-limits): `$` is the
+root, `["name"]` names a record field or union payload part, and `[n]` is a
+one-based Array element or anonymous root field. A `value` slot adds no segment
+of its own. For example:
+
+```text
+protobuf: missing required field 2 at $["items"][3]["label"]
+protobuf: unsupported dynamic value at $[1]["payload"]
+```
+
+The suffix is a debugging aid: it is added only when a replay in trace mode
+reproduces the complete original message at a nested position. Root-level
+errors, schema errors, hook-validation errors and registration errors remain
+unchanged. The replay never calls a transfer hook, resource callback or public
+`new`, and never loads a module.
+
+The path names at most 16 nesting levels of values that generated codecs
+handle; a deeper position is reported as the path of its sixteenth level
+followed by `...`. Values traversed entirely by the reflective codec are
+reported in full.
+
+The `protobuf: ` prefix is reserved for codec diagnostics. A callback,
+including a transfer hook, resource callback or public `new`, that raises a
+message beginning with that prefix may receive a suffix naming a later
+position if the replay encounters the same message there. User errors without
+that prefix, including non-string error values, propagate unchanged.
 
 ### Transfer collaboration entries
 
@@ -181,7 +219,9 @@ describes the allocation profile.
 
 `use_generated_codecs(false)` makes later codec lookups in the current Lua
 state choose the reflective codec, and returns the previous setting. It is a
-diagnostic for comparing the two codecs and changes no observable result.
+diagnostic for comparing the two codecs. Bytes, decoded values and diagnostics
+before the optional position suffix are unchanged; deep generated positions
+can be abbreviated as described under [Errors](#errors).
 Codec handles obtained before the call still run generated code when passed to
 `serialize_generated_to_buffer`.
 
@@ -224,12 +264,153 @@ and public members. Pointer fields use
 the same borrowed-address semantics as nominal pointer fields. No extra public
 record type is needed to define an anonymous root.
 
+## Portable codecs
+
+`portable` creates a reusable codec for copied data shared by native and browser
+targets. Its ordered `fields` describe an anonymous root, just as for
+`serialize_fields`. Creation checks the complete public type graph before
+visiting any values, even for absent Options, empty Arrays, and inactive public
+union variants.
+
+| Declared type | Portable policy |
+| --- | --- |
+| Nil, boolean, integer, float, string, `value` | Accepted |
+| Option or mutable, const, maybe-const Array | Accepted when its element is portable |
+| Public record | Accepted when every public field type is portable |
+| Public union | Accepted when every public variant's parts are portable |
+| Record with transfer hooks, or a packet resource | Rejected |
+| Local nominal | Rejected |
+| Map, Interface, callable, or any foreign type | Rejected |
+
+The codec closes over every record and union reachable through `fields` and the
+optional `dynamic` Array. Each `dynamic` entry must resolve to a record or
+union. A `value` position may contain the supported scalars, Arrays, and only
+those nominals in this closed set; include additional nominal descriptors in
+`dynamic` when they occur only inside `value` positions. Unknown or unlisted
+names raise `protobuf: <name> is not in this portable codec`. Decoding never
+loads modules on demand, calls transfer hooks, or attaches or claims packet
+resources. Registering a packet-resource codec after creation still makes
+encoding and decoding reject that nominal; neither resource callback runs
+under a portable codec. A `transfer.TransferValue` is not a portable type
+because some of its declared variants contain foreign values.
+
+Creation errors identify the descriptor path and rejected kind or nominal.
+Paths use JSON's syntax: `$[1]` selects the first root field,
+`$[1]["items"][1]` its Array element schema, and
+`$["dynamic"][2]` the second additional nominal. Options add no path component;
+an Array element schema uses the representative index 1. Field and part names
+are quoted. For example, a hooked record reports
+`protobuf: $[1]: <name> has transfer hooks`, and a resource reports
+`protobuf: $[1]: <name> is a packet resource and is not portable`.
+
+`codec:encode(...)` requires exactly one argument per field, including nil
+positions. `codec:decode(bytes)` returns exactly that many results. The
+ordinary protobuf wire validation, graph-cycle rejection, nesting bound, Array
+holes, and constness rules apply. Repeated acyclic references are copied
+independently. The codec retains its input string during decoding and returns
+independent values, not views into the input bytes.
+
+For values accepted by both entries, portable encoding is byte-for-byte
+identical to `serialize_fields(fields, ...)`. Public views also use the
+ordinary field framing; plain protobuf entries retain their stricter
+visibility checks.
+
+### Public views and construction
+
+A public record with local fields crosses as its public fields, in declaration
+order; local storage is not serialized. Decoding uses a compatible public
+`new`, found by [`RecordType:public_constructor()`](standard-library-reflect.md#public-nominal-members).
+Every fixed constructor parameter must be named after a public field. Each
+field is decoded and validated against its declared field type, and the
+same-named values are passed in constructor parameter order, preserving nil
+positions. Public fields not taken by the constructor are validated and
+dropped. Constructor errors propagate.
+
+Without such a constructor, the record is encode-only: decoding raises
+`protobuf: <name> has no public constructor over its public fields` before
+constructing that record. All-public records instead retain ordinary protobuf
+construction: fields are initialized directly, without invoking `new`.
+
+A public union may have private variants. A public active arm crosses normally;
+encoding a private active arm raises `protobuf: private union variant`.
+Decoding an ordinal with no recognized public variant raises.
+
+### Schema descriptions and text positions
+
+`codec:describe()` returns cached JSON text for an external peer. The format is
+target-neutral and deterministic: root fields retain their order, and nominal
+entries are sorted by qualified name. It contains no version field.
+
+```json
+{"fields":[["nominal","app.Point"],"value"],"nominals":{"app.Point":{"module":"app","record":[["x","integer"],["label","bytes"]]}}}
+```
+
+The top-level object has `fields`, an Array of type descriptions, and
+`nominals`, an object keyed by qualified nominal name. Each nominal entry has
+`module`, the declaring module name also carried by a dynamic nominal's wire
+arm, and exactly one of:
+
+| Entry | Ordered contents |
+| --- | --- |
+| `"record"` | `[fieldName, T]` pairs for public fields in declaration order |
+| `"union"` | `[variantName, parts]` pairs for public variants in public-ordinal order |
+
+A variant's `parts` is an Array of `[partName, T]` pairs. A part name is always
+a string: the declared name, or `"value"` for a single-type shorthand such as
+`count(integer)`. An empty variant has an empty parts Array. Local fields and
+private variants never appear. The nominal table includes every reachable and
+additional `dynamic` nominal, including recursive types.
+
+| Type description `T` | Meaning |
+| --- | --- |
+| `"nil"`, `"boolean"`, `"integer"`, `"float"` | Corresponding scalar |
+| `"bytes"` | Titan string, interpreted as bytes by the peer |
+| `"text"` | Titan string marked as UTF-8 text for the peer |
+| `"value"` | Self-describing dynamic value |
+| `["option", T]` | Optional `T` |
+| `["array", constness, T]` | Array of `T`; constness is `"mutable"`, `"const"`, or `"maybe"` |
+| `["nominal", qualifiedName]` | Reference to an entry in `nominals` |
+
+The optional `text` argument to `portable` lists string positions whose
+description should use `"text"` instead of `"bytes"`:
+
+| Path | Position |
+| --- | --- |
+| `"<n>"` | Root field `n`, written as its 1-based decimal index |
+| `"<Nominal>.<field>"` | Public record field, using the qualified nominal name |
+| `"<Nominal>.<variant>.<part>"` | Named part of a public union variant |
+
+A position may be a string inside any number of Options and Arrays; the
+wrappers remain in the description and the string leaf becomes `"text"`.
+For example, an explicit descriptor
+`reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+reflect.Type.is_option(reflect.Type.is_string()))`
+becomes `["array","mutable",["option","text"]]` when marked. Source `{T?}`
+is canonicalized to `{T}`, so its reflected Array element has no Option
+wrapper. Marking a field affects that field wherever its nominal occurs in
+the codec. Repeated paths are harmless.
+
+Creation raises an error naming the text path if it does not resolve, names
+an unlisted nominal, or designates anything other than a string through
+Options and Arrays. A `value` position cannot be marked as text. Text marks
+change only the description: Titan encoding and decoding remain byte-for-byte
+unchanged and do not validate UTF-8.
+
+For JavaScript classes, text and byte representations, shared class tables,
+and peer error codes and paths, see
+[Copying typed values](standard-library-browser.md#copying-typed-values).
+The standalone SDK peer accepts canonical Titan output; it is stricter than
+the native decoder about groups, wrong wire kinds in repeated scalars, and
+invalid UTF-8 in dynamic nominal names.
+
 ## Eligible values
 
-Every encountered Titan nominal type must be public and have only public
-fields or variants. A local record or union is rejected even if all its
-members are public. Const fields are supported: reconstruction initializes a
-new value rather than assigning an existing field.
+For ordinary protobuf entries, every encountered Titan nominal type must be
+public and have only public fields or variants. A local record or union is
+rejected even if all its members are public. Const fields are supported:
+reconstruction initializes a new value rather than assigning an existing
+field. [Portable codecs](#portable-codecs) instead accept the public views
+described above.
 
 Eligible field and payload types are:
 
@@ -327,12 +508,18 @@ lengths, groups, wire kinds, out-of-range native integers, missing required
 fields, and unrecognized union selections raise. Messages must fit the
 protobuf 2 GiB size bound.
 
+Nested encoding and decoding failures use the [error paths](#errors) above
+when a replay in trace mode reproduces the failure.
+
 Nesting is limited on every encoding, decoding, and schema path, generated or
-reflective. Levels count nested messages and the fields of the innermost one:
-a chain of records whose innermost record has a field holds at most 127 records
-on native and browser targets. Deeper input raises the ordinary catchable
-error `protobuf: nesting exceeds 128 levels`. This bounds the codec's own
-traversal, not stack already used by its caller.
+reflective. Levels count nested messages and the fields of the innermost one.
+A nominal-root chain whose innermost record has a field holds at most 127
+records; putting that chain in an anonymous root field adds a level, allowing
+126 records and rejecting 127. These bounds apply on native and browser
+targets, on the main stack or inside a Task or coroutine. Deeper input raises
+the ordinary catchable error `protobuf: nesting exceeds 128 levels`, with an
+error-path suffix for located encoding or decoding failures. This bounds the
+codec's own traversal, not stack already used by its caller.
 
 String entry points keep their input alive throughout decoding, including
 while a custom decoder runs after the caller has dropped its last reference to

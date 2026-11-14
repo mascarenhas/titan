@@ -1634,3 +1634,42 @@ function test_qualified_native_projection_preserves_adjacent_bitfields_and_sibli
     inspected.type:construct({inspected:project(1), {23, 5, 8, 19, 29, projected[6], projected[7]}})
   end)
 end
+
+local public_constructor_calls = 0
+
+record PublicConstructorRecord
+  number: integer
+  local secret: boolean
+end
+
+function PublicConstructorRecord.new(source: integer): PublicConstructorRecord
+  public_constructor_calls = public_constructor_calls + 1
+  return {number = source, secret = true}
+end
+
+record WrongConstructorResult
+end
+
+function WrongConstructorResult.new(): integer
+  return 1
+end
+
+function test_public_constructor_finds_compatible_public_new_without_invoking_it(_: test.Context)
+  local descriptor = required_record("reflect.tests.PublicConstructorRecord")
+  public_constructor_calls = 0
+  local constructor? = descriptor:public_constructor()
+  test.assert(constructor ~= nil and constructor.name == "new")
+  test.assert(constructor.param_names[1] == "source" and public_constructor_calls == 0)
+  local restored: PublicConstructorRecord = constructor.callable(17)
+  test.assert(restored.number == 17 and restored.secret and public_constructor_calls == 1)
+  local default? = required_record("reflect.tests.CallableRecord"):public_constructor()
+  test.assert(default ~= nil)
+  local ordinary: CallableRecord = default.callable(23)
+  test.assert(ordinary.total == 23)
+end
+
+function test_public_constructor_rejects_private_new_and_another_result_type(_: test.Context)
+  local descriptor = record_value(LocalProjectedRecord(1)).type
+  test.assert(descriptor:public_constructor() == nil)
+  test.assert(required_record("reflect.tests.WrongConstructorResult"):public_constructor() == nil)
+end

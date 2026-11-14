@@ -379,6 +379,8 @@ record RecordType
   const methods: const {MethodType}
 end
 
+function RecordType:public_constructor(): StaticFunctionType?
+
 record UnionType
   const name: string
   const is_public: boolean
@@ -436,6 +438,15 @@ name and type in declaration order; an empty Array means an empty variant.
 Pass arguments in that order. An unnamed source payload has the name `value`. Calls
 retain the ordinary checks and argument/result adjustment of the underlying
 functions.
+
+`public_constructor()` finds the public static `new` without invoking it. It
+returns its descriptor only when the constructor has fixed inputs, no flexible
+results, and exactly one result of this record's nominal type. Otherwise it
+returns nil. Parameter names and types are retained as declared; the helper
+does not require them to match fields. JSON uses that signature to decode
+named members. Portable protobuf adds its public-field-name requirement for
+records with local fields. This callable construction is separate from
+`RecordType:construct`, which initializes default storage without calling `new`.
 
 ### Erased generics
 

@@ -57,7 +57,8 @@ The implementation is spread over:
   `titan-browser-trace.h`, the Emscripten JavaScript libraries
   `titan-browser-library.js`, `titan-browser-bridge.js`, and
   `titan-browser-trace.js`, the loader source `titan-browser.mjs` that
-  `browserlink.embed` places in every image, and the runner
+  `browserlink.embed` places in every image, the standalone portable peer
+  `titan-protobuf.mjs`, and the runner
   `titan-browser-run` with `titan-browser-run.mjs`,
   `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`; and
 * the Make targets `lua-browser` (`scripts/lua_browser.sh`), `browser-sdk`
@@ -266,6 +267,12 @@ prefix`.
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
 | `provider` | `titan.a` | the browser standard provider: thirteen shared core roots, `titan.async` and `titan.timer` with browser variants, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
+
+The SDK also installs `titan-protobuf.mjs` in `titan_bin`. This standalone ES
+module encodes and decodes copied JavaScript values using a portable protobuf
+description. Pages deploy and import it separately; the compiler neither
+links it nor embeds it in an image, so it is not a `browserlink.sdk_assets`
+entry.
 
 None of the five runtime sources is compiled with `-fPIC`, LTO, or
 libbacktrace; their host-only paths compile out under the browser target
@@ -614,7 +621,7 @@ delivered.
 | `test` | yes | none | `test.tests`, and every other owner through the runner | loads the Lua trace and pattern helpers when the Lua `string` library is open | none |
 | `reflect` | yes | none | `reflect.tests` | metatable, hydration, brand, and tag tables | none |
 | `json` | yes | none | `json.tests` | builds the JSON pattern | none |
-| `protobuf` | yes | none | `protobuf.tests`, including both raw index writers and the reservation failure | caches the nominal registry, sets up the ephemeron, validates the codec handoff | `write_resource_index`, `write_resource_index_bytes` |
+| `protobuf` | yes | none | `protobuf.tests`, including both raw index writers and the reservation failure; `protobuf.portable_tests` for copied-data policy | caches the nominal registry, sets up the ephemeron, validates the codec handoff | `write_resource_index`, `write_resource_index_bytes` |
 | `transfer` | yes | none | `transfer.tests` (same-instance behavior), including all three raw exports | installs protobuf's packet-context provider and nominal loader, the ephemerons, and `closure_fields` | `copy_message`, `discard_message`, `transfer_load_module` |
 | `peg` | yes | none | `peg.tests` | `_initialize_native()` | none |
 | `string` | yes | none | `string.core_test`, `string.format_pack_test`, `string.regex_test` | target size, length-modifier, endianness, and alignment facts; the format and regex parsers | none |
@@ -683,10 +690,10 @@ roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
 ```text
 coroutine.tests iteration.tests gc.tests math.tests peg.tests
 string.core_test string.format_pack_test string.regex_test url.tests path.tests
-test.tests reflect.tests json.tests protobuf.tests transfer.tests async.tests timer.tests
+test.tests reflect.tests json.tests protobuf.tests protobuf.portable_tests transfer.tests async.tests timer.tests
 ```
 
-All seventeen owners are compiled into `images/stdlib.mjs`, with its `.wasm`
+All eighteen owners are compiled into `images/stdlib.mjs`, with its `.wasm`
 and `.wasm.map` siblings. `TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK` rejects an
 empty or duplicate root inventory before build setup. The compiler's
 [general image bounds](#build-time-image-bounds) apply; the suite has no
@@ -783,11 +790,14 @@ instead of this gate.
 
 ### Nesting limits
 
-Browser and native builds share the 128-level codec budget in `transfer.h`:
-the innermost field consumes one level, so a structural record chain accepts
-127 records. Generated and reflective protobuf paths, `protobuf.schema`,
-`TransferValue`, and packet encode/decode share that policy and ordinary
-error string. The browser descriptor no longer overrides it.
+Browser and native builds share the 128-level codec budget in `transfer.h`.
+The innermost field consumes one level: a nominal-root structural record
+chain accepts 127 records, while protobuf's anonymous field root adds a level
+and accepts 126, rejecting 127. Generated and reflective protobuf paths,
+`protobuf.schema`, `TransferValue`, and packet encode/decode share the budget
+and ordinary error string. The browser descriptor does not override it.
+Reflective coroutine-stack boundary tests exercise the shared budget on
+both targets.
 
 JSON encoding uses only the call's validated `max_depth` (default 32);
 there is no additional target cap or cached writer clamp. The owning native
@@ -3634,7 +3644,7 @@ hosts`).
   check](#the-dependency-closure-check) and its negative fixtures, the
   interface-derived [member inventory](#interface-derived-member-inventory)
   (raw foreign functions, nominal members, named-call metadata, unrecorded
-  differences, exact recorded omissions and opaque records), the seventeen-owner
+  differences, exact recorded omissions and opaque records), the eighteen-owner
   root inventory and its rejection of empty or
   duplicate inventories before build setup, the cold and warm single-image
   layout and filtered runs, the CI failure artifact's image and per-engine log

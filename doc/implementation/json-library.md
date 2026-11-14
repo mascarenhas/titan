@@ -181,9 +181,9 @@ eagerly expanded cyclic descriptor shells. Reflection's generic erasure remains
 visible: erased value leaves decode dynamically, with no specialization registry
 or implied proof from the result's outer nominal identity.
 
-Record decoding (`decoder.titan` `Decoder:decode_record`) locates the reflected
-static `new` and verifies that it takes fixed
-parameters and returns exactly one value of the target record's nominal type.
+Record decoding (`decoder.titan` `Decoder:decode_record`) obtains the reflected
+public `new` through `RecordType:public_constructor()`. Reflection checks fixed
+parameters and exactly one result of the target record's nominal type.
 Absent constructors, input varargs, flexible results, optional results, and
 other result shapes raise `constructor_unavailable` before invocation. This
 accepts compatible custom overrides without bypassing their bodies or assuming

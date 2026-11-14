@@ -1,0 +1,1010 @@
+local test = import "test"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+local string = import "string"
+local transfer = import "transfer"
+local coroutine = import "coroutine"
+foreign import "protobuf_fixture.h"
+
+local function descriptor(candidate: value): reflect.Type
+  case reflect.inspect(candidate)
+  when is_record(actual) then return reflect.Type.is_record(actual.type)
+  when is_union(actual) then return reflect.Type.is_union(actual.type)
+  else raise "expected a nominal fixture"
+  end
+end
+
+local function expect_error(action: function (): (), expected: string)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+    local message: string = error
+    test.assert(string.find(message, expected, 1, true) ~= nil, message)
+  end
+  test.assert(caught, "expected rejection: " .. expected)
+end
+
+local function count(...: value): integer
+  return #...
+end
+
+record Point
+  x: integer
+  label: string
+end
+
+record Node
+  next: Node?
+  number: integer
+end
+
+record Pair
+  left: Node
+  right: Node
+end
+
+union Choice
+  empty()
+  scalar(integer)
+  pair(point: Point, note: string?)
+end
+
+record Dynamic
+  item: value
+end
+
+record Hidden
+  local number: integer
+end
+
+local record LocalRecord
+  number: integer
+end
+
+interface View
+  number: integer
+end
+
+record Embedded
+  data: foreign titan_protobuf_pair
+end
+
+local hook_encodes = 0
+local hook_decodes = 0
+
+record Hooked
+  local number: integer
+end
+
+function Hooked:to_transfer_payload(): string
+  hook_encodes = hook_encodes + 1
+  return "transfer"
+end
+
+function Hooked.from_transfer_payload(_: string): Hooked
+  hook_decodes = hook_decodes + 1
+  return Hooked(1)
+end
+
+record HookParent
+  item: Hooked
+end
+
+record Resource
+  number: integer
+end
+
+record LateResource
+  number: integer
+end
+
+record LateResourceParent
+  item: LateResource
+end
+
+local function with_generated(context: test.Context,
+    action: function (boolean): ())
+  context:run("generated", function(_: test.Context)
+    local previous = protobuf.use_generated_codecs(true)
+    defer protobuf.use_generated_codecs(previous)
+    action(true)
+  end)
+  context:run("reflective", function(_: test.Context)
+    local previous = protobuf.use_generated_codecs(false)
+    defer protobuf.use_generated_codecs(previous)
+    action(false)
+  end)
+end
+
+function test_scalar_roots_and_nil_positions(_: test.Context)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_nil(), reflect.Type.is_boolean(), reflect.Type.is_integer(),
+    reflect.Type.is_float(), reflect.Type.is_string(),
+    reflect.Type.is_option(reflect.Type.is_boolean()), reflect.Type.is_nil(),
+  }
+  local codec = protobuf.portable(fields)
+  local minimum = -9223372036854775807 - 1
+  local bytes = codec:encode(nil, false, minimum, 1.5, "a\0b", false, nil)
+  test.assert(bytes == protobuf.serialize_fields(
+      fields, nil, false, minimum, 1.5, "a\0b", false, nil))
+  test.assert(count(codec:decode(bytes)) == 7)
+  local a: value, b: value, c: value, d: value, e: value, f: value, g: value =
+    codec:decode(bytes)
+  test.assert(a == nil and b == false and c == minimum)
+  test.assert(d == 1.5 and e == "a\0b" and f == false and g == nil)
+  local empty = protobuf.portable({})
+  test.assert(empty:encode() == "" and count(empty:decode("")) == 0)
+  expect_error(function() codec:encode(nil) end, "anonymous field count mismatch")
+end
+
+function test_nominal_records_unions_and_recursive_descriptors(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local point = Point(-2, "p")
+    local fields: const {reflect.Type} = {descriptor(point), descriptor(Choice.empty())}
+    local codec = protobuf.portable(fields)
+    local choices: {Choice} = {Choice.empty(), Choice.scalar(7), Choice.pair(point, nil)}
+    for index = 1, #choices do
+      local choice = choices[index]
+      local bytes = codec:encode(point, choice)
+      test.assert(bytes == protobuf.serialize_fields(fields, point, choice))
+      local restored: Point, selected: Choice = codec:decode(bytes)
+      test.assert(restored.x == -2 and restored.label == "p")
+      case selected
+      when empty() then test.assert(index == 1)
+      when scalar(number) then test.assert(index == 2 and number == 7)
+      when pair{point, note} then test.assert(index == 3 and point.x == -2 and note == nil)
+      end
+    end
+    local node = Node(Node(nil, 2), 1)
+    local recursive = protobuf.portable({descriptor(node)})
+    local restored: Node = recursive:decode(recursive:encode(node))
+    test.assert(restored.number == 1 and restored.next.number == 2 and restored.next.next == nil)
+  end)
+end
+
+function test_arrays_keep_holes_and_declared_or_observed_constness(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local integers = reflect.Type.is_integer()
+    local fields: const {reflect.Type} = {
+      reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), integers),
+      reflect.Type.is_array(reflect.ArrayTypeConstness.is_const(), integers),
+      reflect.Type.is_array(reflect.ArrayTypeConstness.is_maybe_const(), integers),
+      reflect.Type.is_value(),
+    }
+    local codec = protobuf.portable(fields)
+    local entries: {integer} = {}
+    entries[1], entries[3] = 1, 3
+    local frozen = entries as const {integer}
+    local bytes = codec:encode(entries, frozen, frozen, frozen)
+    test.assert(bytes == protobuf.serialize_fields(fields, entries, frozen, frozen, frozen))
+    local a: {integer}, b: const {integer}, c: const? {integer}, d: value = codec:decode(bytes)
+    test.assert(#a == 3 and a[2] == nil and a[3] == 3 and b[2] == nil)
+    test.assert(c is const {integer} and d is const {value})
+    local _, _, mutable: const? {integer}, dynamic: value =
+      codec:decode(codec:encode(entries, frozen, entries, entries))
+    test.assert(mutable is {integer} and dynamic is {value})
+    -- Declared qualifiers, rather than the supplied wrapper, select a/b.
+    local declared_mutable: {integer}, declared_const: const {integer} =
+      codec:decode(codec:encode(frozen, entries, entries, entries))
+    test.assert(declared_mutable is {integer} and declared_const is const {integer})
+  end)
+end
+
+function test_value_arms_and_closed_dynamic_nominals(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local point = Point(9, "nine")
+    local fields: const {reflect.Type} = {descriptor(Dynamic(nil))}
+    local codec = protobuf.portable(fields, {descriptor(point), descriptor(Choice.empty())})
+    local heterogeneous: {value} = {1, nil, "x"}
+    local arms: {value} = {false, 3, 2.5, "a\0b", point, Choice.empty(), heterogeneous}
+    for index = 1, #arms do
+      local parent = Dynamic(arms[index])
+      local bytes = codec:encode(parent)
+      test.assert(bytes == protobuf.serialize_fields(fields, parent))
+      local restored: Dynamic = codec:decode(bytes)
+      test.assert(protobuf.serialize(restored) == protobuf.serialize(parent))
+    end
+    local absent: Dynamic = codec:decode(codec:encode(Dynamic(nil)))
+    test.assert(absent.item == nil)
+    local closed = protobuf.portable(fields)
+    expect_error(function() closed:encode(Dynamic(point)) end,
+        "protobuf.portable_tests.Point is not in this portable codec")
+    expect_error(function() closed:decode(codec:encode(Dynamic(point))) end,
+        "protobuf.portable_tests.Point is not in this portable codec")
+    -- Nominals reachable through declared fields are also allowed in value slots.
+    local reachable = protobuf.portable({descriptor(point), reflect.Type.is_value()})
+    local first: Point, second: Point = reachable:decode(reachable:encode(point, point))
+    test.assert(first.x == 9 and second.label == "nine" and first ~= second)
+  end)
+end
+
+function test_missing_dynamic_module_is_never_loaded(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local nominal_fields: const {reflect.Type} = {
+      reflect.Type.is_string(), reflect.Type.is_string(), reflect.Type.is_string(),
+    }
+    local name = "portable_uninitialized.Token"
+    test.assert(reflect.find_nominal(name) == nil)
+    local nominal = protobuf.serialize_fields(nominal_fields, "portable_uninitialized", name, "")
+    local wrapped = string.char(42, #nominal) .. nominal
+    local bytes = string.char(10, #wrapped) .. wrapped
+    local codec = protobuf.portable({reflect.Type.is_value()})
+    expect_error(function() codec:decode(bytes) end, name .. " is not in this portable codec")
+    test.assert(reflect.find_nominal(name) == nil)
+  end)
+end
+
+function test_creation_rejects_ineligible_types_before_values(context: test.Context)
+  local invalid: {reflect.Type} = {
+    reflect.Type.is_map(reflect.Type.is_string(), reflect.Type.is_integer()),
+    reflect.Type.is_function(reflect.FunctionType({}, nil, {}, nil)),
+    reflect.Type.is_foreign_integer("int", true, 3, 32),
+    reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {}),
+  }
+  local names: {string} = {"Map", "function", "foreign type", "foreign type"}
+  for index = 1, #invalid do
+    local rejected = invalid[index]
+    local name = names[index]
+    context:run("kind_" .. index, function(_: test.Context)
+      expect_error(function() protobuf.portable({reflect.Type.is_option(rejected)}) end,
+          "$[1]: " .. name .. " is not portable")
+      expect_error(function()
+        protobuf.portable({reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), rejected)})
+      end, "$[1][1]: " .. name .. " is not portable")
+    end)
+  end
+  expect_error(function() protobuf.portable({reflect.Type.is_named(reflect.NamedType("missing.Type"))}) end,
+      "$[1]: unknown nominal type missing.Type")
+  expect_error(function() protobuf.portable({}, {reflect.Type.is_integer()}) end,
+      "$[\"dynamic\"][1]: expected a record or union")
+  expect_error(function() protobuf.portable({reflect.Type.is_named(reflect.NamedType(
+      "protobuf.portable_tests.View"))}) end,
+      "$[1]: Interface protobuf.portable_tests.View is not portable")
+  expect_error(function() protobuf.portable({descriptor(LocalRecord(1))}) end,
+      "$[1]: protobuf.portable_tests.LocalRecord is not public data")
+  local embedded = foreign titan_protobuf_pair.new()
+  local embedded_type = descriptor(Embedded(embedded))
+  expect_error(function() protobuf.portable({embedded_type}) end,
+      "$[1][\"data\"]: foreign type is not portable")
+  expect_error(function() protobuf.portable({descriptor(transfer.TransferValue.is_nil())}) end,
+      "foreign type is not portable")
+end
+
+function test_hooks_never_run_in_any_portable_position(context: test.Context)
+  with_generated(context, function(_: boolean)
+    hook_encodes, hook_decodes = 0, 0
+    local hooked = Hooked(5)
+    local hooked_type = descriptor(hooked)
+    expect_error(function() protobuf.portable({hooked_type}) end,
+        "$[1]: protobuf.portable_tests.Hooked has transfer hooks")
+    expect_error(function() protobuf.portable({descriptor(HookParent(hooked))}) end,
+        "$[1][\"item\"]: protobuf.portable_tests.Hooked has transfer hooks")
+    expect_error(function() protobuf.portable({reflect.Type.is_array(
+        reflect.ArrayTypeConstness.is_mutable(), hooked_type)}) end,
+        "$[1][1]: protobuf.portable_tests.Hooked has transfer hooks")
+    expect_error(function() protobuf.portable({}, {hooked_type}) end,
+        "$[\"dynamic\"][1]: protobuf.portable_tests.Hooked has transfer hooks")
+    local fields: const {reflect.Type} = {descriptor(Dynamic(nil))}
+    local codec = protobuf.portable(fields)
+    expect_error(function() codec:encode(Dynamic(hooked)) end,
+        "Hooked is not in this portable codec")
+    test.assert(hook_encodes == 0 and hook_decodes == 0)
+    -- Ordinary protobuf deliberately runs the transfer encoder to make input bytes.
+    local bytes = protobuf.serialize_fields(fields, Dynamic(hooked))
+    hook_encodes, hook_decodes = 0, 0
+    expect_error(function() codec:decode(bytes) end, "Hooked is not in this portable codec")
+    test.assert(hook_encodes == 0 and hook_decodes == 0)
+  end)
+end
+
+function test_packet_resources_are_rejected_without_callbacks(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local resource = Resource(1)
+    local encodes, decodes = 0, 0
+    case descriptor(resource)
+    when is_record(record_type) then
+      protobuf.register_resource_codec(resource, record_type,
+        function(_context: value, _candidate: value): integer
+          encodes = encodes + 1
+          return 0
+        end,
+        function(_context: value, _data: foreign const *void, _length: integer): value
+          decodes = decodes + 1
+          return resource
+        end)
+    end
+    expect_error(function() protobuf.portable({descriptor(resource)}) end,
+        "$[1]: protobuf.portable_tests.Resource is a packet resource and is not portable")
+    test.assert(encodes == 0 and decodes == 0, "creation called a resource callback")
+  end)
+end
+
+function test_resources_registered_after_creation_never_run_callbacks(context: test.Context)
+  local resource = LateResource(7)
+  local parent = LateResourceParent(resource)
+  local resource_type = descriptor(resource)
+  local fields: const {reflect.Type} = {resource_type}
+  local direct = protobuf.portable(fields)
+  local nested = protobuf.portable({descriptor(parent)})
+  local direct_bytes = direct:encode(resource)
+  local nested_bytes = nested:encode(parent)
+  local encodes, decodes = 0, 0
+  case resource_type
+  when is_record(record_type) then
+    protobuf.register_resource_codec(resource, record_type,
+      function(_context: value, _candidate: value): integer
+        encodes = encodes + 1
+        return 0
+      end,
+      function(_context: value, _data: foreign const *void, _length: integer): value
+        decodes = decodes + 1
+        return resource
+      end)
+  end
+  local rejected = "protobuf.portable_tests.LateResource" ..
+      " is a packet resource and is not portable"
+  with_generated(context, function(generated: boolean)
+    encodes, decodes = 0, 0
+    if generated then test.assert(protobuf.find_generated_codec(parent) ~= nil) end
+    expect_error(function() direct:encode(resource) end, rejected)
+    expect_error(function() direct:decode(direct_bytes) end, rejected)
+    expect_error(function() nested:encode(parent) end, rejected)
+    expect_error(function() nested:decode(nested_bytes) end, rejected)
+    -- A wrong wire kind is reported before the resource is refused.
+    expect_error(function() direct:decode(string.char(8, 1)) end, "unexpected wire type")
+    expect_error(function() nested:decode(string.char(10, 2, 8, 1)) end,
+        "unexpected wire type")
+    test.assert(encodes == 0 and decodes == 0, "portable resource callback ran")
+
+    local ordinary = protobuf.serialize_fields(fields, resource)
+    local restored: LateResource = protobuf.deserialize_fields(ordinary, fields)
+    test.assert(restored.number == 7 and encodes == 1 and decodes == 1,
+        "ordinary resource dispatch changed")
+  end)
+end
+
+local public_view_constructions = 0
+
+record PublicView
+  local secret: integer
+  number: integer
+  note: string?
+  last: string?
+  dropped: integer
+end
+
+function PublicView.new(note: string?, number: integer, last: string?): PublicView
+  public_view_constructions = public_view_constructions + 1
+  if number < 0 then raise "public constructor failed" end
+  return {secret = 99, number = number, note = note, last = last, dropped = 17}
+end
+
+record ViewParent
+  field: PublicView
+  entries: {PublicView}
+  dynamic: value
+end
+
+record RenamedView
+  number: integer
+  local secret: integer
+end
+
+function RenamedView.new(source: integer): RenamedView
+  return {number = source, secret = 0}
+end
+
+local all_public_constructions = 0
+
+record AllPublic
+  number: integer
+end
+
+function AllPublic.new(number: integer): AllPublic
+  all_public_constructions = all_public_constructions + 1
+  return {number = number}
+end
+
+union PublicUnion
+  shown(integer)
+  local hidden(string)
+  empty()
+end
+
+record UnionParent
+  field: PublicUnion
+end
+
+function test_public_views_reach_fields_arrays_and_dynamic_handoffs(context: test.Context)
+  with_generated(context, function(generated: boolean)
+    local original = PublicView(nil, 12, nil)
+    original.secret, original.dropped = -50, 91
+    local entries: {PublicView} = {}
+    entries[1], entries[3] = original, original
+    local parent = ViewParent(original, entries, original)
+    test.assert((protobuf.find_generated_codec(parent) ~= nil) == generated)
+    local codec = protobuf.portable({descriptor(parent)})
+    local bytes = codec:encode(parent)
+    public_view_constructions = 0
+    local restored: ViewParent = codec:decode(bytes)
+    local dynamic: PublicView = restored.dynamic
+    test.assert(restored.field.number == 12 and #restored.entries == 3)
+    test.assert(restored.field.note == nil and restored.field.last == nil)
+    test.assert(restored.entries[2] == nil and restored.entries[3].number == 12)
+    test.assert(dynamic.number == 12 and public_view_constructions == 4)
+    test.assert(restored.field.secret == 99 and restored.field.dropped == 17)
+    test.assert(restored.field ~= restored.entries[1] and restored.field ~= dynamic)
+    expect_error(function() protobuf.serialize_fields({descriptor(original)}, original) end,
+        "record must be public with only public fields")
+  end)
+end
+
+function test_public_view_decode_validates_unused_fields_before_construction(_: test.Context)
+  local codec = protobuf.portable({descriptor(PublicView(nil, 1, nil))})
+  -- The fourth public field is discarded by new but must still be an integer.
+  local malformed = string.char(10, 5, 8, 2, 34, 1, 0)
+  public_view_constructions = 0
+  expect_error(function() codec:decode(malformed) end, "unexpected wire type")
+  test.assert(public_view_constructions == 0)
+end
+
+function test_records_without_a_public_field_constructor_are_encode_only(_: test.Context)
+  local hidden = Hidden(1)
+  local codec = protobuf.portable({descriptor(hidden)})
+  test.assert(codec:encode(hidden) == string.char(10, 0))
+  expect_error(function() codec:decode(string.char(10, 0)) end,
+      "Hidden has no public constructor over its public fields")
+  local renamed = RenamedView(3)
+  local renamed_codec = protobuf.portable({descriptor(renamed)})
+  local bytes = renamed_codec:encode(renamed)
+  test.assert(bytes == string.char(10, 2, 8, 6))
+  expect_error(function() renamed_codec:decode(bytes) end,
+      "RenamedView has no public constructor over its public fields")
+end
+
+function test_all_public_records_still_bypass_new(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local original = AllPublic(7)
+    local fields: const {reflect.Type} = {descriptor(original)}
+    local codec = protobuf.portable(fields)
+    local bytes = codec:encode(original)
+    test.assert(bytes == protobuf.serialize_fields(fields, original))
+    all_public_constructions = 0
+    local restored: AllPublic = codec:decode(bytes)
+    test.assert(restored.number == 7 and all_public_constructions == 0)
+  end)
+end
+
+function test_unions_with_private_variants_expose_only_the_public_arms(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local original = PublicUnion.shown(3)
+    local codec = protobuf.portable({descriptor(original)})
+    local restored: PublicUnion = codec:decode(codec:encode(original))
+    case restored
+    when shown(number) then test.assert(number == 3)
+    else raise "wrong public variant"
+    end
+    test.assert(codec:encode(PublicUnion.empty()) == string.char(10, 2, 18, 0))
+    expect_error(function() codec:encode(PublicUnion.hidden("private")) end,
+        "private union variant")
+    expect_error(function() codec:decode(string.char(10, 2, 26, 0)) end,
+        "union has no recognized variant")
+    local parent = UnionParent(original)
+    local parents = protobuf.portable({descriptor(parent)})
+    local restored_parent: UnionParent = parents:decode(parents:encode(parent))
+    case restored_parent.field
+    when shown(number) then test.assert(number == 3)
+    else raise "wrong nested public variant"
+    end
+    expect_error(function() protobuf.serialize_fields({descriptor(original)}, original) end,
+        "union must be public with only public variants")
+  end)
+end
+
+function test_error_unwind_reuses_the_same_codec(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local original = PublicView(nil, 8, nil)
+    local codec = protobuf.portable({descriptor(original), reflect.Type.is_integer()})
+    local expected = string.char(10, 4, 8, 16, 32, 34, 16, 6)
+    for _ = 1, 1024 do
+      expect_error(function() codec:encode(original, "not an integer") end, "expected integer")
+      expect_error(function() codec:decode(string.char(10, 4, 8, 16, 32, 34, 18, 1, 0)) end,
+          "unexpected wire type")
+      test.assert(codec:encode(original, 3) == expected)
+      local restored: PublicView, number: integer = codec:decode(expected)
+      test.assert(restored.number == 8 and number == 3)
+    end
+    expect_error(function() codec:decode(string.char(10, 4, 8, 1, 32, 34, 16, 6)) end,
+        "public constructor failed")
+  end)
+end
+
+function test_cycles_fail_and_shared_acyclic_values_are_copied(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local node = Node(nil, 1)
+    local codec = protobuf.portable({descriptor(node)})
+    node.next = node
+    expect_error(function() codec:encode(node) end, "cyclic object graph")
+    node.next = nil
+    local pair = Pair(node, node)
+    local pairs = protobuf.portable({descriptor(pair)})
+    local restored: Pair = pairs:decode(pairs:encode(pair))
+    test.assert(restored.left ~= restored.right and restored.left.number == restored.right.number)
+    local array: {value} = {}
+    array[1] = array
+    local dynamic = protobuf.portable({reflect.Type.is_value()})
+    expect_error(function() dynamic:encode(array) end, "cyclic object graph")
+  end)
+end
+
+function test_golden_wire_literals(_: test.Context)
+  -- Shared fixtures: anonymous scalars, a nominal field, an empty union arm,
+  -- and a TitanValue integer. Host peers can use these without Titan names.
+  local scalars = protobuf.portable({reflect.Type.is_integer(), reflect.Type.is_string(),
+      reflect.Type.is_boolean(), reflect.Type.is_option(reflect.Type.is_integer())})
+  local scalar_bytes = string.char(8, 13, 18, 3, 65, 0, 66, 24, 0)
+  test.assert(scalars:encode(-7, "A\0B", false, nil) == scalar_bytes)
+  local number: integer, bytes: string, flag: boolean, absent: integer? = scalars:decode(scalar_bytes)
+  test.assert(number == -7 and bytes == "A\0B" and not flag and absent == nil)
+  local point = Point(3, "x")
+  local nominal = protobuf.portable({descriptor(point)})
+  local nominal_bytes = string.char(10, 5, 8, 6, 18, 1, 120)
+  test.assert(nominal:encode(point) == nominal_bytes)
+  local restored: Point = nominal:decode(nominal_bytes)
+  test.assert(restored.x == 3 and restored.label == "x")
+  local union_codec = protobuf.portable({descriptor(Choice.empty())})
+  test.assert(union_codec:encode(Choice.empty()) == string.char(10, 2, 10, 0))
+  local dynamic = protobuf.portable({reflect.Type.is_value()})
+  test.assert(dynamic:encode(7) == string.char(10, 2, 16, 14))
+end
+
+local path_constructor_failure: value = nil
+local path_constructor_calls = 0
+
+record PathConstructor
+  number: integer
+  local hidden: integer
+end
+
+function PathConstructor.new(number: integer): PathConstructor
+  path_constructor_calls = path_constructor_calls + 1
+  if path_constructor_failure ~= nil then raise path_constructor_failure end
+  return { number = number, hidden = 0 }
+end
+
+local function expect_exact_error(action: function (): (), expected: value)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+    test.assert(error == expected, "the original error value was replaced")
+  end
+  test.assert(caught, "expected an error")
+end
+
+function test_error_paths_preserve_public_constructor_errors(context: test.Context)
+  with_generated(context, function (_: boolean)
+    local sample: PathConstructor = { number = 1, hidden = 0 }
+    local codec = protobuf.portable({descriptor(sample), reflect.Type.is_integer()})
+    local bytes = string.char(10, 2, 8, 2, 16, 6)
+    path_constructor_failure = "constructor: original message"
+    defer path_constructor_failure = nil
+    path_constructor_calls = 0
+    expect_exact_error(function () codec:decode(bytes) end, "constructor: original message")
+    test.assert(path_constructor_calls == 1)
+    local marker = Point(7, "marker")
+    path_constructor_failure = marker
+    path_constructor_calls = 0
+    expect_exact_error(function () codec:decode(bytes) end, marker)
+    test.assert(path_constructor_calls == 1)
+  end)
+end
+
+function test_error_paths_do_not_repeat_public_constructors(context: test.Context)
+  with_generated(context, function (_: boolean)
+    local sample: PathConstructor = { number = 1, hidden = 0 }
+    local codec = protobuf.portable({descriptor(sample), reflect.Type.is_integer()})
+    path_constructor_failure = nil
+    path_constructor_calls = 0
+    expect_exact_error(function () codec:decode(string.char(10, 2, 8, 2)) end,
+        "protobuf: missing required field 2 at $[2]")
+    test.assert(path_constructor_calls == 1)
+  end)
+end
+
+local function on_portable_coroutine(generated: boolean, action: function (): ())
+  local co = coroutine.create(function (_: value): value
+    test.assert(coroutine.running() ~= nil, "portable codec test needs a coroutine stack")
+    local previous = protobuf.use_generated_codecs(generated)
+    defer protobuf.use_generated_codecs(previous)
+    action()
+    return true
+  end, "portable-codec")
+  test.assert(co:resume(nil) == true and co:status() == "dead")
+end
+
+local coroutine_view_constructions = 0
+
+record CoroutinePublicView
+  local secret: integer
+  next: CoroutinePublicView?
+  number: integer
+end
+
+function CoroutinePublicView.new(next: CoroutinePublicView?, number: integer): CoroutinePublicView
+  coroutine_view_constructions = coroutine_view_constructions + 1
+  return {secret = 99, next = next, number = number}
+end
+
+function test_deep_public_view_on_coroutine_stack(_: test.Context)
+  on_portable_coroutine(true, function ()
+    -- The anonymous root and the innermost fields each consume one level.
+    local count: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 2
+    local candidate = CoroutinePublicView(nil, 1)
+    candidate.secret = -1
+    for number = 2, count do
+      candidate = CoroutinePublicView(candidate, number)
+      candidate.secret = -1
+    end
+    test.assert(protobuf.find_generated_codec(candidate) == nil)
+    local codec = protobuf.portable({descriptor(candidate)})
+    local bytes = codec:encode(candidate)
+    coroutine_view_constructions = 0
+    local restored: CoroutinePublicView = codec:decode(bytes)
+    test.assert(coroutine_view_constructions == count)
+    test.assert(codec:encode(restored) == bytes)
+    local current = restored
+    for number = count, 1, -1 do
+      test.assert(current.number == number and current.secret == 99)
+      if number > 1 then
+        test.assert(current.next ~= nil)
+        current = current.next
+      else
+        test.assert(current.next == nil)
+      end
+    end
+  end)
+end
+
+union CoroutinePublicUnion
+  empty()
+  link(next: CoroutinePublicUnion)
+  local hidden(integer)
+end
+
+function test_deep_public_union_on_coroutine_stack(_: test.Context)
+  on_portable_coroutine(true, function ()
+    -- A partless leaf needs no field probe, but the anonymous root costs one.
+    local count: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 1
+    local candidate = CoroutinePublicUnion.empty()
+    for _ = 2, count do candidate = CoroutinePublicUnion.link(candidate) end
+    test.assert(protobuf.find_generated_codec(candidate) == nil)
+    local codec = protobuf.portable({descriptor(candidate)})
+    local bytes = codec:encode(candidate)
+    local restored: CoroutinePublicUnion = codec:decode(bytes)
+    test.assert(codec:encode(restored) == bytes)
+    local current = restored
+    for index = 1, count do
+      case current
+      when link(next) then
+        test.assert(index < count)
+        current = next
+      when empty() then test.assert(index == count)
+      else raise "decoded a private union variant"
+      end
+    end
+  end)
+end
+
+local coroutine_dynamic_constructions = 0
+
+record CoroutinePublicDynamic
+  local secret: integer
+  item: value
+end
+
+function CoroutinePublicDynamic.new(item: value): CoroutinePublicDynamic
+  coroutine_dynamic_constructions = coroutine_dynamic_constructions + 1
+  return {secret = 99, item = item}
+end
+
+local function public_dynamic_chain(count: integer, leaf: value): CoroutinePublicDynamic
+  local candidate = CoroutinePublicDynamic(leaf)
+  candidate.secret = -1
+  for _ = 2, count do
+    candidate = CoroutinePublicDynamic(candidate)
+    candidate.secret = -1
+  end
+  return candidate
+end
+
+local function portable_varint(number: integer): string
+  local bytes = ""
+  while number >= 128 do
+    bytes = bytes .. string.char((number & 127) | 128)
+    number = number >> 7
+  end
+  return bytes .. string.char(number)
+end
+
+local function portable_field(number: integer, bytes: string): string
+  return portable_varint((number << 3) | 2) .. portable_varint(#bytes) .. bytes
+end
+
+local function public_dynamic_bytes(count: integer, leaf: string): string
+  local identity = portable_field(1, "protobuf.portable_tests") ..
+      portable_field(2, "protobuf.portable_tests.CoroutinePublicDynamic")
+  local bytes = portable_field(1, leaf)
+  for _ = 2, count do
+    bytes = portable_field(1, portable_field(5, identity .. portable_field(3, bytes)))
+  end
+  return portable_field(1, bytes)
+end
+
+function test_dynamic_public_view_limit_on_coroutine_stack(context: test.Context)
+  with_generated(context, function (generated: boolean)
+    on_portable_coroutine(generated, function ()
+      -- The anonymous root starts at depth 2; its last value field must fit too.
+      local count: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 2
+      local candidate = public_dynamic_chain(count, 1)
+      test.assert(protobuf.find_generated_codec(candidate) == nil)
+      local codec = protobuf.portable({descriptor(candidate)})
+      local bytes = public_dynamic_bytes(count, string.char(16, 2))
+      test.assert(codec:encode(candidate) == bytes)
+      coroutine_dynamic_constructions = 0
+      local restored: CoroutinePublicDynamic = codec:decode(bytes)
+      test.assert(coroutine_dynamic_constructions == count)
+      test.assert(codec:encode(restored) == bytes)
+      local current: value = restored
+      for _ = 1, count do
+        local node: CoroutinePublicDynamic = current
+        test.assert(node.secret == 99)
+        current = node.item
+      end
+      test.assert(current == 1)
+      local too_deep = public_dynamic_chain(count + 1, 1)
+      local over_bytes = public_dynamic_bytes(count + 1, string.char(16, 2))
+      local expected = "protobuf: nesting exceeds 128 levels at $[1]" ..
+          string.rep("[\"item\"]", count + 1)
+      coroutine_dynamic_constructions = 0
+      expect_exact_error(function () codec:decode(over_bytes) end, expected)
+      expect_exact_error(function () codec:encode(too_deep) end, expected)
+      test.assert(coroutine_dynamic_constructions == 0)
+    end)
+  end)
+end
+
+-- Parameters keep each named child bound to its own depth and codec mode.
+local function public_dynamic_failure(context: test.Context, count: integer, generated: boolean)
+  local name = "reflective_"
+  if generated then name = "generated_" end
+  context:run(name .. count, function (_: test.Context)
+    on_portable_coroutine(generated, function ()
+      local candidate = public_dynamic_chain(count, function (): integer return 1 end)
+      test.assert(protobuf.find_generated_codec(candidate) == nil)
+      local codec = protobuf.portable({descriptor(candidate)})
+      local bytes = public_dynamic_bytes(count, string.char(8, 2))
+      local decoding = "protobuf: invalid boolean"
+      local encoding = "protobuf: unsupported dynamic value"
+      if count == ffi.TITAN_CODEC_DEPTH_LIMIT - 1 then
+        decoding = "protobuf: nesting exceeds 128 levels"
+        encoding = decoding
+      end
+      local path = " at $[1]" .. string.rep("[\"item\"]", count)
+      coroutine_dynamic_constructions = 0
+      expect_exact_error(function () codec:decode(bytes) end, decoding .. path)
+      expect_exact_error(function () codec:encode(candidate) end, encoding .. path)
+      test.assert(coroutine_dynamic_constructions == 0)
+    end)
+  end)
+end
+
+function test_dynamic_public_view_failures_at_every_coroutine_depth(context: test.Context)
+  local limit: integer = ffi.TITAN_CODEC_DEPTH_LIMIT - 1
+  for count = 1, limit do
+    public_dynamic_failure(context, count, false)
+    public_dynamic_failure(context, count, true)
+  end
+end
+
+local function description_fields(): const {reflect.Type}
+  return {
+    reflect.Type.is_nil(), reflect.Type.is_boolean(), reflect.Type.is_integer(),
+    reflect.Type.is_float(), reflect.Type.is_string(),
+    reflect.Type.is_option(reflect.Type.is_string()),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+        reflect.Type.is_option(reflect.Type.is_string())),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_const(), reflect.Type.is_integer()),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_maybe_const(), reflect.Type.is_string()),
+    reflect.Type.is_value(), descriptor(Choice.empty()), descriptor(PublicView(nil, 1, nil)),
+    descriptor(PublicUnion.empty()), descriptor(Node(nil, 0)),
+  }
+end
+
+local function description_fixture(): string
+  return '{"fields":["nil","boolean","integer","float","bytes",["option","bytes"],' ..
+      '["array","mutable",["option","bytes"]],["array","const","integer"],' ..
+      '["array","maybe","bytes"],"value",["nominal","protobuf.portable_tests.Choice"],' ..
+      '["nominal","protobuf.portable_tests.PublicView"],' ..
+      '["nominal","protobuf.portable_tests.PublicUnion"],' ..
+      '["nominal","protobuf.portable_tests.Node"]],"nominals":{' ..
+      '"protobuf.portable_tests.Choice":{"module":"protobuf.portable_tests","union":[' ..
+      '["empty",[]],["scalar",[["value","integer"]]],' ..
+      '["pair",[["point",["nominal","protobuf.portable_tests.Point"]],' ..
+      '["note",["option","bytes"]]]]]},' ..
+      '"protobuf.portable_tests.Dynamic":{"module":"protobuf.portable_tests",' ..
+      '"record":[["item","value"]]},' ..
+      '"protobuf.portable_tests.Node":{"module":"protobuf.portable_tests",' ..
+      '"record":[["next",["option",["nominal","protobuf.portable_tests.Node"]]],' ..
+      '["number","integer"]]},' ..
+      '"protobuf.portable_tests.Point":{"module":"protobuf.portable_tests",' ..
+      '"record":[["x","integer"],["label","bytes"]]},' ..
+      '"protobuf.portable_tests.PublicUnion":{"module":"protobuf.portable_tests",' ..
+      '"union":[["shown",[["value","integer"]]],["empty",[]]]},' ..
+      '"protobuf.portable_tests.PublicView":{"module":"protobuf.portable_tests",' ..
+      '"record":[["number","integer"],["note",["option","bytes"]],' ..
+      '["last",["option","bytes"]],["dropped","integer"]]}}}'
+end
+
+local function fixture_hex(bytes: string): string
+  local output = string.writer()
+  defer output:close()
+  for index = 0, #bytes - 1 do
+    local byte: integer = (bytes as foreign const *unsigned char)[index]
+    output:write(string.format("%02x", byte))
+  end
+  return output:drain()
+end
+
+function test_describe_exact_public_closed_schema(context: test.Context)
+  local codec = protobuf.portable(description_fields(), {descriptor(Dynamic(nil))})
+  test.assert(codec:describe() == description_fixture(), codec:describe())
+  test.assert(codec:describe() == codec:describe(), "cached description changed")
+  local fresh = protobuf.portable(description_fields(), {descriptor(Dynamic(nil))})
+  test.assert(fresh:describe() == codec:describe(), "fresh codec changed its description")
+  test.assert(protobuf.portable({}):describe() == '{"fields":[],"nominals":{}}')
+  local labels: {string} = {}
+  labels[1], labels[3] = "x", "y"
+  local integers: const {integer} = {1, 2}
+  local strings: {string} = {"z"}
+  local bytes = codec:encode(nil, false, -7, 1.5, "A\0B", nil, labels, integers,
+      strings, Dynamic(7), Choice.pair(Point(3, "x"), "n"), PublicView(nil, 12, nil),
+      PublicUnion.empty(), Node(Node(nil, 2), 1))
+  context:log("portable fixture schema: " .. codec:describe())
+  context:log("portable fixture bytes: " .. fixture_hex(bytes))
+end
+
+function test_describe_sorts_dynamic_nominals_independent_of_walk_order(_: test.Context)
+  local point = descriptor(Point(0, ""))
+  local choice = descriptor(Choice.empty())
+  local first = protobuf.portable({reflect.Type.is_value()}, {point, choice})
+  local second = protobuf.portable({reflect.Type.is_value()}, {choice, point})
+  test.assert(first:describe() == second:describe(), "nominal order followed the walk")
+end
+
+record TextFields
+  items: {string?}
+end
+
+union TextChoice
+  words(items: {string?})
+end
+
+function test_text_paths_describe_wrapped_root_record_and_union_strings(_: test.Context)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+        reflect.Type.is_option(reflect.Type.is_string())),
+    descriptor(TextFields({})), descriptor(TextChoice.words({})),
+  }
+  local codec = protobuf.portable(fields, nil, {"1", "protobuf.portable_tests.TextFields.items",
+      "protobuf.portable_tests.TextChoice.words.items"})
+  local wrapped = '["array","mutable",["option","text"]]'
+  -- Source {T?} normalizes to {T}; only the explicit root descriptor retains Option.
+  local canonical = '["array","mutable","text"]'
+  local expected = '{"fields":[' .. wrapped ..
+      ',["nominal","protobuf.portable_tests.TextFields"],' ..
+      '["nominal","protobuf.portable_tests.TextChoice"]],"nominals":{' ..
+      '"protobuf.portable_tests.TextChoice":{"module":"protobuf.portable_tests",' ..
+      '"union":[["words",[["items",' .. canonical .. ']]]]},' ..
+      '"protobuf.portable_tests.TextFields":{"module":"protobuf.portable_tests",' ..
+      '"record":[["items",' .. canonical .. ']]}}}'
+  test.assert(codec:describe() == expected, codec:describe())
+end
+
+function test_text_marks_dynamic_only_nominal_fields_and_duplicate_paths(_: test.Context)
+  local fields: const {reflect.Type} = {reflect.Type.is_value()}
+  local dynamic: const {reflect.Type} = {descriptor(Point(0, ""))}
+  local codec = protobuf.portable(fields, dynamic,
+      {"protobuf.portable_tests.Point.label", "protobuf.portable_tests.Point.label"})
+  test.assert(codec:describe() == '{"fields":["value"],"nominals":{' ..
+      '"protobuf.portable_tests.Point":{"module":"protobuf.portable_tests",' ..
+      '"record":[["x","integer"],["label","text"]]}}}')
+  test.assert(protobuf.portable(fields, dynamic, {}):describe() ==
+      protobuf.portable(fields, dynamic):describe())
+end
+
+local function reject_text_path(context: test.Context, name: string, path: string,
+    fields: const {reflect.Type})
+  context:run(name, function(_: test.Context)
+    expect_error(function() protobuf.portable(fields, nil, {path}) end, "text path " .. path .. ":")
+  end)
+end
+
+function test_text_rejects_unresolved_private_and_non_string_positions(context: test.Context)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_integer(), reflect.Type.is_value(), descriptor(Point(0, "")),
+    descriptor(Choice.empty()), reflect.Type.is_string(),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_integer()),
+    reflect.Type.is_option(reflect.Type.is_integer()), descriptor(PublicView(nil, 0, nil)),
+    descriptor(PublicUnion.empty()),
+  }
+  reject_text_path(context, "empty", "", fields)
+  reject_text_path(context, "zero", "0", fields)
+  reject_text_path(context, "leading_zero", "05", fields)
+  reject_text_path(context, "out_of_range", "10", fields)
+  reject_text_path(context, "integer", "1", fields)
+  reject_text_path(context, "value", "2", fields)
+  reject_text_path(context, "nominal", "3", fields)
+  reject_text_path(context, "integer_array", "6", fields)
+  reject_text_path(context, "integer_option", "7", fields)
+  reject_text_path(context, "unknown_nominal", "missing.Point.label", fields)
+  reject_text_path(context, "unlisted_nominal", "protobuf.portable_tests.TextFields.items", fields)
+  reject_text_path(context, "unknown_field", "protobuf.portable_tests.Point.missing", fields)
+  reject_text_path(context, "integer_field", "protobuf.portable_tests.Point.x", fields)
+  reject_text_path(context, "private_field", "protobuf.portable_tests.PublicView.secret", fields)
+  reject_text_path(context, "unknown_variant", "protobuf.portable_tests.Choice.missing.value", fields)
+  reject_text_path(context, "unknown_part", "protobuf.portable_tests.Choice.scalar.missing", fields)
+  reject_text_path(context, "integer_part", "protobuf.portable_tests.Choice.scalar.value", fields)
+  reject_text_path(context, "private_variant", "protobuf.portable_tests.PublicUnion.hidden.value", fields)
+end
+
+function test_text_changes_no_wire_bytes_or_utf8_validation(context: test.Context)
+  with_generated(context, function(_: boolean)
+    local fields: const {reflect.Type} = {reflect.Type.is_string(),
+        descriptor(Point(0, "")), descriptor(Choice.empty())}
+    local plain = protobuf.portable(fields)
+    local text = protobuf.portable(fields, nil,
+        {"1", "protobuf.portable_tests.Point.label", "protobuf.portable_tests.Choice.pair.note"})
+    local invalid_utf8 = "\255\0B"
+    local point = Point(3, invalid_utf8)
+    local choice = Choice.pair(point, invalid_utf8)
+    local bytes = plain:encode(invalid_utf8, point, choice)
+    test.assert(text:encode(invalid_utf8, point, choice) == bytes)
+    local root: string, restored: Point, arm: Choice = text:decode(bytes)
+    test.assert(root == invalid_utf8 and restored.label == invalid_utf8)
+    case arm
+    when pair{note} then test.assert(note == invalid_utf8)
+    else test.assert(false, "text changed the union variant")
+    end
+  end)
+end
+
+local function nominal_arm_module(bytes: string): string
+  local carrier: string = protobuf.deserialize_fields(bytes, {reflect.Type.is_string()})
+  -- Every dynamic nominal, record or union, uses TitanValue arm 5.
+  local _, _, _, _, arm: string = protobuf.deserialize_fields(carrier, {
+    reflect.Type.is_nil(), reflect.Type.is_nil(), reflect.Type.is_nil(),
+    reflect.Type.is_nil(), reflect.Type.is_string(),
+  })
+  return protobuf.deserialize_fields(arm, {reflect.Type.is_string()})
+end
+
+function test_described_record_module_matches_dynamic_nominal_wire(_: test.Context)
+  local point = Point(3, "x")
+  local codec = protobuf.portable({reflect.Type.is_value()}, {descriptor(point)})
+  local module = nominal_arm_module(codec:encode(point))
+  test.assert(codec:describe() == '{"fields":["value"],"nominals":{' ..
+      '"protobuf.portable_tests.Point":{"module":"' .. module .. '",' ..
+      '"record":[["x","integer"],["label","bytes"]]}}}')
+end
+
+function test_described_union_module_matches_dynamic_nominal_wire(_: test.Context)
+  local choice = Choice.empty()
+  local codec = protobuf.portable({reflect.Type.is_value()}, {descriptor(choice)})
+  local module = nominal_arm_module(codec:encode(choice))
+  test.assert(string.find(codec:describe(), '"module":"' .. module .. '"', 1, true) ~= nil)
+  test.assert(module == "protobuf.portable_tests")
+end

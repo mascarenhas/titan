@@ -2,10 +2,11 @@
 
 The public contract is [Protocol Buffers standard
 library](../language/standard-library-protobuf.md). The logical `titan.protobuf`
-module has four source contributors in `titan/protobuf/`: `protobuf.titan` owns
-the public API, resource-codec registry and shared scalar/type helpers,
+module has six source contributors in `titan/protobuf/`: `protobuf.titan` owns
+the ordinary public API, resource-codec registry and shared scalar/type helpers,
 `encoder.titan` owns graph traversal, `decoder.titan` owns wire parsing and
-reconstruction, and `schema.titan` owns proto3 declarations. `native.h` holds
+reconstruction, `portable.titan` owns copied-data codecs, `trace.titan` locates
+failed traversals, and `schema.titan` owns proto3 declarations. `native.h` holds
 the reflective decoder's directory entry and includes the SDK header
 `titan-runtime/transfer.h`, which owns the shared buffer and the generated-codec
 runtime. The module imports `reflect`, `string` and `gc`; it does not depend on
@@ -152,10 +153,10 @@ reserves and appends four bytes into an owned `titan_protobuf_buffer`) and
 `transfer.attach_resource` (which builds the four-byte index string for opaque
 hooks).
 
+Outside a [portable codec](#portable-copied-data-policy),
 `Encoder:record_value` and `union_value` enforce public nominal and complete
-member visibility, active-path cycle detection, the [nesting
-limit](#nesting-limit), and the normal field and variant traversal with
-nested custom-hook dispatch. The
+member visibility. Both contexts retain active-path cycle detection, the
+[nesting limit](#nesting-limit), and normal field and variant traversal. The
 inspected-root helpers check the 2 GiB message limit after encoding. Root
 custom-hook and root resource-codec selection belong to `titan.transfer`;
 ordinary `protobuf.serialize` keeps its structural public-data rules. See the
@@ -173,13 +174,66 @@ generated codecs' `titan_codec_depth` (also used when their field reader skips
 a group) raise when a depth exceeds the budget, with `protobuf: nesting
 exceeds <budget> levels` built from the macro in both. The budget is raw:
 each record or union with fields probes them one level deeper, so 128 accepts
-a 127-record chain, while a union whose selected variant has
-no parts probes nothing deeper and is accepted at the budget itself. There is
+a 127-record chain at a nominal root, while a union whose selected variant has
+no parts probes nothing deeper and is accepted at the budget itself. An
+anonymous field root (`serialize_fields_to_buffer_with_context` and
+`deserialize_fields_slice`, so also `PortableCodec`) starts its fields at
+depth 2, so a chain in one of its fields holds at most 126 records and 127
+raise; the SDK peer counts the same way. There is
 no reflective-only limit and no separate `transfer` constant: `transfer`
 encodes and decodes through these paths, so the one define bounds it too.
 The boundary tests derive their depths and messages from the macro:
 `encode_127_accepted`, `decode_128_rejected_by_both`, and
-`partless_union_at_128` apply on both targets.
+`partless_union_at_128` apply on both targets, and
+`test_dynamic_public_view_limit_on_coroutine_stack` in `protobuf.portable_tests`
+checks the anonymous-root maximum and its rejection one record deeper.
+
+### Reflective frame budget
+
+The same nesting boundary holds on a Task or coroutine stack, not just on the
+main stack. Keep `decode_field` and `Encoder:field` thin: normalize the
+descriptor, check depth and presence, and dispatch to the appropriate arm.
+Each arm owns its temporaries. Unwrap Options in a loop at the same depth;
+recursing through the dispatcher would retain a second frame for every
+optional link.
+
+Union selection and dynamic nominal identity lookup finish before child
+traversal. Record codec lookup and constructor eligibility likewise finish
+before reflective children. The record arm selects ordinary or public-view
+field traversal directly; neither traversal forwards to the other. Portable
+public-field constructor invocation runs after all child fields have decoded,
+in its own short-lived frame. Conditional trace updates use small helpers
+rather than adding temporary root slots to every retained traversal frame.
+
+The native x86-64 validation (`-O0`) budget is a sum of at most 6 KiB of
+generated C frame reservations per nesting level for each recursive shape.
+At 128 levels this reserves at most 768 KiB of a 2 MiB coroutine stack,
+leaving more than 1 MiB for the caller, raising, and failure-only replay.
+The measured dispatcher reservations, in bytes, are:
+
+| Dispatcher | Monolithic dispatch | Thin dispatch |
+| --- | ---: | ---: |
+| `decode_field` | 8656 | 1200 |
+| `Encoder:field` | 6128 | 816 |
+
+The complete retained chains include the arm and traversal functions, not
+just the dispatcher. A dynamic nominal retains two dispatchers: one for the
+`value` field and one for its nominal payload. The optional-record chain
+retained two dispatchers with monolithic dispatch, but now retains only one.
+
+| Shape | Monolithic decode | Thin decode | Monolithic encode | Thin encode |
+| --- | ---: | ---: | ---: | ---: |
+| Optional record | 19456 | 3360 | 14144 | 3392 |
+| Union part | 13200 | 3264 | 8576 | 3520 |
+| Array of Arrays | 10848 | 3424 | 8288 | 2912 |
+| `value` holding a nominal | 23504 | 5808 | 16240 | 5664 |
+| `value` holding a portable public-view record | 30224 | 6016 | 16240 | 5664 |
+
+These are installed-provider C-body frame reservations, not a portable ABI
+property. Coroutine tests exercise accepted values, innermost failures,
+over-limit values and cycles on native and browser targets; the sanitizer
+lane exercises the same boundary with its larger frames. The nesting budget
+bounds the codec's traversal, not stack already consumed by its caller.
 
 ## Generated nominal codecs
 
@@ -202,8 +256,7 @@ occurrence; zero, repeated, replaced, or non-message variants hand back to the
 reflective decoder after that validation. One shared parts directory serves
 the selected variant, so variant count does not grow that directory. Wider
 records or payloads stay reflective, whose per-level C stack does not grow
-with field count. Deep reflective decoding and its error traceback can still
-exhaust a coroutine's C stack in unoptimized (`-O0`) builds.
+with field count.
 
 The declaring module emits one `TitanTransferCodec` entry per codec and
 binds the nominal's canonical metatable to it under `TITAN_MT_CODEC`
@@ -251,8 +304,9 @@ A generated codec *is* the reflective codec specialized to one storage plan,
 sharing one root state with it (`TitanCodecState`): the buffer, the packet
 context, the reflective `Encoder`'s active Map, a C-stack path of the open
 generated frames, and one Lua stack slot holding the root's reusable
-`Encoder`. It writes identical bytes and raises the identical error string at
-the identical point; it never declines or reruns. Booleans, integers, floats,
+`Encoder`. It writes identical bytes and raises the same diagnostics before
+failure-only position attribution; a generated subtree's position can be
+abbreviated. Booleans, integers, floats,
 strings, their Options, nested records and unions, and the nil and scalar arms
 of `value` fields are encoded natively, nested nominals through their own bound
 codec after the same registered-resource check by expected type. Every other
@@ -309,7 +363,7 @@ generated encoder writes the nil and scalar arms and hands a nominal or Array
 to the state's `Encoder`.
 
 The generated decoder mirrors `read_message_slice` and `decode_field`: it
-validates the complete message first with the same error strings (keys,
+validates the complete message first with the same pre-suffix error strings (keys,
 varints, lengths, groups and their depth, wire kinds), recording the latest
 occurrence of each declared field, then checks depth and decodes the declared
 fields in order with the reflective missing-field, wire, and boolean checks.
@@ -346,19 +400,90 @@ Generated codecs serve `serialize_to_buffer` (before `reflect.inspect`), the
 inspected-root entries, `deserialize`, `deserialize_nominal*`, transfer
 packets, and every nested record or union reached by either codec; a nominal
 with a codec always decodes through it. The collaboration entry
-`serialize_generated_to_buffer` runs only the generated root, and the
-diagnostic `use_generated_codecs(false)` makes the whole state reflective,
-which native differential tests use as the oracle.
+`serialize_generated_to_buffer` runs the supplied generated root even when
+the diagnostic `use_generated_codecs(false)` disables ordinary generated
+lookup. Native differential tests use that diagnostic as the reflective
+oracle, comparing error messages up to the optional abbreviated suffix.
+
+## Error positions
+
+Encoding and decoding locate failures only after the original traversal raises.
+The execution roots have function-level `catch` clauses:
+`encode_generated_root`, `encode_record_root`, `encode_union_root`,
+`serialize_fields_to_buffer_with_context`, `deserialize_record_buffer`,
+`deserialize_union_buffer` and `deserialize_fields_slice`. Public entries that
+forward to these roots, including `PortableCodec:encode` and `decode`, do not
+add a second catch.
+
+`locate_encoding` and `locate_decoding` ignore non-string errors and strings
+without the reserved `protobuf: ` prefix. They install one module-local
+`CodecTrace` for a synchronous replay, then clear it with `defer`. The trace
+bypasses generated codecs until its trail has 16 segments. At that point a
+nominal with a generated codec hands back to it; a nominal without one stays
+reflective at every depth. `CODEC_TRACE_DEPTH_LIMIT` is the one named bound.
+No generated-codec structure, function pointer or inline helper in
+`transfer.h` changes.
+
+The reflective frames append a quoted member or one-based index before
+descending. They remove it only after a normal return, not with `defer`, so
+an error leaves the trail. A generated hand-back freezes the trail, including
+through reflective field handoffs below it. Normal return resumes recording
+for following siblings. An error inside that subtree adds `...` to the
+hand-back path. A `value` wrapper adds no segment.
+Portable creation paths and runtime traces share `path_member` and
+`path_index`, with the [JSON path spelling](../language/standard-library-protobuf.md#errors).
+
+Trace mode retains structural checks but skips transfer-hook and resource
+callbacks and public constructors. It never performs an ambient packet-context
+lookup or calls the demand module loader. Decoding marks skipped values and
+their enclosing frames incomplete: default storage construction still runs
+for complete frames, but cannot receive a fabricated nil in place of an opaque
+callback result. Following fields are still visited. Hook-validation failures
+are not attributed.
+
+The replay retains generated codecs below its 16-segment reflective prefix
+instead of replacing the whole generated chain with reflective frames. This
+keeps the replay's added reflective portion bounded. The worst-case
+64-field, 128-level failure must raise without crashing in native, sanitizer
+and browser validation: replay must not turn the first attempt's raised error
+into a crash. These are codec bounds, not a guarantee about stack the caller
+has already used.
+
+The trace retains whether the first attempt used generated code. In
+particular, a saved codec passed to `serialize_generated_to_buffer` can run
+while ordinary generated lookup is disabled; its replay still hands back
+below the bound. An ordinary reflective traversal with lookup disabled stays
+reflective and retains its complete path.
+
+Encoding replays into its own initialized heap buffer, acquired immediately
+before a deferred `titan_protobuf_buf_free_heap`; it never writes into the
+caller's buffer. Decoding retains the supplied context, string holder and raw
+buffer borrow. The trace appends ` at <path>` only if the replay raises the
+whole original message at a non-root position. A successful replay, a different
+error or a diagnostic allocation failure leaves the original error and
+traceback intact through bare `raise`; an attributed message preserves the
+original traceback explicitly.
+
+The prefix is a diagnostic namespace, not provenance. A transfer hook,
+resource callback or public `new` that raises a message beginning with
+`protobuf: ` can acquire a suffix naming a later position if the replay
+reproduces that message there. Errors without the prefix and non-string errors
+are unchanged. Callbacks are never repeated to obtain a position.
+
+The successful traversal adds one protected region at its execution root and
+nil checks in reflective frames and codec lookup. It allocates no trail,
+formatted path or replay buffer and performs no second traversal.
 
 ## Encoding
 
 The encoder keeps an active-path Map keyed by the original nominal or Array
 value. A deferred removal accompanies every entry, so exceptions unwind the
 cycle detector. Shared values outside the active path are encoded again. The
-encoder does not prevalidate the entire declared type graph; it resolves and
-checks descriptors as their values are visited. Union traversal visits the
-active payload only; the all-public type flag still rejects private variants
-anywhere on that nominal declaration.
+ordinary encoder does not prevalidate the entire declared type graph; it
+resolves and checks descriptors as their values are visited. Union traversal
+visits the active payload only; ordinary protobuf's all-public type flag still
+rejects private variants anywhere on that nominal declaration. Portable codecs
+instead validate the public schema at creation.
 
 All wire accumulation writes into a pluggable, expandable native buffer,
 `titan_protobuf_buffer` (`data`, `length`, `capacity`, a `context` pointer and a
@@ -561,6 +686,93 @@ already-resolved `ResourceScope` to
 payloads are already byte strings, so this use does not introduce a recursive
 native transfer representation or a separate field codec.
 
+## Portable copied-data policy
+
+`PortableCodec` owns the ordered root descriptors and a closed nominal-name
+table. Creation walks public descriptors only, resolving named references
+through `resolve_type`, and enters each accepted nominal before descending so
+recursive types terminate. Each entry retains its resolved descriptor.
+Private-field records additionally retain a compatible public constructor and
+a public-field-ordinal to parameter-position mapping, when available. The
+mapping is computed once at creation, not during each decode.
+
+The creation walk excludes packet resources, foreign types, hooked records,
+local nominals, Maps, Interfaces and functions. It accepts a public record's
+public fields and a public union's public variants without requiring
+`all_public`. Creation errors use JSON-style paths, with root-field indices,
+quoted field/part names, and representative Array index 1.
+
+The walk also collects each first-seen nominal name in a transient Array.
+Creation sorts it in unsigned byte order with bottom-up mergesort and builds
+the description with `string.writer()`. The codec retains only the finished
+JSON string; `describe` returns that cached value. Root descriptors, public
+record fields, public union variants and their named parts retain their wire
+order. Options and Array constness are explicit wrappers, while nominal
+references name entries in the closed table rather than recursively expanding
+them. Name emission escapes JSON quotes, backslashes and control bytes without
+adding a `json` import.
+
+`portable_module` obtains the module name from `resource_nominals`, the traced
+canonical-metatable registry already used for resource exclusion. A borrowed
+`Table *` enters the existing `titan_codec_module` inline; the module's
+`TitanModuleData.symbols` resolver supplies the immutable transfer manifest.
+Its name is the same one `titan_codec_nominal_module` uses for a dynamic
+nominal's wire arm. The registry retains the metatable and declaring module
+through the borrow, and the name is copied immediately to a Titan string.
+No Lua stack transaction or new C helper is involved.
+
+When `text` is nonempty, a temporary path Map records requested and resolved
+positions. Description construction visits each canonical root, public field
+and public variant part and resolves a marked position through its Option and
+Array wrappers to a string. It rejects non-string positions immediately and
+unresolved paths before returning the codec. The Map is not retained. Text
+marks affect only the cached schema, never encoding, decoding or UTF-8
+validation.
+
+The traversal distinguishes a portable context:
+
+- `Encoder:record_value` and `Encoder:union_value` skip their ordinary
+  complete-public-visibility guards; the creation walk already checked the
+  public schema. Private active union arms still raise.
+- `Message:record_constructor` serves both the root `decode_record` and the
+  field arm `Message:record_field`. It returns nil for an all-public record,
+  which keeps direct default construction in `decode_record_fields`. For a
+  record with local fields, `PortableCodec:record_constructor` returns the
+  captured `PortableConstructor` or raises before any field is decoded.
+  `PortableConstructor:decode_record` validates every public field, including
+  discarded ones, and places mapped values in an argument Array in parameter
+  order; `PortableConstructor:construct` then calls `new` with an explicit
+  fixed arity, preserving nil positions.
+- `decode_union` skips only its complete-public-visibility guard. Unknown
+  ordinals retain ordinary wire rejection.
+- `Encoder:begin_dynamic_nominal` requires a listed name, and
+  `Message:dynamic_descriptor` obtains its descriptor from the closed table
+  and returns before nominal lookup or demand loading.
+- `Encoder:resource_field` and `Message:resource_field`, reached from the
+  record arms of `Encoder:field` and `decode_field`, and the resource
+  operations of `codec_handoff` reject packet resources before invoking either
+  callback. The registry remains live, so registrations made after codec
+  creation are rejected too.
+
+Constructor compatibility comes from `RecordType:public_constructor` in
+`reflect`, also used by `json`. Protobuf additionally requires each parameter
+name to match a public field. An unavailable constructor makes that record
+encode-only. Private-field records and private-variant unions have no generated
+codec; generated parents hand them back to these reflective paths. Generated
+nominal `value` arms and Arrays likewise preserve the closed-name check.
+Every non-portable context follows its existing behavior unchanged.
+
+`PortableCodec:encode` owns one heap buffer and immediately defers its release,
+then calls `serialize_fields_to_buffer_with_context` with itself as context.
+`decode` calls `deserialize_fields_slice` with that same context and the input
+string as holder. Generated frames preserve the non-nil context and never
+request lazy packet-context resolution. No transfer hook, resource callback,
+new Lua C API call, or host-specific bridge is needed for this policy.
+
+The wire mapping is unchanged. Values accepted by both the portable codec and
+ordinary anonymous messages produce the same bytes; the portable context only
+relaxes the nominal public-view policy.
+
 ## Schema generation
 
 The schema builder walks declared descriptors, separately from optimistic value
@@ -592,10 +804,11 @@ their defining modules, nominal names, and bytes. Closure reconstruction uses
 the codec to decode its snapshot against the receiving state's initialized types;
 no operation reads another state's reflection descriptors.
 
-Tests belong in `spec/stdlib/titan/protobuf/`: `protobuf.tests` imports only
-the browser subset and runs on both targets, including the raw index writers
-and their reservation failure, while `protobuf.resource_tests` holds the
-`thread` endpoint cases. Same-instance packet cases are in `transfer.tests`,
+Tests belong in `spec/stdlib/titan/protobuf/`: `protobuf.tests` and
+`protobuf.portable_tests` import only the browser subset and run on both
+targets, including raw index writers and portable codec policy, while
+`protobuf.resource_tests` holds the `thread` endpoint cases. Same-instance
+packet cases are in `transfer.tests`,
 cross-state transfer lifecycle cases in the Lua/async/thread native owners,
 and reflection/code-generation tests in their existing layers. Keep depth
 cases derived from `ffi.TITAN_CODEC_DEPTH_LIMIT` and cover full-width

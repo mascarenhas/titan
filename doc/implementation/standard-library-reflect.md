@@ -227,6 +227,16 @@ const and adjacent bitfields without taking their addresses or overwriting
 an already initialized sibling. Pointer temporaries discard only a typedef's
 top-level qualifiers; pointee qualifiers remain intact.
 
+## Public record constructors
+
+`RecordType:public_constructor()` scans the hydrated public `statics` for
+`new`. It returns the existing `StaticFunctionType` descriptor only for fixed
+inputs, no flexible results, and one `is_named` or `is_record` result with the
+receiver's qualified name. It allocates no wrapper, resolves no module, and
+never invokes the constructor. Missing or incompatible constructors return
+nil. The rule is shared by JSON and portable protobuf; parameter-to-field
+mapping remains the serializer's policy.
+
 ## Value classification
 
 `inspect` dispatches on the Lua tag, then on a recognized userdata brand or
