@@ -275,9 +275,10 @@ argument data, and result and status storage. It then calls
 `async.run_foreign(lua_state_run_worker, call.packet, lua_state_release_abandoned)`
 through `LuaCall:run_worker`; the third argument is the
 [host-state-close release](#host-state-close-during-run_async).
-`lua_state_run_worker` resets the pool thread's
-[floating-point state](libuv-runtime.md#worker-floating-point-state) and then
-calls `lua_state_run`, which synchronous `run` calls directly. Result slots borrow strings
+`lua_state_run_worker` restores the pool thread's x87 precision on Windows
+([worker floating-point state](libuv-runtime.md#worker-floating-point-state);
+the call is empty on other targets) and then calls `lua_state_run`, which
+synchronous `run` calls directly. Result slots borrow strings
 from the rooted independent stack and own no further allocation, so freeing the
 single result buffer also handles a partially converted run.
 

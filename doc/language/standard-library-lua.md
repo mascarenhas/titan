@@ -231,10 +231,11 @@ and execute Titan modules initialized in that state, including running their
 own async Tasks and loop. Their module values, runtime, and GC objects belong
 to that state; they cannot access the hosting state's corresponding objects.
 C functions or modules used by the chunk must obey the same isolation and
-their own thread-safety contracts. Each job starts from the platform's default
-floating-point state, so `long double` keeps the main thread's precision on
-Windows too ([worker threads](windows-build.md#long-double-on-worker-threads));
-synchronous `run` keeps the calling thread's state.
+their own thread-safety contracts. A job computes `long double` at the main
+thread's precision: on Windows the worker restores x87 precision before each
+job, and other targets need no reset
+([worker threads](windows-build.md#long-double-on-worker-threads)).
+Synchronous `run` keeps the calling thread's floating-point state.
 
 For example, this complete Titan module requires Titan's string module in
 the independent state and calls it on a worker. The module can be found through

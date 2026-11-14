@@ -208,8 +208,10 @@ read or write.
 A pool thread keeps whatever state its previous job left, and on Windows a new
 thread starts with 53-bit x87 precision, so `long double` arithmetic there
 can be less precise than on the main thread. A worker that depends on it
-resets the state itself (on Windows, `_fpreset()` from `float.h`).
-`Lua:run_async`, `sqlite3` and `thread` reset it before each work item
+restores the precision itself (on Windows, `_fpreset()` from `float.h`).
+`Lua:run_async`, `sqlite3` and `thread` workers compute `long double` at the
+main thread's precision on every target: on Windows they restore x87
+precision before each work item, and other targets need no reset
 ([Windows worker threads](windows-build.md#long-double-on-worker-threads)).
 
 [`lua.Lua:run_async`](standard-library-lua.md#asynchronous-execution)

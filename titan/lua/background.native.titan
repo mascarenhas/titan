@@ -9,9 +9,9 @@ local function LuaCall:abandon_if_pending()
   self.owner.busy = false
 end
 
--- Pool threads keep whatever floating-point state the last job left, and
--- Windows starts them at reduced x87 precision. Synchronous run keeps the
--- caller's own state, so only this worker entry resets it.
+-- On Windows pool threads start at reduced x87 precision and keep the last
+-- job's floating-point state, so this worker entry restores the main thread's
+-- precision (other targets need no reset). Synchronous run keeps the caller's.
 local foreign function lua_state_run_worker(argument: *void)
   ffi.titan_worker_fp_reset()
   lua_state_run(argument)
