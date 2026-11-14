@@ -535,12 +535,21 @@ APIs called from a Lua chunk, not the typed `titan.io` and `titan.os` APIs.
 | `os.getenv` | reads the instance environment, initially empty (`HOME` is nil) |
 | `print`, `io.write`, `io.stdout`, `io.stderr` | send their bytes to the instance's copied output queues |
 | `os.clock()` | raises `os.clock is unavailable on the browser target (no process CPU-time clock)` |
-| `os.exit(code)` | delegates to an already loaded `titan.os.exit`; otherwise raises the unavailable error below |
+| `os.exit(code)` | loads a linked `titan.os` through Lua's normal loader and delegates to its exit request; otherwise raises the unavailable error below |
 
-Stock `os.exit` never calls C `exit()`. In an owner-state async Task it uses
-Titan's [exit request](standard-library-os.md#on-the-browser), mapping `true`
-to status 0 and `false` to status 1. Outside a Task it raises
+Stock `os.exit` never calls C `exit()`. When `titan.os` is linked, the first
+call loads it with Lua's normal `require` if necessary. This reuses the same
+per-state module and `stdin`, `stdout` and `stderr` instances as a native
+Titan import; it does not initialize them a second time. In an owner-state
+async Task it uses Titan's [exit request](standard-library-os.md#on-the-browser),
+mapping `true` to status 0 and `false` to status 1. Without a linked `titan.os`,
+or outside a Task, it raises
 `os.exit is unavailable outside an async Task on the browser target`.
 An independent state always raises that error, including after it requires
 `titan.os`: it cannot run a browser Task. Native stock Lua libraries are
 unchanged.
+
+Stock output retains C stdio buffering: `print` flushes at its newline, and
+`io.flush` flushes pending `io.write` bytes. A print flush can send the body
+and newline as separate copied chunks. Chunk boundaries are not print-call
+boundaries; binary bytes and their order with Titan writes are preserved.

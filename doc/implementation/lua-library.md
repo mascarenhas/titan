@@ -112,11 +112,16 @@ driver belongs to the original instance state.
 browser and an empty string on native targets. The one chunk replaces only
 stock `os.clock` and `os.exit`; filesystem, process, environment and stdio
 behavior comes from the existing Lua/libc build and launcher definitions.
-`os.clock` raises the no-CPU-clock diagnostic. `os.exit` consults
-`package.loaded["titan.os"]`, maps boolean statuses and delegates to Titan's
-exit request when available; otherwise it raises the outside-Task diagnostic.
-Requiring `titan.os` in a child does not grant driver ownership, so its
-`os.exit` still raises. It never reaches C `exit()`.
+`os.clock` raises the no-CPU-clock diagnostic. `os.exit` first consults
+`package.loaded["titan.os"]`. When that entry is absent but the linked
+`package.preload["titan.os"]` exists, it calls normal Lua `require`; loader
+errors propagate. The generated opener reuses the canonical per-state module
+userdata already created by a native import, without rerunning initialization
+or creating another stdin/stdout/stderr set. The profile maps boolean
+statuses and delegates to Titan's exit request. Without a linked module or
+an owner Task it raises the outside-Task diagnostic. Requiring `titan.os` in
+a child does not grant driver ownership, so its `os.exit` still raises. It
+never reaches C `exit()`.
 
 The [browser initializer](browser-target.md#the-browser-entrypoint) runs the
 same chunk immediately after `luaL_openlibs` and `titan_install_searcher`.
@@ -468,9 +473,16 @@ index is retained across an operation that can reallocate the stack.
 The `lua.tests` owner under `spec/stdlib/titan/lua/` runs on native and browser
 targets. Shared cases cover text and binary chunks, embedded zeros, borrowed
 Reader ownership, custom searchers, cache states, linked initialized imports,
-independent-state preload snapshots, scalar transfers, close and detach.
-Browser cases run the stock Lua profile in both state kinds and pin miss
-diagnostic order and immunity to `TITAN_PATH` changes.
+independent-state preload snapshots, close and detach. Transfer case bodies
+run through both `run` and a borrowed `run_from_loader`: scalars and binary
+strings, C functions and borrowed pointers, explicit policies, records,
+unions, custom record payloads, and closures. They check hook execution in
+the source and destination, native hook-error text, destination preload
+loading, captured cells, module globals, and survival after source close.
+Native `run_async` cases use the same assertions rather than duplicate them.
+Browser cases also check destination-stable stdin/stdout/stderr identities
+and repeated payload discard returning zero. The stock Lua profile runs in
+both state kinds, with fixed miss diagnostics immune to `TITAN_PATH` changes.
 
 Native-only contributors retain File-error descriptor accounting (through
 `titan_uv_test_stdio_open_fd_count`), asynchronous source loads, duplicate-load
@@ -482,3 +494,14 @@ Task, worker still running or already returned, and a SIGALRM-guarded child
 with four abandoned jobs while each child state has queued pool work. Direct
 `package` access and FIFO creation use
 `spec/stdlib/titan/lua/test_support.native.titan`.
+
+Embedding-sensitive public-state cases live in the
+[bridge and scheduler gates](browser-bridge.md#test-layers), not this plain
+owner. They cover bridge invalidation after explicit close, collection or
+detach followed by test-owned `lua_close`; non-owner driver and Task
+refusals; and stock Lua input, exit, environment and binary output with real
+embedding options. Stock exit checks the first normal Lua load against the
+native import's stable streams and buffered-output flush order. In the output
+case, short buffered `io.write` bytes share print's body chunk; the newline
+arrives as a second chunk at that flush. A later `io.flush` publishes the
+next buffered write before the following Titan write.

@@ -1,0 +1,46 @@
+local stream_os = import "os"
+
+local function check_parent_stream_transfers(run: IndependentRun)
+  local state = tlua.new()
+  defer state:close()
+  local input = async.TransferValue.from_value(stream_os.stdin)
+  local output = async.TransferValue.from_value(stream_os.stdout)
+  local errors = async.TransferValue.from_value(stream_os.stderr)
+  local returned: {async.TransferValue} = {run(state, [[
+    local input, output, errors = ...
+    local os = require('titan.os')
+    assert(input == os.stdin and output == os.stdout and errors == os.stderr,
+      'stream transfer did not resolve to destination stable streams')
+    assert(input ~= output and output ~= errors and errors ~= input)
+    return input, output, errors
+  ]], nil, input, output, errors)}
+  state:close()
+  test.assert(#returned == 3)
+  local restored_input: stream_os.InputStream = returned[1]:to_value()
+  local restored_output: stream_os.OutputStream = returned[2]:to_value()
+  local restored_errors: stream_os.OutputStream = returned[3]:to_value()
+  test.assert(restored_input == stream_os.stdin and
+    restored_output == stream_os.stdout and restored_errors == stream_os.stderr)
+  local packets = {input, output, errors}
+  for index = 1, #packets do
+    case packets[index]
+    when is_record_payload(module, name, payload) then
+      test.assert(module == "titan.os")
+      for _ = 1, 2 do
+        if index == 1 then
+          test.assert(name == "titan.os.InputStream")
+          test.assert(stream_os.InputStream.discard_transfer_payload(payload) == 0)
+        else
+          test.assert(name == "titan.os.OutputStream")
+          test.assert(stream_os.OutputStream.discard_transfer_payload(payload) == 0)
+        end
+      end
+    else raise "parent stream did not use its transfer payload hook"
+    end
+  end
+end
+
+function test_lua_independent_parent_streams_use_destination_identities(
+    context: test.Context)
+  with_independent_runners(context, check_parent_stream_transfers)
+end

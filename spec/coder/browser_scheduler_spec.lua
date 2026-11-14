@@ -140,7 +140,7 @@ describe("browser drive interface", function()
                 io.stdout:flush()
                 assert.is_true(result.ok, result.output)
                 assert.truthy(result.output:find('"verdict":"PASS"', 1, true), result.output)
-                assert.truthy(result.output:find('"gate":21', 1, true), result.output)
+                assert.truthy(result.output:find('"gate":22', 1, true), result.output)
                 assert.truthy(result.output:find('"crowd":2000', 1, true), result.output)
                 local streams = execute(info, engine, { "--js-test", fixture.source .. "/streams.mjs", "--", image })
                 io.stdout:write(string.format("\nSTREAMS assertions=%d engine=%s\n%s\n",
@@ -186,7 +186,7 @@ describe("browser drive interface", function()
                     assertions, engine, result.output))
                 io.stdout:flush()
                 assert.is_true(result.ok, result.output)
-                assert.truthy(result.output:find('OS-STREAMS {"verdict":"PASS","cases":66,"dialogs":0',
+                assert.truthy(result.output:find('OS-STREAMS {"verdict":"PASS","cases":77,"dialogs":0',
                     1, true), result.output)
             end
         end)
