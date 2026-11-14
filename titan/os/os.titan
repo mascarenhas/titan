@@ -14,10 +14,11 @@ foreign import "string.h"
 -- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 
--- Portable operating-system helpers. The low-level uv module owns native
--- resources plus portable current/CPU clock queries. The ISO C surface above
--- remains only for calendar, difference, formatting, and locale operations
--- that libuv does not provide; this facade exposes ordinary Titan values.
+-- The shared main keeps calendar, difference, formatting, and locale
+-- operations on the ISO C surface above, plus the stream records and the
+-- environment and exit facades. Target contributors supply clocks, the
+-- environment, exit, and parent streams: public uv on native targets, libc and
+-- SDK sources on the browser. Processes, signals, and host queries are native.
 
 --- Calendar date returned by date with the *t format.
 -- @field year Calendar year.

@@ -805,7 +805,10 @@ is refused with `TITAN_BROWSER_STATE`. A method that needs none still works:
 `notify` enqueues, and a `drain` with nothing to deliver succeeds. A queued
 notification that cannot get an identity when it is delivered is reported
 through `onNotificationError` with that same error, like any other
-notification failure.
+notification failure. Disposal's `async` Task cleanup also needs ordinary
+identities. With none left, disposal skips that cleanup but still closes the
+state with the reserved identity, and `dispose()` rejects with the
+`TITAN_BROWSER_STATE` error.
 
 Byte argument snapshots for `call`, `callable.call`, `notify` and `run` read
 native `Uint8Array` storage, including subarrays, subclasses and Node Buffers.
@@ -1293,9 +1296,9 @@ that the `async` driver uses but schedules nothing itself. See
 
 The other standard modules are absent from the browser target: `uv`,
 `fs`, `net`, `ssl`, `http`, `websocket`, `sqlite3`, and `thread`.
-Each of them uses libuv, directly or through its imports. Most have only
-native variants (such as
-`titan/fs.native.titan`; see [target source
+Each of them uses libuv, directly or through its imports. Each has only a
+native main, either a flat variant such as `titan/fs.native.titan` or a
+folder main such as `titan/uv/uv.native.titan` (see [target source
 selection](target-source-selection.md)), so a browser build finds no source and
 no browser archive for them. Their imports fail with the ordinary
 missing-module error:

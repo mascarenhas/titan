@@ -726,8 +726,10 @@ int titan_browser_call_sync(const titan_browser_identity *callable, uint32_t arg
   the slot its JavaScript wrapper also uses. `identity()` returns the
   `(state, slot, generation)` that C copies into a `titan_browser_identity`
   for the callback's user data. `close()` drops the hold; closing again does
-  nothing, and an unreachable pin closes itself. `pin` raises `"browser state
-  is closing"` while its state closes.
+  nothing, and an unreachable pin closes itself. After `close()`,
+  `identity()` reports slot 0 with the same state and generation, which names
+  no callable. `pin` raises `"browser state is closing"` while its state
+  closes.
 - Keep the pin and the identity's storage reachable, for example an `owned
   *titan_browser_identity` in a module variable, until the C callback is
   unregistered. Unregister it before closing the pin or releasing anything else

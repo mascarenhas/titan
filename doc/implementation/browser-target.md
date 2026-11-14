@@ -504,7 +504,8 @@ members.
 
 ### The dependency-closure check
 
-`scripts/browser_stdlib.lua` rejects libuv, OpenSSL, llhttp, and SQLite by
+`scripts/browser_stdlib.lua` rejects the eight browser-absent standard modules
+by Titan import and module identity, and libuv, OpenSSL, llhttp, and SQLite by
 path, by symbol, and through the evidence each certified input carries:
 
 * **Titan imports** (`check_sources`): logical source candidates below `titan/`
@@ -520,7 +521,6 @@ path, by symbol, and through the evidence each certified input carries:
   and archive member must not name any of those eight absent modules. A neutral
   member filename cannot hide one, while an unrelated application module such
   as `app.fs` is not mistaken for `titan.fs`.
-
 * **Paths** (`check_path`): a header named `uv.h`, `llhttp.h`, `sqlite3.h`, or
   `sqlite3ext.h`, or below a `uv`, `libuv`, `openssl`, `llhttp`, or `sqlite3`
   directory; and an archive named `libuv`, `libssl`, `libcrypto`,
@@ -700,26 +700,26 @@ does not register a second driver.
 
 | Module | Browser initialization | Source site |
 | --- | --- | --- |
-| `async` | Builds the nil-result caches and stores the bootstrap hook. The browser backend registers `titan:driver` only in the owner state; it performs no signal or process-argument setup. The launcher reads the same bootstrap registry key. | [`async.titan`](../../titan/async/async.titan#L4070-L4081), [`initialize_backend`](../../titan/async/runtime.browser.titan#L209-L216), [launcher lookup](../../titan-compiler/driver.lua#L10439-L10445) |
-| `timer` | Initializes optional source handles to nil; timeout and interval bindings are opened on first use. | [`timer.browser.titan`](../../titan/timer.browser.titan#L24-L42) |
+| `async` | Builds the nil-result caches and stores the bootstrap hook. The browser backend registers `titan:driver` only in the owner state; it performs no signal or process-argument setup. The launcher reads the same bootstrap registry key. | the module `do` block of [`async.titan`](../../titan/async/async.titan), `initialize_backend` in [`runtime.browser.titan`](../../titan/async/runtime.browser.titan), and the `TITAN_MAIN_BOOTSTRAP_KEY` lookup that `driver.browser_entrypoint_contents` generates ([`driver.lua`](../../titan-compiler/driver.lua)) |
+| `timer` | Initializes optional source handles to nil; timeout and interval bindings are opened on first use. | the source-handle variables of [`timer.browser.titan`](../../titan/timer.browser.titan) |
 | `io` | Imports the selected OS facade and string helpers; no explicit initializer or host operation. | [`io.titan`](../../titan/io.titan) |
-| `os` | Constructs stable parent facades and transfer descriptors, with empty lazy Stdio storage. Sources and kind metadata are acquired only by later stream operations. | [facades](../../titan/os/os.titan#L60-L68), [storage and lazy bindings](../../titan/os/stdio.browser.titan#L7-L119) |
-| `lua` | Creates its loading Map; creating and opening an independent state happens only in `new`, not at module load. The protected state opener installs the same stock profile and searcher as the launcher. | [module storage](../../titan/lua/lua.titan#L21-L24), [`new`](../../titan/lua/lua.titan#L310-L321), [state opener](../../titan/lua/worker.titan#L12-L41) |
-| `browser` | Allocates and registers its state record, callback thread and handlers. Both owner and independent states initialize without an embedding attach step; only the owner identifies itself as the driver owner. | [state allocation](../../titan/browser.browser.titan#L113-L114), [initializer](../../titan/browser.browser.titan#L1494-L1525) |
-| `math` | Seeds its generator. | [initializer](../../titan/math.titan#L571-L573) |
-| `transfer` | Installs protobuf packet-context and nominal-loader callbacks, configures ephemerons, and builds closure-field descriptors. | [initializer](../../titan/transfer.titan#L1390-L1401) |
-| `coroutine` | Allocates its per-state `mco_runtime` in module storage. | [module storage](../../titan/coroutine.titan#L11-L19) |
-| `reflect` | Initializes metatable, hydration, brand and tag tables. | [initializer](../../titan/reflect.titan#L1358-L1363) |
-| `json` | Builds its parsing pattern. | [initializer](../../titan/json/json.titan#L198-L200) |
-| `protobuf` | Retains the state's canonical nominal table, configures the payload ephemeron, and validates its codec handoff. | [initializer](../../titan/protobuf/protobuf.titan#L911-L933) |
-| `peg` | Opens one private LPegLabel engine for the state. | [initializer](../../titan/peg/peg.titan#L855-L857), [engine bootstrap](../../titan/peg/native.titan#L7-L18) |
-| `string` | Computes target facts, builds format and regex parsers and byte tables, and makes the regex cache weak. | [initializer](../../titan/string/string.titan#L972-L982) |
-| `url` | Builds its URL and request-target patterns. | [initializer](../../titan/url.titan#L443-L448) |
-| `path` | Selects the POSIX separator from the target macro, without querying a host path. | [initializer](../../titan/path.titan#L416-L419) |
-| `test` | Eagerly loads the Lua trace scanner and pattern matcher when the stock helpers are available. | [initializer](../../titan/test.titan#L664-L671) |
+| `os` | Constructs stable parent facades, binds them for adoption, and builds transfer descriptors, with empty lazy Stdio storage. Sources and kind metadata are acquired only by later stream operations. | `stdin`, `stdout` and `stderr` in [`os.titan`](../../titan/os/os.titan); `parent_streams`, the adoption facades, `Stdio:open_source` and `Stdio:kind` in [`stdio.browser.titan`](../../titan/os/stdio.browser.titan) |
+| `lua` | Creates its loading Map; creating and opening an independent state happens only in `new`, not at module load. The protected state opener installs the same stock profile and searcher as the launcher. | `loading` and `new` in [`lua.titan`](../../titan/lua/lua.titan); `lua_state_open_libraries` in [`worker.titan`](../../titan/lua/worker.titan) |
+| `browser` | Allocates and registers its state record, callback thread and handlers. Both owner and independent states initialize without an embedding attach step; only the owner identifies itself as the driver owner. | `state_record` and the module `do` block of [`browser.browser.titan`](../../titan/browser.browser.titan) |
+| `math` | Seeds its generator. | the module `do` block of [`math.titan`](../../titan/math.titan) |
+| `transfer` | Installs protobuf packet-context and nominal-loader callbacks, configures ephemerons, and builds closure-field descriptors. | the module `do` block of [`transfer.titan`](../../titan/transfer.titan) |
+| `coroutine` | Allocates its per-state `mco_runtime` in module storage. | the `runtime` variable of [`coroutine.titan`](../../titan/coroutine.titan) |
+| `reflect` | Initializes metatable, hydration, brand and tag tables. | the module `do` block of [`reflect.titan`](../../titan/reflect.titan) |
+| `json` | Builds its parsing pattern. | the module `do` block of [`json.titan`](../../titan/json/json.titan) |
+| `protobuf` | Retains the state's canonical nominal table, configures the payload ephemeron, and validates its codec handoff. | the module `do` block of [`protobuf.titan`](../../titan/protobuf/protobuf.titan) |
+| `peg` | Opens one private LPegLabel engine for the state. | the module `do` block of [`peg.titan`](../../titan/peg/peg.titan) and `_initialize_native` in [`native.titan`](../../titan/peg/native.titan) |
+| `string` | Computes target facts, builds format and regex parsers and byte tables, and makes the regex cache weak. | the module `do` block of [`string.titan`](../../titan/string/string.titan) |
+| `url` | Builds its URL and request-target patterns. | the module `do` block of [`url.titan`](../../titan/url.titan) |
+| `path` | Selects the POSIX separator from the target macro, without querying a host path. | the module `do` block of [`path.titan`](../../titan/path.titan) |
+| `test` | Eagerly loads the Lua trace scanner and pattern matcher when the stock helpers are available. | the module `do` block of [`test.titan`](../../titan/test.titan) |
 | `gc` | No explicit module initializer. | [`gc.titan`](../../titan/gc.titan) |
 | `iteration` | No explicit module initializer. | [`iteration.titan`](../../titan/iteration.titan) |
-| `uv`, `net`, `ssl`, `thread`, `sqlite3`, `websocket`, `fs`, `http` | No browser main is selected. Their imports and SDK module metadata are rejected by the closure checks. | [native-only mains](target-source-selection.md#make-inventories-and-audits), [selection policy](../../titan-compiler/source_selection.lua#L23-L34), [absence checks](../../scripts/browser_stdlib.lua) |
+| `uv`, `net`, `ssl`, `thread`, `sqlite3`, `websocket`, `fs`, `http` | No browser main is selected. Their imports and SDK module metadata are rejected by the closure checks. | [native-only mains](target-source-selection.md#make-inventories-and-audits), `selection.applies` in [`source_selection.lua`](../../titan-compiler/source_selection.lua), [absence checks](../../scripts/browser_stdlib.lua) |
 
 * **`math`.** The automatic seed has two components: `time(NULL) ~ clock()`
   and a value drawn from the generator with `next_random()`, and
@@ -886,7 +886,8 @@ purpose and assertions 2, and runs them through `gate.mjs` under
 `titan-browser-run --js-test` on Node and Chromium. The isolated fixture list
 comes from `BROWSER_STDLIB_ROOTS`; the emsdk-free inventory spec checks each
 fixture's direct imports, both combined fixtures, and the child-state module
-list against those same roots:
+list against those same roots, and requires the directory's `init_*.titan`
+files to be exactly those fixtures, so a stale one cannot go unbuilt:
 
 * `init_<module>.titan`, one for each of the nineteen delivered roots, imports
   only that module (and the `titan.test` runner every test image has) and must
@@ -3075,6 +3076,14 @@ acknowledges physical context retirement only; its numeric value is never
 application status. Neither completion arrival nor an intermediate safe point
 reopens public admission. Only a drive's parked relinquish gates start sinks
 inside an operation ([drives](#drives-the-call-queue-and-wake-sources)).
+
+Only close is reserved. Disposal's `async` shutdown is an ordinary `invoke`,
+and its cleanup drive delivers items with ordinary identities, so no fixed
+reservation could guarantee that cleanup completes. After exhaustion,
+`retireOwner`'s shutdown attempt fails at allocation without entering Wasm;
+close still runs with the reserved identity, and `dispose()` rejects with
+that `TITAN_BROWSER_STATE` failure. Reaching that point takes 2^64 - 2
+operations.
 
 `invokeTarget` boxes the single decoded result as `{value}` inside `operate` so
 that internal operation completion, `this.active` release, and `dispose()`
