@@ -151,6 +151,18 @@ static inline int titan_state_closing(lua_State *L) {
   return (G(L)->gcstp & GCSTPCLS) != 0;
 }
 
+/* Windows starts every new thread, libuv pool threads included, with x87
+** precision control at 53 bits; the MinGW CRT sets the main thread to 64.
+** Standard-library worker entries call this before each work item, so long
+** double keeps the main thread's precision. Other targets need nothing. */
+/* Implementation notes: doc/implementation/libuv-runtime.md#worker-floating-point-state */
+#if defined(_WIN32)
+#include <float.h>
+static inline void titan_worker_fp_reset(void) { _fpreset(); }
+#else
+static inline void titan_worker_fp_reset(void) {}
+#endif
+
 /* Continue an abandoned-coroutine unwind from the current frame: jump to the
 ** next finally boundary or coroutine floor on L's error-recovery chain,
 ** closing exhausted Lua coroutines on the way. Never returns. */

@@ -1132,6 +1132,16 @@ duplicating or adopting the handle
 ([parent standard streams](../language/standard-library-os.md#parent-standard-streams)).
 Connected TCP stdio (`kind() == "tcp"`) is a Linux and macOS feature.
 
+New Windows threads start with 53-bit x87 precision, and libuv pool threads
+keep their previous job's floating-point state. Titan's own worker entries
+(`Lua:run_async` jobs, SQLite operations and `titan.thread` threads) call
+`_fpreset` before each work item, so `long double` arithmetic there matches
+the main thread ([worker floating-point
+state](libuv-runtime.md#worker-floating-point-state)). A raw C entry passed to
+`async.run_foreign`, `uv.queue_work` or `uv.thread_create` keeps the thread's
+state; it calls `_fpreset` from `float.h` itself when it needs the main
+thread's precision.
+
 The shared tests still need Windows equivalents for the Unix file-descriptor
 leak inventory, FIFO-based accepted-open cancellation, and USR1/USR2 delivery
 fixtures. These are coverage gaps, not evidence that native file cancellation,

@@ -204,6 +204,14 @@ owner alive in the suspended caller, but the caller is still responsible for
 synchronization and must not concurrently access bytes that the worker may
 read or write.
 
+`run_foreign` does not change the worker thread's floating-point state either.
+A pool thread keeps whatever state its previous job left, and on Windows a new
+thread starts with 53-bit x87 precision, so `long double` arithmetic there
+can be less precise than on the main thread. A worker that depends on it
+resets the state itself (on Windows, `_fpreset()` from `float.h`).
+`Lua:run_async`, `sqlite3` and `thread` reset it before each work item
+([Windows worker threads](windows-build.md#long-double-on-worker-threads)).
+
 [`lua.Lua:run_async`](standard-library-lua.md#asynchronous-execution)
 is the explicit independent-state use of this boundary. Its worker exclusively
 owns a separate Lua state, and Lua or Titan code initialized there runs with

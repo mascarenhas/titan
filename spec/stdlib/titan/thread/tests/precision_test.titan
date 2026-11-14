@@ -1,0 +1,18 @@
+foreign import "float.h"
+
+-- Windows starts new threads at reduced x87 precision, where 1 + LDBL_EPSILON
+-- rounds to 1. Thread entries restore the main thread's precision first.
+function test_thread_long_double_precision_matches_the_main_thread(_context: test.Context)
+  local main_precise: foreign long double = (1 as foreign long double) + ffi.LDBL_EPSILON
+  local expected = main_precise ~= (1 as foreign long double)
+  test.assert(expected, "the main thread rounded 1 + LDBL_EPSILON to 1")
+  runtime_test.run(function ()
+    local worker = thread.spawn(function (): boolean
+      local precise: foreign long double = (1 as foreign long double) + ffi.LDBL_EPSILON
+      return precise ~= (1 as foreign long double)
+    end)
+    local ok, observed? = worker:join():has_succeeded()
+    test.assert(ok and observed == expected,
+      "a thread computed long double at a different precision than the main thread")
+  end)
+end

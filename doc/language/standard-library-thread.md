@@ -303,7 +303,9 @@ synchronously on the caller thread, and launch a dedicated OS worker thread. Any
 non-transferable capture or argument raises immediately in the caller before the
 OS thread starts.
 
-Inside the worker OS thread:
+Inside the worker OS thread, which first takes the platform's default
+floating-point state (so `long double` has the main thread's precision on
+Windows too; see [worker threads](windows-build.md#long-double-on-worker-threads)):
 
 1. `titan.thread` is loaded into the child state.
 2. An asynchronous `titan.async` Runtime is started with the reconstructed

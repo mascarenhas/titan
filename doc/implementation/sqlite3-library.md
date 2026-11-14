@@ -47,7 +47,8 @@ the loop thread.
 Each operation uses its own exact `foreign function (*void): void` entry. There is no
 second operation dispatcher or actor. Every submission calls that entry through
 the `sqlite_run_worker` trampoline, which adds only the
-[state-close handoff](#lua-state-close). `sqlite_copy_bytes` (`worker.titan`) always allocates
+[floating-point reset](libuv-runtime.md#worker-floating-point-state) before the
+entry and the [state-close handoff](#lua-state-close) after it. `sqlite_copy_bytes` (`worker.titan`) always allocates
 one extra terminator byte, including for an empty BLOB; binding lengths remain
 explicit and use `SQLITE_TRANSIENT`.
 

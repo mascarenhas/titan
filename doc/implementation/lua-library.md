@@ -272,9 +272,12 @@ the argument Array, the owned `titan_lua_value[]` inputs, and an embedded
 `titan_lua_call` packet. The packet carries the independent state, chunk bytes
 and length, the diagnostic name (`name or chunk`, passed as `const char *`),
 argument data, and result and status storage. It then calls
-`async.run_foreign(lua_state_run, call.packet, lua_state_release_abandoned)`
+`async.run_foreign(lua_state_run_worker, call.packet, lua_state_release_abandoned)`
 through `LuaCall:run_worker`; the third argument is the
-[host-state-close release](#host-state-close-during-run_async). Result slots borrow strings
+[host-state-close release](#host-state-close-during-run_async).
+`lua_state_run_worker` resets the pool thread's
+[floating-point state](libuv-runtime.md#worker-floating-point-state) and then
+calls `lua_state_run`, which synchronous `run` calls directly. Result slots borrow strings
 from the rooted independent stack and own no further allocation, so freeing the
 single result buffer also handles a partially converted run.
 

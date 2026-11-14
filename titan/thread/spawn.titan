@@ -639,7 +639,10 @@ local foreign function record_bootstrap_failure_native(
   end
 end
 
+-- Windows starts each thread at reduced x87 precision; begin from the CRT
+-- default, as the main thread does.
 local foreign function thread_worker_main(arg: *void)
+  ffi.titan_worker_fp_reset()
   local ctrl = arg as *titan_thread_control
   local state = ctrl.child_state
   if state ~= nil then

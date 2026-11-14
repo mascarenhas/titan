@@ -173,6 +173,19 @@ selects an external standalone LuaRocks executable. Close Titan consumers
 first; after a locked-file cleanup failure, close them, reinstall the rock to
 restore the command, and run it again.
 
+## Long double on worker threads
+
+Windows starts every new thread with 53-bit x87 precision, while a Titan
+program's main thread computes `long double` with 64-bit precision. Titan's
+own worker code restores the main thread's precision before each work item:
+[`Lua:run_async`](standard-library-lua.md#asynchronous-execution) jobs,
+[`sqlite3`](standard-library-sqlite3.md) operations, and
+[`thread`](standard-library-thread.md#standalone-os-threads) and `Group`
+threads. A raw C function that you pass to `async.run_foreign`, or to the
+public `uv.queue_work` and `uv.thread_create`, runs with the thread's current
+state; call `_fpreset()` from `float.h` at its start if it needs the main
+thread's precision.
+
 ## Validate an installation
 
 Use a separate validation SDK and local NTFS workspace. In the MSYS2 shell,

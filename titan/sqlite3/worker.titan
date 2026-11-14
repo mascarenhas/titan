@@ -474,8 +474,11 @@ end
 
 -- Every submission runs its operation through this trampoline, which then
 -- completes the state-close handoff. The packet's GC owner outlives this
--- call: Lua state close drains accepted work before freeing any object.
+-- call: Lua state close drains accepted work before freeing any object. Pool
+-- threads start at reduced x87 precision on Windows and keep a previous
+-- job's floating-point state, so each operation starts from the CRT default.
 local foreign function sqlite_run_worker(argument: *void)
+  ffi.titan_worker_fp_reset()
   local packet = argument as *TitanSqlitePacket
   local entry = packet.worker
   entry(argument)

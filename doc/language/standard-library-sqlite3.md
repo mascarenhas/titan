@@ -88,7 +88,10 @@ no URI option, read-only overload, busy timeout, or connection pool.
 The bundled build uses `SQLITE_THREADSAFE=1`, and each connection explicitly
 requests `SQLITE_OPEN_FULLMUTEX`. A Connection admits only one outstanding
 native operation. Overlap raises `Error` before submission. Independent
-Connections can run concurrently in libuv's shared worker pool.
+Connections can run concurrently in libuv's shared worker pool. Each operation
+starts from the platform's default floating-point state, so SQLite's
+`long double` arithmetic matches the main thread on Windows too
+([worker threads](windows-build.md#long-double-on-worker-threads)).
 
 `prepare` accepts exactly one SQL statement. Trailing whitespace, empty
 semicolons, and comments are allowed; empty/comment-only SQL, embedded NUL,
