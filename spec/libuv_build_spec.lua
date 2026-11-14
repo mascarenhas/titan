@@ -2998,14 +2998,17 @@ int main(void) {
                 "titan/async/async_signal_platform.h",
             }, makefile_words("ASYNC_TITAN_HEADERS"))
             assert.same({
-                "titan/os/os.titan", "titan/os/clock.native.titan",
-                "titan/os/environment.native.titan", "titan/os/process.native.titan",
-                "titan/os/stdio.native.titan",
+                "titan/os/os.titan",
+                "titan/os/clock.native.titan", "titan/os/clock.browser.titan",
+                "titan/os/environment.native.titan", "titan/os/environment.browser.titan",
+                "titan/os/process.native.titan", "titan/os/process.browser.titan",
+                "titan/os/stdio.native.titan", "titan/os/stdio.browser.titan",
             }, makefile_words("OS_TITAN_SOURCES"))
             assert.same({}, undeclared_folder_sources(
                 makefile_words("OS_TITAN_SOURCES"), "titan/os", "titan/os/"))
             assert.same({
                 "titan/os/os_platform.h", "titan/os/os_environment.h",
+                "titan/os/environment.browser.h",
             }, makefile_words("OS_TITAN_HEADERS"))
             assert.same({
                 "$(LPEGLABEL_ARCHIVE)",
@@ -3070,9 +3073,12 @@ int main(void) {
                 "titan/websocket/websocket.native.titan", "titan/websocket/handshake.titan",
                 "titan/websocket/connection.titan", "titan/websocket/frames.titan",
                 "titan/websocket/utf8.titan", "titan/websocket/native.titan",
-                "titan/os/os.titan", "titan/os/clock.native.titan",
-                "titan/os/environment.native.titan", "titan/os/process.native.titan",
-                "titan/os/stdio.native.titan", "titan/path.titan",
+                "titan/os/os.titan",
+                "titan/os/clock.native.titan", "titan/os/clock.browser.titan",
+                "titan/os/environment.native.titan", "titan/os/environment.browser.titan",
+                "titan/os/process.native.titan", "titan/os/process.browser.titan",
+                "titan/os/stdio.native.titan", "titan/os/stdio.browser.titan",
+                "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -3590,7 +3596,7 @@ int main(void) {
                 'check_status(uv.chdir(checked_path(path, "fs.chdir")), "fs.chdir")')
         end)
 
-    it("pins the public os process and stdio facade", function()
+    it("pins the public native os process and stdio facade", function()
         local expected = {
             "Date", "Date.new", "ExitStatus", "ExitStatus.new",
             "SpawnConfig", "SpawnOption",
@@ -3617,7 +3623,8 @@ int main(void) {
             "InputOutputStream.from_transfer_payload", "popen",
         }
         local actual = {}
-        for _, source in ipairs(makefile_words("OS_TITAN_SOURCES")) do
+        for _, source in ipairs(host_selected_sources(
+                makefile_words("OS_TITAN_SOURCES"))) do
             for _, name in ipairs(public_declarations(source)) do
                 actual[#actual + 1] = name
             end

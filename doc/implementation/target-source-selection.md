@@ -417,11 +417,14 @@ browser drops the native-only families. The browser-only
 family has only a `browser` member, so native targets select no main for
 `titan.browser`.
 
-`titan.os` has the shared main `titan/os/os.titan` with native and browser
-`clock`, `environment`, `process`, and `stdio` contributor families.
-`OS_TITAN_SOURCES` enumerates the main and all contributors, and
-`OS_TITAN_HEADERS` names their sibling headers. The complete shared
-`titan.io` facade imports the selected `os` composition.
+`titan.os` has the shared main `titan/os/os.titan`; its `clock`,
+`environment`, `process`, and `stdio` contributor families each have `native`
+and `browser` members. `OS_TITAN_SOURCES` enumerates the main and both
+members of every family. `OS_TITAN_HEADERS` names the two sibling native
+headers and the browser-only `environment.browser.h` declarations. Each
+target composes its matching four contributors. The complete shared
+`titan.io` facade has the flat main `titan/io.titan` and uses that target's
+`os` composition for its standard streams.
 
 `titan.lua` has the shared main `titan/lua/lua.titan` and `worker.titan`, native
 and browser `loading` contributors, and a native-only `background` family.

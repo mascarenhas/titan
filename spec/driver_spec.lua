@@ -13349,27 +13349,25 @@ describe("target-aware source resolver", function()
         end
     end)
 
-    it("composes titan.os from its shared main and native contributors", function()
+    it("composes titan.os from its shared main and the target's contributor members", function()
         for _, target in ipairs(driver.SOURCE_LABELS) do
+            local member = target == "browser" and "browser" or "native"
             local selected = assert(driver.resolve_source(context(target), "titan.os", stdlib_root))
             assert.equal("folder", selected.kind, target)
             assert.equal(stdlib_root .. "/titan/os/os.titan", paths.to_slash(selected.main), target)
             assert.equal(selected.main, selected.native_output, target)
             local files = {}
             for index, filename in ipairs(selected.files) do files[index] = paths.basename(filename) end
-            assert.same(target == "browser" and { "os.titan" } or {
-                "os.titan", "clock.native.titan", "environment.native.titan",
-                "process.native.titan", "stdio.native.titan",
+            assert.same({
+                "os.titan", "clock." .. member .. ".titan",
+                "environment." .. member .. ".titan", "process." .. member .. ".titan",
+                "stdio." .. member .. ".titan",
             }, files, target)
             for _, part in ipairs({ "clock", "environment", "process", "stdio" }) do
                 local blocked = driver.resolve_source(context(target), "titan.os." .. part, stdlib_root)
-                if target == "browser" then
-                    assert.is_nil(blocked, part)
-                else
-                    assert.equal("blocked", assert(blocked, part).kind, part)
-                    assert.equal(stdlib_root .. "/titan/os/" .. part .. ".native.titan",
-                        paths.to_slash(blocked.contributor), target .. " " .. part)
-                end
+                assert.equal("blocked", assert(blocked, part).kind, part)
+                assert.equal(stdlib_root .. "/titan/os/" .. part .. "." .. member .. ".titan",
+                    paths.to_slash(blocked.contributor), target .. " " .. part)
             end
         end
     end)
