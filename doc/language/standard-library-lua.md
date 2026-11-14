@@ -546,8 +546,10 @@ mapping `true` to status 0 and `false` to status 1. Without a linked `titan.os`,
 or outside a Task, it raises
 `os.exit is unavailable outside an async Task on the browser target`.
 An independent state always raises that error, including after it requires
-`titan.os`: it cannot run a browser Task. Native stock Lua libraries are
-unchanged.
+`titan.os`: it cannot run a browser Task. Both replacements keep the `error`,
+`require`, `package.loaded` and `package.preload` values present when the
+state opened, so later reassignment of those globals does not change them.
+Native stock Lua libraries are unchanged.
 
 Stock output retains C stdio buffering: `print` flushes at its newline, and
 `io.flush` flushes pending `io.write` bytes. A print flush can send the body

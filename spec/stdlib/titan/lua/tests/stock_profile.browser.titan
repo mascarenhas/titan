@@ -72,6 +72,31 @@ function test_lua_browser_stock_filesystem_failures(context: test.Context)
     local ok, message = pcall(os.exit, false)
     assert(not ok and message == 'os.exit is unavailable outside an async Task on the browser target')
   ]])
+  -- An image that does not link titan.os publishes no preload loader for it.
+  stock_profile_case(context, "exit_without_linked_titan_os", [[
+    local loaded, preload = package.loaded['titan.os'], package.preload['titan.os']
+    package.loaded['titan.os'], package.preload['titan.os'] = nil, nil
+    local ok, message = pcall(os.exit, true)
+    local loaded_by_exit = package.loaded['titan.os']
+    package.loaded['titan.os'], package.preload['titan.os'] = loaded, preload
+    assert(not ok and message == 'os.exit is unavailable outside an async Task on the browser target',
+      'stock exit without a titan.os loader did not raise the unavailable error')
+    assert(loaded_by_exit == nil, 'stock exit loaded titan.os without a published loader')
+  ]])
+  -- The profile captured these when it was installed.
+  stock_profile_case(context, "replaced_globals", [[
+    local saved_require, saved_package, saved_error = require, package, error
+    require, package, error = nil, nil, nil
+    local clock_ok, clock_message = pcall(os.clock)
+    local exit_ok, exit_message = pcall(os.exit, false)
+    require, package, error = saved_require, saved_package, saved_error
+    assert(not clock_ok and
+      clock_message == 'os.clock is unavailable on the browser target (no process CPU-time clock)',
+      'stock clock depends on the global error: ' .. tostring(clock_message))
+    assert(not exit_ok and
+      exit_message == 'os.exit is unavailable outside an async Task on the browser target',
+      'stock exit depends on replaceable globals: ' .. tostring(exit_message))
+  ]])
 end
 
 function test_lua_browser_require_misses_ignore_provider_environment(_: test.Context)

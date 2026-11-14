@@ -112,9 +112,13 @@ driver belongs to the original instance state.
 browser and an empty string on native targets. The one chunk replaces only
 stock `os.clock` and `os.exit`; filesystem, process, environment and stdio
 behavior comes from the existing Lua/libc build and launcher definitions.
-`os.clock` raises the no-CPU-clock diagnostic. `os.exit` first consults
-`package.loaded["titan.os"]`. When that entry is absent but the linked
-`package.preload["titan.os"]` exists, it calls normal Lua `require`; loader
+The chunk first binds `error`, `package.loaded`, `package.preload` and
+`require` to locals, so its closures behave like C functions: replacing those
+globals later changes neither replacement. Lua's own `require` reads the same
+registry tables, so the captured tables are the ones it uses.
+`os.clock` raises the no-CPU-clock diagnostic. `os.exit` first consults the
+loaded table's `titan.os` entry. When that entry is absent but the linked
+preload loader exists, it calls the captured `require`; loader
 errors propagate. The generated opener reuses the canonical per-state module
 userdata already created by a native import, without rerunning initialization
 or creating another stdin/stdout/stderr set. The profile maps boolean
@@ -482,7 +486,9 @@ loading, captured cells, module globals, and survival after source close.
 Native `run_async` cases use the same assertions rather than duplicate them.
 Browser cases also check destination-stable stdin/stdout/stderr identities
 and repeated payload discard returning zero. The stock Lua profile runs in
-both state kinds, with fixed miss diagnostics immune to `TITAN_PATH` changes.
+both state kinds, including exit without a published `titan.os` loader and
+both replacements after `require`, `package` and `error` are cleared, with
+fixed miss diagnostics immune to `TITAN_PATH` changes.
 
 Native-only contributors retain File-error descriptor accounting (through
 `titan_uv_test_stdio_open_fd_count`), asynchronous source loads, duplicate-load
