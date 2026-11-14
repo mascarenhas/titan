@@ -577,6 +577,12 @@ Missing input and undeclared kinds raise `async.OperationError` with code
 The member is `os.InputStream.read`, `os.InputStream.read_until`,
 `os.InputStream.kind`, or `os.OutputStream.kind`, respectively.
 
+The [transfer payloads](#transferring-process-streams) of these streams carry
+only the descriptor. Adoption returns the receiving state's own `stdin`,
+`stdout`, or `stderr` record, even after a module variable was reassigned, and
+applies the same refusals as on native targets: standard input that has
+started reading, and output with an accepted write or shutdown still pending.
+
 Explicit instance disposal is not graceful Runtime exit: waiting writers and
 their cleanup writes receive the sticky `"instance disposed"` cancellation.
 Already called sinks cannot be recalled. See the

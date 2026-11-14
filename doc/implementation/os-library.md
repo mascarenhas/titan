@@ -83,10 +83,13 @@ excess, so a later Runtime sees none of its predecessor's input state.
 The source handle and declared kind remain state-owned. Parent `close()` has
 no Task requirement and does nothing to those resources.
 
-Parent transfer hooks use the native descriptor payload schemas. They return
-the receiving state's stable stream records, reject active input or pending
-output, and release no resource when discarding a valid parent payload.
-There is no browser captured-stream adoption path.
+Parent transfer hooks use the native descriptor payload schemas. Adoption
+returns the facade records that the contributor bound at module
+initialization, not the assignable `stdin`/`stdout`/`stderr` variables, so a
+state keeps one facade per descriptor and the read-state reset above always
+reaches it. The hooks reject active input or pending output, and discarding a
+valid parent payload releases nothing. There is no browser captured-stream
+adoption path.
 
 The browser error constructor uses negated libc errno values and the native
 libuv names/messages. Host failure callbacks use `browser.failure_text` to
