@@ -69,7 +69,7 @@ describe("browser stdlib initialization and byte fidelity gate", function()
             assert.truthy(log:find('"verdict":"PASS"', 1, true), log)
             assert.truthy(log:find('"subsetInitializeRunDisposeCycles":3', 1, true), log)
             assert.truthy(log:find('"independentStateRoots":' .. #modules, 1, true), log)
-            assert.truthy(log:find('"asyncBootstrap":"enabled"', 1, true), log)
+            assert.truthy(log:find('"bootstrapLinkedInitializer":"images/init_async_bootstrap.mjs"', 1, true), log)
         end
         io.stdout:write(string.format("STDLIB GATE wall-seconds=%d images=%d engines=2\n",
             os.time() - started, #modules + 4))

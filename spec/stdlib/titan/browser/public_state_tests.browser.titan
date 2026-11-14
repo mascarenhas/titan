@@ -79,7 +79,7 @@ local function close_public_detached(...: Value): Value
   if public_detached_state ~= nil then
     local state = public_detached_state
     public_detached_state = nil
-    ffi.lua_close(state)
+    ffi.titan_bridge_test_close_detached(state)
   end
   return Value.is_nil()
 end

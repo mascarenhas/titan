@@ -70,7 +70,8 @@ local function tracked_lines(...: Value): Value
     elseif mode == "read-error" then
       test.assert(error is async.OperationError, "io.lines replaced a read error")
       local failure: async.OperationError = error
-      test.assert(failure.operation == "stdio.read" and failure.name == "EIO")
+      test.assert(failure.operation == "stdio.read" and failure.name == "EIO",
+        "io.lines changed the read error's fields")
     else
       raise
     end
@@ -86,7 +87,8 @@ local function read_delimiter(...: Value): Value
   test.assert(system.stdin:read_until("<->", true) == "ab", "split delimiter changed")
   test.assert(system.stdin:read_until("<->", true) == "cd", "delimiter excess was lost")
   test.assert(system.stdin:read() == "tail", "read did not receive delimiter excess")
-  test.assert(system.stdin:read() == nil and system.stdin:read() == nil)
+  test.assert(system.stdin:read() == nil and system.stdin:read() == nil,
+    "stdin EOF after delimited reads is not sticky")
   return Value.is_boolean(true)
 end
 
@@ -111,7 +113,7 @@ local function cancelled_reader_handoff(...: Value): Value
   end
   note("reader-retired")
   test.assert(system.stdin:read() == "late\0\255", "cancelled reader lost its pending chunk")
-  test.assert(system.stdin:read() == nil)
+  test.assert(system.stdin:read() == nil, "the successor read did not reach EOF")
   return Value.is_boolean(true)
 end
 
@@ -129,7 +131,8 @@ local function contending_readers(...: Value): Value
 end
 
 local function read_eof(...: Value): Value
-  test.assert(system.stdin:read() == nil and system.stdin:read() == nil)
+  test.assert(system.stdin:read() == nil and system.stdin:read() == nil,
+    "stdin EOF is not sticky")
   return Value.is_boolean(true)
 end
 
@@ -145,7 +148,8 @@ local function missing_input(...: Value): Value
   local until_message = expect_operation(function () system.stdin:read_until("\n", true) end,
     "os.InputStream.read_until", "ENOSYS")
   test.assert(read_message == "os.InputStream.read is unavailable on the browser target" and
-    until_message == "os.InputStream.read_until is unavailable on the browser target")
+    until_message == "os.InputStream.read_until is unavailable on the browser target",
+    "missing input raised a different unavailable message")
   return Value.is_boolean(true)
 end
 

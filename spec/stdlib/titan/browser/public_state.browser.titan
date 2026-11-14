@@ -26,7 +26,8 @@ function prepare(index: integer): integer
   end
   local pin = browser.pin(callback)
   local state, slot, generation = pin:identity()
-  test.assert(state > 0 and slot > 0 and generation > 0)
+  test.assert(state > 0 and slot > 0 and generation > 0,
+    "a live public pin has a zero state, slot or generation")
   pin:close()
   pin:close()
   local same_state, closed_slot, same_generation = pin:identity()

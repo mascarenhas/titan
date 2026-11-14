@@ -192,7 +192,8 @@ local function declared_kinds(...: Value): Value
     test.assert(target:kind() == expected and target:is_tty() == (expected == "tty"),
       "output kind or TTY changed")
   end
-  return Value.is_string(expected)
+  -- The driver compares this observation, not its own argument echoed back.
+  return Value.is_string(system.stdout:kind())
 end
 
 local function undeclared_kinds(...: Value): Value
@@ -215,7 +216,7 @@ local function invalid_kind(...: Value): Value
     elseif name == "stdoutKind" then
       system.stdout:kind()
     else
-      test.assert(name == "stderrKind")
+      test.assert(name == "stderrKind", "invalid_kind received an unknown option name")
       system.stderr:kind()
     end
   catch

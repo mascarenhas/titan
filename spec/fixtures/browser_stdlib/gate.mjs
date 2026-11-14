@@ -62,8 +62,10 @@ export async function run(context) {
     passed(await execute(await context.image(path)));
     emit({isolatedInitializer: path, passed: 1});
   }
+  // The build links this image with the async bootstrap; the gate observes
+  // only that it initializes and passes like the isolated images.
   passed(await execute(await context.image(bootstrapPath)));
-  emit({asyncBootstrap: "enabled", passed: 1});
+  emit({bootstrapLinkedInitializer: bootstrapPath, passed: 1});
   const child = await execute(await context.image(childPath));
   passed(child);
   context.assert(occurrences(child.stdout, text("independent-state roots=" + rootCount)) === 1,

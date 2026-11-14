@@ -166,6 +166,14 @@ plan:
         for _, root in ipairs(roots) do
             assert.same({ ["titan.test"] = true, [root] = true }, imports("init_" .. root:sub(7)))
         end
+        -- The directory holds no initializer fixture that the gate would skip.
+        local expected, present = { init_subset = true, init_lua_states = true }, {}
+        for _, root in ipairs(roots) do expected["init_" .. root:sub(7)] = true end
+        for _, name in ipairs(assert(strategy:list("spec/fixtures/browser_stdlib"))) do
+            local fixture = name:match("^(init_[%w_]+)%.titan$")
+            if fixture then present[fixture] = true end
+        end
+        assert.same(expected, present)
         assert.same(wanted, imports("init_subset"))
         assert.same(wanted, imports("init_lua_states"))
         local filename = "spec/fixtures/browser_stdlib/init_lua_states.titan"

@@ -1,6 +1,6 @@
 local test = import "test"
-local timerlib = import "timer"
+local subject = import "timer"
 
-function test_initializer_completed(_: test.Context)
-  test.assert(test.testing(), "timer initialized without an active runner")
+function test_initializer_completed(_context: test.Context)
+  test.assert(test.testing(), "timer initializer did not reach its test")
 end

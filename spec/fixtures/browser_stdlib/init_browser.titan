@@ -1,6 +1,6 @@
 local test = import "test"
-local browserlib = import "browser"
+local subject = import "browser"
 
-function test_initializer_completed(_: test.Context)
-  test.assert(test.testing(), "browser initialized without an active runner")
+function test_initializer_completed(_context: test.Context)
+  test.assert(test.testing(), "browser initializer did not reach its test")
 end

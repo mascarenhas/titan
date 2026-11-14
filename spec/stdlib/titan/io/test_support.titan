@@ -1,9 +1,8 @@
--- Exact stdout and Lua conversion probes for io.tests.
+-- Exact stdout capture for io.tests' native printing cases.
 local test = import "test"
 foreign import "titan/ffi.h"
 foreign import "stdio.h"
 foreign import "lua.h"
-foreign import "lauxlib.h"
 foreign import "print_capture.h"
 
 local function begin_stdout_capture(): (integer, integer)

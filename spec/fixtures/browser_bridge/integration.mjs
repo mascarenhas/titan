@@ -1901,7 +1901,7 @@ async function publicStates(context, image) {
         retired.length === allocated.length && allocated.every(item =>
           retired.filter(other => other.slot === item.slot && other.generation === item.generation).length === 1),
         `${mode}: handle/request slots were not retired exactly once by identity`);
-      context.assert(registered.length > 0 && invalidated.length === registered.length &&
+      context.assert(registered.length === 1 && invalidated.length === registered.length &&
         registered.every(item => invalidated.filter(other => other.key === item.key).length === 1),
         `${mode}: host callable records were not invalidated exactly once`);
       const units = observations.units.filter(item => item.state === token);
