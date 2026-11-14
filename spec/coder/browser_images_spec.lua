@@ -175,8 +175,10 @@ describe("browser stock Lua initialization", function()
         local called = assert(browser:find("lua_call(L, 0, 0);", profile, true))
         local root = assert(browser:find('lua_pushliteral(L, "profile_app");', called, true))
         assert.is_true(opened < searcher and searcher < profile and profile < called and called < root)
-        assert.is_nil(driver.entrypoint_contents("profile_app", "profile-app"):find(
-            "TITAN_LUA_BROWSER_PROFILE", 1, true))
+        -- Windows entrypoints name their provider; other targets ignore it.
+        local native = driver.entrypoint_contents("profile_app", "profile-app",
+            { provider = "profile_app.dll" })
+        assert.is_nil(native:find("TITAN_LUA_BROWSER_PROFILE", 1, true))
     end)
 end)
 
