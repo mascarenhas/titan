@@ -769,6 +769,23 @@ fixture wraps `malloc` to fail one call).
 Initializer failure has a separate real Titan image with a
 suspended cleanup coroutine and `main` error-conversion checks.
 
+The same gate uses a separate ordinary owner, `browser.public_state_tests`,
+to create children through public `lua.new`. Its image imports Lua and thus
+registers async's owner driver; the legacy C-state image retains its original
+no-driver composition and operation-identity exhaustion checks. A child loads
+`browser.public_state` through its preload snapshot, creates handles and
+requests, and publishes a callable. Explicit close, wrapper collection, and
+detach followed by test-owned `lua_close` each discard a queued notification
+and request settlement; late settlement and later wrapper calls are refused
+before Lua entry. Detach first leaves calls and notification delivery live.
+Fixture-only JavaScript instrumentation counts every host callable record,
+handle/request slot identity and ownership unit through retirement, including
+duplicate-free checks. These are host callable-record counts, not observations
+of Titan's private pin table. Public pins and close idempotence are checked
+while the child is live. An earlier object's finalizer then verifies inert
+handle, request and pin closes followed by a binding-error warning. The parent
+and another public child remain usable, and instance disposal succeeds.
+
 Drives themselves are exercised by `spec/coder/browser_scheduler_spec.lua`
 with the fixture `spec/fixtures/browser_scheduler/`: a test-owned mini driver
 (`mini_driver.titan`) runs "jobs" in place of Tasks over the drive interface
@@ -819,6 +836,13 @@ Titan cases (Tasks over host requests across hundreds of turns, inline
 registrations, cleanup under cancellation, fatal and ordinary failures,
 combinators, channels and a listener-fed subscription, nested coroutines,
 child-state refusals, the `timer` cases, and the synchronous-callback cases).
+- **Public-state ownership:** the same child refusal module loads through
+  `lua.new`, with no owner Runtime and with an owner request held pending.
+  `async.loop` and Task creation refuse, including calls from an owner Task;
+  synchronous child computation still succeeds. Initializing the child while
+  an owner notification is queued does not deliver it or replace the driver:
+  owner request completion, notification delivery, and later Task-form calls
+  keep progressing.
 - **Timer cases:** sleeps mixed with host requests, and zero delays and yields
   that resume in a later browser task, shown by a marker armed on the driver's
   turn source having run. Sleeps, tickers and a ticker left open past its
@@ -878,6 +902,19 @@ completion, cancellation, disposal and graceful exit, C-stdio ordering and
 failure latching, shutdown and kind errors, input buffering and reader
 ownership, line-iterator cleanup, wall time, calendars, and C/Titan environment
 agreement. Both engines run both assertion builds.
+
+Stock Lua cases repeat input, environment and output checks in the owner and
+in public `lua.new` states. Configured embedding input is never consumed by
+`io.read` or `io.stdin:read`: both return errors, not EOF, with no prompt.
+Stock `os.getenv` sees embedding values and later Titan environment changes.
+Short buffered binary `io.write` bytes share print's body chunk, followed by a
+separate newline chunk at print's flush. A later `io.write` flushes at explicit
+`io.flush`, in order between Titan writes. Stock `os.exit(3)`, `os.exit(true)`
+and `os.exit(false)` inside the owner bootstrap Task produce `run()` exit
+statuses 3, 0 and 1; all three remain unavailable in a child state. First stock
+exit resolves the linked OS module through normal Lua loading, preserving
+the native import's three stream identities and native-exit flush ordering.
+
 Disposal preserves native cancellation precedence: admitted writers and new
 cleanup writes observe the nominal `instance disposed` cancellation, while
 their public Task-form calls reject `TITAN_BROWSER_DISPOSED`. The disposal case

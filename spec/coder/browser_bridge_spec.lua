@@ -66,12 +66,15 @@ describe("persistent core JavaScript bridge", function()
                 repository .. "/spec/fixtures/browser_bridge/independent_states.c", true)
             local failure = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "initializer_failure", "initializer-failure", false)
+            local public = build(info, assertions, repository .. "/spec/stdlib/titan",
+                "browser.public_state_tests", "public-states", true,
+                repository .. "/spec/fixtures/browser_bridge/independent_states.c", true)
             local counter = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "counter", "counter", false)
             local responsive = build(info, assertions, repository .. "/spec/fixtures/browser_bridge",
                 "responsive", "responsive", false)
             for _, engine in ipairs({ "node", "chromium" }) do
-                local result = execute(info, engine, "integration.mjs", { native, failure })
+                local result = execute(info, engine, "integration.mjs", { native, failure, public })
                 io.stdout:write(string.format("\nBRIDGE assertions=%d engine=%s node=%s chrome=%s\n%s\n",
                     assertions, engine, info.node.version, info.chrome.version, result.output))
                 io.stdout:flush()
