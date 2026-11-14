@@ -1,0 +1,117 @@
+local browser_os = import "os"
+
+local function stock_profile_case(context: test.Context, name: string, source: string)
+  context:run(name, function (_: test.Context)
+    local chunk = [[
+      local function failure(operation)
+        local values = table.pack(pcall(operation))
+        if not values[1] then
+          assert(type(values[2]) == 'string')
+        else
+          assert(values[2] == nil and type(values[3]) == 'string' and
+                 type(values[4]) == 'number')
+        end
+      end
+    ]] .. source .. "\nreturn true"
+    test.assert(tlua.load(chunk, "=browser-stock-" .. name)() == true)
+    local state = tlua.new()
+    defer state:close()
+    assert_transfer_boolean(state:run(chunk, "=browser-state-stock-" .. name), true)
+  end)
+end
+
+function test_lua_browser_stock_filesystem_failures(context: test.Context)
+  stock_profile_case(context, "io_open", "failure(function() return io.open('x', 'r') end)")
+  stock_profile_case(context, "io_lines", "failure(function() return io.lines('x') end)")
+  stock_profile_case(context, "io_input", "failure(function() return io.input('x') end)")
+  stock_profile_case(context, "io_output", "failure(function() return io.output('x') end)")
+  stock_profile_case(context, "io_tmpfile", "failure(io.tmpfile)")
+  stock_profile_case(context, "os_remove", "failure(function() return os.remove('x') end)")
+  stock_profile_case(context, "os_rename", "failure(function() return os.rename('x', 'y') end)")
+  stock_profile_case(context, "os_tmpname", "failure(os.tmpname)")
+  stock_profile_case(context, "dofile", "failure(function() return dofile('x') end)")
+  stock_profile_case(context, "loadfile", [[
+    local result, message, extra = loadfile('x')
+    assert(result == nil and type(message) == 'string' and extra == nil)
+  ]])
+  stock_profile_case(context, "io_popen", "failure(function() return io.popen('x') end)")
+  stock_profile_case(context, "os_execute", [[
+    failure(function() return os.execute('x') end)
+    assert(os.execute() == false)
+  ]])
+  stock_profile_case(context, "io_read", [[
+    local result, message, code = io.read()
+    assert(result == nil and type(message) == 'string' and type(code) == 'number')
+  ]])
+  stock_profile_case(context, "io_stdin_read", [[
+    local result, message, code = io.stdin:read()
+    assert(result == nil and type(message) == 'string' and type(code) == 'number')
+  ]])
+  stock_profile_case(context, "package_loadlib", [[
+    local result, message, where = package.loadlib('x', 'y')
+    assert(result == nil and type(message) == 'string' and where == 'absent')
+  ]])
+  stock_profile_case(context, "package_paths", [[
+    assert(type(package.path) == 'string' and type(package.cpath) == 'string')
+    local result, message = package.searchpath('definitely_missing', package.path)
+    assert(result == nil and type(message) == 'string')
+    result, message = package.searchpath('definitely_missing', package.cpath)
+    assert(result == nil and type(message) == 'string')
+  ]])
+  stock_profile_case(context, "environment", "assert(os.getenv('HOME') == nil)")
+  stock_profile_case(context, "clock", [[
+    local ok, message = pcall(os.clock)
+    assert(not ok and message == 'os.clock is unavailable on the browser target (no process CPU-time clock)')
+  ]])
+  stock_profile_case(context, "exit", [[
+    local ok, message = pcall(os.exit)
+    assert(not ok and message == 'os.exit is unavailable outside an async Task on the browser target')
+  ]])
+  stock_profile_case(context, "exit_with_titan_os", [[
+    require('titan.os')
+    local ok, message = pcall(os.exit, false)
+    assert(not ok and message == 'os.exit is unavailable outside an async Task on the browser target')
+  ]])
+end
+
+function test_lua_browser_require_misses_ignore_provider_environment(_: test.Context)
+  local name = "lua.tests.browser_missing"
+  local source = "no source search: the browser target has no filesystem"
+  local provider = "no Titan provider search: the browser target has no dynamic providers"
+  local miss = function (): string
+    tlua.require(name)
+    raise "missing module unexpectedly loaded"
+  catch
+    return error as string
+  end
+  local before = miss()
+  local previous? = browser_os.getenv("TITAN_PATH")
+  local versioned? = browser_os.getenv("TITAN_PATH_0_6")
+  defer do
+    if previous ~= nil then browser_os.setenv("TITAN_PATH", previous)
+    else browser_os.unsetenv("TITAN_PATH") end
+    if versioned ~= nil then browser_os.setenv("TITAN_PATH_0_6", versioned)
+    else browser_os.unsetenv("TITAN_PATH_0_6") end
+  end
+  browser_os.setenv("TITAN_PATH", "/browser/provider/one")
+  browser_os.setenv("TITAN_PATH_0_6", "/browser/provider/two")
+  test.assert(miss() == before, "browser provider search read the environment")
+  local check = tlua.load([[
+    return function(message, source, provider)
+      local preload = assert(message:find("no field package.preload['lua.tests.browser_missing']", 1, true))
+      local source_at = assert(message:find(source, 1, true))
+      local c_at = assert(message:find('no file', source_at, true))
+      local provider_at = assert(message:find(provider, 1, true))
+      assert(preload < source_at and source_at < c_at and c_at < provider_at)
+    end
+  ]])() as function (string, string, string): ()
+  check(before, source, provider)
+  local state = tlua.new()
+  defer state:close()
+  local result = state:run([[
+    local ok, message = pcall(require, 'lua.tests.browser_missing')
+    assert(not ok and message:find('no Titan provider search: the browser target has no dynamic providers', 1, true))
+    return true
+  ]])
+  assert_transfer_boolean(result, true)
+end

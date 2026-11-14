@@ -257,7 +257,7 @@ image, and the target cache is not stale-handle or dangling-borrow protection.
 C-only calls after state close require the
 [provider image to remain mapped](foreign-functions.md#source-collaboration-and-binary-isolation).
 
-The independent-state fixture (`spec/stdlib/titan/lua/receiver_fixture.titan`)
+The independent-state fixture (`spec/stdlib/titan/lua/receiver_fixture.native.titan`)
 exercises the GC detach during `lua_close` by registering its loop-cleanup
 finalizer before constructing the wake, so reverse finalization detaches the
 wake first. It asserts that `reserve` returns `EINVAL` before closing the handle,

@@ -1,0 +1,57 @@
+-- Implementation notes: doc/implementation/lua-library.md#host-state-close-during-run_async
+-- Lua state close unwinds a Task parked here without completing the wait, and
+-- catch never runs during that unwind, so `pending` stays set. run_foreign
+-- then hands the independent state to lua_state_release_abandoned, which the
+-- host Runtime runs after its worker returns; the wrapper behaves as closed.
+local function LuaCall:abandon_if_pending()
+  if not self.pending then return end
+  self.owner.handle = nil
+  self.owner.busy = false
+end
+
+local function LuaCall:run_worker()
+  self.pending = true
+  defer self:abandon_if_pending()
+  do
+    async.run_foreign(lua_state_run, self.packet, lua_state_release_abandoned)
+  catch
+    self.pending = false
+    raise
+  end
+  self.pending = false
+end
+
+--- Execute Lua or required Titan code on a worker while other Tasks continue.
+-- @usage standard-library-lua.md#asynchronous-execution
+function Lua:run_async(chunk: string, name: string?, ...: async.TransferValue):
+    (...: async.TransferValue)
+  local call = self:prepare_call(chunk, name, {...})
+  self:reserve()
+  call.stack_top = ffi.lua_gettop(self.handle)
+  defer call:finish()
+  call:prepare()
+  call:run_worker()
+  return ...call:values()
+end
+
+--- Drain a borrowed Reader, then execute its bytes on a worker.
+-- @usage standard-library-lua.md#asynchronous-execution
+function Lua:run_async_from_loader(reader: io.Reader, name: string?,
+                                         ...: async.TransferValue): (...: async.TransferValue)
+  local builder = string.writer()
+  for chunk in reader:read do builder:write(chunk) end
+  return self:run_async(builder:drain(), name, ...)
+end
+
+-- Implementation notes: doc/implementation/lua-library.md#host-state-close-during-run_async
+-- run_async's abandoned-wait release. The host Runtime calls it on the closing
+-- host thread once the worker has returned and no pool thread runs an
+-- abandoned job, because closing the independent state may itself wait for
+-- that state's queued pool work.
+local foreign function lua_state_release_abandoned(argument: *void)
+  local call = argument as *titan_lua_call
+  ffi.free(call.results)
+  call.results = nil
+  ffi.lua_close(call.state)
+  call.state = nil
+end

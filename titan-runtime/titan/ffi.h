@@ -17,6 +17,14 @@
 #include "lua.h"
 #endif
 
+/* One stock-Lua profile for the browser launcher and independent states.
+** The native target has no stock-library replacements. */
+#if defined(TITAN_TARGET_BROWSER)
+#define TITAN_LUA_BROWSER_PROFILE "os.clock = function() error('os.clock is unavailable on the browser target (no process CPU-time clock)', 0) end; os.exit = function(code) local titan_os = package.loaded['titan.os']; if titan_os then return titan_os.exit(code == true and 0 or code == false and 1 or code) end; error('os.exit is unavailable outside an async Task on the browser target', 0) end"
+#else
+#define TITAN_LUA_BROWSER_PROFILE ""
+#endif
+
 /* Runtime helpers are linked into each Titan provider. A shared Lua DLL may
 ** export Lua internals, but does not own these helpers. Keep their existing
 ** ELF/Mach-O visibility and use ordinary extern declarations elsewhere. */

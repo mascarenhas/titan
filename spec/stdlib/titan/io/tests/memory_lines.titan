@@ -1,0 +1,10 @@
+local strings = import "string"
+
+function test_io_lines_keeps_empty_lines_and_returns_the_eof_tail_once(_context: test.Context)
+  local reader = strings.reader("first\n\nlast")
+  local lines: {string} = {}
+  for line in stream.lines(reader) do lines[#lines + 1] = line end
+  test.assert(#lines == 3 and lines[1] == "first" and lines[2] == "" and lines[3] == "last",
+    "io.lines lost an empty line or the final unterminated tail")
+  test.assert(reader:read() == nil, "io.lines did not close its memory Reader")
+end

@@ -1,0 +1,15 @@
+local function os_getenv(name: string): string?
+  checked_text(name, "os.getenv")
+  return os_sized_buffer(function (capacity: integer): (integer, string?, integer)
+    return uv.os_getenv(name, capacity)
+  end, "os.getenv")
+end
+local function os_setenv(name: string, contents: string)
+  checked_text(name, "os.setenv")
+  checked_text(contents, "os.setenv")
+  check_status(uv.os_setenv(name, contents), "os.setenv")
+end
+local function os_unsetenv(name: string)
+  checked_text(name, "os.unsetenv")
+  check_status(uv.os_unsetenv(name), "os.unsetenv")
+end

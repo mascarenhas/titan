@@ -51,6 +51,41 @@ local template = [[
 #include "lualib.h"
 #include "titan.h"
 #include "titan/browser.h"
+#include <errno.h>
+#include <wasi/api.h>
+#include <emscripten/syscalls.h>
+
+/* libc requires these exact symbols even in images without Titan modules.
+ * The launcher owns the filesystem-free image; only output crosses to JS. */
+__wasi_errno_t __wasi_fd_write(__wasi_fd_t fd, const __wasi_ciovec_t *iovs,
+        size_t iovs_len, __wasi_size_t *nwritten) {
+    if (fd != 1 && fd != 2) return __WASI_ERRNO_BADF;
+    __wasi_size_t total = 0;
+    for (size_t i = 0; i < iovs_len; i++) {
+        if (iovs[i].buf_len)
+            titan_browser_host_output(fd, iovs[i].buf, iovs[i].buf_len);
+        total += iovs[i].buf_len;
+    }
+    *nwritten = total;
+    return __WASI_ERRNO_SUCCESS;
+}
+__wasi_errno_t __wasi_fd_read(__wasi_fd_t fd, const __wasi_iovec_t *iovs, size_t iovs_len, __wasi_size_t *nread) { return __WASI_ERRNO_NOSYS; }
+__wasi_errno_t __wasi_fd_close(__wasi_fd_t fd) { return fd <= 2 ? __WASI_ERRNO_SUCCESS : __WASI_ERRNO_BADF; }
+__wasi_errno_t __wasi_fd_seek(__wasi_fd_t fd, __wasi_filedelta_t offset, __wasi_whence_t whence, __wasi_filesize_t *newoffset) { return __WASI_ERRNO_SPIPE; }
+int __syscall_openat(int dirfd, const char *path, int flags, ...) { return -ENOSYS; }
+int __syscall_unlinkat(int dirfd, const char *path, int flags) { return -ENOSYS; }
+int __syscall_renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpath) { return -ENOSYS; }
+int __syscall_rmdir(const char *path) { return -ENOSYS; }
+int __syscall_stat64(const char *path, struct stat *buf) { return -ENOSYS; }
+int __syscall_lstat64(const char *path, struct stat *buf) { return -ENOSYS; }
+int __syscall_fstat64(int fd, struct stat *buf) { return -ENOSYS; }
+int __syscall_newfstatat(int dirfd, const char *path, struct stat *buf, int flags) { return -ENOSYS; }
+int __syscall_getcwd(char *buf, size_t size) { return -ENOSYS; }
+int __syscall_readlinkat(int dirfd, const char *path, char *buf, size_t bufsize) { return -ENOSYS; }
+int __syscall_ioctl(int fd, int request, ...) { return -ENOSYS; }
+int __syscall_fcntl64(int fd, int cmd, ...) { return -ENOSYS; }
+int __syscall_dup3(int oldfd, int newfd, int flags) { return -ENOSYS; }
+int _emscripten_system(const char *command) { return command ? -ENOSYS : 0; }
 
 struct titan_browser_arguments {
     int argc;
@@ -80,19 +115,6 @@ lua_State *titan_browser_owner_thread(void) { return titan_browser_owner; }
 
 $ERROR_HELPERS
 
-static void titan_browser_flush_completion(titan_browser_completion *completion) {
-    int out = fflush(stdout), err = fflush(stderr);
-    if (completion->status == TITAN_BROWSER_OK && (out || err)) {
-        static const unsigned char out_error[] = "cannot flush browser stdout";
-        static const unsigned char err_error[] = "cannot flush browser stderr";
-        completion->status = TITAN_BROWSER_TITAN_ERROR;
-        completion->application_status = 1;
-        completion->message = out ? out_error : err_error;
-        completion->message_length = (uint32_t)(out ? sizeof(out_error) - 1 : sizeof(err_error) - 1);
-    }
-    titan_browser_complete(completion);
-}
-
 int titan_browser_invalid_entry(uint64_t id, uint32_t operation, const char *message) {
     titan_browser_completion completion = {0};
     completion.operation_id = id;
@@ -101,7 +123,9 @@ int titan_browser_invalid_entry(uint64_t id, uint32_t operation, const char *mes
     completion.application_status = 1;
     completion.message = (const unsigned char *)message;
     completion.message_length = (uint32_t)strlen(message);
-    titan_browser_flush_completion(&completion);
+    fflush(stdout);
+    fflush(stderr);
+    titan_browser_complete(&completion);
     return 0;
 }
 
@@ -164,7 +188,9 @@ static void titan_browser_complete_failure(lua_State *L,
             fputc('\n', stderr);
         }
     }
-    titan_browser_flush_completion(completion);
+    fflush(stdout);
+    fflush(stderr);
+    titan_browser_complete(completion);
 }
 
 static int titan_browser_protected_entry(uint64_t id, uint32_t operation,
@@ -185,7 +211,9 @@ static int titan_browser_protected_entry(uint64_t id, uint32_t operation,
             completion.application_status = low <= INT32_MAX ? (int32_t)low :
                 -1 - (int32_t)(UINT32_MAX - low);
         }
-        titan_browser_flush_completion(&completion);
+        fflush(stdout);
+        fflush(stderr);
+        titan_browser_complete(&completion);
     }
     lua_settop(L, top);
     return 0;
@@ -220,7 +248,9 @@ int titan_browser_initialize(uint64_t operation_id) {
         completion.application_status = $STATE_STATUS;
         completion.message = message;
         completion.message_length = sizeof(message) - 1;
-        titan_browser_flush_completion(&completion);
+        fflush(stdout);
+        fflush(stderr);
+        titan_browser_complete(&completion);
         return 0;
     }
     return titan_browser_protected_entry(operation_id, TITAN_BROWSER_INITIALIZE,
@@ -283,7 +313,9 @@ int titan_browser_close(uint64_t operation_id) {
         lua_close(L);
         if (token) titan_browser_host_state_closed(token);
     }
-    titan_browser_flush_completion(&completion);
+    fflush(stdout);
+    fflush(stderr);
+    titan_browser_complete(&completion);
     return 0;
 }
 ]]

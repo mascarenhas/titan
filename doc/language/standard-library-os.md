@@ -4,9 +4,9 @@ The `os` standard module provides portable clocks, calendars, locales,
 environment, path, process, graceful exit, one-shot signal, child-process, and
 shell-command helpers. Its
 synchronous CPU/current-time queries and resource-owning operations use public
-libuv APIs; calendar conversion, formatting, differences, and locale selection
-use ISO C where libuv has no equivalent. Titan imports its canonical short
-name:
+libuv APIs on native targets; calendar conversion, formatting, differences,
+and locale selection use ISO C where libuv has no equivalent. Titan imports
+its canonical short name:
 
 ```titan
 local os = import "os"
@@ -16,7 +16,30 @@ Lua loads the same canonical module identity with `require "titan.os"`. The
 qualified Lua name is deliberate: `require "os"` remains Lua's standard
 library table and is never replaced.
 
-The module currently supports Linux and macOS.
+The native module currently supports Linux and macOS.
+
+## On the browser
+
+The browser module provides the following subset; omitted members have no
+declaration, rather than a placeholder that raises:
+
+| Members | Browser availability |
+| --- | --- |
+| `Date`, `date`, `time`, `difftime`, `setlocale` | Available; `time()` reads the host wall clock, not CPU time. |
+| `getenv`, `setenv`, `unsetenv` | Available in the instance's own environment. |
+| `exit` | Available inside an async Task. |
+| `InputStream`, `OutputStream`, `stdin`, `stdout`, `stderr` | Available as [embedding-provided parent streams](#browser-parent-streams). |
+| `clock` | Absent: wall time is not a substitute for CPU time. |
+| `cwd`, `chdir`, `homedir`, `tmpdir`, `hostname`, `exepath`, `pid`, `ppid` | Absent. |
+| `spawn`, `popen`, every `with_*` option, `wait_signal` | Absent. |
+| `ExitStatus`, `SpawnConfig`, `SpawnOption`, `Process`, `InputOutputStream` | Absent. |
+
+The loader's `create({env})` copies the supplied environment into the instance.
+Without that option it starts empty, including `HOME` and `USER`; mutations
+never change the JavaScript host's environment or another instance.
+Local calendar conversion follows the JavaScript host's time zone. Setting
+`TZ` changes an environment variable, not that time zone; a leading `!` in
+`date` still selects UTC.
 
 ## Clocks and time differences
 
@@ -28,8 +51,7 @@ function difftime(later: integer, earlier: integer): float
 `clock` sums the portable libuv user and system CPU-usage clocks and returns
 seconds consumed by the program. It is not elapsed wall time. `difftime`
 returns `later - earlier` in seconds using the host's ISO C calendar-time
-representation. Titan timestamps are integers on the supported 64-bit Linux
-and macOS targets.
+representation. Titan timestamps are integer seconds on both targets.
 
 ## Calendar formatting and decomposition
 
@@ -116,6 +138,10 @@ the selected name, or `nil` when the C library cannot satisfy the request.
 `""` asks for the implementation-defined native locale and `"C"` selects the
 portable C locale. Locale and category strings reject embedded NUL; unknown
 categories raise.
+
+On the browser, emsdk 6.0.13's musl accepts valid unknown locale names and
+reports them as selected while using C.UTF-8 locale data; selecting an
+unknown name therefore need not return nil or change calendar formatting.
 
 Locale selection is process-global and the ISO C calendar/locale functions
 used here have process-global or static storage. They are not safe to race from
@@ -224,6 +250,11 @@ fatal error and not a direct call to ISO C `exit`.
 loaded by Lua or another embedding does not own the host Lua state and never
 closes it; the embedding remains responsible for that state after Titan's
 Runtime has finished.
+
+On the browser, calling `exit` outside an async Task raises the string
+`os.exit is unavailable outside an async Task on the browser target` and
+leaves the instance usable. Inside a Task it uses the same graceful Runtime
+exit request described above; it does not terminate the JavaScript host.
 
 ## Child processes
 
@@ -373,7 +404,7 @@ local stderr = process.stderr
 
 ### Parent standard streams
 
-The module exports three mutable stream variables:
+On native targets, the module exports three mutable stream variables:
 
 - `os.stdin: InputStream` reads the parent process's descriptor 0;
 - `os.stdout: OutputStream` writes descriptor 1; and
@@ -497,6 +528,58 @@ is distinct from closing a captured child endpoint.
 exactly. These are structural conversions at typed use sites; neither the
 records' private ownership metadata nor the low-level handle union is part of
 any Interface.
+
+### Browser parent streams
+
+On the browser, the same `stdin`, `stdout`, and `stderr` records use the
+loader's [embedding options](browser-target.md#the-loader-api), not host file
+descriptors. All operations below require an async Task except `close()`,
+which remains an idempotent no-op and never closes a sink or sends an end.
+Their `io` Interface conversions have the same signatures as on native targets.
+
+Each nonempty `stdout:write(bytes)` or `stderr:write(bytes)` is one FIFO entry
+on that stream. It returns only after the embedding's sink has completed,
+including a returned promise. Bytes are copied without UTF-8 decoding, so NUL
+and `0xff` pass unchanged. An empty write is a cancellation checkpoint with no
+host request. There is no ordering guarantee between stdout and stderr.
+Cancelling an admitted write waits for its sink to settle before delivering
+the cancellation; it does not retract accepted output. A sink failure raises
+`async.OperationError` with name `EIO`, operation `stdio.write`, and the host
+diagnostic when available.
+
+The embedding can declare `stdinKind`, `stdoutKind`, and `stderrKind` as
+`"tty"`, `"pipe"`, `"file"`, or `"tcp"`. `kind()` returns that declaration,
+and `is_tty()` is true exactly for `"tty"`. Without a declaration,
+`is_tty()` is false and `kind()` raises the unavailable error below.
+An invalid declaration raises a plain error naming the option; no kind is
+invented from the sink or source.
+
+`shutdown()` is supported only for an output declared `"tcp"`. It orders the
+embedding's end hook after accepted writes and waits for it just like a write.
+Once shutdown is accepted, later shutdown calls return at once and every
+write, including an empty write, raises `stdio.write` with name `EPIPE`.
+A shutdown failure raises `EIO` with operation `stdio.shutdown`.
+For every other or undeclared kind, shutdown raises `ENOTSUP` with operation
+`stdio.shutdown` and changes nothing.
+
+The optional `stdin` function supplies a byte chunk or a promise of one;
+`null` or `undefined` means EOF, and an empty byte chunk is still data.
+There can be one waiting reader. Cancelling it detaches only that waiter:
+the stream keeps the request and retains its result for a successor.
+EOF and read errors remain sticky for the Runtime. Ending the Runtime
+clears them, buffered chunks, and delimiter excess before a later Runtime.
+Without a `stdin` source, `read()` and `read_until()` raise, never return EOF.
+
+Missing input and undeclared kinds raise `async.OperationError` with code
+`-ENOSYS`, name `ENOSYS`, message
+`<member> is unavailable on the browser target`, and operation `<member>`.
+The member is `os.InputStream.read`, `os.InputStream.read_until`,
+`os.InputStream.kind`, or `os.OutputStream.kind`, respectively.
+
+Explicit instance disposal is not graceful Runtime exit: queued and in-flight
+output rejects with `TITAN_BROWSER_DISPOSED`, and already called sinks cannot
+be recalled. See [output and disposal](browser-target.md#status-and-output-semantics)
+for interruption and finalizer-output rules.
 
 ### TCP-backed parent streams
 

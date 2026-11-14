@@ -626,6 +626,7 @@ local function stdlib_source_files(filename)
     local source_ensembles = {
         ["$(UV_TITAN_SOURCES)"] = "UV_TITAN_SOURCES",
         ["$(ASYNC_TITAN_SOURCES)"] = "ASYNC_TITAN_SOURCES",
+        ["$(OS_TITAN_SOURCES)"] = "OS_TITAN_SOURCES",
         ["$(STDLIB_HTTP_SOURCES)"] = "STDLIB_HTTP_SOURCES",
         ["$(WEBSOCKET_TITAN_SOURCES)"] = "WEBSOCKET_TITAN_SOURCES",
         ["$(SQLITE3_TITAN_SOURCES)"] = "SQLITE3_TITAN_SOURCES",
@@ -1190,7 +1191,7 @@ esac
                 assert(lfs.mkdir(root .. "/titan"))
                 -- The consumer's selected sources and the headers they import,
                 -- at their checkout-relative paths; async is a folder module.
-                local inputs = { "titan/" .. consumer .. ".native.titan" }
+                local inputs = { "titan/" .. consumer .. ".titan" }
                 if consumer == "async" then
                     assert(lfs.mkdir(root .. "/titan/async"))
                     inputs = discovered_async_sources()
@@ -2971,8 +2972,11 @@ int main(void) {
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
-            assert.same({ "titan/lua/lua.native.titan", "titan/lua/worker.titan" },
+            assert.same({ "titan/lua/lua.titan", "titan/lua/background.native.titan",
+                "titan/lua/loading.browser.titan", "titan/lua/loading.native.titan", "titan/lua/worker.titan" },
                 makefile_words("LUA_TITAN_SOURCES"))
+            assert.same({}, undeclared_folder_sources(
+                makefile_words("LUA_TITAN_SOURCES"), "titan/lua", "titan/lua/"))
             assert.same({ "titan/lua/native.h" },
                 makefile_words("LUA_TITAN_HEADERS"))
             assert.same({
@@ -2993,6 +2997,19 @@ int main(void) {
                 "titan/async/async_receiver_native.h",
                 "titan/async/async_signal_platform.h",
             }, makefile_words("ASYNC_TITAN_HEADERS"))
+            assert.same({
+                "titan/os/os.titan",
+                "titan/os/clock.native.titan", "titan/os/clock.browser.titan",
+                "titan/os/environment.native.titan", "titan/os/environment.browser.titan",
+                "titan/os/process.native.titan", "titan/os/process.browser.titan",
+                "titan/os/stdio.native.titan", "titan/os/stdio.browser.titan",
+            }, makefile_words("OS_TITAN_SOURCES"))
+            assert.same({}, undeclared_folder_sources(
+                makefile_words("OS_TITAN_SOURCES"), "titan/os", "titan/os/"))
+            assert.same({
+                "titan/os/os_platform.h", "titan/os/os_environment.h",
+                "titan/os/environment.browser.h",
+            }, makefile_words("OS_TITAN_HEADERS"))
             assert.same({
                 "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
@@ -3048,7 +3065,7 @@ int main(void) {
                 "titan/async/external.native.titan", "titan/async/external.browser.titan",
                 "titan/async/foreign.native.titan", "titan/async/receiver.native.titan",
                 "titan/async/runtime.native.titan", "titan/async/runtime.browser.titan",
-                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.native.titan", "titan/fs.native.titan",
+                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.native.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
@@ -3056,7 +3073,12 @@ int main(void) {
                 "titan/websocket/websocket.native.titan", "titan/websocket/handshake.titan",
                 "titan/websocket/connection.titan", "titan/websocket/frames.titan",
                 "titan/websocket/utf8.titan", "titan/websocket/native.titan",
-                "titan/os.native.titan", "titan/path.titan",
+                "titan/os/os.titan",
+                "titan/os/clock.native.titan", "titan/os/clock.browser.titan",
+                "titan/os/environment.native.titan", "titan/os/environment.browser.titan",
+                "titan/os/process.native.titan", "titan/os/process.browser.titan",
+                "titan/os/stdio.native.titan", "titan/os/stdio.browser.titan",
+                "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -3066,7 +3088,8 @@ int main(void) {
                 "titan/string/pack.titan", "titan/string/regex_api.titan",
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
-                "titan/math.titan", "titan/lua/lua.native.titan", "titan/lua/worker.titan",
+                "titan/math.titan", "titan/lua/lua.titan", "titan/lua/background.native.titan",
+                "titan/lua/loading.browser.titan", "titan/lua/loading.native.titan", "titan/lua/worker.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
                 "titan/reflect.titan",
                 "titan/sqlite3/sqlite3.native.titan", "titan/sqlite3/bindings.titan",
@@ -3106,7 +3129,7 @@ int main(void) {
             end
         end
         for _, source in ipairs({"titan/async/runtime.native.titan", "titan/timer.native.titan", "titan/fs.native.titan",
-                "titan/net.native.titan", "titan/os.native.titan"}) do
+                "titan/net.native.titan", "titan/os/stdio.native.titan"}) do
             local imports = {}
             for _, node in ipairs(parsed_source(source)) do
                 if node._tag == "Ast.TopLevelImport" then imports[node.modname] = true end
@@ -3277,7 +3300,7 @@ int main(void) {
                 error("unexpected titan.io source type " .. tostring(typ._tag))
             end
 
-            local path = "titan/io.native.titan"
+            local path = "titan/io.titan"
             local source = read_file(path)
             local ast, parse_error = parser.parse(path, source)
             assert.truthy(ast, parse_error and parse_error.label)
@@ -3575,8 +3598,8 @@ int main(void) {
                 'check_status(uv.chdir(checked_path(path, "fs.chdir")), "fs.chdir")')
         end)
 
-    it("pins the public os process and stdio facade", function()
-        assert.same({
+    it("pins the public native os process and stdio facade", function()
+        local expected = {
             "Date", "Date.new", "ExitStatus", "ExitStatus.new",
             "SpawnConfig", "SpawnOption",
             "InputStream", "OutputStream", "Process", "InputOutputStream", "stdin", "stdout",
@@ -3600,10 +3623,18 @@ int main(void) {
             "InputOutputStream:write", "InputOutputStream:wait",
             "InputOutputStream:close", "InputOutputStream:to_transfer_payload",
             "InputOutputStream.from_transfer_payload", "popen",
-        }, public_declarations("titan/os.native.titan"))
-
-        assert.falsy(read_file("titan/os.native.titan"):find(
-            "os_stdio_is_closed", 1, true))
+        }
+        local actual = {}
+        for _, source in ipairs(host_selected_sources(
+                makefile_words("OS_TITAN_SOURCES"))) do
+            for _, name in ipairs(public_declarations(source)) do
+                actual[#actual + 1] = name
+            end
+            assert.falsy(read_file(source):find("os_stdio_is_closed", 1, true))
+        end
+        table.sort(expected)
+        table.sort(actual)
+        assert.same(expected, actual)
     end)
 
     it("centralizes every peg and string export in the folder main",
@@ -4055,12 +4086,12 @@ esac
             end
             local sources = {
                 "titan/coroutine.titan",
-                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.native.titan", "titan/fs.native.titan",
+                "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.native.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
                 "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
-                "titan/os.native.titan", "titan/path.titan",
+                "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -4074,9 +4105,9 @@ esac
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, ensemble in ipairs({
-                "UV_TITAN_SOURCES", "ASYNC_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
+                "UV_TITAN_SOURCES", "ASYNC_TITAN_SOURCES", "OS_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
                 "PROTOBUF_TITAN_SOURCES", "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
-                "THREAD_TITAN_SOURCES", "ASYNC_TITAN_HEADERS", "SQLITE3_TITAN_HEADERS",
+                "THREAD_TITAN_SOURCES", "ASYNC_TITAN_HEADERS", "OS_TITAN_HEADERS", "SQLITE3_TITAN_HEADERS",
                 "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do

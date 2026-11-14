@@ -2,12 +2,17 @@
 
 The user-facing Interfaces, printing, and line-iteration contracts are in the
 [I/O standard-library chapter](../language/standard-library-io.md).
-`titan/io.native.titan` is a flat Titan module whose only imports are the ordinary
+`titan/io.titan` is a shared flat Titan module whose only imports are the ordinary
 public `os` and `string` interfaces, so a source build composes with
 compiled-only providers of both. It adds no compiler intrinsic, Lua C API
 operation, or native code. Concrete streams, including the shell facade, live
 with their resources in [`titan.os`](os-library.md#shell-process-stream) and
 other owners; `titan.io` declares only the Interfaces they satisfy.
+
+The same shared source is delivered in the browser provider. Its `os` import
+selects browser contributors, so one-write printing awaits the SDK sink and
+the parent stream records satisfy the same Interfaces. No browser variant or
+transport policy belongs in `titan.io`.
 
 ## One-write printing
 
@@ -52,10 +57,14 @@ precedence and can replace a pending body error, `break`, or `return`.
 
 ## Tests
 
-The non-LuaCov native folder module `spec/stdlib/titan/io/tests/` uses
-`core_test.titan` to instrument string and output values and check conversion
-order, conversion before output, one write, and late lookup of a reassigned
-`os.stdout`. Structural ReaderCloser records check every exit path in the table
-above. Shell-stream behavior, including its conversions to all seven
-Interfaces, is tested by `os.process_tests`
+The non-LuaCov folder module `spec/stdlib/titan/io/tests/` is an owner in both
+native and browser suites. `core_test.titan` uses structural ReaderCloser
+records to check every exit path in the table above; `memory_lines.titan`
+checks empty lines and a final unterminated tail over a string Reader.
+`printing.native.titan` instruments string and output values through captured
+stdio to check conversion order, conversion before output, one write, and
+late lookup of reassigned `os.stdout`. `streams.browser.titan` checks parent
+stream Interface conversions and printing through SDK output.
+Shell-stream behavior, including conversions to all seven Interfaces, stays
+in the native-only `os.process_tests`
 ([shell tests](os-library.md#shell-and-disposal-tests)).

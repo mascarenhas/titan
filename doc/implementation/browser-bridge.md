@@ -26,8 +26,9 @@ runner, deployment, and fatal engine classifications.
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
 contains the same four objects (`titan.o`, `minicoro.o`, `titan_path.o`,
 `ltitanlib.o`) on both native and browser targets. The native standard provider
-has no `titan.browser`, while the browser provider adds `titan.browser` beside
-the thirteen shared modules. It imports only `gc`, and the [member
+has no `titan.browser`, while the nineteen-module browser provider includes
+it alongside fourteen shared modules and the browser compositions of `async`,
+`timer`, `os`, and `lua`. It imports only `gc`, and the [member
 inventory](browser-target.md#interface-derived-member-inventory) skips it
 because it has no native interface to compare.
 
@@ -40,7 +41,7 @@ shipped file is justified by the capability in its last column.
 | File | Owns | Host capability |
 | --- | --- | --- |
 | `titan-browser-library.js` (`--js-library`) | The execution owner of one Module: the pending entry, the promising wrappers of the state-entering exports, one promise per coroutine context with its saved linear stack, the suspending imports (`titan_mco_transfer`, `titan_mco_destroy`, `titan_browser_relinquish`), the synchronous-callback depth, and poison | JSPI suspension and resumption; engine failure |
-| `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner. It keeps no state | Emscripten import glue |
+| `titan-browser-bridge.js` (`--js-library`) | The JavaScript half of `titan/browser.h`: one line per import, forwarding to the loader owner, including `titan_browser_host_output` for C stdio; the one-line `$getEnvStrings` override supplies the instance's environment snapshot. It keeps no state | Emscripten import glue; the embedder's libc environment input |
 | `titan-browser.mjs` (embedded in each image) | The loader: `create` and `BrowserOwner`, in the parts listed below | See below |
 | `titan-browser-trace.js` (`--js-library`) | The index built from the fetched `.wasm.map`, stack capture into C-owned records, and symbolization ([trace metadata](browser-target.md#eager-map-loader-and-trace-metadata)) | Engine stack capture; fetching and parsing the map outside the Wasm heap |
 | `titan-protobuf.mjs` (standalone SDK module) | The portable protobuf peer: retains no per-call state, shares a class table only when the caller supplies one, and is not part of any image | Building and reading JavaScript values and classes: records, union variants, Arrays, BigInts, byte arrays, and strings |
@@ -50,14 +51,15 @@ The loader's parts:
 | Part | Holds | Host capability |
 | --- | --- | --- |
 | Public object, admission, `operate`, `entry`, `initialize`, `run`, `dispose` | One promise per operation, the lifecycle state, the pending completion, which failure an operation reports, and the references that disposal must drop | The embedder-facing promise API; entering Wasm through a promising export |
+| `create` environment snapshot | The embedder's `NAME=value` strings, empty by default, for Emscripten's later libc initialization | Holding and validating the embedder's option data |
 | Slot table and `CallableView` wrappers | JavaScript values with their state, generation, and units; one wrapper per pin with its logical-release flag | Holding JavaScript values and host objects |
 | Marshalling (`snapshotArguments`, `writeValue`, `valuesAt`, `completionAt`, `importResponse`) | Nothing between calls | Converting JavaScript values to and from the records of `titan/browser.h` |
 | Queue (`queue`, `batch`) | Notifications, request events, and calls that wait for `drain()` or a drive, with each queued call's promise | JavaScript values that have no slot yet; items that wait for a point where Wasm can be entered |
 | Pending Task-form calls (`openTasks`) | Delivered Task-form calls whose Task has not reported its outcome, with each call's promise | The embedder-facing promise API; promises waiting for a Titan-reported outcome |
 | Requests | The detachable cell of each promise or listener continuation, the host cancel function, the ownership form, the completion and failure targets, and the terminal promise that disposal awaits; no callable hold accounting | Promise and listener continuations |
 | Drive | The gate promise of the suspending import, the turn source, the owner token, and the exit latch | JSPI resumption; macrotask scheduling |
-| `OutputChannel` and `drainOutput` | One FIFO of copied chunks per stream, at most one sink call in flight, and the drains that run after the image is released | The embedder's sinks and their promises |
-| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`) | One bounded host timer per arm, and the two driver callables; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs |
+| `OutputChannel`, `output`, and `drainOutput` | One FIFO of copied C iovec batches and Titan write/end entries per stream, each Titan entry's settlement promise, one latched C sink error, at most one sink or end hook in flight, and C-only drains after image release; no per-byte buffer | Copying bytes out of the Wasm heap; the embedder's sinks/end hooks and their promise continuations |
+| SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`, `titan:stdout`, `titan:stderr`, `titan:stdin`, `titan:stdio`) | One bounded host timer per arm, the two driver callables, output-entry settlement promises, the optional input function, and declared backings; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs; the embedder's byte source, sinks, end hooks, declared backings and promises |
 
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
 `titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
@@ -119,9 +121,9 @@ rules](../style-guide.md#write-native-bindings-titan-first):
    `invoke_entry` is a function-scope `catch` wrapper whose preamble fits
    inside the trampoline's `LUA_MINSTACK` reservation. Argument decoding,
    execution, rollback, and formatted error reporting run in `invoke_work`.
-   A failed completion flush rolls back the provisional wrapper inline into
-   `free_slots`, pre-grown during `allocate_pin`. The inner `catch` performs
-   the same rollback before calling `complete_titan_failure`. If work raises
+   The inner `catch` rolls back a provisional wrapper into `free_slots`,
+   pre-grown during `allocate_pin`, before calling `complete_titan_failure`.
+   If work raises
    at its own preamble or while reporting an error, the outer `catch` writes
    `"not enough memory"` into `state_record.fallback` through inline FFI
    writes, flushes both streams, and calls `titan_browser_complete`, without
@@ -163,8 +165,8 @@ held, never a `lua_pcall` on the state being freed. The browser record's Titan
 finalizer handles invalidation; C-only images close their bare host token
 around `lua_close`. Lua's per-finalizer protection remains authoritative.
 Warnings alone do not convert successful close into an application failure.
-Both libc streams are flushed, preserving the first error while attempting
-both; the loader then handles copied stream queues and disposal outcomes.
+Both libc streams are flushed before completion; the loader then handles
+copied stream queues and disposal outcomes.
 
 The launcher also defines `titan_browser_owner_thread()`, a C function that
 returns its owner `lua_State *` (set before any initializer runs, cleared
@@ -203,10 +205,10 @@ callable release are no-ops, while binding lookup and calls raise. An uncaught
 raise becomes a Lua finalizer warning on stderr. A zero token in a record that
 has not finalized remains an admission failure, not a successful close.
 
-The launcher does not initialize `titan.browser` specially. C-created
-independent states load modules normally too: no `attach` operation or
-pre-`luaL_openlibs` bootstrap is required. `titan.lua` is native-only, so no
-standard-library API creates independent browser states.
+The launcher does not initialize `titan.browser` specially. Independent states
+created by `lua.new()` or C load it normally too: no `attach` operation or
+pre-`luaL_openlibs` bootstrap is required. A `lua.new()` state shares the
+WebAssembly instance but owns its own module records.
 `state_closing()` and `current_state()` check `titan_state_closing(L)`
 (`G(L)->gcstp & GCSTPCLS`) before imports, so a direct `lua_close` of an
 independent state refuses new requests and reverse calls before a finalizer's
@@ -535,6 +537,11 @@ The installed header is the sole C/JavaScript layout contract. C layout
 assertions check sizes and offsets for wasm32. There is no native packet
 serialization, schema codec, attachment index, or per-call JSON/protobuf step.
 
+The header also declares `titan_browser_host_output(stream, bytes, length)`.
+The generated launcher's libc adapter passes descriptor 1 or 2 and one
+nonempty iovec. The import copies the counted bytes into that stream's queue
+before returning, never starts a sink, and retains no borrowed Wasm pointer.
+
 Kinds are `NIL = 0`, `BOOLEAN = 1`, `INTEGER = 2`, `FLOAT = 3`, `STRING = 4`,
 `BYTES = 5`, `HANDLE = 6`, `CALLABLE = 7`, and `REQUEST = 8`. `REQUEST` is the
 import result kind for `host_start`. Statuses are `OK = 0`, `TITAN_ERROR = 1`,
@@ -682,9 +689,23 @@ and host invocation. The loader then queues one event per outcome:
 - A failure event that cannot be marshalled has no callable left to receive
   it. The loader reports it through `onNotificationError`.
 
+`browser.failure_text(message, thrown)` is the shared Titan-side consumer for
+failure callbacks that need only a diagnostic. It closes an `is_handle`
+thrown value and returns an `is_string` message, or nil otherwise.
+The timer and OS adapters supply their own fallback text and construct their
+own `OperationError`; neither duplicates handle disposal or message extraction.
+
 Detachable mailbox and guaranteed-terminal retained ownership, cancellation,
 listener removal, late-settlement dropping, FIFO batching, and disposal all
 remain with the JS bridge owner. No C import awaits host work.
+
+The SDK stream sources use this same boundary. Output sources return a
+retained promise tied to their FIFO entry; the optional stdin source calls
+the embedder synchronously under `hostInvoke` and turns either a return or
+throw into a detachable promise outcome. `valuesAt` already copies a bytes
+argument, so output admission does not copy it again. A missing SDK source
+(`titan:stdin` without an option) yields the ordinary unknown-binding error.
+`titan:stdio` is an ordinary synchronous call returning an option value.
 
 `drain()` and a drive's `deliver` each work on a detached batch, so both
 recheck an entry's request before invoking it. Cancellation removes the
@@ -783,7 +804,7 @@ coroutine hops), Task-form calls with `AbortSignal`, the SDK timer sources,
 output at relinquish points (on both streams, a sink call still pending when
 the next gate publishes output and released at swept points around the pump
 runner's retirement, no sink call started by a held call that settles during
-a later turn's coroutine switches, including over full 1024-byte chunks, and
+a later turn's coroutine switches, including over large C-output batches, and
 no sink during the coroutine switches that follow an `IDLE` relinquish),
 disposal with a running, cleanup and shutdown drive, the exit latch, an open
 `BrowserPin` keeping a waiting drive parked until a C callback settles its job,
@@ -877,6 +898,9 @@ JavaScript integration driver exercises public promises, two instances,
 runtime-type marshalling, variant rejections, non-string callable errors, pin
 hold lifetimes, re-export after synchronous release, notification batches,
 disposal, sinks, requests, and WeakRef ownership with real linked images.
+The separate `environment.mjs` driver, run by `browser_bridge_spec.lua`,
+checks empty and supplied libc environments, validation, UTF-8 round trips,
+mutation, and per-instance isolation under Node and Chromium.
 Test-only C instrumentation may hand explicit frozen controls to a supplied
 fixture binding; the generated application API never exposes the raw Emscripten
 Module or factory.

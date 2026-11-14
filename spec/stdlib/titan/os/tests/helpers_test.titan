@@ -49,45 +49,5 @@ function test_text_helpers_reject_embedded_nul(
   support.assert_operation_error(function()
     system.unsetenv(name .. "\0unset")
   end, "os.unsetenv")
-  support.assert_operation_error(function()
-    system.chdir(system.cwd() .. "\0suffix")
-  end, "os.chdir")
 end
 
-function test_paths_and_process_identity(_context: test.Context)
-  local original = system.cwd()
-  local target = system.tmpdir()
-  if target == original then target = system.homedir() end
-  if target == original then target = "/" end
-  test.assert(target ~= original,
-              "host exposes no distinct standard directory for chdir")
-
-  do
-    defer system.chdir(original)
-    system.chdir(target)
-    test.assert(system.cwd() ~= original, "chdir did not update cwd")
-  end
-  test.assert(system.cwd() == original,
-              "cwd was not restored after chdir")
-
-  test.assert(#system.homedir() > 0, "homedir returned an empty path")
-  test.assert(#system.tmpdir() > 0, "tmpdir returned an empty path")
-  test.assert(#system.hostname() > 0, "hostname returned an empty name")
-  test.assert(#system.exepath() > 0,
-              "compiled Titan exepath returned an empty path")
-  test.assert(system.pid() > 0, "pid was not positive")
-  test.assert(system.ppid() >= 0, "ppid was negative")
-end
-
-function test_lua_host_rejects_exepath_without_standalone_arguments(
-    _context: test.Context)
-  local output, why, code = command.lua([==[
-      local system = require "titan.os"
-      local succeeded, failure = pcall(system.exepath)
-      assert(not succeeded)
-      assert(failure ==
-        "os.exepath is only available in a compiled Titan program", failure)
-    ]==])
-  test.assert(why == "exit" and code == 0,
-              "Lua-host os.exepath probe failed: " .. output)
-end

@@ -40,14 +40,14 @@ library implementations for the same call-graph pattern.
 
 ## Keep the browser subset dependency-closed
 
-Thirteen shared modules form the portable part of the [browser standard
-library](browser-target.md#the-browser-standard-library): `coroutine`, `gc`,
-`iteration`, `math`, `test`, `reflect`, `json`, `protobuf`, `transfer`, `peg`,
-`string`, `url`, and `path`. None of them may gain an import path to `uv`,
-`async`, `timer`, `titan.browser`, or a native-only module (`io`, `fs`, `net`,
-`ssl`, `http`, `websocket`, `os`, `lua`, `sqlite3`, `thread`), and their only native
-payload and include path is LPegLabel: a libuv, OpenSSL, llhttp, or SQLite
-header, archive, or symbol fails the [dependency-closure
+Thirteen shared core modules form the dependency-free part of the [browser
+standard library](browser-target.md#the-browser-standard-library):
+`coroutine`, `gc`, `iteration`, `math`, `test`, `reflect`, `json`, `protobuf`,
+`transfer`, `peg`, `string`, `url`, and `path`. None may gain an import path
+to `io`, `os`, `uv`, `async`, `timer`, `titan.browser`, or a native-only module
+(`fs`, `net`, `ssl`, `http`, `websocket`, `lua`, `sqlite3`, `thread`), and
+their only native payload and include path is LPegLabel: a libuv, OpenSSL,
+llhttp, or SQLite header, archive, or symbol fails the [dependency-closure
 check](browser-target.md#the-dependency-closure-check) in `make browser-sdk`
 and `make titan-stdlib-browser-test`. A new shared module or member keeps
 its native signature and behavior; the [member
@@ -56,9 +56,10 @@ difference between the native and browser interfaces that it does not record.
 Read a target-dependent constant from a target C define through `ffi`, as
 `coroutine`, `protobuf`,
 `json`, and `path` do, rather than adding a `.browser.titan` copy; reserve a
-variant for a real behavioral difference. The native-only modules keep their
-canonical mains as `<name>.native.titan`, so a later browser composition adds
-a selected `.browser.titan` main or contributors without renaming them back.
+variant for a real behavioral difference. Native-only modules with no shared
+main keep their canonical mains as `<name>.native.titan`. The complete shared
+`io` facade instead imports `os`, whose shared main composes with native or
+browser clock, environment, process, and stdio contributors.
 
 `titan.async` is a browser module through its own browser composition: its
 shared main and the `runtime.browser.titan` and `external.browser.titan`
@@ -68,8 +69,10 @@ opaque `ExternalWait` are recorded in the member inventory, so a new public
 shared one must type-check without `uv`. `titan.timer` is one through its
 flat variant `titan/timer.browser.titan`, built on public `async` and the
 SDK's timer sources; a member added to `timer.native.titan` needs its browser
-twin, and its opaque `Ticker` is recorded in the inventory. Only these browser
-files of `async` and `timer` may import `titan.browser`.
+twin, and its opaque `Ticker` is recorded in the inventory. `os` keeps its
+native-only members absent on browser and its two stream records opaque;
+their public methods must still match. Only these browser files of `async`
+and `timer`, and `os/stdio.browser.titan`, may import `titan.browser`.
 
 The browser provider's other target-specific module, `titan.browser`
 (`titan/browser.browser.titan`), is the one reviewed browser-only exception.
@@ -147,7 +150,7 @@ JavaScript](#the-same-rules-for-browser-javascript) follow the six pairs.
    ordinary function (`reserve_resource` in `titan/transfer.titan`).
    Platform-conditional work is a `static inline` helper that returns a
    status or fills a plain struct, as `titan_probe_parent_stdio` in
-   `titan/os_platform.h` does for `titan.os`, which keeps the classification;
+   `titan/os/os_platform.h` does for `titan.os`, which keeps the classification;
    a platform flag is a macro (`TITAN_UV_NETWORK_WINDOWS` in
    `titan/uv/network-native.h`), not a function.
 2. **Plain C stays plain C.** Wrong (`titan-browser.c` at `843b446e`):

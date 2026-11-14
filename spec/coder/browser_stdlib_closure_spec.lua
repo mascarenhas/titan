@@ -44,6 +44,30 @@ describe("browser stdlib real-toolchain closure", function()
         assert(checks.check_image(assert(strategy:read_file(output .. "/intruder.wasm")), "intruder.wasm"))
     end
 
+    it("rejects imported filesystem functions without rejecting native definitions or nonfunctions", function()
+        local function section(id, bytes)
+            assert.is_true(#bytes < 128)
+            return string.char(id, #bytes) .. bytes
+        end
+        for _, name in ipairs({ "__syscall_closure_intruder", "fd_closure_intruder", "_emscripten_system" }) do
+            for _, kind in ipairs({ 0, 3 }) do
+                local import = "\1\3env" .. string.char(#name) .. name .. string.char(kind) ..
+                    (kind == 0 and "\0" or "\127\0")
+                local names = "\1\0\14portable_entry"
+                local image = "\0asm\1\0\0\0" .. section(1, "\1\96\0\0") ..
+                    section(2, import) .. section(3, "\1\0") .. section(10, "\1\2\0\11") ..
+                    section(0, "\4name" .. section(1, kind == 0 and "\1\1\14portable_entry" or names))
+                local ok, err = checks.check_image(image, "intruder.wasm")
+                if kind == 0 then
+                    assert.is_nil(ok)
+                    assert.equal("intruder.wasm: forbidden browser filesystem import " .. name, err)
+                else
+                    assert.is_true(ok, err)
+                end
+            end
+        end
+    end)
+
     it("builds and audits the real suite target from cold and warm output trees", function()
         if platform.windows then pending("browser suite Make target is Unix-only"); return end
         local info = fixture({ node = true, chrome = true, sdk = true })

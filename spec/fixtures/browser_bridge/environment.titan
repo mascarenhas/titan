@@ -1,0 +1,46 @@
+-- Read and mutate the instance's libc environment through the C FFI.
+local browser = import "browser"
+foreign import "stdlib.h"
+foreign import "unistd.h"
+
+local type Value = browser.BrowserValue
+
+local function argument(args: {Value}, index: integer): string
+  case args[index]
+  when is_string(text) then return text
+  end
+  raise "environment fixture expects string arguments"
+end
+
+local function read(...: Value): Value
+  local args = {...}
+  local text = ffi.getenv(argument(args, 1))
+  if text ~= nil then return Value.is_string(text as string) end
+  return Value.is_nil()
+end
+
+local function count(...: Value): Value
+  local length = 0
+  if ffi.environ ~= nil then
+    while ffi.environ[length] ~= nil do length = length + 1 end
+  end
+  return Value.is_integer(length)
+end
+
+local function set(...: Value): Value
+  local args = {...}
+  return Value.is_integer(ffi.setenv(argument(args, 1), argument(args, 2), 1))
+end
+
+local function unset(...: Value): Value
+  local args = {...}
+  return Value.is_integer(ffi.unsetenv(argument(args, 1)))
+end
+
+function main(_: {string}): integer
+  local publish = browser.binding("environment")
+  defer publish:close()
+  publish:call(Value.is_callable(read), Value.is_callable(count),
+      Value.is_callable(set), Value.is_callable(unset))
+  return 0
+end

@@ -82,6 +82,12 @@ end
 function M.check_image(bytes, origin)
     local image, err = staticmetadata.browser_trace_image(bytes, origin)
     if not image then return nil, err end
+    for _, import in ipairs(image.imports) do
+        if import.kind == 0 and (import.name:match("^__syscall_") or
+            import.name:match("^fd_") or import.name == "_emscripten_system") then
+            return nil, origin .. ": forbidden browser filesystem import " .. import.name
+        end
+    end
     for _, inventory in ipairs({ image.imports, image.exports }) do
         for _, symbol in ipairs(inventory) do
             local ok
@@ -261,8 +267,11 @@ function M.members(modtype)
                 add(name .. "." .. variant.name, "variant", variant, "(" .. table.concat(parts, ", ") .. ")")
             end
         end
+        -- Interface methods have both ordered and named views; use their
+        -- declaration order once, while record and union methods are maps.
+        local each = typ._tag == "Type.Interface" and ipairs or pairs
         for _, group in ipairs({ typ.methods or {}, typ.functions or {} }) do
-            for _, method in pairs(group) do
+            for _, method in each(group) do
                 if not method.islocal then
                     local key = name .. (method._tag == "Type.Method" and ":" or ".") .. method.name
                     -- A union variant's generated static constructor is the
@@ -322,6 +331,20 @@ M.browser_differences = {
     -- of a uv timer.
     ["titan.timer"] = {
         opaque = { "Ticker" },
+    },
+    ["titan.os"] = {
+        omitted = {
+            "clock", "cwd", "chdir", "homedir", "tmpdir", "hostname", "exepath", "pid", "ppid",
+            "spawn", "with_stdin", "with_stdout", "with_stderr", "with_parent_stdin",
+            "with_parent_stdout", "with_parent_stderr", "with_merged_output", "with_env",
+            "popen", "wait_signal", "ExitStatus", "SpawnConfig", "SpawnOption", "Process",
+            "InputOutputStream",
+        },
+        opaque = { "InputStream", "OutputStream" },
+    },
+    ["titan.lua"] = {
+        omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" },
+        opaque = { "Lua" },
     },
 }
 

@@ -1,0 +1,5 @@
+-- Slot 2 stays reserved, but browser images have no source filesystem.
+local function source_search(_modname: string, _path: string):
+    (value, value, string)
+  return nil, nil, "\n\tno source search: the browser target has no filesystem"
+end

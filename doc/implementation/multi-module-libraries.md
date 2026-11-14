@@ -277,19 +277,22 @@ invocation names all twenty-six logical roots (`Makefile` `STDLIB_ROOTS`):
 `titan.math`, `titan.lua`, `titan.iteration`, `titan.gc`, `titan.test`,
 `titan.reflect`, `titan.sqlite3`, `titan.json`, `titan.protobuf`,
 `titan.transfer`, and `titan.thread`. `titan.uv`, `titan.async`, `titan.http`,
-`titan.websocket`, `titan.peg`, `titan.string`, `titan.sqlite3`,
+`titan.websocket`, `titan.os`, `titan.peg`, `titan.string`, `titan.sqlite3`,
 `titan.json`, `titan.lua`, `titan.protobuf`, and `titan.thread` are folder
-ensembles; the others are flat sources. The mains of `titan.io`, `titan.fs`,
-`titan.net`, `titan.ssl`, `titan.os`, `titan.uv`, `titan.http`,
-`titan.websocket`, `titan.sqlite3`, `titan.lua`, and `titan.thread` are
-`native` variants (`titan/os.native.titan`, `titan/uv/uv.native.titan`), so
-the browser target has none of them. `titan.timer` has a `native` and a
-`browser` variant (`titan/timer.native.titan`, `titan/timer.browser.titan`)
-with one public interface. The other thirteen roots, `titan.async` through
-its shared main and browser contributors, and `titan.timer` through its
-`browser` variant form the [browser standard
-provider](browser-target.md#the-browser-standard-library), with the
-browser-only `titan.browser`. The root order is
+ensembles; the others are flat sources. The mains of `titan.fs`,
+`titan.net`, `titan.ssl`, `titan.uv`, `titan.http`, `titan.websocket`,
+`titan.sqlite3` and `titan.thread` are `native` variants
+(`titan/fs.native.titan`, `titan/uv/uv.native.titan`), so the browser target
+has none of them. `titan.os` and `titan.lua` have shared mains with native and
+browser contributors: browser `os` omits native host/process capabilities,
+and browser `lua` omits file loading and background execution.
+The complete shared `titan.io` facade imports the selected `os` composition.
+`titan.timer` has a `native` and a `browser` variant
+(`titan/timer.native.titan`, `titan/timer.browser.titan`) with one public
+interface. Fourteen shared roots including `io`, the target-specific
+compositions of `async`, `timer`, `os`, and `lua`, and the browser-only
+`titan.browser` form the nineteen-module [browser standard
+provider](browser-target.md#the-browser-standard-library). The root order is
 not topological (`titan.async` precedes `titan.string`, which it imports);
 recursive import loading resolves dependencies while the roots are processed.
 The invocation publishes root `titan.so` and `titan.a`:

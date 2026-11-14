@@ -202,27 +202,6 @@ local function response_dispose(response: foreign *titan_browser_response)
   ffi.free(ffi.lmacro_unconst(response.message))
 end
 
--- A queued item delivered inside a drive settles through host_settle: its
--- containing entry still owns the one ordinary completion.
-local function flush_completion(completion: foreign *titan_browser_completion,
-                                queued: boolean)
-  local out = ffi.fflush(ffi.stdout)
-  local err = ffi.fflush(ffi.stderr)
-  if completion.status == ffi.TITAN_BROWSER_OK and (out ~= 0 or err ~= 0) then
-    local message = out ~= 0 and
-        "cannot flush browser stdout" or "cannot flush browser stderr"
-    completion.status = ffi.TITAN_BROWSER_TITAN_ERROR as foreign uint32_t
-    completion.application_status = 1
-    completion.message = message as foreign const *unsigned char
-    completion.message_length = #message
-  end
-  if queued then
-    ffi.titan_browser_host_settle(completion)
-  else
-    ffi.titan_browser_complete(completion)
-  end
-end
-
 function BrowserHandle:close()
   local slot = self.slot
   if slot ~= 0 then
@@ -281,6 +260,21 @@ end
 
 function BrowserError:close()
   self.thrown:close()
+end
+
+--- Release a request's thrown handle and recover its optional diagnostic text.
+-- @param message The request failure's first argument.
+-- @param thrown The request failure's second argument, closed when it is a handle.
+-- @return The message string, or nil for a different value kind.
+-- @usage standard-library-browser.md#requests-and-listeners
+function failure_text(message: BrowserValue, thrown: BrowserValue): string?
+  case thrown
+  when is_handle(handle) then handle:close()
+  end
+  case message
+  when is_string(text) then return text
+  end
+  return nil
 end
 
 local function check_utf8(text: string)
@@ -595,7 +589,13 @@ local function complete_titan_failure(operation_id: foreign uint64_t,
   completion.message_length = #message
   completion.trace = trace as foreign const *unsigned char
   completion.trace_length = #trace
-  flush_completion(completion, queued)
+  ffi.fflush(ffi.stdout)
+  ffi.fflush(ffi.stderr)
+  if queued then
+    ffi.titan_browser_host_settle(completion)
+  else
+    ffi.titan_browser_complete(completion)
+  end
 end
 
 local function invoke_work(
@@ -641,29 +641,15 @@ local function invoke_work(
     completion.operation = ffi.TITAN_BROWSER_INVOKE as foreign uint32_t
     completion.result_count = 1
     completion.results = encoded
-    flush_completion(completion, queued)
-    if completion.status ~= ffi.TITAN_BROWSER_OK then
-      -- Stay helper-free and non-raising after completion: a raise would emit twice.
-      local prov_pin? = invoke_provisional_item.pin
-      if prov_pin ~= nil then
-        invoke_provisional_item.pin = nil
-        invoke_provisioned[1] = nil
-        if ffi.titan_browser_host_callable_closed(
-               state, prov_pin.slot, prov_pin.generation) ~= 0 then
-          prov_pin.wrapper_live = false
-        end
-        if not prov_pin.wrapper_live and prov_pin.holds <= 0 then
-          if pins_by_slot[prov_pin.slot] == prov_pin then
-            pins_by_slot[prov_pin.slot] = nil
-            pins_by_fn[prov_pin.callback] = nil
-            free_slots[#free_slots + 1] = prov_pin.slot
-          end
-        end
-      end
+    ffi.fflush(ffi.stdout)
+    ffi.fflush(ffi.stderr)
+    if queued then
+      ffi.titan_browser_host_settle(completion)
     else
-      invoke_provisional_item.pin = nil
-      invoke_provisioned[1] = nil
+      ffi.titan_browser_complete(completion)
     end
+    invoke_provisional_item.pin = nil
+    invoke_provisioned[1] = nil
   catch
     local trace = traceback
     -- Stay helper-free and non-raising so rollback finishes before error reporting.

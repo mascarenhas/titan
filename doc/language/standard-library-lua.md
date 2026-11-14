@@ -1,13 +1,27 @@
 # Lua states and loading standard library
 
 The `titan.lua` module creates independent Lua states, compiles Lua chunks,
-reads chunks through Titan I/O, executes Lua files asynchronously, and loads
-Lua, C, or Titan modules into the current Lua state. Import it by its
-qualified name:
+reads chunks through Titan I/O, and loads modules into the current Lua state.
+Native targets also execute Lua files asynchronously and search for Lua, C,
+and Titan provider files. Import it by its qualified name:
 
 ```titan
 local lua = import "lua"
 ```
+
+## Target availability
+
+| Members | Native | Browser |
+| --- | --- | --- |
+| `load`, `load_from_reader`, `require`, `new` | available | available |
+| `Lua:run`, `Lua:run_from_loader`, `Lua:close`, `Lua:detach` | available | available |
+| `dofile`, `Lua:run_async`, `Lua:run_async_from_loader` | available | absent |
+
+A browser `lua.new()` creates another state in the same WebAssembly instance,
+not another instance or a Worker. Its calls execute synchronously on the owner
+thread. Browser async Tasks belong to the instance's original state; a child
+state cannot start or drive them. The native asynchronous execution and
+Receiver sections below do not apply on the browser.
 
 ## Independent Lua states
 
@@ -62,14 +76,16 @@ bindings are created independently in each state. A nested `lua.new()` can
 copy inherited loaders and descriptors even before their modules have been
 initialized in the intermediate state.
 
-`require` otherwise uses the new state's own `package.path`, `package.cpath`,
-and searchers, initially configured by Lua's standard-library initialization,
-followed by Titan's package searcher, which every new state receives. Host
-path/searcher customizations are not copied, and the new state computes its
-own [Titan path](modules.md#the-titan-path) from the environment rather than
-inheriting the host's. Installed Titan providers remain available when that
-path finds them, so `require "titan.os"` works in a new state without
-`require "titan"`.
+On native targets, `require` otherwise uses the new state's own `package.path`,
+`package.cpath`, and searchers, initially configured by Lua's standard-library
+initialization, followed by Titan's package searcher. Host path/searcher
+customizations are not copied. The new state computes its own
+[Titan path](modules.md#the-titan-path) from the environment rather than
+inheriting the host's, so installed providers remain available when that path
+finds them. On the browser, both file searches miss and the Titan searcher
+does not read the environment or probe providers; copied preload entries still
+work. A linked module that no initialized module imports has no published
+loader and is not requirable merely because its code is in the image.
 
 `run` compiles and executes the complete text or binary chunk, passing
 its variadic arguments to Lua's `...` and returning the complete result list.
@@ -204,6 +220,8 @@ to globals or external resources are not rolled back. Lua errors cross as
 copied diagnostics, not shared error objects.
 
 ### Asynchronous execution
+
+This section and the following Receiver bootstrap section are native-only.
 
 `run_async` executes the chunk in
 [`async.run_foreign`](async-io.md)'s shared libuv worker pool. It must run in
@@ -404,6 +422,8 @@ reading or compilation succeeds or raises; ownership remains with the caller.
 
 ## Executing a file
 
+This operation is native-only.
+
 ```text
 function dofile(filename: string, ...: value): (...: value)
 ```
@@ -431,22 +451,28 @@ returned; if both its result and `package.loaded[modname]` are nil, `true`
 is installed as the fallback. A stored false value deliberately causes the
 next call to load the module again.
 
-Loader lookup preserves the ordinary Lua ordering while replacing only the
-blocking source-file operation:
+Loader lookup preserves the ordinary Lua ordering while replacing the
+source-file operation:
 
 1. Call `package.searchers[1]`, normally the preload searcher.
-2. Search every template in `package.path` with asynchronous `fs`
-   operations. Dots in `modname` become directory separators and every `?`
-   in a template becomes that path. A readable candidate is compiled and
-   receives `(modname, filename)` when its loader runs.
+2. On native targets, search every template in `package.path` with asynchronous
+   `fs` operations. Dots in `modname` become directory separators and every `?`
+   becomes that path. A readable candidate is compiled and receives
+   `(modname, filename)` when its loader runs. On the browser, contribute only
+   `no source search: the browser target has no filesystem`.
 3. Call searchers at indexes 3 and above, normally the two C searchers followed
    by Titan's package searcher and any appended custom searchers, until the
    first nil slot.
 
-This source pass loads ordinary Lua files. Compiled Titan modules are found by
-Titan's package searcher in the third step, so `titan.lua.require` does not
-need a special Titan-loader branch. C modules continue through Lua's
-installed C searchers.
+On native targets this source pass loads ordinary Lua files, and C modules
+continue through Lua's installed C searchers. Compiled Titan modules use
+Titan's package searcher in the third step. On the browser, that searcher
+returns a canonical initialized module or a published preload loader;
+otherwise it contributes
+`no Titan provider search: the browser target has no dynamic providers`.
+It never reads `TITAN_PATH_0_6` or `TITAN_PATH` or probes files. Miss diagnostics
+retain the order above, including the stock C-searcher misses before Titan's
+miss. Custom searchers in the callable slots work on either target.
 
 A standalone Titan entrypoint initially publishes only the main module through
 the first, preload searcher. Its bootstrap require performs the normal
@@ -463,10 +489,11 @@ uninitialized linked modules. Independent-state snapshots can inherit these
 native loaders before their modules are initialized in the destination, as
 described above.
 
-The second searcher slot is reserved for the asynchronous source pass and is
+The second searcher slot is reserved for the selected source pass and is
 never called. Replacing `package.searchers[2]` therefore does not replace that
 pass. Moving or copying Lua's built-in source searcher to another slot is not
-supported, because invoking it there would reintroduce blocking file I/O.
+supported: it would reintroduce blocking file I/O on native targets and cannot
+provide files on the browser.
 Replacement or appended custom searchers in the callable slots are supported;
 they receive the module name and may return a loader plus loader data, or a
 diagnostic string. Searchers and loaders are invoked through Titan's
@@ -491,3 +518,29 @@ load concurrently.
 
 `require` returns only the module value. Lua 5.5's additional loader-data
 result is intentionally not part of this typed API.
+
+## Stock Lua libraries on the browser
+
+The launcher's state and every `lua.new()` state open Lua's standard
+libraries. They share the following browser profile; these are the stock Lua
+APIs called from a Lua chunk, not the typed `titan.io` and `titan.os` APIs.
+
+| Lua operation | Browser behavior |
+| --- | --- |
+| `io.open`, `io.lines(filename)`, `io.input(filename)`, `io.output(filename)`, `io.tmpfile`, `os.remove`, `os.rename`, `os.tmpname`, `dofile`, `loadfile` | fail with Lua's documented error result or raised error; there is no filesystem |
+| `io.popen`, `os.execute(command)` | fail without starting a process; `os.execute()` reports no shell |
+| `io.read`, `io.stdin:read` | fail with a read error, not EOF; embedding input is available through `titan.os.stdin` |
+| `package.loadlib` | returns `nil, message, "absent"` |
+| `package.path`, `package.cpath` searches | miss; no provider or source files are available |
+| `os.getenv` | reads the instance environment, initially empty (`HOME` is nil) |
+| `print`, `io.write`, `io.stdout`, `io.stderr` | send their bytes to the instance's copied output queues |
+| `os.clock()` | raises `os.clock is unavailable on the browser target (no process CPU-time clock)` |
+| `os.exit(code)` | delegates to an already loaded `titan.os.exit`; otherwise raises the unavailable error below |
+
+Stock `os.exit` never calls C `exit()`. In an owner-state async Task it uses
+Titan's [exit request](standard-library-os.md#on-the-browser), mapping `true`
+to status 0 and `false` to status 1. Outside a Task it raises
+`os.exit is unavailable outside an async Task on the browser target`.
+An independent state always raises that error, including after it requires
+`titan.os`: it cannot run a browser Task. Native stock Lua libraries are
+unchanged.

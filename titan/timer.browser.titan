@@ -46,14 +46,8 @@ end
 -- A host timer that fails reports the host's message as an I/O error: the
 -- browser has no error code for it. The thrown JavaScript value is released.
 local function host_error(message: Value, thrown: Value, operation: string): async.OperationError
-  case thrown
-  when is_handle(handle) then handle:close()
-  end
-  local text = "host timer failed"
-  case message
-  when is_string(host_message) then text = host_message
-  end
-  return async.OperationError(-ffi.EIO, "EIO", text, operation)
+  return async.OperationError(-ffi.EIO, "EIO",
+    browser.failure_text(message, thrown) or "host timer failed", operation)
 end
 
 local function sleep_once(milliseconds: integer)
