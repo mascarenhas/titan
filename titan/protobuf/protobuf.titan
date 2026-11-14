@@ -404,14 +404,18 @@ local function codec_kind(is_union: boolean): integer
   return 0
 end
 
+-- Ordinary lookup follows the diagnostic setting; a failure trace instead
+-- follows its own reflective-prefix rule.
+local function generated_codecs_bypassed(): boolean
+  if codec_trace ~= nil then return codec_trace:bypass_generated() end
+  return not generated_codecs_enabled
+end
+
 -- The generated codec bound to a registered nominal name of that kind, and
 -- the name's canonical metatable, or nil for reflection.
 local function find_named_codec(name: string,
     kind: integer): (foreign const *TitanTransferCodec, value)
-  if codec_trace ~= nil then
-    if codec_trace:bypass_generated() then return nil, nil end
-  elseif not generated_codecs_enabled then return nil, nil
-  end
+  if generated_codecs_bypassed() then return nil, nil end
   local identity? = resource_nominals[name]
   if identity == nil then return nil, nil end
   local metatable: foreign TValue = identity as value
@@ -429,10 +433,7 @@ end
 -- @return Opaque codec handle for serialize_generated_to_buffer, or nil.
 -- @usage standard-library-protobuf.md#generated-codecs
 function find_generated_codec(candidate: value): foreign const *void
-  if codec_trace ~= nil then
-    if codec_trace:bypass_generated() then return nil end
-  elseif not generated_codecs_enabled then return nil
-  end
+  if generated_codecs_bypassed() then return nil end
   local raw: foreign TValue = candidate
   local resources: foreign TValue = resource_codecs as value
   return ffi.titan_codec_find(L, resources, raw) as foreign const *void
@@ -444,10 +445,7 @@ end
 -- No stack effects or allocation, and one codec lookup.
 local function find_field_codec(candidate: value, name: string,
     is_union: boolean): foreign const *TitanTransferCodec
-  if codec_trace ~= nil then
-    if codec_trace:bypass_generated() then return nil end
-  elseif not generated_codecs_enabled then return nil
-  end
+  if generated_codecs_bypassed() then return nil end
   local identity? = resource_nominals[name]
   if identity == nil then return nil end
   local raw: foreign TValue = candidate
