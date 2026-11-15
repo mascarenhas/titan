@@ -1,0 +1,52 @@
+local function add_tls_disconnect_case(context: test.Context, workspace: string,
+                                       mode: string, timed: boolean)
+  local deadline = "disabled"
+  if timed then deadline = "enabled" end
+  context:run(mode .. "_timeout_" .. deadline, function (_: test.Context)
+    runtime_test.run(function ()
+      local output, why, status = command.capture({
+        command.program(workspace, "http_tls_idle_app"), mode, deadline,
+      })
+      test.assert(why == "exit" and status == 0, "HTTPS disconnect fixture failed:\n" .. output)
+      test.assert(string.find(output, "HTTPS DISCONNECT OK") ~= nil and
+                  string.find(output, "LISTENER succeeded") ~= nil, "HTTPS fixture did not complete:\n" .. output)
+      local diagnostics = 0
+      local offset = 1
+      while true do
+        local found? = string.find(output, "uncaught error in async Task", offset)
+        if found == nil then break end
+        diagnostics = diagnostics + 1
+        offset = found + 1
+      end
+      if mode == "partial" or mode == "body" then
+        test.assert(diagnostics == 1, "incomplete HTTPS request lost or duplicated its diagnostic:\n" .. output)
+      else
+        test.assert(diagnostics == 0, "idle HTTPS disconnect failed a server-owned Task:\n" .. output)
+        test.assert(string.find(output, "CONNECTION succeeded") ~= nil,
+                    "idle HTTPS connection Task did not succeed:\n" .. output)
+      end
+    end)
+  end)
+end
+
+function test_https_idle_tls_disconnect_boundary(context: test.Context)
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function () command.remove_tree(workspace) end)
+    fs.write_file(workspace .. "/http_tls_idle_app.titan",
+      fs.read_file("spec/fixtures/stdlib/titan/http_tls_idle_app.titan"))
+    local output, why, compiled = command.compile(workspace, "http_tls_idle_app")
+    test.assert(why == "exit" and compiled == 0, "could not compile HTTPS disconnect fixture:\n" .. output)
+  end)
+  add_tls_disconnect_case(context, workspace, "idle", false)
+  add_tls_disconnect_case(context, workspace, "idle", true)
+  add_tls_disconnect_case(context, workspace, "clean", false)
+  add_tls_disconnect_case(context, workspace, "clean", true)
+  add_tls_disconnect_case(context, workspace, "partial", false)
+  add_tls_disconnect_case(context, workspace, "partial", true)
+  add_tls_disconnect_case(context, workspace, "body", false)
+  add_tls_disconnect_case(context, workspace, "body", true)
+end
