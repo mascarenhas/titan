@@ -1232,7 +1232,7 @@ jobs:
           lua -E spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-bridge-build.log"
 
-      - name: Build the live browser HTTP client fixtures
+      - name: Build the live browser HTTP and WebSocket client fixtures
         run: |
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
@@ -1243,7 +1243,7 @@ jobs:
         if: matrix.engine == 'chromium'
         run: python3 --version
 
-      - name: Run live HTTP and HTTPS clients on the managed engine
+      - name: Run live HTTP, HTTPS, and WebSocket clients on the managed engine
         run: |
           set -euo pipefail
           "$TITAN_NODE" spec/fixtures/browser_net/run.mjs \

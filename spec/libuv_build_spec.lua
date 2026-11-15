@@ -6513,7 +6513,7 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(bridge_builder:find(
                 '{name="public-states", owner="browser.public_state_tests", testing=true,', 1, true), bridge_builder)
             local net_build = named_step(playwright_job,
-                "Build the live browser HTTP client fixtures")
+                "Build the live browser HTTP and WebSocket client fixtures")
             assert.falsy(net_build:find("if:", 1, true), net_build)
             assert.truthy(net_build:find(
                 'lua -E spec/browser/build-net.lua "$TITAN_NET_OUTPUT"', 1, true))
@@ -6522,7 +6522,7 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(net_python:find("if: matrix.engine == 'chromium'", 1, true))
             assert.truthy(net_python:find("run: python3 --version", 1, true))
             local net_gate = named_step(playwright_job,
-                "Run live HTTP and HTTPS clients on the managed engine")
+                "Run live HTTP, HTTPS, and WebSocket clients on the managed engine")
             assert.falsy(net_gate:find("if:", 1, true), net_gate)
             for _, contract in ipairs({
                 '"$TITAN_NODE" spec/fixtures/browser_net/run.mjs',

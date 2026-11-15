@@ -37,8 +37,6 @@ export async function wirePeer() {
         if (masked) header += 4;
         if (received.length < header + length) return;
         const opcode = received[0] & 15;
-        const row = events.get(route);
-        row.frames++; row.bytes += length;
         if (opcode === 8) {
           const body = Buffer.from(received.subarray(header, header + length));
           if (masked) for (let index = 0; index < length; index++) body[index] ^= received[mask + index % 4];
@@ -82,7 +80,6 @@ export async function wirePeer() {
         socket.end('HTTP/1.1 200 OK\r\n' + cors + 'Content-Length: ' + body.length + '\r\nConnection: close\r\n\r\n' + body);
       } else if (route.startsWith('/ws/')) {
         const [, , id, mode] = route.split('/');
-        row.frames = 0; row.bytes = 0;
         if (mode === '403') { socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n'); return; }
         const key = received.toString('latin1', 0, end).match(/^Sec-WebSocket-Key:\s*(.+)$/mi)?.[1].trim();
         const accept = mode === 'malformed' ? 'invalid' :

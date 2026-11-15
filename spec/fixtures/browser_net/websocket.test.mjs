@@ -1,4 +1,3 @@
-const encoder = new TextEncoder();
 function text(chunks) {
   const decoder = new TextDecoder();
   return chunks.map(bytes => decoder.decode(bytes, {stream: true})).join('') + decoder.decode();
@@ -16,7 +15,7 @@ function observe() {
   const original = globalThis.WebSocket, rows = new Map();
   globalThis.WebSocket = new Proxy(original, {construct(target, args) {
     const socket = Reflect.construct(target, args);
-    const row = {socket, opened: false, added: 0, removed: 0, sends: 0, bytes: 0};
+    const row = {socket, opened: false, added: 0, removed: 0, sends: 0};
     rows.set(socket.url, row);
     const add = socket.addEventListener, remove = socket.removeEventListener, send = socket.send;
     const listeners = new Map();
@@ -31,7 +30,7 @@ function observe() {
       return remove.call(this, type, actual, options);
     };
     socket.send = function(data) {
-      row.sends++; row.bytes += typeof data === 'string' ? encoder.encode(data).byteLength : data.byteLength;
+      row.sends++;
       return send.call(this, data);
     };
     return socket;
@@ -40,7 +39,6 @@ function observe() {
     const row = rows.get(source);
     if (!row) throw new Error('unknown observed WebSocket ' + source);
     if (name === 'send') return row.sends;
-    if (name === 'sentBytes') return row.bytes;
     if (name === 'buffered') return row.socket.bufferedAmount;
     if (name === 'ready') return row.socket.readyState;
     throw new Error('unknown WebSocket metric ' + name);

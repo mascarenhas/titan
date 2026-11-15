@@ -27,15 +27,13 @@ local function blocked_write_case(id: string, action: string)
       target:call(Value.is_string(source), Value.is_string(id), Value.is_string(action))
     end
     local writer = async.run<|nil, value|>(function (): nil
-      do
-        for index = 1, 8 do
-          attempted = index
-          connection:write(websocket.BINARY, payload)
-          test.assert(metric("ready", source) == 1, "write returned success after the host reported transport loss")
-          returned = index
-        end
-        completed = true
-      catch failure = error end
+      for index = 1, 8 do
+        attempted = index
+        do connection:write(websocket.BINARY, payload) catch failure = error; return nil end
+        test.assert(metric("ready", source) == 1, "write returned success after the host reported transport loss")
+        returned = index
+      end
+      completed = true
       return nil
     end)
     defer writer:cancel(async.CancellationReason.simple("writer test completed"))
@@ -66,7 +64,8 @@ local function blocked_write_case(id: string, action: string)
       test.assert(completed and metric("drains") > drains,
         "writer did not complete after draining through low water")
     else
-      local exact = not remote or metric("exactWrite") == 1
+      -- FIN can drain the admitted write before the host reports the transport loss.
+      local exact = action ~= "fin" and (not remote or metric("exactWrite") == 1)
       test.assert(not completed and (not exact or returned < blocked),
         "writer did not fail after the observed transport loss")
       assert_write_failure(failure, nil)

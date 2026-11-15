@@ -6,7 +6,7 @@ EM_JS(void, titan_net_test_publish, (), {
   const binding = owner.binding, release = owner.releaseSlot;
   const copy = Uint8Array.prototype.set;
   const large = 20 * 1024 * 1024;
-  const marks = {takes: 0, sends: 0, high: 0, low: 0, drains: 0,
+  const marks = {takes: 0, high: 0, drains: 0,
     largeTakes: 0, largeReleased: 0, largeCopies: 0};
   owner.binding = function(pointer, length, state) {
     const result = binding.call(this, pointer, length, state);
@@ -19,16 +19,13 @@ EM_JS(void, titan_net_test_publish, (), {
           marks.takes++;
           if (args[0].bytes?.byteLength === large) marks.largeTakes++;
         }
-        if (op === 'send') marks.sends++;
         const value = source(op, ...args);
         if (op === 'buffered' && value > 262144n) {
           marks.high++; waiting.add(args[0]);
           owner.options.bindings.ws_high(args[0].url);
         }
-        if (op === 'buffered' && value >= 0n && value <= 65536n) {
-          marks.low++;
-          if (waiting.delete(args[0])) marks.drains++;
-        }
+        if (op === 'buffered' && value >= 0n && value <= 65536n &&
+            waiting.delete(args[0])) marks.drains++;
         return value;
       };
     }
