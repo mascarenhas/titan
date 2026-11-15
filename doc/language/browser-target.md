@@ -258,7 +258,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | --- | --- |
 | `libtitan.a` | the browser runtime archive |
 | `libtitan-lpeglabel.a` | the PEG engine, built for the browser; `make browser-sdk` links it into `titan.a` |
-| `titan.a` | the [browser standard library](#the-browser-standard-library): fourteen shared modules including `io`, browser contributors for `async`, `timer`, synchronous `lua`, and the `os` subset, browser-only `titan.browser`, and the PEG engine |
+| `titan.a` | the [browser standard library](#the-browser-standard-library): fourteen shared modules including `io`, browser contributors for `async`, `timer`, synchronous `lua`, the `os` subset, and the `http` and `websocket` clients, browser-only `titan.browser`, and the PEG engine |
 | `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
@@ -1215,10 +1215,10 @@ bare `raise`.
 
 ## The browser standard library
 
-The browser SDK's `titan.a` holds nineteen standard modules that need no libuv
-or other native-only library: fourteen complete shared modules, browser
-compositions of `async`, `timer`, `os`, and `lua`, and the browser-only
-`titan.browser`:
+The browser SDK's `titan.a` holds twenty-one standard modules that need no
+libuv or other native-only library: fourteen complete shared modules, browser
+compositions of `async`, `timer`, `os`, `lua`, `http`, and `websocket`, and the
+browser-only `titan.browser`:
 
 | Module | Contents |
 | --- | --- |
@@ -1240,6 +1240,8 @@ compositions of `async`, `timer`, `os`, and `lua`, and the browser-only
 | [`timer`](standard-library-timer.md#on-the-browser) | Task delays, yields, and coalescing tickers on JavaScript timers |
 | [`os`](standard-library-os.md#on-the-browser) | calendars, wall time, locale, instance environment, Task exit, and embedding-provided parent streams |
 | [`lua`](standard-library-lua.md) | string and Reader loading, preload/custom-searcher `require`, and synchronous independent states |
+| [`http`](standard-library-http.md#on-the-browser) | headers, request options, and the streaming HTTP client over `fetch` |
+| [`websocket`](standard-library-websocket.md#on-the-browser) | the message-oriented WebSocket client over the host's `WebSocket` |
 | [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
 
 Each of the fourteen shared modules keeps its complete interface. Every public
@@ -1285,6 +1287,27 @@ raises instead of reporting CPU time, and its `os.exit` uses Titan's Task exit
 or raises outside a Task. See [the Lua chapter](standard-library-lua.md),
 including its stock-library table.
 
+`http` keeps its headers, request options, and client: `Client`,
+`ClientResponse`, `request`, `get`, and `close_idle_connections` run over the
+host's `fetch`. Servers, protocol upgrades, and `Exchange` handoff are absent.
+The browser follows redirects by default (natively the redirect response is
+returned), applies its HTTP cache, cookies, CORS, and certificate trust,
+rejects the request headers that browsers forbid before anything is sent, and
+returns decoded response bodies. Network failures raise
+`async.OperationError` named `"EIO"`, never `ssl.Error`. See
+[HTTP on the browser](standard-library-http.md#on-the-browser).
+
+`websocket` keeps its message-oriented client over the host's `WebSocket`.
+The server, `Connection:ping`, and the transfer hooks are absent, and dial
+options with headers or a `ca_file` raise. Opening failures raise
+`HandshakeError` without a status or headers, the browser negotiates
+compression, and `close()` lets the browser finish the closing handshake. See
+[WebSocket on the browser](standard-library-websocket.md#on-the-browser).
+
+Both clients need the instance's active async Runtime: in a state created by
+`lua.new()`, their network calls raise `"async Runtime is not active"`, while
+headers, options, and `http.Client.new` still work.
+
 `titan.browser` is the reviewed target-only exception. It has no native
 placeholder and imports only the portable core. Its byte/scalar ABI is not the
 native transfer packet format, and schema copies are a separate feature. It
@@ -1294,8 +1317,8 @@ that the `async` driver uses but schedules nothing itself. See
 
 ### Modules that are not available
 
-The other standard modules are absent from the browser target: `uv`,
-`fs`, `net`, `ssl`, `http`, `websocket`, `sqlite3`, and `thread`.
+The other standard modules are absent from the browser target: `uv`, `fs`,
+`net`, `ssl`, `sqlite3`, and `thread`.
 Each of them uses libuv, directly or through its imports. Each has only a
 native main, either a flat variant such as `titan/fs.native.titan` or a
 folder main such as `titan/uv/uv.native.titan` (see [target source
@@ -1570,9 +1593,10 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 ## Current limits
 
-* The browser standard library has [nineteen standard
+* The browser standard library has [twenty-one standard
   modules](#the-browser-standard-library), including `io`, the `os` subset,
-  and synchronous `lua` states. Files, networking, child processes, host
+  synchronous `lua` states, and the `http` and `websocket` clients. Files, raw
+  TCP and TLS sockets, HTTP and WebSocket servers, child processes, host
   paths and identity, CPU time, `thread`, and `sqlite3` remain unavailable.
 * `async` Tasks run only in the instance's owner state and only while a drive
   runs: the program's `main`, a call that calls `async.loop()`, or a

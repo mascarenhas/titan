@@ -1,9 +1,12 @@
 # HTTP/1.1 standard library
 
 The `http` standard module provides a small streaming HTTP/1.1 client and
-server. It is layered over public `net`, [`ssl`](standard-library-ssl.md),
-[`url`](standard-library-url.md), [`io`](standard-library-io.md), and
-[`async`](async-io.md) APIs. Titan source uses its short import:
+server. On native targets it is layered over public `net`,
+[`ssl`](standard-library-ssl.md), [`url`](standard-library-url.md),
+[`io`](standard-library-io.md), and [`async`](async-io.md) APIs. On the
+browser target the same client API runs over the host's `fetch`; servers,
+protocol upgrades, and connection handoff are native-only (see
+[on the browser](#on-the-browser)). Titan source uses its short import:
 
 ```titan
 local http = import "http"
@@ -12,9 +15,9 @@ local http = import "http"
 The parser resolves that spelling to the canonical `titan.http` module
 identity. Lua loads that identity directly with `require "titan.http"`.
 
-All network operations and server handlers run in async Tasks. The module
-supports only HTTP/1.1. It does not expose its llhttp parser or any native
-socket handle.
+All network operations and server handlers run in async Tasks. The native
+client and server support only HTTP/1.1. The module does not expose its
+llhttp parser, any native socket handle, or any browser `fetch` object.
 
 ## API
 
@@ -34,30 +37,61 @@ function Headers:values(name: string): {string}
 function Headers:remove(name: string)
 function Headers:all(): {Header}
 
+union CacheMode
+    default()
+    no_store()
+    reload()
+    no_cache()
+    force_cache()
+    only_if_cached()
+end
+
+union CredentialsMode
+    omit()
+    same_origin()
+    include()
+end
+
+union RequestMode
+    cors()
+    no_cors()
+    same_origin()
+end
+
+union RedirectMode
+    follow()
+    error()
+    manual()
+end
+
+record RequestOptions -- opaque; construct with RequestOptions.new
+function RequestOptions.new(headers: Headers?, body: string?, ca_file: string?,
+                            cache: CacheMode?, credentials: CredentialsMode?,
+                            mode: RequestMode?,
+                            redirect: RedirectMode?): RequestOptions
+
 record ClientResponse
     status: integer
     reason: string
-    version: string
     headers: Headers
+    url: string?
+    redirected: boolean
 end
 
 record Client
 function Client.new(): Client
 function Client:request(method: string, source_url: string,
-                        supplied_headers: Headers?, body: string?,
-                        ca_file: string?): ClientResponse
-function Client:get(source_url: string, supplied_headers: Headers?,
-                    ca_file: string?): ClientResponse
+                        options: RequestOptions?): ClientResponse
+function Client:get(source_url: string,
+                    options: RequestOptions?): ClientResponse
 function Client:close_idle_connections()
 function Client:close()
 function close_idle_connections()
 
 function request(method: string, source_url: string,
-                 supplied_headers: Headers?, body: string?,
-                 ca_file: string?): ClientResponse
+                 options: RequestOptions?): ClientResponse
 
-function get(source_url: string, supplied_headers: Headers?,
-             ca_file: string?): ClientResponse
+function get(source_url: string, options: RequestOptions?): ClientResponse
 
 function request_upgrade_on(connection: io.ReaderWriterCloser,
                             abort: function (): (), source_url: string,
@@ -167,61 +201,196 @@ operation has begun at that point. A server `Request.url` is the normalized
 `url.Url` returned by `url.parse_request` from the connection scheme, required
 Host field, and received origin-form target.
 
-The HTTP client connects with `Url.host` and `Url.port`, sends `Url.target` in
-the request line, and uses `Url.authority` when it generates an absent Host
-field. Applications that only need to validate or inspect a URL should import
-`url` directly and handle its nonthrowing `(Url?, Error?)` result.
+The native HTTP client connects with `Url.host` and `Url.port`, sends
+`Url.target` in the request line, and uses `Url.authority` when it generates
+an absent Host field. Applications that only need to validate or inspect a URL
+should import `url` directly and handle its nonthrowing `(Url?, Error?)`
+result.
 
 ## Client requests
 
-`request` validates `method` as an HTTP token, parses `source_url`, chooses a
-plain or TLS connection from its scheme, sends one request, and returns after
-the final response headers have been parsed. Method names are case-sensitive;
-only exact `HEAD` selects response-to-HEAD framing. For HTTPS, `ca_file` has
-exactly the trust-selection behavior documented by
-[`ssl.connect`](standard-library-ssl.md#verified-client-connections); it is
-ignored for HTTP.
+`request(method, source_url, options)` validates `method` as an HTTP token,
+parses `source_url`, applies the [request options](#request-options), sends
+one request, and returns after the final response headers have been parsed.
+`options` is an optional `RequestOptions` snapshot; omitting it selects every
+default. A native client chooses a plain or TLS connection from the URL's
+scheme. Method names are case-sensitive; only exact `HEAD` selects
+response-to-HEAD framing.
 
-The supplied headers are copied before the module adds framing fields. There
-must be at most one `Host` field. If absent, it is generated from the URL. A
-supplied value must be one complete URI authority: a registered name, IPv4
-address, or bracketed IP literal, followed by an optional valid port. User
-information and the `/`, `?`, and `#` delimiters are rejected, so a supplied
-Host cannot consume or reinterpret the separately generated request target.
-These failures raise the structured `url.Error` returned by
-`url.parse_request`. The valid supplied spelling is preserved on the wire.
-Client request bodies are one optional in-memory string, not a streaming
-Writer. When a body is present, `Content-Length` is generated unless supplied;
-an explicit length must exactly match. Request `Transfer-Encoding` is not
-supported. Request `Expect` is also rejected because this initial client sends
-the optional body in the same write as its preamble and does not expose a
-staged `100-continue` state machine. HTTP/1.1 connections are persistent by
-default. A supplied `Connection: close` is preserved and disables reuse for
-that exchange.
+```titan
+local http = import "http"
 
-`get` is `request` with method `GET` and no body. It does not attach semantics
-to any other method name.
+function post_form(source: string, form: string): integer
+  local supplied = http.headers()
+  supplied:add("Content-Type", "application/x-www-form-urlencoded")
+  local response = http.request("POST", source, http.RequestOptions {
+    headers = supplied, body = form,
+  })
+  defer response:close()
+  return response.status
+end
+```
 
-The ordinary response parser consumes informational 1xx responses before returning
-the final response. `status`, `reason`, `version`, and `headers` are then
-available while its body remains streaming. `read` returns decoded body chunks
-with HTTP chunk framing removed; `read_until` has the ordinary binary
-`io.Reader` delimiter contract. Content-Length, chunked, no-body, and
-connection-close-delimited HTTP/1.1 responses are handled by the protocol
-parser. Response trailers, when present, are appended to the same ordered
-`headers` collection as parsing reaches them.
+The `headers` option is copied when the options are constructed, and the
+native client copies it again before adding framing fields. A native request
+has at most one `Host` field. If absent, it is generated from the URL. A supplied
+value must be one complete URI authority: a registered name, IPv4 address, or
+bracketed IP literal, followed by an optional valid port. User information
+and the `/`, `?`, and `#` delimiters are rejected, so a supplied Host cannot
+consume or reinterpret the separately generated request target. These
+failures raise the structured `url.Error` returned by `url.parse_request`. The
+valid supplied spelling is preserved on the wire. The `body` option is one
+in-memory string, not a streaming Writer. When a body is present,
+`Content-Length` is generated unless supplied; an explicit length must
+exactly match. Request `Transfer-Encoding` is not supported. Request `Expect`
+is also rejected because the native client sends the optional body in the
+same write as its preamble and does not expose a staged `100-continue` state
+machine. HTTP/1.1 connections are persistent by default. A supplied
+`Connection: close` is preserved and disables reuse for that exchange.
+
+`get(source_url, options)` is `request` with method `GET`. It rejects options
+that carry a body, even an empty one, with `"HTTP get does not accept a
+request body"`; a native `request("GET", ...)` still sends a supplied body. It
+does not attach semantics to any other method name.
+
+The ordinary response parser consumes informational 1xx responses before
+returning the final response. Its `status`, `reason`, `headers`, `url`, and
+`redirected` fields are then available while its body remains streaming.
+`url` is the normalized URL of the exchange that produced the response, which
+is the last one when redirects were followed, or `nil` when the browser hides
+it (see [on the browser](#on-the-browser)). `redirected` is true when at least
+one redirect was followed. `read` returns decoded body chunks with HTTP chunk
+framing removed; `read_until` has the ordinary binary `io.Reader` delimiter
+contract. Content-Length, chunked, no-body, and connection-close-delimited
+HTTP/1.1 responses are handled by the protocol parser. Response trailers,
+when present, are appended to the same ordered `headers` collection as
+parsing reaches them.
 
 Reading through body EOF closes the response and makes a healthy persistent
 connection available for reuse. Always defer `response:close()` immediately:
 callers that stop reading early still own closing the response. Close is
 idempotent; later reads return nil.
 
+### Request options
+
+`RequestOptions.new` validates and copies the options of a request. Call it
+through the record, usually with named arguments, as in
+`http.RequestOptions { headers = supplied, redirect = http.RedirectMode.follow() }`:
+
+| Option | Meaning | `nil` selects |
+| --- | --- | --- |
+| `headers` | application request headers, copied | no headers |
+| `body` | one in-memory, binary-safe request body | no body |
+| `ca_file` | PEM trust file for native HTTPS | the default trust paths |
+| `cache` | a `CacheMode` | `default()` |
+| `credentials` | a `CredentialsMode` | `same_origin()` |
+| `mode` | a `RequestMode` | `cors()` |
+| `redirect` | a `RedirectMode` | `manual()` on native targets, `follow()` on the browser |
+
+The record is opaque: its fields are private and never change after
+construction. Changing the caller's `Headers` afterwards does not reach the
+copy, and no request changes it either, because redirect handling works on its
+own copy of the headers. One `RequestOptions` can serve any number of
+requests and Clients. The constructor raises `"HTTP cache mode
+'only-if-cached' requires request mode 'same-origin'"` when `cache` is
+`only_if_cached()` and `mode` is not explicitly `same_origin()`; a `nil` mode
+counts as `cors()`.
+
+The four mode unions are closed sets of variants without payloads, named after
+the [Fetch standard's](https://fetch.spec.whatwg.org/#requestinit) `RequestInit`
+values (`no_store()` for `"no-store"`, `same_origin()` for `"same-origin"`, and
+so on). Each call to a variant constructor creates a new value, and union
+equality compares identity, so `http.CacheMode.reload() ==
+http.CacheMode.reload()` is false. Inspect a mode with `case`:
+
+```titan
+local http = import "http"
+
+function cache_label(mode: http.CacheMode): string
+  case mode
+  when default() then return "default"
+  when no_store() then return "no-store"
+  when reload() then return "reload"
+  when no_cache() then return "no-cache"
+  when force_cache() then return "force-cache"
+  when only_if_cached() then return "only-if-cached"
+  end
+end
+```
+
+Each target applies the modes as its platform does. A native target behaves
+like a browser with an empty HTTP cache, no cookie jar, and no CORS:
+
+- **`cache`.** `default()`, `no_store()`, `reload()`, `no_cache()`, and
+  `force_cache()` perform an ordinary network exchange and store nothing.
+  `only_if_cached()` always misses: it raises `async.OperationError` named
+  `"EIO"` with operation `"http.request"` and message `"HTTP response not in
+  cache (only-if-cached)"` before opening a connection.
+- **`credentials`.** No variant adds cookies or HTTP authentication; the
+  request carries only the headers the application supplied.
+- **`mode`.** `no_cors()` admits only the methods `GET`, `HEAD`, and `POST`,
+  compared ASCII case-insensitively, and raises `"HTTP request mode 'no-cors'
+  allows only GET, HEAD, or POST"` before any I/O. The browser applies the
+  same check. Native targets enforce no CORS, so every mode otherwise
+  performs an ordinary exchange.
+- **`ca_file`.** For HTTPS it has exactly the trust-selection behavior
+  documented by
+  [`ssl.connect`](standard-library-ssl.md#verified-client-connections), on
+  every HTTPS hop of a followed redirect chain. Plain HTTP ignores it.
+- **`redirect`.** See [redirects](#redirects).
+
+The browser applies `cache`, `credentials`, and `mode` through `fetch`, and
+rejects a `ca_file`; see [on the browser](#on-the-browser).
+
+### Redirects
+
+The redirect statuses are 301, 302, 303, 307, and 308. The redirect mode
+decides the outcome of every response with one of these statuses, whether or
+not it carries a `Location` field; any other status returns normally.
+
+- **`manual()`**, the native default, returns the redirect response itself.
+  On a native target that is the received response: its 3xx status, reason,
+  headers (with or without `Location`), a readable body, `url` naming the
+  requested URL, and `redirected` false. On the browser it is the
+  opaque-redirect response described in [on the browser](#on-the-browser).
+- **`error()`** closes the response and raises `async.OperationError` named
+  `"EIO"` with operation `"http.request"` and message `"HTTP redirect
+  disallowed by RedirectMode.error"`, on both targets.
+- **`follow()`**, the browser default, requests the `Location` target and
+  returns the first response that is not followed, with `url` naming its URL
+  and `redirected` true. A native target follows the rules of the
+  [Fetch standard](https://fetch.spec.whatwg.org/#http-redirect-fetch):
+  - A redirect response without `Location` is returned as it is.
+  - A response with several `Location` fields, a 21st redirect after twenty
+    followed ones, or a `Location` that cannot be followed raises
+    `async.OperationError` named `"EIO"` with operation `"http.request"`.
+  - `Location` loses surrounding spaces and tabs and any `#fragment`, and is
+    resolved against the current URL as an RFC 3986 reference: absolute,
+    network-path (`//host/path`), absolute-path, relative-path, and
+    query-only references work, and `.` and `..` segments are removed. A
+    target with a scheme other than `http` or `https`, user information, or
+    no authority, or one that the `url` module rejects, cannot be followed.
+  - Each intermediate response is closed through the ordinary
+    `ClientResponse:close()`, with its bounded drain, before the next request,
+    and cancellation is checked between hops.
+  - A 301 or 302 response to `POST`, and a 303 response to a method other than
+    `GET` or `HEAD`, change the next request to a bodyless `GET` and remove its
+    `Content-Encoding`, `Content-Language`, `Content-Location`,
+    `Content-Type`, and `Content-Length` headers. These method names compare
+    ASCII case-insensitively. 307 and 308 keep the method and body.
+  - When a hop changes origin, the `Authorization`, `Proxy-Authorization`,
+    `Cookie`, `Cookie2`, and `Host` headers are removed for the rest of the
+    chain, even if a later hop returns to the first origin. Origins compare
+    normalized scheme, host, and effective port, so `HTTP://Example.COM:80/`
+    and `http://example.com/` are one origin. A change from `https` to
+    `http` changes the origin and is followed.
+
 ### Connection pools and early close
 
-Module-level `get` and `request` share a default connection pool within the
-current async Runtime. `http.Client()` creates an independent pool with the
-same request methods. Use an explicit Client when a component needs its own
-connection lifetime:
+On native targets, module-level `get` and `request` share a default connection
+pool within the current async Runtime. `http.Client()` creates an independent
+pool with the same request methods. Use an explicit Client when a component
+needs its own connection lifetime:
 
 ```titan
 local http = import "http"
@@ -308,9 +477,144 @@ cancellation-insensitive: when reuse is unavailable, close completes cleanup
 before terminal cancellation is published. Background draining retains its
 parser and transport until read cancellation and native cleanup finish.
 
-Redirect status codes are returned unchanged; the client never follows them.
-Content codings such as gzip are likewise returned unchanged. The caller owns
-redirect policy and decompression.
+A native client returns content codings such as gzip unchanged: `read`
+delivers the encoded bytes, and the caller owns decompression. The browser
+decodes them instead (see [on the browser](#on-the-browser)).
+
+### Client errors
+
+| Failure | Native targets | Browser target |
+| --- | --- | --- |
+| Malformed source URL, or a scheme other than `http` or `https` | `url.Error` | `url.Error` |
+| Invalid method, header, or option; `only_if_cached()` without `same_origin()`; `no_cors()` with another method; `get` with a body; a browser-only restriction below; a request with no active Runtime | string | string |
+| Task cancellation | `async.CancellationReason` | `async.CancellationReason` |
+| `only_if_cached()` miss, `RedirectMode.error()` on a redirect status, more than twenty redirects, an unusable or repeated redirect `Location` | `async.OperationError`, name `"EIO"`, operation `"http.request"` | the same |
+| DNS or connection failure | `async.OperationError` from `net` | `async.OperationError`, name `"EIO"`, operation `"http.request"` |
+| Certificate or TLS failure | `ssl.Error` | the same `"EIO"` `OperationError` |
+| CORS or same-origin block, mixed content | (no such check) | the same `"EIO"` `OperationError` |
+| HTTP protocol or framing failure | string | the same `"EIO"` `OperationError` |
+| Body stream failure after the headers | the transport's error, or a string for framing | `async.OperationError`, name `"EIO"`, operation `"http.read"` |
+
+Request-option policy failures therefore raise the same `OperationError`
+identity on both targets. Branch on its `name` and `operation`: the numeric
+`code` is the platform's negative `EIO` value and differs between targets.
+There is no `http.Error` record, and `ssl.Error` never reaches a browser
+caller.
+
+## On the browser
+
+On `--target browser`, `http` provides the client: `Header`, `Headers`,
+`headers`, the four mode unions, `RequestOptions`, `Client`, `ClientResponse`,
+`request`, `get`, `close_idle_connections`, and the `Client` and
+`ClientResponse` methods other than `ClientResponse:take_upgrade`. Each has
+its native signature. Servers (`listen`, `listen_tls`, `Server`, `Handler`,
+`Request`, `Response`), protocol upgrades (`request_upgrade_on`,
+`ClientResponse:take_upgrade`, `UpgradedStream`), and `Exchange` handoff have
+no browser declarations, so a browser build that names one fails to compile.
+
+The host's `fetch` performs each request. The browser engine, or Node when a
+browser image runs under Node, owns the HTTP version, connection reuse, TLS
+trust, its HTTP cache, cookies, CORS, mixed-content blocking, and the
+`Origin` and `Referer` it sends. A shared interface does not promise the same
+outcome on both targets: a request that succeeds natively can fail in a
+browser because of CORS, and the redirect default differs.
+
+**Runtime.** A request needs the instance's active async Runtime. In a state
+created by `lua.new()`, `request` and `get` raise `"async Runtime is not
+active"`. Importing `http`, building headers and options, and `Client.new`
+work there.
+
+**Checks before the network.** Titan rejects these requests before it calls
+the host, so nothing reaches the network:
+
+- an invalid method token, and `CONNECT`, `TRACE`, or `TRACK` in any letter
+  case;
+- a method other than `GET`, `HEAD`, or `POST` with `RequestMode.no_cors()`,
+  as on native targets;
+- an invalid URL, or a scheme other than `http` or `https` (`url.Error`);
+- any `ca_file`, with `"HTTP ca_file is unavailable on the browser target"`;
+- any body, even an empty one, with `GET` or `HEAD` in any letter case; and
+- a forbidden request header, below.
+
+**Request headers.** Browsers refuse to send the
+[forbidden request headers](https://fetch.spec.whatwg.org/#forbidden-request-header)
+of the Fetch standard. Titan checks them first, so every engine behaves the
+same. Names compare ASCII case-insensitively:
+
+- One `Host` naming the URL's authority is removed, because the browser sends
+  its own; any other `Host` raises `"HTTP custom Host header is unavailable on
+  the browser target"`.
+- One `Content-Length` equal to the body length is removed; any other
+  `Content-Length` raises.
+- `Transfer-Encoding` and `Expect` raise, as on native targets.
+- `Accept-Charset`, `Accept-Encoding`, `Access-Control-Request-Headers`,
+  `Access-Control-Request-Method`, `Connection`, `Cookie`, `Cookie2`, `Date`,
+  `DNT`, `Keep-Alive`, `Origin`, `Referer`, `Set-Cookie`, `TE`, `Trailer`,
+  `Upgrade`, and `Via` raise `"HTTP request header '<name>' is forbidden on
+  the browser target"`, as does any name that begins with `Proxy-` or `Sec-`.
+- `X-HTTP-Method`, `X-HTTP-Method-Override`, and `X-Method-Override` raise
+  when an element of their comma-separated value, with surrounding spaces and
+  tabs removed, is `CONNECT`, `TRACE`, or `TRACK` in any letter case. A comma
+  inside a double-quoted string does not separate elements, so `GET, TRACE`
+  raises and `"foo,TRACE,bar"` is sent unchanged.
+
+Every other header goes to `fetch` as supplied. With `RequestMode.no_cors()`
+the browser itself drops the headers that CORS does not safelist. Fetch sends
+the methods `delete`, `get`, `head`, `options`, `post`, and `put` in upper
+case whatever their spelling; a native client sends the method as written.
+
+**Options.** `cache`, `credentials`, and `mode` select the matching `fetch`
+values, and `redirect` defaults to `follow()`. `CacheMode.default()` uses the
+browser's HTTP cache, so a fresh cached response can arrive without a network
+request; choose `no_store()` or `reload()` to bypass it. Node has no HTTP
+cache, so under Node `only_if_cached()` misses at once and raises the native
+`"HTTP response not in cache (only-if-cached)"` `OperationError` without a
+request. In a browser it reads the cache, and a miss raises `OperationError`
+with name `"EIO"` and operation `"http.request"`. `CredentialsMode.include()`
+sends cookies on cross-origin requests too, and such a response passes CORS
+only when the server names the page's origin rather than `*`.
+
+**Responses.** `status` is the HTTP status, or 0 for an opaque response.
+`headers` holds what the browser exposes: lowercase names in sorted order,
+repeated fields joined by commas, and no trailers. `Set-Cookie` and
+`Set-Cookie2` never appear, under Node either. A cross-origin response
+exposes only the CORS-safelisted headers and those its server lists in
+`Access-Control-Expose-Headers`. `reason` is the status text that the
+browser reports. `url` is the final URL and `redirected` reports whether the
+browser followed a redirect; a cross-origin hop must pass CORS as well.
+Two kinds of response are opaque, with `status` 0, an empty `reason` and
+`headers`, `redirected` false, and a body whose first read returns nil:
+
+- With `RedirectMode.manual()`, every redirect status, with or without
+  `Location`, gives Fetch's opaque-redirect response, whose `url` names the
+  requested URL. Titan returns the same response under Node, which otherwise
+  exposes the raw 3xx response.
+- A cross-origin request with `RequestMode.no_cors()` gives an opaque
+  response whose `url` is nil.
+
+**Bodies.** The browser decodes content codings: `read` and `read_until`
+return the decoded body bytes, while `Content-Encoding` and `Content-Length`
+in `headers` still describe the bytes on the wire. Do not decompress again
+because of `Content-Encoding`, and do not bound reads by `Content-Length`. A
+body streams: each `read` returns the next chunk that the host delivers.
+Request bodies are one in-memory string; there are no streaming uploads.
+
+**Closing and cancellation.** `ClientResponse:close()` aborts the fetch at
+once without yielding, so it is safe in a cancellation `defer`, and there is
+no background drain. Cancelling a Task while it awaits response headers or a
+body read also aborts the fetch, and the server sees the connection end.
+
+**Clients.** A `Client` binds to the Runtime of its first request and raises
+when another Runtime uses it. After `close()`, its requests raise `"HTTP
+Client is closed"`. The browser engine pools connections, so
+`close_idle_connections()` and `Client:close_idle_connections()` do nothing.
+
+**Errors.** Failures that the host reports, including DNS failures, refused
+connections, untrusted certificates and host-name mismatches, CORS and
+same-origin blocks, and mixed content, raise `async.OperationError` with name
+`"EIO"` and operation `"http.request"`; browsers do not tell them apart. A
+failure while reading the body raises the same error with operation
+`"http.read"`. See [client errors](#client-errors).
 
 ## Servers and handlers
 
