@@ -765,8 +765,10 @@ fixed opaque-redirect envelope with the requested URL and no body, which
 covers Node's raw 3xx responses and the body WebKit exposes for a redirect
 without `Location`; `error()` raises the `RedirectMode.error` policy error, and
 the adoption guard closes the session (Chromium exposes the raw status when
-`Location` is absent). Only an `opaqueredirect` keeps a URL; an empty URL,
-as for an `opaque` response, becomes `nil`. Fetch rejections become
+`Location` is absent). An ordinary response keeps the final URL that the host
+reports; the opaque-redirect envelope and any `opaqueredirect` response take
+the requested URL; and an empty URL, as for an `opaque` response, becomes
+`nil`. Fetch rejections become
 `async.OperationError(-ffi.EIO, "EIO", message, "http.request")`, including
 the network error that Fetch requires for a cross-origin `no-cors` request
 whose redirect mode is not `follow`.

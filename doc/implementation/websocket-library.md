@@ -232,10 +232,12 @@ before `open` to `HandshakeError("WebSocket opening handshake failed", nil,
 nil)`; a listener failure or a host exception before `open` becomes
 `HandshakeError(message, nil, nil)` with the host's message. After `open`
 and before adoption, `connect` compares the selected subprotocol with the
-immutable offer: an unselected protocol when one was offered, or one that
-was not offered, raises the same fixed `HandshakeError` and retires the
-socket through the adoption guard. Chromium already refuses such an opening,
-but Firefox and WebKit open it with an empty protocol.
+immutable offer: no selection when protocols were offered, or a selection
+that was not offered, raises the same fixed `HandshakeError` and retires the
+socket through the adoption guard. Chromium refuses an opening that selects
+none of the offered protocols, but Firefox and WebKit open it with an empty
+protocol. A native client fails only the unoffered selection and returns a
+nil `subprotocol()` when none is selected.
 
 **State.** The connection moves from connecting to open, closing (after
 `shutdown` sends Close), and terminal. The first failure latches as an

@@ -269,11 +269,12 @@ string for a scheme other than `ws` or `wss` and for options that carry any
 headers or a `ca_file`: a browser `WebSocket` sends no application headers and
 trusts the browser's certificates. The browser offers the `subprotocols`,
 sends its cookies and HTTP authentication with the opening request, and
-negotiates `permessage-deflate` compression itself. When subprotocols were
-offered and the response selects none (or one that was not offered), the
-opening fails on every engine: Chromium refuses it itself, and Titan checks
-the selected subprotocol where Firefox and WebKit open anyway. A native client
-instead returns a connection whose `subprotocol()` is nil. Every failure
+negotiates `permessage-deflate` compression itself. A response that selects
+a subprotocol that was not offered fails the opening on both targets. When
+subprotocols were offered and the response selects none, the browser opening
+fails as well, on every engine: Chromium refuses it itself, and Titan checks
+the selection where Firefox and WebKit open anyway. A native client instead
+returns a connection whose `subprotocol()` is nil. Every failure
 before the connection opens, whether an HTTP rejection, an invalid response,
 a DNS failure, a refused connection, or a TLS failure, raises `HandshakeError`
 with nil `status` and `headers`, because the browser reports them alike; a
@@ -337,7 +338,8 @@ the same way.
 | Malformed URL | `url.Error` | `url.Error` |
 | Scheme other than `ws` or `wss`; invalid `DialOptions`; browser `headers` or `ca_file`; no active Runtime | string | string |
 | Opening deadline | `Error("timeout", "websocket.open", ..., nil)` | the same |
-| HTTP rejection, invalid opening response, unselected subprotocol | `HandshakeError` with the status and headers when known | `HandshakeError(message, nil, nil)` |
+| HTTP rejection, invalid opening response, selected subprotocol that was not offered | `HandshakeError` with the status and headers when known | `HandshakeError(message, nil, nil)` |
+| Subprotocols offered, none selected | a connection whose `subprotocol()` is nil | `HandshakeError(message, nil, nil)` |
 | DNS, connection, or TLS failure before opening | `async.OperationError` or `ssl.Error` | `HandshakeError(message, nil, nil)` |
 | Outgoing invalid UTF-8 in `write` or `shutdown` | `Error("utf8", operation, ..., nil)` | the same |
 | Closed or closing connection, duplicate operation, invalid Close code, reason over 123 bytes | `Error("state", operation, ..., nil)` | the same, with the browser's code range |

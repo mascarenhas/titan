@@ -1015,9 +1015,13 @@ home, because WebKit's default ephemeral context has no HTTP cache.
   wraps the bridge's binding and slot release to count `take` calls, holder
   releases, and Wasm copies, with no production hook.
 
-Every case requires the peer to see its connection close before disposal,
-balanced WebSocket listeners, no `onNotificationError` before or during an
-awaited `dispose()`, and the driver ends with one `BROWSER-NET` JSON report
+Each of the four HTTP cancellation phases waits for the peer to see its
+aborted connection close before disposal, since disposal is not the leak
+oracle. The WebSocket driver, after its suite and after each cancellation
+phase, waits for the peer to see every connection it observed close and
+requires balanced host listeners on each, before disposal. Both drivers
+require that no `onNotificationError` arrives before or during each
+`dispose()` they await. The driver ends with one `BROWSER-NET` JSON report
 (verdict, 65 cases, the cancellation phases, the same-origin page, engine,
 and verified TLS) that `run.mjs` and the spec check.
 
