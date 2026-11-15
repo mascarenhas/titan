@@ -46,7 +46,8 @@ record RequestOptions
 end
 
 local function cache_mode_string(mode: CacheMode?): string
-  case mode or CacheMode.default()
+  if mode == nil then return "default" end
+  case mode
   when default() then return "default"
   when no_store() then return "no-store"
   when reload() then return "reload"
@@ -57,7 +58,8 @@ local function cache_mode_string(mode: CacheMode?): string
 end
 
 local function credentials_mode_string(mode: CredentialsMode?): string
-  case mode or CredentialsMode.same_origin()
+  if mode == nil then return "same-origin" end
+  case mode
   when omit() then return "omit"
   when same_origin() then return "same-origin"
   when include() then return "include"
@@ -65,7 +67,8 @@ local function credentials_mode_string(mode: CredentialsMode?): string
 end
 
 local function request_mode_string(mode: RequestMode?): string
-  case mode or RequestMode.cors()
+  if mode == nil then return "cors" end
+  case mode
   when cors() then return "cors"
   when no_cors() then return "no-cors"
   when same_origin() then return "same-origin"
@@ -73,12 +76,11 @@ local function request_mode_string(mode: RequestMode?): string
 end
 
 local function redirect_mode_string(mode: RedirectMode?, default_follow: boolean): string
-  local effective? = mode
-  if effective == nil then
-    if default_follow then effective = RedirectMode.follow()
-    else effective = RedirectMode.manual() end
+  if mode == nil then
+    if default_follow then return "follow" end
+    return "manual"
   end
-  case effective
+  case mode
   when follow() then return "follow"
   when error() then return "error"
   when manual() then return "manual"
@@ -86,14 +88,16 @@ local function redirect_mode_string(mode: RedirectMode?, default_follow: boolean
 end
 
 local function is_only_if_cached(mode: CacheMode?): boolean
-  case mode or CacheMode.default()
+  if mode == nil then return false end
+  case mode
   when only_if_cached() then return true
   else return false
   end
 end
 
 local function is_no_cors(mode: RequestMode?): boolean
-  case mode or RequestMode.cors()
+  if mode == nil then return false end
+  case mode
   when no_cors() then return true
   else return false
   end
@@ -125,9 +129,11 @@ function RequestOptions.new(headers: Headers?, body: string?, ca_file: string?,
                             cache: CacheMode?, credentials: CredentialsMode?,
                             mode: RequestMode?, redirect: RedirectMode?): RequestOptions
   if is_only_if_cached(cache) then
-    case mode or RequestMode.cors()
-    when same_origin() then
-    else
+    local same_origin = false
+    if mode ~= nil then
+      case mode when same_origin() then same_origin = true end
+    end
+    if not same_origin then
       raise "HTTP cache mode 'only-if-cached' requires request mode 'same-origin'"
     end
   end
