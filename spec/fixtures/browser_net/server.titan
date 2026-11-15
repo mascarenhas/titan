@@ -94,6 +94,11 @@ local function handle(request: http.Request, response: http.Response)
     response:set_header("Location", cross_url .. "/inspect")
   elseif route == "inspect" then
     send(response, request.method .. "\n" .. (request.headers:get("Authorization") or "") .. "\n" .. read_body(request))
+  elseif route == "header-snapshot" then
+    local hosts = request.headers:values("Host")
+    local lengths = request.headers:values("Content-Length")
+    send(response, #hosts .. "\n" .. (hosts[1] or "") .. "\n" ..
+      #lengths .. "\n" .. (lengths[1] or "") .. "\n" .. read_body(request))
   elseif route == "header" then
     send(response, request.headers:get(key) or "")
   elseif path == "/expose-subset" then

@@ -87,3 +87,21 @@ function test_browser_http_client_cannot_migrate_between_runtimes(_: test.Contex
       "HTTP Client is closed")
   end)
 end
+
+function test_browser_http_host_default_ports_are_equivalent(_: test.Context)
+  runtime_test.run(function ()
+    for _, scheme in iteration.ipairs({"http", "https"}) do
+      local port = "80"
+      if scheme == "https" then port = "443" end
+      for _, source_port in iteration.ipairs({"", ":" .. port}) do
+        for _, host_port in iteration.ipairs({"", ":" .. port}) do
+          local fields = http.headers({http.Header("Host", "127.0.0.1" .. host_port),
+            http.Header("Cookie", "test")})
+          assert_options_error(function ()
+            http.get(scheme .. "://127.0.0.1" .. source_port, http.RequestOptions(fields))
+          end, "HTTP request header 'Cookie' is forbidden on the browser target")
+        end
+      end
+    end
+  end)
+end

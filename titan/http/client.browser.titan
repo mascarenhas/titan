@@ -129,6 +129,7 @@ local function fetch_request_headers(parsed: url.Url, policy: RequestOptions): {
   local length_seen = false
   local body_length = 0
   if policy.body ~= nil then body_length = #policy.body end
+  -- Preserve insertion order and duplicates without Headers:all()'s deep copy.
   for index = 1, #policy.headers.entries do
     local entry = policy.headers.entries[index]
     local name = lower_header_name(entry.name)
@@ -136,7 +137,7 @@ local function fetch_request_headers(parsed: url.Url, policy: RequestOptions): {
       if host_seen then raise "HTTP request has more than one Host header" end
       host_seen = true
       local host = parse_request_url_or_raise(parsed.scheme, entry.contents, "/")
-      if host.authority ~= parsed.authority then
+      if host.host ~= parsed.host or host.port ~= parsed.port then
         raise "HTTP custom Host header is unavailable on the browser target"
       end
     elseif name == "content-length" then

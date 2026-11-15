@@ -26,11 +26,17 @@ function test_methods_binary_headers_and_client_lifecycle(_: test.Context)
         "quoted method override was stripped")
     end
     local parsed = url.parse(server())
-    local headers = one_header("Host", parsed.authority)
-    headers:add("Content-Length", "3")
-    local response = client:request("POST", server() .. "/echo", http.RequestOptions(headers, "a\0b"))
-    defer response:close()
-    test.assert(all(response) == "a\0b", "matching Host/Content-Length were not stripped safely")
+    for _, mixed_case in iteration.ipairs({false, true}) do
+      local host_name = "Host"
+      local length_name = "Content-Length"
+      if mixed_case then host_name, length_name = "hOsT", "content-length" end
+      local headers = one_header(host_name, parsed.authority)
+      headers:add(length_name, "3")
+      local response = client:request("POST", server() .. "/header-snapshot", http.RequestOptions(headers, "a\0b"))
+      defer response:close()
+      test.assert(all(response) == "1\n" .. parsed.authority .. "\n1\n3\na\0b",
+        "matching Host/Content-Length were not stripped safely")
+    end
     client:close()
     client:close()
     string_error(function () client:get(server() .. "/echo") end)
