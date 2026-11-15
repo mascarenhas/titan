@@ -1309,7 +1309,7 @@ Both clients need the instance's active async Runtime: in a state created by
 headers, options, and `http.Client.new` still work.
 
 `titan.browser` is the reviewed target-only exception. It has no native
-placeholder and imports only the portable core. Its byte/scalar ABI is not the
+placeholder and imports only `gc`. Its byte/scalar ABI is not the
 native transfer packet format, and schema copies are a separate feature. It
 provides the [drive primitives](standard-library-browser.md#driver-interface-low-level)
 that the `async` driver uses but schedules nothing itself. See
