@@ -11,7 +11,7 @@ local M = {}
 
 M.absent_modules = {
     "titan.uv", "titan.net", "titan.ssl", "titan.thread", "titan.sqlite3",
-    "titan.websocket", "titan.fs", "titan.http",
+    "titan.websocket", "titan.fs",
 }
 local absent_modules = {}
 for _, name in ipairs(M.absent_modules) do absent_modules[name] = true end
@@ -437,6 +437,11 @@ M.browser_differences = {
     ["titan.lua"] = {
         omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" },
         opaque = { "Lua" },
+    },
+    ["titan.http"] = {
+        opaque = { "Client", "ClientResponse" },
+        omitted = { "ClientResponse:take_upgrade", "Exchange", "Handler", "Request", "Response",
+            "Server", "UpgradedStream", "listen", "listen_tls", "request_upgrade_on" },
     },
 }
 

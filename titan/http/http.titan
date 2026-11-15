@@ -1,22 +1,17 @@
---- HTTP/1.1 clients, streaming request bodies, headers, and servers.
+--- Streaming HTTP clients, validated request options, headers, and native servers.
 -- @module titan.http
 -- @usage standard-library-http.md
 
 local async = import "async"
 local io = import "io"
 local math = import "math"
-local net = import "net"
-local reflect = import "reflect"
-local protobuf = import "protobuf"
-local ssl = import "ssl"
 local string = import "string"
 local timer = import "timer"
 local url = import "url"
 foreign import "titan/ffi.h"
 
--- This folder module is intentionally layered over the public net, ssl, io,
--- and async modules. Its C boundary contains only exact llhttp foreign
--- callbacks; synchronous parsing policy and event storage remain in Titan.
+-- Target-selected clients share headers, request policy, and URL validation.
+-- Native transports and the synchronous llhttp boundary stay in native contributors.
 
 local function parse_url_or_raise(source: string): url.Url
   local parsed?, parse_error? = url.parse(source)

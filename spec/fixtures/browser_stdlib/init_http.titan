@@ -1,0 +1,12 @@
+local test = import "test"
+local subject = import "http"
+
+function test_initializer_completed(_: test.Context)
+  test.assert(test.testing(), "http initializer did not reach its test")
+  local client = subject.Client()
+  defer client:close()
+  subject.RequestOptions()
+  local fields = subject.headers()
+  fields:add("X-Ready", "yes")
+  test.assert(fields:get("x-ready") == "yes")
+end

@@ -1,3 +1,6 @@
+local reflect = import "reflect"
+local protobuf = import "protobuf"
+
 -- HTTP request and response ownership crosses states as one exchange.
 -- The llhttp snapshot is process-local, tied to this provider's pinned llhttp.
 -- Its state selector and span callback are native code identities; all pointers

@@ -2520,7 +2520,7 @@ printf '%s/%s\n' "$directory" "$object"
     it("keeps the reviewed HTTP source list equal to the folder ensemble",
         function()
             local listed = makefile_words("STDLIB_HTTP_SOURCES")
-            assert.equal("titan/http/http.native.titan", listed[1])
+            assert.equal("titan/http/http.titan", listed[1])
             local normalized = {}
             local seen = {}
             for _, source in ipairs(listed) do
@@ -3081,7 +3081,7 @@ int main(void) {
                 "titan/async/runtime.native.titan", "titan/async/runtime.browser.titan",
                 "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
-                "titan/http/http.native.titan", "titan/http/client.native.titan",
+                "titan/http/http.titan", "titan/http/client.native.titan", "titan/http/client.browser.titan",
                 "titan/http/headers.titan", "titan/http/options.titan", "titan/http/parser.native.titan",
                 "titan/http/pool.native.titan", "titan/http/server.native.titan",
                 "titan/http/transfer.native.titan", "titan/http/upgrade.native.titan",

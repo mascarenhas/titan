@@ -1,0 +1,385 @@
+local browser = import "browser"
+foreign import "errno.h"
+
+local type Value = browser.BrowserValue
+
+-- The session exists before fetch starts and outlives its headers request.
+local record FetchSession
+  handle: browser.BrowserHandle?
+end
+
+--- Received Fetch metadata and an owned decoded streaming response body.
+-- @usage standard-library-http.md#client-requests
+record ClientResponse
+  status: integer
+  reason: string
+  headers: Headers
+  url: string?
+  redirected: boolean
+  local session: FetchSession
+  local excess: string
+  local reading: boolean
+end
+
+--- A Runtime-bound client; the host owns connection pooling.
+-- @usage standard-library-http.md#client-requests
+record Client
+  local bound: boolean
+  local closed: boolean
+  local remove_close_listener: (function (): ())?
+end
+
+local fetch: browser.BrowserHandle? = nil
+local default_client: Client? = nil
+
+local function fetch_source(): browser.BrowserHandle
+  if fetch == nil then fetch = browser.binding("titan:fetch") end
+  return fetch
+end
+
+local function fetch_error(message: string, operation: string): async.OperationError
+  return async.OperationError(-ffi.EIO, "EIO", message, operation)
+end
+
+local function FetchSession:close()
+  local handle? = self.handle
+  if handle == nil then return end
+  self.handle = nil
+  defer handle:close()
+  fetch_source():call(Value.is_string("close"), Value.is_handle(handle))
+end
+
+local function FetchSession:wait(arguments: {Value}, operation: string): string?
+  local task = async.running()
+  local token = async.ResumeToken(operation)
+  local result = Value.is_nil()
+  local failure: async.OperationError? = nil
+  local request = fetch_source():start(function (...: Value): Value
+    result = ...[1]
+    task:resume(token)
+    return Value.is_nil()
+  end, function (...: Value): Value
+    failure = fetch_error(browser.failure_text(...[1], ...[2]) or "host fetch failed", operation)
+    task:resume(token)
+    return Value.is_nil()
+  end, ...arguments)
+  defer request:close()
+  -- The headers request may already have retired: abort the session itself.
+  async.suspend(token, function () self:close() catch end)
+  if failure ~= nil then raise failure end
+  case result
+  when is_bytes(bytes) then return bytes
+  when is_nil() then return nil
+  when is_handle(handle) then handle:close()
+  end
+  raise fetch_error("host fetch returned a value that is not bytes", operation)
+catch
+  if not (error is browser.BrowserError) then raise end
+  local failure: browser.BrowserError = error
+  local message = failure.message
+  failure:close()
+  raise fetch_error(message, operation)
+end
+
+local function forbidden_fetch_method(method: string): boolean
+  local lower = lower_header_name(method)
+  return lower == "connect" or lower == "trace" or lower == "track"
+end
+
+-- Fetch's get/decode/split preserves quotes and escapes; only bare methods
+-- outside quoted strings are forbidden. An unclosed quote consumes the rest.
+local function forbidden_method_override(contents: string): boolean
+  local first = 1
+  local position = 1
+  while position <= #contents do
+    local byte = string.byte(contents, position)
+    if byte == 34 then
+      position = position + 1
+      while position <= #contents do
+        byte = string.byte(contents, position)
+        position = position + 1
+        if byte == 34 then break end
+        if byte == 92 then position = position + 1 end
+      end
+    elseif byte == 44 then
+      if forbidden_fetch_method(trim_header_value(string.sub(contents, first, position - 1))) then
+        return true
+      end
+      position = position + 1
+      first = position
+    else
+      position = position + 1
+    end
+  end
+  return forbidden_fetch_method(trim_header_value(string.sub(contents, first)))
+end
+
+local const forbidden_fetch_headers: {string: boolean} = {
+  ["accept-charset"] = true, ["accept-encoding"] = true,
+  ["access-control-request-headers"] = true, ["access-control-request-method"] = true,
+  ["connection"] = true, ["cookie"] = true, ["cookie2"] = true,
+  ["date"] = true, ["dnt"] = true, ["keep-alive"] = true,
+  ["origin"] = true, ["referer"] = true, ["set-cookie"] = true,
+  ["te"] = true, ["trailer"] = true, ["upgrade"] = true, ["via"] = true,
+}
+
+local function fetch_request_headers(parsed: url.Url, policy: RequestOptions): {Value}
+  local pairs: {Value} = {}
+  local host_seen = false
+  local length_seen = false
+  local body_length = 0
+  if policy.body ~= nil then body_length = #policy.body end
+  for index = 1, #policy.headers.entries do
+    local entry = policy.headers.entries[index]
+    local name = lower_header_name(entry.name)
+    if name == "host" then
+      if host_seen then raise "HTTP request has more than one Host header" end
+      host_seen = true
+      local host = parse_request_url_or_raise(parsed.scheme, entry.contents, "/")
+      if host.authority ~= parsed.authority then
+        raise "HTTP custom Host header is unavailable on the browser target"
+      end
+    elseif name == "content-length" then
+      if length_seen then raise "HTTP request has more than one Content-Length header" end
+      length_seen = true
+      if decimal_header(entry.contents, "HTTP Content-Length") ~= body_length then
+        raise "HTTP Content-Length does not match the request body"
+      end
+    elseif name == "transfer-encoding" then
+      raise "HTTP client requests do not support Transfer-Encoding"
+    elseif name == "expect" then
+      raise "HTTP client requests do not support Expect"
+    elseif forbidden_fetch_headers[name] or string.sub(name, 1, 6) == "proxy-" or
+        string.sub(name, 1, 4) == "sec-" or
+        ((name == "x-http-method" or name == "x-http-method-override" or
+          name == "x-method-override") and forbidden_method_override(entry.contents)) then
+      raise "HTTP request header '" .. entry.name .. "' is forbidden on the browser target"
+    else
+      pairs[#pairs + 1] = Value.is_bytes(entry.name)
+      pairs[#pairs + 1] = Value.is_bytes(entry.contents)
+    end
+  end
+  return pairs
+end
+
+--- Create an unbound client, including in synchronous child states.
+-- @usage standard-library-http.md#client-requests
+function Client.new(): Client
+  return {bound = false, closed = false, remove_close_listener = nil}
+end
+
+local function Client:bind()
+  async.checkpoint()
+  if self.closed then raise "HTTP Client is closed" end
+  if not self.bound then
+    self.remove_close_listener = async.add_close_listener(function ()
+      if default_client == self then default_client = nil end
+      self:close()
+    end)
+    self.bound = true
+  end
+end
+
+local function default_http_client(): Client
+  async.checkpoint()
+  local current? = default_client
+  if current == nil or current.closed then
+    current = Client()
+    current:bind()
+    default_client = current
+  end
+  return current
+end
+
+local function fetch_response(session: FetchSession, head: string,
+                              source_url: string, redirect: string): ClientResponse
+  local fields: {string} = {}
+  for field in string.split(head, "\0") do fields[#fields + 1] = field end
+  local status? = math.tointeger(fields[1])
+  if status == nil or (status ~= 0 and (status < 200 or status > 999)) then
+    raise fetch_error("host fetch returned invalid response metadata", "http.request")
+  end
+  if is_redirect_status(status) then
+    if redirect == "error" then
+      raise fetch_error("HTTP redirect disallowed by RedirectMode.error", "http.request")
+    elseif redirect == "manual" then
+      session:close()
+      return {status = 0, reason = "", headers = headers(), url = source_url,
+        redirected = false, session = session, excess = "", reading = false}
+    end
+  end
+  local reason = fields[3]
+  if string.match(reason, FORBIDDEN_FIELD_BYTE_PATTERN) then
+    raise "HTTP reason phrase contains a forbidden byte"
+  end
+  local response_url: string? = fields[4]
+  if response_url == "" then response_url = nil end
+  -- Engines hide opaqueredirect URLs inconsistently; manual retains the request URL.
+  if status == 0 and redirect == "manual" then response_url = source_url end
+  local received = headers()
+  local index = 5
+  while index < #fields do
+    local name = fields[index]
+    local contents = fields[index + 1]
+    local lower = lower_header_name(name)
+    if lower ~= "set-cookie" and lower ~= "set-cookie2" then received:add(name, contents) end
+    index = index + 2
+  end
+  return {status = status, reason = reason, headers = received, url = response_url,
+    redirected = fields[2] == "1", session = session, excess = "", reading = false}
+end
+
+--- Request a URL with Fetch policy and an in-memory optional body.
+-- @usage standard-library-http.md#client-requests
+function Client:request(method: string, source_url: string, options: RequestOptions?): ClientResponse
+  self:bind()
+  validate_http_token(method, "HTTP method")
+  if forbidden_fetch_method(method) then raise "HTTP method is forbidden on the browser target" end
+  local policy = options or RequestOptions()
+  if is_no_cors(policy.mode) then validate_no_cors_method(method) end
+  local parsed = parse_url_or_raise(source_url)
+  if policy.ca_file ~= nil then raise "HTTP ca_file is unavailable on the browser target" end
+  local lower = lower_header_name(method)
+  if policy.body ~= nil and (lower == "get" or lower == "head") then
+    raise "HTTP GET and HEAD do not accept a request body on the browser target"
+  end
+  local pairs = fetch_request_headers(parsed, policy)
+  if is_only_if_cached(policy.cache) then
+    case fetch_source():call(Value.is_string("has-cache"))
+    when is_boolean(has_cache) then
+      if not has_cache then
+        raise fetch_error("HTTP response not in cache (only-if-cached)", "http.request")
+      end
+    end
+  end
+  local handle: browser.BrowserHandle? = nil
+  case fetch_source():call(Value.is_string("new"))
+  when is_handle(created) then handle = created
+  end
+  if handle == nil then raise fetch_error("host fetch did not create a session", "http.request") end
+  local session = FetchSession(handle)
+  local adopted = false
+  defer if not adopted then session:close() end
+  local body = Value.is_nil()
+  if policy.body ~= nil then body = Value.is_bytes(policy.body) end
+  local redirect = redirect_mode_string(policy.redirect, true)
+  local arguments: {Value} = {Value.is_string("open"), Value.is_handle(handle),
+    Value.is_string(source_url), Value.is_string(method), body,
+    Value.is_string(cache_mode_string(policy.cache)),
+    Value.is_string(credentials_mode_string(policy.credentials)),
+    Value.is_string(request_mode_string(policy.mode)), Value.is_string(redirect), ...pairs}
+  local head = session:wait(arguments, "http.request")
+  local response = fetch_response(session, head, source_url, redirect)
+  adopted = true
+  return response
+end
+
+--- Request a bodyless GET.
+-- @usage standard-library-http.md#client-requests
+function Client:get(source_url: string, options: RequestOptions?): ClientResponse
+  async.checkpoint()
+  if options ~= nil and options.body ~= nil then raise "HTTP get does not accept a request body" end
+  return self:request("GET", source_url, options)
+end
+
+--- Request through the active Runtime's default client.
+-- @usage standard-library-http.md#client-requests
+function request(method: string, source_url: string, options: RequestOptions?): ClientResponse
+  return default_http_client():request(method, source_url, options)
+end
+
+--- Request a bodyless GET through the active Runtime's default client.
+-- @usage standard-library-http.md#client-requests
+function get(source_url: string, options: RequestOptions?): ClientResponse
+  return default_http_client():get(source_url, options)
+end
+
+local function ClientResponse:read_chunk(): string?
+  if self.session.handle == nil then return nil end
+  local chunk? = self.session:wait({Value.is_string("read"), Value.is_handle(self.session.handle)}, "http.read")
+  if chunk == nil then self.session:close() end
+  return chunk
+catch
+  self:close()
+  raise
+end
+
+--- Read decoded body bytes; wire Content-Length does not bound decoded input.
+-- @usage standard-library-http.md#client-requests
+function ClientResponse:read(): string?
+  async.checkpoint()
+  if self.reading then raise "HTTP response already has a waiting reader" end
+  self.reading = true
+  defer do self.reading = false end
+  if #self.excess > 0 then
+    local chunk = self.excess
+    self.excess = ""
+    return chunk
+  end
+  return self:read_chunk()
+end
+
+--- Read through a binary delimiter, retaining any suffix for later reads.
+-- @usage standard-library-http.md#client-requests
+function ClientResponse:read_until(delimiter: string, chop: boolean?): string?
+  async.checkpoint()
+  if #delimiter == 0 then raise "delimiter must not be empty" end
+  if self.reading then raise "HTTP response already has a waiting reader" end
+  self.reading = true
+  defer do self.reading = false end
+  local builder = string.writer()
+  local pending = self.excess
+  self.excess = ""
+  while true do
+    local found? = string.find(pending, delimiter, 1)
+    if found ~= nil then
+      local last = found + #delimiter - 1
+      if chop then builder:write(string.sub(pending, 1, found - 1))
+      else builder:write(string.sub(pending, 1, last)) end
+      self.excess = string.sub(pending, last + 1)
+      return builder:drain()
+    end
+    -- Retain only the potential delimiter overlap, not the accumulated body.
+    local emitted = #pending - #delimiter + 1
+    if emitted > 0 then
+      builder:write(string.sub(pending, 1, emitted))
+      pending = string.sub(pending, emitted + 1)
+    end
+    local chunk? = self:read_chunk()
+    if chunk == nil then
+      builder:write(pending)
+      local tail = builder:drain()
+      if #tail == 0 then return nil end
+      return tail
+    end
+    pending = pending .. chunk
+  end
+end
+
+--- Synchronously abort and release this response; repeated calls are safe.
+-- @usage standard-library-http.md#client-requests
+function ClientResponse:close()
+  self.excess = ""
+  self.session:close()
+end
+
+--- The host owns its pool; no idle sockets are owned by this client.
+-- @usage standard-library-http.md#client-requests
+function Client:close_idle_connections()
+end
+
+--- Close this client without taking ownership of its active responses.
+-- @usage standard-library-http.md#client-requests
+function Client:close()
+  if self.closed then return end
+  self.closed = true
+  local remove? = self.remove_close_listener
+  self.remove_close_listener = nil
+  if remove ~= nil then remove() end
+end
+
+--- The host owns pooling; validate the default client's Runtime only.
+-- @usage standard-library-http.md#client-requests
+function close_idle_connections()
+  default_http_client():close_idle_connections()
+end
