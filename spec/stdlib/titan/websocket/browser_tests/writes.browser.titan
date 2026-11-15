@@ -39,7 +39,7 @@ local function blocked_write_case(id: string, action: string)
     defer writer:cancel(async.CancellationReason.simple("writer test completed"))
     local blocked = 0
     if remote then
-      async.join(writer)
+      case async.join(writer) when failed(failure) then failure:raise() end
       blocked = metric("armedSend", source)
       test.assert(blocked > 0, "peer action did not observe the admitted write above high water")
     else
@@ -57,7 +57,7 @@ local function blocked_write_case(id: string, action: string)
         connection:close()
         test.assert(metric("clock") - before < 1000, "local close waited for stalled output")
       end
-      async.join(writer)
+      case async.join(writer) when failed(failure) then failure:raise() end
     end
     if action == "resume" then
       if failure ~= nil then raise failure end
@@ -112,7 +112,7 @@ function test_live_local_close_during_write_fairness_yield_never_sends(_context:
     defer writer:cancel(async.CancellationReason.simple("fairness-close test completed"))
     while not started do async.yield() end
     connection:close()
-    async.join(writer)
+    case async.join(writer) when failed(failure) then failure:raise() end
     assert_write_failure(failure, "state")
     test.assert(metric("send", source) == before, "write sent after local close during its fairness yield")
   end)
