@@ -485,8 +485,8 @@ decodes them instead (see [on the browser](#on-the-browser)).
 
 | Failure | Native targets | Browser target |
 | --- | --- | --- |
-| Malformed source URL, or a scheme other than `http` or `https` | `url.Error` | `url.Error` |
-| Invalid method, header, or option; `only_if_cached()` without `same_origin()`; `no_cors()` with another method; `get` with a body; a browser-only restriction below; a request with no active Runtime | string | string |
+| Malformed source URL, a scheme other than `http` or `https`, or a malformed supplied `Host` authority | `url.Error` | `url.Error` |
+| Invalid method or option, another invalid or forbidden header (including a second `Host`); `only_if_cached()` without `same_origin()`; `no_cors()` with another method; `get` with a body; a browser-only restriction below; a request with no active Runtime | string | string |
 | Task cancellation | `async.CancellationReason` | `async.CancellationReason` |
 | `only_if_cached()` miss, `RedirectMode.error()` on a redirect status, more than twenty redirects, an unusable or repeated redirect `Location` | `async.OperationError`, name `"EIO"`, operation `"http.request"` | the same |
 | DNS or connection failure | `async.OperationError` from `net` | `async.OperationError`, name `"EIO"`, operation `"http.request"` |
@@ -541,9 +541,12 @@ the host, so nothing reaches the network:
 of the Fetch standard. Titan checks them first, so every engine behaves the
 same. Names compare ASCII case-insensitively:
 
-- One `Host` naming the URL's authority is removed, because the browser sends
-  its own; any other `Host` raises `"HTTP custom Host header is unavailable on
-  the browser target"`.
+- A `Host` must be one valid authority. A malformed one raises the
+  `url.Error` of `url.parse_request`, as natively, and a second `Host` raises
+  `"HTTP request has more than one Host header"`. A `Host` naming the URL's
+  authority is removed, because the browser sends its own; any other valid
+  `Host` raises `"HTTP custom Host header is unavailable on the browser
+  target"`.
 - One `Content-Length` equal to the body length is removed; any other
   `Content-Length` raises.
 - `Transfer-Encoding` and `Expect` raise, as on native targets.

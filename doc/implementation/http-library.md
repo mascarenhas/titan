@@ -285,10 +285,12 @@ without fragments and does not remove dot segments:
    is dropped and the query is split at the first `?`.
 2. A leading scheme (`ALPHA *(ALPHA / DIGIT / "+" / "-" / ".") ":"`) is taken
    off. A scheme without a following `//authority` raises.
-3. A `//authority` reference replaces the authority. An empty path keeps the
-   base path, and the base query when the reference has none. A relative path
-   joins the base path's directory, after rejecting a colon in its first
-   segment.
+3. A `//authority` reference replaces the authority and keeps its own path
+   and query; `url` normalizes its empty path to `/`. Only a reference with
+   neither a scheme nor a new authority inherits from the base: an empty path
+   keeps the base path, and the base query when the reference has none, and a
+   relative path joins the base path's directory, after rejecting a colon in
+   its first segment.
 4. The whole candidate, `scheme://authority target`, is checked with
    `url.parse` before dot segments are removed, so a byte that `url` rejects
    inside a segment that removal would drop still fails. A scheme other than
@@ -699,8 +701,10 @@ Runtime. It validates the method token, refuses `CONNECT`, `TRACE`, and
 parses the URL with `http`/`https` only, rejects a `ca_file`, and rejects any
 `GET` or `HEAD` body, because `fetch` rejects even an empty body on those
 methods. One forbidden-request-header predicate then visits each option
-header. It holds the Fetch standard's list in Titan: `Host` (removed when it
-equals the URL authority, otherwise rejected), `Content-Length` (removed when
+header. It holds the Fetch standard's list in Titan: `Host` (parsed with
+`parse_request_url_or_raise`, so a malformed authority raises its `url.Error`
+and a second `Host` a string; removed when the normalized authority equals the
+URL's, otherwise rejected), `Content-Length` (removed when
 it equals the body length, otherwise rejected), `Transfer-Encoding` and
 `Expect`, seventeen further exact names, the `proxy-` and `sec-` prefixes of
 the lowercased name, and the three method-override names. Their values are
