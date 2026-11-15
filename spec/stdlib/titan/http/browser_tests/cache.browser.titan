@@ -8,6 +8,13 @@ function test_same_origin_cache_modes(_: test.Context)
     test.skip("cache behavior runs in the native server's same-origin iframe")
   end
   runtime_test.run(function ()
+    -- Same-origin no-cors bypasses the cross-origin redirect-mode restriction.
+    local source = server() .. "/echo"
+    local response = http.get(source, http.RequestOptions(nil, nil, nil, nil, nil,
+      http.RequestMode.no_cors(), http.RedirectMode.manual()))
+    defer response:close()
+    test.assert(response.status == 200 and response.url == source and not response.redirected and all(response) == "",
+      "same-origin no-cors/manual did not retain its normal response")
     for _, key in iteration.ipairs({"default-cache", "force-cache", "only-cache"}) do
       test.assert(cached(key, http.CacheMode.default()) == "cached:1")
       for _ = 1, 2 do
