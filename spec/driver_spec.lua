@@ -13232,8 +13232,8 @@ describe("target-aware source resolver", function()
     local excluded_stdlib = {
         { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" },
         { "uv", "uv/uv", "tcp" },
-        { "http", "http/http", "client" },
-        { "websocket", "websocket/websocket", "handshake" },
+        { "http", "http/http", "headers" },
+        { "websocket", "websocket/websocket", "types" },
         { "sqlite3", "sqlite3/sqlite3", "bindings" },
         { "thread", "thread/thread", "channel" },
     }
