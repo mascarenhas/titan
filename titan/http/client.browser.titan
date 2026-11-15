@@ -214,12 +214,12 @@ local function fetch_response(session: FetchSession, head: string,
   if string.match(reason, FORBIDDEN_FIELD_BYTE_PATTERN) then
     raise "HTTP reason phrase contains a forbidden byte"
   end
-  local response_url: string? = fields[4]
+  local response_url? = fields[4]
   if response_url == "" then response_url = nil end
-  -- Engines hide opaqueredirect URLs inconsistently; manual retains the request URL.
-  if status == 0 and redirect == "manual" then response_url = source_url end
+  -- Only an opaqueredirect retains the requested URL; an opaque response has none.
+  if fields[5] == "opaqueredirect" then response_url = source_url end
   local received = headers()
-  local index = 5
+  local index = 6
   while index < #fields do
     local name = fields[index]
     local contents = fields[index + 1]

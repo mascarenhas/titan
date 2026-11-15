@@ -170,7 +170,7 @@ function latin1String(bytes) {
 }
 
 function encodeFetchHead(res) {
-  const parts = [String(res.status), res.redirected ? '1' : '0', res.statusText, res.url];
+  const parts = [String(res.status), res.redirected ? '1' : '0', res.statusText, res.url, res.type];
   for (const [name, value] of res.headers) parts.push(name, value);
   const all = parts.join('\0') + '\0', out = new Uint8Array(all.length);
   for (let index = 0; index < all.length; ++index) out[index] = all.charCodeAt(index);

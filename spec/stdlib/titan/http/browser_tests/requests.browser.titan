@@ -82,12 +82,20 @@ function test_browser_cors_modes_and_credentials(_: test.Context)
       "Access-Control-Expose-Headers was not enforced")
     operation_error(function () http.get(server() .. "/echo",
       http.RequestOptions(nil, nil, nil, nil, nil, http.RequestMode.same_origin())) end, "http.request")
-    local opaque = http.get(server() .. "/echo",
-      http.RequestOptions(nil, nil, nil, nil, nil, http.RequestMode.no_cors()))
-    defer opaque:close()
-    test.assert(opaque.status == 0 and opaque.reason == "" and opaque.url == nil and
-      not opaque.redirected and #opaque.headers:all() == 0 and opaque:read() == nil,
-      "no-cors did not produce an opaque response")
+    local source = server() .. "/redirect/302/with"
+    local manual = http.get(source, http.RequestOptions(nil, nil, nil, nil, nil, nil,
+      http.RedirectMode.manual()))
+    defer manual:close()
+    test.assert(manual.status == 0 and manual.url == source and manual:read() == nil,
+      "manual opaqueredirect lost the requested URL")
+    for _, redirect in iteration.ipairs({http.RedirectMode.follow(), http.RedirectMode.manual()}) do
+      local opaque = http.get(server() .. "/echo",
+        http.RequestOptions(nil, nil, nil, nil, nil, http.RequestMode.no_cors(), redirect))
+      defer opaque:close()
+      test.assert(opaque.status == 0 and opaque.reason == "" and opaque.url == nil and
+        not opaque.redirected and #opaque.headers:all() == 0 and opaque:read() == nil,
+        "no-cors did not produce an opaque response")
+    end
     operation_error(function () http.get(server() .. "/echo",
       http.RequestOptions(nil, nil, nil, nil, http.CredentialsMode.include())) end, "http.request")
     for _ = 1, 2 do
