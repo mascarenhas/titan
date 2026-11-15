@@ -4,7 +4,6 @@ local function request_body(request: http.Request): string
   return builder:drain()
 end
 
-
 local function assert_request_policy_error(action: OptionsAction, expected: string?)
   local rejected = false
   do
@@ -19,7 +18,6 @@ local function assert_request_policy_error(action: OptionsAction, expected: stri
   end
   test.assert(rejected, "request policy unexpectedly succeeded")
 end
-
 
 function test_request_options_pre_io_policies(_: test.Context)
   run_reuse_case(function ()

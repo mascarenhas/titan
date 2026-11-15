@@ -1,3 +1,5 @@
+-- Imports that only the native contributors of http.tests use. The folder is
+-- one module, so each import is declared once for all of them.
 local fs = import "fs"
 local net = import "net"
 local ssl = import "ssl"

@@ -382,7 +382,7 @@ OS_TITAN_SOURCES := titan/os/os.titan \
 OS_TITAN_HEADERS := titan/os/os_platform.h titan/os/os_environment.h \
 	titan/os/environment.browser.h
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.native.titan \
-	titan/http/client.browser.titan \
+	titan/http/client.browser.titan titan/http/native_imports.native.titan \
 	titan/http/headers.titan titan/http/options.titan titan/http/parser.native.titan \
 	titan/http/pool.native.titan titan/http/server.native.titan \
 	titan/http/transfer.native.titan titan/http/upgrade.native.titan

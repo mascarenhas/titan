@@ -3082,6 +3082,7 @@ int main(void) {
                 "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.native.titan", "titan/http/client.browser.titan",
+                "titan/http/native_imports.native.titan",
                 "titan/http/headers.titan", "titan/http/options.titan", "titan/http/parser.native.titan",
                 "titan/http/pool.native.titan", "titan/http/server.native.titan",
                 "titan/http/transfer.native.titan", "titan/http/upgrade.native.titan",

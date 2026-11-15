@@ -1,6 +1,3 @@
-local net = import "net"
-local ssl = import "ssl"
-
 foreign import "errno.h"
 
 --- Received response headers and an owned streaming response body.
