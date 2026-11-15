@@ -6527,11 +6527,13 @@ printf '%s\n' "${schedule[@]}"
                 '"$TITAN_NODE" spec/fixtures/browser_net/run.mjs',
                 '--root "$TITAN_NET_OUTPUT" --engine "$TITAN_TRACE_ENGINE"',
                 '--sdk "$PREFIX/lib/titan-browser/0.6"',
-                '--runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD"',
+                '--runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" --persistent-webkit',
                 "browser-playwright-net.log",
             }) do
                 assert.truthy(net_gate:find(contract, 1, true), contract)
             end
+            local _, persistent_steps = playwright_job:gsub("%-%-persistent%-webkit", "")
+            assert.equals(1, persistent_steps, "only browser-net uses a persistent WebKit context")
             local vite_install = named_step(playwright_job,
                 "Install the pinned Vite deployment dependency")
             assert.truthy(vite_install:find("if: matrix.engine == 'chromium'", 1, true))

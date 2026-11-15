@@ -11,9 +11,10 @@ const playwrightVersion = '1.64.1';
 const diagnostic = text => process.stderr.write(`titan-playwright-run: ${text}\n`);
 const usage = `usage: node spec/browser/playwright-run.mjs --engine chromium|firefox|webkit
        [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
-       [--allow-degraded-trace] [--image] FILE [-- ARG...]
+       [--persistent-context DIR] [--allow-degraded-trace] [--image] FILE [-- ARG...]
 
 FILE is a portable run(context) test unless --image selects a Titan image.
+The caller owns and removes DIR when --persistent-context selects a persistent profile.
 Set TITAN_PLAYWRIGHT_ROOT to an npm prefix containing playwright@${playwrightVersion}.
 Set PLAYWRIGHT_BROWSERS_PATH to a session-owned managed-browser directory.
 `;
@@ -21,7 +22,7 @@ Set PLAYWRIGHT_BROWSERS_PATH to a session-owned managed-browser directory.
 export function parseOptions(argv) {
   const options = {engine: undefined, root: undefined, sdk: undefined,
     timeout: 300000, grace: 1500, args: [], jsTest: true, allowDegradedTrace: false};
-  const values = new Set(['engine', 'root', 'sdk', 'timeout', 'grace']);
+  const values = new Set(['engine', 'root', 'sdk', 'timeout', 'grace', 'persistent-context']);
   for (let index = 0; index < argv.length; ++index) {
     const arg = argv[index];
     if (arg === '--') { options.args = argv.slice(index + 1); break; }
@@ -77,6 +78,8 @@ async function run(options) {
       !within(root, file) || !file.endsWith('.mjs')) {
     throw new Error('FILE must be a regular .mjs file beneath --root');
   }
+  const profile = options['persistent-context'] && resolve(options['persistent-context']);
+  if (profile && !within(root, profile)) throw new Error('--persistent-context must be beneath --root');
   const sdk = await realpath(resolve(options.sdk ??
     fileURLToPath(new URL('../../titan-runtime/browser/', import.meta.url))));
   await assetPath(sdk, 'titan-browser-page.mjs');
@@ -123,12 +126,20 @@ async function run(options) {
       args: options.args, jsTest: options.jsTest, allowDegradedTrace: options.allowDegradedTrace};
     html = '<!doctype html><meta charset=utf-8><title>Titan Playwright tests</title><script type=module>' +
       `import {startPage} from '/sdk/titan-browser-page.mjs'; startPage(${JSON.stringify(config).replaceAll('<', '\\u003c')});</script>`;
-    browserServer = await browserType.launchServer({headless: true, timeout: Math.min(options.timeout, 30000),
-      ...(options.engine === 'chromium' ? {args: ['--disable-dev-shm-usage']} : {})});
-    browser = await browserType.connect(browserServer.wsEndpoint(), {timeout: Math.min(options.timeout, 30000)});
-    diagnostic(`${options.engine} ${browser.version()}; Playwright ${playwrightVersion}; pid ${browserServer.process().pid}`);
+    const launch = {headless: true, timeout: Math.min(options.timeout, 30000),
+      ...(options.engine === 'chromium' ? {args: ['--disable-dev-shm-usage']} : {})};
+    if (profile) {
+      const context = await browserType.launchPersistentContext(profile, launch);
+      browser = context.browser();
+      diagnostic(`${options.engine} ${browser.version()}; Playwright ${playwrightVersion}; persistent context`);
+      page = context.pages()[0] ?? await context.newPage();
+    } else {
+      browserServer = await browserType.launchServer(launch);
+      browser = await browserType.connect(browserServer.wsEndpoint(), {timeout: Math.min(options.timeout, 30000)});
+      diagnostic(`${options.engine} ${browser.version()}; Playwright ${playwrightVersion}; pid ${browserServer.process().pid}`);
+      page = await browser.newPage();
+    }
     browser.on('disconnected', () => { if (!closing) monitor.fail('harness', 'browser disconnected before shutdown'); });
-    page = await browser.newPage();
     page.on('crash', () => monitor.fail('harness', 'browser page crashed'));
     page.on('pageerror', error => { if (!ready) monitor.fail('harness', error.message); });
     page.on('console', message => {

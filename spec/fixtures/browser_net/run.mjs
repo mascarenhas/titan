@@ -6,10 +6,15 @@ import {chromiumTrust} from './nss_trust.mjs';
 
 const fixture = dirname(fileURLToPath(import.meta.url));
 const options = {};
-for (let index = 2; index < process.argv.length; index += 2) {
-  const key = process.argv[index], value = process.argv[index + 1];
+for (let index = 2; index < process.argv.length; ++index) {
+  const key = process.argv[index];
+  if (key === '--persistent-webkit' && !options[key]) {
+    options[key] = true;
+    continue;
+  }
+  const value = process.argv[++index];
   if (!['--root', '--engine', '--sdk', '--runner', '--repository'].includes(key) || value === undefined || options[key]) {
-    throw new Error('usage: run.mjs --root OUTPUT --engine ENGINE --sdk SDK --runner RUNNER --repository REPO');
+    throw new Error('usage: run.mjs --root OUTPUT --engine ENGINE --sdk SDK --runner RUNNER --repository REPO [--persistent-webkit]');
   }
   options[key] = value;
 }
@@ -66,6 +71,9 @@ try {
     TITAN_TEST_RAW_URL: rawURL, TITAN_TEST_VERIFIED_TLS: verified ? '1' : '0',
     TITAN_TEST_BROWSER: engine === 'node' ? '0' : '1', TITAN_TEST_ENGINE: engine};
   const args = [runner, '--engine', engine, '--timeout', '300000', '--grace', '2000', '--root', root];
+  if (engine === 'webkit' && options['--persistent-webkit']) {
+    args.push('--persistent-context', join(home, 'webkit-profile'));
+  }
   if (runner.endsWith('playwright-run.mjs')) args.push('--sdk', sdk, join(root, 'images/net.test.mjs'));
   else args.push('--js-test', join(root, 'images/net.test.mjs'));
   args.push('--', 'images/http.mjs', JSON.stringify(config));

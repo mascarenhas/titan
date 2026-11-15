@@ -39,11 +39,25 @@ function test_same_origin_cache_modes(_: test.Context)
         "no-cache did not combine the conditional 304 with cached body bytes")
     end
     test.assert(get_body(server() .. "/hits/revalidate", nil) == "3:2", "no-cache skipped ETag revalidation")
+    local miss_url = server() .. "/uncached/cache-miss"
+    local options = http.RequestOptions(nil, nil, nil, http.CacheMode.only_if_cached(), nil,
+      http.RequestMode.same_origin())
+    local webkit = os.getenv("TITAN_TEST_ENGINE") == "webkit"
     for _ = 1, 2 do
-      operation_error(function () http.get(server() .. "/uncached/cache-miss",
-        http.RequestOptions(nil, nil, nil, http.CacheMode.only_if_cached(), nil,
-          http.RequestMode.same_origin())) end, "http.request")
+      if webkit then
+        -- This host ignores cache-only misses and returns the network response.
+        local response = http.get(miss_url, options)
+        defer response:close()
+        test.assert(response.status == 200 and response.url == miss_url and not response.redirected and
+          response.headers:get("X-Method") == "GET" and all(response) == "",
+          "WebKit cache-only miss did not return the fixture's network response")
+      else
+        operation_error(function () http.get(miss_url, options) end, "http.request")
+      end
     end
-    test.assert(get_body(server() .. "/hits/cache-miss", nil) == "0:0", "only-if-cached miss performed network I/O")
+    local expected_hits = "0:0"
+    if webkit then expected_hits = "2:0" end
+    test.assert(get_body(server() .. "/hits/cache-miss", nil) == expected_hits,
+      "cache-only miss did not match the host's network behavior")
   end)
 end

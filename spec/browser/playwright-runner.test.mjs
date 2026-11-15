@@ -29,13 +29,17 @@ test('Playwright CLI keeps engine, policy, image mode and test arguments explici
     assert.equal(parsed.engine, engine);
     assert.equal(parsed.jsTest, true);
     assert.equal(parsed.allowDegradedTrace, false);
+    assert.equal(parsed['persistent-context'], undefined);
   }
+  const persistent = parseOptions(['--engine', 'webkit', '--persistent-context', '/output/profile', 'suite.mjs']);
+  assert.equal(persistent['persistent-context'], '/output/profile');
   assert.equal(parseOptions(['--help']).help, true);
 });
 
 test('Playwright CLI rejects missing, extra and unsafe timer values', () => {
   for (const argv of [[], ['--engine', 'node', 'suite.mjs'], ['--engine'],
     ['--engine', 'firefox'], ['--engine', 'webkit', 'a.mjs', 'b.mjs'],
+    ['--engine', 'webkit', '--persistent-context'],
     ['--engine', 'chromium', '--unknown', 'a.mjs']]) {
     assert.throws(() => parseOptions(argv));
   }
@@ -105,35 +109,48 @@ test('Playwright asset server rejects traversal and symlinks outside its mount',
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const execute = promisify(execFile);
 for (const engine of (process.env.TITAN_PLAYWRIGHT_TEST_ENGINES ?? '').split(',').filter(Boolean)) {
-  test(`Playwright ${engine} runs the shared page, preserves bytes and retires failed pages`, async () => {
-    async function fixture(name) {
-      const args = [fileURLToPath(new URL('./playwright-run.mjs', import.meta.url)),
-        '--engine', engine, '--root', repository, '--timeout', '15000', '--grace', '0',
-        fileURLToPath(new URL(`../fixtures/browser_playwright/${name}.mjs`, import.meta.url))];
-      let output;
-      try {
-        output = {...await execute(process.execPath, args, {encoding: 'buffer', timeout: 30000}), status: 0};
-      } catch (error) {
-        if (!Number.isInteger(error.code)) throw error;
-        output = {stdout: error.stdout, stderr: error.stderr, status: error.code};
+  for (const persistent of engine === 'webkit' ? [false, true] : [false]) {
+    test(`Playwright ${engine}${persistent ? ' persistent' : ''} runs the shared page, preserves bytes and retires failed pages`, async () => {
+      await mkdir(join(repository, 'tmp'), {recursive: true});
+      const profile = persistent ? await mkdtemp(join(repository, 'tmp', 'playwright-context-')) : null;
+      async function fixture(name) {
+        const args = [fileURLToPath(new URL('./playwright-run.mjs', import.meta.url)),
+          '--engine', engine, '--root', repository, '--timeout', '15000', '--grace', '0',
+          ...(profile ? ['--persistent-context', profile] : []),
+          fileURLToPath(new URL(`../fixtures/browser_playwright/${name}.mjs`, import.meta.url))];
+        let output;
+        try {
+          output = {...await execute(process.execPath, args, {encoding: 'buffer', timeout: 30000}), status: 0};
+        } catch (error) {
+          if (!Number.isInteger(error.code)) throw error;
+          output = {stdout: error.stdout, stderr: error.stderr, status: error.code};
+        }
+        const stderr = output.stderr.toString();
+        assert.doesNotMatch(stderr, /cleanup failed:/);
+        if (profile) {
+          assert.match(stderr, /; persistent context/);
+        } else {
+          const leaders = [...stderr.matchAll(/\bpid ([1-9]\d*)\b/g)];
+          assert.equal(leaders.length, 1, stderr);
+          assert.throws(() => process.kill(Number(leaders[0][1]), 0), {code: 'ESRCH'});
+        }
+        return output;
       }
-      const stderr = output.stderr.toString();
-      assert.doesNotMatch(stderr, /cleanup failed:/);
-      const leaders = [...stderr.matchAll(/\bpid ([1-9]\d*)\b/g)];
-      assert.equal(leaders.length, 1, stderr);
-      assert.throws(() => process.kill(Number(leaders[0][1]), 0), {code: 'ESRCH'});
-      return output;
-    }
-    const success = await fixture('context');
-    assert.equal(success.status, 0, success.stderr.toString());
-    assert.deepEqual(success.stdout, Buffer.from([65, 0, 255, 10]));
-    assert.match(success.stderr.toString(), /Playwright context passed/);
-    const failure = await fixture('failure');
-    assert.equal(failure.status, 1, failure.stderr.toString());
-    assert.match(failure.stderr.toString(), /Playwright fixture rejected/);
-    const timeout = await fixture('timeout');
-    assert.equal(timeout.status, 72, timeout.stderr.toString());
-    assert.match(timeout.stdout.toString(), /Playwright timeout entered/);
-    assert.match(timeout.stderr.toString(), /timed out after 15000 ms/);
-  });
+      try {
+        const success = await fixture('context');
+        assert.equal(success.status, 0, success.stderr.toString());
+        assert.deepEqual(success.stdout, Buffer.from([65, 0, 255, 10]));
+        assert.match(success.stderr.toString(), /Playwright context passed/);
+        const failure = await fixture('failure');
+        assert.equal(failure.status, 1, failure.stderr.toString());
+        assert.match(failure.stderr.toString(), /Playwright fixture rejected/);
+        const timeout = await fixture('timeout');
+        assert.equal(timeout.status, 72, timeout.stderr.toString());
+        assert.match(timeout.stdout.toString(), /Playwright timeout entered/);
+        assert.match(timeout.stderr.toString(), /timed out after 15000 ms/);
+      } finally {
+        if (profile) await rm(profile, {recursive: true, force: true});
+      }
+    });
+  }
 }

@@ -1249,7 +1249,7 @@ jobs:
           "$TITAN_NODE" spec/fixtures/browser_net/run.mjs \
             --root "$TITAN_NET_OUTPUT" --engine "$TITAN_TRACE_ENGINE" \
             --sdk "$PREFIX/lib/titan-browser/0.6" \
-            --runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" \
+            --runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" --persistent-webkit \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-net.log"
 
       - name: Run the persistent bridge and opaque-Promise diagnostics
