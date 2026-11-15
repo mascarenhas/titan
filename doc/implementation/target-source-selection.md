@@ -434,8 +434,8 @@ and a no-filesystem source-search pass.
 
 `titan.http` has the shared main `titan/http/http.titan` and the shared
 contributors `headers.titan` and `options.titan`. Its `client` family has
-`native` and `browser` members, and the `pool`, `parser`, `server`,
-`transfer`, and `upgrade` families have only `native` ones, so the browser
+`native` and `browser` members, and the `native_imports`, `pool`, `parser`,
+`server`, `transfer`, and `upgrade` families have only `native` ones, so the browser
 composes the shared files with `client.browser.titan`. `titan.websocket`'s
 main family has `native` and `browser` members (`websocket.native.titan`,
 `websocket.browser.titan`) and no default; `types.titan` and `utf8.titan` are

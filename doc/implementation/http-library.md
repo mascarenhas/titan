@@ -11,23 +11,25 @@ the browser client over the SDK's `fetch` source.
 
 `titan.http` is one folder module whose contributors are selected per target
 ([target source selection](target-source-selection.md)). The shared main
-`titan/http/http.titan` holds the imports both targets use and the URL and
-request-header helpers; native contributors add `net`, `ssl`, `protobuf`,
-`reflect`, and `uv`, and the browser contributor adds `titan.browser`. The
-contributors (`Makefile` `STDLIB_HTTP_SOURCES`) share one module-private
-scope:
+`titan/http/http.titan` imports `async`, `io`, `math`, `string`, `timer`, and
+`url` and holds the URL and request-header helpers. Because the folder is one
+module, each import is declared once: `native_imports.native.titan` declares
+the native-only `net`, `ssl`, `reflect`, and `protobuf`, `server.native.titan`
+adds `uv`, and `client.browser.titan` adds `titan.browser`. The contributors
+(`Makefile` `STDLIB_HTTP_SOURCES`) share one module-private scope:
 
 ```text
-titan/http/http.titan               shared main: imports, URL and header helpers
-titan/http/headers.titan            ordered public Headers value and validators
-titan/http/options.titan            mode unions, RequestOptions, case helpers
-titan/http/client.native.titan      native exchanges, redirects, ClientResponse
-titan/http/pool.native.titan        Client pools, idle leases, bounded drains
-titan/http/parser.native.titan      private parser owner and callback event Array
-titan/http/server.native.titan      Request, Response, and per-connection serving
-titan/http/transfer.native.titan    paired Exchange handoff and parser snapshots
-titan/http/upgrade.native.titan     owned upgrade stream, opening supervisor
-titan/http/client.browser.titan     browser Client, ClientResponse, fetch sessions
+titan/http/http.titan                 shared main: imports, URL and header helpers
+titan/http/headers.titan              ordered public Headers value and validators
+titan/http/options.titan              mode unions, RequestOptions, case helpers
+titan/http/native_imports.native.titan  imports used only natively
+titan/http/client.native.titan        native exchanges, redirects, ClientResponse
+titan/http/pool.native.titan          Client pools, idle leases, bounded drains
+titan/http/parser.native.titan        private parser owner and callback event Array
+titan/http/server.native.titan        Request, Response, and per-connection serving
+titan/http/transfer.native.titan      paired Exchange handoff and parser snapshots
+titan/http/upgrade.native.titan       owned upgrade stream, opening supervisor
+titan/http/client.browser.titan       browser Client, ClientResponse, fetch sessions
 ```
 
 `headers.titan` and `options.titan` are the whole shared surface besides the
@@ -572,6 +574,16 @@ a real request remain accepted. The server maps only the idle outcome to normal
 connection-Task return; a client awaiting its first or final response maps the
 same outcome back to an incomplete-message error.
 
+An HTTPS peer usually drops an idle connection without TLS `close_notify`, so
+the SSL read reports `ssl.Error` `TLS_TRUNCATED_EOF` instead of EOF.
+`read_request` (`server.native.titan`) catches exactly that error from the
+`ssl.read` operation while `parser.input_seen` is still false, which is the
+same empty header boundary, and returns no request; the connection Task, or
+the header-reader child under an idle timeout, then ends quietly. Truncation
+after any request byte or during a body, other TLS errors, and cancellation
+keep raising, and `ssl` itself still reports the truncation to every other
+caller.
+
 At the start of each serial request iteration, the connection Task reads the
 Server's `idle_timeout_ms`; the shared header-acquisition helper
 (`server.native.titan` `read_request_with_idle_timeout`) takes the encryption mode and
@@ -703,8 +715,9 @@ parses the URL with `http`/`https` only, rejects a `ca_file`, and rejects any
 methods. One forbidden-request-header predicate then visits each option
 header. It holds the Fetch standard's list in Titan: `Host` (parsed with
 `parse_request_url_or_raise`, so a malformed authority raises its `url.Error`
-and a second `Host` a string; removed when the normalized authority equals the
-URL's, otherwise rejected), `Content-Length` (removed when
+and a second `Host` a string; removed when its host and port, which `url`
+normalizes with the effective default port, equal the URL's, otherwise
+rejected), `Content-Length` (removed when
 it equals the body length, otherwise rejected), `Transfer-Encoding` and
 `Expect`, seventeen further exact names, the `proxy-` and `sec-` prefixes of
 the lowercased name, and the three method-override names. Their values are
@@ -715,12 +728,18 @@ element, and each element loses surrounding HTAB and SP before the
 comparison with `CONNECT`, `TRACE`, and `TRACK`. Browsers drop a forbidden
 header silently and Node sends it; checking first gives every engine the same
 request or none. Removing an equal `Content-Length` also keeps Node from
-failing or stalling on a duplicate length.
+failing or stalling on a duplicate length. The predicate is the normative one
+even where an engine is stricter: Firefox and WebKit drop the quoted-list
+value `"foo,TRACE,bar"` that Fetch's split allows, and Titan does not imitate
+that.
 
 **Cache gate and `RequestInit`.** Under `only_if_cached()` the client asks
 `titan:fetch` `has-cache` before creating a session. Node has no HTTP cache,
 so `false` raises the native `only-if-cached` policy error with no network
-request; in a browser the mode passes through to `fetch`. The modes translate
+request; in a browser the mode passes through to `fetch`. WebKit then sends a
+cache-only miss to the network and returns the network's response; `fetch`
+exposes no from-cache fact, so Titan cannot detect it and does not try to
+recognize the engine. The modes translate
 through the shared string helpers, with `redirect_mode_string(mode, true)`
 for the browser's `follow()` default, and each header crosses as a pair of
 byte values that the source turns into Latin-1 `ByteString`s.
@@ -735,28 +754,42 @@ while the body stream is still open; and a failure in head translation or
 redirect normalization before adoption. Closing the session cancels the body
 reader and aborts the controller, so the server sees the connection end.
 
-**Response head.** The source reports the status (0 for opaque and
-opaque-redirect responses), `redirected`, the status text, the URL (empty
-becomes `nil`), and every header pair in one byte string. Titan validates the
+**Response head.** The source reports one byte string of NUL-terminated
+fields: the status (0 for opaque and opaque-redirect responses), `1` or `0`
+for `redirected`, the status text, the URL, the raw `Response.type`, then
+every header name and value as the host exposes them. Titan validates the
 reason, drops `Set-Cookie` and `Set-Cookie2`, which Node exposes and browsers
-hide, and builds `headers`. On a redirect status, `manual()` closes the session
-and returns the opaque-redirect shape (Node returns the raw 3xx response), and
-`error()` closes the session and raises the `RedirectMode.error` policy error
-(Chromium exposes the raw status when `Location` is absent). Fetch rejections
-become `async.OperationError(-ffi.EIO, "EIO", message, "http.request")`.
+hide, and builds `headers`. A redirect status or the type `opaqueredirect`
+selects the redirect policy: `manual()` closes the session and returns the
+fixed opaque-redirect envelope with the requested URL and no body, which
+covers Node's raw 3xx responses and the body WebKit exposes for a redirect
+without `Location`; `error()` raises the `RedirectMode.error` policy error, and
+the adoption guard closes the session (Chromium exposes the raw status when
+`Location` is absent). Only an `opaqueredirect` keeps a URL; an empty URL,
+as for an `opaque` response, becomes `nil`. Fetch rejections become
+`async.OperationError(-ffi.EIO, "EIO", message, "http.request")`, including
+the network error that Fetch requires for a cross-origin `no-cors` request
+whose redirect mode is not `follow`.
 
 **Body and close.** `read` calls `async.checkpoint()` before admitting its one
 reader, requests the next chunk with `read`, turns bytes into a Titan string
 and nil into EOF, and closes the session when the read fails or its Task is
 cancelled; read failures raise the same `OperationError` with operation
-`"http.read"`. `read_until` keeps the bytes after its delimiter for the next
-read. `close()` closes the session synchronously: it never yields or drains,
-so it is safe in a cancellation `defer`.
+`"http.read"`. Under `follow()`, Node's Undici destroys the connection of
+every redirect response before it learns that `Location` is absent, so the
+body of such a response returned directly fails there with this
+`"http.read"` error; Titan does not refetch. `read_until` keeps the bytes
+after its delimiter for the next read. `close()` closes the session
+synchronously: it never yields or drains, so it is safe in a cancellation
+`defer`.
 
 **Client.** A browser `Client` registers `async.add_close_listener` on its
 first request and closes when that Runtime closes; later requests raise
-`"HTTP Client is closed"`, and a closed default client is replaced. It holds
-no pool: `close_idle_connections` does nothing.
+`"HTTP Client is closed"`, and a closed default client is replaced. A browser
+owner state has at most one active Runtime, and Runtime shutdown runs its
+close listeners before another Runtime can start, so a bound `Client` cannot
+migrate to a second Runtime. It holds no pool: `close_idle_connections` does
+nothing.
 
 The client therefore normalizes five Node behaviors to browser behavior in
 Titan instead of exposing them: exposed `Set-Cookie` fields, forbidden request
@@ -815,9 +848,16 @@ rejects mixed-case methods), sticky cross-origin credential removal,
 normalized same-origin comparison, intermediate drain and connection reuse,
 and options reuse after a followed chain.
 
-`http.tests` runs on both targets: its shared contributor checks headers,
-option validation, and failures that precede any transport, and its browser
-contributor checks the forbidden-header predicate, method overrides, the
-method, body, and `ca_file` refusals, and the `lua.new()` refusal. The browser
-client's network behavior needs real engines and runs in the live browser
-network harness ([browser target](browser-target.md#the-live-browser-network-harness)).
+`http.tests` runs on both targets. Its shared `portable.titan` checks
+`RequestOptions` validation, header copying and validation, failures that
+precede any transport (including duplicate and non-decimal framing headers),
+and a closed `Client`. Its browser contributor `validation.browser.titan`
+checks the forbidden-header predicate, every quoted method-override sample
+through it, the method, body, and `ca_file` refusals, the `lua.new()` refusal,
+a `Client` that cannot migrate to a second Runtime, and `Host` default-port
+equivalence. `tls_idle_disconnect_test.native.titan` runs a native HTTPS
+server in a separate process (`spec/fixtures/stdlib/titan/http_tls_idle_app.titan`)
+with and without an idle timeout: idle and clean disconnects log no uncaught
+Task error, while a partial request and a truncated body each log exactly
+one. The browser client's network behavior needs real engines and runs in the
+live browser network harness ([browser target](browser-target.md#the-live-browser-network-harness)).

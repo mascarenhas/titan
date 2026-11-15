@@ -270,14 +270,16 @@ headers or a `ca_file`: a browser `WebSocket` sends no application headers and
 trusts the browser's certificates. The browser offers the `subprotocols`,
 sends its cookies and HTTP authentication with the opening request, and
 negotiates `permessage-deflate` compression itself. When subprotocols were
-offered and the server selects none, the browser fails the opening; a native
-client instead returns a connection whose `subprotocol()` is nil. Every
-failure before the connection opens, whether an HTTP rejection, an invalid
-response, a DNS failure, a refused connection, or a TLS failure, raises
-`HandshakeError` with message `"WebSocket opening handshake failed"` and nil
-`status` and `headers`, because the browser reports them alike.
+offered and the response selects none (or one that was not offered), the
+opening fails on every engine: Chromium refuses it itself, and Titan checks
+the selected subprotocol where Firefox and WebKit open anyway. A native client
+instead returns a connection whose `subprotocol()` is nil. Every failure
+before the connection opens, whether an HTTP rejection, an invalid response,
+a DNS failure, a refused connection, or a TLS failure, raises `HandshakeError`
+with nil `status` and `headers`, because the browser reports them alike; a
+rejected opening's message is `"WebSocket opening handshake failed"`.
 `handshake_timeout` raises `Error("timeout", "websocket.open", ...)` as
-natively.
+natively. A connection closes when its Runtime closes.
 
 **Messages.** `read` returns complete messages in arrival order. The
 `read_limit` applies to each message's length after decompression. Messages
@@ -298,8 +300,9 @@ failure or `Error("state", "websocket.write", ...)` instead of letting the
 browser drop the message silently.
 
 **Closing.** `shutdown(code, reason, timeout_ms)` accepts code 1000, the
-default, and 3000 through 4999; a code from 1001 through 1014 or a reason over
-123 bytes raises `Error("state", "websocket.shutdown", ...)`, and a reason that
+default, and 3000 through 4999; any other code (the browser refuses 1001
+through 1014) or a reason over 123 bytes raises
+`Error("state", "websocket.shutdown", ...)`, and a reason that
 is not valid UTF-8 raises `Error("utf8", "websocket.shutdown", ...)`. An
 active reader still receives one message before shutdown discards later data,
 as natively, and shutdown waits up to `timeout_ms` for the server's Close.
@@ -311,6 +314,13 @@ sends an empty Close frame after the messages it has already queued and
 finishes the closing handshake itself. Cancelling an admitted `read` ends the
 connection, as does cancelling a `write` after the browser accepted its
 message.
+
+Two engines keep a socket's TCP connection after Titan has let go of it.
+Firefox keeps the connection of an opening that was cancelled or timed out
+until the server answers the handshake or the browser closes, and Node keeps
+the connection of an opening it rejected (an unselected subprotocol or an
+invalid response) until the server closes it. Titan has already removed its
+listeners and closed the socket in both cases.
 
 **Close status and transport loss.** A valid Close frame from the server
 makes `read` return `(nil, nil)` and lets `shutdown` complete, even when the

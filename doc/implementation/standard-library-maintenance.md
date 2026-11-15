@@ -94,8 +94,9 @@ JavaScript](#the-same-rules-for-browser-javascript)).
 
 Only these browser files may import `titan.browser`: those of `async`
 (`runtime.browser.titan` and `external.browser.titan`), `timer.browser.titan`,
-`os/stdio.browser.titan`, `http/client.browser.titan`, and
-`websocket/websocket.browser.titan` with `websocket/client.browser.titan`.
+`os/stdio.browser.titan`, `http/client.browser.titan`, and the WebSocket
+browser main `websocket/websocket.browser.titan`, whose import the browser
+`websocket/client.browser.titan` uses within the same module.
 
 The browser provider's other target-specific module, `titan.browser`
 (`titan/browser.browser.titan`), is the one reviewed browser-only exception.

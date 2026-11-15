@@ -491,7 +491,7 @@ decodes them instead (see [on the browser](#on-the-browser)).
 | `only_if_cached()` miss, `RedirectMode.error()` on a redirect status, more than twenty redirects, an unusable or repeated redirect `Location` | `async.OperationError`, name `"EIO"`, operation `"http.request"` | the same |
 | DNS or connection failure | `async.OperationError` from `net` | `async.OperationError`, name `"EIO"`, operation `"http.request"` |
 | Certificate or TLS failure | `ssl.Error` | the same `"EIO"` `OperationError` |
-| CORS or same-origin block, mixed content | (no such check) | the same `"EIO"` `OperationError` |
+| CORS or same-origin block, mixed content, a cross-origin `no_cors()` request with `manual()` or `error()` | (no such check) | the same `"EIO"` `OperationError` |
 | HTTP protocol or framing failure | string | the same `"EIO"` `OperationError` |
 | Body stream failure after the headers | the transport's error, or a string for framing | `async.OperationError`, name `"EIO"`, operation `"http.read"` |
 
@@ -543,10 +543,11 @@ same. Names compare ASCII case-insensitively:
 
 - A `Host` must be one valid authority. A malformed one raises the
   `url.Error` of `url.parse_request`, as natively, and a second `Host` raises
-  `"HTTP request has more than one Host header"`. A `Host` naming the URL's
-  authority is removed, because the browser sends its own; any other valid
-  `Host` raises `"HTTP custom Host header is unavailable on the browser
-  target"`.
+  `"HTTP request has more than one Host header"`. A `Host` whose host and
+  port equal the URL's, compared after normalization so that an omitted
+  default port matches an explicit one, is removed, because the browser sends
+  its own; any other valid `Host` raises `"HTTP custom Host header is
+  unavailable on the browser target"`.
 - One `Content-Length` equal to the body length is removed; any other
   `Content-Length` raises.
 - `Transfer-Encoding` and `Expect` raise, as on native targets.
@@ -559,7 +560,9 @@ same. Names compare ASCII case-insensitively:
   when an element of their comma-separated value, with surrounding spaces and
   tabs removed, is `CONNECT`, `TRACE`, or `TRACK` in any letter case. A comma
   inside a double-quoted string does not separate elements, so `GET, TRACE`
-  raises and `"foo,TRACE,bar"` is sent unchanged.
+  raises and `"foo,TRACE,bar"` passes to `fetch` unchanged. Firefox and WebKit
+  then drop that quoted-list value themselves, so it reaches the server only
+  from Chromium and Node.
 
 Every other header goes to `fetch` as supplied. With `RequestMode.no_cors()`
 the browser itself drops the headers that CORS does not safelist. Fetch sends
@@ -573,9 +576,13 @@ request; choose `no_store()` or `reload()` to bypass it. Node has no HTTP
 cache, so under Node `only_if_cached()` misses at once and raises the native
 `"HTTP response not in cache (only-if-cached)"` `OperationError` without a
 request. In a browser it reads the cache, and a miss raises `OperationError`
-with name `"EIO"` and operation `"http.request"`. `CredentialsMode.include()`
-sends cookies on cross-origin requests too, and such a response passes CORS
-only when the server names the page's origin rather than `*`.
+with name `"EIO"` and operation `"http.request"`, except on WebKit, whose
+cache-only miss goes to the network and returns the network's response.
+`fetch` reports nothing that would let Titan detect that. A browsing context
+without an HTTP cache, such as WebKit's ephemeral automation context, serves
+nothing from cache. `CredentialsMode.include()` sends cookies on cross-origin
+requests too, and such a response passes CORS only when the server names the
+page's origin rather than `*`.
 
 **Responses.** `status` is the HTTP status, or 0 for an opaque response.
 `headers` holds what the browser exposes: lowercase names in sorted order,
@@ -585,15 +592,23 @@ exposes only the CORS-safelisted headers and those its server lists in
 `Access-Control-Expose-Headers`. `reason` is the status text that the
 browser reports. `url` is the final URL and `redirected` reports whether the
 browser followed a redirect; a cross-origin hop must pass CORS as well.
+A `follow()` response with a redirect status and no `Location` has the
+right status, headers, and `url` everywhere, but Node aborts its body: reading
+it there can raise `OperationError` with operation `"http.read"`. Browsers
+deliver that body.
 Two kinds of response are opaque, with `status` 0, an empty `reason` and
 `headers`, `redirected` false, and a body whose first read returns nil:
 
 - With `RedirectMode.manual()`, every redirect status, with or without
   `Location`, gives Fetch's opaque-redirect response, whose `url` names the
   requested URL. Titan returns the same response under Node, which otherwise
-  exposes the raw 3xx response.
-- A cross-origin request with `RequestMode.no_cors()` gives an opaque
-  response whose `url` is nil.
+  exposes the raw 3xx response, and hides the body that WebKit exposes for a
+  redirect without `Location`.
+- A cross-origin request with `RequestMode.no_cors()` and the `follow()`
+  default gives an opaque response whose `url` is nil. With `manual()` or
+  `error()`, Fetch treats such a request as a network error, so it raises
+  `OperationError` with name `"EIO"` and operation `"http.request"`. A
+  same-origin `no_cors()` request behaves as an ordinary request.
 
 **Bodies.** The browser decodes content codings: `read` and `read_until`
 return the decoded body bytes, while `Content-Encoding` and `Content-Length`
@@ -725,7 +740,10 @@ adds it when absent and rejects an explicit nonzero value. Transfer-Encoding is
 removed from every no-body response. A request or response `Connection: close`
 decision disables reuse; otherwise HTTP/1.1 keep-alive is preserved. A peer
 closing an idle persistent connection before beginning its next request is a
-normal disconnect. EOF after any byte of a next request is a parse error,
+normal disconnect. On HTTPS that includes a peer that drops the connection
+without TLS `close_notify` before sending any byte of its next request: the
+connection closes quietly instead of failing with `ssl.Error`
+`TLS_TRUNCATED_EOF`. EOF after any byte of a next request is a parse error,
 including after only empty request lines or a dangling CR. Empty request lines
 remain accepted when an actual request follows them.
 

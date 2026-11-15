@@ -715,8 +715,13 @@ ordinary calls and starts `open` and `read` as detachable requests whose
 cancel function aborts the session's controller; the `http` client also
 closes the session itself, because once `open` has settled with headers the
 bridge retires that cancel function while the body stream is still open.
-Header pairs arrive as copied byte values and become Latin-1 `ByteString`s
-without inspection. `titan:websocket` registers `connect` as a listener whose
+`open` takes its fixed arguments first and the header pairs last, as
+alternating copied byte values that become Latin-1 `ByteString`s without
+inspection, because a `BrowserValue` has no Array variant; it completes with
+one byte string of NUL-terminated fields (status, `redirected`, status text,
+URL, `Response.type`, then each header name and value), and Titan alone tells
+`opaqueredirect` from `opaque`. `titan:websocket` takes subprotocols the same
+way, as trailing strings, and registers `connect` as a listener whose
 unregister function removes the three DOM listeners before it closes the
 socket. A message event carries a holder handle instead of bytes, so a message
 that Titan refuses by length never enters Wasm memory. Neither source holds

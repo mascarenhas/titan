@@ -804,8 +804,10 @@ covers headers, `RequestOptions` validation, and validation that precedes any
 transport, and `validation.browser.titan` covers the browser client's
 forbidden headers and method overrides, its method, body, and `ca_file`
 checks, and the `lua.new()` refusal. `websocket.tests` likewise keeps
-servers, framing, and transfer in native contributors and shares
-`DialOptions`, UTF-8 validation, and the browser client's fail-fast cases.
+servers, framing, UTF-8 wire cases, and transfer in native contributors; its
+shared `portable.titan` covers message kinds, error records, `DialOptions`
+validation, and URL and scheme refusal, and `validation.browser.titan` covers
+the refusal of dial headers and `ca_file` and the `lua.new()` refusal.
 Network behavior of the two browser clients needs
 live servers and belongs to `http.browser_tests` and `websocket.browser_tests`,
 outside this root inventory ([live harness](#the-live-browser-network-harness)).
@@ -945,57 +947,91 @@ embedding bindings and request lifecycle.
 ### The live browser network harness
 
 The browser `http` and `websocket` clients need live servers, which a browser
-test image cannot start. `spec/coder/browser_net_spec.lua`, a real-toolchain
-gate file that is pending unless `TITAN_REQUIRE_BROWSER_TOOLCHAIN` is set,
-starts native peers, builds the live test images, and runs them under Node and
-Chromium. `spec/browser/build-net.lua` builds the same images for the
-[`browser-playwright` job](continuous-integration.md#browser-playwright-job),
-which runs them on Chromium, Firefox, and WebKit in both build profiles. The
-fixtures live in `spec/fixtures/browser_net/`:
+test image cannot start. The harness in `spec/fixtures/browser_net/` runs from
+two places: `spec/coder/browser_net_spec.lua`, a real-toolchain gate file
+that is pending unless `TITAN_REQUIRE_BROWSER_TOOLCHAIN` is set, builds it
+into `out/browser-net` and runs it on Node and Chromium through the SDK's
+`titan-browser-run`; the
+[`browser-playwright` job](continuous-integration.md#browser-playwright-job)
+runs it on each cell's managed Chromium, Firefox, or WebKit through
+`spec/browser/playwright-run.mjs`, in both build profiles.
 
-* `server.titan` is a native Titan program, compiled with the installed
-  `titanc`. It binds loopback ports with the `EADDRINUSE`-only scan and serves
-  plain HTTP and three HTTPS listeners: one with the repository test CA's
-  certificate for `127.0.0.1` and `localhost`, one with the same CA's
-  certificate for another host name, and one with an untrusted self-signed
-  certificate. Its routes answer CORS preflights and expose headers on CORS
-  responses (with routes that omit or restrict those headers), serve the
-  runner page and cacheable and uncached same-origin fixtures, implement every
-  redirect status with and without `Location`, the hop-limit chain, and
-  cross-origin hops, and accept WebSocket openings whose allowed origin is
-  the request's own `Origin`, with a route that denies it.
-* `wire_peer.mjs` is a Node `node:net` peer for wire cases that a compliant
-  server does not produce: a body held open across the adoption window, gzip
-  with the compressed `Content-Length`, a reset mid-body, and, for WebSocket,
-  an empty Close, a Close followed at once by a reset, an opening that omits
-  the offered subprotocol, a paused reader, closes during writes, and an
-  oversized frame.
-* `nss_trust.mjs` gives Linux Chromium an isolated `HOME` whose
-  `.pki/nssdb` trusts the test CA, so verified `https://` and `wss://` run with
-  no certificate-ignore flag; Node trusts the CA through
-  `NODE_EXTRA_CA_CERTS`.
-* `net.test.mjs` is the `--js-test` driver. It passes the peers' URLs in the
-  instance's `env` (`TITAN_TEST_HTTP_URL`, `TITAN_TEST_HTTPS_VALID_URL`,
-  `TITAN_TEST_HTTPS_WRONG_HOST_URL`, `TITAN_TEST_HTTPS_UNTRUSTED_URL`,
-  `TITAN_TEST_WS_URL`, `TITAN_TEST_WSS_VALID_URL`,
-  `TITAN_TEST_WSS_WRONG_HOST_URL`, `TITAN_TEST_WSS_UNTRUSTED_URL`,
-  `TITAN_TEST_RAW_URL`) with `TITAN_TEST_VERIFIED_TLS`, which is `"1"` where
-  the CA is trusted (Node and Linux Chromium) and `"0"` elsewhere. After the
-  run it requires that the server saw the cancelled connections end before
-  `dispose()`, that `onNotificationError` never fired, that every WebSocket
-  listener added was removed, and that `await instance.dispose()` completed.
+`spec/browser/build-net.lua OUTPUT` uses the installed `titanc` to build the
+native peer `OUTPUT/native/server` from `server.titan`, the test image
+`OUTPUT/images/http.mjs` of `http.browser_tests`, and the test image
+`OUTPUT/images/websocket.mjs` of `websocket.browser_tests`, which also links
+the fixture-only `controls.c`. The browser builds use an empty
+`TITAN_PATH_0_6`, so they see only the browser SDK. The builder copies the
+JavaScript drivers next to the images.
 
-Each peer runs in its own process group, which the spec kills and joins in
-`finally`. The test owners `http.browser_tests` and `websocket.browser_tests`
-read the URLs with `os.getenv`. They cover request methods, binary bodies,
-permitted and forbidden headers, every request mode including real cache hits
-and misses, every redirect status under every redirect mode, streaming reads,
-cancellation before headers, after settlement but before adoption, and
-mid-body, decoded gzip bodies, `Set-Cookie` filtering, verified TLS and both
-certificate rejections, CORS, and the fail-fast rejections with zero server
-hits; and for WebSocket, subprotocols and opening deadlines, text and binary
-round trips, write fairness and backpressure, the close races, shutdown codes,
-peer Close and resets, the lazy read limit, cancellation, and `Origin`.
+`run.mjs --root OUTPUT --engine ENGINE --sdk SDK --runner RUNNER --repository
+REPO [--persistent-webkit]` owns one run. It starts the native server and
+`wire_peer.mjs`, each in its own process group, waits for each `READY` line,
+runs the driver with the peers' URLs, checks the final report, and kills and
+joins every peer in `finally`. For Linux Chromium, `nss_trust.mjs` first
+imports the repository test CA into an NSS database under a private `HOME`
+inside `OUTPUT`, through Python `ctypes` over `libnss3`, so verified
+`https://` and `wss://` run with no certificate-ignore flag; Node trusts the
+CA through `NODE_EXTRA_CA_CERTS`. `--persistent-webkit`, which only the CI step
+passes, runs WebKit in a persistent Playwright context inside that private
+home, because WebKit's default ephemeral context has no HTTP cache.
+
+* `server.titan` scans loopback ports from 31000 and serves four listeners:
+  plain HTTP, and HTTPS with `spec/fixtures/ssl/server.pem` (valid for
+  `127.0.0.1` and `localhost`), with `wrong-server.pem` (the same CA, another
+  host name), and with the committed self-signed `untrusted.pem`. Its HTTP
+  routes echo and inspect requests, report the `Host` and `Content-Length`
+  fields received, set `Set-Cookie` fields, answer CORS preflights and expose
+  headers (with routes that omit or restrict CORS headers), serve cacheable
+  resources with an ETag and hit and revalidation counters, implement every
+  redirect status with and without `Location`, a redirect chain past the hop
+  limit, and a cross-origin hop, and serve the runner page and image assets
+  for same-origin requests. Its WebSocket routes echo with subprotocol
+  selection and accept the request's own `Origin`, and one route denies every
+  origin.
+* `wire_peer.mjs` is a Node `node:net` peer for wire behavior that a
+  compliant server does not produce: response headers held until
+  cancellation, a held body, a chunked stream released on request, gzip with
+  the compressed `Content-Length`, a partial body then a reset, and, for
+  WebSocket, a 403, a malformed 101, a 101 without the offered subprotocol, a
+  held handshake, an empty Close, a Close followed by a reset, a paused
+  reader, peer FIN and reset, and a 20 MiB frame. Per-route counters report
+  when connections open and close.
+* `net.test.mjs` is the `run(context)` driver for both runners. It passes the
+  URLs in the instance's `env` (`TITAN_TEST_HTTP_URL`,
+  `TITAN_TEST_HTTPS_VALID_URL`, `TITAN_TEST_HTTPS_WRONG_HOST_URL`,
+  `TITAN_TEST_HTTPS_UNTRUSTED_URL`, the `ws`/`wss` forms of the same listeners
+  as `TITAN_TEST_WS_URL` and `TITAN_TEST_WSS_*_URL`, `TITAN_TEST_RAW_URL`)
+  with `TITAN_TEST_VERIFIED_TLS` (`"1"` where the CA is trusted),
+  `TITAN_TEST_BROWSER`, and `TITAN_TEST_ENGINE`. It runs the HTTP image (39
+  active cases, plus two that skip outside their capability context) and four
+  Task-form cancellation phases: pending headers, an already-settled headers
+  request before adoption, failing metadata, and a pending body. In real
+  browsers an iframe from the native server's origin (`same-origin.mjs`) runs
+  the one filtered case for same-origin cache modes and `no_cors()`. It then
+  hands over to `websocket.test.mjs`, which runs the WebSocket image and three
+  cancellation phases (opening, read, write). That driver wraps the host
+  `WebSocket` constructor to count listeners and sends, and `controls.c`
+  wraps the bridge's binding and slot release to count `take` calls, holder
+  releases, and Wasm copies, with no production hook.
+
+Every case requires the peer to see its connection close before disposal,
+balanced WebSocket listeners, no `onNotificationError` before or during an
+awaited `dispose()`, and the driver ends with one `BROWSER-NET` JSON report
+(verdict, 65 cases, the cancellation phases, the same-origin page, engine,
+and verified TLS) that `run.mjs` and the spec check.
+
+The tests assert each engine's measured behavior where hosts deviate. Node
+aborts the body of a `follow()` redirect response without `Location`. Firefox
+and WebKit drop the quoted-list method-override value. WebKit sends a
+cache-only miss to the network. Firefox keeps the TCP connection of a
+cancelled or timed-out opening until the handshake is answered, and Node
+keeps the TCP connection of a rejected opening until the peer closes it, so
+those cases release a handshake reply or a peer FIN after their Titan
+assertions and only then require the peer-side close. A peer FIN while
+writes are buffered is reported late on every engine, so that case requires
+that the in-flight or next write raise and that no write succeed once the
+socket is not open, not that one particular write fail.
 
 ### Nesting limits
 
@@ -3657,7 +3693,7 @@ portable `run(context)` host tests (or a standalone Titan image with `--image`)
 across Playwright-managed `chromium`, `firefox`, and `webkit`
 (`playwright@1.64.1`), `spec/browser/playwright-run.mjs` parses `--engine
 chromium|firefox|webkit [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
-[--allow-degraded-trace] [--image] FILE [-- ARG...]` (defaults: `timeout`
+[--persistent-context DIR] [--allow-degraded-trace] [--image] FILE [-- ARG...]` (defaults: `timeout`
 300000 ms, `grace` 1500 ms, `sdk` `<repo>/titan-runtime/browser/`), loads
 `playwright` from `TITAN_PLAYWRIGHT_ROOT` and managed browsers from
 `PLAYWRIGHT_BROWSERS_PATH`, and reuses `titan-browser-page.mjs`, the exported
@@ -3667,7 +3703,10 @@ chromium|firefox|webkit [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
 retirement (`browserServer.close()`, escalating to `browserServer.kill()`). Its
 own diagnostics start with `titan-playwright-run: `, while the shared `Monitor`
 keeps the runner's `titan-browser-run: ` prefix; its unit suite is
-`spec/browser/playwright-runner.test.mjs`. It is repository test
+`spec/browser/playwright-runner.test.mjs`. `--persistent-context DIR` launches
+a persistent context with that profile directory instead of a browser
+server; the directory must resolve beneath `--root`, and the caller owns and
+removes it. It is repository test
 infrastructure, not an installed SDK binary.
 
 ## The executing protocol runner
