@@ -120,16 +120,14 @@ end
 
 local function listen(first_port: integer, certificate: string?, key: string?): (http.Server, integer)
   for port = first_port, first_port + 199 do
-    do
-      if certificate ~= nil then
-        return http.listen_tls("127.0.0.1", certificate, handle, key, port), port
-      end
-      return http.listen("127.0.0.1", handle, port), port
-    catch
-      if not (error is async.OperationError) then raise end
-      local failure: async.OperationError = error
-      if failure.name ~= "EADDRINUSE" then raise end
+    if certificate ~= nil then
+      return http.listen_tls("127.0.0.1", certificate, handle, key, port), port
     end
+    return http.listen("127.0.0.1", handle, port), port
+  catch
+    if not (error is async.OperationError) then raise end
+    local failure: async.OperationError = error
+    if failure.name ~= "EADDRINUSE" then raise end
   end
   raise "browser network fixture has no available loopback port"
 end

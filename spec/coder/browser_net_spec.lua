@@ -1,6 +1,7 @@
 local assert = require "luassert"
 local lfs = require "lfs"
 local process = require "titan-compiler.process"
+local linux = require("luv").os_uname().sysname == "Linux"
 local toolchain = require "spec.support.browser_toolchain"
 local repository = assert(lfs.currentdir())
 local output = repository .. "/out/browser-net"
@@ -29,6 +30,10 @@ describe("browser HTTP clients", function()
                 "--runner", info.sdk_root .. "/titan-browser-run.mjs", "--repository", repository}, env, engine)
             assert.matches('BROWSER%-NET {"verdict":"PASS","cases":39,"cancellation":%["headers","settled","metadata","body"%]', result)
             assert.matches('"sameOrigin":' .. (engine == "node" and "0" or "1"), result, 1, true)
+            assert.matches('"engine":"' .. engine .. '"', result, 1, true)
+            if engine == "node" or linux then
+                assert.matches('"verified":true', result, 1, true)
+            end
         end
     end)
 end)

@@ -6516,6 +6516,10 @@ printf '%s\n' "${schedule[@]}"
             assert.falsy(net_build:find("if:", 1, true), net_build)
             assert.truthy(net_build:find(
                 'lua -E spec/browser/build-net.lua "$TITAN_NET_OUTPUT"', 1, true))
+            local net_python = named_step(playwright_job,
+                "Verify Python for Chromium HTTPS trust")
+            assert.truthy(net_python:find("if: matrix.engine == 'chromium'", 1, true))
+            assert.truthy(net_python:find("run: python3 --version", 1, true))
             local net_gate = named_step(playwright_job,
                 "Run live HTTP and HTTPS clients on the managed engine")
             assert.falsy(net_gate:find("if:", 1, true), net_gate)

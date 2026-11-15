@@ -62,10 +62,15 @@ checked('NSS_Shutdown', shutdown())
 
 export async function chromiumTrust(home, ca) {
   if (process.platform !== 'linux') return false;
+  const python = spawnSync('python3', ['--version'], {encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL'});
+  if (python.error || python.status !== 0) {
+    throw new Error('Linux Chromium verified HTTPS requires Python 3 (python3): ' + (python.stderr || python.error));
+  }
   const db = join(home, '.pki', 'nssdb');
   await mkdir(db, {recursive: true});
   for (const args of [[db, ca], [db]]) {
-    const result = spawnSync('python3', ['-c', importCA, ...args], {encoding: 'utf8'});
+    const result = spawnSync('python3', ['-c', importCA, ...args],
+      {encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL'});
     if (result.error || result.status !== 0) {
       throw new Error('isolated Chromium NSS setup failed: ' + (result.stderr || result.error));
     }

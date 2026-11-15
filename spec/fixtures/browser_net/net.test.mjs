@@ -1,5 +1,8 @@
-const encoder = new TextEncoder(), decoder = new TextDecoder();
-function text(chunks) { return chunks.map(bytes => decoder.decode(bytes)).join(''); }
+const encoder = new TextEncoder();
+function text(chunks) {
+  const decoder = new TextDecoder();
+  return chunks.map(bytes => decoder.decode(bytes, {stream: true})).join('') + decoder.decode();
+}
 function host(image, env) {
   const state = {stdout: [], stderr: [], errors: [], notes: [], entry: undefined};
   state.instance = image.create({locateFile: image.locateFile, env,
@@ -119,6 +122,7 @@ async function sameOrigin(context, env) {
   const url = new URL(env.TITAN_TEST_HTTP_URL + '/runner');
   url.searchParams.set('config', JSON.stringify({...env, TITAN_TEST_SAME_ORIGIN: '1'}));
   url.searchParams.set('token', token);
+  url.searchParams.set('parentOrigin', location.origin);
   let listener, timer;
   try {
     const result = new Promise((resolve, reject) => {
@@ -139,10 +143,13 @@ async function sameOrigin(context, env) {
 }
 
 export async function run(context) {
+  const sample = "a\u00e9\u20ac\u{20000}z", bytes = encoder.encode(sample);
+  context.assert(text(Array.from(bytes, byte => Uint8Array.of(byte))) === sample, 'output lost split UTF-8 sequences');
   context.assert(context.args.length === 2, 'pass HTTP image and fixture configuration');
   const [imagePath, configuration] = context.args, env = JSON.parse(configuration);
   const image = await context.image(imagePath);
-  const report = {verdict: 'PASS', cases: await suite(context, image, env), cancellation: []};
+  const report = {verdict: 'PASS', cases: await suite(context, image, env), cancellation: [],
+    engine: env.TITAN_TEST_ENGINE, verified: env.TITAN_TEST_VERIFIED_TLS === '1'};
   for (const phase of ['headers', 'settled', 'metadata', 'body']) {
     report.cancellation.push(await cancellation(context, image, env, phase));
   }

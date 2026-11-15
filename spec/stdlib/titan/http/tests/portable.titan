@@ -80,6 +80,29 @@ function test_request_validation_precedes_transport(_: test.Context)
   end)
 end
 
+function test_request_header_framing_errors_precede_transport(_: test.Context)
+  runtime_test.run(function ()
+    for _, name in iteration.ipairs({"Host", "Content-Length"}) do
+      local contents = "0"
+      if name == "Host" then contents = "127.0.0.1:1" end
+      local headers = http.headers({http.Header(name, contents), http.Header(string.lower(name), contents)})
+      assert_options_error(function ()
+        http.get("http://127.0.0.1:1", http.RequestOptions {headers = headers})
+      end, "HTTP request has more than one " .. name .. " header")
+    end
+    for _, row in iteration.ipairs({
+      {"", "must not be empty"},
+      {"1.5", "must contain only decimal digits"},
+      {"18446744073709551616", "is too large"},
+    }) do
+      local headers = http.headers({http.Header("Content-Length", row[1])})
+      assert_options_error(function ()
+        http.get("http://127.0.0.1:1", http.RequestOptions {headers = headers})
+      end, "HTTP Content-Length " .. row[2])
+    end
+  end)
+end
+
 function test_client_close_rejects_requests(_: test.Context)
   runtime_test.run(function ()
     local client = http.Client()

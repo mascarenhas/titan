@@ -1239,6 +1239,10 @@ jobs:
           lua -E spec/browser/build-net.lua "$TITAN_NET_OUTPUT" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-net-build.log"
 
+      - name: Verify Python for Chromium HTTPS trust
+        if: matrix.engine == 'chromium'
+        run: python3 --version
+
       - name: Run live HTTP and HTTPS clients on the managed engine
         run: |
           set -euo pipefail

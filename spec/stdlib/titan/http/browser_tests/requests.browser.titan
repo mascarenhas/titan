@@ -9,6 +9,7 @@ function test_methods_binary_headers_and_client_lifecycle(_: test.Context)
       defer response:close()
       test.assert(response.status == 200 and response.headers:get("X-Method") == method,
         method .. " did not reach the native peer")
+      client:close_idle_connections()
       test.assert(all(response) == (body or ""), method .. " changed binary body bytes")
     end
     local allowed = {"Permissions-Policy", "Access-Control-Request-Private-Network", "Tenant-ID",
@@ -42,7 +43,12 @@ function test_methods_binary_headers_and_client_lifecycle(_: test.Context)
     string_error(function () client:get(server() .. "/echo") end)
   end)
   -- A fresh Runtime must not reuse the preceding Runtime's closed default client.
-  runtime_test.run(function () test.assert(get_body(server() .. "/echo", nil) == "") end)
+  runtime_test.run(function ()
+    local response = http.get(server() .. "/echo")
+    defer response:close()
+    http.close_idle_connections()
+    test.assert(all(response) == "")
+  end)
 end
 
 function test_io_lines_and_response_close(_: test.Context)

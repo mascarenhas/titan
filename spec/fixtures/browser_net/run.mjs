@@ -28,7 +28,7 @@ function signal(child, name) {
 }
 function start(command, args, env) {
   const child = spawn(command, args, {env, detached: true, stdio: ['ignore', 'pipe', 'pipe']});
-  child.done = new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', (code, signal) => resolve({code, signal})); });
+  child.done = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => resolve({code, signal})); });
   // Attach immediately: startup failures are also awaited by ready().
   child.done.catch(() => {});
   child.stderr.on('data', chunk => process.stderr.write(chunk));
@@ -64,15 +64,22 @@ try {
   const config = {TITAN_TEST_HTTP_URL: http, TITAN_TEST_HTTPS_VALID_URL: valid,
     TITAN_TEST_HTTPS_WRONG_HOST_URL: wrongHost, TITAN_TEST_HTTPS_UNTRUSTED_URL: untrusted,
     TITAN_TEST_RAW_URL: rawURL, TITAN_TEST_VERIFIED_TLS: verified ? '1' : '0',
-    TITAN_TEST_BROWSER: engine === 'node' ? '0' : '1'};
+    TITAN_TEST_BROWSER: engine === 'node' ? '0' : '1', TITAN_TEST_ENGINE: engine};
   const args = [runner, '--engine', engine, '--timeout', '300000', '--grace', '2000', '--root', root];
   if (runner.endsWith('playwright-run.mjs')) args.push('--sdk', sdk, join(root, 'images/net.test.mjs'));
   else args.push('--js-test', join(root, 'images/net.test.mjs'));
   args.push('--', 'images/http.mjs', JSON.stringify(config));
   const running = start(process.execPath, args, env);
-  running.stdout.on('data', chunk => process.stdout.write(chunk));
+  const chunks = [];
+  running.stdout.on('data', chunk => { chunks.push(chunk); process.stdout.write(chunk); });
   const result = await running.done;
   if (interrupted || result.code !== 0) throw new Error('network runner failed: ' + JSON.stringify(result));
+  const match = Buffer.concat(chunks).toString('utf8').match(/^BROWSER-NET (\{[^\r\n]*\})\r?$/m);
+  if (!match) throw new Error('network runner did not report BROWSER-NET facts');
+  const report = JSON.parse(match[1]);
+  if (report.verdict !== 'PASS' || report.engine !== engine || report.verified !== verified) {
+    throw new Error('network runner reported different engine or verified TLS facts: ' + match[1]);
+  }
 } finally {
   let cleanupError;
   for (const child of children.reverse()) {

@@ -4,7 +4,13 @@ function test_incremental_read_and_delimiter_streaming(_: test.Context)
       local response = http.get(raw_server() .. "/stream")
       defer response:close()
       if variant == 1 then
-        test.assert(response:read() == "first|", "read waited for response completion")
+        local first = response:read() or ""
+        test.assert(#first > 0 and string.sub("first|", 1, #first) == first,
+          "read waited for response completion or changed its first bytes")
+        if first ~= "first|" then
+          test.assert(response:read_until("|") == string.sub("first|", #first + 1),
+            "read lost the rest of the initial bytes")
+        end
       else
         test.assert(response:read_until("|") == "first|", "read_until waited for response completion")
       end
@@ -32,7 +38,7 @@ function test_gzip_wire_headers_cookies_and_mid_body_reset(_: test.Context)
       all(cookies) == "cookies", "Fetch exposed response cookie headers")
     local reset = http.get(raw_server() .. "/reset")
     defer reset:close()
-    test.assert(reset:read() == "partial", "reset peer did not expose its first chunk")
+    test.assert(reset:read_until("partial") == "partial", "reset peer did not expose its first bytes")
     test.assert(get_body(raw_server() .. "/reset-now", nil) == "")
     operation_error(function () reset:read() end, "http.read")
     test.assert(reset:read() == nil, "failed read did not retire its response")
