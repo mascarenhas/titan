@@ -749,10 +749,10 @@ cancelled; read failures raise the same `OperationError` with operation
 read. `close()` closes the session synchronously: it never yields or drains,
 so it is safe in a cancellation `defer`.
 
-**Client.** A browser `Client` binds to the owner Runtime on its first
-request through `async.add_close_listener`, refuses requests from another
-Runtime and after `close()`, and holds no pool: `close_idle_connections` does
-nothing.
+**Client.** A browser `Client` registers `async.add_close_listener` on its
+first request and closes when that Runtime closes; later requests raise
+`"HTTP Client is closed"`, and a closed default client is replaced. It holds
+no pool: `close_idle_connections` does nothing.
 
 The client therefore normalizes five Node behaviors to browser behavior in
 Titan instead of exposing them: exposed `Set-Cookie` fields, forbidden request
@@ -798,7 +798,7 @@ focused sanitizer boundary drives the same timeout-induced SSL-read
 cancellation and serial HTTP path through public TLS and llhttp, rather than a
 private test transport.
 
-`request_options_test` covers constructor validation for every `mode` with
+The request-option cases cover constructor validation for every `mode` with
 `only_if_cached()`, the pre-I/O `no_cors()` method and `only-if-cached`
 failures with zero server hits, `get` bodies, the native meaning of every
 mode, snapshot isolation from later header changes, and bodyful native
@@ -811,7 +811,9 @@ rejects mixed-case methods), sticky cross-origin credential removal,
 normalized same-origin comparison, intermediate drain and connection reuse,
 and options reuse after a followed chain.
 
-The browser client's portable cases (headers, options, fail-fast validation,
-and `lua.new()` refusal) run in `http.tests` on both targets. Its network
-behavior needs real engines and runs in the live browser network harness
-([browser target](browser-target.md#the-live-browser-network-harness)).
+`http.tests` runs on both targets: its shared contributor checks headers,
+option validation, and failures that precede any transport, and its browser
+contributor checks the forbidden-header predicate, method overrides, the
+method, body, and `ca_file` refusals, and the `lua.new()` refusal. The browser
+client's network behavior needs real engines and runs in the live browser
+network harness ([browser target](browser-target.md#the-live-browser-network-harness)).

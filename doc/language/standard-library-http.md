@@ -604,10 +604,11 @@ once without yielding, so it is safe in a cancellation `defer`, and there is
 no background drain. Cancelling a Task while it awaits response headers or a
 body read also aborts the fetch, and the server sees the connection end.
 
-**Clients.** A `Client` binds to the Runtime of its first request and raises
-when another Runtime uses it. After `close()`, its requests raise `"HTTP
-Client is closed"`. The browser engine pools connections, so
-`close_idle_connections()` and `Client:close_idle_connections()` do nothing.
+**Clients.** A `Client` binds to the Runtime of its first request and closes
+when that Runtime closes. After `close()`, its requests raise `"HTTP Client is
+closed"`; the module helpers then start a new default client. The browser
+engine pools connections, so `close_idle_connections()` and
+`Client:close_idle_connections()` do nothing.
 
 **Errors.** Failures that the host reports, including DNS failures, refused
 connections, untrusted certificates and host-name mismatches, CORS and

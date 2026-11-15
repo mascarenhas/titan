@@ -798,10 +798,12 @@ through both chunk and borrowed-Reader entry points. Native contributors own
 source files, C-module fixtures, asynchronous worker execution, Receivers and
 resource handoff. Browser contributors check destination-stable parent-stream
 transfers, stock Lua failures in both state kinds and fixed searcher misses.
-`http.tests` keeps its server, socket, TLS, pooling, redirect, and transfer
-cases in `.native.titan` contributors; its shared contributors cover headers,
-request-option validation and `case` dispatch, the pre-I/O failures of both
-clients, and the `lua.new()` refusal. `websocket.tests` likewise keeps
+`http.tests` keeps its server, socket, TLS, pooling, option, redirect, and
+transfer cases in `.native.titan` contributors. Its shared `portable.titan`
+covers headers, `RequestOptions` validation, and validation that precedes any
+transport, and `validation.browser.titan` covers the browser client's
+forbidden headers and method overrides, its method, body, and `ca_file`
+checks, and the `lua.new()` refusal. `websocket.tests` likewise keeps
 servers, framing, and transfer in native contributors and shares
 `DialOptions`, UTF-8 validation, and the browser client's fail-fast cases.
 Network behavior of the two browser clients needs
