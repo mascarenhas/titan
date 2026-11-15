@@ -113,7 +113,8 @@ for (const engine of (process.env.TITAN_PLAYWRIGHT_TEST_ENGINES ?? '').split(','
     test(`Playwright ${engine}${persistent ? ' persistent via symlinked root' : ''} runs the shared page, preserves bytes and retires failed pages`, async () => {
       await mkdir(join(repository, 'tmp'), {recursive: true});
       const profile = persistent ? await mkdtemp(join(repository, 'tmp', 'playwright-context-')) : null;
-      const root = profile ? join(profile, 'root') : repository;
+      const alias = profile ? await mkdtemp(join(tmpdir(), 'playwright-root-')) : null;
+      const root = alias ? join(alias, 'root') : repository;
       async function fixture(name) {
         const args = [fileURLToPath(new URL('./playwright-run.mjs', import.meta.url)),
           '--engine', engine, '--root', root, '--timeout', '15000', '--grace', '0',
@@ -138,7 +139,10 @@ for (const engine of (process.env.TITAN_PLAYWRIGHT_TEST_ENGINES ?? '').split(','
         return output;
       }
       try {
-        if (profile) await symlink(repository, root, 'dir');
+        if (profile) {
+          assert.equal(within(repository, root), false);
+          await symlink(repository, root, 'dir');
+        }
         const success = await fixture('context');
         assert.equal(success.status, 0, success.stderr.toString());
         assert.deepEqual(success.stdout, Buffer.from([65, 0, 255, 10]));
@@ -152,6 +156,7 @@ for (const engine of (process.env.TITAN_PLAYWRIGHT_TEST_ENGINES ?? '').split(','
         assert.match(timeout.stderr.toString(), /timed out after 15000 ms/);
       } finally {
         if (profile) await rm(profile, {recursive: true, force: true});
+        if (alias) await rm(alias, {recursive: true, force: true});
       }
     });
   }
