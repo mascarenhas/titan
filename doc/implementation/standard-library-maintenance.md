@@ -44,8 +44,9 @@ Thirteen shared core modules form the dependency-free part of the [browser
 standard library](browser-target.md#the-browser-standard-library):
 `coroutine`, `gc`, `iteration`, `math`, `test`, `reflect`, `json`, `protobuf`,
 `transfer`, `peg`, `string`, `url`, and `path`. None may gain an import path
-to `io`, `os`, `lua`, `uv`, `async`, `timer`, `titan.browser`, or a native-only
-module (`fs`, `net`, `ssl`, `http`, `websocket`, `sqlite3`, `thread`), and
+to `io`, `os`, `lua`, `http`, `websocket`, `uv`, `async`, `timer`,
+`titan.browser`, or a native-only module (`fs`, `net`, `ssl`, `sqlite3`,
+`thread`), and
 their only native payload and include path is LPegLabel: a libuv, OpenSSL,
 llhttp, or SQLite header, archive, or symbol fails the [dependency-closure
 check](browser-target.md#the-dependency-closure-check) in `make browser-sdk`
@@ -74,8 +75,27 @@ flat variant `titan/timer.browser.titan`, built on public `async` and the
 SDK's timer sources; a member added to `timer.native.titan` needs its browser
 twin, and its opaque `Ticker` is recorded in the inventory. `os` keeps its
 native-only members absent on browser and its two stream records opaque;
-their public methods must still match. Only these browser files of `async`
-and `timer`, and `os/stdio.browser.titan`, may import `titan.browser`.
+their public methods must still match.
+
+`titan.http` and `titan.websocket` are browser modules through their client
+compositions. Their shared contributors (`http.titan`, `headers.titan`,
+`options.titan`, `websocket/types.titan`, `websocket/utf8.titan`) must
+type-check on both targets, so they import neither `net`, `ssl`, `uv`, nor
+`titan.browser`; native transport, server, upgrade, and transfer code lives in
+`*.native.titan` contributors, and the browser client in `*.browser.titan`.
+A public member added to a native contributor is either given a browser
+implementation with the same signature or recorded as a browser omission in
+the inventory, whose opaque records (`Client`, `ClientResponse`, and
+`websocket.Connection`) keep their public methods compared. Neither browser
+composition may reach llhttp, OpenSSL, or libuv. Request and connection policy
+stays in Titan; the SDK's `titan:fetch` and `titan:websocket` sources only
+reach host objects ([the same rules for browser
+JavaScript](#the-same-rules-for-browser-javascript)).
+
+Only these browser files may import `titan.browser`: those of `async`
+(`runtime.browser.titan` and `external.browser.titan`), `timer.browser.titan`,
+`os/stdio.browser.titan`, `http/client.browser.titan`, and
+`websocket/websocket.browser.titan` with `websocket/client.browser.titan`.
 
 The browser provider's other target-specific module, `titan.browser`
 (`titan/browser.browser.titan`), is the one reviewed browser-only exception.

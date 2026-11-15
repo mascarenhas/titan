@@ -537,7 +537,7 @@ foreign functions compiled into the owning module objects:
   Ordinary Titan callbacks remain main-thread entries; C-only workers, thread
   entries, and once callbacks have separate foreign signatures and cannot call
   into Titan or Lua.
-* `titan/http/native.titan` defines the eight synchronous llhttp data and
+* `titan/http/parser.native.titan` defines the eight synchronous llhttp data and
   completion callbacks; the private llhttp archive contains only `llhttp.o`,
   `http.o`, and `api.o`.
 * `titan/transfer.titan` and `titan/thread/*.titan` define the C-ABI packet and

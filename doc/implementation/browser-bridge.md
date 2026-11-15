@@ -26,9 +26,9 @@ runner, deployment, and fatal engine classifications.
 There is no hand-written C runtime file for the browser bridge: `libtitan.a`
 contains the same four objects (`titan.o`, `minicoro.o`, `titan_path.o`,
 `ltitanlib.o`) on both native and browser targets. The native standard provider
-has no `titan.browser`, while the nineteen-module browser provider includes
+has no `titan.browser`, while the twenty-one-module browser provider includes
 it alongside fourteen shared modules and the browser compositions of `async`,
-`timer`, `os`, and `lua`. It imports only `gc`, and the [member
+`timer`, `os`, `lua`, `http`, and `websocket`. It imports only `gc`, and the [member
 inventory](browser-target.md#interface-derived-member-inventory) skips it
 because it has no native interface to compare.
 
@@ -60,6 +60,8 @@ The loader's parts:
 | Drive | The gate promise of the suspending import, the turn source, the owner token, and the exit latch | JSPI resumption; macrotask scheduling |
 | `OutputChannel`, `output`, and `drainOutput` | One FIFO of copied C iovec batches and Titan write/end entries per stream, each Titan entry's settlement promise, one latched C sink error, at most one sink or end hook in flight, and C-only drains after image release; no per-byte buffer | Copying bytes out of the Wasm heap; the embedder's sinks/end hooks and their promise continuations |
 | SDK sources (`titan:timeout`, `titan:interval`, `titan:driver`, `titan:stdout`, `titan:stderr`, `titan:stdin`, `titan:stdio`) | One bounded host timer per arm, the two driver callables, output-entry settlement promises, the optional input function, and declared backings; long-wait chunking belongs to `timer.browser.titan` | Host timer APIs; the embedder's byte source, sinks, end hooks, declared backings and promises |
+| `titan:fetch` SDK source | Per session, one `AbortController`, the settled `Response`, and its `ReadableStreamDefaultReader`; nothing about headers, modes, or redirects | `fetch`, `AbortController`, and stream-reader promises; whether the host has an HTTP cache |
+| `titan:websocket` SDK source | Per connection, the `WebSocket` object, its three named listeners, and one holder object per received message until Titan takes or closes it | The host `WebSocket` object, its event listeners, and its `readyState` and `bufferedAmount` |
 
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
 `titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
@@ -706,6 +708,22 @@ throw into a detachable promise outcome. `valuesAt` already copies a bytes
 argument, so output admission does not copy it again. A missing SDK source
 (`titan:stdin` without an option) yields the ordinary unknown-binding error.
 `titan:stdio` is an ordinary synchronous call returning an option value.
+
+The network sources use the same boundary and take the operation name as
+their first argument. `titan:fetch` answers `has-cache`, `new`, and `close` as
+ordinary calls and starts `open` and `read` as detachable requests whose
+cancel function aborts the session's controller; the `http` client also
+closes the session itself, because once `open` has settled with headers the
+bridge retires that cancel function while the body stream is still open.
+Header pairs arrive as copied byte values and become Latin-1 `ByteString`s
+without inspection. `titan:websocket` registers `connect` as a listener whose
+unregister function removes the three DOM listeners before it closes the
+socket. A message event carries a holder handle instead of bytes, so a message
+that Titan refuses by length never enters Wasm memory. Neither source holds
+policy: header checks, `Set-Cookie` filtering, the `only-if-cached` gate,
+redirect normalization, the read limit, write backpressure, and every error
+classification are Titan's ([HTTP browser client](http-library.md#browser-client),
+[WebSocket browser client](websocket-library.md#browser-client)).
 
 `drain()` and a drive's `deliver` each work on a detached batch, so both
 recheck an entry's request before invoking it. Cancellation removes the

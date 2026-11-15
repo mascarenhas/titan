@@ -1,31 +1,57 @@
 # WebSocket ownership and framing
 
-`titan/websocket/` is one folder module with one nominal schema, native unit,
-and Lua opener. The public boundary is documented in
-[WebSocket messages](../language/standard-library-websocket.md). It composes
-ordinary public `http`, `ssl`, `net`, `uv`, `async`, `timer`, `string`, `url`
-and `gc` imports. It never imports private UV/async/transport state.
+`titan/websocket/` is one folder module with one nominal schema per target.
+The public boundary is documented in
+[WebSocket messages](../language/standard-library-websocket.md). The native
+composition is a protocol implementation over ordinary public `http`, `ssl`,
+`net`, `uv`, `async`, `timer`, `string`, `url` and `gc` imports; the browser
+composition is a client over the host's `WebSocket` through `titan.browser`.
+Neither imports private UV, async, or transport state.
 
 ## Contributor responsibilities
 
-- `websocket.native.titan` declares public messages, errors and validated option owners,
-  the transfer schema and the protocol budgets (`FRAME_BYTES`, `WORK_BYTES`,
-  `FRAME_BUDGET`), imports dependencies, and makes the `openings` registry an
+Shared by both targets:
+
+- `types.titan` imports `http` and `string` and declares the public message
+  kinds and constants, `Error`, `HandshakeError`, `DialOptions` and its
+  validating constructor, the shared defaults (`DEFAULT_LIMIT`,
+  `OPEN_TIMEOUT`, `CONTROL_TIMEOUT`, `WORK_BYTES`), and the option, header,
+  token, and error helpers (`positive`, `copy_protocols`, `copy_dial_headers`,
+  `state_error`, `wire_error`, `timeout_error`).
+- `utf8.titan` validates Unicode scalar prefixes across all chunk/frame splits.
+
+Native (`*.native.titan`):
+
+- `websocket.native.titan` is the native main. It imports the native
+  dependencies, declares `AcceptOptions`, the transfer schema and the protocol
+  budgets (`FRAME_BYTES`, `FRAME_BUDGET`), and makes the `openings` registry an
   ephemeron in its initializer.
-- `handshake.titan` validates opening fields/origins/extensions/subprotocols,
+- `handshake.native.titan` validates opening fields/origins/extensions/subprotocols,
   composes explicit resolved TCP/TLS/HTTP ownership, and serializes pending
   openings by semantic remote address.
-- `connection.titan` owns directional/public-operation reservations, frame
+- `connection.native.titan` owns directional/public-operation reservations, frame
   priority, cancellation-aware supervisors, control deadlines and shared
   terminal retirement.
-- `frames.titan` consumes arbitrary transport slices, checks framing before
+- `frames.native.titan` consumes arbitrary transport slices, checks framing before
   allocation, carries fragmented message state, masks bytes and dispatches
   controls while assembling complete messages.
-- `utf8.titan` validates Unicode scalar prefixes across all chunk/frame splits.
-- `native.titan` uses synchronous OpenSSL EVP digest/base64 operations
+- `crypto.native.titan` uses synchronous OpenSSL EVP digest/base64 operations
   (`accept_digest`, `base64`); `random_bytes` draws keys, masks and Ping tokens
   from public synchronous `uv.random`. It adds no native dependency or SSL/libuv
   FFI.
+
+Browser (`*.browser.titan`):
+
+- `websocket.browser.titan` is the browser main and imports the browser
+  composition's dependencies.
+- `client.browser.titan` declares the browser `Connection` and `connect` and
+  implements `read`, `write`, `shutdown`, `close`, `subprotocol`, and
+  `close_status` over the SDK's `titan:websocket` source
+  ([browser client](#browser-client)).
+
+The [member inventory](browser-target.md#interface-derived-member-inventory)
+records `accept`, `AcceptOptions`, `Connection:ping`, and the three transfer
+hooks as browser omissions and keeps `Connection` opaque.
 
 Portable foreign byte accesses borrow immutable strings only while their
 owning Titan locals remain rooted. Mask output uses a counted native owner;
@@ -41,7 +67,7 @@ http/https validation. WebSocket uses the original normalized authority and
 target for HTTP and original hostname for TLS identity; resolved socket
 addresses are never substituted for either.
 
-`handshake.titan` `openings` maps each Runtime loop (ephemeron key) to buckets
+`handshake.native.titan` `openings` maps each Runtime loop (ephemeron key) to buckets
 of pending attempt supervisors. `destination_key` builds the bucket key from
 semantic address bytes, port and effective IPv6 scope, omits flowinfo, and
 normalizes IPv4-mapped IPv6. Resolve once, reserve only
@@ -179,16 +205,95 @@ No operation Tasks, timers or source closures are transferred.
 of the same schema and delegates to `http.UpgradedStream.discard_transfer_payload`.
 It does not reconstruct WebSocket state or require a Runtime.
 
+## Browser client
+
+`client.browser.titan` drives one host `WebSocket` per `Connection` through
+the SDK's `titan:websocket` source
+([browser bridge](browser-bridge.md#javascript-files)). The JavaScript
+constructs the socket with `binaryType = 'arraybuffer'`, installs named
+`open`, `message`, and `close` listeners, and reads `bufferedAmount` and
+`readyState`; state, limits, backpressure, and error policy are Titan's.
+
+**Opening.** `connect` calls `async.checkpoint()` (so a `lua.new()` state
+raises `"async Runtime is not active"`), raises the `url.Error` of a failed
+`url.parse`, requires `ws` or `wss` (the host constructor would otherwise
+rewrite `http` and `https`), and rejects a `DialOptions` with any header or a
+`ca_file`, before any host call. It then listens on `connect` with the URL and
+the subprotocols. The source emits `open` with the socket handle and the
+selected subprotocol, `text` and `binary` with the message length and a holder
+object of its bytes, and `close` with the code, reason, and `wasClean`; it
+ignores `error`, which Chromium omits on a reset after `open`. Unregistering
+removes all three listeners and then calls `socket.close()`. Titan races the
+opening against `timer.sleep` of the handshake timeout, which raises
+`Error("timeout", "websocket.open", ...)`, and maps any `close` before `open`
+to `HandshakeError("WebSocket opening handshake failed", nil, nil)`. The
+browser itself fails an opening whose response selects none of the offered
+subprotocols.
+
+**State.** The connection moves from connecting to open, closing (after
+`shutdown` sends Close), and terminal. The first failure latches as an
+`async.Error` carrier that every later operation raises again. After `open`,
+a `close` event with code 1006 or 1015, which no Close frame can carry, latches
+`Error("abnormal", operation, "transport ended before WebSocket Close", nil)`;
+any other code is a valid peer Close, including 1005 for an empty Close and a
+coded Close followed at once by a TCP reset, for which Chromium reports
+`wasClean = false`. `close_status()` records the code and reason of every
+`close` event except 1005, 1006, and 1015, whatever `wasClean` says.
+
+**Lazy read limit.** Message events queue holders, not bytes. `read` compares
+the reported length, which is the length after `permessage-deflate`
+decompression, with the read limit before it asks for the bytes. A message
+over the limit closes its holder without `take`, retires the connection, and
+raises `Error("limit", "websocket.read", ..., 1009)`; the message is never
+copied into Wasm memory. Otherwise `take` returns the bytes, the holder
+closes, and `read` returns the message. Earlier queued messages are delivered
+first. The queue itself is not bounded: browsers expose no stream
+backpressure for `WebSocket` (`WebSocketStream` is Chromium-only).
+
+**Write backpressure.** `write` admits one writer, validates text with the
+shared `validate_text` before JavaScript could replace invalid UTF-8 with
+U+FFFD, and calls `async.yield()` once for fairness. It rechecks the
+connection state at entry, after the yield, and after every poll: a latched
+failure raises again, and a closing or terminal connection raises
+`Error("state", "websocket.write", ...)`. `send` returns false without
+calling `WebSocket.send` when the socket is no longer open, which covers a
+peer Close that the engine has received but not yet dispatched; Titan then
+raises the same state error rather than let the browser discard the message.
+After a successful `send`, while `buffered` reports more than 262,144 bytes,
+`write` polls with `timer.sleep(2)` until 65,536 bytes or fewer remain;
+`buffered` returns -1 once the socket is not open, and a failure or
+retirement during the wait raises. Cancelling `write` after `send`
+terminalizes the connection.
+
+**Shutdown and close.** `shutdown` defaults to code 1000 and an empty reason,
+admits 1000 and 3000 through 4999 (the browser's `close()` refuses 1001
+through 1014), validates the reason's length and UTF-8, keeps the active
+reader's one-message takeover, calls `close` with the code and reason, and
+waits for the `close` event up to its deadline. `Connection:close()` is
+synchronous, idempotent, local retirement: it closes the listener request
+(removing the listeners and closing the socket), closes the queued holders
+and the socket handle, and wakes waiters with the state error or the latched
+failure. An `OPEN` socket then queues an empty Close frame behind its
+buffered sends, and the engine finishes the closing handshake. Cancelling an
+admitted `read` terminalizes the connection.
+
 ## Integration and verification
 
-The module belongs to the canonical provider and native test inventory.
-Unix keeps paired providers; Windows remains DLL-only.
+The module belongs to the canonical provider and native test inventory, and
+its browser composition to the browser provider. Unix keeps paired providers;
+Windows remains DLL-only.
 
 Native WebSocket tests use installed public APIs and independent raw TCP/TLS
 peers under `spec/stdlib/titan/websocket/tests/`. Prerequisites are tested in
 the owning net/SSL/HTTP/URL suites. Parser/compiler/build/schema/publication
 assertions remain in Busted. Forced GC and cancellation cover retained strings,
 partial frames and concurrent retirement.
+
+The portable cases of `websocket.tests` (`DialOptions`, UTF-8 validation, and
+the browser's fail-fast scheme, header, `ca_file`, and `lua.new()` refusals)
+run on both targets. The browser client's network behavior runs against real
+engines in the live browser network harness
+([browser target](browser-target.md#the-live-browser-network-harness)).
 
 [The conformance harness](../../spec/conformance/websocket/README.md) pins both
 Autobahn roles and checks exact nonempty selected-case/agent inventories plus

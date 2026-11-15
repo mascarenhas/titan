@@ -350,10 +350,11 @@ After step 7, `browser-stdlib` runs:
 8. **Complete browser core stdlib suite.** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
    unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
-   builds all twenty-one browser-portable owners into one validation-profile
+   builds all twenty-three browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
    checks dependency closure and the native/browser member inventory of the
-   fourteen shared modules, `async`, `timer`, `os`, and `lua` (with their recorded
+   fourteen shared modules, `async`, `timer`, `os`, `lua`, `http`, and
+   `websocket` (with their recorded
    differences), then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
    `TITAN_CHROME`. Each engine must execute every owner with complete nonzero
@@ -364,7 +365,7 @@ After step 7, `browser-stdlib` runs:
 9. **Strict gate.** With the same `TITAN_ROOT`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN`, and `TITAN_PROBE_CACHE_DISABLE` settings
    as the `browser-toolchain` gate, the prefix's installed `busted -c -o gtest
-   -v` runs the twelve real-toolchain files
+   -v` runs the thirteen real-toolchain files
    `spec/coder/browser_providers_spec.lua`,
    `spec/coder/browser_incremental_spec.lua`,
    `spec/coder/browser_images_spec.lua`,
@@ -374,12 +375,15 @@ After step 7, `browser-stdlib` runs:
    `spec/coder/browser_bridge_spec.lua`,
    `spec/coder/browser_scheduler_spec.lua`,
    `spec/coder/browser_stdlib_gate_spec.lua`,
+   `spec/coder/browser_net_spec.lua`,
    `spec/coder/browser_fixtures_spec.lua`, and `spec/minicoro_spec.lua` under
    LuaCov, with output copied to `$RUNNER_TEMP/browser-stdlib-gate.log`. A
    missing gate file fails with the same message before Busted starts. The
    entry-gate, bridge and scheduler specs build their own assertion-on and
    assertion-off images, and the entry, bridge, scheduler, stdlib gate,
-   fixture, and minicoro specs run both engines. The bridge uses its dedicated
+   network, fixture, and minicoro specs run both engines. The network spec
+   runs the [live browser network harness](browser-target.md#the-live-browser-network-harness),
+   with verified TLS on both engines. The bridge uses its dedicated
    native Titan test owner with explicit JavaScript bindings, rather than
    adding it to the ordinary core aggregate; the scheduler spec drives the
    bridge's drive interface with a test-owned mini driver, runs the real
@@ -396,7 +400,8 @@ After step 7, `browser-stdlib` runs:
     browser core stdlib suite's evidence: `out/browser-stdlib/*.log` (the
     per-engine `stdlib.<engine>.log` stdout and `stdlib.<engine>.stderr.log`
     files), `out/browser-stdlib/images/*.{mjs,wasm,wasm.map}`, `roots.txt`
-    (through the `*roots.txt` pattern), and `members.md`.
+    (through the `*roots.txt` pattern), `members.md`, and the live network
+    harness's `out/browser-net/` tree.
 
 ## `browser-playwright` job
 
@@ -521,7 +526,15 @@ runner with a 60-minute timeout after `build-compiler`:
    (`$RUNNER_TEMP/browser-playwright-node-policy.log`),
    and the `--allow-degraded-trace ... -- --degraded` run covers the degraded
    rows (`$RUNNER_TEMP/browser-playwright-node-degraded.log`).
-11. **Receipts.** On `always()`, `actions/upload-artifact` uploads
+11. **Live network gate (all six cells).** `lua -E spec/browser/build-net.lua`
+    builds the native network peers and the `http.browser_tests` and
+    `websocket.browser_tests` images with the cell's installed `titanc`, and
+    `playwright-run.mjs` runs them on the cell's engine against those peers
+    ([live browser network harness](browser-target.md#the-live-browser-network-harness)).
+    Verified `https://` and `wss://` run on Linux Chromium, whose isolated NSS
+    database trusts the test CA; Firefox and WebKit run the untrusted-certificate
+    rejections only.
+12. **Receipts.** On `always()`, `actions/upload-artifact` uploads
     `${{ runner.temp }}/browser-playwright-*.log`,
     `${{ runner.temp }}/browser-production-pins.log`,
     `${{ env.TITAN_TRACE_OUTPUT }}`, and `${{ env.TITAN_BRIDGE_OUTPUT }}` as

@@ -2,42 +2,100 @@
 
 The public API and behavior are documented in the
 [HTTP/1.1 standard-library chapter](../language/standard-library-http.md).
-This chapter describes the `titan.http` folder module, its synchronous llhttp
-callback bridge, streaming parser ownership, and high-level server composition.
+This chapter describes the `titan.http` folder module: its shared request
+options, the native client's redirect engine, synchronous llhttp callback
+bridge, streaming parser ownership, and high-level server composition, and
+the browser client over the SDK's `fetch` source.
 
 ## Folder-module structure and layering
 
-The `titan/http/http.native.titan` main imports `async`, `io`, `math`, `net`,
-`protobuf`, `reflect`, `ssl`, `string`, `timer` and `url`; `server.titan` adds
-`uv`. The contributors (`Makefile` `STDLIB_HTTP_SOURCES`) share one
-module-private scope:
+`titan.http` is one folder module whose contributors are selected per target
+([target source selection](target-source-selection.md)). The shared main
+`titan/http/http.titan` holds the imports both targets use and the URL and
+request-header helpers; native contributors add `net`, `ssl`, `protobuf`,
+`reflect`, and `uv`, and the browser contributor adds `titan.browser`. The
+contributors (`Makefile` `STDLIB_HTTP_SOURCES`) share one module-private
+scope:
 
 ```text
-titan/http/http.native.titan       imports and initialization
-titan/http/client.titan     request/response exchanges and ClientResponse
-titan/http/pool.titan       Client pools, idle leases, bounded background drains
-titan/http/headers.titan    ordered public Headers value
-titan/http/native.titan     private parser owner and callback event Array
-titan/http/server.titan     Request, Response, and per-connection serving
-titan/http/transfer.titan   paired Exchange handoff and parser snapshots
-titan/http/upgrade.titan    owned upgrade stream, opening supervisor, handoff
+titan/http/http.titan               shared main: imports, URL and header helpers
+titan/http/headers.titan            ordered public Headers value and validators
+titan/http/options.titan            mode unions, RequestOptions, case helpers
+titan/http/client.native.titan      native exchanges, redirects, ClientResponse
+titan/http/pool.native.titan        Client pools, idle leases, bounded drains
+titan/http/parser.native.titan      private parser owner and callback event Array
+titan/http/server.native.titan      Request, Response, and per-connection serving
+titan/http/transfer.native.titan    paired Exchange handoff and parser snapshots
+titan/http/upgrade.native.titan     owned upgrade stream, opening supervisor
+titan/http/client.browser.titan     browser Client, ClientResponse, fetch sessions
 ```
 
-The only HTTP-owned native boundary is the eight synchronous source
-`foreign function` callbacks in `titan/http/native.titan` (`llhttp_url_cb`
-through `llhttp_message_complete_cb`). They have no network or Task operation.
-HTTP obtains every byte from the public `io.ReaderWriterCloser` view of either
-a `net.Connection` or an `ssl.Connection`, and writes through that same view.
-URL parsing calls the independent public `titan.url` module without an
-HTTP-specific C bridge. HTTP imports public `titan.uv` for the borrowed Runtime-loop identity, monotonic
-`hrtime` deadlines, and the `uv.req_t?` type of named Completion registrars. It adds no native
-network boundary and does not change UV.
+`headers.titan` and `options.titan` are the whole shared surface besides the
+main. Every other public declaration of a native-only contributor is absent on
+the browser, where `client.browser.titan` supplies `Client`, `ClientResponse`,
+`request`, `get`, `close_idle_connections`, and their methods with the native
+signatures. The [member inventory](browser-target.md#interface-derived-member-inventory)
+records the omissions and keeps `Client` and `ClientResponse` opaque.
+
+The only native-only C boundary that HTTP owns is the eight synchronous source
+`foreign function` callbacks in `titan/http/parser.native.titan`
+(`llhttp_url_cb` through `llhttp_message_complete_cb`). They have no network
+or Task operation. The native client and server obtain every byte from the
+public `io.ReaderWriterCloser` view of either a `net.Connection` or an
+`ssl.Connection`, and write through that same view. URL parsing calls the
+independent public `titan.url` module without an HTTP-specific C bridge. HTTP
+imports public `titan.uv` for the borrowed Runtime-loop identity, monotonic
+`hrtime` deadlines, and the `uv.req_t?` type of named Completion registrars.
+It adds no native network boundary and does not change UV. The browser client
+has no C at all; it reaches the host only through the
+[`titan:fetch`](browser-bridge.md#javascript-files) SDK source of
+`titan.browser`.
+
+## Request options
+
+`options.titan` is shared by both targets. Its four unions have only
+payload-free variants, and every `RequestOptions` field is `local`, so the
+record is opaque and cannot change after construction. `RequestOptions.new`
+copies the supplied `Headers` with the module's `copy_headers`, keeps an
+omitted mode `nil` so that the request applies its own target's default
+later, and rejects `only_if_cached()` unless `mode` is an explicit
+`same_origin()`. It touches no Runtime, so a `lua.new()` state can build
+options.
+
+A union constructor allocates a fresh value and union equality is identity,
+so no option is compared with `==`. Private helpers in `options.titan`
+substitute the default and dispatch with `case`:
+
+| Helper | Result |
+| --- | --- |
+| `cache_mode_string(mode)` | the Fetch cache string; `nil` selects `default()` |
+| `credentials_mode_string(mode)` | the Fetch credentials string; `nil` selects `same_origin()` |
+| `request_mode_string(mode)` | the Fetch mode string; `nil` selects `cors()` |
+| `redirect_mode_string(mode, default_follow)` | `"follow"`, `"error"`, or `"manual"`; `nil` selects `follow()` when `default_follow` is true and `manual()` otherwise |
+| `is_only_if_cached(mode)`, `is_no_cors(mode)` | whether the effective mode is that variant |
+| `is_redirect_status(status)` | whether the status is 301, 302, 303, 307, or 308 |
+| `validate_no_cors_method(method)` | raises unless the ASCII-lowercased method is `get`, `head`, or `post` |
+
+The native client uses the predicates and matches `policy.redirect or
+RedirectMode.manual()` directly; the browser client uses the string helpers to
+build `RequestInit` values, passing `true` for the browser's redirect default.
+
+Native `Client:request` runs `async.checkpoint()`, validates the method token,
+parses the URL, substitutes `RequestOptions()` for absent options, applies
+`validate_no_cors_method` under `no_cors()`, and raises the `only-if-cached`
+policy error before acquiring a connection. `credentials` and the other cache
+modes need no native code: there is no cache or cookie jar to consult.
+`request_policy_error` builds every runtime policy failure as
+`async.OperationError(-ffi.EIO, "EIO", message, "http.request")`, with `EIO`
+read from `errno.h` through the ordinary FFI. Argument violations stay
+strings. `Client:get` rejects an options body before delegating to
+`Client:request`.
 
 ## Synchronous llhttp callback bridge
 
 llhttp invokes callbacks synchronously inside `llhttp_execute` and
 `llhttp_finish`. Ordinary Titan closures are not C function pointers, so
-`native.titan` defines the exact restricted source foreign entries and follows
+`parser.native.titan` defines the exact restricted source foreign entries and follows
 the same callback-owner protocol without introducing an asynchronous boundary.
 
 The Titan `Parser` record embeds its `llhttp_t` and `llhttp_settings_t` in
@@ -125,7 +183,7 @@ trust path (with default trust distinct from a file); HTTP ignores the CA path.
 There is no DNS-address coalescing, native socket access, or private net/SSL import.
 
 Acquisition binds a Client to `async.current_loop()` and installs one
-`async.add_close_listener` (`pool.titan` `Client:bind`). Explicit close detaches the listener, marks the
+`async.add_close_listener` (`pool.native.titan` `Client:bind`). Explicit close detaches the listener, marks the
 Client closed, detaches idle leases and drains before any suspension, then
 retires them. Runtime notification runs only after every Task and raw handle
 has retired, when idle TCP close and TLS abort are synchronous. The default
@@ -170,7 +228,7 @@ retry-after-failure behavior.
 
 A stale reused connection gets one fresh attempt only for exact GET/HEAD with
 nil body, no received response byte (including interim responses), and selected
-EOF/reset errors (`Client:request`, `stale_client_failure`). `Parser.input_received` is sticky across interim resets;
+EOF/reset errors (`Client:exchange`, `stale_client_failure`). `Parser.input_received` is sticky across interim resets;
 `input_seen` remains message-local. A cancellation checkpoint precedes retry.
 Other failures propagate with their original error and traceback. Detecting
 dirty idle input before output instead discards the lease and fresh-dials any
@@ -198,6 +256,61 @@ before closing parser state. Closing during a foreground read instead retires
 the transport and leaves parser cleanup to that reader's defer. Background
 errors are contained because the response is already logically closed. The
 bounds follow [Go's connection-reuse design](https://go.dev/blog/http-connection-reuse).
+
+## Native redirect engine
+
+`Client:request` (`client.native.titan`) owns redirect policy above the
+single-exchange path `Client:exchange`, which keeps pooling and the stale
+retry. It holds a request-local copy of the option headers, the current
+method, body, and parsed URL, and a hop count, so a reusable `RequestOptions`
+is never mutated. Each iteration arms `defer if not returned then
+response:close() end` on the new response: every raised policy failure,
+including one from `Location` resolution, closes the intermediate response
+through the ordinary `ClientResponse:close()` and its bounded drain, and no
+second drain implementation exists. `redirected` is set to `hops > 0` on each
+response. A status other than 301, 302, 303, 307, or 308 returns at once;
+otherwise `case` on the effective mode returns the response (`manual()`),
+raises the `RedirectMode.error` policy error (`error()`), or follows
+(`follow()`): no `Location` returns the response, several `Location` fields
+raise, and a redirect after twenty hops raises the limit error. Following
+resolves the target, adjusts the working headers, method, and body, closes the
+response explicitly, runs `async.checkpoint()`, and loops with the new URL.
+`ca_file` comes from the options on every hop.
+
+`resolve_redirect(base, location)` implements the RFC 3986 section 5.2
+reference resolution privately, because `titan.url` accepts only absolute URLs
+without fragments and does not remove dot segments:
+
+1. `trim_header_value` removes HTTP whitespace; everything from the first `#`
+   is dropped and the query is split at the first `?`.
+2. A leading scheme (`ALPHA *(ALPHA / DIGIT / "+" / "-" / ".") ":"`) is taken
+   off. A scheme without a following `//authority` raises.
+3. A `//authority` reference replaces the authority. An empty path keeps the
+   base path, and the base query when the reference has none. A relative path
+   joins the base path's directory, after rejecting a colon in its first
+   segment.
+4. The whole candidate, `scheme://authority target`, is checked with
+   `url.parse` before dot segments are removed, so a byte that `url` rejects
+   inside a segment that removal would drop still fails. A scheme other than
+   `http` or `https`, user information, or any other `url.Error` raises the
+   policy error.
+5. `remove_dot_segments` (section 5.2.4) rewrites the parsed `path`, keeping
+   one Array entry per output segment so that removing a parent never rescans
+   a growing string, and `target` is rebuilt from the new path and query.
+
+`same_http_origin` compares the parsed `Url.scheme`, `Url.host`, and
+`Url.port`. `url` lowercases the scheme and registered names and supplies the
+effective default port, so `:80` or `:443` spellings and letter case cannot
+make one origin look like two, and `https` to `http` is a change of origin
+that is followed, as Fetch does. A cross-origin hop removes `Authorization`,
+`Proxy-Authorization`, `Cookie`, `Cookie2`, and `Host` from the working
+headers; nothing restores them, so the removal is sticky across later hops.
+The method rewrite compares the ASCII-lowercased method (`lower_header_name`):
+301 or 302 after `POST`, and 303 after anything but `GET` or `HEAD`, switch to
+`GET` with no body and remove the five entity headers; otherwise the method
+keeps its spelling. `ClientResponse.url` is `normalized_http_url` of the
+exchange's parsed URL (`scheme://authority target`); `request_upgrade_on` also
+fills it, with `redirected = false`.
 
 ## Bounded opening and protocol takeover
 
@@ -256,7 +369,7 @@ fields, preserving handler header customization before controlling framing and
 Connection/Upgrade.
 
 Suspending upgrade I/O runs in an owned child with a cancellation-sensitive
-parent join (`upgrade.titan` `supervised_http_io`). The parent's lexical cleanup remains independently runnable while
+parent join (`upgrade.native.titan` `supervised_http_io`). The parent's lexical cleanup remains independently runnable while
 the child awaits accepted transport output. On interruption it invokes the
 captured abort action before requesting child cancellation and draining the
 child with `await_terminal_cleanup`. This order lets cancellation retire
@@ -314,9 +427,9 @@ Absolute client entry points additionally require exactly `http` or `https`,
 so URL's additive `ws`/`wss` policy cannot route a secure WebSocket URL through
 plain HTTP transport selection.
 
-The client connects with normalized `Url.host`, uses normalized
+The native client connects with normalized `Url.host`, uses normalized
 `Url.authority` when it generates an absent Host field, and sends normalized
-`Url.target`. HTTPS passes its sole optional `ca_file` through to
+`Url.target`. HTTPS passes the options' `ca_file` through to
 `ssl.connect`; HTTP neither reads trust paths nor exposes a CA-directory
 parameter. The SSL layer performs explicit CA-file I/O through high-level
 `fs`. The server passes the scheme, exact received Host, and origin-form target
@@ -324,7 +437,7 @@ to the URL module as separate values, so an authority delimiter cannot consume
 or reinterpret the independently parsed target. `Request.target` remains that
 received target, while `Request.url` provides the normalized routing view.
 
-The client copies supplied headers, validates Content-Length, rejects request
+The native client copies the option headers, validates Content-Length, rejects request
 Transfer-Encoding and Expect fields, and preserves supplied Connection fields.
 An explicit close token disables reuse; HTTP/1.1 is otherwise persistent. The
 optional request body is assembled with the preamble as one high-level write;
@@ -345,7 +458,7 @@ decision and an explicit Connection close token decide whether the
 per-connection loop resets the parser.
 
 Immediately after header parsing, the per-connection loop resolves `Expect`
-(`server.titan` `accept_request_expectation`) before it can call a handler that waits in `Request:read`. An OWS-trimmed,
+(`server.native.titan` `accept_request_expectation`) before it can call a handler that waits in `Request:read`. An OWS-trimmed,
 case-insensitive `100-continue` is accepted only as one complete singleton
 field and writes the exact interim response synchronously. Every other value,
 comma-combined value, or repeated field produces a framed zero-length 417 and
@@ -459,7 +572,7 @@ same outcome back to an incomplete-message error.
 
 At the start of each serial request iteration, the connection Task reads the
 Server's `idle_timeout_ms`; the shared header-acquisition helper
-(`server.titan` `read_request_with_idle_timeout`) takes the encryption mode and
+(`server.native.titan` `read_request_with_idle_timeout`) takes the encryption mode and
 timeout as explicit values, so either serving loop passes its own per-request
 snapshot. Zero reads directly. A positive value starts a header-reader Task and
 a timer Task and uses `async.race_two`:
@@ -513,9 +626,9 @@ only. Demand mode stops each native read before publication, allowing Windows
 header classification followed by an explicit callback-retirement yield and
 ordinary Exchange handoff.
 
-`ExchangeState` (`upgrade.titan`) remains the shared private owner of the
+`ExchangeState` (`upgrade.native.titan`) remains the shared private owner of the
 parser, captured transport, and admission flags. Public `Exchange`
-(`transfer.titan`) bundles its matching `Request` and `Response`; its custom
+(`transfer.native.titan`) bundles its matching `Request` and `Response`; its custom
 hook detaches that shared owner once. Request reads, response output/close, and
 supervised upgrade output hold `pending` across their entire operation,
 including queued native completion. The `serving` flag rejects nested or
@@ -569,6 +682,83 @@ private schema carries prefix, transport kind and child bytes.
 Neither reconstructs a parser or adopts a handle, so failed delivery can retire
 a packet without a live Runtime. WebSocket uses the `UpgradedStream` form.
 
+## Browser client
+
+`client.browser.titan` implements `Client`, `ClientResponse`, the module
+helpers, and response reads over the SDK's `titan:fetch` source
+([browser bridge](browser-bridge.md#javascript-files)). It imports
+`titan.browser` and never `uv`, `net`, `ssl`, or llhttp. Every policy decision
+is Titan's: the JavaScript source only owns `AbortController`s, builds the
+`RequestInit`, calls `fetch`, reads response properties and body chunks, and
+reports whether the host has an HTTP cache.
+
+**Validation before the host.** A request first calls `async.checkpoint()`,
+which raises `"async Runtime is not active"` in a state without the owner
+Runtime. It validates the method token, refuses `CONNECT`, `TRACE`, and
+`TRACK` in any letter case, applies the shared `no_cors()` method check,
+parses the URL with `http`/`https` only, rejects a `ca_file`, and rejects any
+`GET` or `HEAD` body, because `fetch` rejects even an empty body on those
+methods. One forbidden-request-header predicate then visits each option
+header. It holds the Fetch standard's list in Titan: `Host` (removed when it
+equals the URL authority, otherwise rejected), `Content-Length` (removed when
+it equals the body length, otherwise rejected), `Transfer-Encoding` and
+`Expect`, seventeen further exact names, the `proxy-` and `sec-` prefixes of
+the lowercased name, and the three method-override names. Their values are
+split by Fetch's "getting, decoding, and splitting" algorithm: commas separate
+elements outside HTTP quoted strings, a backslash escapes the next byte inside
+quotes, an unterminated quote runs to the end, quotes and escapes stay in the
+element, and each element loses surrounding HTAB and SP before the
+comparison with `CONNECT`, `TRACE`, and `TRACK`. Browsers drop a forbidden
+header silently and Node sends it; checking first gives every engine the same
+request or none. Removing an equal `Content-Length` also keeps Node from
+failing or stalling on a duplicate length.
+
+**Cache gate and `RequestInit`.** Under `only_if_cached()` the client asks
+`titan:fetch` `has-cache` before creating a session. Node has no HTTP cache,
+so `false` raises the native `only-if-cached` policy error with no network
+request; in a browser the mode passes through to `fetch`. The modes translate
+through the shared string helpers, with `redirect_mode_string(mode, true)`
+for the browser's `follow()` default, and each header crosses as a pair of
+byte values that the source turns into Latin-1 `ByteString`s.
+
+**The abort session.** Before `open`, the client creates a session with `new`,
+a host object that owns one `AbortController`, and guards it with a `defer`
+that closes the session unless a `ClientResponse` has adopted it. `open`
+waits through `async.suspend` with a cancel action that closes the session.
+The guard covers two windows that `BrowserRequest:cancel` cannot: the request
+has settled with headers, so the bridge has retired its cancel function,
+while the body stream is still open; and a failure in head translation or
+redirect normalization before adoption. Closing the session cancels the body
+reader and aborts the controller, so the server sees the connection end.
+
+**Response head.** The source reports the status (0 for opaque and
+opaque-redirect responses), `redirected`, the status text, the URL (empty
+becomes `nil`), and every header pair in one byte string. Titan validates the
+reason, drops `Set-Cookie` and `Set-Cookie2`, which Node exposes and browsers
+hide, and builds `headers`. On a redirect status, `manual()` closes the session
+and returns the opaque-redirect shape (Node returns the raw 3xx response), and
+`error()` closes the session and raises the `RedirectMode.error` policy error
+(Chromium exposes the raw status when `Location` is absent). Fetch rejections
+become `async.OperationError(-ffi.EIO, "EIO", message, "http.request")`.
+
+**Body and close.** `read` calls `async.checkpoint()` before admitting its one
+reader, requests the next chunk with `read`, turns bytes into a Titan string
+and nil into EOF, and closes the session when the read fails or its Task is
+cancelled; read failures raise the same `OperationError` with operation
+`"http.read"`. `read_until` keeps the bytes after its delimiter for the next
+read. `close()` closes the session synchronously: it never yields or drains,
+so it is safe in a cancellation `defer`.
+
+**Client.** A browser `Client` binds to the owner Runtime on its first
+request through `async.add_close_listener`, refuses requests from another
+Runtime and after `close()`, and holds no pool: `close_idle_connections` does
+nothing.
+
+The client therefore normalizes five Node behaviors to browser behavior in
+Titan instead of exposing them: exposed `Set-Cookie` fields, forbidden request
+headers that Node would send, network access under `only-if-cached`, raw 3xx
+responses under `manual()`, and mismatched `Content-Length` failures.
+
 ## Native build and provider composition
 
 The Makefile pins llhttp 9.4.3 (`LLHTTP_VERSION`) and verifies its source
@@ -581,6 +771,10 @@ no system-llhttp mode, and neither the private archive nor its headers are
 installed as runtime-SDK files. Its position in the `-X` payload order and the
 rest of the standard-library image are described in
 [the standard-library image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image).
+The browser provider's `titan.http` contains no llhttp, OpenSSL, or libuv: its
+browser composition never selects a native contributor, and the
+[dependency-closure check](browser-target.md#the-dependency-closure-check)
+rejects their headers, archives, and symbols.
 
 ## Verification
 
@@ -603,3 +797,21 @@ listener/response close completion under cancellation without a retry. The
 focused sanitizer boundary drives the same timeout-induced SSL-read
 cancellation and serial HTTP path through public TLS and llhttp, rather than a
 private test transport.
+
+`request_options_test` covers constructor validation for every `mode` with
+`only_if_cached()`, the pre-I/O `no_cors()` method and `only-if-cached`
+failures with zero server hits, `get` bodies, the native meaning of every
+mode, snapshot isolation from later header changes, and bodyful native
+`GET`. `redirect_test` runs every redirect status against every mode with and
+without `Location`, the native `manual()` default, reference resolution with
+relative paths, fragments and dot segments, the twenty-hop boundary, invalid
+and repeated `Location` values, the method and entity-header rules (including
+a mixed-case `pOsT` through a raw peer, because the native server's llhttp
+rejects mixed-case methods), sticky cross-origin credential removal,
+normalized same-origin comparison, intermediate drain and connection reuse,
+and options reuse after a followed chain.
+
+The browser client's portable cases (headers, options, fail-fast validation,
+and `lua.new()` refusal) run in `http.tests` on both targets. Its network
+behavior needs real engines and runs in the live browser network harness
+([browser target](browser-target.md#the-live-browser-network-harness)).
