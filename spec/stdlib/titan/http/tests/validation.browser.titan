@@ -1,5 +1,3 @@
-local iteration = import "iteration"
-
 local function browser_header_rejection(name: string, contents: string, expected: string)
   assert_options_error(function ()
     http.get("http://127.0.0.1:1", http.RequestOptions {headers = http.headers({http.Header(name, contents)})})
