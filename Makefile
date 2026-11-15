@@ -291,7 +291,7 @@ TITAN_RUNTIME_SOURCES := titan-runtime/titan.c titan-runtime/minicoro.c \
 BROWSER_RUNTIME_SOURCES := $(TITAN_RUNTIME_SOURCES)
 BROWSER_STDLIB_ROOTS := titan.test titan.coroutine titan.gc titan.math titan.iteration \
 	titan.reflect titan.json titan.protobuf titan.transfer titan.peg titan.string titan.url titan.path titan.browser \
-	titan.async titan.timer titan.os titan.io titan.lua titan.http
+	titan.async titan.timer titan.os titan.io titan.lua titan.http titan.websocket
 TITAN_BROWSER_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-sdk
 LUA_BROWSER_CC ?=
 LUA_BROWSER_AR ?=
@@ -395,7 +395,8 @@ LUA_TITAN_HEADERS := titan/lua/native.h
 STRING_TITAN_HEADERS := titan/string/format_native.h
 WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.native.titan titan/websocket/handshake.native.titan \
 	titan/websocket/connection.native.titan titan/websocket/frames.native.titan \
-	titan/websocket/types.titan titan/websocket/utf8.titan titan/websocket/crypto.native.titan
+	titan/websocket/types.titan titan/websocket/utf8.titan titan/websocket/crypto.native.titan \
+	titan/websocket/websocket.browser.titan titan/websocket/client.browser.titan
 JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
 PROTOBUF_TITAN_SOURCES := titan/protobuf/protobuf.titan titan/protobuf/encoder.titan \

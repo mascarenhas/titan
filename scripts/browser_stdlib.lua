@@ -11,7 +11,7 @@ local M = {}
 
 M.absent_modules = {
     "titan.uv", "titan.net", "titan.ssl", "titan.thread", "titan.sqlite3",
-    "titan.websocket", "titan.fs",
+    "titan.fs",
 }
 local absent_modules = {}
 for _, name in ipairs(M.absent_modules) do absent_modules[name] = true end
@@ -442,6 +442,11 @@ M.browser_differences = {
         opaque = { "Client", "ClientResponse" },
         omitted = { "ClientResponse:take_upgrade", "Exchange", "Handler", "Request", "Response",
             "Server", "UpgradedStream", "listen", "listen_tls", "request_upgrade_on" },
+    },
+    ["titan.websocket"] = {
+        opaque = { "Connection" },
+        omitted = { "AcceptOptions", "Connection.discard_transfer_payload", "Connection.from_transfer_payload",
+            "Connection:ping", "Connection:to_transfer_payload", "accept" },
     },
 }
 

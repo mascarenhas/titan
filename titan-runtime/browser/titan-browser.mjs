@@ -207,10 +207,43 @@ function fetchSource(op, ...args) {
   throw new TypeError(`unknown titan:fetch op ${op}`);
 }
 
+function websocketSource(op, ...args) {
+  if (op === 'connect') {
+    const [url, ...protocols] = args;
+    return {kind: 'listener', subscribe(emit) {
+      const socket = new WebSocket(url, protocols);
+      socket.binaryType = 'arraybuffer';
+      function onOpen() { emit('open', socket, socket.protocol); }
+      function onMessage(event) {
+        const text = typeof event.data === 'string';
+        const bytes = text ? encodeString(event.data) : new Uint8Array(event.data);
+        emit(text ? 'text' : 'binary', BigInt(bytes.byteLength), {bytes});
+      }
+      function onClose(event) { emit('close', BigInt(event.code), event.reason, event.wasClean); }
+      socket.addEventListener('open', onOpen);
+      socket.addEventListener('message', onMessage);
+      socket.addEventListener('close', onClose);
+      return () => {
+        socket.removeEventListener('open', onOpen);
+        socket.removeEventListener('message', onMessage);
+        socket.removeEventListener('close', onClose);
+        socket.close();
+      };
+    }};
+  }
+  const [target, a, b] = args;
+  if (op === 'take') { const bytes = target.bytes; target.bytes = undefined; return bytes; }
+  if (op === 'buffered') return target.readyState === 1 ? BigInt(target.bufferedAmount) : -1n;
+  if (op === 'send') { if (target.readyState !== 1) return false; target.send(a); return true; }
+  if (op === 'close') { if (a === null) target.close(); else target.close(Number(a), b); return; }
+  throw new TypeError(`unknown titan:websocket op ${op}`);
+}
+
 const sdkBindings = Object.freeze(Object.assign(Object.create(null), {
   'titan:timeout': () => timeoutSource,
   'titan:interval': () => intervalSource,
   'titan:fetch': () => fetchSource,
+  'titan:websocket': () => websocketSource,
   'titan:driver': (owner, state) => owner.registerDriver.bind(owner, state),
   'titan:stdout': owner => owner.out.write.bind(owner.out),
   'titan:stderr': owner => owner.err.write.bind(owner.err),

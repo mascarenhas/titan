@@ -1,0 +1,401 @@
+local type Value = browser.BrowserValue
+local const HIGH_WATER = 256 * 1024
+local const LOW_WATER = 64 * 1024
+
+-- Only a suspended operation owns a wake; release it before queuing its Task.
+local record Wait
+  task: async.Task
+  token: async.ResumeToken
+  waiting: boolean
+end
+
+local function Wait:wake()
+  if not self.waiting then return end
+  self.waiting = false
+  self.task:resume(self.token)
+end
+
+local function Wait:wait()
+  self.waiting = true
+  defer self.waiting = false
+  async.suspend(self.token, function () self.waiting = false end)
+end
+
+local record Message
+  kind: MessageType
+  length: integer
+  holder: browser.BrowserHandle
+end
+
+--- An owned browser session with one application reader and one data writer.
+-- @usage standard-library-websocket.md#public-interface
+record Connection
+  local request: browser.BrowserRequest?
+  local socket: browser.BrowserHandle?
+  local protocol: string?
+  local limit: integer
+  local messages: {Message}
+  local first: integer
+  local opening: Wait?
+  local reader: Wait?
+  local shutdown_wait: Wait?
+  local writing: boolean
+  local open_seen: boolean
+  local close_seen: boolean
+  local abnormal: boolean
+  local peer_code: integer?
+  local peer_reason: string?
+  local closing: boolean
+  local terminal: boolean
+  local failure: async.Error?
+  local remove_close_listener: (function (): ())?
+end
+
+local websocket: browser.BrowserHandle? = nil
+
+local function websocket_source(): browser.BrowserHandle
+  if websocket == nil then websocket = browser.binding("titan:websocket") end
+  return websocket
+end
+
+-- Host exceptions never escape as BrowserError through the WebSocket API.
+local function websocket_call(operation: string, ...: Value): Value
+  return websocket_source():call(...)
+catch
+  if not (error is browser.BrowserError) then raise end
+  local failure: browser.BrowserError = error
+  local message = failure.message
+  failure:close()
+  raise Error("abnormal", operation, message, nil)
+end
+
+local function Connection:wake_waiters()
+  if self.opening ~= nil then self.opening:wake() end
+  if self.reader ~= nil then self.reader:wake() end
+  if self.shutdown_wait ~= nil then self.shutdown_wait:wake() end
+end
+
+local function Connection:discard_messages()
+  for index = self.first, #self.messages do self.messages[index].holder:close() end
+  self.messages = {}
+  self.first = 1
+end
+
+--- Retire local ownership synchronously, without waiting for the host wire drain.
+-- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
+function Connection:close()
+  if self.terminal then return end
+  self.terminal = true
+  self.closing = true
+  self:wake_waiters()
+  self:discard_messages()
+  local request? = self.request
+  self.request = nil
+  local socket? = self.socket
+  self.socket = nil
+  local remove? = self.remove_close_listener
+  self.remove_close_listener = nil
+  defer do if remove ~= nil then remove() end end
+  defer do if socket ~= nil then socket:close() end end
+  if request ~= nil then request:close() end
+end
+
+local function Connection:fail(cause: value, source_trace: string)
+  if not self.terminal and self.failure == nil then self.failure = async.Error(cause, source_trace) end
+  self:close()
+end
+
+local function Connection:check_failure(operation: string)
+  if self.failure ~= nil then self.failure:raise() end
+  if self.close_seen and self.abnormal then
+    raise Error("abnormal", operation, "transport ended before WebSocket Close", nil)
+  end
+end
+
+local function Connection:check_open(operation: string)
+  self:check_failure(operation)
+  if self.terminal or self.close_seen then raise state_error(operation, "WebSocket is closed") end
+  if self.closing then raise state_error(operation, "WebSocket is closing") end
+end
+
+local function event_string(item: Value): string
+  case item
+  when is_string(text) then return text
+  end
+  raise "WebSocket host event requires text"
+end
+
+local function event_integer(item: Value): integer
+  case item
+  when is_integer(number) then return number
+  end
+  raise "WebSocket host event requires an integer"
+end
+
+local function Connection:receive(...: Value): Value
+  local event = event_string(...[1])
+  if event == "open" then
+    case ...[2]
+    when is_handle(socket) then self.socket = socket
+    end
+    self.open_seen = true
+    local protocol = event_string(...[3])
+    if protocol ~= "" then self.protocol = protocol end
+  elseif event == "text" or event == "binary" then
+    case ...[3]
+    when is_handle(holder) then
+      local accepted = false
+      defer do if not accepted then holder:close() end end
+      if not self.terminal then
+        local kind = BINARY
+        if event == "text" then kind = TEXT end
+        self.messages[#self.messages + 1] = Message(kind, event_integer(...[2]), holder)
+        accepted = true
+      end
+    end
+  elseif event == "close" then
+    local code = event_integer(...[2])
+    self.close_seen = true
+    self.abnormal = code == 1006 or code == 1015
+    -- wasClean describes transport teardown, not whether a wire Close arrived.
+    if code ~= 1005 and code ~= 1006 and code ~= 1015 then
+      self.peer_code = code
+      self.peer_reason = event_string(...[3])
+    end
+  end
+  self:wake_waiters()
+  return Value.is_nil()
+catch
+  self:fail(error, traceback)
+  return Value.is_nil()
+end
+
+local function Connection:receive_failure(...: Value): Value
+  local message = browser.failure_text(...[1], ...[2]) or "WebSocket listener failed"
+  if not self.open_seen then
+    raise HandshakeError(message, nil, nil)
+  end
+  raise Error("abnormal", "websocket.read", message, nil)
+catch
+  self:fail(error, traceback)
+  return Value.is_nil()
+end
+
+local function Connection:wait_control(waiter: Wait, timeout: integer, opening: boolean)
+  local expired = false
+  local deadline = async.run<|nil, value|>(function (): nil
+    timer.sleep(timeout)
+    expired = true
+    waiter:wake()
+    return nil
+  end)
+  defer deadline:cancel(async.CancellationReason.simple("WebSocket control completed"))
+  local operation = "websocket.shutdown"
+  if opening then operation = "websocket.open" end
+  while true do
+    if self.failure ~= nil then self.failure:raise() end
+    if self.terminal then raise state_error(operation, "WebSocket is closed") end
+    if opening then
+      if self.open_seen then return end
+      if self.close_seen then raise HandshakeError("WebSocket opening handshake failed", nil, nil) end
+    else
+      self:check_failure(operation)
+      if self.reader == nil then
+        self:discard_messages()
+        if self.close_seen then return end
+      end
+    end
+    if expired then raise timeout_error(operation) end
+    waiter:wait()
+  end
+end
+
+--- Open a ws/wss client using browser trust and credentials policy.
+-- @usage standard-library-websocket.md#public-interface
+function connect(source_url: string, options: DialOptions?): Connection
+  async.checkpoint()
+  local parsed?, failure? = url.parse(source_url)
+  if parsed == nil then raise failure end
+  if parsed.scheme ~= "ws" and parsed.scheme ~= "wss" then
+    raise "WebSocket URL must use ws or wss"
+  end
+  local policy = options or DialOptions()
+  if #policy.headers:all() > 0 then raise "WebSocket headers are unavailable on the browser target" end
+  if policy.ca_file ~= nil then raise "WebSocket ca_file is unavailable on the browser target" end
+  local waiter = Wait(async.running(), async.ResumeToken("websocket.open"), false)
+  local connection: Connection = {
+    request = nil, socket = nil, protocol = nil, limit = policy.limit,
+    messages = {}, first = 1, opening = waiter, reader = nil, shutdown_wait = nil,
+    writing = false, open_seen = false, close_seen = false, abnormal = false,
+    peer_code = nil, peer_reason = nil, closing = false, terminal = false,
+    failure = nil, remove_close_listener = nil,
+  }
+  local adopted = false
+  defer do if not adopted then connection:close() end end
+  connection.remove_close_listener = async.add_close_listener(function () connection:close() end)
+  local protocols: {Value} = {}
+  for index = 1, #policy.protocols do protocols[index] = Value.is_string(policy.protocols[index]) end
+  connection.request = websocket_source():listen(connection:receive, connection:receive_failure,
+    Value.is_string("connect"), Value.is_string(source_url), ...protocols)
+  connection:wait_control(waiter, policy.timeout, true)
+  connection.opening = nil
+  adopted = true
+  return connection
+catch
+  if error is browser.BrowserError then
+    local failure: browser.BrowserError = error
+    local message = failure.message
+    failure:close()
+    raise HandshakeError(message, nil, nil)
+  end
+  raise
+end
+
+--- Return the selected case-sensitive subprotocol, or nil when none was selected.
+-- @usage standard-library-websocket.md#public-interface
+function Connection:subprotocol(): string?
+  return self.protocol
+end
+
+--- Return valid peer Close metadata, excluding synthetic and empty-Close codes.
+-- @usage standard-library-websocket.md#public-interface
+function Connection:close_status(): (integer?, string?)
+  return self.peer_code, self.peer_reason
+end
+
+local function Connection:read_message(waiter: Wait): (MessageType?, string?)
+  while true do
+    if self.failure ~= nil then self.failure:raise() end
+    if self.terminal then raise state_error("websocket.read", "WebSocket is closed") end
+    if self.first <= #self.messages then
+      local message = self.messages[self.first]
+      self.messages[self.first] = nil
+      self.first = self.first + 1
+      if self.first > #self.messages then self.messages = {}; self.first = 1 end
+      defer message.holder:close()
+      -- Inspect length while the host alone owns the bytes; do not take on overflow.
+      if message.length > self.limit then
+        raise wire_error("limit", "message exceeds the WebSocket read limit", 1009)
+      end
+      case websocket_call("websocket.read", Value.is_string("take"), Value.is_handle(message.holder))
+      when is_bytes(bytes) then return message.kind, bytes
+      end
+      raise "WebSocket host returned no message bytes"
+    end
+    self:check_failure("websocket.read")
+    if self.close_seen then return nil, nil end
+    waiter:wait()
+  end
+end
+
+--- Read one complete message, or nil/nil after a valid peer Close.
+-- @usage standard-library-websocket.md#public-interface
+function Connection:read(): (MessageType?, string?)
+  async.checkpoint()
+  if self.failure ~= nil then self.failure:raise() end
+  if self.close_seen and not self.abnormal and #self.messages == 0 then return nil, nil end
+  if self.terminal then raise state_error("websocket.read", "WebSocket is closed") end
+  if self.shutdown_wait ~= nil then raise state_error("websocket.read", "WebSocket shutdown owns receive progress") end
+  if self.reader ~= nil then raise state_error("websocket.read", "another reader is active") end
+  local waiter = Wait(async.running(), async.ResumeToken("websocket.read"), false)
+  self.reader = waiter
+  defer do
+    self.reader = nil
+    if self.shutdown_wait ~= nil then self.shutdown_wait:wake() end
+  end
+  do
+    return self:read_message(waiter)
+  catch
+    self:fail(error, traceback)
+    raise
+  end
+end
+
+local function Connection:buffered(): integer
+  case websocket_call("websocket.write", Value.is_string("buffered"), Value.is_handle(self.socket))
+  when is_integer(amount) then return amount
+  end
+  raise "WebSocket host returned no buffered amount"
+end
+
+local function Connection:write_state(): integer
+  self:check_open("websocket.write")
+  local amount = self:buffered()
+  if amount < 0 then raise state_error("websocket.write", "WebSocket is closing") end
+  return amount
+end
+
+--- Send one message, yielding fairly and bounding host buffered output.
+-- @usage standard-library-websocket.md#public-interface
+function Connection:write(kind: MessageType, data: string)
+  async.checkpoint()
+  if self.failure ~= nil then self.failure:raise() end
+  if self.terminal or self.closing then self:check_open("websocket.write") end
+  if self.writing then raise state_error("websocket.write", "another writer is active") end
+  self.writing = true
+  defer self.writing = false
+  local sent = false
+  do
+    self:write_state()
+    local payload = Value.is_bytes(data)
+    case kind
+    when text() then
+      validate_text(data, "websocket.write")
+      payload = Value.is_string(data)
+    when binary() then
+    end
+    async.yield()
+    self:write_state()
+    case websocket_call("websocket.write", Value.is_string("send"), Value.is_handle(self.socket), payload)
+    when is_boolean(accepted) then
+      if not accepted then raise state_error("websocket.write", "WebSocket is closing") end
+    end
+    sent = true
+    local amount = self:write_state()
+    if amount > HIGH_WATER then
+      repeat
+        timer.sleep(2)
+        amount = self:write_state()
+      until amount <= LOW_WATER
+    end
+  catch
+    -- A clean Close or another task's shutdown must keep its own completion.
+    if error is Error and (error as Error).kind == "state" then raise end
+    local abnormal = self.abnormal
+    if error is Error then abnormal = abnormal or (error as Error).kind == "abnormal" end
+    if sent or abnormal then self:fail(error, traceback) end
+    raise
+  end
+end
+
+--- Perform a bounded graceful Close using browser-permitted application codes.
+-- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
+function Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
+  async.checkpoint()
+  local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket shutdown timeout")
+  local status = code or 1000
+  local text = reason or ""
+  if status ~= 1000 and (status < 3000 or status > 4999) then
+    raise state_error("websocket.shutdown", "invalid outgoing Close status")
+  end
+  if #text > 123 then raise state_error("websocket.shutdown", "Close reason exceeds 123 bytes") end
+  validate_text(text, "websocket.shutdown")
+  if self.failure ~= nil then self.failure:raise() end
+  if self.close_seen and not self.abnormal then self:close(); return end
+  if self.terminal then raise state_error("websocket.shutdown", "WebSocket is closed") end
+  if self.shutdown_wait ~= nil then raise state_error("websocket.shutdown", "another shutdown is active") end
+  local waiter = Wait(async.running(), async.ResumeToken("websocket.shutdown"), false)
+  self.shutdown_wait = waiter
+  self.closing = true
+  defer self.shutdown_wait = nil
+  do
+    self:check_failure("websocket.shutdown")
+    websocket_call("websocket.shutdown", Value.is_string("close"), Value.is_handle(self.socket),
+      Value.is_integer(status), Value.is_string(text))
+    self:wait_control(waiter, timeout, false)
+  catch
+    self:fail(error, traceback)
+    raise
+  end
+  self:close()
+end

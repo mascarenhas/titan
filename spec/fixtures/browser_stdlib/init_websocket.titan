@@ -1,0 +1,11 @@
+local test = import "test"
+local subject = import "websocket"
+
+function test_initializer_completed(_: test.Context)
+  test.assert(test.testing(), "websocket initializer did not reach its test")
+  subject.DialOptions { subprotocols = {"ready"}, read_limit = 1, handshake_timeout = 1 }
+  case subject.TEXT
+  when text() then
+  when binary() then test.assert(false, "TEXT has the wrong message kind")
+  end
+end

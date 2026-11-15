@@ -1,0 +1,8 @@
+--- Message-oriented WebSocket clients over the browser's verified host transport.
+-- @module titan.websocket
+-- @usage standard-library-websocket.md
+
+local async = import "async"
+local browser = import "browser"
+local timer = import "timer"
+local url = import "url"

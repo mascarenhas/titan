@@ -3089,6 +3089,7 @@ int main(void) {
                 "titan/websocket/websocket.native.titan", "titan/websocket/handshake.native.titan",
                 "titan/websocket/connection.native.titan", "titan/websocket/frames.native.titan",
                 "titan/websocket/types.titan", "titan/websocket/utf8.titan", "titan/websocket/crypto.native.titan",
+                "titan/websocket/websocket.browser.titan", "titan/websocket/client.browser.titan",
                 "titan/os/os.titan",
                 "titan/os/clock.native.titan", "titan/os/clock.browser.titan",
                 "titan/os/environment.native.titan", "titan/os/environment.browser.titan",
