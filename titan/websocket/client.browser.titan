@@ -275,7 +275,7 @@ local function Connection:read_message(waiter: Wait): (MessageType?, string?)
       defer message.holder:close()
       -- Inspect length while the host alone owns the bytes; do not take on overflow.
       if message.length > self.limit then
-        raise wire_error("limit", "message exceeds the WebSocket read limit", 1009)
+        raise wire_error("limit", "incoming message exceeds read limit", 1009)
       end
       case websocket_call("websocket.read", Value.is_string("take"), Value.is_handle(message.holder))
       when is_bytes(bytes) then return message.kind, bytes
@@ -331,7 +331,7 @@ function Connection:write(kind: MessageType, data: string)
   async.checkpoint()
   if self.failure ~= nil then self.failure:raise() end
   if self.terminal or self.closing then self:check_open("websocket.write") end
-  if self.writing then raise state_error("websocket.write", "another writer is active") end
+  if self.writing then raise state_error("websocket.write", "another data writer is active") end
   self.writing = true
   defer self.writing = false
   local sent = false
