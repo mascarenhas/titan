@@ -4,6 +4,7 @@ local http = import "http"
 local io = import "io"
 local math = import "math"
 local string = import "string"
+local websocket = import "websocket"
 
 local hits: {string: integer} = {}
 local revalidations: {string: integer} = {}
@@ -27,8 +28,36 @@ local function asset(response: http.Response, name: string, media_type: string)
   send(response, fs.read_file(asset_root .. "/" .. name))
 end
 
+local function websocket_session(request: http.Request, response: http.Response)
+  local path = request.url.path
+  if path == "/ws/deny-origin" then
+    do
+      local connection = websocket.accept(request, response, websocket.AcceptOptions { allowed_origins = {} })
+      connection:close()
+    catch
+      -- accept has already sent the deliberate cross-origin rejection.
+      if not (error is websocket.HandshakeError) then raise end
+    end
+    return
+  end
+  local origins: {string} = {}
+  local origin? = request.headers:get("Origin")
+  if origin ~= nil then origins[1] = origin end
+  local connection = websocket.accept(request, response,
+    websocket.AcceptOptions { subprotocols = {"chat", "other"}, allowed_origins = origins })
+  defer connection:close()
+  if path == "/ws/origin" then connection:write(websocket.TEXT, origin or "") end
+  while true do
+    local kind?, data? = connection:read()
+    if kind == nil then return end
+    if data == nil then raise "WebSocket fixture received a message without bytes" end
+    connection:write(kind, data)
+  end
+end
+
 local function handle(request: http.Request, response: http.Response)
   local path = request.url.path
+  if string.sub(path, 1, 4) == "/ws/" then websocket_session(request, response); return end
   if path ~= "/no-cors" then
     response:set_header("Access-Control-Allow-Origin", "*")
     response:set_header("Access-Control-Expose-Headers", "*")
