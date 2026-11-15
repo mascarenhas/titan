@@ -563,7 +563,7 @@ local function start_cancelled_client_close(first_port: integer): async.Task
     defer task_support.cancel_and_join_task(peer, "nested HTTP peer cleanup")
 
     local response = http.get(
-      "http://127.0.0.1:" .. string.tostring(port) .. "/close", nil, nil)
+      "http://127.0.0.1:" .. string.tostring(port) .. "/close")
     defer response:close()
     local closer: async.Task? = nil
     local close_returned = false

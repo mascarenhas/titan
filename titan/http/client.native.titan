@@ -1,14 +1,18 @@
+foreign import "errno.h"
+
 --- Received response headers and an owned streaming response body.
 -- @field status HTTP status number.
 -- @field reason HTTP reason phrase.
--- @field version Received HTTP version.
 -- @field headers Received headers, preserving duplicates and insertion order.
+-- @field url Normalized URL of the final exchange, or nil when unavailable.
+-- @field redirected Whether at least one redirect was followed.
 -- @usage standard-library-http.md#client-requests
 record ClientResponse
   status: integer
   reason: string
-  version: string
   headers: Headers
+  url: string?
+  redirected: boolean
   local parser: Parser
   local connection: io.ReaderWriterCloser
   local abort: function (): ()
@@ -124,19 +128,115 @@ local function stale_client_failure(failure: value): boolean
   return false
 end
 
---- Send an HTTP request using this client's pool and return final response headers.
--- @param method Case-sensitive HTTP token selecting the request method.
--- @param source_url Absolute URL text.
--- @param supplied_headers Optional headers copied into the outgoing message.
--- @param body Optional in-memory request-body bytes.
--- @param ca_file Optional PEM trust bundle replacing the default trust roots.
--- @return Response metadata and streaming body; the caller owns closing it.
--- @usage standard-library-http.md#client-requests
-function Client:request(method: string, source_url: string,
-                         supplied_headers: Headers?, body: string?,
-                         ca_file: string?): ClientResponse
-  validate_http_token(method, "HTTP method")
-  local parsed_url = parse_url_or_raise(source_url)
+local function normalized_http_url(parsed: url.Url): string
+  return parsed.scheme .. "://" .. parsed.authority .. parsed.target
+end
+
+local function request_policy_error(message: string): async.OperationError
+  return async.OperationError(-ffi.EIO, "EIO", message, "http.request")
+end
+
+-- RFC 3986 section 5.2.4. Each output entry is one path segment, including
+-- its leading slash, so removing a parent never reparses a growing string.
+local function remove_dot_segments(path: string): string
+  local segments: {string} = {}
+  local index = 1
+  while index <= #path do
+    local remaining = #path - index + 1
+    if string.sub(path, index, index + 2) == "../" then
+      index = index + 3
+    elseif string.sub(path, index, index + 1) == "./" then
+      index = index + 2
+    elseif string.sub(path, index, index + 2) == "/./" then
+      index = index + 2
+    elseif remaining == 2 and string.sub(path, index) == "/." then
+      segments[#segments + 1] = "/"
+      break
+    elseif string.sub(path, index, index + 3) == "/../" or
+        (remaining == 3 and string.sub(path, index) == "/..") then
+      if #segments > 0 then segments[#segments] = nil end
+      if remaining == 3 then
+        segments[#segments + 1] = "/"
+        break
+      end
+      index = index + 3
+    elseif (remaining == 1 and string.sub(path, index) == ".") or
+        (remaining == 2 and string.sub(path, index) == "..") then
+      break
+    else
+      local start = index
+      if string.byte(path, index) == 47 then start = start + 1 end
+      local slash? = string.find(path, "/", start, true)
+      local last = (slash or (#path + 1)) - 1
+      segments[#segments + 1] = string.sub(path, index, last)
+      index = last + 1
+    end
+  end
+  local builder = string.writer()
+  for index = 1, #segments do builder:write(segments[index]) end
+  return builder:drain()
+end
+
+local function resolve_redirect(base: url.Url, location: string): url.Url
+  local reference = trim_header_value(location)
+  local fragment? = string.find(reference, "#", 1, true)
+  if fragment then reference = string.sub(reference, 1, fragment - 1) end
+  local query: string? = nil
+  local question? = string.find(reference, "?", 1, true)
+  if question then
+    query = string.sub(reference, question + 1)
+    reference = string.sub(reference, 1, question - 1)
+  end
+  local scheme: string? = nil
+  local scheme_match? = string.match(reference, "^[A-Za-z][A-Za-z0-9+.-]*:")
+  if scheme_match then
+    local prefix = scheme_match:whole()
+    scheme = string.sub(prefix, 1, #prefix - 1)
+    reference = string.sub(reference, #prefix + 1)
+  end
+  local authority = base.authority
+  local path = reference
+  if string.sub(reference, 1, 2) == "//" then
+    local slash? = string.find(reference, "/", 3, true)
+    authority = string.sub(reference, 3, (slash or (#reference + 1)) - 1)
+    path = ""
+    if slash then path = string.sub(reference, slash) end
+  elseif scheme then
+    raise request_policy_error("HTTP redirect Location requires an HTTP authority")
+  elseif #path == 0 then
+    path = base.path
+    if query == nil then query = base.query end
+  elseif string.sub(path, 1, 1) ~= "/" then
+    -- A relative reference's first segment cannot contain a colon.
+    local slash? = string.find(path, "/", 1, true)
+    local first = string.sub(path, 1, (slash or (#path + 1)) - 1)
+    if string.find(first, ":", 1, true) then
+      raise request_policy_error("HTTP redirect Location is malformed")
+    end
+    local directory = string.match(base.path, "^.*/"):whole()
+    path = directory .. path
+  end
+  local target = path
+  if query ~= nil then target = target .. "?" .. query end
+  -- Validate the entire reference before removing segments: an invalid byte
+  -- in a removed segment is still an invalid Location.
+  local parsed?, problem? = url.parse((scheme or base.scheme) .. "://" .. authority .. target)
+  if problem or (parsed.scheme ~= "http" and parsed.scheme ~= "https") then
+    raise request_policy_error("HTTP redirect Location is malformed or disallowed")
+  end
+  parsed.path = remove_dot_segments(parsed.path)
+  parsed.target = parsed.path
+  if parsed.query ~= nil then parsed.target = parsed.target .. "?" .. parsed.query end
+  return parsed
+end
+
+local function same_http_origin(left: url.Url, right: url.Url): boolean
+  return left.scheme == right.scheme and left.host == right.host and left.port == right.port
+end
+
+local function Client:exchange(method: string, parsed_url: url.Url,
+                               supplied_headers: Headers?, body: string?,
+                               ca_file: string?): ClientResponse
   local request_headers = client_request_headers(parsed_url, supplied_headers, body)
   local keep_alive = not header_has_token(request_headers, "Connection", "close")
   local builder = string.writer()
@@ -169,7 +269,8 @@ function Client:request(method: string, source_url: string,
           return ClientResponse {
             status = exact.status_number,
             reason = exact.reason_text,
-            version = "HTTP/1.1",
+            url = normalized_http_url(parsed_url),
+            redirected = false,
             headers = exact.parsed_headers,
             parser = exact,
             connection = lease.transport.connection,
@@ -204,32 +305,104 @@ function Client:request(method: string, source_url: string,
   raise "HTTP request attempts exhausted"
 end
 
---- Send a GET using this client's connection pool.
+--- Send an HTTP request using this client's pool and the selected redirect policy.
+-- @param method HTTP token selecting the request method.
+-- @param source_url Absolute URL text.
+-- @param options Optional validated request snapshot.
+-- @return Response metadata and streaming body; the caller owns closing it.
 -- @usage standard-library-http.md#client-requests
-function Client:get(source_url: string, supplied_headers: Headers?,
-                     ca_file: string?): ClientResponse
-  return self:request("GET", source_url, supplied_headers, nil, ca_file)
+function Client:request(method: string, source_url: string,
+                         options: RequestOptions?): ClientResponse
+  async.checkpoint()
+  validate_http_token(method, "HTTP method")
+  local parsed_url = parse_url_or_raise(source_url)
+  local policy = options or RequestOptions()
+  if is_no_cors(policy.mode) then validate_no_cors_method(method) end
+  if is_only_if_cached(policy.cache) then
+    raise request_policy_error("HTTP response not in cache (only-if-cached)")
+  end
+  local working_headers = copy_headers(policy.headers)
+  local body? = policy.body
+  local hops = 0
+  while true do
+    local response = self:exchange(method, parsed_url, working_headers, body, policy.ca_file)
+    local returned = false
+    defer if not returned then response:close() end
+    response.redirected = hops > 0
+    if not is_redirect_status(response.status) then
+      returned = true
+      return response
+    end
+    case policy.redirect or RedirectMode.manual()
+    when manual() then
+      returned = true
+      return response
+    when error() then
+      raise request_policy_error("HTTP redirect disallowed by RedirectMode.error")
+    when follow() then
+      local locations = response.headers:values("Location")
+      if #locations == 0 then
+        returned = true
+        return response
+      end
+      if #locations ~= 1 then
+        raise request_policy_error("HTTP redirect has more than one Location")
+      end
+      if hops == 20 then
+        raise request_policy_error("HTTP redirect limit (20) exceeded")
+      end
+      local next_url = resolve_redirect(parsed_url, locations[1])
+      if not same_http_origin(parsed_url, next_url) then
+        working_headers:remove("Authorization")
+        working_headers:remove("Proxy-Authorization")
+        working_headers:remove("Cookie")
+        working_headers:remove("Cookie2")
+        working_headers:remove("Host")
+      end
+      local normalized_method = lower_header_name(method)
+      if ((response.status == 301 or response.status == 302) and normalized_method == "post") or
+          (response.status == 303 and normalized_method ~= "get" and normalized_method ~= "head") then
+        method = "GET"
+        body = nil
+        working_headers:remove("Content-Encoding")
+        working_headers:remove("Content-Language")
+        working_headers:remove("Content-Location")
+        working_headers:remove("Content-Type")
+        working_headers:remove("Content-Length")
+      end
+      response:close()
+      async.checkpoint()
+      parsed_url = next_url
+      hops = hops + 1
+    end
+  end
+end
+
+--- Send a bodyless GET using this client's connection pool.
+-- @usage standard-library-http.md#client-requests
+function Client:get(source_url: string, options: RequestOptions?): ClientResponse
+  async.checkpoint()
+  if options ~= nil and options.body ~= nil then
+    raise "HTTP get does not accept a request body"
+  end
+  return self:request("GET", source_url, options)
 end
 
 --- Send an HTTP request using the current Runtime's shared default client.
--- @param method Case-sensitive HTTP token selecting the request method.
+-- @param method HTTP token selecting the request method.
 -- @param source_url Absolute URL text.
--- @param supplied_headers Optional headers copied into the outgoing message.
--- @param body Optional in-memory request-body bytes.
--- @param ca_file Optional PEM trust bundle replacing the default trust roots.
+-- @param options Optional validated request snapshot.
 -- @return Response metadata and streaming body; the caller owns closing it.
 -- @usage standard-library-http.md#client-requests
 function request(method: string, source_url: string,
-                 supplied_headers: Headers?, body: string?,
-                 ca_file: string?): ClientResponse
-  return default_http_client():request(method, source_url, supplied_headers, body, ca_file)
+                 options: RequestOptions?): ClientResponse
+  return default_http_client():request(method, source_url, options)
 end
 
---- Send a GET using the current Runtime's shared default client.
+--- Send a bodyless GET using the current Runtime's shared default client.
 -- @usage standard-library-http.md#client-requests
-function get(source_url: string, supplied_headers: Headers?,
-             ca_file: string?): ClientResponse
-  return default_http_client():get(source_url, supplied_headers, ca_file)
+function get(source_url: string, options: RequestOptions?): ClientResponse
+  return default_http_client():get(source_url, options)
 end
 
 --- Send an upgrade request over an owned supplied stream and await response headers.
@@ -287,7 +460,8 @@ function request_upgrade_on(connection: io.ReaderWriterCloser,
         return ClientResponse {
           status = exact.status_number,
           reason = exact.reason_text,
-          version = "HTTP/1.1",
+          url = normalized_http_url(parsed_url),
+          redirected = false,
           headers = exact.parsed_headers,
           parser = exact,
           connection = connection,

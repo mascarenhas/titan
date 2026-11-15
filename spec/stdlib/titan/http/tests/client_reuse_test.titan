@@ -240,7 +240,7 @@ function test_client_reuse_default_get_and_request(_: test.Context)
     local first = http.get(base .. "/first")
     defer first:close()
     reuse_assert_response(first, 1, "ok")
-    local second = http.request("POST", base .. "/second", nil, "request")
+    local second = http.request("POST", base .. "/second", http.RequestOptions { body = "request" })
     defer second:close()
     reuse_assert_response(second, 1, "ok")
     test.assert(#owners == 1, "module GET and request used different pools")
@@ -255,16 +255,16 @@ function test_client_reuse_verified_https_and_ca_isolation(_: test.Context)
     local copied_ca = fs.tmpname()
     defer fs.unlink(copied_ca)
     fs.write_file(copied_ca, fs.read_file(support.TRUST_ROOT))
-    local first = client:get(base .. "/first", nil, support.TRUST_ROOT)
+    local first = client:get(base .. "/first", http.RequestOptions { ca_file = support.TRUST_ROOT })
     defer first:close()
     reuse_assert_response(first, 1, "ok")
-    local second = client:get(base .. "/second", nil, support.TRUST_ROOT)
+    local second = client:get(base .. "/second", http.RequestOptions { ca_file = support.TRUST_ROOT })
     defer second:close()
     reuse_assert_response(second, 1, "ok")
-    local alternate = client:get(base .. "/alternate", nil, copied_ca)
+    local alternate = client:get(base .. "/alternate", http.RequestOptions { ca_file = copied_ca })
     defer alternate:close()
     reuse_assert_response(alternate, 2, "ok")
-    local original = client:get(base .. "/original", nil, support.TRUST_ROOT)
+    local original = client:get(base .. "/original", http.RequestOptions { ca_file = support.TRUST_ROOT })
     defer original:close()
     reuse_assert_response(original, 1, "ok")
     test.assert(#owners == 2, "HTTPS reuse crossed distinct CA selections")
@@ -285,7 +285,7 @@ function test_client_reuse_isolates_clients_and_host_authority(_: test.Context)
     defer second:close()
     reuse_assert_response(second, 2, "ok")
     local headers = http.headers({http.Header("Host", "example.test")})
-    local virtual = first_client:get(base .. "/virtual", headers)
+    local virtual = first_client:get(base .. "/virtual", http.RequestOptions { headers = headers })
     defer virtual:close()
     reuse_assert_response(virtual, 3, "ok")
     local original = first_client:get(base .. "/original")
@@ -312,7 +312,7 @@ local function add_reuse_background_drain(context: test.Context, name: string, e
       defer client:close()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local first = client:get(fixture:url() .. "/first", nil, ca)
+      local first = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
       defer first:close()
       -- Header acquisition pauses before the body. Closing without a read
       -- must defer even an already-buffered body and trailer to its worker.
@@ -324,7 +324,7 @@ local function add_reuse_background_drain(context: test.Context, name: string, e
       first:close()
       test.assert(first:read() == nil, "closed response remained readable during drain")
       reuse_wait_drained(first)
-      local next = client:get(fixture:url() .. "/next", nil, ca)
+      local next = client:get(fixture:url() .. "/next", http.RequestOptions { ca_file = ca })
       defer next:close()
       reuse_assert_response(next, 1, "next")
     end)
@@ -399,11 +399,11 @@ local function add_reuse_drain_timeout(context: test.Context, name: string, encr
       defer client:close()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local first = client:get(fixture:url() .. "/stalled", nil, ca)
+      local first = client:get(fixture:url() .. "/stalled", http.RequestOptions { ca_file = ca })
       defer first:close()
       first:close()
       while not saw_eof do timer.yield() end
-      local next = client:get(fixture:url() .. "/next", nil, ca)
+      local next = client:get(fixture:url() .. "/next", http.RequestOptions { ca_file = ca })
       defer next:close()
       reuse_assert_response(next, 2, "next")
     end)
@@ -478,7 +478,7 @@ local function add_reuse_nonpersistent(context: test.Context, name: string,
       defer client:close()
       local headers = http.headers()
       if request_close then headers:add("Connection", "keep-alive, CLOSE") end
-      local first = client:get(fixture:url() .. "/discard", headers)
+      local first = client:get(fixture:url() .. "/discard", http.RequestOptions { headers = headers })
       defer first:close()
       first:close()
       while not saw_eof do timer.yield() end
@@ -658,7 +658,8 @@ local function add_reuse_no_retry(context: test.Context, name: string,
       while not first_request_done do timer.yield() end
       local rejected = false
       do
-        local response = client:request(method, fixture:url() .. "/must-not-replay", nil, body)
+        local response = client:request(method, fixture:url() .. "/must-not-replay",
+                                        http.RequestOptions { body = body })
         defer response:close()
         support.read_response(response)
       catch
@@ -733,7 +734,7 @@ local function add_reuse_late_input(context: test.Context, name: string, encrypt
       defer client:close()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local first = client:get(fixture:url() .. "/first", nil, ca)
+      local first = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
       defer first:close()
       reuse_assert_response(first, 1, "first")
       send_poison = true
@@ -741,7 +742,7 @@ local function add_reuse_late_input(context: test.Context, name: string, encrypt
       -- A completed TLS write need not have reached the receiver yet. Wait
       -- for the idle observer's retirement instead of assuming delivery timing.
       while not retired do timer.yield() end
-      local second = client:get(fixture:url() .. "/second", nil, ca)
+      local second = client:get(fixture:url() .. "/second", http.RequestOptions { ca_file = ca })
       defer second:close()
       reuse_assert_response(second, 2, "actual")
       test.assert(#fixture.connections == 2, "idle unsolicited input was accepted as a response")
@@ -872,7 +873,7 @@ local function add_reuse_tls_retirement(context: test.Context, mode: string)
       end, true)
       local client = http.Client()
       defer client:close()
-      local response = client:get(fixture:url() .. "/close", nil, support.TRUST_ROOT)
+      local response = client:get(fixture:url() .. "/close", http.RequestOptions { ca_file = support.TRUST_ROOT })
       defer response:close()
       reuse_assert_response(response, 1, "ok")
       if mode == "client_close" then client:close()
@@ -912,7 +913,7 @@ local function add_reuse_idle_retirement(context: test.Context, name: string, en
       defer client:close()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local response = client:get(fixture:url() .. "/first", nil, ca)
+      local response = client:get(fixture:url() .. "/first", http.RequestOptions { ca_file = ca })
       defer response:close()
       reuse_assert_response(response, 1, "first")
       send_input = true
@@ -942,7 +943,7 @@ local function add_reuse_post_runtime_close(context: test.Context, name: string,
       local client = http.Client()
       local ca: string? = nil
       if encrypted then ca = support.TRUST_ROOT end
-      local response = client:get(fixture:url() .. "/retained", nil, ca)
+      local response = client:get(fixture:url() .. "/retained", http.RequestOptions { ca_file = ca })
       retained = response
       test.assert(response:read_until("ok", false) == "ok", "final response chunk changed")
       -- Keep the complete response caller-owned instead of reading EOF. The

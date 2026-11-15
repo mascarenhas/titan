@@ -1,50 +1,3 @@
-local const TOKEN_PATTERN = "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
-local const RESERVED_HEADERS: {string: boolean} = {
-  ["host"] = true, ["connection"] = true, ["upgrade"] = true,
-  ["content-length"] = true, ["transfer-encoding"] = true, ["expect"] = true,
-  ["sec-websocket-key"] = true, ["sec-websocket-version"] = true,
-  ["sec-websocket-accept"] = true, ["sec-websocket-protocol"] = true,
-  ["sec-websocket-extensions"] = true,
-}
-local function ascii_lower(text: string): string
-  local result = string.gsub(text, "[A-Z]", function (letter: string): string
-    return string.char(octet(letter, 1) + 32)
-  end, nil)
-  return result
-end
-local function trim(text: string): string
-  local first = 1; local last = #text
-  while first <= last and (octet(text, first) == 32 or octet(text, first) == 9) do first = first + 1 end
-  while last >= first and (octet(text, last) == 32 or octet(text, last) == 9) do last = last - 1 end
-  return string.sub(text, first, last)
-end
-local function copy_protocols(supplied: ({string})?): {string}
-  local result: {string} = {}; local seen: {string: boolean} = {}
-  if supplied then
-    for index = 1, #supplied do
-      local token = supplied[index]
-      if not string.match(token, TOKEN_PATTERN) or seen[token] then
-        raise "invalid or duplicate WebSocket subprotocol"
-      end
-      seen[token] = true; result[index] = token
-    end
-  end
-  return result
-end
-local function copy_dial_headers(supplied: http.Headers?): http.Headers
-  local result = http.headers(nil)
-  if supplied then
-    local entries = supplied:all()
-    for index = 1, #entries do
-      local entry = entries[index]
-      if RESERVED_HEADERS[ascii_lower(entry.name)] then
-        raise "WebSocket dial headers contain a reserved handshake field"
-      end
-      result:add(entry.name, entry.contents)
-    end
-  end
-  return result
-end
 local function normalized_origin(contents: string): string?
   if contents == "null" or trim(contents) ~= contents then return nil end
   local parsed?, problem? = url.parse(contents .. "/")
@@ -286,7 +239,7 @@ local function verify_client_opening(response: http.ClientResponse, key: string,
     raise HandshakeError("WebSocket server rejected opening", response.status, http.headers(response.headers:all()))
   end
   local upgrades = upgrade_protocols(response.headers)
-  if response.version ~= "HTTP/1.1" or #upgrades ~= 1 or
+  if #upgrades ~= 1 or
      ascii_lower(upgrades[1]) ~= "websocket" or
      not has_token(response.headers, "Connection", "upgrade") or
      singleton(response.headers, "Sec-WebSocket-Accept") ~= accept_digest(key) or

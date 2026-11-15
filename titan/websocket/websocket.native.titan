@@ -4,14 +4,12 @@
 
 local async = import "async"
 local gc = import "gc"
-local http = import "http"
 local io = import "io"
 local iteration = import "iteration"
 local net = import "net"
 local reflect = import "reflect"
 local protobuf = import "protobuf"
 local ssl = import "ssl"
-local string = import "string"
 local timer = import "timer"
 local url = import "url"
 local uv = import "uv"
@@ -22,60 +20,9 @@ local const connection_transfer_fields: const {reflect.Type} = {
   reflect.Type.is_integer(), reflect.Type.is_string(),
 }
 
-local const DEFAULT_LIMIT = 1024 * 1024
-local const OPEN_TIMEOUT = 10000
-local const CONTROL_TIMEOUT = 5000
 local const FRAME_BYTES = 16 * 1024
-local const WORK_BYTES = 64 * 1024
 local const FRAME_BUDGET = 32
 
---- The text or binary kind of a complete WebSocket data message.
--- @field text Text variant.
--- @field binary Binary variant.
--- @usage standard-library-websocket.md#public-interface
-union MessageType
-  text()
-  binary()
-end
---- The text-message kind; outgoing text must contain valid UTF-8.
--- @usage standard-library-websocket.md#public-interface
-const TEXT = MessageType.text()
---- The binary-message kind; bytes may include embedded NUL.
--- @usage standard-library-websocket.md#public-interface
-const BINARY = MessageType.binary()
-
---- A WebSocket protocol, state, or deadline failure with an optional close code.
--- @field kind Stable error-kind key.
--- @field operation Operation that reported the failure.
--- @field message Human-readable failure description.
--- @field close_code Protocol Close code, or nil when no code applies.
--- @usage standard-library-websocket.md#opening-policy-and-errors
-record Error
-  const kind: string
-  const operation: string
-  const message: string
-  const close_code: integer?
-end
---- A rejected or failed opening handshake with optional HTTP status and headers.
--- @field message Human-readable failure description.
--- @field status HTTP rejection status, or nil when no response status is available.
--- @field headers Received or emitted handshake headers, or nil when unavailable.
--- @usage standard-library-websocket.md#opening-policy-and-errors
-record HandshakeError
-  const message: string
-  const status: integer?
-  const headers: http.Headers?
-end
-
---- Validated copied client-opening options with finite positive limits and deadlines.
--- @usage standard-library-websocket.md#public-interface
-record DialOptions
-  local headers: http.Headers
-  local ca_file: string?
-  local protocols: {string}
-  local limit: integer
-  local timeout: integer
-end
 --- Validated copied server-opening, Origin, and subprotocol options.
 -- @usage standard-library-websocket.md#public-interface
 record AcceptOptions
@@ -83,32 +30,6 @@ record AcceptOptions
   local origins: {string}
   local limit: integer
   local timeout: integer
-end
-
-local function positive(supplied: integer?, fallback: integer,
-                        subject: string): integer
-  local result = supplied or fallback
-  if result <= 0 then raise subject .. " must be positive" end
-  return result
-end
-
---- Validate and snapshot client headers, trust, protocols, and opening limits.
--- @param headers Application handshake headers to validate and copy.
--- @param ca_file Optional PEM trust bundle replacing the default trust roots.
--- @param subprotocols Ordered case-sensitive subprotocol tokens to snapshot.
--- @param read_limit Positive incoming message-byte limit; nil defaults to 1 MiB.
--- @param handshake_timeout Positive opening deadline in milliseconds; nil defaults to 10000.
--- @return Validated immutable snapshot of the client options.
--- @usage standard-library-websocket.md#public-interface
-function DialOptions.new(headers: http.Headers?, ca_file: string?,
-                         subprotocols: ({string})?, read_limit: integer?,
-                         handshake_timeout: integer?): DialOptions
-  return {
-    headers = copy_dial_headers(headers), ca_file = ca_file,
-    protocols = copy_protocols(subprotocols),
-    limit = positive(read_limit, DEFAULT_LIMIT, "WebSocket read limit"),
-    timeout = positive(handshake_timeout, OPEN_TIMEOUT, "WebSocket opening timeout"),
-  }
 end
 
 --- Validate and snapshot server protocols, allowed origins, and opening limits.
@@ -126,16 +47,6 @@ function AcceptOptions.new(subprotocols: ({string})?,
     limit = positive(read_limit, DEFAULT_LIMIT, "WebSocket read limit"),
     timeout = positive(handshake_timeout, OPEN_TIMEOUT, "WebSocket opening timeout"),
   }
-end
-
-local function state_error(operation: string, message: string): Error
-  return Error("state", operation, message, nil)
-end
-local function wire_error(kind: string, message: string, code: integer): Error
-  return Error(kind, "websocket.read", message, code)
-end
-local function timeout_error(operation: string): Error
-  return Error("timeout", operation, "WebSocket deadline expired", nil)
 end
 
 do

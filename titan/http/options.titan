@@ -1,0 +1,138 @@
+--- HTTP cache policy; targets without a cache always perform network exchanges.
+-- @usage standard-library-http.md#client-requests
+union CacheMode
+  default()
+  no_store()
+  reload()
+  no_cache()
+  force_cache()
+  only_if_cached()
+end
+
+--- Ambient credential policy; native clients have no cookie jar.
+-- @usage standard-library-http.md#client-requests
+union CredentialsMode
+  omit()
+  same_origin()
+  include()
+end
+
+--- Request origin policy; native transports do not enforce CORS.
+-- @usage standard-library-http.md#client-requests
+union RequestMode
+  cors()
+  no_cors()
+  same_origin()
+end
+
+--- Redirect policy; nil defaults to manual natively and follow in browsers.
+-- @usage standard-library-http.md#client-requests
+union RedirectMode
+  follow()
+  error()
+  manual()
+end
+
+--- Validated copied request options, reusable without redirect mutations.
+-- @usage standard-library-http.md#client-requests
+record RequestOptions
+  local headers: Headers
+  local body: string?
+  local ca_file: string?
+  local cache: CacheMode?
+  local credentials: CredentialsMode?
+  local mode: RequestMode?
+  local redirect: RedirectMode?
+end
+
+local function cache_mode_string(mode: CacheMode?): string
+  case mode or CacheMode.default()
+  when default() then return "default"
+  when no_store() then return "no-store"
+  when reload() then return "reload"
+  when no_cache() then return "no-cache"
+  when force_cache() then return "force-cache"
+  when only_if_cached() then return "only-if-cached"
+  end
+end
+
+local function credentials_mode_string(mode: CredentialsMode?): string
+  case mode or CredentialsMode.same_origin()
+  when omit() then return "omit"
+  when same_origin() then return "same-origin"
+  when include() then return "include"
+  end
+end
+
+local function request_mode_string(mode: RequestMode?): string
+  case mode or RequestMode.cors()
+  when cors() then return "cors"
+  when no_cors() then return "no-cors"
+  when same_origin() then return "same-origin"
+  end
+end
+
+local function redirect_mode_string(mode: RedirectMode?, default_follow: boolean): string
+  local effective? = mode
+  if effective == nil then
+    if default_follow then effective = RedirectMode.follow()
+    else effective = RedirectMode.manual() end
+  end
+  case effective
+  when follow() then return "follow"
+  when error() then return "error"
+  when manual() then return "manual"
+  end
+end
+
+local function is_only_if_cached(mode: CacheMode?): boolean
+  case mode or CacheMode.default()
+  when only_if_cached() then return true
+  else return false
+  end
+end
+
+local function is_no_cors(mode: RequestMode?): boolean
+  case mode or RequestMode.cors()
+  when no_cors() then return true
+  else return false
+  end
+end
+
+local function is_redirect_status(status: integer): boolean
+  return status == 301 or status == 302 or status == 303 or
+         status == 307 or status == 308
+end
+
+local function validate_no_cors_method(method: string)
+  local normalized = lower_header_name(method)
+  if normalized ~= "get" and normalized ~= "head" and normalized ~= "post" then
+    raise "HTTP request mode 'no-cors' allows only GET, HEAD, or POST"
+  end
+end
+
+--- Validate request policy and copy supplied headers into an opaque snapshot.
+-- @param headers Optional application request headers to copy.
+-- @param body Optional in-memory request-body bytes.
+-- @param ca_file Optional PEM trust bundle replacing native default trust roots.
+-- @param cache Cache policy; nil uses the target's default.
+-- @param credentials Ambient credential policy; nil uses the target's default.
+-- @param mode Request origin policy; nil uses the target's default.
+-- @param redirect Redirect policy; nil uses the target's default.
+-- @return Validated request snapshot.
+-- @usage standard-library-http.md#client-requests
+function RequestOptions.new(headers: Headers?, body: string?, ca_file: string?,
+                            cache: CacheMode?, credentials: CredentialsMode?,
+                            mode: RequestMode?, redirect: RedirectMode?): RequestOptions
+  if is_only_if_cached(cache) then
+    case mode or RequestMode.cors()
+    when same_origin() then
+    else
+      raise "HTTP cache mode 'only-if-cached' requires request mode 'same-origin'"
+    end
+  end
+  return {
+    headers = copy_headers(headers), body = body, ca_file = ca_file,
+    cache = cache, credentials = credentials, mode = mode, redirect = redirect,
+  }
+end

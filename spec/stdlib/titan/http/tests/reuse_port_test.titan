@@ -42,8 +42,8 @@ local function reused_http_listener(encrypted: boolean)
   local client = http.Client.new()
   defer client:close()
   local response = client:get(scheme .. "://127.0.0.1:" ..
-                             string.tostring(port) .. "/", nil,
-                             support.TRUST_ROOT)
+                             string.tostring(port) .. "/",
+                             http.RequestOptions { ca_file = support.TRUST_ROOT })
   defer response:close()
   test.assert(response.status == 200 and
               support.read_response(response) == "survivor",

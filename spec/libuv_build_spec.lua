@@ -2512,7 +2512,7 @@ printf '%s/%s\n' "$directory" "$object"
         assert.truthy(async:find("uv.queue_work(current_loop()", 1, true))
         assert.falsy(work:find("await_cancellable", 1, true), work)
         assert.falsy(async:find("type Task = uv.", 1, true), async)
-        local http = read_file("titan/http/server.titan")
+        local http = read_file("titan/http/server.native.titan")
         assert.truthy(http:find("async.run<|Request?, value|>(", 1, true), http)
         assert.truthy(http:find("async.run(function (): nil", 1, true), http)
     end)
@@ -2678,7 +2678,7 @@ int main(void) {
     end)
 
     it("keeps HTTP parser storage, callbacks, and policy in Titan", function()
-        local path = "titan/http/native.titan"
+        local path = "titan/http/parser.native.titan"
         local native = read_file(path)
         local ast, parse_error = parser.parse(path, native)
         assert.truthy(ast, parse_error and parser.error_to_string(parse_error))
@@ -3081,12 +3081,13 @@ int main(void) {
                 "titan/async/runtime.native.titan", "titan/async/runtime.browser.titan",
                 "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
-                "titan/http/http.native.titan", "titan/http/client.titan",
-                "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
-                "titan/websocket/websocket.native.titan", "titan/websocket/handshake.titan",
-                "titan/websocket/connection.titan", "titan/websocket/frames.titan",
-                "titan/websocket/utf8.titan", "titan/websocket/native.titan",
+                "titan/http/http.native.titan", "titan/http/client.native.titan",
+                "titan/http/headers.titan", "titan/http/options.titan", "titan/http/parser.native.titan",
+                "titan/http/pool.native.titan", "titan/http/server.native.titan",
+                "titan/http/transfer.native.titan", "titan/http/upgrade.native.titan",
+                "titan/websocket/websocket.native.titan", "titan/websocket/handshake.native.titan",
+                "titan/websocket/connection.native.titan", "titan/websocket/frames.native.titan",
+                "titan/websocket/types.titan", "titan/websocket/utf8.titan", "titan/websocket/crypto.native.titan",
                 "titan/os/os.titan",
                 "titan/os/clock.native.titan", "titan/os/clock.browser.titan",
                 "titan/os/environment.native.titan", "titan/os/environment.browser.titan",
@@ -3251,7 +3252,7 @@ int main(void) {
                 "local actual_private_key_file = certificate_file", 1, true),
             ssl)
 
-        local http = read_file("titan/http/server.titan")
+        local http = read_file("titan/http/server.native.titan")
         assert.truthy(http:find("local actual_port = 80", 1, true), http)
         assert.truthy(http:find("local actual_port = 443", 1, true), http)
     end)
@@ -4102,9 +4103,10 @@ esac
                 "titan/coroutine.titan",
                 "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
-                "titan/http/http.native.titan", "titan/http/client.titan",
-                "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
+                "titan/http/http.native.titan", "titan/http/client.native.titan",
+                "titan/http/headers.titan", "titan/http/options.titan", "titan/http/parser.native.titan",
+                "titan/http/pool.native.titan", "titan/http/server.native.titan",
+                "titan/http/transfer.native.titan", "titan/http/upgrade.native.titan",
                 "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
