@@ -66,7 +66,8 @@ options.
 
 A union constructor allocates a fresh value and union equality is identity,
 so no option is compared with `==`. Private helpers in `options.titan`
-substitute the default and dispatch with `case`:
+return the nil default directly without allocating a temporary union, and
+dispatch present modes with `case`:
 
 | Helper | Result |
 | --- | --- |
@@ -78,9 +79,10 @@ substitute the default and dispatch with `case`:
 | `is_redirect_status(status)` | whether the status is 301, 302, 303, 307, or 308 |
 | `validate_no_cors_method(method)` | raises unless the ASCII-lowercased method is `get`, `head`, or `post` |
 
-The native client uses the predicates and matches `policy.redirect or
-RedirectMode.manual()` directly; the browser client uses the string helpers to
-build `RequestInit` values, passing `true` for the browser's redirect default.
+The native client returns a redirect directly when its mode is nil (the
+manual default), and matches a present `policy.redirect` with `case`. The
+browser client uses the string helpers to build `RequestInit` values, passing
+`true` for the browser's redirect default.
 
 Native `Client:request` runs `async.checkpoint()`, validates the method token,
 parses the URL, substitutes `RequestOptions()` for absent options, applies

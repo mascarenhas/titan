@@ -329,11 +329,11 @@ function Client:request(method: string, source_url: string,
     local returned = false
     defer if not returned then response:close() end
     response.redirected = hops > 0
-    if not is_redirect_status(response.status) then
+    if not is_redirect_status(response.status) or policy.redirect == nil then
       returned = true
       return response
     end
-    case policy.redirect or RedirectMode.manual()
+    case policy.redirect
     when manual() then
       returned = true
       return response
