@@ -14,7 +14,7 @@ local function arm(generation: string, source: os.InputOutputStream)
   local rejected = false
   do source:to_transfer_payload()
   catch
-    test.assert(string.find(string.tostring(error), "too many open files", 1, true) ~= nil,
+    test.assert(string.find(string.tostring(error), "too many open files", 1) ~= nil,
                 "expected the armed second-dup failure")
     rejected = true
   end

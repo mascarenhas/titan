@@ -1421,7 +1421,7 @@ local function codec_errors_agree(generated: string, reflective: string): boolea
   if string.sub(generated, 1, 10) ~= "protobuf: " and
       string.sub(generated, 1, 16) ~= "error protobuf: " then return false end
   if string.sub(generated, -3) ~= "..." or
-      string.find(generated, " at $", 1, true) == nil then return false end
+      string.find(generated, " at $", 1) == nil then return false end
   return string.sub(generated, 1, -4) == string.sub(reflective, 1, #generated - 3)
 end
 
@@ -1432,7 +1432,7 @@ local function check_same_error(context: test.Context, name: string,
     local generated = raised_message(action)
     local reflective = reflective_message(action)
     test.assert(codec_errors_agree(generated, reflective), generated .. " ~= " .. reflective)
-    test.assert(string.find(generated, expected, 1, true) ~= nil, generated)
+    test.assert(string.find(generated, expected, 1) ~= nil, generated)
   end)
 end
 
@@ -1853,7 +1853,7 @@ function test_generated_codecs_hand_off_field_occurrences(context: test.Context)
   local both = oversized .. string.char(16, 1)
   check_decode_outcome(context, "decode_error_before_conversion", both, embedded_type)
   test.assert(string.find(decode_outcome(both, embedded_type, true),
-      "unexpected wire type", 1, true) ~= nil, "a later field must fail first")
+      "unexpected wire type", 1) ~= nil, "a later field must fail first")
 end
 
 -- A hook below a generated frame drops the last reference to that frame's
@@ -2013,7 +2013,7 @@ function test_generated_codecs_depth_boundaries(context: test.Context)
     local generated = decode_outcome(node_chain_bytes(CODEC_DEPTH_LIMIT), node_type, true)
     test.assert(codec_errors_agree(generated,
         decode_outcome(node_chain_bytes(CODEC_DEPTH_LIMIT), node_type, false)), generated)
-    test.assert(string.find(generated, CODEC_DEPTH_ERROR, 1, true) ~= nil, generated)
+    test.assert(string.find(generated, CODEC_DEPTH_ERROR, 1) ~= nil, generated)
   end)
   context:run("partless_union_at_" .. CODEC_DEPTH_LIMIT, function (_: test.Context)
     -- A partless union at the raw depth budget has no deeper field probe.
@@ -2068,8 +2068,8 @@ function test_value_fields_use_one_dynamic_wire(context: test.Context)
   end)
   context:run("schema", function (_: test.Context)
     local output = protobuf.schema(descriptor(AnyValue(nil)))
-    test.assert(string.find(output, "message TitanValue {", 1, true) ~= nil, output)
-    test.assert(string.find(output, "TitanValue f_item = 1;", 1, true) ~= nil, output)
+    test.assert(string.find(output, "message TitanValue {", 1) ~= nil, output)
+    test.assert(string.find(output, "TitanValue f_item = 1;", 1) ~= nil, output)
   end)
 end
 

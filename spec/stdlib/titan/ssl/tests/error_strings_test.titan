@@ -29,7 +29,7 @@ function test_ssl_preserves_native_code_without_loaded_error_strings(
     command.program(workspace, "ssl_error_strings_app"),
   }, workspace)
   if why == "exit" and status == 77 then
-    test.assert(string.find(output, "capability: ", 1, true) == 1,
+    test.assert(string.find(output, "capability: ", 1) == 1,
                 "no-error-strings child omitted its capability reason")
     test.skip(string.gsub(output, "[\r\n]+$", function (_: string): string return "" end))
   end
