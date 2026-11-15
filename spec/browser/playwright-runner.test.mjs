@@ -4,7 +4,7 @@ import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {mkdtemp, mkdir, rm, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {join, relative} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {assetPath, parseOptions} from './playwright-run.mjs';
 import {Monitor, within} from '../../titan-runtime/browser/titan-browser-run.mjs';
@@ -110,13 +110,14 @@ const repository = fileURLToPath(new URL('../../', import.meta.url));
 const execute = promisify(execFile);
 for (const engine of (process.env.TITAN_PLAYWRIGHT_TEST_ENGINES ?? '').split(',').filter(Boolean)) {
   for (const persistent of engine === 'webkit' ? [false, true] : [false]) {
-    test(`Playwright ${engine}${persistent ? ' persistent' : ''} runs the shared page, preserves bytes and retires failed pages`, async () => {
+    test(`Playwright ${engine}${persistent ? ' persistent via symlinked root' : ''} runs the shared page, preserves bytes and retires failed pages`, async () => {
       await mkdir(join(repository, 'tmp'), {recursive: true});
       const profile = persistent ? await mkdtemp(join(repository, 'tmp', 'playwright-context-')) : null;
+      const root = profile ? join(profile, 'root') : repository;
       async function fixture(name) {
         const args = [fileURLToPath(new URL('./playwright-run.mjs', import.meta.url)),
-          '--engine', engine, '--root', repository, '--timeout', '15000', '--grace', '0',
-          ...(profile ? ['--persistent-context', profile] : []),
+          '--engine', engine, '--root', root, '--timeout', '15000', '--grace', '0',
+          ...(profile ? ['--persistent-context', join(root, relative(repository, profile), 'user-data')] : []),
           fileURLToPath(new URL(`../fixtures/browser_playwright/${name}.mjs`, import.meta.url))];
         let output;
         try {
@@ -137,6 +138,7 @@ for (const engine of (process.env.TITAN_PLAYWRIGHT_TEST_ENGINES ?? '').split(','
         return output;
       }
       try {
+        if (profile) await symlink(repository, root, 'dir');
         const success = await fixture('context');
         assert.equal(success.status, 0, success.stderr.toString());
         assert.deepEqual(success.stdout, Buffer.from([65, 0, 255, 10]));

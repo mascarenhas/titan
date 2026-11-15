@@ -2,7 +2,7 @@
 import {createServer} from 'node:http';
 import {readFile, realpath, stat} from 'node:fs/promises';
 import {createRequire} from 'node:module';
-import {dirname, join, relative, resolve, sep} from 'node:path';
+import {basename, dirname, join, relative, resolve, sep} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 // Shared supervision intentionally retains the titan-browser-run diagnostic prefix.
 import {Monitor, within} from '../../titan-runtime/browser/titan-browser-run.mjs';
@@ -78,7 +78,10 @@ async function run(options) {
       !within(root, file) || !file.endsWith('.mjs')) {
     throw new Error('FILE must be a regular .mjs file beneath --root');
   }
-  const profile = options['persistent-context'] && resolve(options['persistent-context']);
+  const requestedProfile = options['persistent-context'] && resolve(options['persistent-context']);
+  // The profile may not exist yet; its parent does.
+  const profile = requestedProfile &&
+    join(await realpath(dirname(requestedProfile)), basename(requestedProfile));
   if (profile && !within(root, profile)) throw new Error('--persistent-context must be beneath --root');
   const sdk = await realpath(resolve(options.sdk ??
     fileURLToPath(new URL('../../titan-runtime/browser/', import.meta.url))));
