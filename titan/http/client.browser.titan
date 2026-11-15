@@ -9,6 +9,11 @@ local record FetchSession
 end
 
 --- Received Fetch metadata and an owned decoded streaming response body.
+-- @field status HTTP status number, or zero for a filtered response.
+-- @field reason HTTP reason phrase.
+-- @field headers Exposed headers, preserving insertion order.
+-- @field url Final URL, or nil for an opaque response.
+-- @field redirected Whether at least one redirect was followed.
 -- @usage standard-library-http.md#client-requests
 record ClientResponse
   status: integer
@@ -164,6 +169,7 @@ local function fetch_request_headers(parsed: url.Url, policy: RequestOptions): {
 end
 
 --- Create an unbound client, including in synchronous child states.
+-- @return A fresh unbound Client.
 -- @usage standard-library-http.md#client-requests
 function Client.new(): Client
   return {bound = false, closed = false, remove_close_listener = nil}
@@ -233,6 +239,10 @@ local function fetch_response(session: FetchSession, head: string,
 end
 
 --- Request a URL with Fetch policy and an in-memory optional body.
+-- @param method HTTP token selecting the request method.
+-- @param source_url Absolute URL text.
+-- @param options Optional validated request snapshot.
+-- @return Response metadata and streaming body; the caller owns closing it.
 -- @usage standard-library-http.md#client-requests
 function Client:request(method: string, source_url: string, options: RequestOptions?): ClientResponse
   self:bind()
@@ -278,6 +288,9 @@ function Client:request(method: string, source_url: string, options: RequestOpti
 end
 
 --- Request a bodyless GET.
+-- @param source_url Absolute URL text.
+-- @param options Optional validated request snapshot without a body.
+-- @return Response metadata and streaming body; the caller owns closing it.
 -- @usage standard-library-http.md#client-requests
 function Client:get(source_url: string, options: RequestOptions?): ClientResponse
   async.checkpoint()
@@ -286,12 +299,19 @@ function Client:get(source_url: string, options: RequestOptions?): ClientRespons
 end
 
 --- Request through the active Runtime's default client.
+-- @param method HTTP token selecting the request method.
+-- @param source_url Absolute URL text.
+-- @param options Optional validated request snapshot.
+-- @return Response metadata and streaming body; the caller owns closing it.
 -- @usage standard-library-http.md#client-requests
 function request(method: string, source_url: string, options: RequestOptions?): ClientResponse
   return default_http_client():request(method, source_url, options)
 end
 
 --- Request a bodyless GET through the active Runtime's default client.
+-- @param source_url Absolute URL text.
+-- @param options Optional validated request snapshot without a body.
+-- @return Response metadata and streaming body; the caller owns closing it.
 -- @usage standard-library-http.md#client-requests
 function get(source_url: string, options: RequestOptions?): ClientResponse
   return default_http_client():get(source_url, options)
@@ -308,12 +328,13 @@ catch
 end
 
 --- Read decoded body bytes; wire Content-Length does not bound decoded input.
+-- @return Copied bytes, or nil at EOF or after close.
 -- @usage standard-library-http.md#client-requests
 function ClientResponse:read(): string?
   async.checkpoint()
-  if self.reading then raise "HTTP response already has a waiting reader" end
+  if self.reading then raise "HTTP response already has a reader" end
   self.reading = true
-  defer do self.reading = false end
+  defer self.reading = false
   if #self.excess > 0 then
     local chunk = self.excess
     self.excess = ""
@@ -323,13 +344,16 @@ function ClientResponse:read(): string?
 end
 
 --- Read through a binary delimiter, retaining any suffix for later reads.
+-- @param delimiter Nonempty byte delimiter to include or remove.
+-- @param chop Remove the delimiter when true; nil or false retains it.
+-- @return Copied bytes, or nil at EOF or after close.
 -- @usage standard-library-http.md#client-requests
 function ClientResponse:read_until(delimiter: string, chop: boolean?): string?
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
   async.checkpoint()
-  if #delimiter == 0 then raise "delimiter must not be empty" end
-  if self.reading then raise "HTTP response already has a waiting reader" end
+  if self.reading then raise "HTTP response already has a reader" end
   self.reading = true
-  defer do self.reading = false end
+  defer self.reading = false
   local builder = string.writer()
   local pending = self.excess
   self.excess = ""

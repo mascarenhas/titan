@@ -1,14 +1,9 @@
 local iteration = import "iteration"
 
-local function browser_header_rejection(name: string, contents: string)
-  local rejected = false
-  do
+local function browser_header_rejection(name: string, contents: string, expected: string)
+  assert_options_error(function ()
     http.get("http://127.0.0.1:1", http.RequestOptions {headers = http.headers({http.Header(name, contents)})})
-  catch
-    rejected = true
-    test.assert(error is string, "browser argument validation lost string identity")
-  end
-  test.assert(rejected, "browser accepted a forbidden request header")
+  end, expected)
 end
 
 function test_browser_http_forbidden_headers(context: test.Context)
@@ -18,7 +13,12 @@ function test_browser_http_forbidden_headers(context: test.Context)
     "Transfer-Encoding", "Upgrade", "Via", "pRoXy-Value", "sEc-Value"}
   for _, name in iteration.ipairs(names) do
     context:run(name, function (_: test.Context)
-      runtime_test.run(function () browser_header_rejection(name, "test") end)
+      runtime_test.run(function ()
+        local expected = "HTTP request header '" .. name .. "' is forbidden on the browser target"
+        if name == "Expect" then expected = "HTTP client requests do not support Expect" end
+        if name == "Transfer-Encoding" then expected = "HTTP client requests do not support Transfer-Encoding" end
+        browser_header_rejection(name, "test", expected)
+      end)
     end)
   end
 end
@@ -28,7 +28,10 @@ function test_browser_http_forbidden_method_override(context: test.Context)
   for index = 1, #values do
     local contents = values[index]
     context:run("case_" .. index, function (_: test.Context)
-      runtime_test.run(function () browser_header_rejection("X-HTTP-Method-Override", contents) end)
+      runtime_test.run(function ()
+        browser_header_rejection("X-HTTP-Method-Override", contents,
+          "HTTP request header 'X-HTTP-Method-Override' is forbidden on the browser target")
+      end)
     end)
   end
 end
@@ -47,8 +50,10 @@ function test_browser_http_method_body_ca_validation(_: test.Context)
     assert_options_error(function ()
       http.get("http://127.0.0.1:1", http.RequestOptions {ca_file = "unused.pem"})
     end, "HTTP ca_file is unavailable on the browser target")
-    browser_header_rejection("Host", "other.example")
-    browser_header_rejection("Content-Length", "1")
+    browser_header_rejection("Host", "other.example",
+      "HTTP custom Host header is unavailable on the browser target")
+    browser_header_rejection("Content-Length", "1",
+      "HTTP Content-Length does not match the request body")
   end)
 end
 

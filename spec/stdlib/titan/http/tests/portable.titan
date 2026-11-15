@@ -79,3 +79,15 @@ function test_request_validation_precedes_transport(_: test.Context)
     test.assert(rejected, "HTTP accepted a WebSocket URL")
   end)
 end
+
+function test_client_close_rejects_requests(_: test.Context)
+  runtime_test.run(function ()
+    local client = http.Client()
+    client:close()
+    client:close()
+    assert_options_error(function () client:get("http://127.0.0.1:1") end,
+      "HTTP Client is closed")
+    assert_options_error(function () client:request("POST", "http://127.0.0.1:1") end,
+      "HTTP Client is closed")
+  end)
+end
