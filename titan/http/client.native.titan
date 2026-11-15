@@ -166,7 +166,7 @@ local function remove_dot_segments(path: string): string
     else
       local start = index
       if string.byte(path, index) == 47 then start = start + 1 end
-      local slash? = string.find(path, "/", start, true)
+      local slash? = string.find(path, "/", start)
       local last = (slash or (#path + 1)) - 1
       segments[#segments + 1] = string.sub(path, index, last)
       index = last + 1
@@ -179,10 +179,10 @@ end
 
 local function resolve_redirect(base: url.Url, location: string): url.Url
   local reference = trim_header_value(location)
-  local fragment? = string.find(reference, "#", 1, true)
+  local fragment? = string.find(reference, "#", 1)
   if fragment then reference = string.sub(reference, 1, fragment - 1) end
   local query: string? = nil
-  local question? = string.find(reference, "?", 1, true)
+  local question? = string.find(reference, "?", 1)
   if question then
     query = string.sub(reference, question + 1)
     reference = string.sub(reference, 1, question - 1)
@@ -197,7 +197,7 @@ local function resolve_redirect(base: url.Url, location: string): url.Url
   local authority = base.authority
   local path = reference
   if string.sub(reference, 1, 2) == "//" then
-    local slash? = string.find(reference, "/", 3, true)
+    local slash? = string.find(reference, "/", 3)
     authority = string.sub(reference, 3, (slash or (#reference + 1)) - 1)
     path = ""
     if slash then path = string.sub(reference, slash) end
@@ -208,9 +208,9 @@ local function resolve_redirect(base: url.Url, location: string): url.Url
     if query == nil then query = base.query end
   elseif string.sub(path, 1, 1) ~= "/" then
     -- A relative reference's first segment cannot contain a colon.
-    local slash? = string.find(path, "/", 1, true)
+    local slash? = string.find(path, "/", 1)
     local first = string.sub(path, 1, (slash or (#path + 1)) - 1)
-    if string.find(first, ":", 1, true) then
+    if string.find(first, ":", 1) then
       raise request_policy_error("HTTP redirect Location is malformed")
     end
     local directory = string.match(base.path, "^.*/"):whole()

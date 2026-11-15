@@ -440,19 +440,19 @@ local function start_client_framing(first_port: integer): async.Task
 
     support.outcome = "client-lowercase-head"
     local lowercase_head = http.request(
-      "head", base .. "/lowercase-head", nil, nil, nil)
+      "head", base .. "/lowercase-head")
     defer lowercase_head:close()
     test.assert(support.read_response(lowercase_head) == "body",
           "HTTP client treated a case-distinct method as HEAD")
 
     support.outcome = "client-eof"
-    local eof_response = http.get(base .. "/eof", nil, nil)
+    local eof_response = http.get(base .. "/eof")
     defer eof_response:close()
     test.assert(support.read_response(eof_response) == "eof-body",
           "HTTP client did not read the EOF-delimited body")
 
     support.outcome = "client-truncated"
-    local truncated = http.get(base .. "/truncated", nil, nil)
+    local truncated = http.get(base .. "/truncated")
     defer truncated:close()
     local truncated_failed = false
     do
@@ -466,7 +466,7 @@ local function start_client_framing(first_port: integer): async.Task
     support.outcome = "client-malformed"
     local malformed_failed = false
     do
-      local malformed = http.get(base .. "/malformed", nil, nil)
+      local malformed = http.get(base .. "/malformed")
       defer malformed:close()
       malformed:close()
     catch
@@ -479,7 +479,7 @@ local function start_client_framing(first_port: integer): async.Task
     local informational_failed = false
     do
       local informational = http.get(
-        base .. "/informational-eof", nil, nil)
+        base .. "/informational-eof")
       defer informational:close()
       informational:close()
     catch
