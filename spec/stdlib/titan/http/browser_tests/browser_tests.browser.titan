@@ -1,0 +1,106 @@
+-- Live Fetch behavior; the host owns peers, verified trust and cancellation
+-- barriers. All HTTP assertions and response consumption remain in Titan.
+local async = import "async"
+local browser = import "browser"
+local http = import "http"
+local io = import "io"
+local iteration = import "iteration"
+local lua = import "lua"
+local math = import "math"
+local os = import "os"
+local runtime_test = import "support.runtime.titan"
+local string = import "string"
+local test = import "test"
+local url = import "url"
+
+local type Value = browser.BrowserValue
+local type Action = function (): ()
+
+local function environment(name: string): string
+  local contents? = os.getenv(name)
+  if contents == nil then raise "missing browser network fixture variable: " .. name end
+  return contents
+end
+
+local function server(): string return environment("TITAN_TEST_HTTP_URL") end
+local function raw_server(): string return environment("TITAN_TEST_RAW_URL") end
+local function in_browser(): boolean return environment("TITAN_TEST_BROWSER") == "1" end
+
+local function all(response: http.ClientResponse): string
+  local writer = string.writer()
+  for chunk in response:read do writer:write(chunk) end
+  return writer:drain()
+catch
+  if not (error is async.OperationError) then raise end
+  local failure: async.OperationError = error
+  raise failure.operation .. ": " .. failure.message
+end
+
+local function one_header(name: string, contents: string): http.Headers
+  local result = http.headers()
+  result:add(name, contents)
+  return result
+end
+
+local function get_body(source: string, options: http.RequestOptions?): string
+  local response = http.get(source, options)
+  defer response:close()
+  test.assert(response.status == 200, "unexpected status at " .. source)
+  return all(response)
+end
+
+local function operation_error(action: Action, operation: string)
+  local caught = false
+  do
+    action()
+  catch
+    if not (error is async.OperationError) then raise end
+    local failure: async.OperationError = error
+    test.assert(failure.name == "EIO" and failure.operation == operation,
+      "wrong Fetch failure identity: " .. failure.name .. " / " .. failure.operation)
+    caught = true
+  end
+  test.assert(caught, "expected Fetch " .. operation .. " failure")
+end
+
+local function string_error(action: Action)
+  local caught = false
+  do action()
+  catch
+    if not (error is string) then raise end
+    caught = true
+  end
+  test.assert(caught, "expected synchronous request validation failure")
+end
+
+local function host_note(text: string)
+  local target = browser.binding("net_note")
+  defer target:close()
+  target:call(Value.is_string(text))
+end
+
+-- callTask supplies an AbortSignal independently of instance disposal.
+local function request_entry(...: Value): Value
+  local phase = ""
+  local source = ""
+  case ...[1] when is_string(item) then phase = item end
+  case ...[2] when is_string(item) then source = item end
+  if phase == "metadata" then
+    operation_error(function () http.get(source) end, "http.request")
+    return Value.is_string("metadata EIO")
+  end
+  local response = http.get(source)
+  defer response:close()
+  if phase == "body" then
+    test.assert(response:read_until("\n") == "first\n", "held body did not arrive incrementally")
+    host_note("body-ready")
+    response:read()
+  end
+  return Value.is_integer(response.status)
+end
+
+do
+  local target = browser.binding("net_publish")
+  defer target:close()
+  target:call(Value.is_callable(request_entry))
+end

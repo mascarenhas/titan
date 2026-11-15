@@ -171,6 +171,8 @@ end
 local function Client:bind()
   async.checkpoint()
   if self.closed then raise "HTTP Client is closed" end
+  -- One browser owner state has one active Runtime. Its close listeners run
+  -- before another Runtime can start, so a bound client cannot migrate.
   if not self.bound then
     self.remove_close_listener = async.add_close_listener(function ()
       if default_client == self then default_client = nil end

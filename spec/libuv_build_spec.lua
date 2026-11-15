@@ -6344,6 +6344,7 @@ printf '%s\n' "${schedule[@]}"
                     "spec/coder/browser_entry_gate_spec.lua",
                     "spec/coder/browser_bridge_spec.lua",
                     "spec/coder/browser_scheduler_spec.lua",
+                    "spec/coder/browser_net_spec.lua",
                     "spec/coder/browser_stdlib_gate_spec.lua",
                     "spec/coder/browser_fixtures_spec.lua",
                     "spec/minicoro_spec.lua",
@@ -6382,6 +6383,7 @@ printf '%s\n' "${schedule[@]}"
                 "make titan-stdlib-browser-test", stdlib_sdk, true))
             local stdlib_gate = assert(browser_stdlib_job:find("gate_specs=(", stdlib_suite, true))
             assert.is_true(stdlib_sdk < stdlib_suite and stdlib_suite < stdlib_gate)
+            assert.truthy(browser_stdlib_job:find("out/browser-net/**", 1, true))
             assert.falsy(linux_workflow:find("HigherRendererMemoryLimit", 1, true))
             assert.falsy(browser_stdlib_job:find("titan-stdlib-chrome", 1, true))
             for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job }) do
@@ -6460,6 +6462,9 @@ printf '%s\n' "${schedule[@]}"
                 "spec/browser/build-trace.lua",
                 "spec/browser/build-bridge.lua",
                 "${{ env.TITAN_BRIDGE_OUTPUT }}",
+                "${{ env.TITAN_NET_OUTPUT }}",
+                "spec/browser/build-net.lua",
+                "spec/fixtures/browser_net/run.mjs",
                 "spec/browser/playwright-run.mjs",
                 "spec/browser/playwright-runner.test.mjs",
                 "--allow-degraded-trace",
@@ -6505,6 +6510,23 @@ printf '%s\n' "${schedule[@]}"
             local bridge_builder = read_file("spec/browser/build-bridge.lua")
             assert.truthy(bridge_builder:find(
                 '{name="public-states", owner="browser.public_state_tests", testing=true,', 1, true), bridge_builder)
+            local net_build = named_step(playwright_job,
+                "Build the live browser HTTP client fixtures")
+            assert.falsy(net_build:find("if:", 1, true), net_build)
+            assert.truthy(net_build:find(
+                'lua -E spec/browser/build-net.lua "$TITAN_NET_OUTPUT"', 1, true))
+            local net_gate = named_step(playwright_job,
+                "Run live HTTP and HTTPS clients on the managed engine")
+            assert.falsy(net_gate:find("if:", 1, true), net_gate)
+            for _, contract in ipairs({
+                '"$TITAN_NODE" spec/fixtures/browser_net/run.mjs',
+                '--root "$TITAN_NET_OUTPUT" --engine "$TITAN_TRACE_ENGINE"',
+                '--sdk "$PREFIX/lib/titan-browser/0.6"',
+                '--runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD"',
+                "browser-playwright-net.log",
+            }) do
+                assert.truthy(net_gate:find(contract, 1, true), contract)
+            end
             local vite_install = named_step(playwright_job,
                 "Install the pinned Vite deployment dependency")
             assert.truthy(vite_install:find("if: matrix.engine == 'chromium'", 1, true))

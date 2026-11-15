@@ -1,0 +1,23 @@
+import create from './http.mjs';
+
+const parameters = new URL(location.href).searchParams;
+const env = JSON.parse(parameters.get('config'));
+const token = parameters.get('token');
+const chunks = [], errors = [];
+const instance = create({env, locateFile: name => new URL(name, import.meta.url).href,
+  bindings: {net_publish() {}, net_note() {}},
+  stdout(bytes) { chunks.push(new TextDecoder().decode(bytes)); },
+  stderr(bytes) { chunks.push(new TextDecoder().decode(bytes)); },
+  onNotificationError(error) { errors.push(error); }});
+let ok = false, passed = 0;
+try {
+  const result = await instance.run(['--filter=^http[.]browser_tests[.]test_same_origin_cache_modes$']);
+  const match = chunks.join('').match(/\[  PASSED  \] (\d+) tests?\./);
+  passed = match ? Number(match[1]) : 0;
+  ok = result.kind === 'returned' && result.status === 0 && passed === 1 && errors.length === 0;
+} catch (error) { chunks.push(error.stack || String(error)); }
+finally {
+  try { await instance.dispose(); } catch (error) { ok = false; chunks.push(String(error)); }
+  if (errors.length) { ok = false; chunks.push(JSON.stringify(errors)); }
+}
+parent.postMessage({token, ok, passed, output: chunks.join('')}, new URL(document.referrer).origin);

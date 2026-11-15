@@ -73,3 +73,17 @@ function test_browser_http_child_state_construction_and_refusal(_: test.Context)
   defer loader:close()
   state:run_from_loader(loader, "=http-child-state")
 end
+
+function test_browser_http_client_cannot_migrate_between_runtimes(_: test.Context)
+  local client = http.Client()
+  defer client:close()
+  runtime_test.run(function ()
+    -- Binding precedes method validation and requires no network operation.
+    assert_options_error(function () client:request("TRACE", "http://127.0.0.1:1") end,
+      "HTTP method is forbidden on the browser target")
+  end)
+  runtime_test.run(function ()
+    assert_options_error(function () client:get("http://127.0.0.1:1") end,
+      "HTTP Client is closed")
+  end)
+end

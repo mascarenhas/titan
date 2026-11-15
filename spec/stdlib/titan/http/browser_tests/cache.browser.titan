@@ -1,0 +1,42 @@
+local function cached(key: string, mode: http.CacheMode?): string
+  return get_body(server() .. "/cacheable/" .. key,
+    http.RequestOptions(nil, nil, nil, mode, nil, http.RequestMode.same_origin()))
+end
+
+function test_same_origin_cache_modes(_: test.Context)
+  if os.getenv("TITAN_TEST_SAME_ORIGIN") ~= "1" then
+    test.skip("cache behavior runs in the native server's same-origin iframe")
+  end
+  runtime_test.run(function ()
+    for _, key in iteration.ipairs({"default-cache", "force-cache", "only-cache"}) do
+      test.assert(cached(key, http.CacheMode.default()) == "cached:1")
+      for _ = 1, 2 do
+        local mode = http.CacheMode.default()
+        if key == "force-cache" then mode = http.CacheMode.force_cache() end
+        if key == "only-cache" then mode = http.CacheMode.only_if_cached() end
+        test.assert(cached(key, mode) == "cached:1", "cached response was not reused: " .. key)
+      end
+      test.assert(get_body(server() .. "/hits/" .. key, nil) == "1:0", "cache hit reached the server")
+    end
+    for _, key in iteration.ipairs({"no-store", "reload"}) do
+      for index = 1, 2 do
+        local mode = http.CacheMode.no_store()
+        if key == "reload" then mode = http.CacheMode.reload() end
+        test.assert(cached(key, mode) == "cached:" .. index, key .. " reused a cached response")
+      end
+      test.assert(get_body(server() .. "/hits/" .. key, nil) == "2:0")
+    end
+    test.assert(cached("revalidate", http.CacheMode.default()) == "cached:1")
+    for _ = 1, 2 do
+      test.assert(cached("revalidate", http.CacheMode.no_cache()) == "cached:1",
+        "no-cache did not combine the conditional 304 with cached body bytes")
+    end
+    test.assert(get_body(server() .. "/hits/revalidate", nil) == "3:2", "no-cache skipped ETag revalidation")
+    for _ = 1, 2 do
+      operation_error(function () http.get(server() .. "/uncached/cache-miss",
+        http.RequestOptions(nil, nil, nil, http.CacheMode.only_if_cached(), nil,
+          http.RequestMode.same_origin())) end, "http.request")
+    end
+    test.assert(get_body(server() .. "/hits/cache-miss", nil) == "0:0", "only-if-cached miss performed network I/O")
+  end)
+end
