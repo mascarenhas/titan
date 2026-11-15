@@ -21,10 +21,16 @@ function test_methods_binary_headers_and_client_lifecycle(_: test.Context)
       test.assert(get_body(server() .. "/header/" .. name,
         http.RequestOptions(one_header(name, contents))) == contents, name .. " was silently stripped")
     end
-    for _, contents in iteration.ipairs({'"foo,TRACE,bar"', '"TRACE"', '"a\\"b,TRACE", POST'}) do
-      test.assert(get_body(server() .. "/header/X-HTTP-Method-Override",
-        http.RequestOptions(one_header("X-HTTP-Method-Override", contents))) == contents,
-        "quoted method override was stripped")
+    local engine = environment("TITAN_TEST_ENGINE")
+    local strips_quoted_list = engine == "firefox" or engine == "webkit"
+    for _, name in iteration.ipairs({"X-HTTP-Method", "X-HTTP-Method-Override", "X-Method-Override"}) do
+      for _, contents in iteration.ipairs({'"foo,TRACE,bar"', '"TRACE"', '"a\\"b,TRACE", POST'}) do
+        local received = get_body(server() .. "/header/" .. name, http.RequestOptions(one_header(name, contents)))
+        -- Firefox and WebKit split this quoted list and strip the whole field.
+        test.assert(received == contents or
+          (strips_quoted_list and contents == '"foo,TRACE,bar"' and received == ""),
+          name .. " changed quoted method override: " .. contents)
+      end
     end
     local parsed = url.parse(server())
     for _, mixed_case in iteration.ipairs({false, true}) do

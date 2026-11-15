@@ -34,6 +34,23 @@ function test_browser_http_forbidden_method_override(context: test.Context)
   end
 end
 
+function test_browser_http_quoted_method_override_is_allowed(context: test.Context)
+  for _, name in iteration.ipairs({"X-HTTP-Method", "X-HTTP-Method-Override", "X-Method-Override"}) do
+    for index, contents in iteration.ipairs({'"foo,TRACE,bar"', '"TRACE"', '"a\\"b,TRACE", POST'}) do
+      context:run(name .. "_" .. index, function (_: test.Context)
+        runtime_test.run(function ()
+          -- A later forbidden field proves Titan accepted the quoted override
+          -- without depending on the host's own request-header guard.
+          local fields = http.headers({http.Header(name, contents), http.Header("Cookie", "unreachable")})
+          assert_options_error(function ()
+            http.get("http://127.0.0.1:1", http.RequestOptions(fields))
+          end, "HTTP request header 'Cookie' is forbidden on the browser target")
+        end)
+      end)
+    end
+  end
+end
+
 function test_browser_http_method_body_ca_validation(_: test.Context)
   runtime_test.run(function ()
     for _, method in iteration.ipairs({"CONNECT", "tRaCe", "TRACK"}) do

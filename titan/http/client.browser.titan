@@ -208,7 +208,8 @@ local function fetch_response(session: FetchSession, head: string,
   if status == nil or (status ~= 0 and (status < 200 or status > 999)) then
     raise fetch_error("host fetch returned invalid response metadata", "http.request")
   end
-  if is_redirect_status(status) then
+  -- Some hosts expose an opaqueredirect body when Location is absent.
+  if is_redirect_status(status) or fields[5] == "opaqueredirect" then
     if redirect == "error" then
       raise fetch_error("HTTP redirect disallowed by RedirectMode.error", "http.request")
     elseif redirect == "manual" then
