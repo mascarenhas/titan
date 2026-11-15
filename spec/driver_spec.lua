@@ -13232,7 +13232,6 @@ describe("target-aware source resolver", function()
     local excluded_stdlib = {
         { "fs", "fs" }, { "net", "net" }, { "ssl", "ssl" },
         { "uv", "uv/uv", "tcp" },
-        { "http", "http/http", "headers" },
         { "websocket", "websocket/websocket", "types" },
         { "sqlite3", "sqlite3/sqlite3", "bindings" },
         { "thread", "thread/thread", "channel" },
@@ -13294,6 +13293,38 @@ describe("target-aware source resolver", function()
                 else
                     assert.equal("blocked", assert(blocked, part).kind, part)
                     assert.equal(stdlib_root .. "/titan/async/" .. part .. "." .. member .. ".titan",
+                        paths.to_slash(blocked.contributor), target .. " " .. part)
+                end
+            end
+        end
+    end)
+
+    it("composes titan.http from its shared main and the target's contributor members", function()
+        for _, target in ipairs(driver.SOURCE_LABELS) do
+            local selected = assert(driver.resolve_source(context(target), "titan.http", stdlib_root))
+            assert.equal("folder", selected.kind, target)
+            assert.equal(stdlib_root .. "/titan/http/http.titan", paths.to_slash(selected.main), target)
+            assert.equal(selected.main, selected.native_output, target)
+            local files = {}
+            for index, filename in ipairs(selected.files) do files[index] = paths.basename(filename) end
+            assert.same(target == "browser" and {
+                "http.titan", "client.browser.titan", "headers.titan", "options.titan",
+            } or {
+                "http.titan", "client.native.titan", "headers.titan", "native_imports.native.titan",
+                "options.titan", "parser.native.titan", "pool.native.titan",
+                "server.native.titan", "transfer.native.titan", "upgrade.native.titan",
+            }, files, target)
+            for _, part in ipairs({ "client", "headers", "options", "native_imports", "parser",
+                "pool", "server", "transfer", "upgrade" }) do
+                local blocked = driver.resolve_source(context(target), "titan.http." .. part, stdlib_root)
+                local shared = part == "headers" or part == "options"
+                if target == "browser" and not shared and part ~= "client" then
+                    assert.is_nil(blocked, part)
+                else
+                    assert.equal("blocked", assert(blocked, part).kind, part)
+                    assert.equal(selected.main, blocked.main, target .. " " .. part)
+                    local member = shared and "" or (target == "browser" and ".browser" or ".native")
+                    assert.equal(stdlib_root .. "/titan/http/" .. part .. member .. ".titan",
                         paths.to_slash(blocked.contributor), target .. " " .. part)
                 end
             end
