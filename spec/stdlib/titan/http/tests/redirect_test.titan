@@ -1,8 +1,9 @@
 local function add_redirect_cell(context: test.Context, status: integer,
                                   mode: http.RedirectMode, name: string,
-                                  with_location: boolean)
+                                  with_location: boolean, multiple: boolean?)
   local suffix = "_without_location"
   if with_location then suffix = "_with_location" end
+  if multiple then suffix = "_multiple_locations" end
   context:run("status_" .. status .. "_" .. name .. suffix, function (_: test.Context)
     run_reuse_case(function ()
       local hits = 0
@@ -11,6 +12,7 @@ local function add_redirect_cell(context: test.Context, status: integer,
         if request.url.path == "/start" then
           response:set_status(status)
           if with_location then response:add_header("Location", "/final") end
+          if multiple then response:add_header("Location", "/other") end
           response:set_header("Content-Length", "8")
           response:write("redirect")
         else
@@ -39,6 +41,16 @@ local function add_redirect_cell(context: test.Context, status: integer,
         else
           test.assert(response.status == status and not response.redirected)
           test.assert(response.url == base .. "/start")
+          local locations = response.headers:values("Location")
+          if with_location then
+            local expected = 1
+            if multiple then expected = 2 end
+            test.assert(#locations == expected and locations[1] == "/final",
+                        "manual response lost the wire Location header")
+            if multiple then test.assert(locations[2] == "/other", "manual response collapsed Location values") end
+          else
+            test.assert(#locations == 0, "response invented a Location header")
+          end
           test.assert(support.read_response(response) == "redirect")
           test.assert(hits == 1)
         end
@@ -58,6 +70,7 @@ function test_redirect_status_mode_location_matrix(context: test.Context)
     add_redirect_cell(context, status, http.RedirectMode.follow(), "follow", false)
     add_redirect_cell(context, status, http.RedirectMode.follow(), "follow", true)
   end
+  add_redirect_cell(context, 302, http.RedirectMode.manual(), "manual", true, true)
 end
 
 function test_redirect_native_default_is_manual(_: test.Context)
@@ -73,6 +86,25 @@ function test_redirect_native_default_is_manual(_: test.Context)
     defer response:close()
     test.assert(response.status == 302 and not response.redirected)
     test.assert(response.url == base .. "/start")
+    test.assert(response.headers:get("Location") == "/next")
+  end)
+end
+
+function test_redirect_error_accepts_non_redirect_response(_: test.Context)
+  run_reuse_case(function ()
+    local hits = 0
+    local base = reuse_http_server(false, 28200, function (_: http.Request, response: http.Response)
+      hits = hits + 1
+      response:set_header("Content-Length", "2")
+      response:write("ok")
+    end)
+    local client = http.Client()
+    defer client:close()
+    local response = client:get(base .. "/normal",
+      http.RequestOptions { redirect = http.RedirectMode.error() })
+    defer response:close()
+    test.assert(response.status == 200 and not response.redirected and hits == 1)
+    test.assert(response.url == base .. "/normal" and support.read_response(response) == "ok")
   end)
 end
 
