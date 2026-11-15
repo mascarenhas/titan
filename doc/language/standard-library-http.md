@@ -615,7 +615,8 @@ return the decoded body bytes, while `Content-Encoding` and `Content-Length`
 in `headers` still describe the bytes on the wire. Do not decompress again
 because of `Content-Encoding`, and do not bound reads by `Content-Length`. A
 body streams: each `read` returns the next chunk that the host delivers.
-Request bodies are one in-memory string; there are no streaming uploads.
+Request bodies are one in-memory string, sent byte for byte, NUL and invalid
+UTF-8 included; there are no streaming uploads.
 
 **Closing and cancellation.** `ClientResponse:close()` aborts the fetch at
 once without yielding, so it is safe in a cancellation `defer`, and there is
