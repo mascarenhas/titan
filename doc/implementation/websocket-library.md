@@ -276,6 +276,11 @@ After a successful `send`, while `buffered` reports more than 262,144 bytes,
 failure or retirement during the wait raises. A state error leaves the
 connection to the operation that closed it; any other failure after `send`
 (including cancellation) or an abnormal loss terminalizes it.
+These checks observe the host's current state, not remote delivery. Node may
+report a paused peer's FIN only after the peer resumes reading. WebKit can
+drain output to low water before reporting a remote Close or reset. Even with
+the final state check, an admitted write can therefore succeed while the host
+still reports OPEN; a subsequent write raises after the host reports loss.
 
 **Shutdown and close.** `shutdown` defaults to code 1000 and an empty reason,
 admits only 1000 and 3000 through 4999 (the browser's `close()` refuses 1001

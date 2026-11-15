@@ -299,6 +299,11 @@ the server received it. If the connection is closing, closed, or failed when
 `write` starts, after its yield, or while it waits, `write` raises the first
 failure or `Error("state", "websocket.write", ...)` instead of letting the
 browser drop the message silently.
+The host can report loss after its output queue drains, so a write may still
+return successfully while the host reports OPEN. Node can keep a paused,
+half-closed peer OPEN until that peer resumes reading; WebKit can drain queued
+data before reporting a remote Close or reset. A later write raises once the
+host reports the loss.
 
 **Closing.** `shutdown(code, reason, timeout_ms)` accepts code 1000, the
 default, and 3000 through 4999; any other code (the browser refuses 1001
