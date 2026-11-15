@@ -1,4 +1,4 @@
--- Build the native peer and the browser HTTP behavior image in one owned tree.
+-- Build native peers and the browser HTTP/WebSocket behavior images.
 local lfs = require "lfs"
 local process = require "titan-compiler.process"
 local path = require "titan-compiler.path"
@@ -31,10 +31,16 @@ local function compile(arguments, browser)
     assert(result.ok, result.output or result.diagnostic)
 end
 mkdir(output)
+mkdir(images)
 compile({"--tree", fixture, "--output", path.join(output, "native"),
     "--exe", path.join(output, "native/server"), "server"})
 compile({"--target", "browser", "--no-uv-bootstrap", "--test", "--tree", path.join(repository, "spec/stdlib/titan"),
-    "--output", images, "--exe", path.join(images, "http.mjs"), "http.browser_tests"}, true)
+    "--output", path.join(output, "objects/http"), "--exe", path.join(images, "http.mjs"), "http.browser_tests"}, true)
+compile({"--target", "browser", "--no-uv-bootstrap", "--test", "--tree", path.join(repository, "spec/stdlib/titan"),
+    "--c-source", path.join(fixture, "controls.c"),
+    "--output", path.join(output, "objects/websocket"), "--exe", path.join(images, "websocket.mjs"),
+    "websocket.browser_tests"}, true)
 copy("net.test.mjs")
 copy("same-origin.mjs")
+copy("websocket.test.mjs")
 io.stdout:write("BROWSER-NET " .. output .. " profile=" .. (os.getenv("TITAN_BUILD_PROFILE") or "production") .. "\n")

@@ -1,0 +1,155 @@
+local function assert_write_failure(observed: value, expected_kind: string?)
+  if not (observed is websocket.Error) then raise "blocked write did not raise a WebSocket error" end
+  local failure: websocket.Error = observed
+  test.assert(failure.operation == "websocket.write" and failure.close_code == nil,
+    "blocked write changed its error operation or Close metadata")
+  if expected_kind ~= nil then
+    test.assert(failure.kind == expected_kind, "blocked write raised " .. failure.kind)
+  else
+    test.assert(failure.kind == "state" or failure.kind == "abnormal", "blocked write raised " .. failure.kind)
+  end
+end
+
+local function blocked_write_case(id: string, action: string)
+  runtime_test.run(function ()
+    local source = raw(id, "paused")
+    local connection = websocket.connect(source)
+    defer connection:close()
+    local high, drains = metric("high"), metric("drains")
+    local completed = false
+    local attempted, returned = 0, 0
+    local failure: value = nil
+    local payload = string.rep("w", 8 * 1024 * 1024)
+    local remote = action ~= "resume" and action ~= "local"
+    if remote then
+      local target = browser.binding("ws_arm")
+      defer target:close()
+      target:call(Value.is_string(source), Value.is_string(id), Value.is_string(action))
+    end
+    local writer = async.run<|nil, value|>(function (): nil
+      do
+        for index = 1, 8 do
+          attempted = index
+          connection:write(websocket.BINARY, payload)
+          test.assert(metric("ready", source) == 1, "write returned success after the host reported transport loss")
+          returned = index
+        end
+        completed = true
+      catch failure = error end
+      return nil
+    end)
+    defer writer:cancel(async.CancellationReason.simple("writer test completed"))
+    local blocked = 0
+    if remote then
+      async.join(writer)
+      blocked = metric("armedSend", source)
+      test.assert(blocked > 0, "peer action did not observe the admitted write above high water")
+    else
+      wait_for(function (): boolean
+        return metric("buffered", source) > 262144 and metric("high") > high and not completed
+      end, "paused peer did not block a sent message above high water")
+      blocked = attempted
+      test.assert(not completed and returned < blocked and metric("send", source) > 0,
+        "writer was not blocked after a real send")
+      websocket_error(function () connection:write(websocket.TEXT, "duplicate writer") end,
+        "state", "websocket.write", nil)
+      if action == "resume" then control(id, "resume")
+      else
+        local before = metric("clock")
+        connection:close()
+        test.assert(metric("clock") - before < 1000, "local close waited for stalled output")
+      end
+      async.join(writer)
+    end
+    if action == "resume" then
+      if failure ~= nil then raise failure end
+      test.assert(completed and metric("drains") > drains,
+        "writer did not complete after draining through low water")
+    else
+      local exact = not remote or metric("exactWrite") == 1
+      test.assert(not completed and (not exact or returned < blocked),
+        "writer did not fail after the observed transport loss")
+      assert_write_failure(failure, nil)
+      -- Let the browser finish any queued wire drain only after the write failed.
+      control(id, "resume")
+    end
+  end)
+end
+
+function test_live_one_hundred_writes_allow_concurrent_timer_progress(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(live("echo"))
+    defer connection:close()
+    local ticks, completed = 0, false
+    local ticker = async.run<|nil, value|>(function (): nil
+      while not completed do timer.sleep(1); ticks = ticks + 1 end
+      return nil
+    end)
+    defer ticker:cancel(async.CancellationReason.simple("fairness test completed"))
+    for _index = 1, 100 do connection:write(websocket.TEXT, "fair") end
+    test.assert(ticks > 0, "write fairness yields starved the concurrent timer")
+    completed = true
+    async.join(ticker)
+    for _index = 1, 100 do
+      local kind?, data? = connection:read()
+      test.assert(kind == websocket.TEXT and data == "fair", "fair writes lost an echo")
+    end
+  end)
+end
+
+function test_live_local_close_during_write_fairness_yield_never_sends(_context: test.Context)
+  runtime_test.run(function ()
+    local source = live("echo")
+    local connection = websocket.connect(source)
+    defer connection:close()
+    local before = metric("send", source)
+    local started = false
+    local failure: value = nil
+    local writer = async.run<|nil, value|>(function (): nil
+      started = true
+      do connection:write(websocket.TEXT, "must not send") catch failure = error end
+      return nil
+    end)
+    defer writer:cancel(async.CancellationReason.simple("fairness-close test completed"))
+    while not started do async.yield() end
+    connection:close()
+    async.join(writer)
+    assert_write_failure(failure, "state")
+    test.assert(metric("send", source) == before, "write sent after local close during its fairness yield")
+  end)
+end
+
+function test_live_peer_close_before_write_never_sends(_context: test.Context)
+  runtime_test.run(function ()
+    local source = raw("before-write", "idle")
+    local connection = websocket.connect(source)
+    defer connection:close()
+    control("before-write", "close")
+    wait_for(function (): boolean return metric("ready", source) ~= 1 end, "peer Close did not change host state")
+    local before = metric("send", source)
+    websocket_error(function () connection:write(websocket.TEXT, "must not send") end,
+      "state", "websocket.write", nil)
+    test.assert(metric("send", source) == before, "write called send on a non-open host socket")
+    closed(connection, 1000, "bye")
+  end)
+end
+
+function test_live_paused_peer_high_and_low_water_and_duplicate_writer(_context: test.Context)
+  blocked_write_case("backpressure", "resume")
+end
+
+function test_live_local_close_during_buffered_write_returns_promptly_and_fails_the_write(_context: test.Context)
+  blocked_write_case("buffered-local", "local")
+end
+
+function test_live_peer_close_during_buffered_write_fails_the_write(_context: test.Context)
+  blocked_write_case("buffered-close", "close")
+end
+
+function test_live_peer_reset_during_buffered_write_fails_the_write(_context: test.Context)
+  blocked_write_case("buffered-reset", "reset")
+end
+
+function test_live_peer_fin_during_buffered_write_fails_the_write(_context: test.Context)
+  blocked_write_case("buffered-fin", "fin")
+end

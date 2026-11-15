@@ -1,3 +1,4 @@
+import {websocket} from './websocket.test.mjs';
 const encoder = new TextEncoder();
 function text(chunks) {
   const decoder = new TextDecoder();
@@ -145,14 +146,20 @@ async function sameOrigin(context, env) {
 export async function run(context) {
   const sample = "a\u00e9\u20ac\u{20000}z", bytes = encoder.encode(sample);
   context.assert(text(Array.from(bytes, byte => Uint8Array.of(byte))) === sample, 'output lost split UTF-8 sequences');
-  context.assert(context.args.length === 2, 'pass HTTP image and fixture configuration');
-  const [imagePath, configuration] = context.args, env = JSON.parse(configuration);
+  context.assert(context.args.length === 3, 'pass HTTP image, WebSocket image and fixture configuration');
+  const [imagePath, websocketPath, configuration] = context.args, env = JSON.parse(configuration);
   const image = await context.image(imagePath);
-  const report = {verdict: 'PASS', cases: await suite(context, image, env), cancellation: [],
+  const websocketOnly = env.TITAN_TEST_WEBSOCKET_ONLY === '1';
+  const report = {verdict: 'PASS', cases: websocketOnly ? 0 : await suite(context, image, env), cancellation: [],
     engine: env.TITAN_TEST_ENGINE, verified: env.TITAN_TEST_VERIFIED_TLS === '1'};
-  for (const phase of ['headers', 'settled', 'metadata', 'body']) {
-    report.cancellation.push(await cancellation(context, image, env, phase));
+  if (!websocketOnly) {
+    for (const phase of ['headers', 'settled', 'metadata', 'body']) {
+      report.cancellation.push(await cancellation(context, image, env, phase));
+    }
+    report.sameOrigin = await sameOrigin(context, env);
   }
-  report.sameOrigin = await sameOrigin(context, env);
+  report.websocket = await websocket(context, await context.image(websocketPath), env);
+  report.cases += report.websocket.cases;
+  report.selection = websocketOnly ? 'websocket' : 'all';
   context.stdout(encoder.encode('BROWSER-NET ' + JSON.stringify(report) + '\n'));
 }

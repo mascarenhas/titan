@@ -239,6 +239,16 @@ function connect(source_url: string, options: DialOptions?): Connection
     Value.is_string("connect"), Value.is_string(source_url), ...protocols)
   connection:wait_control(waiter, policy.timeout, true)
   connection.opening = nil
+  -- Some hosts open even when an offered subprotocol was not selected.
+  local accepted = connection.protocol == nil and #policy.protocols == 0
+  if connection.protocol ~= nil then
+    for index = 1, #policy.protocols do
+      if connection.protocol == policy.protocols[index] then accepted = true; break end
+    end
+  end
+  if not accepted then
+    raise HandshakeError("WebSocket opening handshake failed", nil, nil)
+  end
   adopted = true
   return connection
 catch

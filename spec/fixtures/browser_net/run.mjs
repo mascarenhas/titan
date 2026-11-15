@@ -68,7 +68,11 @@ try {
   raw.stdout.on('data', chunk => process.stdout.write(chunk));
   const config = {TITAN_TEST_HTTP_URL: http, TITAN_TEST_HTTPS_VALID_URL: valid,
     TITAN_TEST_HTTPS_WRONG_HOST_URL: wrongHost, TITAN_TEST_HTTPS_UNTRUSTED_URL: untrusted,
+    TITAN_TEST_WS_URL: http.replace(/^http/, 'ws'), TITAN_TEST_WSS_VALID_URL: valid.replace(/^https/, 'wss'),
+    TITAN_TEST_WSS_WRONG_HOST_URL: wrongHost.replace(/^https/, 'wss'),
+    TITAN_TEST_WSS_UNTRUSTED_URL: untrusted.replace(/^https/, 'wss'),
     TITAN_TEST_RAW_URL: rawURL, TITAN_TEST_VERIFIED_TLS: verified ? '1' : '0',
+    TITAN_TEST_WEBSOCKET_ONLY: process.env.TITAN_TEST_WEBSOCKET_ONLY ?? '0',
     TITAN_TEST_BROWSER: engine === 'node' ? '0' : '1', TITAN_TEST_ENGINE: engine};
   const args = [runner, '--engine', engine, '--timeout', '300000', '--grace', '2000', '--root', root];
   if (engine === 'webkit' && options['--persistent-webkit']) {
@@ -76,7 +80,7 @@ try {
   }
   if (runner.endsWith('playwright-run.mjs')) args.push('--sdk', sdk, join(root, 'images/net.test.mjs'));
   else args.push('--js-test', join(root, 'images/net.test.mjs'));
-  args.push('--', 'images/http.mjs', JSON.stringify(config));
+  args.push('--', 'images/http.mjs', 'images/websocket.mjs', JSON.stringify(config));
   const running = start(process.execPath, args, env);
   const chunks = [];
   running.stdout.on('data', chunk => { chunks.push(chunk); process.stdout.write(chunk); });

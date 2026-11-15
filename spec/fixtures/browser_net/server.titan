@@ -6,6 +6,9 @@ local math = import "math"
 local string = import "string"
 local websocket = import "websocket"
 
+local websocket_opened: {string: integer} = {}
+local websocket_closed: {string: integer} = {}
+
 local hits: {string: integer} = {}
 local revalidations: {string: integer} = {}
 local asset_root = ""
@@ -30,6 +33,9 @@ end
 
 local function websocket_session(request: http.Request, response: http.Response)
   local path = request.url.path
+  local key = request.url.query or ""
+  websocket_opened[key] = (websocket_opened[key] or 0) + 1
+  defer websocket_closed[key] = (websocket_closed[key] or 0) + 1
   if path == "/ws/deny-origin" then
     do
       local connection = websocket.accept(request, response, websocket.AcceptOptions { allowed_origins = {} })
@@ -58,6 +64,12 @@ end
 local function handle(request: http.Request, response: http.Response)
   local path = request.url.path
   if string.sub(path, 1, 4) == "/ws/" then websocket_session(request, response); return end
+  if path == "/ws-events" then
+    response:set_header("Access-Control-Allow-Origin", "*")
+    local key = request.url.query or ""
+    send(response, (websocket_opened[key] or 0) .. ":" .. (websocket_closed[key] or 0))
+    return
+  end
   if path ~= "/no-cors" then
     response:set_header("Access-Control-Allow-Origin", "*")
     response:set_header("Access-Control-Expose-Headers", "*")

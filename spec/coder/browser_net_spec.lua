@@ -15,8 +15,8 @@ local function execute(argv, env, log)
     return result.output
 end
 
-describe("browser HTTP clients", function()
-    it("uses real HTTP and verified HTTPS peers with streaming and abort ownership", function()
+describe("browser HTTP and WebSocket clients", function()
+    it("uses real verified network peers with streaming, messages and abort ownership", function()
         local info, why = toolchain.require({node = true, chrome = true, sdk = true})
         if not info then pending(why) return end
         local env = {TITAN_ROOT = info.prefix, TITAN_NODE = info.node.path, TITAN_CHROME = info.chrome.path}
@@ -28,7 +28,7 @@ describe("browser HTTP clients", function()
             local result = execute({info.node.path, "spec/fixtures/browser_net/run.mjs",
                 "--root", output, "--engine", engine, "--sdk", info.sdk_root,
                 "--runner", info.sdk_root .. "/titan-browser-run.mjs", "--repository", repository}, env, engine)
-            assert.matches('BROWSER%-NET {"verdict":"PASS","cases":39,"cancellation":%["headers","settled","metadata","body"%]', result)
+            assert.matches('BROWSER%-NET {"verdict":"PASS","cases":65,"cancellation":%["headers","settled","metadata","body"%]', result)
             assert.matches('"sameOrigin":' .. (engine == "node" and "0" or "1"), result, 1, true)
             assert.matches('"engine":"' .. engine .. '"', result, 1, true)
             if engine == "node" or linux then
