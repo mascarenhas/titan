@@ -1,0 +1,81 @@
+local type OptionsAction = function (): ()
+
+local function assert_options_error(action: OptionsAction, expected: string)
+  local rejected = false
+  do action()
+  catch
+    rejected = true
+    test.assert(error == expected, "request policy raised a different argument error")
+  end
+  test.assert(rejected, "request policy accepted invalid arguments")
+end
+
+function test_request_options_cache_requires_explicit_same_origin(context: test.Context)
+  context:run("nil", function (_: test.Context)
+    for _ = 1, 2 do
+      assert_options_error(function ()
+        http.RequestOptions {cache = http.CacheMode.only_if_cached()}
+      end, "HTTP cache mode 'only-if-cached' requires request mode 'same-origin'")
+    end
+  end)
+  context:run("cors", function (_: test.Context)
+    for _ = 1, 2 do
+      assert_options_error(function ()
+        http.RequestOptions {cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.cors()}
+      end, "HTTP cache mode 'only-if-cached' requires request mode 'same-origin'")
+    end
+  end)
+  context:run("no_cors", function (_: test.Context)
+    assert_options_error(function ()
+      http.RequestOptions {cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.no_cors()}
+    end, "HTTP cache mode 'only-if-cached' requires request mode 'same-origin'")
+  end)
+  context:run("same_origin", function (_: test.Context)
+    for _ = 1, 2 do
+      http.RequestOptions {cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.same_origin()}
+    end
+  end)
+end
+
+function test_headers_copy_order_duplicates_and_case(_: test.Context)
+  local initial = {http.Header("X-One", "first"), http.Header("x-one", "second")}
+  local fields = http.headers(initial)
+  initial[1].contents = "changed"
+  test.assert(fields:get("X-ONE") == "first")
+  local values = fields:values("x-one")
+  test.assert(#values == 2 and values[1] == "first" and values[2] == "second")
+  local entries = fields:all()
+  entries[1].contents = "changed again"
+  test.assert(fields:get("x-one") == "first")
+  fields:set("X-One", "replacement")
+  test.assert(#fields:all() == 1 and fields:get("x-one") == "replacement")
+  fields:remove("x-ONE")
+  test.assert(#fields:all() == 0)
+end
+
+function test_headers_validate_names_and_values(_: test.Context)
+  local fields = http.headers()
+  assert_options_error(function () fields:add("", "ok") end, "HTTP header name must not be empty")
+  assert_options_error(function () fields:add("bad name", "ok") end, "HTTP header name contains an invalid byte")
+  assert_options_error(function () fields:add("X-Valid", "bad\r\nvalue") end, "HTTP header value contains a forbidden byte")
+  fields:add("X-Binary", "\t\255")
+  test.assert(fields:get("x-binary") == "\t\255")
+end
+
+function test_request_validation_precedes_transport(_: test.Context)
+  runtime_test.run(function ()
+    assert_options_error(function ()
+      http.request("PUT", "http://127.0.0.1:1", http.RequestOptions {mode = http.RequestMode.no_cors()})
+    end, "HTTP request mode 'no-cors' allows only GET, HEAD, or POST")
+    assert_options_error(function ()
+      http.get("http://127.0.0.1:1", http.RequestOptions {body = ""})
+    end, "HTTP get does not accept a request body")
+    local rejected = false
+    do http.get("ws://127.0.0.1:1")
+    catch
+      rejected = true
+      test.assert(error is url.Error, "invalid HTTP scheme lost url.Error identity")
+    end
+    test.assert(rejected, "HTTP accepted a WebSocket URL")
+  end)
+end

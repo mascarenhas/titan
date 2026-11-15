@@ -1,15 +1,9 @@
--- Native titan.http behavior tests.
+-- Portable titan.http headers, request policy, and fail-fast behavior.
 local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"
-local fs = import "fs"
 local http = import "http"
-local net = import "net"
-local ssl = import "ssl"
 local string = import "string"
-local timer = import "timer"
-local command = import "support.command.titan"
 local url = import "url"
+local lua = import "lua"
 
-local support = import "http.test_support.titan"
-local task_support = import "support.async.titan"

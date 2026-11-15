@@ -1,0 +1,75 @@
+local iteration = import "iteration"
+
+local function browser_header_rejection(name: string, contents: string)
+  local rejected = false
+  do
+    http.get("http://127.0.0.1:1", http.RequestOptions {headers = http.headers({http.Header(name, contents)})})
+  catch
+    rejected = true
+    test.assert(error is string, "browser argument validation lost string identity")
+  end
+  test.assert(rejected, "browser accepted a forbidden request header")
+end
+
+function test_browser_http_forbidden_headers(context: test.Context)
+  local names = {"Accept-Charset", "Accept-Encoding", "Access-Control-Request-Headers",
+    "Access-Control-Request-Method", "Connection", "Cookie", "Cookie2", "Date", "DNT",
+    "Expect", "Keep-Alive", "Origin", "Referer", "Set-Cookie", "TE", "Trailer",
+    "Transfer-Encoding", "Upgrade", "Via", "pRoXy-Value", "sEc-Value"}
+  for _, name in iteration.ipairs(names) do
+    context:run(name, function (_: test.Context)
+      runtime_test.run(function () browser_header_rejection(name, "test") end)
+    end)
+  end
+end
+
+function test_browser_http_forbidden_method_override(context: test.Context)
+  local values = {"TRACE", "GET, TRACE", "  tRaCe\t ", '"a\\\\",TRACE'}
+  for index = 1, #values do
+    local contents = values[index]
+    context:run("case_" .. index, function (_: test.Context)
+      runtime_test.run(function () browser_header_rejection("X-HTTP-Method-Override", contents) end)
+    end)
+  end
+end
+
+function test_browser_http_method_body_ca_validation(_: test.Context)
+  runtime_test.run(function ()
+    for _, method in iteration.ipairs({"CONNECT", "tRaCe", "TRACK"}) do
+      assert_options_error(function () http.request(method, "http://127.0.0.1:1") end,
+        "HTTP method is forbidden on the browser target")
+    end
+    for _, method in iteration.ipairs({"GET", "hEaD"}) do
+      assert_options_error(function ()
+        http.request(method, "http://127.0.0.1:1", http.RequestOptions {body = ""})
+      end, "HTTP GET and HEAD do not accept a request body on the browser target")
+    end
+    assert_options_error(function ()
+      http.get("http://127.0.0.1:1", http.RequestOptions {ca_file = "unused.pem"})
+    end, "HTTP ca_file is unavailable on the browser target")
+    browser_header_rejection("Host", "other.example")
+    browser_header_rejection("Content-Length", "1")
+  end)
+end
+
+function test_browser_http_child_state_construction_and_refusal(_: test.Context)
+  local state = lua.new()
+  defer state:close()
+  local loader = string.reader([[
+    local http = require "titan.http"
+    local header = http.Header.new("X-Child", "yes")
+    local headers = http.headers()
+    headers:add(header.name, header.contents)
+    local client = http.Client.new()
+    local options = http.RequestOptions.new(headers)
+    assert(headers:get("x-child") == "yes")
+    local ok, message = pcall(http.get, "http://127.0.0.1:1", options)
+    assert(not ok and message == "async Runtime is not active")
+    ok, message = pcall(client.get, client, "http://127.0.0.1:1", options)
+    assert(not ok and message == "async Runtime is not active")
+    client:close()
+    return true
+  ]])
+  defer loader:close()
+  state:run_from_loader(loader, "=http-child-state")
+end
