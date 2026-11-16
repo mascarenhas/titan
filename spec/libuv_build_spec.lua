@@ -4105,10 +4105,6 @@ esac
                 "titan/coroutine.titan",
                 "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
-                "titan/http/http.native.titan", "titan/http/client.native.titan",
-                "titan/http/headers.titan", "titan/http/options.titan", "titan/http/parser.native.titan",
-                "titan/http/pool.native.titan", "titan/http/server.native.titan",
-                "titan/http/transfer.native.titan", "titan/http/upgrade.native.titan",
                 "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
@@ -4123,8 +4119,8 @@ esac
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, ensemble in ipairs({
-                "UV_TITAN_SOURCES", "ASYNC_TITAN_SOURCES", "OS_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
-                "PROTOBUF_TITAN_SOURCES", "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
+                "UV_TITAN_SOURCES", "ASYNC_TITAN_SOURCES", "OS_TITAN_SOURCES", "STDLIB_HTTP_SOURCES",
+                "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES", "PROTOBUF_TITAN_SOURCES", "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
                 "THREAD_TITAN_SOURCES", "ASYNC_TITAN_HEADERS", "OS_TITAN_HEADERS", "SQLITE3_TITAN_HEADERS",
                 "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
             }) do
@@ -4133,6 +4129,7 @@ esac
                 end
             end
             for _, source in ipairs(sources) do
+                assert.equal("file", lfs.attributes(source, "mode"), source)
                 local ok, output, why, code =
                     run_uv_dry_run("Linux", source)
                 assert.truthy(ok, source .. ": " .. output .. "\n(" ..

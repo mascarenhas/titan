@@ -1044,6 +1044,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/fixtures/stdlib/titan/os_parent_tty_app.titan",
             "spec/fixtures/stdlib/titan/ssl_http_sanitizer_app.titan",
             "spec/fixtures/stdlib/titan/http_tls_idle_app.titan",
+            "spec/fixtures/stdlib/titan/http_tcp_idle_app.titan",
             "spec/fixtures/stdlib/titan/uv_stdio_app.titan",
             "spec/fixtures/stdlib/titan/uv_bootstrap/uv_bootstrap_app.titan",
             "spec/fixtures/stdlib/titan/uv_bootstrap/uv_sync_app.titan",
@@ -1186,6 +1187,17 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "titan/uv/runtime.titan",
             "titan/uv/task.titan",
             "titan/uv/work.titan",
+            "titan/http/http.native.titan",
+            "titan/http/client.titan",
+            "titan/http/native.titan",
+            "titan/http/pool.titan",
+            "titan/http/server.titan",
+            "titan/http/transfer.titan",
+            "titan/http/upgrade.titan",
+            "titan/websocket/handshake.titan",
+            "titan/websocket/connection.titan",
+            "titan/websocket/frames.titan",
+            "titan/websocket/native.titan",
         }) do
             assert.falsy(contains_suffix(retired), retired)
         end
