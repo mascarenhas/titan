@@ -1168,6 +1168,18 @@ esac
         assert.is_true(ok, err)
     end)
 
+    it("keeps the browser status inventory's module rows equal to the Make roots", function()
+        local delivered, native = {}, {}
+        for _, row in ipairs(browser_checks.status_inventory.modules) do
+            if row[2] ~= "absent" then delivered[#delivered + 1] = row[1] end
+            if row[2] ~= "browser-only" then native[#native + 1] = row[1] end
+        end
+        local roots, all = makefile_words("BROWSER_STDLIB_ROOTS"), makefile_words("STDLIB_ROOTS")
+        for _, list in ipairs({ delivered, native, roots, all }) do table.sort(list) end
+        assert.same(roots, delivered)
+        assert.same(all, native)
+    end)
+
     it("gates identical SDK reinstalls on certified module, native and final hits", function()
         local linux = read_file(".github/workflows/ci.yml")
         local macos = read_file(".github/workflows/macos.yml")

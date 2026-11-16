@@ -453,7 +453,7 @@ plan:
         for _, row in ipairs(differences) do kinds[#kinds + 1] = row.name .. "=" .. row.difference end
         assert.same({ "gone=omitted", "Gone=omitted", "Kept:close=omitted" }, kinds)
         local text = checks.member_table(rows, differences)
-        assert.truthy(text:find("## Recorded browser differences", 1, true), text)
+        assert.truthy(text:find("## Absent browser members", 1, true), text)
         assert.truthy(text:find("| `fixture` | `Kept:close` | omitted | method |", 1, true), text)
         for _, case in ipairs({
             { recorded({ "Gone", "Kept:close" }), "fixture.gone: native=" },
@@ -472,8 +472,8 @@ plan:
     end)
 
     it("drops the omitted Lua methods but compares the owner and every retained method", function()
-        assert.same({ omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" } },
-            checks.browser_differences["titan.lua"])
+        assert.same({ omitted = { "Lua:run_async", "Lua:run_async_from_loader", "dofile" } },
+            checks.omissions(checks.status_inventory)["titan.lua"])
         local retained = { "close", "detach", "run", "run_from_loader" }
         local function provider(browser, changed)
             local owner, methods = "titan.lua.Lua", {}
@@ -636,6 +636,166 @@ plan:
             local rows, err = checks.inventory(case[1], case[2])
             assert.is_nil(rows)
             assert.truthy(err:find("fixture.raw: native=", 1, true), err)
+        end
+    end)
+
+    it("checks every module and member row against both interfaces", function()
+        local function entry(modname, members)
+            return { types = types.serialize(types.Module(modname, members, {})) }
+        end
+        local function fn(name, results)
+            return types.ModuleMember("fixture", name, types.Function({}, results or {}, false, nil, nil), {})
+        end
+        local handle = types.Nominal("titan.gone.Handle")
+        local function box(methods)
+            local result = {}
+            for _, name in ipairs(methods) do result[name] = types.Method("fixture.Box", name, {}, {}, nil, nil, {}) end
+            return types.ModuleMember("fixture", "Box", types.Record("fixture.Box", {}, {}, result, 1), nil)
+        end
+        local raw = types.ModuleMember("fixture", "raw", types.CFunction({}, types.CVoid(), false, nil), nil)
+        local wrap = types.ModuleMember("fixture", "Wrap", types.Record("fixture.Wrap", {
+            types.Field("fixture.Wrap", "handle", handle, 0, false),
+        }, {}, { size = types.Method("fixture.Wrap", "size", {}, { types.Integer() }, nil, nil, {}) }, 2), nil)
+        local native = { key_order = { "fixture", "titan.gone" }, entries = {
+            fixture = entry("fixture", { fn("keep"), fn("typed", { handle }), fn("host"), box({ "run", "stop" }), raw,
+                wrap }),
+            ["titan.gone"] = entry("titan.gone", {
+                types.ModuleMember("titan.gone", "Handle", types.Record("titan.gone.Handle", {}, {}, {}, 1), nil),
+            }),
+        } }
+        local browser = { key_order = { "fixture", "titan.web" }, entries = {
+            fixture = entry("fixture", { fn("keep"), box({ "run" }), raw }),
+            ["titan.web"] = entry("titan.web", { types.ModuleMember("titan.web", "bind",
+                types.Function({}, {}, false, nil, nil), {}) }),
+        } }
+        local function inventory(change)
+            local result = {
+                modules = {
+                    { "fixture", "present", test = "fixture.tests" },
+                    { "titan.gone", "absent", reason = "requires a host" },
+                    { "titan.web", "browser-only" },
+                },
+                members = { fixture = {
+                    { "Box", "implemented", "fixture.tests.test_box" },
+                    { "Box:run", "implemented", "fixture.tests.test_box" },
+                    { "Box:stop", "absent:native-only" },
+                    { "Wrap", "absent:typed" },
+                    { "Wrap:size", "absent:typed" },
+                    { "host", "absent:native-only" },
+                    { "keep", "implemented", "fixture.tests.test_keep" },
+                    { "raw", "implemented", "fixture.tests.test_raw" },
+                    { "typed", "absent:typed" },
+                } },
+                stock_lua = { { "os.clock", "raise", "lua.tests.test_stock.clock" } },
+            }
+            if change then change(result, result.members.fixture) end
+            return result
+        end
+        local function row(rows, name)
+            for _, candidate in ipairs(rows) do if candidate[1] == name then return candidate end end
+        end
+        assert(checks.check_status(native, browser, inventory()))
+        assert(checks.check_status(native, browser, inventory(function(result, rows)
+            result.modules[1].core = true
+            row(rows, "keep")[3] = "fixture.tests"
+        end)))
+        for _, case in ipairs({
+            { function(result) table.remove(result.modules, 2) end, "titan.gone: module has no status row" },
+            { function(result) result.modules[2][2] = "present" end,
+                "titan.gone: present module is missing from a provider" },
+            { function(result) result.modules[3][2] = "absent"; result.modules[3].reason = "x" end,
+                "titan.web: absent module is not native-only" },
+            { function(result) result.modules[2].reason = nil end, "titan.gone: absent module has no reason" },
+            { function(result) result.modules[1].test = "fixture.tests.test_keep" end,
+                "fixture: present module names no test owner" },
+            { function(result) result.members["titan.gone"] = {} end,
+                "titan.gone: member rows for a module that is not present" },
+            { function(_, rows) table.remove(rows, 7) end, "fixture.keep: native member has no status row" },
+            { function(_, rows) rows[#rows + 1] = { "Wrap.handle", "absent:typed" } end,
+                "fixture.Wrap.handle: status row is not a native callable, type or variable" },
+            { function(_, rows) rows[#rows + 1] = { "keep", "implemented", "fixture.tests.test_keep" } end,
+                "fixture.keep: duplicate status row" },
+            { function(_, rows) row(rows, "keep")[2] = "maybe" end, "fixture.keep: unknown status maybe" },
+            { function(_, rows) row(rows, "typed")[2] = "absent:native-only" end,
+                "fixture.typed: absence is absent:typed, not absent:native-only" },
+            { function(_, rows) row(rows, "host")[2] = "absent:typed" end,
+                "fixture.host: absence is absent:native-only, not absent:typed" },
+            { function(_, rows) row(rows, "Wrap:size")[2] = "absent:native-only" end,
+                "fixture.Wrap:size: absence is absent:typed, not absent:native-only" },
+            { function(_, rows) row(rows, "keep")[2] = "absent:native-only"; row(rows, "keep")[3] = nil end,
+                "fixture.keep: absent member is in the browser interface" },
+            { function(_, rows) row(rows, "host")[3] = "fixture.tests.test_host" end,
+                "fixture.host: absent member names a test" },
+            { function(_, rows) row(rows, "Box:stop")[2] = "implemented"; row(rows, "Box:stop")[3] = "fixture.tests.x" end,
+                "fixture.Box:stop: implemented member is missing from the browser" },
+            { function(_, rows) row(rows, "keep")[3] = nil end, "fixture.keep: implemented member names no test" },
+            { function(_, rows) row(rows, "keep")[3] = "fixture.tests" end,
+                "fixture.keep: only implemented members of a core module may name a whole test owner" },
+            { function(result, rows) result.modules[1].core = true; row(rows, "keep")[2] = "raise"
+                row(rows, "keep")[3] = "fixture.tests" end,
+                "fixture.keep: only implemented members of a core module may name a whole test owner" },
+            { function(_, rows) row(rows, "raw")[2] = "raise" end,
+                "fixture.raw: a raw foreign function is implemented or absent" },
+            { function(result) result.stock_lua[1][2] = "absent" end, "stock Lua os.clock: unknown status absent" },
+            { function(result) result.stock_lua[1][3] = "lua.tests" end, "stock Lua os.clock: names no exact test case" },
+        }) do
+            local ok, err = checks.check_status(native, browser, inventory(case[1]))
+            assert.is_nil(ok, case[2])
+            assert.truthy(err:find(case[2], 1, true), case[2] .. "\n" .. err)
+        end
+    end)
+
+    it("names tests as runner cases, OS harness cases or whole owners", function()
+        for test, kind in pairs({
+            ["json.tests"] = "owner", ["string.core_test"] = "owner",
+            ["os.tests.test_browser_stdio_requires_a_runtime_and_task"] = "case",
+            ["lua.tests.test_lua_browser_stock_filesystem_failures.clock"] = "case",
+            ["os.browser_tests:stock-owner-task-exit:3"] = "harness",
+        }) do
+            assert.equal(kind, checks.test_reference(test), test)
+        end
+        for _, test in ipairs({ "tests", "json..tests", ".json.tests", "json.tests.", "os.tests:case", 7 }) do
+            assert.is_nil(checks.test_reference(test), tostring(test))
+        end
+    end)
+
+    it("keeps type-only owners unreachable except through raise members", function()
+        local function status(source, statuses)
+            local provider = checked(source)
+            local declared = checks.members(assert(driver.decode_module_interface(provider.entries.test.types, "test",
+                "fixture interface")))
+            local rows = {}
+            for name in pairs(checks.status_scope(declared)) do
+                local state = statuses[name] or "implemented"
+                rows[#rows + 1] = { name, state, (state == "implemented" or state == "raise") and "test.tests.test_case" or nil }
+            end
+            return checks.check_status(provider, provider,
+                { modules = { { "test", "present", test = "test.tests" } }, members = { test = rows } })
+        end
+        local opaque = "record O\n  local handle: integer\nend\n"
+        local owner = { O = "type-only" }
+        assert(status(opaque .. "function take(o: O?) end\nfunction O:close() end\n",
+            { O = "type-only", ["O:close"] = "type-only" }))
+        assert(status(opaque .. "function O.make(): O return { handle = 1 } end\n",
+            { O = "type-only", ["O.make"] = "raise" }))
+        for _, case in ipairs({
+            { opaque .. "function O.make(): O return { handle = 1 } end\n", owner,
+                "test.O: type-only owner is reachable through O.make" },
+            { opaque .. "function fill(out: {O}) end\n", owner, "test.O: type-only owner is reachable through fill" },
+            { opaque .. "record Box<|T|>\n  item: T\nend\nfunction boxed(): Box<|O|> raise \"unavailable\" end\n", owner,
+                "test.O: type-only owner is reachable through boxed" },
+            { opaque .. "function each(visit: function (O)) end\n", owner,
+                "test.O: type-only owner is reachable through each" },
+            { opaque .. "current: O?\n", owner, "test.O: type-only owner is reachable through current" },
+            { opaque .. "record Holder\n  item: O?\nend\n", owner, "test.O: type-only owner is reachable through Holder" },
+            { "record O\n  x: integer\nend\n", owner, "test.O: type-only owner can be built from a record literal" },
+            { "union O\n  a()\nend\n", owner, "test.O: type-only owner has public variants" },
+            { "record P\n  x: integer\nend\nfunction P:get(): integer return self.x end\n", { ["P:get"] = "type-only" },
+                "test.P:get: type-only member of an owner that is not type-only" },
+        }) do
+            local ok, err = status(case[1], case[2])
+            assert.is_nil(ok, case[3])
+            assert.truthy(err:find(case[3], 1, true), case[3] .. "\n" .. err)
         end
     end)
 
