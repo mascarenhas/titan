@@ -51,3 +51,16 @@ function test_unwind_defer_starts_task_after_collection(_: test.Context)
     test.assert(#log == 2 and log[2] == "disposal", "the disposal Task did not run")
   end)
 end
+
+function test_is_closing_tracks_runtime_shutdown(_: test.Context)
+  local rejected = false
+  do async.is_closing()
+  catch rejected = error == "async Runtime is not active" end
+  test.assert(rejected, "is_closing answered without an active Runtime")
+  local observed: boolean?
+  runtime_test.run(function ()
+    test.assert(not async.is_closing(), "an open Runtime reported that it was closing")
+    async.add_close_listener(function () observed = async.is_closing() end)
+  end)
+  test.assert(observed == true, "a close listener did not see its Runtime closing")
+end

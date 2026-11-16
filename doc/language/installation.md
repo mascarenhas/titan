@@ -544,7 +544,9 @@ browser programs, with the PEG engine linked in), the loader input
 `titan-browser.mjs` and its Emscripten libraries `titan-browser-library.js`,
 `titan-browser-bridge.js`, and `titan-browser-trace.js`, the standalone portable
 codec peer `titan-protobuf.mjs`, the runner `titan-browser-run` with its three
-`.mjs` modules, and `sdk-digests`. The compiler embeds the loader into each
+`.mjs` modules, the list of [unavailable standard
+modules](browser-target.md#modules-that-are-not-available) `absent-modules`,
+and `sdk-digests`. The compiler embeds the loader into each
 generated image; applications deploy no separate loader file. A page using
 [copied typed values](standard-library-browser.md#copying-typed-values) serves
 its own copy of `titan-protobuf.mjs`. That

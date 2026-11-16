@@ -792,6 +792,19 @@ end
         assert.equal(
             assert(strategy:read_file(paths.join(repository, "titan-runtime/browser/titan-protobuf.mjs"))),
             assert(strategy:read_file(paths.join(browser_paths.titan_bin, "titan-protobuf.mjs"))))
+        local absent_lines = {}
+        for _, row in ipairs(dofile(paths.join(repository, "scripts/browser_stdlib.lua")).status_inventory.modules) do
+            if row[2] == "absent" then absent_lines[#absent_lines + 1] = row[1] .. "\t" .. row.reason .. "\n" end
+        end
+        assert.equal(table.concat(absent_lines),
+            assert(strategy:read_file(paths.join(browser_paths.titan_bin, "absent-modules"))))
+        -- The uninstaller owns exactly the files the SDK build writes here.
+        local installer = assert(loadfile(paths.join(repository, "scripts/titan_install.lua")))()
+        local owned, written = {}, assert(strategy:list(browser_paths.titan_bin))
+        for _, name in ipairs(installer.browser_sdk_owned) do owned[#owned + 1] = name end
+        table.sort(owned)
+        table.sort(written)
+        assert.same(owned, written)
         local expected_fp = fixtures.fingerprint()
 
         local runtime_ar = assert(staticmetadata.scan_archive(assets.runtime, { target = expected_fp }))

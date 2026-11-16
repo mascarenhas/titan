@@ -8,6 +8,8 @@ local certificate = require "titan-compiler.linkcertificate"
 local native = require "titan-compiler.nativeinputs"
 local lfs = require "lfs"
 local platform = require "titan-compiler.platform"
+local staticmetadata = require "titan-compiler.staticmetadata"
+local driver = require "titan-compiler.driver"
 
 describe("browser stdlib real-toolchain closure", function()
     local workspace
@@ -117,18 +119,22 @@ describe("browser stdlib real-toolchain closure", function()
         assert.truthy(empty.output:find("selected no cases", 1, true), empty.output)
     end)
 
-    it("rejects every absent standard module at compile time by its module name", function()
+    it("rejects every absent standard module at compile time with the SDK's reason", function()
         local info = fixture({ sdk = true })
         if not info then return end
-        for _, module in ipairs(checks.absent_modules) do
-            local name = "missing_" .. module:sub(7)
-            write(name .. ".titan", "local missing = import " .. string.format("%q", module:sub(7)) .. "\n")
-            local result = strategy:run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser",
-                "--tree", workspace, "--output", workspace .. "/missing-out", name },
-                { stderr_to_stdout = true })
-            assert.is_true(result.started, result.output)
-            assert.is_false(result.ok, result.output)
-            assert.truthy(result.output:find(module, 1, true), result.output)
+        for _, row in ipairs(checks.status_inventory.modules) do
+            if row[2] == "absent" then
+                local module = row[1]
+                local name = "missing_" .. module:sub(7)
+                write(name .. ".titan", "local missing = import " .. string.format("%q", module:sub(7)) .. "\n")
+                local result = strategy:run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser",
+                    "--tree", workspace, "--output", workspace .. "/missing-out", name },
+                    { stderr_to_stdout = true })
+                assert.is_true(result.started, result.output)
+                assert.is_false(result.ok, result.output)
+                assert.truthy(result.output:find("module '" .. module .. "' is not available for target 'browser': " ..
+                    row.reason, 1, true), result.output)
+            end
         end
     end)
 
@@ -424,5 +430,26 @@ end
             assert.truthy(result.output:find("cannot construct record type 'titan.async.ExternalWait' outside " ..
                 "module 'titan.async' because it has local fields", 1, true), target .. "\n" .. result.output)
         end
+    end)
+
+    -- The browser lane checks both fixtures against the installed providers:
+    -- the browser one is rendered whole, the native one compared module by
+    -- module with the native provider's metadata.
+    it("pins the native and browser type fixtures to the installed providers", function()
+        local info = fixture({ sdk = true })
+        if not info then return end
+        local browser = assert(staticmetadata.scan_archive(info.sdk_root .. "/titan.a"))
+        assert.equal(assert(strategy:read_file("spec/fixtures/stdlib/titan_stdlib_browser_types.lua")),
+            checks.type_fixture(browser),
+            "browser type fixture is stale; regenerate it with check_browser_stdlib.lua fixture")
+        local native_provider = assert(driver.installed_paths(info.prefix)).titan_bin .. "/titan.a"
+        local scanned = assert(staticmetadata.scan_archive(native_provider))
+        local expected = assert(loadfile("spec/fixtures/stdlib/titan_stdlib_types.lua"))()
+        for _, modname in ipairs(scanned.key_order) do
+            assert.equal(expected[modname:sub(7)], scanned.entries[modname].types, modname)
+        end
+        local count = 0
+        for _ in pairs(expected) do count = count + 1 end
+        assert.equal(#scanned.key_order, count)
     end)
 end)

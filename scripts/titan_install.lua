@@ -342,7 +342,11 @@ local function sdk_digests_path(relative)
         relative:match("^lib/titan/%d+[.]%d+/sdk%-digests$") ~= nil
 end
 
-local browser_sdk_owned = {
+-- Every file `make browser-sdk` writes in lib/titan-browser/<release>;
+-- spec/browser_sdk_spec.lua checks a fresh SDK build against this list.
+-- Uninstall removes them and keeps any other file there, such as an
+-- application archive.
+installer.browser_sdk_owned = {
     "libtitan.a",
     "libtitan-lpeglabel.a",
     "titan.a",
@@ -355,6 +359,7 @@ local browser_sdk_owned = {
     "titan-browser-run.mjs",
     "titan-browser-node-worker.mjs",
     "titan-browser-page.mjs",
+    "absent-modules",
     "sdk-digests",
 }
 
@@ -389,7 +394,7 @@ function installer.uninstall(package_dir, program)
         end
     end
     for release in pairs(releases) do
-        for _, name in ipairs(browser_sdk_owned) do
+        for _, name in ipairs(installer.browser_sdk_owned) do
             inventory["lib/titan-browser/" .. release .. "/" .. name] = true
         end
     end

@@ -9,12 +9,22 @@ local util = require "titan-compiler.util"
 local build = require "titan-compiler.build"
 local M = {}
 
-M.absent_modules = {
-    "titan.uv", "titan.net", "titan.ssl", "titan.thread", "titan.sqlite3",
-    "titan.fs",
-}
-local absent_modules = {}
-for _, name in ipairs(M.absent_modules) do absent_modules[name] = true end
+-- The reviewed operation-status inventory: every native module, and every
+-- public callable, type and variable of a present one, with its browser
+-- status and the test that proves it. The other checks read their module
+-- lists from it.
+local directory = debug.getinfo(1, "S").source:match("^@(.*[/\\])") or ""
+M.status_inventory = dofile(directory .. "browser_stdlib_inventory.lua")
+M.absent_modules = {}
+local absent_modules, browser_only_modules = {}, {}
+for _, row in ipairs(M.status_inventory.modules) do
+    if row[2] == "absent" then
+        M.absent_modules[#M.absent_modules + 1] = row[1]
+        absent_modules[row[1]] = true
+    elseif row[2] == "browser-only" then
+        browser_only_modules[row[1]] = true
+    end
+end
 
 -- The Make inventory is literal, with the same continuation convention as the
 -- native source audits. Gates consume it instead of keeping another root list.
@@ -42,7 +52,8 @@ end
 
 -- Discover logical candidates, but let the compiler choose their actual files:
 -- defaults shadowed by variants and constituents of absent folders stay unread.
--- The caller owns an activated browser resolver context.
+-- The caller owns an activated browser resolver context. Returns the selected
+-- files, sorted, so source audits can cover the browser-only ones.
 function M.check_sources(context, tree)
     local strategy, modules, sources = context.io, {}, {}
     local function inspect(name)
@@ -93,7 +104,12 @@ function M.check_sources(context, tree)
         end
         return true
     end
-    return visit(tree .. "/titan", "titan")
+    local ok, err = visit(tree .. "/titan", "titan")
+    if not ok then return nil, err end
+    local selected = {}
+    for file in pairs(sources) do selected[#selected + 1] = file end
+    table.sort(selected, util.bytewise_less)
+    return selected
 end
 
 function M.check_path(path)
@@ -380,111 +396,119 @@ function M.members(modtype)
         local kind = member._tag == "Type.ModuleVariable" and "variable" or
             typ._tag == "Type.CFunction" and "raw foreign function" or
             typ._tag == "Type.Record" and "record" or
-            typ._tag == "Type.Union" and "union" or
-            typ._tag == "Type.Interface" and "interface" or "function"
+            typ._tag == "Type.Union" and "union" or "function"
         add(member.name, kind, typ, member.isconst and " (const)" or nil, member)
         nominal_members(member.name, typ)
     end
     for name, typ in pairs(modtype.type_members or {}) do
-        add(name, "type alias", typ)
+        add(name, typ._tag == "Type.Interface" and "interface" or "type alias", typ)
         nominal_members(name, typ)
     end
     return result
 end
 
--- The reviewed browser-only bridge module has no native interface to compare.
--- Every other delivered module must match its native interface exactly.
-local browser_only_modules = { ["titan.browser"] = true }
+-- A canonical copy of a decoded interface for comparison across targets.
+-- Serialization records a record's total field count and each public field's
+-- physical index, and likewise for union variants, so private layout would
+-- otherwise leak into the comparison. The copy keeps only what private
+-- members change for importers: a record keeps one hidden field when the
+-- checker rejects its literals outside its module (a private field and no
+-- custom constructor), and a union keeps one hidden variant when `case`
+-- cannot cover it. Public fields and variants are renumbered by position,
+-- from 0 as serialized indices are.
+-- `absent` names owner members (`Owner:method`, `Owner.static`) to drop, and
+-- module members are sorted by name.
+function M.normalize(modtype, absent)
+    absent = absent or {}
+    local function present(owner, group, separator)
+        local result = {}
+        for name, member in pairs(group) do
+            if not absent[owner .. separator .. name] then result[name] = member end
+        end
+        return result
+    end
+    local function declaration(owner, typ)
+        if typ._tag == "Type.Record" then
+            local fields = {}
+            for index, field in ipairs(typ.fields) do
+                fields[index] = types.Field(field.fqtn, field.name, field.type, index - 1, field.isconst)
+            end
+            local hidden = (typ.nfields or #typ.fields) > #typ.fields and not typ.custom_constructor
+            return types.Record(typ.name, fields, present(owner, typ.functions, "."),
+                present(owner, typ.methods, ":"), #fields + (hidden and 1 or 0),
+                typ.scope, typ.typeparams, typ.custom_constructor)
+        elseif typ._tag == "Type.Union" then
+            local variants = {}
+            for index, variant in ipairs(typ.variants) do
+                variants[index] = types.Variant(variant.fqtn, variant.name, variant.parts, index - 1)
+            end
+            local hidden = (typ.nvariants or #typ.variants) > #typ.variants
+            return types.Union(typ.name, variants, present(owner, typ.functions, "."),
+                present(owner, typ.methods, ":"), #variants + (hidden and 1 or 0),
+                typ.scope, typ.typeparams)
+        end
+        return typ
+    end
+    local members = {}
+    for index, member in ipairs(modtype.members) do
+        if member._tag == "Type.ModuleMember" then
+            members[index] = types.ModuleMember(member.modname, member.name,
+                declaration(member.name, member.type), member.paramnames)
+        else
+            members[index] = member
+        end
+    end
+    table.sort(members, function(a, b) return util.bytewise_less(a.name, b.name) end)
+    local type_members = {}
+    for name, typ in pairs(modtype.type_members or {}) do type_members[name] = declaration(name, typ) end
+    return types.Module(modtype.name, members, type_members)
+end
 
--- Differences a browser composition records on purpose (titan#334); #336 owns
--- their classification. `omitted` names members the browser interface lacks:
--- a top-level member, or a method of a record the browser keeps (omitting a
--- record omits its fields, variants and methods). `opaque` names records the
--- browser keeps under the native name with its own private fields and no
--- public constructor, so their semantic declarations differ in private
--- layout and in any methods recorded as omitted; their other public methods
--- are still compared one by one.
-M.browser_differences = {
-    ["titan.async"] = {
-        omitted = {
-            -- Typed by uv.
-            "current_loop", "await_with", "await_cleanup_with", "await_cancellable_with",
-            "await_cancellable",
-            -- Native-only facilities.
-            "run_foreign", "prepare_native_retirement", "wait_external_native",
-            "prepare_external_wait", "wait_external", "wait_external_cleanup", "version",
-            "receiver", "send", "Receiver",
-            -- ExternalWait keeps no methods on the browser.
-            "ExternalWait:close", "ExternalWait:wait", "ExternalWait:wait_cleanup",
-        },
-        opaque = { "ExternalWait" },
-    },
-    -- Ticker keeps its methods; its private fields hold a host request instead
-    -- of a uv timer.
-    ["titan.timer"] = {
-        opaque = { "Ticker" },
-    },
-    ["titan.os"] = {
-        omitted = {
-            "clock", "cwd", "chdir", "homedir", "tmpdir", "hostname", "exepath", "pid", "ppid",
-            "spawn", "with_stdin", "with_stdout", "with_stderr", "with_parent_stdin",
-            "with_parent_stdout", "with_parent_stderr", "with_merged_output", "with_env",
-            "popen", "wait_signal", "ExitStatus", "SpawnConfig", "SpawnOption", "Process",
-            "InputOutputStream",
-        },
-        opaque = { "InputStream", "OutputStream" },
-    },
-    ["titan.lua"] = {
-        omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" },
-        opaque = { "Lua" },
-    },
-    ["titan.http"] = {
-        opaque = { "Client", "ClientResponse" },
-        omitted = { "ClientResponse:take_upgrade", "Exchange", "Handler", "Request", "Response",
-            "Server", "UpgradedStream", "listen", "listen_tls", "request_upgrade_on" },
-    },
-    ["titan.websocket"] = {
-        opaque = { "Connection" },
-        omitted = { "AcceptOptions", "Connection.discard_transfer_payload", "Connection.from_transfer_payload",
-            "Connection:ping", "Connection:to_transfer_payload", "accept" },
-    },
-}
+-- The omissions the comparison accepts, by module: the inventory's absent
+-- members. A browser-only module (`titan.browser`) has no native interface
+-- to compare, so the comparison skips it.
+function M.omissions(inventory)
+    local result = {}
+    for modname, rows in pairs(inventory.members) do
+        local omitted = {}
+        for _, row in ipairs(rows) do
+            if row[2]:match("^absent:") then omitted[#omitted + 1] = row[1] end
+        end
+        result[modname] = { omitted = omitted }
+    end
+    return result
+end
 
 -- Every other member must keep its native kind, rendered signature and
--- semantic declaration. Machine layouts live in separate provider metadata
--- and are deliberately not compared. Returns the shared member rows, the
--- number of compared shared modules and the recorded difference rows.
+-- normalized semantic declaration; the native owners of omitted methods and
+-- statics drop them first, while omissions themselves are checked against
+-- the native interface as declared. Machine layouts live in separate provider
+-- metadata and are deliberately not compared. Returns the shared member rows,
+-- the number of compared shared modules and the recorded difference rows.
 function M.inventory(native, browser, recorded_differences)
-    recorded_differences = recorded_differences or M.browser_differences
+    recorded_differences = recorded_differences or M.omissions(M.status_inventory)
     local rows, recorded_rows, differences, modules = {}, {}, {}, 0
     for _, modname in ipairs(browser.key_order) do
         if not browser_only_modules[modname] then
             local browser_entry, native_entry = browser.entries[modname], native.entries[modname]
             if not native_entry then return nil, "missing native module " .. modname end
             modules = modules + 1
-            local b = M.members(assert(driver.decode_module_interface(browser_entry.types, modname, "browser interface")))
-            local n = M.members(assert(driver.decode_module_interface(native_entry.types, modname, "native interface")))
+            local native_type = assert(driver.decode_module_interface(native_entry.types, modname, "native interface"))
+            local declared = M.members(native_type)
             local recorded = recorded_differences[modname] or {}
-            local omitted, opaque = {}, {}
+            local omitted = {}
+            for _, name in ipairs(recorded.omitted or {}) do omitted[name] = true end
+            local b = M.members(M.normalize(assert(driver.decode_module_interface(
+                browser_entry.types, modname, "browser interface"))))
+            local n = M.members(M.normalize(native_type, omitted))
             for _, name in ipairs(recorded.omitted or {}) do
-                omitted[name] = true
-                if not n[name] then
+                if not declared[name] then
                     differences[#differences + 1] = modname .. "." .. name .. ": recorded omission is not a native member"
                 elseif b[name] then
                     differences[#differences + 1] = modname .. "." .. name .. ": recorded omission is in the browser interface"
                 else
                     recorded_rows[#recorded_rows + 1] = { module = modname, name = name, difference = "omitted",
-                        kind = n[name].kind, signature = n[name].signature }
-                end
-            end
-            for _, name in ipairs(recorded.opaque or {}) do
-                opaque[name] = true
-                local bm, nm = b[name], n[name]
-                if not bm or not nm or bm.kind ~= "record" or nm.kind ~= "record" or bm.signature ~= nm.signature then
-                    differences[#differences + 1] = modname .. "." .. name .. ": recorded opaque record is not the same record in both interfaces"
-                else
-                    recorded_rows[#recorded_rows + 1] = { module = modname, name = name, difference = "opaque",
-                        kind = nm.kind, signature = nm.signature }
+                        kind = declared[name].kind, signature = declared[name].signature }
                 end
             end
             local names, seen = {}, {}
@@ -494,7 +518,7 @@ function M.inventory(native, browser, recorded_differences)
             for _, name in ipairs(names) do
                 local bm, nm = b[name], n[name]
                 local owner = name:match("^([^.:]+)[.:]")
-                if opaque[name] or (nm and not bm and (omitted[name] or (owner and omitted[owner] and not b[owner]))) then
+                if nm and not bm and (omitted[name] or (owner and omitted[owner] and not b[owner])) then
                     -- Recorded above, or a member of an omitted record.
                 elseif not bm or not nm or bm.kind ~= nm.kind or bm.signature ~= nm.signature or bm.semantic ~= nm.semantic then
                     differences[#differences + 1] = modname .. "." .. name .. ": native=" ..
@@ -510,29 +534,444 @@ function M.inventory(native, browser, recorded_differences)
     return rows, modules, recorded_rows
 end
 
-function M.member_table(rows, recorded_rows)
+local member_statuses = { implemented = true, raise = true, ["type-only"] = true,
+    ["absent:typed"] = true, ["absent:native-only"] = true }
+local module_statuses = { present = true, absent = true, ["browser-only"] = true }
+
+-- Inventory rows cover callables, types and variables. Fields, union variants
+-- (with their constructors) and Interface methods belong to their owner's
+-- declaration, which the comparison checks whole.
+function M.status_scope(members)
+    local scope = {}
+    for name, row in pairs(members) do
+        local owner = name:match("^([^.:]+)[.:]")
+        if row.kind ~= "field" and row.kind ~= "variant" and
+            not (owner and members[owner] and members[owner].kind == "interface") then
+            scope[name] = row
+        end
+    end
+    return scope
+end
+
+-- How a row names its test: `<owner>.<case>` as the runner reports it, with
+-- subtests joined by `.`; `os.browser_tests:<name>` for a case of the
+-- program-mode OS stream harness; or a whole `<owner>`.
+function M.test_reference(test)
+    if type(test) ~= "string" then return nil end
+    if test:match("^os%.browser_tests:[^%s]+$") then return "harness" end
+    if not test:match("^[%w_]+%.[%w_.]*[%w_]$") or test:find("..", 1, true) then return nil end
+    return select(2, test:gsub("%.", "")) == 1 and "owner" or "case"
+end
+
+-- Test owners outside the browser stdlib image, with the real-toolchain gate
+-- that runs them under Node and Chromium and checks their evidence.
+M.harness_owners = {
+    ["async.browser_tests"] = "spec/coder/browser_scheduler_spec.lua",
+    ["os.browser_tests"] = "spec/coder/browser_scheduler_spec.lua",
+    ["http.browser_tests"] = "spec/coder/browser_net_spec.lua",
+    ["websocket.browser_tests"] = "spec/coder/browser_net_spec.lua",
+}
+
+-- Every test the inventory names, with its owner and the row naming it.
+function M.test_references(inventory)
+    local result = {}
+    local function add(test, label)
+        local kind = M.test_reference(test)
+        if kind then
+            result[#result + 1] = { test = test, kind = kind, label = label,
+                owner = kind == "harness" and "os.browser_tests" or test:match("^[%w_]+%.[%w_]+") }
+        end
+    end
+    for _, row in ipairs(inventory.modules) do add(row.test, row[1]) end
+    for modname, rows in pairs(inventory.members) do
+        for _, row in ipairs(rows) do add(row[3], modname .. "." .. row[1]) end
+    end
+    for _, row in ipairs(inventory.stock_lua or {}) do add(row[3], "stock Lua " .. row[1]) end
+    return result
+end
+
+-- The cases a run reports as passed: runner lines `[       OK ] <case>
+-- (<ms> ms)`, and the case names of a passing OS stream harness summary. A
+-- parent reports OK after its subtests whatever their outcome, so it counts
+-- only when none of them was skipped or failed.
+function M.passed_cases(output)
+    local passed, unfinished = {}, {}
+    for raw in (output .. "\n"):gmatch("([^\n]*)\n") do
+        local line = raw:gsub("\r$", "")
+        local name = line:match("^%[       OK %] (.-) %(%d+%.%d%d ms%)$")
+        if name then passed[name] = true end
+        local other = line:match("^%[  SKIPPED %] (.*)$") or line:match("^%[  FAILED  %] (.*)$")
+        if other then unfinished[#unfinished + 1] = other end
+    end
+    for name in pairs(passed) do
+        local prefix = name .. "."
+        for _, text in ipairs(unfinished) do
+            if text:sub(1, #prefix) == prefix then passed[name] = nil; break end
+        end
+    end
+    local summary = output:match("OS%-STREAMS (%b{})")
+    if summary and summary:find('"verdict":"PASS"', 1, true) then
+        for name in (summary:match('"names":(%b[])') or ""):gmatch('"([^"]*)"') do
+            passed["os.browser_tests:" .. name] = true
+        end
+    end
+    return passed
+end
+
+-- Every inventory test whose owner the run covers must have passed in it: a
+-- named case exactly, a whole owner through at least one passed case.
+-- Skipped cases never count.
+function M.require_evidence(inventory, output, owners)
+    local passed, missing = M.passed_cases(output), {}
+    for _, reference in ipairs(M.test_references(inventory)) do
+        if owners[reference.owner] then
+            local found = passed[reference.test]
+            if reference.kind == "owner" then
+                local prefix = reference.test .. "."
+                for name in pairs(passed) do
+                    if name:sub(1, #prefix) == prefix then found = true; break end
+                end
+            end
+            if not found then missing[#missing + 1] = reference.label .. ": " .. reference.test end
+        end
+    end
+    if #missing > 0 then
+        table.sort(missing, util.bytewise_less)
+        return nil, "inventory tests that did not pass:\n" .. table.concat(missing, "\n")
+    end
+    return true
+end
+
+-- The declaration that classifies an absent owner: its own fields, variant
+-- payloads and generic scope, without the methods and statics that have rows
+-- of their own.
+local function owner_declaration(modtype, name)
+    local member = modtype.members[name]
+    local typ = member and member._tag == "Type.ModuleMember" and member.type or (modtype.type_members or {})[name]
+    if typ and typ._tag == "Type.Record" then
+        return types.Record(typ.name, typ.fields, {}, {}, typ.nfields, typ.scope, typ.typeparams,
+            typ.custom_constructor)
+    elseif typ and typ._tag == "Type.Union" then
+        return types.Union(typ.name, typ.variants, {}, {}, typ.nvariants, typ.scope, typ.typeparams)
+    end
+    return nil
+end
+
+-- Whether some browser declaration other than an exempt one can hand out a
+-- value of `fqtn`. Results, readable fields, variant payloads and the
+-- parameters of function-typed parameters are positive positions; mutable
+-- Arrays, Maps, generic arguments and mutable variables are both.
+local function reaches(typ, fqtn, polarity)
+    local tag = typ and typ._tag
+    local function each(list, sign)
+        for _, item in ipairs(list or {}) do
+            if reaches(item, fqtn, sign) then return true end
+        end
+        return false
+    end
+    local flipped = polarity == "+" and "-" or polarity == "-" and "+" or "both"
+    if tag == "Type.Nominal" then
+        return (typ.fqtn == fqtn and polarity ~= "-") or each(typ.args, "both")
+    elseif tag == "Type.Option" then
+        return reaches(typ.base, fqtn, polarity)
+    elseif tag == "Type.Array" then
+        return reaches(typ.elem, fqtn, typ.isconst.tag == "yes" and polarity or "both")
+    elseif tag == "Type.Map" then
+        return reaches(typ.keys, fqtn, "both") or reaches(typ.values, fqtn, "both")
+    elseif tag == "Type.Function" or tag == "Type.Method" or tag == "Type.StaticMethod" then
+        return each(typ.rettypes, polarity) or reaches(typ.flexrettype, fqtn, polarity) or
+            each(typ.params, flipped) or reaches(typ.varargtype, fqtn, flipped) or each(typ.typeparams, "both")
+    elseif tag == "Type.FunctionScheme" then
+        return reaches(typ.signature, fqtn, polarity) or each(typ.typeparams, "both")
+    elseif tag == "Type.TypeParameter" then
+        return reaches(typ.constraint, fqtn, "both")
+    elseif tag == "Type.Parameter" then
+        return reaches(typ.erased_constraint, fqtn, "both")
+    elseif tag == "Type.GenericAlias" then
+        return typ.target_owner_fqtn == fqtn or each(typ.typeparams, "both")
+    elseif tag == "Type.Record" or tag == "Type.Interface" then
+        for _, field in ipairs(typ.fields) do
+            if reaches(field.type, fqtn, polarity) then return true end
+        end
+        for _, group in ipairs({ typ.methods or {}, typ.functions or {} }) do
+            for _, method in pairs(group) do
+                if type(method) == "table" and reaches(method, fqtn, polarity) then return true end
+            end
+        end
+        return each(typ.typeparams, "both")
+    elseif tag == "Type.Union" then
+        for _, variant in ipairs(typ.variants) do
+            for _, part in ipairs(variant.parts) do
+                if reaches(part.type, fqtn, polarity) then return true end
+            end
+        end
+        for _, group in ipairs({ typ.methods, typ.functions }) do
+            for _, method in pairs(group) do
+                if reaches(method, fqtn, polarity) then return true end
+            end
+        end
+        return each(typ.typeparams, "both")
+    end
+    return false
+end
+
+-- A type-only owner cannot be built without a callable, and nothing in any
+-- browser module except a `raise` member or the owner's own instance methods
+-- and fields can produce one. `modules` lists every decoded browser module
+-- with its module name and the names of its `raise` members. Returns nil or
+-- the reason the owner is reachable.
+local function type_only_violation(modtype, name, modules)
+    local member = modtype.members[name]
+    local owner = member and member._tag == "Type.ModuleMember" and member.type
+    if not owner or (owner._tag ~= "Type.Record" and owner._tag ~= "Type.Union") then
+        return "is not a record or union"
+    end
+    if owner._tag == "Type.Record" and not owner.custom_constructor and (owner.nfields or #owner.fields) == #owner.fields then
+        return "can be built from a record literal"
+    elseif owner._tag == "Type.Union" and #owner.variants > 0 then
+        return "has public variants"
+    end
+    local fqtn = owner.name
+    for _, scanned in ipairs(modules) do
+        local raising, prefix = scanned.raising, scanned.modname .. "."
+        local function check(label, typ, polarity)
+            if not raising[label] and reaches(typ, fqtn, polarity) then return "is reachable through " .. prefix .. label end
+            return nil
+        end
+        for _, other in ipairs(scanned.type.members) do
+            local typ, err = other.type, nil
+            if other == member then
+                for static_name, static in pairs(owner.functions) do
+                    err = err or check(name .. "." .. static_name, static, "+")
+                end
+            elseif other._tag == "Type.ModuleVariable" then
+                err = check(other.name, typ, other.isconst and "+" or "both")
+            elseif typ._tag == "Type.Record" or typ._tag == "Type.Union" then
+                for _, group in ipairs({ typ.methods, typ.functions }) do
+                    for method_name, method in pairs(group) do
+                        local key = other.name .. (method._tag == "Type.Method" and ":" or ".") .. method_name
+                        err = err or check(key, method, "+")
+                    end
+                end
+                err = err or check(other.name, owner_declaration(scanned.type, other.name), "+")
+            else
+                err = check(other.name, typ, "+")
+            end
+            if err then return err end
+        end
+        for alias, typ in pairs(scanned.type.type_members or {}) do
+            if typ._tag == "Type.Interface" and reaches(typ, fqtn, "+") then
+                return "is reachable through " .. prefix .. alias
+            end
+        end
+    end
+    return nil
+end
+
+-- Checks the status inventory against both interfaces: every native module
+-- has a module row and every native member of a present module a member row
+-- (B, C); absences are classified by whether their own declaration names an
+-- absent module; present statuses exist in the browser, name their tests,
+-- and type-only owners stay unreachable (D); browser-only modules have no
+-- native counterpart (E). Returns true, or nil and every violation.
+function M.check_status(native, browser, inventory)
+    inventory = inventory or M.status_inventory
+    local errors, absent, present, core = {}, {}, {}, {}
+    local function fail(text) errors[#errors + 1] = text end
+    local module_rows = {}
+    for _, row in ipairs(inventory.modules) do
+        local modname, status = row[1], row[2]
+        if module_rows[modname] then fail(modname .. ": duplicate module row") end
+        module_rows[modname] = row
+        local in_native, in_browser = native.entries[modname] ~= nil, browser.entries[modname] ~= nil
+        if not module_statuses[status] then
+            fail(modname .. ": unknown module status " .. tostring(status))
+        elseif status == "present" then
+            core[modname] = row.core == true
+            if in_native and in_browser then
+                present[modname] = true
+            else
+                fail(modname .. ": present module is missing from a provider")
+            end
+            if M.test_reference(row.test) ~= "owner" then fail(modname .. ": present module names no test owner") end
+        elseif status == "absent" then
+            absent[modname] = true
+            if not in_native or in_browser then fail(modname .. ": absent module is not native-only") end
+            if type(row.reason) ~= "string" or row.reason == "" then fail(modname .. ": absent module has no reason") end
+        elseif in_native or not in_browser then
+            fail(modname .. ": browser-only module is not browser-only")
+        end
+    end
+    for _, provider in ipairs({ native, browser }) do
+        for _, modname in ipairs(provider.key_order) do
+            if not module_rows[modname] then fail(modname .. ": module has no status row") end
+        end
+    end
+    local function names_absent_module(text)
+        for modname in pairs(absent) do
+            if text:find(modname .. ".", 1, true) then return true end
+        end
+        return false
+    end
+    for modname in pairs(inventory.members) do
+        if not present[modname] then fail(modname .. ": member rows for a module that is not present") end
+    end
+    -- Every browser module, decoded once with its raise members: a type-only
+    -- owner must stay unreachable from all of them.
+    local browser_types, scanned = {}, {}
+    for _, modname in ipairs(browser.key_order) do
+        local raising = {}
+        for _, row in ipairs(inventory.members[modname] or {}) do
+            if row[2] == "raise" then raising[row[1]] = true end
+        end
+        browser_types[modname] = assert(driver.decode_module_interface(browser.entries[modname].types, modname,
+            "browser interface"))
+        scanned[#scanned + 1] = { modname = modname, type = browser_types[modname], raising = raising }
+    end
+    for modname in pairs(present) do
+        local native_type = assert(driver.decode_module_interface(native.entries[modname].types, modname,
+            "native interface"))
+        local browser_type = browser_types[modname]
+        local declared, offered = M.members(native_type), M.members(browser_type)
+        local scope, rows = M.status_scope(declared), {}
+        for _, row in ipairs(inventory.members[modname] or {}) do
+            if rows[row[1]] then fail(modname .. "." .. row[1] .. ": duplicate status row") end
+            rows[row[1]] = row
+        end
+        -- A member of an absent owner typed by an absent module is typed too;
+        -- otherwise its own declaration decides.
+        local function class(name)
+            local owner = name:match("^([^.:]+)[.:]")
+            if owner and rows[owner] and rows[owner][2]:match("^absent:") and class(owner) == "absent:typed" then
+                return "absent:typed"
+            end
+            local declaration = owner_declaration(native_type, name)
+            local text = declaration and types.serialize_semantic(declaration) or declared[name].semantic
+            return names_absent_module(text) and "absent:typed" or "absent:native-only"
+        end
+        for name in pairs(scope) do
+            if not rows[name] then fail(modname .. "." .. name .. ": native member has no status row") end
+        end
+        for name, row in pairs(rows) do
+            local status, test, label = row[2], row[3], modname .. "." .. name
+            local kind = declared[name] and declared[name].kind
+            local reference = M.test_reference(test)
+            if not scope[name] then
+                fail(label .. ": status row is not a native callable, type or variable")
+            elseif not member_statuses[status] then
+                fail(label .. ": unknown status " .. tostring(status))
+            elseif status:match("^absent:") then
+                if offered[name] then fail(label .. ": absent member is in the browser interface") end
+                if status ~= class(name) then fail(label .. ": absence is " .. class(name) .. ", not " .. status) end
+                if test ~= nil then fail(label .. ": absent member names a test") end
+            else
+                if not offered[name] then fail(label .. ": " .. status .. " member is missing from the browser") end
+                if kind == "raw foreign function" and status ~= "implemented" then
+                    fail(label .. ": a raw foreign function is implemented or absent")
+                end
+                if status == "type-only" then
+                    if test ~= nil then fail(label .. ": type-only member names a test") end
+                    local owner = name:match("^([^.:]+)[.:]")
+                    if owner and not (rows[owner] and rows[owner][2] == "type-only") then
+                        fail(label .. ": type-only member of an owner that is not type-only")
+                    elseif owner and kind ~= "method" then
+                        fail(label .. ": only instance methods of a type-only owner are type-only")
+                    elseif not owner then
+                        local violation = type_only_violation(browser_type, name, scanned)
+                        if violation then fail(label .. ": type-only owner " .. violation) end
+                    end
+                elseif reference == nil then
+                    fail(label .. ": " .. status .. " member names no test")
+                elseif reference == "owner" and not (status == "implemented" and core[modname]) then
+                    fail(label .. ": only implemented members of a core module may name a whole test owner")
+                end
+            end
+        end
+    end
+    for _, row in ipairs(inventory.stock_lua or {}) do
+        local reference = M.test_reference(row[3])
+        if row[2] ~= "implemented" and row[2] ~= "raise" then
+            fail("stock Lua " .. row[1] .. ": unknown status " .. tostring(row[2]))
+        elseif reference ~= "case" and reference ~= "harness" then
+            fail("stock Lua " .. row[1] .. ": names no exact test case")
+        end
+    end
+    if #errors > 0 then
+        table.sort(errors, util.bytewise_less)
+        return nil, "status inventory violations:\n" .. table.concat(errors, "\n")
+    end
+    return true
+end
+
+-- The generated member table. Each row shows its inventory status and test;
+-- fields, variants and Interface methods show their owner's.
+function M.member_table(rows, recorded_rows, inventory)
+    inventory = inventory or M.status_inventory
+    local statuses = {}
+    for modname, list in pairs(inventory.members) do
+        for _, row in ipairs(list) do statuses[modname .. " " .. row[1]] = row end
+    end
+    local function status(row)
+        local found = statuses[row.module .. " " .. row.name] or
+            statuses[row.module .. " " .. (row.name:match("^([^.:]+)[.:]") or "")]
+        return found and found[2] or "", found and found[3] or ""
+    end
     local out = {
         "# Browser core stdlib public-member inventory (generated)", "",
         "Derived from native and browser provider interfaces. Shared members keep their native signatures; " ..
-            "the browser differs only in the recorded members listed last.",
+            "the browser differs only in the absent members listed last.",
         "Semantic interface types are compared with documentation excluded; machine layouts are separate metadata.", "",
-        "| Module | Member | Kind | Native and browser signature |", "| --- | --- | --- | --- |",
+        "| Module | Member | Kind | Status | Test | Native and browser signature |",
+        "| --- | --- | --- | --- | --- | --- |",
     }
     local function escape(text) return text:gsub("|", "&#124;"):gsub("`", "&#96;") end
     for _, row in ipairs(rows) do
-        out[#out + 1] = "| `" .. row.module .. "` | `" .. row.name .. "` | " .. row.kind .. " | `" .. escape(row.signature) .. "` |"
+        local state, test = status(row)
+        out[#out + 1] = "| `" .. row.module .. "` | `" .. row.name .. "` | " .. row.kind .. " | " .. state ..
+            " | " .. (test ~= "" and "`" .. test .. "`" or "") .. " | `" .. escape(row.signature) .. "` |"
     end
     if recorded_rows and #recorded_rows > 0 then
         out[#out + 1] = ""
-        out[#out + 1] = "## Recorded browser differences"
+        out[#out + 1] = "## Absent browser members"
         out[#out + 1] = ""
-        out[#out + 1] = "| Module | Member | Difference | Kind | Native signature |"
+        out[#out + 1] = "| Module | Member | Status | Kind | Native signature |"
         out[#out + 1] = "| --- | --- | --- | --- | --- |"
         for _, row in ipairs(recorded_rows) do
-            out[#out + 1] = "| `" .. row.module .. "` | `" .. row.name .. "` | " .. row.difference .. " | " ..
-                row.kind .. " | `" .. escape(row.signature) .. "` |"
+            local state = status(row)
+            out[#out + 1] = "| `" .. row.module .. "` | `" .. row.name .. "` | " .. (state ~= "" and state or row.difference) ..
+                " | " .. row.kind .. " | `" .. escape(row.signature) .. "` |"
         end
     end
+    return table.concat(out, "\n") .. "\n"
+end
+
+-- The browser type fixture: each module's serialized interface from the
+-- browser provider's metadata, keyed by its short name, as the native fixture
+-- pins the native provider. Each value takes the lowest long-bracket level
+-- (from one) whose closing bracket occurs neither in its text nor across its
+-- end, where a trailing `]=*` would join the closing bracket. Long brackets
+-- drop a leading newline and rewrite carriage returns, so such a value is
+-- quoted instead.
+function M.type_fixture(scanned)
+    local out = {
+        "-- Exact current serialized interfaces of the browser standard provider",
+        "-- (lib/titan-browser/<version>/titan.a). Regenerate with",
+        "-- `lua scripts/check_browser_stdlib.lua fixture <browser titan.a> <this file>`.",
+        "return {",
+    }
+    for _, modname in ipairs(scanned.key_order) do
+        local text = scanned.entries[modname].types
+        local literal
+        if text:find("^\n") or text:find("\r", 1, true) then
+            literal = string.format("%q", text)
+        else
+            local level = "="
+            while (text .. "]"):find("]" .. level .. "]", 1, true) do level = level .. "=" end
+            literal = "[" .. level .. "[" .. text .. "]" .. level .. "]"
+        end
+        out[#out + 1] = "    " .. modname:gsub("^titan%.", "") .. " = " .. literal .. ","
+    end
+    out[#out + 1] = "}"
     return table.concat(out, "\n") .. "\n"
 end
 

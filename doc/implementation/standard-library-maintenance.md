@@ -50,10 +50,30 @@ to `io`, `os`, `lua`, `http`, `websocket`, `uv`, `async`, `timer`,
 their only native payload and include path is LPegLabel: a libuv, OpenSSL,
 llhttp, or SQLite header, archive, or symbol fails the [dependency-closure
 check](browser-target.md#the-dependency-closure-check) in `make browser-sdk`
-and `make titan-stdlib-browser-test`. A new shared module or member keeps
-its native signature and behavior; the [member
-inventory](browser-target.md#interface-derived-member-inventory) fails on any
-difference between the native and browser interfaces that it does not record.
+and `make titan-stdlib-browser-test`.
+
+The browser library is a reviewed subset of the native one, enforced by the
+[subset parity gate](browser-target.md#subset-parity-gate) against the status
+inventory `scripts/browser_stdlib_inventory.lua`:
+
+* A change to a public declaration that both targets have updates every
+  implementation that declares it (shared source, `.native.titan`, and
+  `.browser.titan`), both type fixtures
+  (`spec/fixtures/stdlib/titan_stdlib_types.lua` and
+  `titan_stdlib_browser_types.lua`, the latter regenerated with
+  `check_browser_stdlib.lua fixture`), and its inventory row. The browser
+  declaration keeps the native signature exactly, including parameter names,
+  generics, and C facts.
+* A delivered module must not declare a public member its native module
+  lacks; a browser-only declaration belongs in `titan.browser`.
+* A public member added to the native module either gets a browser
+  implementation and a test that the inventory names, or an `absent:typed`
+  or `absent:native-only` row. A member that would always raise needs a
+  `raise` row and the maintainer's approval; none exists today.
+* A new native module gets a `present` or `absent` module row; an absent
+  row's reason is what the [absent-module
+  diagnostic](browser-target.md#the-absent-module-diagnostic) prints.
+
 Read a target-dependent constant from a target C define through `ffi`, as
 `coroutine`, `protobuf`,
 `json`, and `path` do, rather than adding a `.browser.titan` copy; reserve a
@@ -67,15 +87,17 @@ no-filesystem loading contributor and omits native background execution
 
 `titan.async` is a browser module through its own browser composition: its
 shared main and the `runtime.browser.titan` and `external.browser.titan`
-contributors, which import `titan.browser`. Its browser omissions and its
-opaque `ExternalWait` are recorded in the member inventory, so a new public
-`async` member that the browser cannot provide must be recorded there, and a
-shared one must type-check without `uv`. `titan.timer` is one through its
-flat variant `titan/timer.browser.titan`, built on public `async` and the
-SDK's timer sources; a member added to `timer.native.titan` needs its browser
-twin, and its opaque `Ticker` is recorded in the inventory. `os` keeps its
-native-only members absent on browser and its two stream records opaque;
-their public methods must still match.
+contributors, which import `titan.browser`. Its absent members and its
+type-only `ExternalWait` and `Completion` are inventory rows, so a new public
+`async` member that the browser cannot provide needs an absent row, and a
+shared one must type-check without `uv`. A browser declaration that can
+produce an `ExternalWait` or `Completion` value fails the gate's type-only
+check.
+`titan.timer` is one through its flat variant `titan/timer.browser.titan`,
+built on public `async` and the SDK's timer sources; a member added to
+`timer.native.titan` needs its browser twin. Private fields of `Ticker`, of
+the `os` stream records, and of the network clients may differ between
+targets; their public fields and methods may not.
 
 `titan.http` and `titan.websocket` are browser modules through their client
 compositions. Their shared contributors (`http.titan`, `headers.titan`,
@@ -84,13 +106,11 @@ type-check on both targets, so they import neither `net`, `ssl`, `uv`, nor
 `titan.browser`; native transport, server, upgrade, and transfer code lives in
 `*.native.titan` contributors, and the browser client in `*.browser.titan`.
 A public member added to a native contributor is either given a browser
-implementation with the same signature or recorded as a browser omission in
-the inventory, whose opaque records (`Client`, `ClientResponse`, and
-`websocket.Connection`) keep their public methods compared. Neither browser
-composition may reach llhttp, OpenSSL, or libuv. Request and connection policy
-stays in Titan; the SDK's `titan:fetch` and `titan:websocket` sources only
-reach host objects ([the same rules for browser
-JavaScript](#the-same-rules-for-browser-javascript)).
+implementation with the same signature or given an absent row in the
+inventory. Neither browser composition may reach llhttp, OpenSSL, or libuv.
+Request and connection policy stays in Titan; the SDK's `titan:fetch` and
+`titan:websocket` sources only reach host objects ([the same rules for
+browser JavaScript](#the-same-rules-for-browser-javascript)).
 
 Only these browser files may import `titan.browser`: those of `async`
 (`runtime.browser.titan` and `external.browser.titan`), `timer.browser.titan`,
@@ -100,8 +120,8 @@ browser main `websocket/websocket.browser.titan`, whose import the browser
 
 The browser provider's other target-specific module, `titan.browser`
 (`titan/browser.browser.titan`), is the one reviewed browser-only exception.
-It has no native placeholder or native interface, so the member inventory
-skips it. It imports only `gc`, defines its native entry points as foreign
+It has no native placeholder or native interface, so the gate does not
+compare it. It imports only `gc`, defines its native entry points as foreign
 functions in `titan/browser.browser.titan`, and must not gain a native-only
 dependency either. A native module must not import it; see [browser bridge
 runtime](browser-bridge.md).

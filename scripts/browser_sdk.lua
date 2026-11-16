@@ -327,11 +327,11 @@ elseif action == "finalize" then
     closed, closure_err = stdlib_checks.check_output(strategy, build_dir)
     if not closed then fail(closure_err) end
     io.stderr:write("browser-sdk: core stdlib closure passed (archive symbols and certified headers)\n")
-    local expected_modules = {
-        "titan.async", "titan.browser", "titan.coroutine", "titan.gc", "titan.http", "titan.io", "titan.iteration",
-        "titan.json", "titan.lua", "titan.math", "titan.os", "titan.path", "titan.peg", "titan.protobuf",
-        "titan.reflect", "titan.string", "titan.test", "titan.timer", "titan.transfer", "titan.url", "titan.websocket",
-    }
+    -- The provider holds exactly the Make roots, which the status inventory's
+    -- present and browser-only modules must equal.
+    local expected_modules, roots_err = stdlib_checks.browser_roots(strategy)
+    if not expected_modules then fail(roots_err) end
+    table.sort(expected_modules, util.bytewise_less)
     if #(scanned.key_order or {}) ~= #expected_modules then
         fail("browser provider titan.a has unexpected module count: " .. tostring(#(scanned.key_order or {})))
     end
@@ -342,6 +342,15 @@ elseif action == "finalize" then
         end
     end
     copy_file_atomic(staged_provider, assets.provider, false)
+    -- The compiler names an absent module and its reason from this list. It
+    -- changes only diagnostics, so sdk-digests does not record it.
+    local absent_lines = {}
+    for _, row in ipairs(stdlib_checks.status_inventory.modules) do
+        if row[2] == "absent" then absent_lines[#absent_lines + 1] = row[1] .. "\t" .. row.reason .. "\n" end
+    end
+    local absent_file = paths.join(descriptor.paths.titan_bin, "absent-modules")
+    local written, write_err = strategy:write_file(absent_file, table.concat(absent_lines))
+    if not written then fail("cannot write '" .. absent_file .. "': " .. tostring(write_err)) end
 
     -- Collect all installed browser SDK inputs for sdk-digests (written LAST).
     local digest_inputs = {

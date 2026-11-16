@@ -650,6 +650,41 @@ local function stdlib_source_files(filename)
     return sources
 end
 
+-- The declared native inventory plus the browser-only standard-library
+-- sources, which no native Make list names: the compiler's browser selection
+-- of the standard tree supplies them, and each must belong to a module that
+-- the browser status inventory marks browser-only. Browser builds need a
+-- Linux or macOS host, so Windows audits the native inventory alone.
+local function audited_stdlib_sources()
+    local sources = stdlib_source_files()
+    if platform.windows then return sources end
+    local declared, browser_only = {}, {}
+    for _, source in ipairs(sources) do declared[source] = true end
+    for _, row in ipairs(browser_checks.status_inventory.modules) do
+        if row[2] == "browser-only" then browser_only[row[1]] = true end
+    end
+    local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
+    local context = driver._new_resolver_context({ target = "browser" }, descriptor)
+    local called, selected, err = pcall(browser_checks.check_sources, context, ".")
+    local closed, close_error = driver.close_resolver_context(context)
+    assert.is_true(called, selected)
+    assert.is_true(closed, close_error)
+    assert.is_table(selected, err)
+    local covered = {}
+    for _, file in ipairs(selected) do
+        local source = paths.to_slash(file):gsub("^%./", "")
+        if not declared[source] then
+            local modname = "titan." .. assert(source:match("^titan/([^/.]+)"), source)
+            assert.truthy(browser_only[modname], source .. " is a browser-only source outside a browser-only module")
+            covered[modname] = true
+            sources[#sources + 1] = source
+        end
+    end
+    -- Every browser-only module is audited through at least one source.
+    assert.same(browser_only, covered)
+    return sources
+end
+
 -- The host's own source label, which selects a family's variant. A native
 -- host without an OS label selects `native` first and the default last.
 local host_label
@@ -1146,7 +1181,7 @@ esac
         }) do
             assert.falsy(makefile:find(retired, 1, true), retired)
         end
-        for _, source in ipairs(stdlib_source_files()) do
+        for _, source in ipairs(audited_stdlib_sources()) do
             for _, node in ipairs(parsed_source(source)) do
                 if node._tag == "Ast.TopLevelImport" then
                     assert.is_false(node.source_required,
@@ -1165,7 +1200,19 @@ esac
         local closed, close_error = driver.close_resolver_context(context)
         assert.is_true(called, ok)
         assert.is_true(closed, close_error)
-        assert.is_true(ok, err)
+        assert.truthy(ok, err)
+    end)
+
+    it("keeps the browser status inventory's module rows equal to the Make roots", function()
+        local delivered, native = {}, {}
+        for _, row in ipairs(browser_checks.status_inventory.modules) do
+            if row[2] ~= "absent" then delivered[#delivered + 1] = row[1] end
+            if row[2] ~= "browser-only" then native[#native + 1] = row[1] end
+        end
+        local roots, all = makefile_words("BROWSER_STDLIB_ROOTS"), makefile_words("STDLIB_ROOTS")
+        for _, list in ipairs({ delivered, native, roots, all }) do table.sort(list) end
+        assert.same(roots, delivered)
+        assert.same(all, native)
     end)
 
     it("gates identical SDK reinstalls on certified module, native and final hits", function()
@@ -2896,8 +2943,14 @@ int main(void) {
         end)
 
     it("keeps domain callbacks above public UV and raw libuv symbols inside its binding", function()
-        for _, module in ipairs({"async", "timer", "fs", "net", "os", "sqlite3"}) do
-            for _, path in ipairs(stdlib_source_files()) do
+        local audited, modules = audited_stdlib_sources(), {"async", "timer", "fs", "net", "os", "sqlite3"}
+        local native_objects = {}
+        for _, module in ipairs(modules) do native_objects[module] = true end
+        for _, row in ipairs(browser_checks.status_inventory.modules) do
+            if row[2] == "browser-only" then modules[#modules + 1] = row[1]:sub(7) end
+        end
+        for _, module in ipairs(modules) do
+            for _, path in ipairs(audited) do
                 if path:match("^titan/([^/.]+)") == module then
                     local source = read_file(path)
                     assert.falsy(source:find('foreign import "uv.h"', 1, true), path)
@@ -2910,11 +2963,15 @@ int main(void) {
                     end
                 end
             end
-            local object = stdlib_artifact((paths.to_slash(stdlib_objects.object(
-                resolver_options().context, "titan." .. module, ".", ".")):gsub("^%./", "")))
-            local output = module_symbols.collect(object, run_argv).undefined_text
-            for symbol in output:gmatch("[^\r\n]+") do
-                assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
+            -- Browser-only modules have no native object; the browser
+            -- closure check rejects uv symbols in the browser provider.
+            if native_objects[module] then
+                local object = stdlib_artifact((paths.to_slash(stdlib_objects.object(
+                    resolver_options().context, "titan." .. module, ".", ".")):gsub("^%./", "")))
+                local output = module_symbols.collect(object, run_argv).undefined_text
+                for symbol in output:gmatch("[^\r\n]+") do
+                    assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
+                end
             end
         end
         assert.same({}, (function ()
@@ -3127,7 +3184,7 @@ int main(void) {
     it("keeps titan.gc as the sole stdlib lua_setmetatable owner",
         function()
             local callers = {}
-            for _, source in ipairs(stdlib_source_files()) do
+            for _, source in ipairs(audited_stdlib_sources()) do
                 if read_file(source):find(
                         "ffi.lua_setmetatable", 1, true) then
                     callers[#callers + 1] = source
@@ -3137,7 +3194,7 @@ int main(void) {
         end)
 
     it("uses ordinary public module imports for async domains", function()
-        for _, source in ipairs(stdlib_source_files()) do
+        for _, source in ipairs(audited_stdlib_sources()) do
             for _, node in ipairs(parsed_source(source)) do
                 if node._tag == "Ast.TopLevelImport" then
                     assert.falsy(node.modname:match("^titan%.uv%."), source .. ": " .. node.modname)
@@ -5913,7 +5970,7 @@ printf '%s\n' "${schedule[@]}"
                 "\n    name: browser target real toolchain (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
                 browser_job)
             assert.equal(1, count_literal(browser_stdlib_job,
-                "\n    name: browser SDK and core stdlib (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
+                "\n    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, emsdk 6.0.13, Node 26)\n"),
                 browser_stdlib_job)
             assert.equal(1, count_literal(macos_workflow, "\n  test-macos:"),
                 macos_workflow)
@@ -6268,21 +6325,21 @@ printf '%s\n' "${schedule[@]}"
                     'make lua-browser PREFIX="$PREFIX"',
                     '"$PREFIX/bin/luarocks" make',
                     'make browser-sdk PREFIX="$PREFIX"',
-                    "gate_specs=(", '"$PREFIX/bin/busted" -c -o gtest -v',
+                    "gate_specs", '"$PREFIX/bin/busted" -c -o gtest -v',
                     'luacov "titan%-compiler/" "titanc$"',
                     "lua spec/support/prepare_codecov_report.lua",
                     "codecov/codecov-action@v7",
                 }) do
                     previous = assert(job:find(command, previous + 1, true), command)
                 end
-                local gate = step_containing(job, "gate_specs=(")
+                local gate = step_containing(job, '"$PREFIX/bin/busted" -c -o gtest -v')
                 assert.equal(1, count_literal(gate,
                     "TITAN_ROOT: ${{ github.workspace }}/.lua"), gate)
                 assert.equal(1, count_literal(gate,
                     'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"'), gate)
                 assert.truthy(gate:find('[[ ! -f $gate_spec ]]', 1, true), gate)
                 assert.truthy(gate:find('"${gate_specs[@]}"', 1, true), gate)
-                -- Both jobs reinstall the native compiler without Emscripten
+                -- All browser runners reinstall the native compiler without Emscripten
                 -- and must retire every unregistered preparation copy.
                 local rocks = step_containing(job, '"$PREFIX/bin/luarocks" make')
                 for _, contract in ipairs({
@@ -6324,37 +6381,69 @@ printf '%s\n' "${schedule[@]}"
                 assert.falsy(job:find("TITAN_BROWSER_ROOT_NO_SANDBOX", 1, true),
                     job)
             end
+            local stdlib_matrix = assert(browser_stdlib_job:match(
+                "\n    strategy:\n(.-)\n    permissions:"))
+            assert.truthy(stdlib_matrix:find("fail-fast: false", 1, true))
+            assert.falsy(stdlib_matrix:find("max-parallel:", 1, true))
+            local stdlib_shards = {}
+            local suite_shards = 0
+            for first, name in stdlib_matrix:gmatch("()\n          %- shard: ([%w_-]+)") do
+                local finish = stdlib_matrix:find("\n          - shard:", first + 1, true)
+                    or (#stdlib_matrix + 1)
+                local shard = stdlib_matrix:sub(first, finish - 1)
+                assert.is_nil(stdlib_shards[name], "duplicate browser stdlib shard " .. name)
+                stdlib_shards[name] = assert(shard:match("\n            gate%-specs: >%-\n(.*)"))
+                local suite = assert(shard:match("\n            stdlib%-suite: (%w+)\n"))
+                assert.is_true(suite == "true" or suite == "false", suite)
+                if suite == "true" then
+                    suite_shards = suite_shards + 1
+                    assert.equal("sdk", name)
+                end
+            end
+            assert.equal(1, suite_shards)
+            local stdlib_gate_step = step_containing(browser_stdlib_job,
+                '"$PREFIX/bin/busted" -c -o gtest -v')
+            assert.truthy(stdlib_gate_step:find(
+                "TITAN_BROWSER_GATE_SPECS: ${{ matrix.gate-specs }}", 1, true))
+            assert.truthy(stdlib_gate_step:find(
+                'read -r -a gate_specs <<< "$TITAN_BROWSER_GATE_SPECS"', 1, true))
+            assert_codecov_upload(browser_job, "browser", "./luacov.codecov.out", "compiler")
+            assert_codecov_upload(browser_stdlib_job, "browser-stdlib-${{ matrix.shard }}",
+                "./luacov.codecov.out", "compiler")
+            assert.truthy(browser_stdlib_job:find(
+                "name: browser-stdlib-${{ matrix.shard }}-failure", 1, true))
             local all_gate_specs = {}
             for _, group in ipairs({
-                { job = browser_job, coverage = "browser", specs = {
+                { array = assert(step_containing(browser_job, "gate_specs=("):match(
+                    "gate_specs=%((.-)\n          %)")), specs = {
                     "spec/wasm_toolchain_spec.lua",
                     "spec/coder/browser_toolchain_spec.lua",
                     "spec/browser_trace_map_spec.lua",
                     "spec/coder/browser_trace_entries_spec.lua",
                     "spec/coder/browser_budgets_spec.lua",
                 } },
-                { job = browser_stdlib_job, coverage = "browser-stdlib", specs = {
-                    "spec/coder/browser_providers_spec.lua",
-                    "spec/coder/browser_incremental_spec.lua",
+                { array = assert(stdlib_shards.sdk), specs = {
+                    "spec/coder/browser_bridge_spec.lua",
+                    "spec/coder/browser_stdlib_gate_spec.lua",
+                    "spec/coder/browser_entry_gate_spec.lua",
                     "spec/coder/browser_images_spec.lua",
-                    "spec/coder/browser_protocol_spec.lua",
+                    "spec/coder/browser_net_spec.lua",
+                    "spec/minicoro_spec.lua",
+                    "spec/coder/browser_fixtures_spec.lua",
+                    "spec/coder/browser_providers_spec.lua",
+                } },
+                { array = assert(stdlib_shards.scheduler), specs = {
+                    "spec/coder/browser_scheduler_spec.lua",
+                    "spec/coder/browser_incremental_spec.lua",
                     "spec/browser_sdk_spec.lua",
                     "spec/coder/browser_stdlib_closure_spec.lua",
-                    "spec/coder/browser_entry_gate_spec.lua",
-                    "spec/coder/browser_bridge_spec.lua",
-                    "spec/coder/browser_scheduler_spec.lua",
-                    "spec/coder/browser_net_spec.lua",
-                    "spec/coder/browser_stdlib_gate_spec.lua",
-                    "spec/coder/browser_fixtures_spec.lua",
-                    "spec/minicoro_spec.lua",
+                    "spec/coder/browser_protocol_spec.lua",
                 } },
             }) do
-                local gate = step_containing(group.job, "gate_specs=(")
-                local array = assert(gate:match("gate_specs=%((.-)\n          %)"))
                 local actual = {}
-                for path in array:gmatch("spec/[%w_/-]+_spec%.lua") do
+                for path in group.array:gmatch("spec/[%w_/-]+_spec%.lua") do
                     assert.is_nil(actual[path], "duplicate gate spec " .. path)
-                    assert.is_nil(all_gate_specs[path], "gate spec in both jobs: " .. path)
+                    assert.is_nil(all_gate_specs[path], "gate spec in multiple runners: " .. path)
                     actual[path], all_gate_specs[path] = true, true
                 end
                 for _, path in ipairs(group.specs) do
@@ -6362,9 +6451,9 @@ printf '%s\n' "${schedule[@]}"
                     actual[path] = nil
                 end
                 assert.is_nil(next(actual), "unexpected gate spec")
-                assert_codecov_upload(group.job, group.coverage,
-                    "./luacov.codecov.out", "compiler")
             end
+            stdlib_shards.sdk, stdlib_shards.scheduler = nil, nil
+            assert.is_nil(next(stdlib_shards), "unexpected browser stdlib shard")
             for _, contract in ipairs({
                 "browser-loader.log", "browser-guard.log",
                 '"$TITAN_NODE" --test spec/browser/runner.test.mjs',
@@ -6380,8 +6469,11 @@ printf '%s\n' "${schedule[@]}"
                 'make browser-sdk PREFIX="$PREFIX"', 1, true))
             local stdlib_suite = assert(browser_stdlib_job:find(
                 "make titan-stdlib-browser-test", stdlib_sdk, true))
-            local stdlib_gate = assert(browser_stdlib_job:find("gate_specs=(", stdlib_suite, true))
+            local stdlib_gate = assert(browser_stdlib_job:find("read -r -a gate_specs", stdlib_suite, true))
             assert.is_true(stdlib_sdk < stdlib_suite and stdlib_suite < stdlib_gate)
+            assert.truthy(named_step(browser_stdlib_job,
+                "Run complete browser core stdlib suite under Node and Chromium"):find(
+                "if: matrix.stdlib-suite", 1, true))
             assert.truthy(browser_stdlib_job:find("out/browser-net/**", 1, true))
             assert.falsy(linux_workflow:find("HigherRendererMemoryLimit", 1, true))
             assert.falsy(browser_stdlib_job:find("titan-stdlib-chrome", 1, true))

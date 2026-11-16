@@ -13248,19 +13248,68 @@ describe("target-aware source resolver", function()
             end
         end)
 
+        -- Without the browser SDK's absent-module list both import forms keep
+        -- the ordinary not-found message; with it, a listed module names the
+        -- target and the SDK's reason, and unlisted names stay unchanged.
         it("rejects browser imports of the native-only stdlib module " .. name, function()
             driver.TITAN_SOURCE_PATH = root .. ";" .. stdlib_root
             driver.TITAN_BIN_PATH = root
-            local ctx = context("browser")
-            assert.is_nil(driver.resolve_source(ctx, name, stdlib_root))
-            put("consumer.titan", 'local excluded = import "' .. entry[1] .. '"\n')
-            local ok, _, errors = driver.defaultloader({}, {
-                context = ctx, source_roots = { consumer = true },
-            })("consumer")
-            assert.is_true(ok)
-            assert.equal(1, #errors, table.concat(errors, "\n"))
-            assert.matches("module '" .. name .. "' not found", errors[1], 1, true)
-            assert.is_nil(driver.imported[name])
+            -- The descriptor's installation root holds the fixture SDK.
+            local fixture_target = driver._browser_target
+            driver._browser_target = setmetatable({ build = function()
+                return assert(saved_browser_target.import(browser_fixtures.descriptor(root .. "/sdk")))
+            end }, { __index = saved_browser_target })
+            local tested, failure = pcall(function()
+                local function import_error(ctx, consumer, imported)
+                    put(consumer .. ".titan", 'local excluded = import "' .. imported .. '"\n')
+                    local ok, _, errors = driver.defaultloader({}, {
+                        context = ctx, source_roots = { [consumer] = true },
+                    })(consumer)
+                    assert.is_true(ok)
+                    assert.equal(1, #errors, table.concat(errors, "\n"))
+                    return errors[1]
+                end
+                local ctx = context("browser")
+                assert.is_nil(driver.resolve_source(ctx, name, stdlib_root))
+                assert.matches("module '" .. name .. "' not found", import_error(ctx, "plain", entry[1]), 1, true)
+                assert.matches("source module '" .. name .. "' not found",
+                    import_error(ctx, "marked", entry[1] .. ".titan"), 1, true)
+                local unavailable = "module '" .. name .. "' is not available for target 'browser': requires a native host"
+                for _, newline in ipairs({ "\n", "\r\n" }) do
+                    fixtures.write(root .. "/sdk/lib/titan-browser/" .. driver.TITAN_LIBRARY_VERSION .. "/absent-modules",
+                        "titan.example\trequires an example" .. newline .. name .. "\trequires a native host" .. newline)
+                    ctx = context("browser")
+                    -- Consumers loaded once stay imported, so each pass uses its own.
+                    local pass = newline == "\n" and "" or "_crlf"
+                    assert.matches(unavailable, import_error(ctx, "listed" .. pass, entry[1]), 1, true)
+                    assert.matches(unavailable, import_error(ctx, "listed_source" .. pass, entry[1] .. ".titan"), 1, true)
+                    assert.matches("module 'missing' not found", import_error(ctx, "unlisted" .. pass, "missing"), 1, true)
+                    assert.matches("source module 'missing' not found",
+                        import_error(ctx, "unlisted_source" .. pass, "missing.titan"), 1, true)
+                    -- External resolution reports a required source like an
+                    -- import and keeps the probe's `missing` kind.
+                    local external = driver.resolve_external_modules({ [name] = true, missing = true }, {}, ctx)
+                    assert.same({ kind = "error", message = unavailable }, external[name])
+                    assert.same({ kind = "error", message = "source module 'missing' not found" }, external.missing)
+                    external = driver.resolve_external_modules({ [name] = false, missing = false }, {}, ctx)
+                    assert.same({ kind = "missing" }, external[name])
+                    assert.same({ kind = "missing" }, external.missing)
+                    -- The table loader: an absent table entry, and a cached
+                    -- compiled interface under a source request.
+                    local source_import = { kind = "source-import" }
+                    local loader = driver.tableloader({}, {}, {}, { context = ctx })
+                    assert.same({ false, unavailable }, { loader(name) })
+                    assert.same({ false, unavailable }, { loader(name, source_import) })
+                    assert.same({ false, "module 'missing' not found" }, { loader("missing") })
+                    assert.same({ false, "source module 'missing' not found" }, { loader("missing", source_import) })
+                    local cached = driver.tableloader({},
+                        { [name] = { kind = "compiled", type = types.Module(name, {}) } }, {}, { context = ctx })
+                    assert.same({ false, unavailable }, { cached(name, source_import) })
+                end
+                assert.is_nil(driver.imported[name])
+            end)
+            driver._browser_target = fixture_target
+            if not tested then error(failure, 0) end
         end)
     end
     it("selects the browser-only bridge without a native placeholder", function()

@@ -3,6 +3,7 @@ local lfs = require "lfs"
 local browserlink = require "titan-compiler.browserlink"
 local files = require "spec.fixtures.target_selection.support"
 local toolchain = require "spec.support.browser_toolchain"
+local checks = dofile("scripts/browser_stdlib.lua")
 local repository = assert(lfs.currentdir())
 local source = repository .. "/spec/fixtures/browser_scheduler"
 local stdlib_tree = repository .. "/spec/stdlib/titan"
@@ -139,6 +140,13 @@ describe("browser drive interface", function()
                     assertions, engine, info.node.version, info.chrome.version, result.output))
                 io.stdout:flush()
                 assert.is_true(result.ok, result.output)
+                assert(checks.require_evidence(checks.status_inventory, result.output,
+                    { ["async.browser_tests"] = true }))
+                local gate_cases = 0
+                for name in pairs(checks.passed_cases(result.output)) do
+                    if name:match("^async%.browser_tests%.") then gate_cases = gate_cases + 1 end
+                end
+                assert.equal(22, gate_cases, result.output)
                 assert.truthy(result.output:find('"verdict":"PASS"', 1, true), result.output)
                 assert.truthy(result.output:find('"gate":22', 1, true), result.output)
                 assert.truthy(result.output:find('"crowd":2000', 1, true), result.output)
@@ -188,6 +196,8 @@ describe("browser drive interface", function()
                     assertions, engine, result.output))
                 io.stdout:flush()
                 assert.is_true(result.ok, result.output)
+                assert(checks.require_evidence(checks.status_inventory, result.output,
+                    { ["os.browser_tests"] = true }))
                 assert.truthy(result.output:find('OS-STREAMS {"verdict":"PASS","cases":77,"dialogs":0',
                     1, true), result.output)
             end

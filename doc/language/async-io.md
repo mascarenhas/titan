@@ -2117,8 +2117,10 @@ functions (`prepare_external_wait`, `prepare_native_retirement`,
 `wait_external`, `wait_external_cleanup`, `wait_external_native`), `version`,
 and Receivers (`receiver`, `send`, `Receiver`). `ExternalWait` remains only as
 a type, with no constructor and no methods, so the `final_wait` of
-`run_with_cleanup` is always `nil`. Initializing `async` on the browser
-changes no signal disposition and reads no process arguments.
+`run_with_cleanup` is always `nil`. `Completion` keeps its methods, but no
+browser function hands one out, since the `await_*_with` functions that do
+are absent. Initializing `async` on the browser changes no signal
+disposition and reads no process arguments.
 
 ### The browser driver
 

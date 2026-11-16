@@ -32,10 +32,11 @@ elseif action == "inventory" then
     local browser = need(staticmetadata.scan_archive(second))
     local rows, modules, recorded = checks.inventory(native, browser)
     need(rows, modules)
+    need(checks.check_status(native, browser))
     local text = checks.member_table(rows, recorded)
     if third then need(strategy:write_file(third, text)) else io.write(text) end
-    print(string.format("Browser stdlib inventory: %d modules, %d public members, %d recorded differences, no others.",
-        modules, #rows, #recorded))
+    print(string.format("Browser stdlib inventory: %d modules, %d public members, %d absent members, " ..
+        "every status row consistent.", modules, #rows, #recorded))
 elseif action == "output" then
     assert(first and second and third and #arguments == 4,
         "output requires roots file, filter and stdout log")
@@ -89,6 +90,19 @@ elseif action == "output" then
         print("Browser stdlib gate: incomplete; final counts unavailable.")
     end
     need(result, err)
+    -- A filtered run may leave inventory tests unselected; a complete run must
+    -- show every image test that the status inventory names as passed.
+    if second == "" then
+        local image_owners = {}
+        for _, root in ipairs(roots) do image_owners[root] = true end
+        need(checks.require_evidence(checks.status_inventory, contents, image_owners))
+        print("Browser stdlib inventory evidence: every named image test passed.")
+    end
+elseif action == "fixture" then
+    assert(first, "fixture requires the browser provider")
+    local text = checks.type_fixture(need(staticmetadata.scan_archive(first)))
+    if second then need(strategy:write_file(second, text)) else io.write(text) end
 else
-    error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | output ROOTS FILTER LOG")
+    error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | " ..
+        "output ROOTS FILTER LOG | fixture BROWSER [FILE]")
 end

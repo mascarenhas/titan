@@ -263,6 +263,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
+| `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
 The directory is a sibling of the native `lib/titan/0.6/`, never inside it,
@@ -1218,31 +1219,39 @@ bare `raise`.
 The browser SDK's `titan.a` holds twenty-one standard modules that need no
 libuv or other native-only library: fourteen complete shared modules, browser
 compositions of `async`, `timer`, `os`, `lua`, `http`, and `websocket`, and the
-browser-only `titan.browser`:
+browser-only `titan.browser`. A *complete* module has every public declaration
+of its native interface; a *subset* module lacks some of them, and the browser
+compiler rejects a use of a missing one like any undeclared name:
 
-| Module | Contents |
-| --- | --- |
-| [`coroutine`](coroutines.md) | stackful coroutines |
-| [`gc`](standard-library-gc.md) | weak Maps, ephemerons, finalizers, and collector control |
-| [`iteration`](standard-library-iteration.md) | Map and Array iteration |
-| [`math`](standard-library-math.md) | numeric functions and random numbers |
-| [`string`](standard-library-string.md) | byte strings, formatting, packing, writers, and regular expressions |
-| [`peg`](standard-library-peg.md) | parsing expressions |
-| [`url`](standard-library-url.md) | URL parsing and construction |
-| [`path`](standard-library-path.md) | lexical paths |
-| [`reflect`](standard-library-reflect.md) | runtime reflection |
-| [`json`](standard-library-json.md) | JSON encoding and decoding |
-| [`protobuf`](standard-library-protobuf.md) | Protocol Buffers encoding and decoding |
-| [`transfer`](standard-library-transfer.md) | transfer policies and native message packets |
-| [`test`](standard-library-test.md) | the test API and the native test runner |
-| [`io`](standard-library-io.md) | byte-stream Interfaces, one-write printing, and ownership-safe line iteration |
-| [`async`](async-io.md#the-browser-target) | Tasks, cancellation, waits, channels, combinators, and subscriptions, driven between browser macrotasks |
-| [`timer`](standard-library-timer.md#on-the-browser) | Task delays, yields, and coalescing tickers on JavaScript timers |
-| [`os`](standard-library-os.md#on-the-browser) | calendars, wall time, locale, instance environment, Task exit, and embedding-provided parent streams |
-| [`lua`](standard-library-lua.md) | string and Reader loading, preload/custom-searcher `require`, and synchronous independent states |
-| [`http`](standard-library-http.md#on-the-browser) | headers, request options, and the streaming HTTP client over `fetch` |
-| [`websocket`](standard-library-websocket.md#on-the-browser) | the message-oriented WebSocket client over the host's `WebSocket` |
-| [`browser`](standard-library-browser.md) | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
+| Module | Availability | Contents |
+| --- | --- | --- |
+| [`coroutine`](coroutines.md) | complete | stackful coroutines |
+| [`gc`](standard-library-gc.md) | complete | weak Maps, ephemerons, finalizers, and collector control |
+| [`iteration`](standard-library-iteration.md) | complete | Map and Array iteration |
+| [`math`](standard-library-math.md) | complete | numeric functions and random numbers |
+| [`string`](standard-library-string.md) | complete | byte strings, formatting, packing, writers, and regular expressions |
+| [`peg`](standard-library-peg.md) | complete | parsing expressions |
+| [`url`](standard-library-url.md) | complete | URL parsing and construction |
+| [`path`](standard-library-path.md) | complete | lexical paths |
+| [`reflect`](standard-library-reflect.md) | complete | runtime reflection |
+| [`json`](standard-library-json.md) | complete | JSON encoding and decoding |
+| [`protobuf`](standard-library-protobuf.md) | complete | Protocol Buffers encoding and decoding |
+| [`transfer`](standard-library-transfer.md) | complete | transfer policies and native message packets |
+| [`test`](standard-library-test.md) | complete | the test API and the native test runner |
+| [`io`](standard-library-io.md) | complete | byte-stream Interfaces, one-write printing, and ownership-safe line iteration |
+| [`async`](async-io.md#the-browser-target) | subset | Tasks, cancellation, waits, channels, combinators, and subscriptions, driven between browser macrotasks |
+| [`timer`](standard-library-timer.md#on-the-browser) | complete | Task delays, yields, and coalescing tickers on JavaScript timers |
+| [`os`](standard-library-os.md#on-the-browser) | subset | calendars, wall time, locale, instance environment, Task exit, and embedding-provided parent streams |
+| [`lua`](standard-library-lua.md) | subset | string and Reader loading, preload/custom-searcher `require`, and synchronous independent states |
+| [`http`](standard-library-http.md#on-the-browser) | subset | headers, request options, and the streaming HTTP client over `fetch` |
+| [`websocket`](standard-library-websocket.md#on-the-browser) | subset | the message-oriented WebSocket client over the host's `WebSocket` |
+| [`browser`](standard-library-browser.md) | browser only | JavaScript bindings, `BrowserValue` runtime-type marshalling, pinned callables, handles, and tracked host requests |
+
+The six other standard modules are [not available](#modules-that-are-not-available).
+A declaration that a browser module keeps has its native signature, including
+its parameter names, generic parameters, and whether its records can be built
+from a literal and its unions matched exhaustively. A browser module never adds a
+public declaration that its native module lacks.
 
 Each of the fourteen shared modules keeps its complete interface. Every public
 declaration, including the raw C functions `protobuf.write_resource_index`,
@@ -1261,8 +1270,10 @@ the libuv-typed `current_loop`, `await_with`, `await_cleanup_with`,
 `run_foreign`, `prepare_native_retirement`, `wait_external_native`,
 `prepare_external_wait`, `wait_external`, `wait_external_cleanup`,
 `version`, `receiver`, `send`, and `Receiver`. `ExternalWait` remains only
-as an opaque type with no constructor and no methods, so the `final_wait`
-of `run_with_cleanup` can only be `nil`. Its Tasks run only in the
+as a type with no constructor and no methods, so the `final_wait`
+of `run_with_cleanup` can only be `nil`. `Completion` keeps its methods but
+no browser function hands one out, since the functions that do are absent.
+Its Tasks run only in the
 instance's owner state, under a drive that gives the page one macrotask
 between turns ([async on the browser target](async-io.md#the-browser-target)).
 
@@ -1317,23 +1328,51 @@ that the `async` driver uses but schedules nothing itself. See
 
 ### Modules that are not available
 
-The other standard modules are absent from the browser target: `uv`, `fs`,
-`net`, `ssl`, `sqlite3`, and `thread`.
-Each of them uses libuv, directly or through its imports. Each has only a
-native main, either a flat variant such as `titan/fs.native.titan` or a
-folder main such as `titan/uv/uv.native.titan` (see [target source
-selection](target-source-selection.md)), so a browser build finds no source and
-no browser archive for them. Their imports fail with the ordinary
-missing-module error:
+The other standard modules are absent from the browser target:
+
+| Module | Reason |
+| --- | --- |
+| `fs` | requires a filesystem |
+| `net` | requires native sockets |
+| `sqlite3` | requires the native SQLite library |
+| `ssl` | requires OpenSSL and native sockets |
+| `thread` | requires OS threads |
+| `uv` | requires libuv |
+
+Each has only a native main, either a flat variant such as
+`titan/fs.native.titan` or a folder main such as `titan/uv/uv.native.titan`
+(see [target source selection](target-source-selection.md)), so a browser
+build finds no source and no browser archive for them. The browser SDK lists
+them, and an import of one, in either the plain or the `.titan` form, fails
+with a diagnostic that names the module, the target, and the reason:
 
 ```text
-module 'titan.fs' not found
+module 'titan.fs' is not available for target 'browser': requires a filesystem
 ```
 
-There are no stand-in modules for them, and their folder contributors, such as
-`titan.uv.tcp`, are not importable on their own. A test module that imports one
-of them cannot be built into a browser test image either; keep such cases in
-native-only test modules.
+Before the browser SDK is installed, the same import reports the ordinary
+`module 'titan.fs' not found`. There are no stand-in modules for them, and
+their folder contributors, such as `titan.uv.tcp`, are not importable on their
+own. A test module that imports one of them cannot be built into a browser
+test image either; keep such cases in native-only test modules.
+
+### Unavailable operations
+
+No browser member is a placeholder that always raises: a member the browser
+cannot provide is absent, so its use fails at compile time. A few members that
+do exist depend on something the embedding or the calling context may not
+supply. When it is missing, they raise an error whose message starts with the
+member's qualified name followed by `is unavailable`:
+
+| Operation | Raised error |
+| --- | --- |
+| `os.stdin` `read` or `read_until` when the embedding supplied no input source, or a parent stream's `kind` when the embedding declared none | `async.OperationError` with `name` `"ENOSYS"`, `operation` the qualified member (`"os.InputStream.read"`, `"os.InputStream.read_until"`, `"os.InputStream.kind"`, or `"os.OutputStream.kind"`), and the message `"<operation> is unavailable on the browser target"` |
+| `os.exit` outside an async Task | `"os.exit is unavailable outside an async Task on the browser target"` |
+| stock Lua `os.clock` | `"os.clock is unavailable on the browser target (no process CPU-time clock)"` |
+
+Test an `OperationError` by its `name` and `operation`, not its target-specific
+`code`. Each such call raises before it has any effect, and repeating it
+raises the same error.
 
 Programs can write through `io.print` and `os.stdout`/`os.stderr`, or through
 C's `stdio.h` as in [the program example](#programs).
@@ -1624,7 +1663,7 @@ a walk over a deep record graph with `reflect`, has no library limit; under
 
 See [the browser target](../implementation/browser-target.md) in the
 implementation manual for the descriptor, the SDK, the browser standard
-library's provider, dependency-closure check, and member inventory, the build
+library's provider, dependency-closure check, and subset parity gate, the build
 profiles and their measurements, the link profile, the browser C-call limit,
 the nesting-limit measurements, the entrypoint, the loader and runner
 mechanics, and the evidence behind the design.

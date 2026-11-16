@@ -18,26 +18,29 @@ local function run(argv)
     return result.started and result.ok, result.output or result.diagnostic or ""
 end
 
-local function build(info, module, options)
+local function image(name)
+    return "images/" .. name .. "/" .. name .. ".mjs"
+end
+
+local function build_command(info, module, options)
     local setup = string.format("package.path=%q..package.path; " ..
         "require('titan-compiler.driver').browser_link_options={purpose='test',assertions=2};",
         repository .. "/?.lua;" .. repository .. "/?/init.lua;")
+    local name = options and options.name or module
     local argv = { "env", "TITAN_ROOT=" .. info.prefix, "TITAN_TARGET=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
-        "TITAN_PATH_0_6=", "TITAN_PROBE_CACHE_DISABLE=1",
+        "TITAN_PATH_0_6=", "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_JOBS=1",
         info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
         "--target", "browser", "-q", "--incremental", "--test",
         "--tree", fixture .. ";" .. repository .. "/spec/stdlib/titan",
-        "--output", workspace .. "/images", "--exe", workspace .. "/images/" ..
-            (options and options.name or module) .. ".mjs" }
+        "--output", workspace .. "/images/" .. name, "--exe", workspace .. "/" .. image(name) }
     if not (options and options.bootstrap) then argv[#argv + 1] = "--no-uv-bootstrap" end
     if options and options.fidelity then
         argv[#argv + 1] = "--c-source"
         argv[#argv + 1] = repository .. "/spec/fixtures/browser_runtime/close.c"
     end
     argv[#argv + 1] = module
-    local ok, log = run(argv)
-    assert.is_true(ok, log)
+    return argv
 end
 
 describe("browser stdlib initialization and byte fidelity gate", function()
@@ -49,19 +52,31 @@ describe("browser stdlib initialization and byte fidelity gate", function()
         if not info then pending(why) return end
         local started = os.time()
         workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/images")
         files.copy(fixture .. "/gate.mjs", workspace .. "/gate.mjs")
-        for _, module in ipairs(modules) do build(info, "init_" .. module) end
-        build(info, "init_subset")
-        build(info, "init_lua_states")
-        build(info, "init_async", { bootstrap = true, name = "init_async_bootstrap" })
-        build(info, "fidelity_test", { fidelity = true })
+        -- Each initializer must remain a separate image. Multiple --test roots
+        -- would combine them into one runner, so batch independent output trees
+        -- instead, with at most two single-slot compiler children.
+        local commands = {}
+        for _, module in ipairs(modules) do
+            commands[#commands + 1] = build_command(info, "init_" .. module)
+        end
+        commands[#commands + 1] = build_command(info, "init_subset")
+        commands[#commands + 1] = build_command(info, "init_lua_states")
+        commands[#commands + 1] = build_command(info, "init_async",
+            { bootstrap = true, name = "init_async_bootstrap" })
+        commands[#commands + 1] = build_command(info, "fidelity_test", { fidelity = true })
+        local results = compiler_io.new_sync():run_batch(commands, { jobs = 2 })
+        for _, result in ipairs(results) do
+            assert.is_true(result.started and result.ok, result.output or result.diagnostic)
+        end
         for _, engine in ipairs({ "node", "chromium" }) do
             local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine,
                 "--timeout", "120000", "--grace", "1500", "--root", workspace,
                 "--js-test", workspace .. "/gate.mjs", "--",
-                tostring(#modules), "images/init_subset.mjs", "images/fidelity_test.mjs",
-                "images/init_lua_states.mjs", "images/init_async_bootstrap.mjs" }
-            for _, module in ipairs(modules) do argv[#argv + 1] = "images/init_" .. module .. ".mjs" end
+                tostring(#modules), image("init_subset"), image("fidelity_test"),
+                image("init_lua_states"), image("init_async_bootstrap") }
+            for _, module in ipairs(modules) do argv[#argv + 1] = image("init_" .. module) end
             local ok, log = run(argv)
             io.stdout:write("\nSTDLIB GATE engine=" .. engine .. "\n" .. log .. "\n")
             io.stdout:flush()
@@ -69,7 +84,8 @@ describe("browser stdlib initialization and byte fidelity gate", function()
             assert.truthy(log:find('"verdict":"PASS"', 1, true), log)
             assert.truthy(log:find('"subsetInitializeRunDisposeCycles":3', 1, true), log)
             assert.truthy(log:find('"independentStateRoots":' .. #modules, 1, true), log)
-            assert.truthy(log:find('"bootstrapLinkedInitializer":"images/init_async_bootstrap.mjs"', 1, true), log)
+            assert.truthy(log:find('"bootstrapLinkedInitializer":"' .. image("init_async_bootstrap") .. '"',
+                1, true), log)
         end
         io.stdout:write(string.format("STDLIB GATE wall-seconds=%d images=%d engines=2\n",
             os.time() - started, #modules + 4))

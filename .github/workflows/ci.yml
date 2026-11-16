@@ -478,7 +478,7 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs \
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs sdk-digests; do
+              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 
@@ -729,15 +729,40 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  # The SDK/stdlib integration gate balances the budget and JavaScript suites
-  # above without sharing a mutable prefix or depending on that sibling job.
+  # Each SDK/stdlib shard owns a validation prefix. Balance the serial spec
+  # lists together with the core suite, which runs only in the sdk shard.
   # Implementation notes: doc/implementation/continuous-integration.md#linux-job-graph-and-concurrency
   browser-stdlib:
-    name: browser SDK and core stdlib (ubuntu-24.04, emsdk 6.0.13, Node 26)
+    name: browser SDK and core stdlib ${{ matrix.shard }} (ubuntu-24.04, emsdk 6.0.13, Node 26)
     needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-4
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Hosted file times plus the same-host init-gate speedup estimate:
+          # sdk ~21.2 minutes including its core suite, scheduler ~21.4.
+          - shard: sdk
+            stdlib-suite: true
+            gate-specs: >-
+              spec/coder/browser_bridge_spec.lua
+              spec/coder/browser_stdlib_gate_spec.lua
+              spec/coder/browser_entry_gate_spec.lua
+              spec/coder/browser_images_spec.lua
+              spec/coder/browser_net_spec.lua
+              spec/minicoro_spec.lua
+              spec/coder/browser_fixtures_spec.lua
+              spec/coder/browser_providers_spec.lua
+          - shard: scheduler
+            stdlib-suite: false
+            gate-specs: >-
+              spec/coder/browser_scheduler_spec.lua
+              spec/coder/browser_incremental_spec.lua
+              spec/browser_sdk_spec.lua
+              spec/coder/browser_stdlib_closure_spec.lua
+              spec/coder/browser_protocol_spec.lua
     permissions:
       contents: read
       # The browser gate uploads its own compiler coverage report.
@@ -946,11 +971,12 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs \
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs sdk-digests; do
+              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 
       - name: Run complete browser core stdlib suite under Node and Chromium
+        if: matrix.stdlib-suite
         run: |
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
@@ -962,24 +988,11 @@ jobs:
           TITAN_ROOT: ${{ github.workspace }}/.lua
           TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
           TITAN_PROBE_CACHE_DISABLE: "1"
+          TITAN_BROWSER_GATE_SPECS: ${{ matrix.gate-specs }}
         run: |
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          gate_specs=(
-            spec/coder/browser_providers_spec.lua
-            spec/coder/browser_incremental_spec.lua
-            spec/coder/browser_images_spec.lua
-            spec/coder/browser_protocol_spec.lua
-            spec/browser_sdk_spec.lua
-            spec/coder/browser_stdlib_closure_spec.lua
-            spec/coder/browser_entry_gate_spec.lua
-            spec/coder/browser_bridge_spec.lua
-            spec/coder/browser_scheduler_spec.lua
-            spec/coder/browser_net_spec.lua
-            spec/coder/browser_stdlib_gate_spec.lua
-            spec/coder/browser_fixtures_spec.lua
-            spec/minicoro_spec.lua
-          )
+          read -r -a gate_specs <<< "$TITAN_BROWSER_GATE_SPECS"
           for gate_spec in "${gate_specs[@]}"; do
             if [[ ! -f $gate_spec ]]; then
               echo "missing browser real-toolchain spec: $gate_spec" >&2
@@ -1004,14 +1017,14 @@ jobs:
           fail_ci_if_error: true
           files: ./luacov.codecov.out
           flags: compiler
-          name: browser-stdlib
+          name: browser-stdlib-${{ matrix.shard }}
           use_oidc: true
 
       - name: Upload browser SDK and stdlib failure logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: browser-stdlib-failure
+          name: browser-stdlib-${{ matrix.shard }}-failure
           path: |
             ${{ runner.temp }}/browser-*.log
             out/browser-stdlib/*.log

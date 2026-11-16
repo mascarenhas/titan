@@ -257,8 +257,9 @@ aggregate, the owners drive their own `async` Runtimes.
 The image is `images/stdlib.mjs` with its `.wasm` and `.wasm.map`, below
 `$(TITAN_BROWSER_TEST_BUILD_DIR)` (default `out/browser-stdlib`); compiler
 output stays in `objects/`, which titanc creates and marks. The target writes
-`roots.txt`, prints the build duration, checks the dependency closure and
-native/browser member inventory, and writes `members.md`. There is no separate
+`roots.txt`, prints the build duration, checks the dependency closure and the
+[subset parity gate](browser-target.md#subset-parity-gate), and writes
+`members.md`. There is no separate
 suite byte budget: the compiler's [general image
 bounds](browser-target.md#build-time-image-bounds) apply.
 
@@ -444,8 +445,10 @@ declares no `modules`.
 
 `titan-uninstall` (`scripts/titan_install.lua`) removes all installed Titan
 rock versions through LuaRocks first. Only when that succeeds does it remove
-the exact external Titan files, including the eleven `make browser-sdk`-owned
-files under `lib/titan-browser/<ver>/` for each matching release; Lua,
+the exact external Titan files, including the fourteen `make browser-sdk`-owned
+files under `lib/titan-browser/<ver>/` (`installer.browser_sdk_owned`, which
+`spec/browser_sdk_spec.lua` checks against the files a fresh SDK build writes)
+for each matching release; Lua,
 LuaRocks, dependency modules, the fork's `lib/browser/`, user archives under
 `lib/titan-browser/<ver>/`, and shared native dependencies remain. Windows
 callers must close processes that use a

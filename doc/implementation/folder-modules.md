@@ -304,9 +304,11 @@ and retirement barriers (`external.native.titan`), cross-state receivers
 each with its public declarations, so member order follows contributor order;
 `spec/fixtures/stdlib/titan_stdlib_types.lua` pins the resulting native
 interface. On the browser target the `runtime` and `external` families select
-their `.browser` members (the browser driver and an opaque `ExternalWait`),
-and the `receiver` and `foreign` families, which have no browser member, are
-dropped. The one object owns the `titan/async/async.titan.h` companion. The
+their `.browser` members (the browser driver and the type-only
+`ExternalWait`), and the `receiver` and `foreign` families, which have no
+browser member, are dropped;
+`spec/fixtures/stdlib/titan_stdlib_browser_types.lua` pins that browser
+interface. The one object owns the `titan/async/async.titan.h` companion. The
 private C headers `async_receiver_native.h` and `async_signal_platform.h` sit
 beside the main, because quoted headers resolve relative to the selected
 main's directory; only native contributors import them.

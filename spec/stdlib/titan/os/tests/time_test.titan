@@ -101,3 +101,14 @@ function test_date_accepts_empty_locale_conversion(_context: test.Context)
   end
   test.skip("capability: no installed LC_TIME locale has empty AM/PM text")
 end
+
+function test_date_constructor_builds_the_utc_epoch_fields(_context: test.Context)
+  local built = system.Date { year = 1970, month = 1, day = 1, hour = 0, min = 0, sec = 0,
+    wday = 5, yday = 1, isdst = false }
+  local epoch: system.Date = system.date("!*t", 0)
+  test.assert(built.year == epoch.year and built.month == epoch.month and built.day == epoch.day and
+    built.hour == epoch.hour and built.min == epoch.min and built.sec == epoch.sec and
+    built.wday == epoch.wday and built.yday == epoch.yday,
+    "the Date constructor and the UTC epoch decomposition disagree")
+  test.assert(built.isdst == false, "the Date constructor dropped its daylight-saving flag")
+end
