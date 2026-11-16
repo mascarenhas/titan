@@ -84,15 +84,23 @@ end
 local function read_request(parser: Parser,
                             encrypted: boolean,
                             transport: Transport): Request?
-  -- An idle HTTP peer may close TCP without TLS close_notify. Keep SSL's raw
-  -- truncation error intact everywhere except this empty header boundary.
+  -- Idle peers may reset TCP or omit TLS close_notify. Keep those raw
+  -- transport errors intact everywhere except this empty header boundary.
   do
     if not acquire_parser_headers(parser) then return nil end
   catch
-    if not parser.input_seen and error is ssl.Error then
-      local failure = error as ssl.Error
-      if failure.name == "TLS_TRUNCATED_EOF" and failure.operation == "ssl.read" then
-        return nil
+    if not parser.input_seen then
+      if error is ssl.Error then
+        local failure: ssl.Error = error
+        if failure.name == "TLS_TRUNCATED_EOF" and failure.operation == "ssl.read" then
+          return nil
+        end
+      elseif error is async.OperationError then
+        local failure: async.OperationError = error
+        if failure.code == uv.ECONNRESET and failure.name == "ECONNRESET" and
+            failure.operation == "net.read" then
+          return nil
+        end
       end
     end
     raise

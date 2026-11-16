@@ -741,12 +741,14 @@ adds it when absent and rejects an explicit nonzero value. Transfer-Encoding is
 removed from every no-body response. A request or response `Connection: close`
 decision disables reuse; otherwise HTTP/1.1 keep-alive is preserved. A peer
 closing an idle persistent connection before beginning its next request is a
-normal disconnect. On HTTPS that includes a peer that drops the connection
-without TLS `close_notify` before sending any byte of its next request: the
-connection closes quietly instead of failing with `ssl.Error`
-`TLS_TRUNCATED_EOF`. EOF after any byte of a next request is a parse error,
-including after only empty request lines or a dangling CR. Empty request lines
-remain accepted when an actual request follows them.
+normal disconnect. On plain TCP this includes a peer reset (`ECONNRESET`);
+on HTTPS it includes a peer that drops the connection without TLS `close_notify`
+before sending any byte of its next request. Both close quietly instead of
+failing the server's header-reading Task. A reset or TLS truncation after any
+request byte, during a body, or during a TLS handshake remains an error.
+EOF after any byte of a next request is a parse error, including after only
+empty request lines or a dangling CR. Empty request lines remain accepted when
+an actual request follows them.
 
 The server promises serial HTTP/1.1 keep-alive processing, not a concurrent
 pipelining facility. Each connection dispatches one handler at a time; the

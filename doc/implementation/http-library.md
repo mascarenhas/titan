@@ -576,15 +576,16 @@ a real request remain accepted. The server maps only the idle outcome to normal
 connection-Task return; a client awaiting its first or final response maps the
 same outcome back to an incomplete-message error.
 
-An HTTPS peer usually drops an idle connection without TLS `close_notify`, so
-the SSL read reports `ssl.Error` `TLS_TRUNCATED_EOF` instead of EOF.
-`read_request` (`server.native.titan`) catches exactly that error from the
-`ssl.read` operation while `parser.input_seen` is still false, which is the
-same empty header boundary, and returns no request; the connection Task, or
-the header-reader child under an idle timeout, then ends quietly. Truncation
-after any request byte or during a body, other TLS errors, and cancellation
-keep raising, and `ssl` itself still reports the truncation to every other
-caller.
+An idle plain-TCP peer can reset the connection, and an HTTPS peer can drop it
+without TLS `close_notify`. At the same empty header boundary, `read_request`
+(`server.native.titan`) retires exactly two errors while `parser.input_seen`
+is false: `async.OperationError` with code `uv.ECONNRESET`, name `ECONNRESET`
+and operation `net.read`, or `ssl.Error` named `TLS_TRUNCATED_EOF` from
+`ssl.read`. It returns no request, so the connection Task, or the header-reader
+child under an idle timeout, ends quietly. Reset or truncation after any request
+byte or during a body, failed TLS handshakes, other transport errors,
+cancellation, and handler errors keep raising. Raw `net` and `ssl` semantics
+are unchanged for every other caller.
 
 At the start of each serial request iteration, the connection Task reads the
 Server's `idle_timeout_ms`; the shared header-acquisition helper
@@ -838,6 +839,11 @@ listener/response close completion under cancellation without a retry. The
 focused sanitizer boundary drives the same timeout-induced SSL-read
 cancellation and serial HTTP path through public TLS and llhttp, rather than a
 private test transport.
+
+Disconnect regressions force real TCP resets through public `uv.tcp_close_reset`
+and abrupt TLS drops. Idle resets succeed without Task diagnostics with the
+idle timeout both disabled and enabled; partial-request controls retain their
+observable errors. TLS cases also cover clean closure and body truncation.
 
 The request-option cases cover constructor validation for every `mode` with
 `only_if_cached()`, the pre-I/O `no_cors()` method and `only-if-cached`

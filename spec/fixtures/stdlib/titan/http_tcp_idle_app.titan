@@ -1,0 +1,182 @@
+local async = import "async"
+local http = import "http"
+local io = import "io"
+local timer = import "timer"
+local uv = import "uv"
+
+local record Peer
+  socket: uv.tcp_t
+  address: uv.sockaddr_t
+  bytes: string
+  done: async.Completion<|Peer, nil, integer|>?
+  number: integer
+end
+
+local function connected(request: uv.connect_t, status: integer)
+  local peer: Peer = request:get_data()
+  request:set_data(nil)
+  if status < 0 then peer.done:reject(peer.number, status)
+  else peer.done:resolve(peer.number, nil) end
+end
+
+local function start_connect(done: async.Completion<|Peer, nil, integer|>, number: integer): uv.req_t?
+  local peer = done:context(number)
+  peer.done, peer.number = done, number
+  local request = uv.connect_t()
+  request:set_data(peer)
+  local status = uv.tcp_connect(request, peer.socket, peer.address, connected)
+  if status < 0 then request:set_data(nil); done:reject(number, status) end
+  return nil
+end
+
+local function written(request: uv.write_t, status: integer)
+  local peer: Peer = request:get_data()
+  request:set_data(nil)
+  if status < 0 then peer.done:reject(peer.number, status)
+  else peer.done:resolve(peer.number, nil) end
+end
+
+local function start_write(done: async.Completion<|Peer, nil, integer|>, number: integer): uv.req_t?
+  local peer = done:context(number)
+  peer.done, peer.number = done, number
+  local request = uv.write_t()
+  request:set_data(peer)
+  local status = uv.write_string(request, peer.socket:as_stream_t(), peer.bytes, written)
+  if status < 0 then request:set_data(nil); done:reject(number, status) end
+  return nil
+end
+
+local function closed(handle: uv.handle_t)
+  local peer: Peer = uv.handle_get_data(handle)
+  uv.handle_set_data(handle, nil)
+  peer.done:resolve(peer.number, nil)
+end
+
+local function start_close(done: async.Completion<|Peer, nil, integer|>, number: integer): uv.req_t?
+  local peer = done:context(number)
+  peer.done, peer.number = done, number
+  local handle = peer.socket:as_handle_t()
+  uv.handle_set_data(handle, peer)
+  uv.close(handle, closed)
+  return nil
+end
+
+local function start_reset(done: async.Completion<|Peer, nil, integer|>, number: integer): uv.req_t?
+  local peer = done:context(number)
+  peer.done, peer.number = done, number
+  local handle = peer.socket:as_handle_t()
+  uv.handle_set_data(handle, peer)
+  local status = uv.tcp_close_reset(peer.socket, closed)
+  if status < 0 then uv.handle_set_data(handle, nil); done:reject(number, status) end
+  return nil
+end
+
+local function Peer:close()
+  local handle = self.socket:as_handle_t()
+  if handle:is_initialized() and not uv.is_closing(handle) then
+    async.await_cleanup_with(self, start_close)
+  end
+end
+
+local function stop(task: async.Task)
+  if not task:status():has_finished() then
+    task:cancel(async.CancellationReason.simple("HTTP reset fixture cleanup"))
+  end
+  async.join(task)
+end
+
+local function listen(handler: http.Handler, timeout: integer): (http.Server, integer)
+  for port = 32300, 32399 do
+    do return http.listen("127.0.0.1", handler, port, nil, timeout), port
+    catch
+      if not (error is async.OperationError) or
+          (error as async.OperationError).name ~= "EADDRINUSE" then raise end
+    end
+  end
+  raise "no available HTTP reset fixture port"
+end
+
+local function exercise(mode: string, timeout: integer)
+  local owner: async.Task? = nil
+  local response_finished = false
+  local server, port = listen(function (_request: http.Request, response: http.Response)
+    if owner ~= nil then raise "partial HTTP request reached the handler" end
+    owner = async.running()
+    response:set_header("Content-Length", "0")
+    response:close()
+    response_finished = true
+  end, timeout)
+  defer server:close()
+  local serving = async.run<|value, value|>(function (): value
+    server:serve()
+    return nil
+  end)
+  defer stop(serving)
+  local code, address? = uv.ip4_addr("127.0.0.1", port)
+  if code < 0 then raise uv.err_name(code) end
+  local bytes = "GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n"
+  if mode == "partial" then bytes = bytes .. "GET /next HTTP/1.1\r\nHost:" end
+  local peer = Peer {
+    socket = uv.tcp_t(), address = address, bytes = bytes, done = nil, number = 0,
+  }
+  local initialized = uv.tcp_init(async.current_loop(), peer.socket)
+  if initialized < 0 then raise uv.err_name(initialized) end
+  defer peer:close()
+  case async.await_with(peer, start_connect)
+  when error(status) then raise uv.err_name(status)
+  end
+  case async.await_with(peer, start_write)
+  when error(status) then raise uv.err_name(status)
+  end
+  -- The handler returns after the response is committed, before the next read.
+  -- Send the partial prefix with the first request to exercise retained input.
+  while not response_finished do async.yield() end
+  case async.await_cleanup_with(peer, start_reset)
+  when error(status) then raise uv.err_name(status)
+  end
+  local status = async.join(owner)
+  if mode == "partial" and timeout == 0 then
+    local failed, problem? = status:has_failed()
+    if not failed then raise "partial HTTP reset did not fail its connection Task" end
+    if not (problem.error is async.OperationError) then problem:raise() end
+    local failure: async.OperationError = problem.error
+    if failure.code ~= uv.ECONNRESET or failure.name ~= "ECONNRESET" or
+        failure.operation ~= "net.read" then problem:raise() end
+  elseif not status:has_succeeded() then
+    raise "HTTP reset connection Task ended " .. status:as_string()
+  end
+  io.print("CONNECTION " .. status:as_string())
+  if serving:status():has_finished() then raise "peer reset ended the HTTP listener" end
+  server:close()
+  if not async.join(serving):has_succeeded() then raise "HTTP listener did not close successfully" end
+  io.print("LISTENER succeeded")
+end
+
+function main(args: {string}): integer
+  local mode = args[1] or "idle"
+  local timeout = 0
+  if args[2] == "enabled" then timeout = 10000 end
+  local running = async.run<|value, value|>(function (): value
+    exercise(mode, timeout)
+    return nil
+  catch
+    return async.Error(error, traceback)
+  end)
+  defer stop(running)
+  local watchdog = async.run<|nil, value|>(function (): nil
+    timer.sleep(5000)
+    return nil
+  end)
+  defer stop(watchdog)
+  case async.race_two(running, watchdog)
+  when second() then raise "HTTP reset fixture timed out"
+  end
+  case async.join(running)
+  when succeeded(failure) then
+    if failure ~= nil then (failure as async.Error):raise() end
+  else
+    raise "HTTP reset fixture did not finish"
+  end
+  io.print("HTTP RESET OK")
+  return 0
+end
