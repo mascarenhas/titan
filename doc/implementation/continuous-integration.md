@@ -352,13 +352,13 @@ After step 7, `browser-stdlib` runs:
    unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
    builds all twenty-three browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
-   checks dependency closure and the native/browser member inventory of the
-   fourteen shared modules, `async`, `timer`, `os`, `lua`, `http`, and
-   `websocket` (with their recorded
-   differences), then
+   checks dependency closure and applies the [subset parity
+   gate](browser-target.md#subset-parity-gate) to the fourteen shared
+   modules, `async`, `timer`, `os`, `lua`, `http`, and `websocket`, then
    runs the image under Node and Chromium using the pinned `TITAN_NODE` and
    `TITAN_CHROME`. Each engine must execute every owner with complete nonzero
-   status/count/timing accounting
+   status/count/timing accounting and pass every image test the status
+   inventory names
    ([browser test owners](browser-target.md#test-owners-and-the-browser-suite)).
    Stdout and stderr stay separate in `out/browser-stdlib/stdlib.<engine>.log`
    and `stdlib.<engine>.stderr.log`.
@@ -389,7 +389,9 @@ After step 7, `browser-stdlib` runs:
    bridge's drive interface with a test-owned mini driver, runs the real
    `async` driver's scheduler gate and bootstrap program, and drives the
    embedding-sensitive `os.browser_tests` program with its separate
-   stream/environment harness.
+   stream/environment harness. The scheduler and network specs require every
+   test of their owners that the status inventory names to have passed
+   ([test evidence](browser-target.md#subset-parity-gate)).
 10. **Browser SDK and stdlib compiler coverage.** The same report commands
     produce `luacov.codecov.out`, which uploads with `name: browser-stdlib`
     and otherwise the same options, so the real provider, image, SDK, and

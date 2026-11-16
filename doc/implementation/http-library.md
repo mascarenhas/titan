@@ -36,8 +36,9 @@ titan/http/client.browser.titan       browser Client, ClientResponse, fetch sess
 main. Every other public declaration of a native-only contributor is absent on
 the browser, where `client.browser.titan` supplies `Client`, `ClientResponse`,
 `request`, `get`, `close_idle_connections`, and their methods with the native
-signatures. The [member inventory](browser-target.md#interface-derived-member-inventory)
-records the omissions and keeps `Client` and `ClientResponse` opaque.
+signatures. The [status inventory](browser-target.md#subset-parity-gate)
+records the absent members; the two records' private fields may differ between
+targets, and their public members match exactly.
 
 The only native-only C boundary that HTTP owns is the eight synchronous source
 `foreign function` callbacks in `titan/http/parser.native.titan`

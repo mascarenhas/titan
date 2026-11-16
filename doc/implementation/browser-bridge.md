@@ -28,9 +28,9 @@ contains the same four objects (`titan.o`, `minicoro.o`, `titan_path.o`,
 `ltitanlib.o`) on both native and browser targets. The native standard provider
 has no `titan.browser`, while the twenty-one-module browser provider includes
 it alongside fourteen shared modules and the browser compositions of `async`,
-`timer`, `os`, `lua`, `http`, and `websocket`. It imports only `gc`, and the [member
-inventory](browser-target.md#interface-derived-member-inventory) skips it
-because it has no native interface to compare.
+`timer`, `os`, `lua`, `http`, and `websocket`. It imports only `gc`, and the
+[subset parity gate](browser-target.md#subset-parity-gate) does not compare
+it because it has no native interface.
 
 ### JavaScript files
 

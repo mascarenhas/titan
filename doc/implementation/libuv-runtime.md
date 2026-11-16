@@ -32,8 +32,9 @@ the shared wake timer, the libuv-typed await helpers, the driver `loop`, and
 `ExternalWait`, `receiver.native.titan` the cross-state `Receiver`, and
 `foreign.native.titan` `run_foreign`. On the browser target,
 `runtime.browser.titan` is the [browser driver](#browser-driver) and
-`external.browser.titan` keeps `ExternalWait` as an opaque record; the
-`receiver` and `foreign` families have no browser member and are dropped
+`external.browser.titan` declares `ExternalWait` with one private field and
+none of its methods, a type-only record that no browser declaration produces;
+the `receiver` and `foreign` families have no browser member and are dropped
 ([target source selection](target-source-selection.md#the-resolver)).
 
 The scheduling core reaches libuv and native retirement only through seams that
@@ -960,9 +961,8 @@ state.
   also compares the ticker's loop with the current one.
 
 The browser `Ticker` keeps its methods but holds a host request instead of a
-uv timer, so the [member
-inventory](browser-target.md#interface-derived-member-inventory) records it as
-an opaque record.
+uv timer in its private fields, which the [subset parity
+gate](browser-target.md#subset-parity-gate) leaves out of the comparison.
 
 ## Allocation profile
 

@@ -401,7 +401,9 @@ target variants: the flat `titan/{fs,net,ssl}.native.titan`
 and the folder mains `titan/{uv,sqlite3,thread}/<name>.native.titan`.
 These six families have no default and no `browser` member, so for
 `browser` the resolver selects no main: the module is absent (an import
-reports `module 'titan.<name>' not found`), and the folder's contributors are
+reports the [absent-module
+diagnostic](browser-target.md#the-absent-module-diagnostic)), and the
+folder's contributors are
 neither composed nor resolvable as flat modules. Native selection, logical
 names, and canonical output stems (such as `titan/uv/uv.titan.h`) are
 unchanged; only the physical main is a variant. Fourteen further standard
@@ -460,6 +462,16 @@ and `client.browser.titan` is browser-only. `STDLIB_HTTP_SOURCES` and
   `driver.classify_source_filename`. Source-policy audits (no explicit source
   imports, foreign-header expectations, the single `lua_setmetatable` owner, no
   uv FFI outside `titan.uv`) iterate every declared file, variants included.
+  The explicit-import, `lua_setmetatable`, and uv FFI audits use
+  `audited_stdlib_sources()`, which adds the browser-only sources no native
+  list names (today `titan/browser.browser.titan`) from the compiler's
+  browser selection of the standard tree, and requires each to belong to a
+  `browser-only` module of the [status
+  inventory](browser-target.md#subset-parity-gate). Native foreign-header
+  predictions do not apply to them; the browser provider's headers and
+  symbols are checked by the [dependency-closure
+  check](browser-target.md#the-dependency-closure-check). Windows hosts,
+  which build no browser target, audit the declared files alone.
   Output-predicting audits, such as `predicted_foreign_headers`, use
   `host_selected_sources()`, which applies `driver.target_selection_labels`
   for the host. The list-versus-disk audits (`undeclared_folder_sources`,

@@ -49,9 +49,10 @@ Browser (`*.browser.titan`):
   `close_status` over the SDK's `titan:websocket` source
   ([browser client](#browser-client)).
 
-The [member inventory](browser-target.md#interface-derived-member-inventory)
-records `accept`, `AcceptOptions`, `Connection:ping`, and the three transfer
-hooks as browser omissions and keeps `Connection` opaque.
+The [status inventory](browser-target.md#subset-parity-gate) records
+`accept`, `AcceptOptions`, `Connection:ping`, and the three transfer hooks as
+absent; `Connection`'s private fields may differ between targets, and its
+other public members match exactly.
 
 Portable foreign byte accesses borrow immutable strings only while their
 owning Titan locals remain rooted. Mask output uses a counted native owner;
