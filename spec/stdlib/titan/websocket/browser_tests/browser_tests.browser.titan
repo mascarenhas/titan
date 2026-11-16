@@ -1,0 +1,145 @@
+-- Real WebSocket clients; the host supplies peers and observes resource lifetimes.
+local async = import "async"
+local browser = import "browser"
+local http = import "http"
+local iteration = import "iteration"
+local os = import "os"
+local runtime_test = import "support.runtime.titan"
+local string = import "string"
+local test = import "test"
+local timer = import "timer"
+local websocket = import "websocket"
+
+foreign import "native.h"
+
+local type Value = browser.BrowserValue
+local type Action = function (): ()
+local type Condition = function (): boolean
+local sequence = 0
+
+local function environment(name: string): string
+  local contents? = os.getenv(name)
+  if contents == nil then raise "missing WebSocket fixture variable: " .. name end
+  return contents
+end
+
+local function live(path: string, source: string?): string
+  sequence = sequence + 1
+  return (source or environment("TITAN_TEST_WS_URL")) .. "/ws/" .. path .. "?id=" .. sequence
+end
+
+local function raw_http(): string return environment("TITAN_TEST_RAW_URL") end
+local function raw(id: string, mode: string): string
+  return "ws" .. string.sub(raw_http(), 5) .. "/ws/" .. id .. "/" .. mode
+end
+
+local function metric(name: string, source: string?): integer
+  local target = browser.binding("ws_metric")
+  defer target:close()
+  case target:call(Value.is_string(name), Value.is_string(source or ""))
+  when is_integer(contents) then return contents
+  end
+  raise "WebSocket fixture metric is not an integer: " .. name
+end
+
+local function host_note(note: string)
+  local target = browser.binding("ws_note")
+  defer target:close()
+  target:call(Value.is_string(note))
+end
+
+local function wait_for(condition: Condition, message: string)
+  for _ = 1, 5000 do
+    if condition() then return end
+    timer.sleep(2)
+  end
+  raise message
+end
+
+local function control(id: string, action: string)
+  local response = http.get(raw_http() .. "/ws-control/" .. id .. "/" .. action)
+  defer response:close()
+  local output = string.writer()
+  for chunk in response:read do output:write(chunk) end
+  test.assert(response.status == 200 and output:drain() == "ready", "raw WebSocket control was not admitted")
+end
+
+local function websocket_error(action: Action, kind: string?, operation: string?, code: integer?): websocket.Error
+  local caught: websocket.Error? = nil
+  do
+    action()
+  catch
+    if not (error is websocket.Error) then raise end
+    local failure: websocket.Error = error
+    test.assert(kind == nil or failure.kind == kind, "wrong WebSocket error kind: " .. failure.kind)
+    test.assert(operation == nil or failure.operation == operation, "wrong WebSocket error operation: " .. failure.operation)
+    test.assert(failure.close_code == code and #failure.message > 0, "wrong WebSocket error details")
+    caught = failure
+  end
+  if caught == nil then raise "expected a WebSocket error" end
+  return caught
+end
+
+local function handshake_error(action: Action, message: string?)
+  local caught = false
+  do action()
+  catch
+    if not (error is websocket.HandshakeError) then raise end
+    local failure: websocket.HandshakeError = error
+    test.assert(#failure.message > 0 and failure.status == nil and failure.headers == nil,
+      "browser handshake exposed unavailable HTTP metadata")
+    test.assert(message == nil or failure.message == message, "browser opening rejection changed its error message")
+    caught = true
+  end
+  test.assert(caught, "expected a WebSocket opening failure")
+end
+
+local function same_message_kind(left: websocket.MessageType?, right: websocket.MessageType): boolean
+  if left == nil then return false end
+  case left
+  when text() then
+    case right when text() then return true when binary() then return false end
+  when binary() then
+    case right when text() then return false when binary() then return true end
+  end
+end
+
+local function echo(connection: websocket.Connection, kind: websocket.MessageType, data: string)
+  connection:write(kind, data)
+  local received_kind?, received_data? = connection:read()
+  test.assert(same_message_kind(received_kind, kind) and received_data == data,
+    "WebSocket echo changed message type or bytes")
+end
+
+local function closed(connection: websocket.Connection, code: integer?, reason: string?)
+  local kind?, data? = connection:read()
+  test.assert(kind == nil and data == nil, "clean Close did not end the message stream")
+  kind, data = connection:read()
+  test.assert(kind == nil and data == nil, "clean Close was not sticky EOF")
+  local received_code?, received_reason? = connection:close_status()
+  test.assert(received_code == code and received_reason == reason, "peer Close metadata changed")
+end
+
+local function cancellation_entry(...: Value): Value
+  local phase, source = "", ""
+  case ...[1] when is_string(item) then phase = item end
+  case ...[2] when is_string(item) then source = item end
+  local connection = websocket.connect(source, websocket.DialOptions { handshake_timeout = 30000 })
+  defer connection:close()
+  if phase == "read" then
+    host_note("read-ready")
+    connection:read()
+  elseif phase == "write" then
+    host_note("write-ready")
+    local payload = string.rep("w", 1024 * 1024)
+    for _ = 1, 64 do connection:write(websocket.BINARY, payload) end
+  end
+  return Value.is_string("unexpected completion")
+end
+
+do
+  ffi.titan_net_test_publish()
+  local target = browser.binding("ws_publish")
+  defer target:close()
+  target:call(Value.is_callable(cancellation_entry))
+end

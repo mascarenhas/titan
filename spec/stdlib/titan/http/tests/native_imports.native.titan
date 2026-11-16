@@ -1,0 +1,9 @@
+-- Imports that only the native contributors of http.tests use. The folder is
+-- one module, so each import is declared once for all of them.
+local fs = import "fs"
+local net = import "net"
+local ssl = import "ssl"
+local timer = import "timer"
+local command = import "support.command.titan"
+local support = import "http.test_support.titan"
+local task_support = import "support.async.titan"

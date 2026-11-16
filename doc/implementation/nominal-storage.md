@@ -147,7 +147,7 @@ code, providers and cached objects with the matching compiler and SDK.
 A native handle, request, or parser struct lives inside its final nominal owner
 as a fixed field: for example `loop_t`, `fs_t`, and `work_t` in
 `titan/uv/uv.native.titan`, and the llhttp parser and settings in
-`titan/http/native.titan` `new_parser`. `buf_t.allocate` passes
+`titan/http/parser.native.titan` `new_parser`. `buf_t.allocate` passes
 `foreign char.new_array(capacity)` directly to the synthesized constructor, so
 the byte storage is a const tail of the same userdata. Rules for these owners:
 

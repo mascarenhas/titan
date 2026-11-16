@@ -2512,7 +2512,7 @@ printf '%s/%s\n' "$directory" "$object"
         assert.truthy(async:find("uv.queue_work(current_loop()", 1, true))
         assert.falsy(work:find("await_cancellable", 1, true), work)
         assert.falsy(async:find("type Task = uv.", 1, true), async)
-        local http = read_file("titan/http/server.titan")
+        local http = read_file("titan/http/server.native.titan")
         assert.truthy(http:find("async.run<|Request?, value|>(", 1, true), http)
         assert.truthy(http:find("async.run(function (): nil", 1, true), http)
     end)
@@ -2520,7 +2520,7 @@ printf '%s/%s\n' "$directory" "$object"
     it("keeps the reviewed HTTP source list equal to the folder ensemble",
         function()
             local listed = makefile_words("STDLIB_HTTP_SOURCES")
-            assert.equal("titan/http/http.native.titan", listed[1])
+            assert.equal("titan/http/http.titan", listed[1])
             local normalized = {}
             local seen = {}
             for _, source in ipairs(listed) do
@@ -2678,7 +2678,7 @@ int main(void) {
     end)
 
     it("keeps HTTP parser storage, callbacks, and policy in Titan", function()
-        local path = "titan/http/native.titan"
+        local path = "titan/http/parser.native.titan"
         local native = read_file(path)
         local ast, parse_error = parser.parse(path, native)
         assert.truthy(ast, parse_error and parser.error_to_string(parse_error))
@@ -3081,12 +3081,15 @@ int main(void) {
                 "titan/async/runtime.native.titan", "titan/async/runtime.browser.titan",
                 "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
-                "titan/http/http.native.titan", "titan/http/client.titan",
-                "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
-                "titan/websocket/websocket.native.titan", "titan/websocket/handshake.titan",
-                "titan/websocket/connection.titan", "titan/websocket/frames.titan",
-                "titan/websocket/utf8.titan", "titan/websocket/native.titan",
+                "titan/http/http.titan", "titan/http/client.native.titan", "titan/http/client.browser.titan",
+                "titan/http/native_imports.native.titan",
+                "titan/http/headers.titan", "titan/http/options.titan", "titan/http/parser.native.titan",
+                "titan/http/pool.native.titan", "titan/http/server.native.titan",
+                "titan/http/transfer.native.titan", "titan/http/upgrade.native.titan",
+                "titan/websocket/websocket.native.titan", "titan/websocket/handshake.native.titan",
+                "titan/websocket/connection.native.titan", "titan/websocket/frames.native.titan",
+                "titan/websocket/types.titan", "titan/websocket/utf8.titan", "titan/websocket/crypto.native.titan",
+                "titan/websocket/websocket.browser.titan", "titan/websocket/client.browser.titan",
                 "titan/os/os.titan",
                 "titan/os/clock.native.titan", "titan/os/clock.browser.titan",
                 "titan/os/environment.native.titan", "titan/os/environment.browser.titan",
@@ -3251,7 +3254,7 @@ int main(void) {
                 "local actual_private_key_file = certificate_file", 1, true),
             ssl)
 
-        local http = read_file("titan/http/server.titan")
+        local http = read_file("titan/http/server.native.titan")
         assert.truthy(http:find("local actual_port = 80", 1, true), http)
         assert.truthy(http:find("local actual_port = 443", 1, true), http)
     end)
@@ -4102,9 +4105,6 @@ esac
                 "titan/coroutine.titan",
                 "titan/timer.native.titan", "titan/timer.browser.titan", "titan/io.titan", "titan/fs.native.titan",
                 "titan/net.native.titan", "titan/ssl.native.titan", "titan/url.titan",
-                "titan/http/http.native.titan", "titan/http/client.titan",
-                "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
                 "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
@@ -4119,8 +4119,8 @@ esac
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, ensemble in ipairs({
-                "UV_TITAN_SOURCES", "ASYNC_TITAN_SOURCES", "OS_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
-                "PROTOBUF_TITAN_SOURCES", "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
+                "UV_TITAN_SOURCES", "ASYNC_TITAN_SOURCES", "OS_TITAN_SOURCES", "STDLIB_HTTP_SOURCES",
+                "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES", "PROTOBUF_TITAN_SOURCES", "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
                 "THREAD_TITAN_SOURCES", "ASYNC_TITAN_HEADERS", "OS_TITAN_HEADERS", "SQLITE3_TITAN_HEADERS",
                 "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
             }) do
@@ -4129,6 +4129,7 @@ esac
                 end
             end
             for _, source in ipairs(sources) do
+                assert.equal("file", lfs.attributes(source, "mode"), source)
                 local ok, output, why, code =
                     run_uv_dry_run("Linux", source)
                 assert.truthy(ok, source .. ": " .. output .. "\n(" ..
@@ -6342,6 +6343,7 @@ printf '%s\n' "${schedule[@]}"
                     "spec/coder/browser_entry_gate_spec.lua",
                     "spec/coder/browser_bridge_spec.lua",
                     "spec/coder/browser_scheduler_spec.lua",
+                    "spec/coder/browser_net_spec.lua",
                     "spec/coder/browser_stdlib_gate_spec.lua",
                     "spec/coder/browser_fixtures_spec.lua",
                     "spec/minicoro_spec.lua",
@@ -6380,6 +6382,7 @@ printf '%s\n' "${schedule[@]}"
                 "make titan-stdlib-browser-test", stdlib_sdk, true))
             local stdlib_gate = assert(browser_stdlib_job:find("gate_specs=(", stdlib_suite, true))
             assert.is_true(stdlib_sdk < stdlib_suite and stdlib_suite < stdlib_gate)
+            assert.truthy(browser_stdlib_job:find("out/browser-net/**", 1, true))
             assert.falsy(linux_workflow:find("HigherRendererMemoryLimit", 1, true))
             assert.falsy(browser_stdlib_job:find("titan-stdlib-chrome", 1, true))
             for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job }) do
@@ -6458,6 +6461,9 @@ printf '%s\n' "${schedule[@]}"
                 "spec/browser/build-trace.lua",
                 "spec/browser/build-bridge.lua",
                 "${{ env.TITAN_BRIDGE_OUTPUT }}",
+                "${{ env.TITAN_NET_OUTPUT }}",
+                "spec/browser/build-net.lua",
+                "spec/fixtures/browser_net/run.mjs",
                 "spec/browser/playwright-run.mjs",
                 "spec/browser/playwright-runner.test.mjs",
                 "--allow-degraded-trace",
@@ -6503,6 +6509,29 @@ printf '%s\n' "${schedule[@]}"
             local bridge_builder = read_file("spec/browser/build-bridge.lua")
             assert.truthy(bridge_builder:find(
                 '{name="public-states", owner="browser.public_state_tests", testing=true,', 1, true), bridge_builder)
+            local net_build = named_step(playwright_job,
+                "Build the live browser HTTP and WebSocket client fixtures")
+            assert.falsy(net_build:find("if:", 1, true), net_build)
+            assert.truthy(net_build:find(
+                'lua -E spec/browser/build-net.lua "$TITAN_NET_OUTPUT"', 1, true))
+            local net_python = named_step(playwright_job,
+                "Verify Python for Chromium HTTPS trust")
+            assert.truthy(net_python:find("if: matrix.engine == 'chromium'", 1, true))
+            assert.truthy(net_python:find("run: python3 --version", 1, true))
+            local net_gate = named_step(playwright_job,
+                "Run live HTTP, HTTPS, and WebSocket clients on the managed engine")
+            assert.falsy(net_gate:find("if:", 1, true), net_gate)
+            for _, contract in ipairs({
+                '"$TITAN_NODE" spec/fixtures/browser_net/run.mjs',
+                '--root "$TITAN_NET_OUTPUT" --engine "$TITAN_TRACE_ENGINE"',
+                '--sdk "$PREFIX/lib/titan-browser/0.6"',
+                '--runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" --persistent-webkit',
+                "browser-playwright-net.log",
+            }) do
+                assert.truthy(net_gate:find(contract, 1, true), contract)
+            end
+            local _, persistent_steps = playwright_job:gsub("%-%-persistent%-webkit", "")
+            assert.equals(1, persistent_steps, "only browser-net uses a persistent WebKit context")
             local vite_install = named_step(playwright_job,
                 "Install the pinned Vite deployment dependency")
             assert.truthy(vite_install:find("if: matrix.engine == 'chromium'", 1, true))

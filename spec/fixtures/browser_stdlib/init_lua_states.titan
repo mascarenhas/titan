@@ -17,6 +17,8 @@ local timerlib = import "timer"
 local oslib = import "os"
 local iolib = import "io"
 local lualib = import "lua"
+local httplib = import "http"
+local websocketlib = import "websocket"
 
 local const REQUIRE_MODULES = [[
   local names = ...
@@ -46,7 +48,7 @@ function test_initializers_in_independent_states(context: test.Context)
     "titan.test", "titan.coroutine", "titan.gc", "titan.math", "titan.iteration",
     "titan.reflect", "titan.json", "titan.protobuf", "titan.transfer", "titan.peg",
     "titan.string", "titan.url", "titan.path", "titan.browser", "titan.async",
-    "titan.timer", "titan.os", "titan.io", "titan.lua",
+    "titan.timer", "titan.os", "titan.io", "titan.lua", "titan.http", "titan.websocket",
   }
   local seen: {string: boolean} = {}
   local all = stringlib.writer()

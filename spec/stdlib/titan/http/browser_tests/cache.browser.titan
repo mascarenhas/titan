@@ -1,0 +1,63 @@
+local function cached(key: string, mode: http.CacheMode?): string
+  return get_body(server() .. "/cacheable/" .. key,
+    http.RequestOptions {cache = mode, mode = http.RequestMode.same_origin()})
+end
+
+function test_same_origin_cache_modes(_: test.Context)
+  if os.getenv("TITAN_TEST_SAME_ORIGIN") ~= "1" then
+    test.skip("cache behavior runs in the native server's same-origin iframe")
+  end
+  runtime_test.run(function ()
+    -- Same-origin no-cors bypasses the cross-origin redirect-mode restriction.
+    local source = server() .. "/echo"
+    local response = http.get(source, http.RequestOptions {
+      mode = http.RequestMode.no_cors(), redirect = http.RedirectMode.manual()})
+    defer response:close()
+    test.assert(response.status == 200 and response.url == source and not response.redirected and all(response) == "",
+      "same-origin no-cors/manual did not retain its normal response")
+    for _, key in iteration.ipairs({"default-cache", "force-cache", "only-cache"}) do
+      test.assert(cached(key, http.CacheMode.default()) == "cached:1")
+      for _ = 1, 2 do
+        local mode = http.CacheMode.default()
+        if key == "force-cache" then mode = http.CacheMode.force_cache() end
+        if key == "only-cache" then mode = http.CacheMode.only_if_cached() end
+        test.assert(cached(key, mode) == "cached:1", "cached response was not reused: " .. key)
+      end
+      test.assert(get_body(server() .. "/hits/" .. key, nil) == "1:0", "cache hit reached the server")
+    end
+    for _, key in iteration.ipairs({"no-store", "reload"}) do
+      for index = 1, 2 do
+        local mode = http.CacheMode.no_store()
+        if key == "reload" then mode = http.CacheMode.reload() end
+        test.assert(cached(key, mode) == "cached:" .. index, key .. " reused a cached response")
+      end
+      test.assert(get_body(server() .. "/hits/" .. key, nil) == "2:0")
+    end
+    test.assert(cached("revalidate", http.CacheMode.default()) == "cached:1")
+    for _ = 1, 2 do
+      test.assert(cached("revalidate", http.CacheMode.no_cache()) == "cached:1",
+        "no-cache did not combine the conditional 304 with cached body bytes")
+    end
+    test.assert(get_body(server() .. "/hits/revalidate", nil) == "3:2", "no-cache skipped ETag revalidation")
+    local miss_url = server() .. "/uncached/cache-miss"
+    local options = http.RequestOptions {
+      cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.same_origin()}
+    local webkit = os.getenv("TITAN_TEST_ENGINE") == "webkit"
+    for _ = 1, 2 do
+      if webkit then
+        -- This host ignores cache-only misses and returns the network response.
+        local response = http.get(miss_url, options)
+        defer response:close()
+        test.assert(response.status == 200 and response.url == miss_url and not response.redirected and
+          response.headers:get("X-Method") == "GET" and all(response) == "",
+          "WebKit cache-only miss did not return the fixture's network response")
+      else
+        operation_error(function () http.get(miss_url, options) end, "http.request")
+      end
+    end
+    local expected_hits = "0:0"
+    if webkit then expected_hits = "2:0" end
+    test.assert(get_body(server() .. "/hits/cache-miss", nil) == expected_hits,
+      "cache-only miss did not match the host's network behavior")
+  end)
+end

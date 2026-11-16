@@ -1,0 +1,4 @@
+#ifndef TITAN_WEBSOCKET_BROWSER_TEST_NATIVE_H
+#define TITAN_WEBSOCKET_BROWSER_TEST_NATIVE_H
+void titan_net_test_publish(void);
+#endif

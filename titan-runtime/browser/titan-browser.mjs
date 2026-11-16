@@ -162,9 +162,88 @@ function intervalTick(emit) { emit(); }
 
 function stopInterval(id) { clearInterval(id); }
 
+// Fetch's ByteString fields retain HTTP's Latin-1 bytes rather than UTF-8 text.
+function latin1String(bytes) {
+  let text = '';
+  for (let index = 0; index < bytes.length; ++index) text += String.fromCharCode(bytes[index]);
+  return text;
+}
+
+function encodeFetchHead(res) {
+  const parts = [String(res.status), res.redirected ? '1' : '0', res.statusText, res.url, res.type];
+  for (const [name, value] of res.headers) parts.push(name, value);
+  const all = parts.join('\0') + '\0', out = new Uint8Array(all.length);
+  for (let index = 0; index < all.length; ++index) out[index] = all.charCodeAt(index);
+  return out;
+}
+
+function fetchSource(op, ...args) {
+  if (op === 'has-cache') return (typeof document === 'object' || typeof WorkerGlobalScope === 'function') && typeof globalThis.process?.versions?.node !== 'string';
+  if (op === 'new') return {controller: new AbortController(), res: undefined, reader: undefined};
+  const [session] = args;
+  if (op === 'open') {
+    const [url, method, body, cache, credentials, mode, redirect, ...rawPairs] = args.slice(1);
+    const headers = [];
+    for (let index = 0; index < rawPairs.length; index += 2) {
+      headers.push([latin1String(rawPairs[index]), latin1String(rawPairs[index + 1])]);
+    }
+    const init = {method, headers, signal: session.controller.signal, cache, credentials, mode, redirect};
+    if (body !== null) init.body = body;
+    return {kind: 'detachable', cancel: () => session.controller.abort(),
+      promise: fetch(url, init).then(res => (session.res = res, encodeFetchHead(res)))};
+  }
+  if (op === 'read') {
+    const reader = session.reader ??= session.res.body === null ? null : session.res.body.getReader();
+    return {kind: 'detachable', cancel: () => session.controller.abort(),
+      promise: reader === null ? Promise.resolve(undefined)
+        : reader.read().then(chunk => chunk.done ? undefined : chunk.value)};
+  }
+  if (op === 'close') {
+    if (session.reader) session.reader.cancel().catch(() => {});
+    session.controller.abort();
+    session.res = session.reader = undefined;
+    return;
+  }
+  throw new TypeError(`unknown titan:fetch op ${op}`);
+}
+
+function websocketSource(op, ...args) {
+  if (op === 'connect') {
+    const [url, ...protocols] = args;
+    return {kind: 'listener', subscribe(emit) {
+      const socket = new WebSocket(url, protocols);
+      socket.binaryType = 'arraybuffer';
+      function onOpen() { emit('open', socket, socket.protocol); }
+      function onMessage(event) {
+        const text = typeof event.data === 'string';
+        const bytes = text ? encodeString(event.data) : new Uint8Array(event.data);
+        emit(text ? 'text' : 'binary', BigInt(bytes.byteLength), {bytes});
+      }
+      function onClose(event) { emit('close', BigInt(event.code), event.reason, event.wasClean); }
+      socket.addEventListener('open', onOpen);
+      socket.addEventListener('message', onMessage);
+      socket.addEventListener('close', onClose);
+      return () => {
+        socket.removeEventListener('open', onOpen);
+        socket.removeEventListener('message', onMessage);
+        socket.removeEventListener('close', onClose);
+        socket.close();
+      };
+    }};
+  }
+  const [target, a, b] = args;
+  if (op === 'take') { const bytes = target.bytes; target.bytes = undefined; return bytes; }
+  if (op === 'buffered') return target.readyState === 1 ? BigInt(target.bufferedAmount) : -1n;
+  if (op === 'send') { if (target.readyState !== 1) return false; target.send(a); return true; }
+  if (op === 'close') { if (a === null) target.close(); else target.close(Number(a), b); return; }
+  throw new TypeError(`unknown titan:websocket op ${op}`);
+}
+
 const sdkBindings = Object.freeze(Object.assign(Object.create(null), {
   'titan:timeout': () => timeoutSource,
   'titan:interval': () => intervalSource,
+  'titan:fetch': () => fetchSource,
+  'titan:websocket': () => websocketSource,
   'titan:driver': (owner, state) => owner.registerDriver.bind(owner, state),
   'titan:stdout': owner => owner.out.write.bind(owner.out),
   'titan:stderr': owner => owner.err.write.bind(owner.err),

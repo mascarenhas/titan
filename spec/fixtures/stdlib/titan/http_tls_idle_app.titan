@@ -1,0 +1,107 @@
+local async = import "async"
+local http = import "http"
+local io = import "io"
+local ssl = import "ssl"
+local timer = import "timer"
+
+local function stop(task: async.Task)
+  if not task:status():has_finished() then
+    task:cancel(async.CancellationReason.simple("HTTPS disconnect fixture cleanup"))
+  end
+  async.join(task)
+end
+
+local function listen(handler: http.Handler, timeout: integer): (http.Server, integer)
+  for port = 32200, 32299 do
+    do
+      return http.listen_tls("127.0.0.1", "spec/fixtures/ssl/server.pem", handler,
+        "spec/fixtures/ssl/server-key.pem", port, nil, timeout), port
+    catch
+      if not (error is async.OperationError) or
+          (error as async.OperationError).name ~= "EADDRINUSE" then raise end
+    end
+  end
+  raise "no available HTTPS disconnect fixture port"
+end
+
+local function exercise(mode: string, timeout: integer)
+  local owner: async.Task? = nil
+  local handled = 0
+  local server, port = listen(function (request: http.Request, response: http.Response)
+    if owner == nil then owner = async.running() end
+    handled = handled + 1
+    if request.target == "/body" then
+      for _ in request:read do end
+      raise "incomplete HTTPS request body was accepted"
+    end
+    response:set_header("Content-Length", "0")
+  end, timeout)
+  defer server:close()
+  local serving = async.run<|value, value|>(function (): value
+    server:serve()
+    return nil
+  end)
+  defer stop(serving)
+  local client = ssl.connect("127.0.0.1", port, "spec/fixtures/ssl/ca.pem")
+  defer client:abort()
+  client:write("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+  if client:read_until("\r\n\r\n", false) == nil then raise "missing HTTPS response" end
+  if owner == nil then raise "HTTPS handler did not expose its connection Task" end
+  -- The completed response is the boundary before the next header read.
+  if mode == "clean" then
+    client:close()
+  else
+    if mode == "partial" then
+      client:write("GET /next HTTP/1.1\r\nHost:")
+    elseif mode == "body" then
+      client:write("POST /body HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nab")
+      while handled < 2 do async.yield() end
+    end
+    client:abort()
+  end
+  local status = async.join(owner)
+  local expect_failure = mode == "body" or (mode == "partial" and timeout == 0)
+  if expect_failure then
+    local failed, problem? = status:has_failed()
+    if not failed then raise "incomplete HTTPS request did not fail its connection Task" end
+    if not (problem.error is ssl.Error) then problem:raise() end
+    local failure = problem.error as ssl.Error
+    if failure.name ~= "TLS_TRUNCATED_EOF" or failure.operation ~= "ssl.read" then problem:raise() end
+  elseif not status:has_succeeded() then
+    raise "HTTPS connection Task ended " .. status:as_string()
+  end
+  io.print("CONNECTION " .. status:as_string())
+  if serving:status():has_finished() then raise "peer disconnect ended the HTTPS listener" end
+  server:close()
+  if not async.join(serving):has_succeeded() then raise "HTTPS listener did not close successfully" end
+  io.print("LISTENER succeeded")
+end
+
+function main(args: {string}): integer
+  local mode = args[1] or "idle"
+  local timeout = 0
+  if args[2] == "enabled" then timeout = 10000 end
+  local running = async.run<|value, value|>(function (): value
+    exercise(mode, timeout)
+    return nil
+  catch
+    return async.Error(error, traceback)
+  end)
+  defer stop(running)
+  local watchdog = async.run<|nil, value|>(function (): nil
+    timer.sleep(5000)
+    return nil
+  end)
+  defer stop(watchdog)
+  case async.race_two(running, watchdog)
+  when second() then raise "HTTPS disconnect fixture timed out"
+  end
+  case async.join(running)
+  when succeeded(failure) then
+    if failure ~= nil then (failure as async.Error):raise() end
+  else
+    raise "HTTPS disconnect fixture did not finish"
+  end
+  io.print("HTTPS DISCONNECT OK")
+  return 0
+end

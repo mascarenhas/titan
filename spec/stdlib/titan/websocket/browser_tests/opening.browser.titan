@@ -1,0 +1,23 @@
+function test_live_pre_open_rejections_hide_http_metadata(_context: test.Context)
+  runtime_test.run(function ()
+    for _, mode in iteration.ipairs({"403", "malformed"}) do
+      handshake_error(function () websocket.connect(raw("opening-" .. mode, mode)) end)
+    end
+  end)
+end
+
+function test_live_offered_but_unselected_subprotocol_fails_opening(_context: test.Context)
+  runtime_test.run(function ()
+    handshake_error(function ()
+      websocket.connect(raw("unselected", "unselected"), websocket.DialOptions { subprotocols = {"chat"} })
+    end, "WebSocket opening handshake failed")
+  end)
+end
+
+function test_live_handshake_timeout_retires_the_request(_context: test.Context)
+  runtime_test.run(function ()
+    websocket_error(function ()
+      websocket.connect(raw("opening-timeout", "hold"), websocket.DialOptions { handshake_timeout = 30 })
+    end, "timeout", "websocket.open", nil)
+  end)
+end

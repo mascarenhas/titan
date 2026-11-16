@@ -1,0 +1,70 @@
+function test_live_subprotocol_negotiation(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(live("echo"), websocket.DialOptions { subprotocols = {"chat", "other"} })
+    defer connection:close()
+    test.assert(connection:subprotocol() == "chat", "native peer did not select the offered subprotocol")
+    echo(connection, websocket.TEXT, "negotiated")
+    local plain = websocket.connect(live("echo"))
+    defer plain:close()
+    test.assert(plain:subprotocol() == nil, "unoffered protocol appeared on the connection")
+  end)
+end
+
+function test_live_text_round_trips(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(live("echo"))
+    defer connection:close()
+    for _, data in iteration.ipairs({"", "plain ASCII", "aé€𠀀z"}) do echo(connection, websocket.TEXT, data) end
+    echo(connection, websocket.MessageType.text(), "fresh-text")
+  end)
+end
+
+function test_live_binary_round_trips(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(live("echo"))
+    defer connection:close()
+    for _, data in iteration.ipairs({"", "\0\xff", string.rep("\0\xff", 32768)}) do echo(connection, websocket.BINARY, data) end
+    echo(connection, websocket.MessageType.binary(), "\0fresh")
+  end)
+end
+
+function test_live_invalid_text_is_rejected_without_sending_or_retiring(_context: test.Context)
+  runtime_test.run(function ()
+    local source = live("echo")
+    local connection = websocket.connect(source)
+    defer connection:close()
+    local before = metric("send", source)
+    websocket_error(function () connection:write(websocket.TEXT, "\255\254") end, "utf8", "websocket.write", nil)
+    test.assert(metric("send", source) == before, "invalid TEXT reached WebSocket.send")
+    echo(connection, websocket.TEXT, "healthy after validation")
+    test.assert(metric("send", source) == before + 1, "validation failure retired the usable connection")
+  end)
+end
+
+function test_live_verified_tls_and_both_certificate_rejections(_context: test.Context)
+  runtime_test.run(function ()
+    if environment("TITAN_TEST_VERIFIED_TLS") == "1" then
+      local connection = websocket.connect(live("echo", environment("TITAN_TEST_WSS_VALID_URL")))
+      defer connection:close()
+      echo(connection, websocket.TEXT, "verified certificate and hostname")
+      connection:shutdown(1000, "verified")
+      closed(connection, 1000, "verified")
+    end
+    for _, name in iteration.ipairs({"TITAN_TEST_WSS_WRONG_HOST_URL", "TITAN_TEST_WSS_UNTRUSTED_URL"}) do
+      handshake_error(function () websocket.connect(live("echo", environment(name))) end)
+    end
+  end)
+end
+
+function test_live_browser_origin_acceptance_and_denial(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(live("origin"))
+    defer connection:close()
+    local kind?, origin? = connection:read()
+    if not same_message_kind(kind, websocket.TEXT) or origin == nil then raise "native Origin fixture did not publish the header" end
+    if environment("TITAN_TEST_BROWSER") == "1" then
+      test.assert(string.sub(origin, 1, 17) == "http://127.0.0.1:", "browser Origin did not reach the native peer")
+      handshake_error(function () websocket.connect(live("deny-origin")) end)
+    end
+  end)
+end

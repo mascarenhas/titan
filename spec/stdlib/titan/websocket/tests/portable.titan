@@ -1,0 +1,89 @@
+function test_message_types_and_error_records(_: test.Context)
+  case websocket.TEXT
+  when text() then
+  when binary() then test.assert(false, "TEXT is not a text message kind")
+  end
+  case websocket.BINARY
+  when binary() then
+  when text() then test.assert(false, "BINARY is not a binary message kind")
+  end
+  local failure = websocket.Error("limit", "websocket.read", "message limit", 1009)
+  test.assert(failure.kind == "limit" and failure.operation == "websocket.read" and
+    failure.message == "message limit" and failure.close_code == 1009)
+  local fields = http.headers({http.Header("X-Rejected", "yes")})
+  local rejected = websocket.HandshakeError("rejected", 403, fields)
+  test.assert(rejected.message == "rejected" and rejected.status == 403 and
+    rejected.headers:get("x-rejected") == "yes")
+  local hidden = websocket.HandshakeError("hidden", nil, nil)
+  test.assert(hidden.status == nil and hidden.headers == nil)
+end
+
+local function assert_option_error(action: function (): (), message: string)
+  local rejected = false
+  do action()
+  catch
+    rejected = true
+    test.assert(error == message, "WebSocket argument error changed identity or message")
+  end
+  test.assert(rejected, "WebSocket accepted invalid options")
+end
+
+function test_dial_options_positive_limits(_: test.Context)
+  websocket.DialOptions()
+  websocket.DialOptions { read_limit = 1, handshake_timeout = 1 }
+  assert_option_error(function () websocket.DialOptions { read_limit = 0 } end,
+    "WebSocket read limit must be positive")
+  assert_option_error(function () websocket.DialOptions { handshake_timeout = -1 } end,
+    "WebSocket opening timeout must be positive")
+end
+
+function test_dial_options_protocol_tokens(context: test.Context)
+  websocket.DialOptions { subprotocols = {"chat", "Chat", "v1.example", "!#$%&'*+-.^_`|~"} }
+  local tokens = {"", "bad protocol", "bad,protocol", "\255", "a\0b"}
+  for index = 1, #tokens do
+    local token = tokens[index]
+    context:run("invalid_" .. index, function (_: test.Context)
+      assert_option_error(function () websocket.DialOptions { subprotocols = {token} } end,
+        "invalid or duplicate WebSocket subprotocol")
+    end)
+  end
+  context:run("duplicate", function (_: test.Context)
+    assert_option_error(function () websocket.DialOptions { subprotocols = {"chat", "chat"} } end,
+      "invalid or duplicate WebSocket subprotocol")
+  end)
+end
+
+function test_dial_options_reserved_headers(context: test.Context)
+  local names = {"Host", "Connection", "Upgrade", "Content-Length", "Transfer-Encoding", "Expect",
+    "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Accept",
+    "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"}
+  for index = 1, #names do
+    local name = names[index]
+    context:run(name, function (_: test.Context)
+      assert_option_error(function ()
+        websocket.DialOptions { headers = http.headers({http.Header(name, "value")}) }
+      end, "WebSocket dial headers contain a reserved handshake field")
+    end)
+  end
+end
+
+function test_connect_rejects_non_websocket_scheme(_: test.Context)
+  runtime_test.run(function ()
+    assert_option_error(function () websocket.connect("http://127.0.0.1:1/") end,
+      "WebSocket URL must use ws or wss")
+    assert_option_error(function () websocket.connect("https://127.0.0.1:1/") end,
+      "WebSocket URL must use ws or wss")
+  end)
+end
+
+function test_connect_retains_url_error_identity(_: test.Context)
+  runtime_test.run(function ()
+    local rejected = false
+    do websocket.connect("ws://bad host/")
+    catch
+      rejected = true
+      test.assert(error is url.Error, "connect lost its URL error identity")
+    end
+    test.assert(rejected, "connect accepted malformed URL")
+  end)
+end

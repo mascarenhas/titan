@@ -200,7 +200,7 @@ end
 -- Upgrade uses protocol-name ["/" protocol-version], unlike Connection's
 -- bare token options. Names are ASCII case-insensitive; versions are exact.
 local function upgrade_protocol_parts(protocol: string): (string?, string?)
-  local slash? = string.find(protocol, "/", 1, true)
+  local slash? = string.find(protocol, "/", 1)
   if not slash then
     if string.match(protocol, HTTP_TOKEN_PATTERN) then return protocol, nil end
     return nil, nil

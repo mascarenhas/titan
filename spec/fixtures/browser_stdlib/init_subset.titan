@@ -17,6 +17,8 @@ local timerlib = import "timer"
 local oslib = import "os"
 local iolib = import "io"
 local lualib = import "lua"
+local httplib = import "http"
+local websocketlib = import "websocket"
 
 function test_initializers_completed(_context: test.Context)
   test.assert(test.testing(), "subset initializers did not reach their test")

@@ -1,0 +1,127 @@
+local function browser_header_rejection(name: string, contents: string, expected: string)
+  assert_options_error(function ()
+    http.get("http://127.0.0.1:1", http.RequestOptions {headers = http.headers({http.Header(name, contents)})})
+  end, expected)
+end
+
+function test_browser_http_forbidden_headers(context: test.Context)
+  local names = {"Accept-Charset", "Accept-Encoding", "Access-Control-Request-Headers",
+    "Access-Control-Request-Method", "Connection", "Cookie", "Cookie2", "Date", "DNT",
+    "Expect", "Keep-Alive", "Origin", "Referer", "Set-Cookie", "TE", "Trailer",
+    "Transfer-Encoding", "Upgrade", "Via", "pRoXy-Value", "sEc-Value"}
+  for _, name in iteration.ipairs(names) do
+    context:run(name, function (_: test.Context)
+      runtime_test.run(function ()
+        local expected = "HTTP request header '" .. name .. "' is forbidden on the browser target"
+        if name == "Expect" then expected = "HTTP client requests do not support Expect" end
+        if name == "Transfer-Encoding" then expected = "HTTP client requests do not support Transfer-Encoding" end
+        browser_header_rejection(name, "test", expected)
+      end)
+    end)
+  end
+end
+
+function test_browser_http_forbidden_method_override(context: test.Context)
+  local values = {"TRACE", "GET, TRACE", "  tRaCe\t ", '"a\\\\",TRACE'}
+  for index = 1, #values do
+    local contents = values[index]
+    context:run("case_" .. index, function (_: test.Context)
+      runtime_test.run(function ()
+        browser_header_rejection("X-HTTP-Method-Override", contents,
+          "HTTP request header 'X-HTTP-Method-Override' is forbidden on the browser target")
+      end)
+    end)
+  end
+end
+
+function test_browser_http_quoted_method_override_is_allowed(context: test.Context)
+  for _, name in iteration.ipairs({"X-HTTP-Method", "X-HTTP-Method-Override", "X-Method-Override"}) do
+    for index, contents in iteration.ipairs({'"foo,TRACE,bar"', '"TRACE"', '"a\\"b,TRACE", POST'}) do
+      context:run(name .. "_" .. index, function (_: test.Context)
+        runtime_test.run(function ()
+          -- A later forbidden field proves Titan accepted the quoted override
+          -- without depending on the host's own request-header guard.
+          local fields = http.headers({http.Header(name, contents), http.Header("Cookie", "unreachable")})
+          assert_options_error(function ()
+            http.get("http://127.0.0.1:1", http.RequestOptions {headers = fields})
+          end, "HTTP request header 'Cookie' is forbidden on the browser target")
+        end)
+      end)
+    end
+  end
+end
+
+function test_browser_http_method_body_ca_validation(_: test.Context)
+  runtime_test.run(function ()
+    for _, method in iteration.ipairs({"CONNECT", "tRaCe", "TRACK"}) do
+      assert_options_error(function () http.request(method, "http://127.0.0.1:1") end,
+        "HTTP method is forbidden on the browser target")
+    end
+    for _, method in iteration.ipairs({"GET", "hEaD"}) do
+      assert_options_error(function ()
+        http.request(method, "http://127.0.0.1:1", http.RequestOptions {body = ""})
+      end, "HTTP GET and HEAD do not accept a request body on the browser target")
+    end
+    assert_options_error(function ()
+      http.get("http://127.0.0.1:1", http.RequestOptions {ca_file = "unused.pem"})
+    end, "HTTP ca_file is unavailable on the browser target")
+    browser_header_rejection("Host", "other.example",
+      "HTTP custom Host header is unavailable on the browser target")
+    browser_header_rejection("Content-Length", "1",
+      "HTTP Content-Length does not match the request body")
+  end)
+end
+
+function test_browser_http_child_state_construction_and_refusal(_: test.Context)
+  local state = lua.new()
+  defer state:close()
+  local loader = string.reader([[
+    local http = require "titan.http"
+    local header = http.Header.new("X-Child", "yes")
+    local headers = http.headers()
+    headers:add(header.name, header.contents)
+    local client = http.Client.new()
+    local options = http.RequestOptions.new(headers)
+    assert(headers:get("x-child") == "yes")
+    local ok, message = pcall(http.get, "http://127.0.0.1:1", options)
+    assert(not ok and message == "async Runtime is not active")
+    ok, message = pcall(client.get, client, "http://127.0.0.1:1", options)
+    assert(not ok and message == "async Runtime is not active")
+    client:close()
+    return true
+  ]])
+  defer loader:close()
+  state:run_from_loader(loader, "=http-child-state")
+end
+
+function test_browser_http_client_cannot_migrate_between_runtimes(_: test.Context)
+  local client = http.Client()
+  defer client:close()
+  runtime_test.run(function ()
+    -- Binding precedes method validation and requires no network operation.
+    assert_options_error(function () client:request("TRACE", "http://127.0.0.1:1") end,
+      "HTTP method is forbidden on the browser target")
+  end)
+  runtime_test.run(function ()
+    assert_options_error(function () client:get("http://127.0.0.1:1") end,
+      "HTTP Client is closed")
+  end)
+end
+
+function test_browser_http_host_default_ports_are_equivalent(_: test.Context)
+  runtime_test.run(function ()
+    for _, scheme in iteration.ipairs({"http", "https"}) do
+      local port = "80"
+      if scheme == "https" then port = "443" end
+      for _, source_port in iteration.ipairs({"", ":" .. port}) do
+        for _, host_port in iteration.ipairs({"", ":" .. port}) do
+          local fields = http.headers({http.Header("Host", "127.0.0.1" .. host_port),
+            http.Header("Cookie", "test")})
+          assert_options_error(function ()
+            http.get(scheme .. "://127.0.0.1" .. source_port, http.RequestOptions {headers = fields})
+          end, "HTTP request header 'Cookie' is forbidden on the browser target")
+        end
+      end
+    end
+  end)
+end

@@ -1,0 +1,127 @@
+function test_methods_binary_headers_and_client_lifecycle(_: test.Context)
+  runtime_test.run(function ()
+    local client = http.Client()
+    defer client:close()
+    for _, method in iteration.ipairs({"GET", "POST", "PUT", "DELETE", "HEAD", "PATCH"}) do
+      local body: string? = nil
+      if method ~= "GET" and method ~= "HEAD" then body = "binary\0\255body" end
+      local response = client:request(method, server() .. "/echo", http.RequestOptions {body = body})
+      defer response:close()
+      test.assert(response.status == 200 and response.headers:get("X-Method") == method,
+        method .. " did not reach the native peer")
+      client:close_idle_connections()
+      test.assert(all(response) == (body or ""), method .. " changed binary body bytes")
+    end
+    local allowed = {"Permissions-Policy", "Access-Control-Request-Private-Network", "Tenant-ID",
+      "Host-Label", "Date-Format", "Cookie-Mode", "Proxy", "Sec", "Second"}
+    for _, name in iteration.ipairs(allowed) do
+      local contents = "accepted"
+      if name == "Permissions-Policy" then contents = "camera=()" end
+      if name == "Access-Control-Request-Private-Network" then contents = "true" end
+      test.assert(get_body(server() .. "/header/" .. name,
+        http.RequestOptions {headers = one_header(name, contents)}) == contents, name .. " was silently stripped")
+    end
+    local engine = environment("TITAN_TEST_ENGINE")
+    local strips_quoted_list = engine == "firefox" or engine == "webkit"
+    for _, name in iteration.ipairs({"X-HTTP-Method", "X-HTTP-Method-Override", "X-Method-Override"}) do
+      for _, contents in iteration.ipairs({'"foo,TRACE,bar"', '"TRACE"', '"a\\"b,TRACE", POST'}) do
+        local received = get_body(server() .. "/header/" .. name, http.RequestOptions {headers = one_header(name, contents)})
+        -- Firefox and WebKit split this quoted list and strip the whole field.
+        test.assert(received == contents or
+          (strips_quoted_list and contents == '"foo,TRACE,bar"' and received == ""),
+          name .. " changed quoted method override: " .. contents)
+      end
+    end
+    local parsed = url.parse(server())
+    for _, mixed_case in iteration.ipairs({false, true}) do
+      local host_name = "Host"
+      local length_name = "Content-Length"
+      if mixed_case then host_name, length_name = "hOsT", "content-length" end
+      local headers = one_header(host_name, parsed.authority)
+      headers:add(length_name, "3")
+      local response = client:request("POST", server() .. "/header-snapshot", http.RequestOptions {headers = headers, body = "a\0b"})
+      defer response:close()
+      test.assert(all(response) == "1\n" .. parsed.authority .. "\n1\n3\na\0b",
+        "matching Host/Content-Length were not stripped safely")
+    end
+    client:close()
+    client:close()
+    string_error(function () client:get(server() .. "/echo") end)
+  end)
+  -- A fresh Runtime must not reuse the preceding Runtime's closed default client.
+  runtime_test.run(function ()
+    local response = http.get(server() .. "/echo")
+    defer response:close()
+    http.close_idle_connections()
+    test.assert(all(response) == "")
+  end)
+end
+
+function test_io_lines_and_response_close(_: test.Context)
+  runtime_test.run(function ()
+    local response = http.get(server() .. "/lines")
+    defer response:close()
+    local lines: {string} = {}
+    for line in io.lines(response) do lines[#lines + 1] = line end
+    test.assert(#lines == 3 and lines[1] == "first" and lines[2] == "second" and lines[3] == "last")
+    response:close()
+    response:close()
+    test.assert(response:read() == nil, "closed response did not reach EOF")
+  end)
+end
+
+function test_verified_https_and_rejected_certificates(_: test.Context)
+  runtime_test.run(function ()
+    if environment("TITAN_TEST_VERIFIED_TLS") == "1" then
+      local body = "verified\0\255https"
+      local response = http.request("POST", environment("TITAN_TEST_HTTPS_VALID_URL") .. "/echo",
+        http.RequestOptions {body = body})
+      defer response:close()
+      test.assert(response.status == 200 and all(response) == body, "verified HTTPS binary echo failed")
+      operation_error(function () http.get(environment("TITAN_TEST_HTTPS_WRONG_HOST_URL") .. "/echo") end,
+        "http.request")
+    end
+    operation_error(function () http.get(environment("TITAN_TEST_HTTPS_UNTRUSTED_URL") .. "/echo") end,
+      "http.request")
+  end)
+end
+
+function test_browser_cors_modes_and_credentials(_: test.Context)
+  if not in_browser() then test.skip("CORS belongs to browser origin policy") end
+  runtime_test.run(function ()
+    -- The custom header forces OPTIONS; success also requires ACAO on the POST.
+    local response = http.request("POST", server() .. "/echo", http.RequestOptions {headers = one_header("X-Preflight", "yes"), body = "cors"})
+    defer response:close()
+    test.assert(all(response) == "cors", "CORS preflight or actual ACAO failed")
+    operation_error(function () http.get(server() .. "/no-cors") end, "http.request")
+    local exposed = http.get(server() .. "/expose-subset")
+    defer exposed:close()
+    test.assert(exposed.headers:get("X-Visible") == "yes" and exposed.headers:get("X-Hidden") == nil,
+      "Access-Control-Expose-Headers was not enforced")
+    operation_error(function () http.get(server() .. "/echo",
+      http.RequestOptions {mode = http.RequestMode.same_origin()}) end, "http.request")
+    local source = server() .. "/redirect/302/with"
+    local manual = http.get(source, http.RequestOptions {
+      redirect = http.RedirectMode.manual()})
+    defer manual:close()
+    test.assert(manual.status == 0 and manual.url == source and manual:read() == nil,
+      "manual opaqueredirect lost the requested URL")
+    local opaque = http.get(server() .. "/echo",
+      http.RequestOptions {mode = http.RequestMode.no_cors()})
+    defer opaque:close()
+    test.assert(opaque.status == 0 and opaque.reason == "" and opaque.url == nil and
+      not opaque.redirected and #opaque.headers:all() == 0 and opaque:read() == nil,
+      "no-cors did not produce an opaque response")
+    -- Cross-origin no-cors requires follow; other redirect modes are network errors.
+    for _, redirect in iteration.ipairs({http.RedirectMode.manual(), http.RedirectMode.error()}) do
+      operation_error(function () http.get(server() .. "/echo", http.RequestOptions {
+        mode = http.RequestMode.no_cors(), redirect = redirect}) end, "http.request")
+    end
+    operation_error(function () http.get(server() .. "/echo",
+      http.RequestOptions {credentials = http.CredentialsMode.include()}) end, "http.request")
+    for _ = 1, 2 do
+      test.assert(get_body(server() .. "/echo", http.RequestOptions {
+        credentials = http.CredentialsMode.omit(), mode = http.RequestMode.cors()}) == "")
+    end
+  end)
+end

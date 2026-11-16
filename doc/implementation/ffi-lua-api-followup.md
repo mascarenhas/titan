@@ -9,7 +9,7 @@ chapter. That exception is an implementation technique, not public API.
 
 The inventory of trusted sites is the code: every `ffi.lua_*` and `ffi.luaL_*`
 call under `titan/`. Such calls appear in `titan/{async,coroutine,gc,iteration,reflect,test,transfer}.titan`,
-`titan/browser.browser.titan`, `titan/http/native.titan`, `titan/lua/{lua,worker}.titan`,
+`titan/browser.browser.titan`, `titan/http/parser.native.titan`, `titan/lua/{lua,worker}.titan`,
 `titan/peg/native.titan`, `titan/protobuf/protobuf.titan`,
 `titan/string/{string,format}.titan`, `titan/thread/{spawn,thread}.titan`, and
 several `titan/uv/*.titan` files. Module-specific ledgers live with their

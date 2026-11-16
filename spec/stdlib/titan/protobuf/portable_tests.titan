@@ -21,7 +21,7 @@ local function expect_error(action: function (): (), expected: string)
   catch
     caught = true
     local message: string = error
-    test.assert(string.find(message, expected, 1, true) ~= nil, message)
+    test.assert(string.find(message, expected, 1) ~= nil, message)
   end
   test.assert(caught, "expected rejection: " .. expected)
 end
@@ -1005,6 +1005,6 @@ function test_described_union_module_matches_dynamic_nominal_wire(_: test.Contex
   local choice = Choice.empty()
   local codec = protobuf.portable({reflect.Type.is_value()}, {descriptor(choice)})
   local module = nominal_arm_module(codec:encode(choice))
-  test.assert(string.find(codec:describe(), '"module":"' .. module .. '"', 1, true) ~= nil)
+  test.assert(string.find(codec:describe(), '"module":"' .. module .. '"', 1) ~= nil)
   test.assert(module == "protobuf.portable_tests")
 end

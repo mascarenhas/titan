@@ -54,7 +54,7 @@ local function check_status(code: integer, operation: string)
 end
 
 local function checked_path(path: string, operation: string): string
-  if string.find(path, "\0", 1, true) then
+  if string.find(path, "\0", 1) then
     raise operation_error(uv.EINVAL as integer, operation)
   end
   return path

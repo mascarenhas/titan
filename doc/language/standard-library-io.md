@@ -188,10 +188,10 @@ Satisfaction is structural at each coercion site; none of these records has an
 
 On the browser, the table's `os.InputStream`, `os.OutputStream`,
 `string.StringReader`, `string.StringWriter`, `async.ChannelReader`,
-`async.ChannelWriter`, and `timer.Ticker` are available with the listed
-Interface shapes. OS streams are embedding-provided parent streams, not
-captured child endpoints. The filesystem, network, HTTP, WebSocket, and shell
-stream types remain native-only.
+`async.ChannelWriter`, `http.ClientResponse`, `websocket.Connection`, and
+`timer.Ticker` are available with the listed Interface shapes. OS streams are
+embedding-provided parent streams, not captured child endpoints. The
+filesystem, socket, HTTP server, and shell stream types remain native-only.
 
 These Interface relations do not create a universal stream class.
 `os.InputStream` and `os.OutputStream` are concrete process-stdio records,

@@ -49,7 +49,7 @@ local function start_client(first_port: integer): async.Task
     support.outcome = "client-requesting"
     local response = http.request(
       "POST", "http://127.0.0.1:" .. string.tostring(port) ..
-      "/path?q=one", request_headers, "request\0body", nil)
+      "/path?q=one", http.RequestOptions { headers = request_headers, body = "request\0body" })
     defer response:close()
     support.outcome = "client-reading-response"
     test.assert(response.status == 302 and response.reason == "Found",
@@ -87,7 +87,7 @@ local function expect_client_url_rejected(source_url: string,
   request_headers:add("Host", authority)
   local rejected = false
   do
-    local response = http.get(source_url, request_headers, nil)
+    local response = http.get(source_url, http.RequestOptions { headers = request_headers })
     defer response:close()
     response:close()
   catch
@@ -130,7 +130,7 @@ local function start_client_host_validation(first_port: integer): async.Task
     request_headers:add("Host", "[2001:db8::1]:8443")
     local source_url =
       "http://127.0.0.1:" .. string.tostring(port) .. "/host-check"
-    local response = http.get(source_url, request_headers, nil)
+    local response = http.get(source_url, http.RequestOptions { headers = request_headers })
     defer response:close()
     test.assert(response.status == 204,
           "HTTP client did not accept a valid supplied IP-literal Host")
@@ -158,7 +158,7 @@ local function start_client_host_validation(first_port: integer): async.Task
     local duplicate_rejected = false
     do
       local duplicate_response =
-        http.get(source_url, duplicate_headers, nil)
+        http.get(source_url, http.RequestOptions { headers = duplicate_headers })
       defer duplicate_response:close()
       duplicate_response:close()
     catch
@@ -175,7 +175,7 @@ local function start_client_host_validation(first_port: integer): async.Task
     local expect_rejected = false
     do
       local expect_response = http.request(
-        "POST", source_url, expect_headers, "body", nil)
+        "POST", source_url, http.RequestOptions { headers = expect_headers, body = "body" })
       defer expect_response:close()
       expect_response:close()
     catch
@@ -215,7 +215,7 @@ local function expect_length_rejected(contents: string, expected: string)
   local rejected = false
   do
     local response = http.request(
-      "POST", "http://127.0.0.1:1/", supplied, "body", nil)
+      "POST", "http://127.0.0.1:1/", http.RequestOptions { headers = supplied, body = "body" })
     defer response:close()
     response:close()
   catch
@@ -263,7 +263,7 @@ local function start_header_validation(first_port: integer): async.Task
     local method_rejected = false
     do
       local response = http.request(
-        "BAD METHOD", "http://127.0.0.1:1/", nil, nil, nil)
+        "BAD METHOD", "http://127.0.0.1:1/")
       defer response:close()
       response:close()
     catch
@@ -310,7 +310,7 @@ local function start_header_validation(first_port: integer): async.Task
       local reason_rejected = false
       do
         local response = http.get(
-          "http://127.0.0.1:" .. string.tostring(port) .. "/", nil, nil)
+          "http://127.0.0.1:" .. string.tostring(port) .. "/")
         defer response:close()
         response:close()
       catch
@@ -420,7 +420,7 @@ local function start_client_framing(first_port: integer): async.Task
 
     local base = "http://127.0.0.1:" .. string.tostring(port)
     support.outcome = "client-fixed"
-    local fixed = http.get(base .. "/fixed", nil, nil)
+    local fixed = http.get(base .. "/fixed")
     defer fixed:close()
     test.assert(fixed.status == 206 and fixed.reason == "Partial Content",
           "HTTP client did not skip the informational response")
@@ -431,7 +431,7 @@ local function start_client_framing(first_port: integer): async.Task
 
     support.outcome = "client-head"
     local head = http.request(
-      "HEAD", base .. "/head", nil, nil, nil)
+      "HEAD", base .. "/head")
     defer head:close()
     test.assert(head.headers:get("Content-Length") == "5" and
           head:read() == nil,
@@ -440,19 +440,19 @@ local function start_client_framing(first_port: integer): async.Task
 
     support.outcome = "client-lowercase-head"
     local lowercase_head = http.request(
-      "head", base .. "/lowercase-head", nil, nil, nil)
+      "head", base .. "/lowercase-head")
     defer lowercase_head:close()
     test.assert(support.read_response(lowercase_head) == "body",
           "HTTP client treated a case-distinct method as HEAD")
 
     support.outcome = "client-eof"
-    local eof_response = http.get(base .. "/eof", nil, nil)
+    local eof_response = http.get(base .. "/eof")
     defer eof_response:close()
     test.assert(support.read_response(eof_response) == "eof-body",
           "HTTP client did not read the EOF-delimited body")
 
     support.outcome = "client-truncated"
-    local truncated = http.get(base .. "/truncated", nil, nil)
+    local truncated = http.get(base .. "/truncated")
     defer truncated:close()
     local truncated_failed = false
     do
@@ -466,7 +466,7 @@ local function start_client_framing(first_port: integer): async.Task
     support.outcome = "client-malformed"
     local malformed_failed = false
     do
-      local malformed = http.get(base .. "/malformed", nil, nil)
+      local malformed = http.get(base .. "/malformed")
       defer malformed:close()
       malformed:close()
     catch
@@ -479,7 +479,7 @@ local function start_client_framing(first_port: integer): async.Task
     local informational_failed = false
     do
       local informational = http.get(
-        base .. "/informational-eof", nil, nil)
+        base .. "/informational-eof")
       defer informational:close()
       informational:close()
     catch

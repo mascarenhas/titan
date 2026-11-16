@@ -398,8 +398,8 @@ effect, and the extension adds no target setting.
 
 The standard library's native-only modules keep their canonical mains as
 target variants: the flat `titan/{fs,net,ssl}.native.titan`
-and the folder mains `titan/{uv,http,websocket,sqlite3,thread}/<name>.native.titan`.
-These eight families have no default and no `browser` member, so for
+and the folder mains `titan/{uv,sqlite3,thread}/<name>.native.titan`.
+These six families have no default and no `browser` member, so for
 `browser` the resolver selects no main: the module is absent (an import
 reports `module 'titan.<name>' not found`), and the folder's contributors are
 neither composed nor resolvable as flat modules. Native selection, logical
@@ -431,6 +431,17 @@ and browser `loading` contributors, and a native-only `background` family.
 `LUA_TITAN_SOURCES` lists all five sources. Native composition preserves file
 loading and worker execution; browser composition keeps synchronous states
 and a no-filesystem source-search pass.
+
+`titan.http` has the shared main `titan/http/http.titan` and the shared
+contributors `headers.titan` and `options.titan`. Its `client` family has
+`native` and `browser` members, and the `native_imports`, `pool`, `parser`,
+`server`, `transfer`, and `upgrade` families have only `native` ones, so the browser
+composes the shared files with `client.browser.titan`. `titan.websocket`'s
+main family has `native` and `browser` members (`websocket.native.titan`,
+`websocket.browser.titan`) and no default; `types.titan` and `utf8.titan` are
+shared, `handshake`, `connection`, `frames`, and `crypto` are native-only,
+and `client.browser.titan` is browser-only. `STDLIB_HTTP_SOURCES` and
+`WEBSOCKET_TITAN_SOURCES` list every source of both modules.
 
 * The native Makefile source lists (`UV_TITAN_SOURCES` and the other stdlib
   lists under `STDLIB_TITAN_SOURCES`) name every source of a native module

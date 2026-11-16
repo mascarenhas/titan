@@ -19,7 +19,7 @@ local function expect_native_json_boxing_failure(candidate: value)
     test.assert(not (error is json.Error), "JSON relabeled a native boxing failure")
     test.assert(error is string)
     test.assert(string.find(error as string,
-        "C scalar is outside its Titan carrier range", 1, true) ~= nil)
+        "C scalar is outside its Titan carrier range", 1) ~= nil)
   end
   test.assert(failed, "JSON should check a native number when boxing it")
 end

@@ -290,8 +290,8 @@ The complete shared `titan.io` facade imports the selected `os` composition.
 `titan.timer` has a `native` and a `browser` variant
 (`titan/timer.native.titan`, `titan/timer.browser.titan`) with one public
 interface. Fourteen shared roots including `io`, the target-specific
-compositions of `async`, `timer`, `os`, and `lua`, and the browser-only
-`titan.browser` form the nineteen-module [browser standard
+compositions of `async`, `timer`, `os`, `lua`, `http`, and `websocket`, and the
+browser-only `titan.browser` form the twenty-one-module [browser standard
 provider](browser-target.md#the-browser-standard-library). The root order is
 not topological (`titan.async` precedes `titan.string`, which it imports);
 recursive import loading resolves dependencies while the roots are processed.

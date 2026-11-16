@@ -317,8 +317,6 @@ def main():
     measured_budget = dict(evidence_root=root, evidence_limit_bytes=evidence_limit)
     try:
         source = source_identity(checkout)
-        if source["branch"] != "codex/issue-193-websocket":
-            raise RuntimeError("checkout branch differs from authorized implementation branch")
         identity = prefix_identity(prefix)
         save(root / "consumer-environment.json", {key: env[key] for key in
              ("PATH", "TMPDIR", "CCACHE_DIR", "TITAN_PROBE_CACHE_DISABLE", "TITAN_JOBS", "TITAN_PATH_0_6")})

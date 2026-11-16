@@ -265,7 +265,7 @@ prefix`.
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
-| `provider` | `titan.a` | the browser standard provider: fourteen shared roots including `io`, browser compositions of `async`, `timer`, synchronous `lua`, and the `os` subset, browser-only `titan.browser`, and five LPegLabel members |
+| `provider` | `titan.a` | the browser standard provider: fourteen shared roots including `io`, browser compositions of `async`, `timer`, synchronous `lua`, the `os` subset, and the `http` and `websocket` clients, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
 
 The SDK also installs `titan-protobuf.mjs` in `titan_bin`. This standalone ES
@@ -345,7 +345,7 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
 4. `titanc --target browser --output <build> --source-first --incremental
    -X <titan_bin>/libtitan-lpeglabel.a <BROWSER_STDLIB_ROOTS>` publishes
    `<build>/titan.a` through ordinary library mode, which runs the executing
-   protocol check against the runtime and runner staged in step 3. The nineteen
+   protocol check against the runtime and runner staged in step 3. The twenty-one
    roots and the payload are described in [the browser standard
    library](#the-browser-standard-library). No `titan.a` or manifest exists
    yet, and none is required.
@@ -355,11 +355,12 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    runs the [dependency-closure
    check](#the-dependency-closure-check) over the staged provider, the
    LPegLabel archive, and every object and link certificate under `<build>`,
-   requires exactly nineteen keys, in bytewise order: `titan.async`,
-   `titan.browser`, `titan.coroutine`, `titan.gc`, `titan.io`, `titan.iteration`,
-   `titan.json`, `titan.lua`, `titan.math`, `titan.os`, `titan.path`, `titan.peg`,
-   `titan.protobuf`, `titan.reflect`, `titan.string`, `titan.test`,
-   `titan.timer`, `titan.transfer`, and `titan.url`; copies it to `titan.a`; and
+   requires exactly twenty-one keys, in bytewise order: `titan.async`,
+   `titan.browser`, `titan.coroutine`, `titan.gc`, `titan.http`, `titan.io`,
+   `titan.iteration`, `titan.json`, `titan.lua`, `titan.math`, `titan.os`,
+   `titan.path`, `titan.peg`, `titan.protobuf`, `titan.reflect`,
+   `titan.string`, `titan.test`, `titan.timer`, `titan.transfer`, `titan.url`,
+   and `titan.websocket`; copies it to `titan.a`; and
    finally writes `sdk-digests` with `incremental.write_sdk_digests` and the
    existing schema.
 
@@ -446,21 +447,32 @@ package searcher keeps canonical/preload lookup, then contributes a fixed
 no-dynamic-providers miss without reading the environment or probing files.
 See [the Lua composition](lua-library.md#browser-states-and-stock-profile).
 
-Eight standard modules have only native mains and are absent at compile time:
+`titan.http` composes its shared main `titan/http/http.titan` with the shared
+`headers.titan` and `options.titan` and the browser contributor
+`client.browser.titan`, which imports `titan.browser` and builds the client
+on the SDK's `titan:fetch` source ([browser client](http-library.md#browser-client)).
+Its servers, upgrades, `Exchange`, and llhttp parser live in `*.native.titan`
+contributors that the browser never selects. `titan.websocket` selects its
+browser main `websocket.browser.titan` and contributor `client.browser.titan`
+beside the shared `types.titan` and `utf8.titan`, and builds the client on the
+SDK's `titan:websocket` source ([browser client](websocket-library.md#browser-client)).
+Neither brings llhttp, OpenSSL, or libuv into the browser closure. The member
+inventory records their omissions and opaque records.
+
+Six standard modules have only native mains and are absent at compile time:
 the flat `titan/{fs,net,ssl}.native.titan` and the folder mains
-`titan/{uv,http,websocket,sqlite3,thread}/<name>.native.titan`
+`titan/{uv,sqlite3,thread}/<name>.native.titan`
 ([Make inventories](target-source-selection.md#make-inventories-and-audits)).
 For `browser` the resolver finds no main, so an import reports the ordinary
 `module 'titan.<name>' not found`, and a contributor of a folder whose main is
 unselected stays blocked rather than resolving as a flat module.
-The plan for the eight absent modules is provisional:
+The plan for the six absent modules is provisional:
 
 | Modules | Browser plan (provisional) |
 | --- | --- |
-| `http` | a browser composition; the only absent module that may bring llhttp into the browser closure |
 | `fs` | only together with a virtual filesystem |
 | `uv`, `net`, `ssl` | absent |
-| `websocket`, `sqlite3`, `thread` | absent; browser WebSocket, SQLite, and Worker-based threads are possible later additions |
+| `sqlite3`, `thread` | absent; browser SQLite and Worker-based threads are possible later additions |
 
 No absent capability is exposed as a placeholder. The member inventory
 compares every delivered module with a native counterpart, recording the
@@ -475,7 +487,7 @@ unless it is built with `--no-uv-bootstrap`; otherwise the
 
 ### Provider recipe
 
-`BROWSER_STDLIB_ROOTS` in the `Makefile` names the nineteen logical roots, and
+`BROWSER_STDLIB_ROOTS` in the `Makefile` names the twenty-one logical roots, and
 [`make browser-sdk`](#make-browser-sdk) step 4 compiles them in one library-mode
 `titanc --target browser` invocation. The provider's native payload and
 include path are LPegLabel only:
@@ -499,12 +511,12 @@ include path ([standard-library
 image](multi-module-libraries.md#reserved-titan-and-the-standard-library-image));
 native link inputs come from invocation options, not module metadata, so the
 browser recipe states its closure explicitly. The published `titan.a` holds
-the nineteen module objects (with their split parts) and the five LPegLabel
+the twenty-one module objects (with their split parts) and the five LPegLabel
 members.
 
 ### The dependency-closure check
 
-`scripts/browser_stdlib.lua` rejects the eight browser-absent standard modules
+`scripts/browser_stdlib.lua` rejects the six browser-absent standard modules
 by Titan import and module identity, and libuv, OpenSSL, llhttp, and SQLite by
 path, by symbol, and through the evidence each certified input carries:
 
@@ -513,12 +525,12 @@ path, by symbol, and through the evidence each certified input carries:
   its selected `source.files` are scanned, through the compiler's
   `build.imports_for`; a replaced default, an inactive native contributor, or
   a constituent whose folder main is absent is not read. An import of
-  `uv`, `net`, `ssl`, `thread`, `sqlite3`, `websocket`, `fs`, or `http` fails.
+  `uv`, `net`, `ssl`, `thread`, `sqlite3`, or `fs` fails.
   This also covers explicit source imports. The native Make audit uses a
   validated frozen browser descriptor, as worker restoration does, so source
   selection needs no Emscripten installation there.
 * **Module identity**: the parsed module metadata of each standalone object
-  and archive member must not name any of those eight absent modules. A neutral
+  and archive member must not name any of those six absent modules. A neutral
   member filename cannot hide one, while an unrelated application module such
   as `app.fs` is not mistaken for `titan.fs`.
 * **Paths** (`check_path`): a header named `uv.h`, `llhttp.h`, `sqlite3.h`, or
@@ -632,10 +644,11 @@ Each member is compared by kind, rendered signature, and
 named-call parameter metadata); machine layouts are separate provider metadata
 and are not compared. `M.browser_differences` records, per module, the
 members that a browser composition omits on purpose and the records it keeps
-as opaque types; `titan.async`, `titan.timer`, `titan.os`, and `titan.lua` have
-entries. The opaque owners are `ExternalWait`, `Ticker`, `InputStream`,
-`OutputStream`, and `Lua`; each retained public method is still compared
-individually, including the synchronous `Lua` methods.
+as opaque types; `titan.async`, `titan.timer`, `titan.os`, `titan.lua`,
+`titan.http`, and `titan.websocket` have entries. The opaque owners are
+`ExternalWait`, `Ticker`, `InputStream`, `OutputStream`, `Lua`, `Client`,
+`ClientResponse`, and `Connection`; each retained public method is still
+compared individually, including the synchronous `Lua` methods.
 The audit requires each
 recorded omission to be a native member absent from the browser interface,
 each opaque record to be the same record name and kind on both targets
@@ -680,8 +693,11 @@ delivered.
 | `io` | yes, from its complete shared source | none | `io.tests` (shared in-memory cases and browser parent-stream cases; captured-stdio printing is native-only); `os.browser_tests` for embedding-sensitive printing and line iteration | none | none |
 | `os` | yes, from its shared main and browser contributors | `clock`; `cwd`, `chdir`, `homedir`, `tmpdir`, `hostname`, `exepath`, `pid`, `ppid`; `spawn`, every `with_*` option, `popen`, `wait_signal`; `ExitStatus`, `SpawnConfig`, `SpawnOption`, `Process`, `InputOutputStream`; `InputStream` and `OutputStream` kept opaque | `os.tests` (portable calendar/environment cases and browser streams; host commands, CPU time, and forced time zones are native-only); `os.browser_tests` for embedding options and stream lifetimes | constructs stable parent facades and transfer-field descriptors; Stdio owners remain lazy | none |
 | `lua` | yes, from its shared main and browser contributors | `dofile`, `Lua:run_async`, `Lua:run_async_from_loader`; `Lua` kept opaque, with every retained method compared | `lua.tests` (portable loading, searcher, preload, synchronous state and browser stock-library cases) | none | none |
+| `http` | yes, from its shared main, `headers.titan`, `options.titan`, and the browser contributor `client.browser.titan` | `ClientResponse:take_upgrade`, `Exchange`, `Handler`, `Request`, `Response`, `Server`, `UpgradedStream`, `listen`, `listen_tls`, `request_upgrade_on`; `Client` and `ClientResponse` kept opaque | `http.tests` (portable header, request-option, fail-fast validation and `lua.new()` refusal cases; socket, server and TLS contributors are `.native.titan`); `http.browser_tests` in the [live network harness](#the-live-browser-network-harness) | none | none |
+| `websocket` | yes, from its browser main `websocket.browser.titan`, the shared `types.titan` and `utf8.titan`, and the browser contributor `client.browser.titan` | `AcceptOptions`, `accept`, `Connection:ping`, `Connection:to_transfer_payload`, `Connection.from_transfer_payload`, `Connection.discard_transfer_payload`; `Connection` kept opaque | `websocket.tests` (portable `DialOptions`, UTF-8 and fail-fast cases; socket, server and transfer contributors are `.native.titan`); `websocket.browser_tests` in the [live network harness](#the-live-browser-network-harness) | none | none |
 
-The table covers fourteen shared modules, `async`, `timer`, `os`, and `lua`.
+The table covers fourteen shared modules, `async`, `timer`, `os`, `lua`,
+`http`, and `websocket`.
 The provider's
 browser-only `titan.browser` has no native counterpart; its owners and tests
 are described in [browser bridge runtime](browser-bridge.md#test-layers).
@@ -719,7 +735,9 @@ does not register a second driver.
 | `test` | Eagerly loads the Lua trace scanner and pattern matcher when the stock helpers are available. | the module `do` block of [`test.titan`](../../titan/test.titan) |
 | `gc` | No explicit module initializer. | [`gc.titan`](../../titan/gc.titan) |
 | `iteration` | No explicit module initializer. | [`iteration.titan`](../../titan/iteration.titan) |
-| `uv`, `net`, `ssl`, `thread`, `sqlite3`, `websocket`, `fs`, `http` | No browser main is selected. Their imports and SDK module metadata are rejected by the closure checks. | [native-only mains](target-source-selection.md#make-inventories-and-audits), `selection.applies` in [`source_selection.lua`](../../titan-compiler/source_selection.lua), [absence checks](../../scripts/browser_stdlib.lua) |
+| `http` | No explicit initializer; the browser client opens the `titan:fetch` source on first use. | [`http.titan`](../../titan/http/http.titan) and [`client.browser.titan`](../../titan/http/client.browser.titan) |
+| `websocket` | No explicit initializer; the browser client opens the `titan:websocket` source on first use. The native main's `openings` ephemeron is not part of the browser composition. | [`websocket.browser.titan`](../../titan/websocket/websocket.browser.titan) and [`client.browser.titan`](../../titan/websocket/client.browser.titan) |
+| `uv`, `net`, `ssl`, `thread`, `sqlite3`, `fs` | No browser main is selected. Their imports and SDK module metadata are rejected by the closure checks. | [native-only mains](target-source-selection.md#make-inventories-and-audits), `selection.applies` in [`source_selection.lua`](../../titan-compiler/source_selection.lua), [absence checks](../../scripts/browser_stdlib.lua) |
 
 * **`math`.** The automatic seed has two components: `time(NULL) ~ clock()`
   and a value drawn from the generator with `next_random()`, and
@@ -780,6 +798,19 @@ through both chunk and borrowed-Reader entry points. Native contributors own
 source files, C-module fixtures, asynchronous worker execution, Receivers and
 resource handoff. Browser contributors check destination-stable parent-stream
 transfers, stock Lua failures in both state kinds and fixed searcher misses.
+`http.tests` keeps its server, socket, TLS, pooling, option, redirect, and
+transfer cases in `.native.titan` contributors. Its shared `portable.titan`
+covers headers, `RequestOptions` validation, and validation that precedes any
+transport, and `validation.browser.titan` covers the browser client's
+forbidden headers and method overrides, its method, body, and `ca_file`
+checks, and the `lua.new()` refusal. `websocket.tests` likewise keeps
+servers, framing, UTF-8 wire cases, and transfer in native contributors; its
+shared `portable.titan` covers message kinds, error records, `DialOptions`
+validation, and URL and scheme refusal, and `validation.browser.titan` covers
+the refusal of dial headers and `ca_file` and the `lua.new()` refusal.
+Network behavior of the two browser clients needs
+live servers and belongs to `http.browser_tests` and `websocket.browser_tests`,
+outside this root inventory ([live harness](#the-live-browser-network-harness)).
 
 The separate embedding-sensitive owner `os.browser_tests` stays outside this
 root inventory, like `async.browser_tests`. `browser_scheduler_spec.lua`
@@ -805,10 +836,10 @@ roots in `TITAN_STDLIB_BROWSER_TEST_ROOTS`, next to the native
 ```text
 coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests
 string.core_test string.format_pack_test string.regex_test url.tests path.tests
-test.tests reflect.tests json.tests protobuf.tests protobuf.portable_tests transfer.tests async.tests timer.tests os.tests io.tests
+test.tests reflect.tests json.tests protobuf.tests protobuf.portable_tests transfer.tests async.tests timer.tests os.tests io.tests http.tests websocket.tests
 ```
 
-All twenty-one owners are compiled into `images/stdlib.mjs`, with its `.wasm`
+All twenty-three owners are compiled into `images/stdlib.mjs`, with its `.wasm`
 and `.wasm.map` siblings. `TITAN_STDLIB_BROWSER_TEST_ROOTS_CHECK` rejects an
 empty or duplicate root inventory before build setup. The compiler's
 [general image bounds](#build-time-image-bounds) apply; the suite has no
@@ -881,7 +912,7 @@ protobuf-startup footprint is not a requirement of current JSPI images.
 ### Initialization and fidelity gate
 
 `spec/coder/browser_stdlib_gate_spec.lua` (a real-toolchain gate file) builds
-twenty-three `--test` images from `spec/fixtures/browser_stdlib/` with the `test`
+twenty-five `--test` images from `spec/fixtures/browser_stdlib/` with the `test`
 purpose and assertions 2, and runs them through `gate.mjs` under
 `titan-browser-run --js-test` on Node and Chromium. The isolated fixture list
 comes from `BROWSER_STDLIB_ROOTS`; the emsdk-free inventory spec checks each
@@ -889,17 +920,17 @@ fixture's direct imports, both combined fixtures, and the child-state module
 list against those same roots, and requires the directory's `init_*.titan`
 files to be exactly those fixtures, so a stale one cannot go unbuilt:
 
-* `init_<module>.titan`, one for each of the nineteen delivered roots, imports
+* `init_<module>.titan`, one for each of the twenty-one delivered roots, imports
   only that module (and the `titan.test` runner every test image has) and must
   return status 0, run and pass exactly one case, and write nothing to stderr.
   These images use `--no-uv-bootstrap`;
 * a second image of `init_async` omits `--no-uv-bootstrap`, so the same one-case
   proof also runs through the registered async bootstrap;
-* `init_subset.titan` imports all nineteen roots and is initialized, run, and
+* `init_subset.titan` imports all twenty-one roots and is initialized, run, and
   disposed three times through one cached image creator, with a tick and a
   collection between cycles;
 * `init_lua_states.titan` requires each root in a fresh `lua.new()` state, then
-  requires all nineteen in one more fresh state. Every state is explicitly
+  requires all twenty-one in one more fresh state. Every state is explicitly
   closed; `async` only loads in the child, without trying to drive it; and
 * `fidelity_test.titan` imports the real `coroutine.tests` owner, so its
   browser cases create coroutines first, then writes a marker with NUL, `0xFF`,
@@ -912,6 +943,102 @@ The deliberately failing case lives outside every suite root. The browser-only
 `titan.browser` participates in the initializer matrix without custom bindings;
 the [bridge gates](browser-bridge.md#test-layers) separately exercise its
 embedding bindings and request lifecycle.
+
+### The live browser network harness
+
+The browser `http` and `websocket` clients need live servers, which a browser
+test image cannot start. The harness in `spec/fixtures/browser_net/` runs from
+two places: `spec/coder/browser_net_spec.lua`, a real-toolchain gate file
+that is pending unless `TITAN_REQUIRE_BROWSER_TOOLCHAIN` is set, builds it
+into `out/browser-net` and runs it on Node and Chromium through the SDK's
+`titan-browser-run`; the
+[`browser-playwright` job](continuous-integration.md#browser-playwright-job)
+runs it on each cell's managed Chromium, Firefox, or WebKit through
+`spec/browser/playwright-run.mjs`, in both build profiles.
+
+`spec/browser/build-net.lua OUTPUT` uses the installed `titanc` to build the
+native peer `OUTPUT/native/server` from `server.titan`, the test image
+`OUTPUT/images/http.mjs` of `http.browser_tests`, and the test image
+`OUTPUT/images/websocket.mjs` of `websocket.browser_tests`, which also links
+the fixture-only `controls.c`. The browser builds use an empty
+`TITAN_PATH_0_6`, so they see only the browser SDK. The builder copies the
+JavaScript drivers next to the images.
+
+`run.mjs --root OUTPUT --engine ENGINE --sdk SDK --runner RUNNER --repository
+REPO [--persistent-webkit]` owns one run. It starts the native server and
+`wire_peer.mjs`, each in its own process group, waits for each `READY` line,
+runs the driver with the peers' URLs, checks the final report, and kills and
+joins every peer in `finally`. For Linux Chromium, `nss_trust.mjs` first
+imports the repository test CA into an NSS database under a private `HOME`
+inside `OUTPUT`, through Python `ctypes` over `libnss3`, so verified
+`https://` and `wss://` run with no certificate-ignore flag; Node trusts the
+CA through `NODE_EXTRA_CA_CERTS`. `--persistent-webkit`, which only the CI step
+passes, runs WebKit in a persistent Playwright context inside that private
+home, because WebKit's default ephemeral context has no HTTP cache.
+
+* `server.titan` scans loopback ports from 31000 and serves four listeners:
+  plain HTTP, and HTTPS with `spec/fixtures/ssl/server.pem` (valid for
+  `127.0.0.1` and `localhost`), with `wrong-server.pem` (the same CA, another
+  host name), and with the committed self-signed `untrusted.pem`. Its HTTP
+  routes echo and inspect requests, report the `Host` and `Content-Length`
+  fields received, set `Set-Cookie` fields, answer CORS preflights and expose
+  headers (with routes that omit or restrict CORS headers), serve cacheable
+  resources with an ETag and hit and revalidation counters, implement every
+  redirect status with and without `Location`, a redirect chain past the hop
+  limit, and a cross-origin hop, and serve the runner page and image assets
+  for same-origin requests. Its WebSocket routes echo with subprotocol
+  selection and accept the request's own `Origin`, and one route denies every
+  origin.
+* `wire_peer.mjs` is a Node `node:net` peer for wire behavior that a
+  compliant server does not produce: response headers held until
+  cancellation, a held body, a chunked stream released on request, gzip with
+  the compressed `Content-Length`, a partial body then a reset, and, for
+  WebSocket, a 403, a malformed 101, a 101 without the offered subprotocol, a
+  held handshake, an empty Close, a Close followed by a reset, a paused
+  reader, peer FIN and reset, and a 20 MiB frame. The Close-then-reset route
+  waits for the client's Close reply before resetting; after five seconds
+  without a reply it records the timeout and resets, and the driver fails
+  the missing-reply assertion. Per-route counters report when connections
+  open and close.
+* `net.test.mjs` is the `run(context)` driver for both runners. It passes the
+  URLs in the instance's `env` (`TITAN_TEST_HTTP_URL`,
+  `TITAN_TEST_HTTPS_VALID_URL`, `TITAN_TEST_HTTPS_WRONG_HOST_URL`,
+  `TITAN_TEST_HTTPS_UNTRUSTED_URL`, the `ws`/`wss` forms of the same listeners
+  as `TITAN_TEST_WS_URL` and `TITAN_TEST_WSS_*_URL`, `TITAN_TEST_RAW_URL`)
+  with `TITAN_TEST_VERIFIED_TLS` (`"1"` where the CA is trusted),
+  `TITAN_TEST_BROWSER`, and `TITAN_TEST_ENGINE`. It runs the HTTP image (39
+  active cases, plus two that skip outside their capability context) and four
+  Task-form cancellation phases: pending headers, an already-settled headers
+  request before adoption, failing metadata, and a pending body. In real
+  browsers an iframe from the native server's origin (`same-origin.mjs`) runs
+  the one filtered case for same-origin cache modes and `no_cors()`. It then
+  hands over to `websocket.test.mjs`, which runs the WebSocket image and three
+  cancellation phases (opening, read, write). That driver wraps the host
+  `WebSocket` constructor to count listeners and sends, and `controls.c`
+  wraps the bridge's binding and slot release to count `take` calls, holder
+  releases, and Wasm copies, with no production hook.
+
+Each of the four HTTP cancellation phases waits for the peer to see its
+aborted connection close before disposal, since disposal is not the leak
+oracle. The WebSocket driver, after its suite and after each cancellation
+phase, waits for the peer to see every connection it observed close and
+requires balanced host listeners on each, before disposal. Both drivers
+require that no `onNotificationError` arrives before or during each
+`dispose()` they await. The driver ends with one `BROWSER-NET` JSON report
+(verdict, 65 cases, the cancellation phases, the same-origin page, engine,
+and verified TLS) that `run.mjs` and the spec check.
+
+The tests assert each engine's measured behavior where hosts deviate. Node
+aborts the body of a `follow()` redirect response without `Location`. Firefox
+and WebKit drop the quoted-list method-override value. WebKit sends a
+cache-only miss to the network. Firefox keeps the TCP connection of a
+cancelled or timed-out opening until the handshake is answered, and Node
+keeps the TCP connection of a rejected opening until the peer closes it, so
+those cases release a handshake reply or a peer FIN after their Titan
+assertions and only then require the peer-side close. A peer FIN while
+writes are buffered is reported late on every engine, so that case requires
+that the in-flight or next write raise and that no write succeed once the
+socket is not open, not that one particular write fail.
 
 ### Nesting limits
 
@@ -1657,7 +1784,7 @@ A browser context has no dynamic pass and never calls `support._loadlib`:
   filename inside `Type.Module` remains an identity string only.
 
 The browser SDK root holds the browser standard provider `titan.a`, so the
-nineteen [browser stdlib](#the-browser-standard-library) modules resolve from it,
+twenty-one [browser stdlib](#the-browser-standard-library) modules resolve from it,
 ahead of the Titan path and source. Modules with native-only mains have no
 browser source, so their imports fail with the ordinary
 `module 'titan.<name>' not found` diagnostic. The shared `os` main selects its
@@ -3573,7 +3700,7 @@ portable `run(context)` host tests (or a standalone Titan image with `--image`)
 across Playwright-managed `chromium`, `firefox`, and `webkit`
 (`playwright@1.64.1`), `spec/browser/playwright-run.mjs` parses `--engine
 chromium|firefox|webkit [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
-[--allow-degraded-trace] [--image] FILE [-- ARG...]` (defaults: `timeout`
+[--persistent-context DIR] [--allow-degraded-trace] [--image] FILE [-- ARG...]` (defaults: `timeout`
 300000 ms, `grace` 1500 ms, `sdk` `<repo>/titan-runtime/browser/`), loads
 `playwright` from `TITAN_PLAYWRIGHT_ROOT` and managed browsers from
 `PLAYWRIGHT_BROWSERS_PATH`, and reuses `titan-browser-page.mjs`, the exported
@@ -3583,7 +3710,10 @@ chromium|firefox|webkit [--root DIR] [--sdk DIR] [--timeout MS] [--grace MS]
 retirement (`browserServer.close()`, escalating to `browserServer.kill()`). Its
 own diagnostics start with `titan-playwright-run: `, while the shared `Monitor`
 keeps the runner's `titan-browser-run: ` prefix; its unit suite is
-`spec/browser/playwright-runner.test.mjs`. It is repository test
+`spec/browser/playwright-runner.test.mjs`. `--persistent-context DIR` launches
+a persistent context with that profile directory instead of a browser
+server; the directory must resolve beneath `--root`, and the caller owns and
+removes it. It is repository test
 infrastructure, not an installed SDK binary.
 
 ## The executing protocol runner
@@ -3837,7 +3967,7 @@ hosts`).
   before execution or provider publication.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
-  `TITAN_EXTRA_CPPFLAGS`, the nineteen-module provider whose non-compiler
+  `TITAN_EXTRA_CPPFLAGS`, the twenty-one-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
   order and contents, and the standalone `-shared-mem` archive regression.
 * `spec/browser_stdlib_spec.lua` (emsdk-free) and
@@ -3845,7 +3975,7 @@ hosts`).
   check](#the-dependency-closure-check) and its negative fixtures, the
   interface-derived [member inventory](#interface-derived-member-inventory)
   (raw foreign functions, nominal members, named-call metadata, unrecorded
-  differences, exact recorded omissions and opaque records), the twenty-one-owner
+  differences, exact recorded omissions and opaque records), the twenty-three-owner
   root inventory and its rejection of empty or
   duplicate inventories before build setup, the cold and warm single-image
   layout and filtered runs, the CI failure artifact's image and per-engine log
@@ -3855,6 +3985,10 @@ hosts`).
   and the rejected `ExternalWait` record literal on both targets.
 * `spec/coder/browser_stdlib_gate_spec.lua` — the [initialization and
   fidelity gate](#initialization-and-fidelity-gate).
+* `spec/coder/browser_net_spec.lua` and `spec/browser/build-net.lua` — the
+  [live browser network harness](#the-live-browser-network-harness) for the
+  `http` and `websocket` clients under Node and Chromium, and on Chromium,
+  Firefox, and WebKit in the `browser-playwright` job.
 * `spec/coder/browser_entry_gate_spec.lua` — the [entry gate](#the-entry-gate-decision).
 * `spec/coder/browser_fixtures_spec.lua` — the coroutine and GC behavior in
   the owning `coroutine.tests` and `gc.tests` modules built for the browser,

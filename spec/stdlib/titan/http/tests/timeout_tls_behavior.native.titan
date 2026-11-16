@@ -486,7 +486,7 @@ local function start_https(first_port: integer): async.Task
       do
         local response = http.get(
           "https://localhost:" .. string.tostring(port) ..
-          "/secure?value=1", nil, support.TRUST_ROOT)
+          "/secure?value=1", http.RequestOptions { ca_file = support.TRUST_ROOT })
         defer response:close()
         response_status = response.status
         body = support.read_response(response)

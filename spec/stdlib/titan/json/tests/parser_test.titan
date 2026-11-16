@@ -324,7 +324,7 @@ function test_parser_peg_limit_is_independent_of_depth_option(_context: test.Con
   catch
     failed = true
     test.assert(not (error is json.Error), "JSON relabeled a PEG resource failure")
-    test.assert(string.find(string.tostring(error), "backtrack stack overflow", 1, true) ~= nil)
+    test.assert(string.find(string.tostring(error), "backtrack stack overflow", 1) ~= nil)
   end
   test.assert(failed, "expected the configured PEG stack to be exhausted")
 end

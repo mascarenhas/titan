@@ -1,0 +1,6 @@
+-- Imports that only the native contributors of http use. The folder is one
+-- module, so each import is declared once before native variable initializers.
+local net = import "net"
+local ssl = import "ssl"
+local reflect = import "reflect"
+local protobuf = import "protobuf"

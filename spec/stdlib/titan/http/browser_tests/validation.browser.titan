@@ -1,0 +1,71 @@
+function test_fail_fast_validation_has_zero_server_hits(_: test.Context)
+  runtime_test.run(function ()
+    local source = server() .. "/zero/validation"
+    for _, invalid in iteration.ipairs({"http://[invalid", "ws://127.0.0.1/zero/validation"}) do
+      local invalid_url = false
+      do http.get(invalid)
+      catch
+        if not (error is url.Error) then raise end
+        invalid_url = true
+      end
+      test.assert(invalid_url, "invalid URL/scheme did not raise url.Error")
+    end
+    for _ = 1, 2 do
+      string_error(function () http.RequestOptions {cache = http.CacheMode.only_if_cached()} end)
+      string_error(function () http.RequestOptions {
+        cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.cors()} end)
+      http.RequestOptions {
+        cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.same_origin()}
+      string_error(function () http.request("PUT", source,
+        http.RequestOptions {mode = http.RequestMode.no_cors()}) end)
+    end
+    string_error(function () http.get(source, http.RequestOptions {body = "body"}) end)
+    string_error(function () http.get(source, http.RequestOptions {ca_file = "unavailable.pem"}) end)
+    string_error(function () http.get(source, http.RequestOptions {headers = one_header("Host", "other.invalid")}) end)
+    for _, method in iteration.ipairs({"GET", "HEAD", "get", "head"}) do
+      string_error(function () http.request(method, source, http.RequestOptions {body = "body"}) end)
+    end
+    for _, method in iteration.ipairs({"CONNECT", "TRACE", "TRACK", "cOnNeCt", "tRaCe", "tRaCk"}) do
+      string_error(function () http.request(method, source) end)
+    end
+    -- The nineteen forbidden exact names not stripped by matching Host/length.
+    local names = {"Accept-Charset", "Accept-Encoding", "Access-Control-Request-Headers",
+      "Access-Control-Request-Method", "Connection", "Cookie", "Cookie2", "Date", "DNT", "Expect",
+      "Keep-Alive", "Origin", "Referer", "Set-Cookie", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Via",
+      "pRoXy-Custom", "sEc-Custom"}
+    for _, name in iteration.ipairs(names) do
+      local contents = "value"
+      if name == "Accept-Encoding" then contents = "identity" end
+      string_error(function () http.get(source, http.RequestOptions {headers = one_header(name, contents)}) end)
+    end
+    for _, name in iteration.ipairs({"X-HTTP-Method", "X-HTTP-Method-Override", "X-Method-Override"}) do
+      for _, contents in iteration.ipairs({"TRACE", "GET, TRACE", "  tRaCe\t ", '"a\\\\",TRACE'}) do
+        string_error(function () http.get(source, http.RequestOptions {headers = one_header(name, contents)}) end)
+      end
+    end
+    local child = lua.new()
+    defer child:close()
+    child:run(string.format([[
+      local http = require "titan.http"
+      local client = http.Client.new()
+      local ok, message = pcall(function() client:get(%q) end)
+      assert(not ok and tostring(message):find("async Runtime is not active", 1, true))
+      client:close()
+    ]], source))
+    test.assert(get_body(server() .. "/hits/validation", nil) == "0:0",
+      "fail-fast request validation reached the native peer")
+  end)
+end
+
+function test_node_only_if_cached_has_zero_server_hits(_: test.Context)
+  if in_browser() then test.skip("browser cache hit/miss require the same-origin runner") end
+  runtime_test.run(function ()
+    for _ = 1, 2 do
+      operation_error(function () http.get(server() .. "/cacheable/node-cache",
+        http.RequestOptions {
+          cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.same_origin()}) end, "http.request")
+    end
+    test.assert(get_body(server() .. "/hits/node-cache", nil) == "0:0",
+      "browser-in-Node only-if-cached performed network I/O")
+  end)
+end

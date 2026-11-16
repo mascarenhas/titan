@@ -8,7 +8,7 @@ local function allocator_fixture_case(context: test.Context, workspace: string,
       command.program(workspace, "ssl_allocator_app"), scenario,
     }, workspace)
     if why == "exit" and code == 77 then
-      test.assert(string.find(output, "capability: ", 1, true) == 1,
+      test.assert(string.find(output, "capability: ", 1) == 1,
                   "allocator fixture returned an undocumented capability status")
       local reason = string.gsub(output, "[\r\n]+$", function (_: string): string
         return ""

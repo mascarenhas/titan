@@ -1,0 +1,28 @@
+function test_browser_connect_rejects_native_options(_: test.Context)
+  runtime_test.run(function ()
+    assert_option_error(function ()
+      websocket.connect("ws://127.0.0.1:1/", websocket.DialOptions {
+        headers = http.headers({http.Header("X-Custom", "value")}) })
+    end, "WebSocket headers are unavailable on the browser target")
+    assert_option_error(function ()
+      websocket.connect("ws://127.0.0.1:1/", websocket.DialOptions { ca_file = "unused.pem" })
+    end, "WebSocket ca_file is unavailable on the browser target")
+  end)
+end
+
+function test_browser_websocket_child_state_construction_and_refusal(_: test.Context)
+  local state = lua.new()
+  defer state:close()
+  local loader = string.reader([[
+    local http = require "titan.http"
+    local websocket = require "titan.websocket"
+    local fields = http.headers()
+    fields:add("X-Child", "yes")
+    local options = websocket.DialOptions.new(fields, "unused.pem", nil, 1, 1)
+    local ok, message = pcall(websocket.connect, "ws://127.0.0.1:1/", options)
+    assert(not ok and message == "async Runtime is not active")
+    return true
+  ]])
+  defer loader:close()
+  state:run_from_loader(loader, "=websocket-child-state")
+end

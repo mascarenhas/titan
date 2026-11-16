@@ -585,9 +585,11 @@ entry, and `create` rejects a `bindings` key with that prefix with
 `TypeError`. An unknown `titan:` name raises like any unknown binding.
 
 These sources are SDK-internal. Applications use
-[`timer`](standard-library-timer.md#on-the-browser) and the
-[`os` parent streams](standard-library-os.md#browser-parent-streams), not the
-reserved binding protocol.
+[`timer`](standard-library-timer.md#on-the-browser), the
+[`os` parent streams](standard-library-os.md#browser-parent-streams),
+[`http`](standard-library-http.md#on-the-browser), and
+[`websocket`](standard-library-websocket.md#on-the-browser), not the reserved
+binding protocol.
 
 | Name | Use | Behavior |
 | --- | --- | --- |
@@ -598,6 +600,8 @@ reserved binding protocol.
 | `titan:stderr` | `start(completion, failure, is_bytes(data))`, or no data argument | The same output-request contract for stderr and `stderrEnd`. |
 | `titan:stdin` | `start(completion, failure)` | One detachable read from `create({stdin})`. The function is invoked synchronously as a binding is; its result or promise settles through the ordinary runtime-type marshalling path. Chunks may be empty; `null` and `undefined` complete with `is_nil()`. Without the option, this is an unknown binding. |
 | `titan:stdio` | `call(is_string(name))`, for `stdin`, `stdout`, or `stderr` | Returns the corresponding declared `*Kind` option unchanged, or `is_nil()` when undeclared. The loader does not validate kinds. |
+| `titan:fetch` | an operation name as the first argument: `call` for `has-cache`, `new`, and `close`; `start` for `open` and `read` | One host `fetch` per session. `has-cache` reports whether the host has an HTTP cache: a document or worker host that is not Node. `new` returns a session handle owning an `AbortController`. `open` takes `(session, url, method, body, cache, credentials, mode, redirect)` (the body as bytes or `is_nil()`, the four modes as Fetch strings), then alternating header name and value bytes, and starts `fetch`; it completes with one byte string of NUL-terminated fields: status, `1` or `0` for `redirected`, status text, URL, response type, then each header name and value. `read` completes with the next body chunk as bytes, or `is_nil()` at the end. `close` cancels the body reader and aborts the session's controller. |
+| `titan:websocket` | an operation name as the first argument: `listen` for `connect`; `call` for `take`, `buffered`, `send`, and `close` | One host `WebSocket` per connection. `connect` takes the URL and then each offered subprotocol as trailing strings, and emits `open` (the socket handle and selected subprotocol), `text` or `binary` (the message length and a handle to a holder of its bytes), and `close` (code, reason, and `wasClean`); unregistering removes its three listeners and closes the socket. `take(holder)` returns the holder's bytes and clears it. `buffered(socket)` returns `bufferedAmount`, or -1 when the socket is not open. `send(socket, payload)` sends a text (`is_string`) or binary (`is_bytes`) payload only while the socket is open and returns whether it did. `close(socket, code, reason)` closes the socket, with no code or reason when `code` is `is_nil()`. |
 
 Their callbacks are ordinary queued notifications, delivered by `drain()` or
 a drive.

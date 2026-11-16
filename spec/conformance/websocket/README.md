@@ -27,6 +27,10 @@ python3 run.py --prefix /tmp/titan-193-prefix \
   --output-root "$PWD/.artifacts/runs"
 ```
 
+Any checkout branch may run the gate. `source-identity.json` records its
+revision, branch, dirty status, and source hashes rather than restricting the
+run to an implementation branch.
+
 Use a disk-backed output root. `run.py` creates a fresh unique directory, compiles
 both fixtures as installed consumers in that directory, sets `TITAN_PATH_0_6`
 to the frozen prefix's absolute provider directory, and runs fuzzingclient

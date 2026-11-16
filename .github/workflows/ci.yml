@@ -975,6 +975,7 @@ jobs:
             spec/coder/browser_entry_gate_spec.lua
             spec/coder/browser_bridge_spec.lua
             spec/coder/browser_scheduler_spec.lua
+            spec/coder/browser_net_spec.lua
             spec/coder/browser_stdlib_gate_spec.lua
             spec/coder/browser_fixtures_spec.lua
             spec/minicoro_spec.lua
@@ -1019,6 +1020,7 @@ jobs:
             out/browser-stdlib/images/*.wasm.map
             out/browser-stdlib/*roots.txt
             out/browser-stdlib/members.md
+            out/browser-net/**
           if-no-files-found: warn
           retention-days: 7
 
@@ -1059,6 +1061,7 @@ jobs:
       TITAN_TRACE_ENGINE: ${{ matrix.engine }}
       TITAN_TRACE_OUTPUT: ${{ github.workspace }}/out/browser/trace-${{ matrix.profile }}-${{ matrix.engine }}
       TITAN_BRIDGE_OUTPUT: ${{ github.workspace }}/out/browser/bridge-${{ matrix.profile }}-${{ matrix.engine }}
+      TITAN_NET_OUTPUT: ${{ github.workspace }}/out/browser-net
 
     steps:
       - uses: actions/checkout@v6
@@ -1229,6 +1232,26 @@ jobs:
           lua -E spec/browser/build-bridge.lua "$TITAN_BRIDGE_OUTPUT" \
             2>&1 | tee "$RUNNER_TEMP/browser-playwright-bridge-build.log"
 
+      - name: Build the live browser HTTP and WebSocket client fixtures
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          lua -E spec/browser/build-net.lua "$TITAN_NET_OUTPUT" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-net-build.log"
+
+      - name: Verify Python for Chromium HTTPS trust
+        if: matrix.engine == 'chromium'
+        run: python3 --version
+
+      - name: Run live HTTP, HTTPS, and WebSocket clients on the managed engine
+        run: |
+          set -euo pipefail
+          "$TITAN_NODE" spec/fixtures/browser_net/run.mjs \
+            --root "$TITAN_NET_OUTPUT" --engine "$TITAN_TRACE_ENGINE" \
+            --sdk "$PREFIX/lib/titan-browser/0.6" \
+            --runner "$PWD/spec/browser/playwright-run.mjs" --repository "$PWD" --persistent-webkit \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-net.log"
+
       - name: Run the persistent bridge and opaque-Promise diagnostics
         run: |
           set -euo pipefail
@@ -1363,6 +1386,7 @@ jobs:
             ${{ runner.temp }}/browser-production-pins.log
             ${{ env.TITAN_TRACE_OUTPUT }}
             ${{ env.TITAN_BRIDGE_OUTPUT }}
+            ${{ env.TITAN_NET_OUTPUT }}
           if-no-files-found: error
           retention-days: 7
 

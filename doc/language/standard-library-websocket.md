@@ -2,8 +2,10 @@
 
 Import `websocket` for RFC 6455 WebSocket version 13 over HTTP/1.1. Calls look
 blocking and suspend their current Task. Both `ws` and verified `wss` clients
-are supported. The server accepts inside an ordinary `http.Handler`, including
-handlers passed to `http.listen_tls`.
+are supported. On native targets the server accepts inside an ordinary
+`http.Handler`, including handlers passed to `http.listen_tls`. On the browser
+target the client runs over the host's `WebSocket` and the server is absent
+(see [on the browser](#on-the-browser)).
 
 ```titan
 local http = import "http"
@@ -89,6 +91,9 @@ Connection.discard_transfer_payload(payload: string): integer
 Connection:subprotocol(): string?
 Connection:close_status(): (integer?, string?)
 ```
+
+On the browser target, `accept`, `AcceptOptions`, `Connection:ping`, and the
+three transfer hooks have no declarations.
 
 Option constructors validate positive limits/deadlines and copy headers and
 arrays. The incoming message limit defaults to **1 MiB**; choose a larger
@@ -232,11 +237,11 @@ retain their identities. The first terminal failure's exact value and captured
 origin traceback survive cleanup and later valid operations. Incoming protocol, UTF-8 and size failures attempt bounded
 Close codes 1002, 1007 and 1009 respectively, then retire the transport.
 
-Extensions and compression are not negotiated. Valid extension offers are
-ignored by servers; malformed syntax fails. Clients offer none and reject an
-unsolicited extension response. Nonzero RSV bits fail. HTTP/2/3, proxies,
-redirects, reconnect, automatic heartbeat and streaming message readers/
-writers are outside this interface.
+A native connection negotiates no extensions or compression. Valid extension
+offers are ignored by servers; malformed syntax fails. Clients offer none and
+reject an unsolicited extension response. Nonzero RSV bits fail. HTTP/2/3,
+proxies, redirects, reconnect, automatic heartbeat and streaming message
+readers/writers are outside this interface.
 
 The message limit bounds decoded-message accumulation. The existing net read
 watcher can buffer immutable chunks without a high-water mark; this module's
@@ -245,3 +250,105 @@ client frame mask use synchronous public `uv.random`; entropy acquisition can
 block. See [implementation and validation](../implementation/websocket-library.md),
 [HTTP](standard-library-http.md), [TLS](standard-library-ssl.md), and
 [async ownership](async-io.md).
+
+## On the browser
+
+On `--target browser`, `websocket` provides the client over the host's
+`WebSocket`: `MessageType`, `TEXT`, `BINARY`, `Error`, `HandshakeError`,
+`DialOptions`, `connect`, and the `Connection` methods `read`, `write`,
+`shutdown`, `close`, `subprotocol`, and `close_status`, each with its native
+signature. The server (`accept` and `AcceptOptions`), `Connection:ping`, and
+the transfer hooks are native-only. The browser engine owns the TCP and TLS
+connection, certificate trust, cookies, the `Origin` it sends, wire
+fragmentation, and the Pong replies to the server's Pings.
+
+**Opening.** `connect` needs the instance's active async Runtime. In a state
+created by `lua.new()` it raises `"async Runtime is not active"`, while
+`DialOptions` works there. It raises `url.Error` for a malformed URL, and a
+string for a scheme other than `ws` or `wss` and for options that carry any
+headers or a `ca_file`: a browser `WebSocket` sends no application headers and
+trusts the browser's certificates. The browser offers the `subprotocols`,
+sends its cookies and HTTP authentication with the opening request, and
+negotiates `permessage-deflate` compression itself. A response that selects
+a subprotocol that was not offered fails the opening on both targets. When
+subprotocols were offered and the response selects none, the browser opening
+fails as well, on every engine: Chromium refuses it itself, and Titan checks
+the selection where Firefox and WebKit open anyway. A native client instead
+returns a connection whose `subprotocol()` is nil. Every failure
+before the connection opens, whether an HTTP rejection, an invalid response,
+a DNS failure, a refused connection, or a TLS failure, raises `HandshakeError`
+with nil `status` and `headers`, because the browser reports them alike; a
+rejected opening's message is `"WebSocket opening handshake failed"`.
+`handshake_timeout` raises `Error("timeout", "websocket.open", ...)` as
+natively. A connection closes when its Runtime closes.
+
+**Messages.** `read` returns complete messages in arrival order. The
+`read_limit` applies to each message's length after decompression. Messages
+that arrived earlier are delivered first; the message over the limit raises
+`Error` with kind `"limit"`, operation `"websocket.read"`, and close code 1009,
+ends the connection, and is never copied into Titan memory. The browser
+applies no backpressure to messages that are not yet read, so a flood of
+small messages still accumulates in memory.
+
+`write` checks text for valid UTF-8 before sending, as natively, and yields
+once so that other Tasks run between writes. It then hands the message to the
+browser and, while more than 256 KiB is queued, waits until 64 KiB or less
+remains. A return means that the browser accepted the message while the
+connection was open and that its queue drained to that mark; it does not mean
+the server received it. If the connection is closing, closed, or failed when
+`write` starts, after its yield, or while it waits, `write` raises the first
+failure or `Error("state", "websocket.write", ...)` instead of letting the
+browser drop the message silently.
+The host can report loss after its output queue drains, so a write may still
+return successfully while the host reports OPEN. Node can keep a paused,
+half-closed peer OPEN until that peer resumes reading; WebKit can drain queued
+data before reporting a remote Close or reset. A later write raises once the
+host reports the loss.
+
+**Closing.** `shutdown(code, reason, timeout_ms)` accepts code 1000, the
+default, and 3000 through 4999; any other code (the browser refuses 1001
+through 1014) or a reason over 123 bytes raises
+`Error("state", "websocket.shutdown", ...)`, and a reason that
+is not valid UTF-8 raises `Error("utf8", "websocket.shutdown", ...)`. An
+active reader still receives one message before shutdown discards later data,
+as natively, and shutdown waits up to `timeout_ms` for the server's Close.
+
+`close()` retires the connection locally, synchronously and idempotently, and
+wakes waiting operations with `Error("state", ...)` or the connection's first
+failure. A native close aborts the transport at once; the browser instead
+sends an empty Close frame after the messages it has already queued and
+finishes the closing handshake itself. Cancelling an admitted `read` ends the
+connection, as does cancelling a `write` after the browser accepted its
+message.
+
+Two engines keep a socket's TCP connection after Titan has let go of it.
+Firefox keeps the connection of an opening that was cancelled or timed out
+until the server answers the handshake or the browser closes, and Node keeps
+the connection of an opening it rejected (an unselected subprotocol or an
+invalid response) until the server closes it. Titan has already removed its
+listeners and closed the socket in both cases.
+
+**Close status and transport loss.** A valid Close frame from the server
+makes `read` return `(nil, nil)` and lets `shutdown` complete, even when the
+server resets the connection immediately after it. `close_status()` then
+returns the server's code and reason; an empty Close leaves both nil. A
+transport loss without a Close raises `Error("abnormal", operation,
+"transport ended before WebSocket Close", nil)` from the waiting operation,
+later operations raise the same error, and `close_status()` stays
+`(nil, nil)`. The browser reports a protocol or UTF-8 violation by the server
+the same way.
+
+| Failure | Native targets | Browser target |
+| --- | --- | --- |
+| Malformed URL | `url.Error` | `url.Error` |
+| Scheme other than `ws` or `wss`; invalid `DialOptions`; browser `headers` or `ca_file`; no active Runtime | string | string |
+| Opening deadline | `Error("timeout", "websocket.open", ..., nil)` | the same |
+| HTTP rejection, invalid opening response, selected subprotocol that was not offered | `HandshakeError` with the status and headers when known | `HandshakeError(message, nil, nil)` |
+| Subprotocols offered, none selected | a connection whose `subprotocol()` is nil | `HandshakeError(message, nil, nil)` |
+| DNS, connection, or TLS failure before opening | `async.OperationError` or `ssl.Error` | `HandshakeError(message, nil, nil)` |
+| Outgoing invalid UTF-8 in `write` or `shutdown` | `Error("utf8", operation, ..., nil)` | the same |
+| Closed or closing connection, duplicate operation, invalid Close code, reason over 123 bytes | `Error("state", operation, ..., nil)` | the same, with the browser's code range |
+| Incoming message over `read_limit` | `Error("limit", "websocket.read", ..., 1009)` | the same |
+| Transport loss or peer violation after opening | `Error("abnormal", ...)`, `Error("protocol", ...)`, or `Error("utf8", ...)` | `Error("abnormal", operation, "transport ended before WebSocket Close", nil)` |
+| `shutdown` deadline | `Error("timeout", "websocket.shutdown", ..., nil)` | the same |
+| Task cancellation | `async.CancellationReason` | the same |

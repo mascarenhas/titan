@@ -84,10 +84,27 @@ end
 local function read_request(parser: Parser,
                             encrypted: boolean,
                             transport: Transport): Request?
-  -- EOF in an idle request parser is a normal peer disconnect. Header
-  -- acquisition reports false only for that case; every partial request
-  -- raises instead.
-  if not acquire_parser_headers(parser) then return nil end
+  -- Idle peers may reset TCP or omit TLS close_notify. Keep those raw
+  -- transport errors intact everywhere except this empty header boundary.
+  do
+    if not acquire_parser_headers(parser) then return nil end
+  catch
+    if not parser.input_seen then
+      if error is ssl.Error then
+        local failure: ssl.Error = error
+        if failure.name == "TLS_TRUNCATED_EOF" and failure.operation == "ssl.read" then
+          return nil
+        end
+      elseif error is async.OperationError then
+        local failure: async.OperationError = error
+        if failure.code == uv.ECONNRESET and failure.name == "ECONNRESET" and
+            failure.operation == "net.read" then
+          return nil
+        end
+      end
+    end
+    raise
+  end
   if #parser.method_text == 0 then raise "HTTP request has no method" end
   -- llhttp also marks CONNECT as an upgrade; only an explicit header offer
   -- enters the upgrade prefilter. Ordinary request-target rejection stays

@@ -1,0 +1,494 @@
+local function add_redirect_cell(context: test.Context, status: integer,
+                                  mode: http.RedirectMode, name: string,
+                                  with_location: boolean, multiple: boolean?)
+  local suffix = "_without_location"
+  if with_location then suffix = "_with_location" end
+  if multiple then suffix = "_multiple_locations" end
+  context:run("status_" .. status .. "_" .. name .. suffix, function (_: test.Context)
+    run_reuse_case(function ()
+      local hits = 0
+      local base = reuse_http_server(false, 28200, function (request: http.Request, response: http.Response)
+        hits = hits + 1
+        if request.url.path == "/start" then
+          response:set_status(status)
+          if with_location then response:add_header("Location", "/final") end
+          if multiple then response:add_header("Location", "/other") end
+          response:set_header("Content-Length", "8")
+          response:write("redirect")
+        else
+          response:set_header("Content-Length", "5")
+          response:write("final")
+        end
+      end)
+      local client = http.Client()
+      defer client:close()
+      local options = http.RequestOptions { redirect = mode }
+      if name == "error" then
+        assert_request_policy_error(function ()
+          local response = client:get(base .. "/start", options)
+          defer response:close()
+        end, "HTTP redirect disallowed by RedirectMode.error")
+        test.assert(hits == 1, "error mode followed a redirect")
+      else
+        local response = client:get(base .. "/start", options)
+        defer response:close()
+        local followed = name == "follow" and with_location
+        if followed then
+          test.assert(response.status == 200 and response.redirected)
+          test.assert(response.url == base .. "/final")
+          test.assert(support.read_response(response) == "final")
+          test.assert(hits == 2)
+        else
+          test.assert(response.status == status and not response.redirected)
+          test.assert(response.url == base .. "/start")
+          local locations = response.headers:values("Location")
+          if with_location then
+            local expected = 1
+            if multiple then expected = 2 end
+            test.assert(#locations == expected and locations[1] == "/final",
+                        "manual response lost the wire Location header")
+            if multiple then test.assert(locations[2] == "/other", "manual response collapsed Location values") end
+          else
+            test.assert(#locations == 0, "response invented a Location header")
+          end
+          test.assert(support.read_response(response) == "redirect")
+          test.assert(hits == 1)
+        end
+      end
+    end)
+  end)
+end
+
+function test_redirect_status_mode_location_matrix(context: test.Context)
+  local statuses = {301, 302, 303, 307, 308}
+  for index = 1, #statuses do
+    local status = statuses[index]
+    add_redirect_cell(context, status, http.RedirectMode.manual(), "manual", false)
+    add_redirect_cell(context, status, http.RedirectMode.manual(), "manual", true)
+    add_redirect_cell(context, status, http.RedirectMode.error(), "error", false)
+    add_redirect_cell(context, status, http.RedirectMode.error(), "error", true)
+    add_redirect_cell(context, status, http.RedirectMode.follow(), "follow", false)
+    add_redirect_cell(context, status, http.RedirectMode.follow(), "follow", true)
+  end
+  add_redirect_cell(context, 302, http.RedirectMode.manual(), "manual", true, true)
+end
+
+function test_redirect_native_default_is_manual(_: test.Context)
+  run_reuse_case(function ()
+    local base = reuse_http_server(false, 28200, function (_: http.Request, response: http.Response)
+      response:set_status(302)
+      response:set_header("Location", "/next")
+      response:set_header("Content-Length", "0")
+    end)
+    local client = http.Client()
+    defer client:close()
+    local response = client:get(base .. "/start")
+    defer response:close()
+    test.assert(response.status == 302 and not response.redirected)
+    test.assert(response.url == base .. "/start")
+    test.assert(response.headers:get("Location") == "/next")
+  end)
+end
+
+function test_redirect_error_accepts_non_redirect_response(_: test.Context)
+  run_reuse_case(function ()
+    local hits = 0
+    local base = reuse_http_server(false, 28200, function (_: http.Request, response: http.Response)
+      hits = hits + 1
+      response:set_header("Content-Length", "2")
+      response:write("ok")
+    end)
+    local client = http.Client()
+    defer client:close()
+    local response = client:get(base .. "/normal",
+      http.RequestOptions { redirect = http.RedirectMode.error() })
+    defer response:close()
+    test.assert(response.status == 200 and not response.redirected and hits == 1)
+    test.assert(response.url == base .. "/normal" and support.read_response(response) == "ok")
+  end)
+end
+
+local function add_redirect_reference(context: test.Context, name: string,
+                                      reference: string, expected: string)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local hits = 0
+      local base = reuse_http_server(false, 28200, function (request: http.Request, response: http.Response)
+        hits = hits + 1
+        if hits == 1 then
+          response:set_status(302)
+          local location = reference
+          if string.sub(location, 1, 1) == "@" then
+            location = request.url.scheme .. "://" .. request.url.authority .. string.sub(location, 2)
+          elseif string.sub(location, 1, 1) == "~" then
+            location = "//" .. request.url.authority .. string.sub(location, 2)
+          end
+          response:add_header("Location", location)
+          response:set_header("Content-Length", "0")
+        else
+          response:set_header("Content-Length", "" .. #request.target)
+          response:write(request.target)
+        end
+      end)
+      local client = http.Client()
+      defer client:close()
+      local response = client:get(base .. "/b/c/d;p?q",
+        http.RequestOptions { redirect = http.RedirectMode.follow() })
+      defer response:close()
+      test.assert(response.status == 200 and response.redirected)
+      test.assert(response.url == base .. expected, "redirect URL was " .. string.tostring(response.url))
+      test.assert(support.read_response(response) == expected, "redirect sent the wrong target")
+      test.assert(hits == 2)
+    end)
+  end)
+end
+
+function test_redirect_reference_resolution(context: test.Context)
+  add_redirect_reference(context, "relative", "g", "/b/c/g")
+  add_redirect_reference(context, "current", "./g", "/b/c/g")
+  add_redirect_reference(context, "trailing_slash", "g/", "/b/c/g/")
+  add_redirect_reference(context, "origin_form", "/g", "/g")
+  add_redirect_reference(context, "network_path", "~/a/../g", "/g")
+  add_redirect_reference(context, "absolute", "@/a/../g#ignored", "/g")
+  add_redirect_reference(context, "query", "?y", "/b/c/d;p?y")
+  add_redirect_reference(context, "empty_query", "?", "/b/c/d;p?")
+  add_redirect_reference(context, "query_not_path", "g?y/../x", "/b/c/g?y/../x")
+  add_redirect_reference(context, "fragment", "#ignored", "/b/c/d;p?q")
+  add_redirect_reference(context, "empty", "", "/b/c/d;p?q")
+  add_redirect_reference(context, "whitespace", "\t ../g?x#ignored \t", "/b/g?x")
+  add_redirect_reference(context, "dot", ".", "/b/c/")
+  add_redirect_reference(context, "parent", "..", "/b/")
+  add_redirect_reference(context, "past_root", "../../../g", "/g")
+  add_redirect_reference(context, "absolute_parents", "/../../g", "/g")
+  add_redirect_reference(context, "embedded", "g/./h/../i", "/b/c/g/i")
+  add_redirect_reference(context, "final_parent", "g/..", "/b/c/")
+  add_redirect_reference(context, "empty_segments", "/a//b/../c", "/a//c")
+  add_redirect_reference(context, "dots_in_name", "g..", "/b/c/g..")
+end
+
+local function add_redirect_limit(context: test.Context, name: string, count: integer)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local hits = 0
+      local base = reuse_http_server(false, 28200, function (_: http.Request, response: http.Response)
+        hits = hits + 1
+        if hits <= count then
+          response:set_status(302)
+          response:set_header("Location", "/step_" .. hits)
+        end
+        response:set_header("Content-Length", "0")
+      end)
+      local client = http.Client()
+      defer client:close()
+      local options = http.RequestOptions { redirect = http.RedirectMode.follow() }
+      if count == 20 then
+        local response = client:get(base, options)
+        defer response:close()
+        test.assert(response.status == 200 and response.redirected)
+        test.assert(response.url == base .. "/step_20")
+      else
+        assert_request_policy_error(function ()
+          local response = client:get(base, options)
+          defer response:close()
+        end, "HTTP redirect limit (20) exceeded")
+      end
+      test.assert(hits == 21, "redirect hop limit admitted the wrong number of requests")
+    end)
+  end)
+end
+
+function test_redirect_twenty_hop_boundary(context: test.Context)
+  add_redirect_limit(context, "twenty", 20)
+  add_redirect_limit(context, "twenty_one", 21)
+end
+
+local function add_invalid_redirect(context: test.Context, name: string, location: string, duplicate: boolean?)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local hits = 0
+      local base = reuse_http_server(false, 28200, function (_: http.Request, response: http.Response)
+        hits = hits + 1
+        response:set_status(302)
+        response:add_header("Location", location)
+        if duplicate then response:add_header("Location", "/other") end
+        response:set_header("Content-Length", "0")
+      end)
+      local client = http.Client()
+      defer client:close()
+      assert_request_policy_error(function ()
+        local response = client:get(base, http.RequestOptions { redirect = http.RedirectMode.follow() })
+        defer response:close()
+      end)
+      test.assert(hits == 1, "invalid Location reached another endpoint")
+    end)
+  end)
+end
+
+function test_redirect_invalid_locations(context: test.Context)
+  add_invalid_redirect(context, "userinfo", "http://user@example.test/")
+  add_invalid_redirect(context, "websocket", "ws://example.test/")
+  add_invalid_redirect(context, "other_scheme", "ftp://example.test/")
+  add_invalid_redirect(context, "missing_authority", "http:/path")
+  add_invalid_redirect(context, "empty_authority", "http:///path")
+  add_invalid_redirect(context, "port", "http://example.test:oops/")
+  add_invalid_redirect(context, "invalid_escape", "/bad%/../ok")
+  add_invalid_redirect(context, "space", "/bad path/../ok")
+  add_invalid_redirect(context, "relative_colon", "1bad:path")
+  add_invalid_redirect(context, "multiple", "/one", true)
+end
+
+local function add_redirect_method(context: test.Context, status: integer, method: string,
+                                   rewritten: boolean)
+  context:run("status_" .. status .. "_" .. method, function (_: test.Context)
+    run_reuse_case(function ()
+      local hits = 0
+      local entity_names = {"Content-Encoding", "Content-Language", "Content-Location", "Content-Type", "Content-Length"}
+      local base = reuse_http_server(false, 28200, function (request: http.Request, response: http.Response)
+        hits = hits + 1
+        local body = request_body(request)
+        if hits % 2 == 1 then
+          test.assert(body == "body\0bytes", "redirect mutated the reusable body snapshot")
+          for index = 1, #entity_names do
+            test.assert(request.headers:get(entity_names[index]) ~= nil,
+                        "redirect mutated the reusable entity-header snapshot")
+          end
+          response:set_status(status)
+          response:set_header("Location", "/final")
+        else
+          local expected_method = method
+          if rewritten then expected_method = "GET" end
+          test.assert(request.method == expected_method, "redirect used the wrong method")
+          if rewritten then test.assert(body == "", "redirect retained a rewritten body")
+          else test.assert(body == "body\0bytes", "redirect lost the preserved body") end
+          for index = 1, #entity_names do
+            local field? = request.headers:get(entity_names[index])
+            if rewritten then test.assert(field == nil, "redirect retained an entity header")
+            else test.assert(field ~= nil, "redirect lost a preserved entity header") end
+          end
+        end
+        response:set_header("Content-Length", "0")
+      end)
+      local supplied = http.headers({
+        http.Header("Content-Encoding", "identity"), http.Header("Content-Language", "en"),
+        http.Header("Content-Location", "/body"), http.Header("Content-Type", "application/octet-stream"),
+        http.Header("Content-Length", "10"),
+      })
+      local options = http.RequestOptions {
+        headers = supplied, body = "body\0bytes", redirect = http.RedirectMode.follow(),
+      }
+      local client = http.Client()
+      defer client:close()
+      for _ = 1, 2 do
+        local response = client:request(method, base .. "/start", options)
+        defer response:close()
+        test.assert(response.status == 200 and response.redirected)
+        support.read_response(response)
+      end
+      test.assert(hits == 4)
+    end)
+  end)
+end
+
+function test_redirect_method_and_entity_rules(context: test.Context)
+  add_redirect_method(context, 301, "POST", true)
+  add_redirect_method(context, 302, "POST", true)
+  add_redirect_method(context, 303, "PUT", true)
+  add_redirect_method(context, 303, "GET", false)
+  add_redirect_method(context, 303, "HEAD", false)
+  add_redirect_method(context, 301, "PUT", false)
+  add_redirect_method(context, 307, "POST", false)
+  add_redirect_method(context, 308, "PUT", false)
+end
+
+local function assert_redirect_credentials(request: http.Request, present: boolean)
+  local names = {"Authorization", "Proxy-Authorization", "Cookie", "Cookie2"}
+  for index = 1, #names do
+    local contents? = request.headers:get(names[index])
+    if present then test.assert(contents == "private", "same-origin redirect lost credentials")
+    else test.assert(contents == nil, "cross-origin redirect leaked credentials") end
+  end
+end
+
+local function add_redirect_origin(context: test.Context, name: string, encrypted: boolean)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local first_hits = 0
+      local second_hits = 0
+      local first_base = ""
+      local second_base = reuse_http_server(false, 28300, function (request: http.Request, response: http.Response)
+        second_hits = second_hits + 1
+        assert_redirect_credentials(request, false)
+        test.assert(request.headers:get("Host") == request.url.authority, "cross-origin redirect retained caller Host")
+        response:set_status(302)
+        response:set_header("Location", first_base .. "/return")
+        response:set_header("Content-Length", "0")
+      end)
+      first_base = reuse_http_server(encrypted, 28200, function (request: http.Request, response: http.Response)
+        first_hits = first_hits + 1
+        if request.url.path == "/start" then
+          assert_redirect_credentials(request, true)
+          test.assert(request.headers:get("Host") == "caller.example:81", "snapshot lost its initial Host")
+          response:set_status(302)
+          response:set_header("Location", second_base .. "/middle")
+        else
+          assert_redirect_credentials(request, false)
+          test.assert(request.headers:get("Host") ~= "caller.example:81", "return hop restored caller Host")
+        end
+        response:set_header("Content-Length", "0")
+      end)
+      local supplied = http.headers({
+        http.Header("Authorization", "private"), http.Header("Proxy-Authorization", "private"),
+        http.Header("Cookie", "private"), http.Header("Cookie2", "private"),
+        http.Header("Host", "caller.example:81"),
+      })
+      local options = http.RequestOptions {
+        headers = supplied, ca_file = support.TRUST_ROOT, redirect = http.RedirectMode.follow(),
+      }
+      local client = http.Client()
+      defer client:close()
+      for _ = 1, 2 do
+        local response = client:get(first_base .. "/start", options)
+        defer response:close()
+        test.assert(response.status == 200 and response.redirected)
+        test.assert(response.url == first_base .. "/return")
+        support.read_response(response)
+      end
+      test.assert(first_hits == 4 and second_hits == 2, "redirect snapshot was not reusable")
+      test.assert(supplied:get("Authorization") == "private" and supplied:get("Host") == "caller.example:81")
+    end)
+  end)
+end
+
+function test_redirect_cross_origin_credentials_are_sticky(context: test.Context)
+  add_redirect_origin(context, "different_port", false)
+  add_redirect_origin(context, "https_to_http_and_back", true)
+end
+
+function test_redirect_normalized_same_origin_preserves_credentials(_: test.Context)
+  run_reuse_case(function ()
+    local hits = 0
+    local base = reuse_http_server(false, 28200, function (request: http.Request, response: http.Response)
+      hits = hits + 1
+      assert_redirect_credentials(request, true)
+      test.assert(request.headers:get("Host") == "caller.example:81")
+      if hits == 1 then
+        response:set_status(302)
+        response:set_header("Location", "HTTP://LOCALHOST:0" .. request.headers:get("X-Test-Port") .. "/final")
+      end
+      response:set_header("Content-Length", "0")
+    end)
+    local supplied = http.headers({
+      http.Header("Authorization", "private"), http.Header("Proxy-Authorization", "private"),
+      http.Header("Cookie", "private"), http.Header("Cookie2", "private"),
+      http.Header("Host", "caller.example:81"),
+    })
+    local client = http.Client()
+    defer client:close()
+    local parsed = url.parse(base)
+    local source = "http://localhost:" .. parsed.port
+    -- Use the listener's port, not the caller's deliberately different Host.
+    supplied:set("X-Test-Port", "" .. parsed.port)
+    local response = client:get(source .. "/start", http.RequestOptions {
+      headers = supplied, redirect = http.RedirectMode.follow(),
+    })
+    defer response:close()
+    test.assert(response.status == 200 and response.redirected and hits == 2)
+  end)
+end
+
+function test_redirect_intermediate_drain_and_reuse(_: test.Context)
+  run_reuse_case(function ()
+    local final_started = false
+    local first_identity = 0
+    local fixture = reuse_raw_server(28200, function (connection, identity)
+      if not reuse_request(connection) then return end
+      if first_identity == 0 then
+        first_identity = identity
+        connection:write("HTTP/1.1 302 Found\r\nLocation: /final\r\nTransfer-Encoding: chunked\r\n\r\n" ..
+                         "4\r\nbody\r\n0\r\nX-Drained: yes\r\n\r\n")
+        -- The final hop is leased independently while the intermediate body drains.
+        for _ in reuse_request, connection do connection:write(reuse_reply(identity, "reused")) end
+      else
+        connection:write(reuse_reply(identity, "final"))
+        final_started = true
+        for _ in reuse_request, connection do connection:write(reuse_reply(identity, "reused")) end
+      end
+    end)
+    local client = http.Client()
+    defer client:close()
+    local response = client:get(fixture:url() .. "/start",
+      http.RequestOptions { redirect = http.RedirectMode.follow() })
+    defer response:close()
+    test.assert(response.redirected and response:read_until("final", false) == "final")
+    test.assert(final_started)
+    -- Keep the final response leased: only the drained intermediate is reusable.
+    local next = client:get(fixture:url() .. "/next")
+    defer next:close()
+    test.assert(support.read_response(next) == "reused")
+    test.assert(next.headers:get("X-Test-Connection") == "" .. first_identity,
+                "intermediate redirect body did not drain into the pool")
+    test.assert(#fixture.connections == 2, "intermediate redirect connection was not drained for reuse")
+  end)
+end
+
+function test_redirect_default_and_explicit_ports_share_origin(_: test.Context)
+  -- The redirect engine compares these parsed fields, not authority spelling.
+  local implicit_http = url.parse("http://LOCALHOST/start")
+  local explicit_http = url.parse("HTTP://localhost:80/final")
+  test.assert(implicit_http.scheme == explicit_http.scheme and
+              implicit_http.host == explicit_http.host and
+              implicit_http.port == explicit_http.port)
+  local implicit_https = url.parse("https://LOCALHOST/start")
+  local explicit_https = url.parse("HTTPS://localhost:443/final")
+  test.assert(implicit_https.scheme == explicit_https.scheme and
+              implicit_https.host == explicit_https.host and
+              implicit_https.port == explicit_https.port)
+end
+
+function test_redirect_followed_response_without_location(_: test.Context)
+  run_reuse_case(function ()
+    local hits = 0
+    local base = reuse_http_server(false, 28200, function (_: http.Request, response: http.Response)
+      hits = hits + 1
+      response:set_status(302)
+      if hits == 1 then response:set_header("Location", "/final") end
+      response:set_header("Content-Length", "0")
+    end)
+    local client = http.Client()
+    defer client:close()
+    local response = client:get(base .. "/start",
+      http.RequestOptions { redirect = http.RedirectMode.follow() })
+    defer response:close()
+    test.assert(response.status == 302 and response.redirected and hits == 2)
+    test.assert(response.url == base .. "/final")
+  end)
+end
+
+function test_redirect_case_insensitive_post_rewrite(_: test.Context)
+  run_reuse_case(function ()
+    local requests = 0
+    local fixture = reuse_raw_server(28200, function (connection, identity)
+      for head in reuse_request, connection do
+        requests = requests + 1
+        if requests == 1 then
+          test.assert(string.sub(head, 1, 6) == "pOsT /", "native client rewrote the initial method")
+          test.assert(connection:read_until("body\0bytes", true) == "")
+          connection:write("HTTP/1.1 301 Moved\r\nLocation: /final\r\nContent-Length: 0\r\n\r\n")
+        else
+          test.assert(string.sub(head, 1, 11) == "GET /final ", "mixed-case POST was not rewritten")
+          test.assert(not support.contains(head, "Content-Type:") and
+                      not support.contains(head, "Content-Length:"), "rewritten GET retained entity headers")
+          connection:write(reuse_reply(identity, "ok"))
+        end
+      end
+    end)
+    local client = http.Client()
+    defer client:close()
+    local response = client:request("pOsT", fixture:url() .. "/start", http.RequestOptions {
+      headers = http.headers({http.Header("Content-Type", "application/octet-stream")}),
+      body = "body\0bytes", redirect = http.RedirectMode.follow(),
+    })
+    defer response:close()
+    test.assert(response.redirected and support.read_response(response) == "ok" and requests == 2)
+  end)
+end

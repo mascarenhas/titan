@@ -1,0 +1,199 @@
+local async = import "async"
+local fs = import "fs"
+local http = import "http"
+local io = import "io"
+local math = import "math"
+local string = import "string"
+local websocket = import "websocket"
+
+local websocket_opened: {string: integer} = {}
+local websocket_closed: {string: integer} = {}
+
+local hits: {string: integer} = {}
+local revalidations: {string: integer} = {}
+local asset_root = ""
+local plain_url = ""
+local cross_url = ""
+
+local function read_body(request: http.Request): string
+  local writer = string.writer()
+  for chunk in request:read do writer:write(chunk) end
+  return writer:drain()
+end
+
+local function send(response: http.Response, body: string)
+  response:set_header("Content-Length", "" .. #body)
+  response:write(body)
+end
+
+local function asset(response: http.Response, name: string, media_type: string)
+  response:set_header("Content-Type", media_type)
+  send(response, fs.read_file(asset_root .. "/" .. name))
+end
+
+local function websocket_session(request: http.Request, response: http.Response)
+  local path = request.url.path
+  local key = request.url.query or ""
+  websocket_opened[key] = (websocket_opened[key] or 0) + 1
+  defer websocket_closed[key] = (websocket_closed[key] or 0) + 1
+  if path == "/ws/deny-origin" then
+    do
+      local connection = websocket.accept(request, response, websocket.AcceptOptions { allowed_origins = {} })
+      connection:close()
+    catch
+      -- accept has already sent the deliberate cross-origin rejection.
+      if not (error is websocket.HandshakeError) then raise end
+    end
+    return
+  end
+  local origins: {string} = {}
+  local origin? = request.headers:get("Origin")
+  if origin ~= nil then origins[1] = origin end
+  local connection = websocket.accept(request, response,
+    websocket.AcceptOptions { subprotocols = {"chat", "other"}, allowed_origins = origins })
+  defer connection:close()
+  if path == "/ws/origin" then connection:write(websocket.TEXT, origin or "") end
+  while true do
+    local kind?, data? = connection:read()
+    if kind == nil then return end
+    if data == nil then raise "WebSocket fixture received a message without bytes" end
+    connection:write(kind, data)
+  end
+end
+
+local function handle(request: http.Request, response: http.Response)
+  local path = request.url.path
+  if string.sub(path, 1, 4) == "/ws/" then websocket_session(request, response); return end
+  if path == "/ws-events" then
+    response:set_header("Access-Control-Allow-Origin", "*")
+    local key = request.url.query or ""
+    send(response, (websocket_opened[key] or 0) .. ":" .. (websocket_closed[key] or 0))
+    return
+  end
+  if path ~= "/no-cors" then
+    response:set_header("Access-Control-Allow-Origin", "*")
+    response:set_header("Access-Control-Expose-Headers", "*")
+  end
+  if request.method == "OPTIONS" then
+    response:set_status(204)
+    response:set_header("Access-Control-Allow-Methods", "*")
+    response:set_header("Access-Control-Allow-Headers", request.headers:get("Access-Control-Request-Headers") or "*")
+    return
+  end
+  response:set_header("Cache-Control", "no-store")
+  if path == "/runner" then
+    response:set_header("Content-Type", "text/html; charset=utf-8")
+    send(response, '<!doctype html><meta charset="utf-8"><script type="module" src="/assets/same-origin.mjs"></script>')
+    return
+  elseif path == "/assets/same-origin.mjs" then
+    asset(response, "same-origin.mjs", "text/javascript")
+    return
+  elseif path == "/assets/http.mjs" then
+    asset(response, "http.mjs", "text/javascript")
+    return
+  elseif path == "/assets/http.wasm" then
+    asset(response, "http.wasm", "application/wasm")
+    return
+  elseif path == "/assets/http.wasm.map" then
+    asset(response, "http.wasm.map", "application/json")
+    return
+  end
+  local pieces: {string} = {}
+  for piece in string.split(path, "/") do
+    if #piece > 0 then pieces[#pieces + 1] = piece end
+  end
+  local route? = pieces[1]
+  local key = pieces[2] or "default"
+  if route == "hits" then
+    send(response, "" .. (hits[key] or 0) .. ":" .. (revalidations[key] or 0))
+    return
+  end
+  hits[key] = (hits[key] or 0) + 1
+  if route == "cacheable" then
+    response:set_header("Cache-Control", "public, max-age=60")
+    response:set_header("ETag", '"browser-net"')
+    if request.headers:get("If-None-Match") == '"browser-net"' then
+      revalidations[key] = (revalidations[key] or 0) + 1
+      response:set_status(304)
+      return
+    end
+    send(response, "cached:" .. hits[key])
+  elseif route == "redirect" then
+    local status = math.tointeger(key)
+    response:set_status(status)
+    if pieces[3] == "with" then response:set_header("Location", "/inspect") end
+    send(response, "redirect")
+  elseif route == "chain" then
+    local remaining = math.tointeger(key)
+    if remaining > 0 then
+      response:set_status(302)
+      response:set_header("Location", "/chain/" .. (remaining - 1))
+    end
+    send(response, "chain")
+  elseif route == "cross" then
+    response:set_status(302)
+    response:set_header("Location", cross_url .. "/inspect")
+  elseif route == "inspect" then
+    send(response, request.method .. "\n" .. (request.headers:get("Authorization") or "") .. "\n" .. read_body(request))
+  elseif route == "header-snapshot" then
+    local hosts = request.headers:values("Host")
+    local lengths = request.headers:values("Content-Length")
+    send(response, #hosts .. "\n" .. (hosts[1] or "") .. "\n" ..
+      #lengths .. "\n" .. (lengths[1] or "") .. "\n" .. read_body(request))
+  elseif route == "header" then
+    send(response, request.headers:get(key) or "")
+  elseif path == "/expose-subset" then
+    response:set_header("Access-Control-Expose-Headers", "X-Visible")
+    response:set_header("X-Visible", "yes")
+    response:set_header("X-Hidden", "no")
+    send(response, "headers")
+  elseif path == "/cookies" then
+    response:add_header("Set-Cookie", "one=1")
+    response:add_header("Set-Cookie2", "two=2")
+    send(response, "cookies")
+  elseif path == "/lines" then
+    send(response, "first\nsecond\nlast")
+  else
+    response:set_header("X-Method", request.method)
+    send(response, read_body(request))
+  end
+end
+
+local function listen(first_port: integer, certificate: string?, key: string?): (http.Server, integer)
+  for port = first_port, first_port + 199 do
+    if certificate ~= nil then
+      return http.listen_tls("127.0.0.1", certificate, handle, key, port), port
+    end
+    return http.listen("127.0.0.1", handle, port), port
+  catch
+    if not (error is async.OperationError) then raise end
+    local failure: async.OperationError = error
+    if failure.name ~= "EADDRINUSE" then raise end
+  end
+  raise "browser network fixture has no available loopback port"
+end
+
+function main(args: {string}): integer
+  asset_root = args[1]
+  local certificates = args[2]
+  local plain, plain_port = listen(31000)
+  defer plain:close()
+  plain_url = "http://127.0.0.1:" .. plain_port
+  cross_url = "http://localhost:" .. plain_port
+  local valid, valid_port = listen(plain_port + 1, certificates .. "/server.pem", certificates .. "/server-key.pem")
+  defer valid:close()
+  local wrong, wrong_port = listen(valid_port + 1, certificates .. "/wrong-server.pem", certificates .. "/server-key.pem")
+  defer wrong:close()
+  local untrusted, untrusted_port = listen(wrong_port + 1, args[3], args[3])
+  defer untrusted:close()
+  io.print("READY " .. plain_url .. " https://127.0.0.1:" .. valid_port ..
+    " https://127.0.0.1:" .. wrong_port .. " https://127.0.0.1:" .. untrusted_port)
+  local first = async.run(function (): nil plain:serve(); return nil end)
+  local second = async.run(function (): nil valid:serve(); return nil end)
+  local third = async.run(function (): nil wrong:serve(); return nil end)
+  untrusted:serve()
+  async.join(first)
+  async.join(second)
+  async.join(third)
+  return 0
+end

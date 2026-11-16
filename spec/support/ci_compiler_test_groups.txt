@@ -106,6 +106,7 @@ compiler spec/coder/browser_entry_gate_spec.lua 1.000 -
 compiler spec/coder/browser_fixtures_spec.lua 1.000 -
 compiler spec/coder/browser_images_spec.lua 1.000 -
 compiler spec/coder/browser_incremental_spec.lua 1.000 -
+compiler spec/coder/browser_net_spec.lua 1.000 -
 compiler spec/coder/browser_protocol_spec.lua 1.000 -
 compiler spec/coder/browser_providers_spec.lua 1.000 -
 compiler spec/coder/browser_scheduler_spec.lua 1.000 -

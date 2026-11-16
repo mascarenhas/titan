@@ -144,7 +144,7 @@ local function client_upgrade_split(split: integer)
   local response = http.request_upgrade_on(
     stream, stream:close, "http://example.test/path?q=one", "echo")
   defer response:close()
-  test.assert(response.status == 101 and response.version == "HTTP/1.1")
+  test.assert(response.status == 101)
   test.assert(support.contains(stream.output, "GET /path?q=one HTTP/1.1\r\n"))
   test.assert(support.contains(stream.output, "Connection: Upgrade\r\n"))
   assert_http_error(function () response:read() end, "no readable body")

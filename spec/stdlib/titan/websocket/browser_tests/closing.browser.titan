@@ -1,0 +1,133 @@
+function test_live_shutdown_accepts_normal_and_application_codes(_context: test.Context)
+  runtime_test.run(function ()
+    for _, code in iteration.ipairs({1000, 3001}) do
+      local connection = websocket.connect(live("echo"))
+      defer connection:close()
+      connection:shutdown(code, "local", 1000)
+      closed(connection, code, "local")
+    end
+  end)
+end
+
+function test_live_shutdown_rejects_browser_reserved_codes_without_retiring(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(live("echo"))
+    defer connection:close()
+    for code = 1001, 1014 do
+      websocket_error(function () connection:shutdown(code, "reserved") end, "state", "websocket.shutdown", nil)
+    end
+    echo(connection, websocket.TEXT, "healthy after invalid Close codes")
+  end)
+end
+
+function test_live_shutdown_rejects_long_and_invalid_utf8_reasons_without_retiring(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(live("echo"))
+    defer connection:close()
+    websocket_error(function () connection:shutdown(1000, string.rep("x", 124)) end,
+      "state", "websocket.shutdown", nil)
+    websocket_error(function () connection:shutdown(1000, "\255\254") end,
+      "utf8", "websocket.shutdown", nil)
+    echo(connection, websocket.TEXT, "healthy after invalid Close reasons")
+  end)
+end
+
+-- The host drops messages that arrive after close() (readyState is no longer
+-- OPEN), so an admitted reader completes with the closing EOF.
+function test_live_shutdown_completes_an_admitted_reader(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(raw("shutdown-reader", "idle"))
+    defer connection:close()
+    local started, finished = false, false
+    local failure: value = nil
+    local reader = async.run<|nil, value|>(function (): nil
+      started = true
+      do
+        local kind?, data? = connection:read()
+        test.assert(kind == nil and data == nil, "shutdown did not deliver EOF to the admitted reader")
+        finished = true
+      catch failure = error end
+      return nil
+    end)
+    defer reader:cancel(async.CancellationReason.simple("reader test completed"))
+    while not started do async.yield() end
+    test.assert(reader:status():as_string() == "waiting", "reader was not admitted before shutdown")
+    connection:shutdown(1000, "reader", 1000)
+    case async.join(reader) when failed(child) then child:raise() end
+    if failure ~= nil then raise failure end
+    test.assert(finished, "shutdown did not complete the admitted reader")
+    closed(connection, 1000, "reader")
+  end)
+end
+
+function test_live_empty_peer_close_is_sticky_eof_without_metadata(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(raw("empty-close", "empty"))
+    defer connection:close()
+    control("empty-close", "release")
+    closed(connection, nil, nil)
+  end)
+end
+
+function test_live_coded_peer_close_preserves_metadata(_context: test.Context)
+  runtime_test.run(function ()
+    for _, code in iteration.ipairs({1000, 1001}) do
+      local id = "coded-" .. code
+      local connection = websocket.connect(raw(id, "" .. code))
+      defer connection:close()
+      control(id, "release")
+      closed(connection, code, "peer")
+    end
+  end)
+end
+
+function test_live_valid_close_then_reset_preserves_close_metadata(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(raw("close-reset", "close-reset"))
+    defer connection:close()
+    control("close-reset", "release")
+    closed(connection, 1000, "bye")
+  end)
+end
+
+function test_live_fin_and_reset_latch_and_replay_the_first_abnormal_error(_context: test.Context)
+  runtime_test.run(function ()
+    for _, action in iteration.ipairs({"fin", "reset"}) do
+      local id = "abnormal-" .. action
+      local connection = websocket.connect(raw(id, "idle"))
+      defer connection:close()
+      control(id, action)
+      local first = websocket_error(function () connection:read() end, "abnormal", "websocket.read", nil)
+      local second = websocket_error(function () connection:read() end, "abnormal", "websocket.read", nil)
+      test.assert(first == second, "abnormal read did not replay the first failure")
+      local code?, reason? = connection:close_status()
+      test.assert(code == nil and reason == nil, "abnormal Close exposed synthetic peer metadata")
+      local repeated = websocket_error(function () connection:write(websocket.TEXT, "after failure") end,
+        "abnormal", "websocket.read", nil)
+      test.assert(first == repeated, "write replaced the latched read failure")
+    end
+  end)
+end
+
+function test_live_read_limit_preserves_fifo_and_retires_the_uncopied_holder(_context: test.Context)
+  runtime_test.run(function ()
+    local connection = websocket.connect(raw("read-limit", "large"), websocket.DialOptions { read_limit = 1024 })
+    defer connection:close()
+    local takes = metric("takes")
+    local large_takes, released, copies = metric("largeTakes"), metric("largeReleased"), metric("largeCopies")
+    control("read-limit", "release")
+    local kind?, data? = connection:read()
+    test.assert(same_message_kind(kind, websocket.TEXT) and data == "first", "read_limit overtook the first queued message")
+    kind, data = connection:read()
+    test.assert(same_message_kind(kind, websocket.BINARY) and data == "\0\xff", "read_limit changed FIFO message order")
+    test.assert(metric("takes") == takes + 2, "small messages did not use the production take path")
+    local first = websocket_error(function () connection:read() end, "limit", "websocket.read", 1009)
+    test.assert(metric("takes") == takes + 2 and metric("largeTakes") == large_takes,
+      "read_limit materialized the oversized payload")
+    wait_for(function (): boolean return metric("largeReleased") == released + 1 end,
+      "read_limit did not retire the untaken bytes holder")
+    test.assert(metric("largeCopies") == copies, "read_limit copied the oversized payload into Wasm")
+    local second = websocket_error(function () connection:read() end, "limit", "websocket.read", 1009)
+    test.assert(first == second, "read_limit did not replay its first failure")
+  end)
+end
