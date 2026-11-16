@@ -129,11 +129,11 @@ function RequestOptions.new(headers: Headers?, body: string?, ca_file: string?,
                             cache: CacheMode?, credentials: CredentialsMode?,
                             mode: RequestMode?, redirect: RedirectMode?): RequestOptions
   if is_only_if_cached(cache) then
-    local same_origin = false
+    local same_origin_mode = false
     if mode ~= nil then
-      case mode when same_origin() then same_origin = true end
+      case mode when same_origin() then same_origin_mode = true end
     end
-    if not same_origin then
+    if not same_origin_mode then
       raise "HTTP cache mode 'only-if-cached' requires request mode 'same-origin'"
     end
   end
