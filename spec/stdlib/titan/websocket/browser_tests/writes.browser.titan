@@ -100,7 +100,7 @@ function test_live_one_hundred_writes_allow_concurrent_timer_progress(_context: 
     async.join(ticker)
     for _ = 1, 100 do
       local kind?, data? = connection:read()
-      test.assert(kind == websocket.TEXT and data == "fair", "fair writes lost an echo")
+      test.assert(same_message_kind(kind, websocket.TEXT) and data == "fair", "fair writes lost an echo")
     end
   end)
 end

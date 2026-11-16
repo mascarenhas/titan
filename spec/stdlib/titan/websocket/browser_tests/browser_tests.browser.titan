@@ -94,10 +94,21 @@ local function handshake_error(action: Action, message: string?)
   test.assert(caught, "expected a WebSocket opening failure")
 end
 
+local function same_message_kind(left: websocket.MessageType?, right: websocket.MessageType): boolean
+  if left == nil then return false end
+  case left
+  when text() then
+    case right when text() then return true when binary() then return false end
+  when binary() then
+    case right when text() then return false when binary() then return true end
+  end
+end
+
 local function echo(connection: websocket.Connection, kind: websocket.MessageType, data: string)
   connection:write(kind, data)
   local received_kind?, received_data? = connection:read()
-  test.assert(received_kind == kind and received_data == data, "WebSocket echo changed message type or bytes")
+  test.assert(same_message_kind(received_kind, kind) and received_data == data,
+    "WebSocket echo changed message type or bytes")
 end
 
 local function closed(connection: websocket.Connection, code: integer?, reason: string?)

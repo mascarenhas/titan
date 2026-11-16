@@ -115,9 +115,9 @@ function test_live_read_limit_preserves_fifo_and_retires_the_uncopied_holder(_co
     local large_takes, released, copies = metric("largeTakes"), metric("largeReleased"), metric("largeCopies")
     control("read-limit", "release")
     local kind?, data? = connection:read()
-    test.assert(kind == websocket.TEXT and data == "first", "read_limit overtook the first queued message")
+    test.assert(same_message_kind(kind, websocket.TEXT) and data == "first", "read_limit overtook the first queued message")
     kind, data = connection:read()
-    test.assert(kind == websocket.BINARY and data == "\0\xff", "read_limit changed FIFO message order")
+    test.assert(same_message_kind(kind, websocket.BINARY) and data == "\0\xff", "read_limit changed FIFO message order")
     test.assert(metric("takes") == takes + 2, "small messages did not use the production take path")
     local first = websocket_error(function () connection:read() end, "limit", "websocket.read", 1009)
     test.assert(metric("takes") == takes + 2 and metric("largeTakes") == large_takes,

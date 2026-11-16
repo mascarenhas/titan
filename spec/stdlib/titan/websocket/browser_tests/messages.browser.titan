@@ -15,6 +15,7 @@ function test_live_text_round_trips(_context: test.Context)
     local connection = websocket.connect(live("echo"))
     defer connection:close()
     for _, data in iteration.ipairs({"", "plain ASCII", "aé€𠀀z"}) do echo(connection, websocket.TEXT, data) end
+    echo(connection, websocket.MessageType.text(), "fresh-text")
   end)
 end
 
@@ -23,6 +24,7 @@ function test_live_binary_round_trips(_context: test.Context)
     local connection = websocket.connect(live("echo"))
     defer connection:close()
     for _, data in iteration.ipairs({"", "\0\xff", string.rep("\0\xff", 32768)}) do echo(connection, websocket.BINARY, data) end
+    echo(connection, websocket.MessageType.binary(), "\0fresh")
   end)
 end
 
@@ -59,7 +61,7 @@ function test_live_browser_origin_acceptance_and_denial(_context: test.Context)
     local connection = websocket.connect(live("origin"))
     defer connection:close()
     local kind?, origin? = connection:read()
-    if kind ~= websocket.TEXT or origin == nil then raise "native Origin fixture did not publish the header" end
+    if not same_message_kind(kind, websocket.TEXT) or origin == nil then raise "native Origin fixture did not publish the header" end
     if environment("TITAN_TEST_BROWSER") == "1" then
       test.assert(string.sub(origin, 1, 17) == "http://127.0.0.1:", "browser Origin did not reach the native peer")
       handshake_error(function () websocket.connect(live("deny-origin")) end)

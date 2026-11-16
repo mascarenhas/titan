@@ -95,8 +95,8 @@ function Connection:close()
   self.socket = nil
   local remove? = self.remove_close_listener
   self.remove_close_listener = nil
-  defer do if remove ~= nil then remove() end end
-  defer do if socket ~= nil then socket:close() end end
+  defer if remove ~= nil then remove() end
+  defer if socket ~= nil then socket:close() end
   if request ~= nil then request:close() end
 end
 
@@ -145,7 +145,7 @@ local function Connection:receive(...: Value): Value
     case ...[3]
     when is_handle(holder) then
       local accepted = false
-      defer do if not accepted then holder:close() end end
+      defer if not accepted then holder:close() end
       if not self.terminal then
         local kind = BINARY
         if event == "text" then kind = TEXT end
@@ -231,7 +231,7 @@ function connect(source_url: string, options: DialOptions?): Connection
     failure = nil, remove_close_listener = nil,
   }
   local adopted = false
-  defer do if not adopted then connection:close() end end
+  defer if not adopted then connection:close() end
   connection.remove_close_listener = async.add_close_listener(function () connection:close() end)
   local protocols: {Value} = {}
   for index = 1, #policy.protocols do protocols[index] = Value.is_string(policy.protocols[index]) end
