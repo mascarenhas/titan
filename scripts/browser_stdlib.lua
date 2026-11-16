@@ -398,7 +398,8 @@ end
 -- members change for importers: a record keeps one hidden field when the
 -- checker rejects its literals outside its module (a private field and no
 -- custom constructor), and a union keeps one hidden variant when `case`
--- cannot cover it. Public fields and variants are renumbered by position.
+-- cannot cover it. Public fields and variants are renumbered by position,
+-- from 0 as serialized indices are.
 -- `absent` names owner members (`Owner:method`, `Owner.static`) to drop, and
 -- module members are sorted by name.
 function M.normalize(modtype, absent)
@@ -414,7 +415,7 @@ function M.normalize(modtype, absent)
         if typ._tag == "Type.Record" then
             local fields = {}
             for index, field in ipairs(typ.fields) do
-                fields[index] = types.Field(field.fqtn, field.name, field.type, index, field.isconst)
+                fields[index] = types.Field(field.fqtn, field.name, field.type, index - 1, field.isconst)
             end
             local hidden = (typ.nfields or #typ.fields) > #typ.fields and not typ.custom_constructor
             return types.Record(typ.name, fields, present(owner, typ.functions, "."),
@@ -423,7 +424,7 @@ function M.normalize(modtype, absent)
         elseif typ._tag == "Type.Union" then
             local variants = {}
             for index, variant in ipairs(typ.variants) do
-                variants[index] = types.Variant(variant.fqtn, variant.name, variant.parts, index)
+                variants[index] = types.Variant(variant.fqtn, variant.name, variant.parts, index - 1)
             end
             local hidden = (typ.nvariants or #typ.variants) > #typ.variants
             return types.Union(typ.name, variants, present(owner, typ.functions, "."),

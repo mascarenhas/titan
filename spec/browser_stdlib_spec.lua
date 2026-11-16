@@ -590,6 +590,32 @@ plan:
         end
     end)
 
+    it("normalizes to a valid interface that keeps capabilities and ignores declaration order", function()
+        local function decoded(source)
+            local ok, err, _, modtype = h.run_checker(source)
+            assert.truthy(ok, err)
+            return assert(driver.decode_module_interface(types.serialize(modtype), "test", "fixture interface"))
+        end
+        local declarations = {
+            "record Literal\n  x: integer\n  y: string\nend\n",
+            "record Hidden\n  local a: integer\n  x: integer\nend\n",
+            "union Closed\n  a()\n  b(value: integer)\nend\n",
+            "union Open\n  local z()\n  a()\nend\n",
+            "function f(): integer return 1 end\n",
+        }
+        local text = types.serialize_semantic(checks.normalize(decoded(table.concat(declarations))))
+        local again = assert(driver.decode_module_interface(text, "test", "normalized interface"))
+        assert.equal(text, types.serialize_semantic(checks.normalize(again)))
+        local members = again.members
+        assert.equal(#members.Literal.type.fields, members.Literal.type.nfields)
+        assert.equal(#members.Hidden.type.fields + 1, members.Hidden.type.nfields)
+        assert.equal(#members.Closed.type.variants, members.Closed.type.nvariants)
+        assert.equal(#members.Open.type.variants + 1, members.Open.type.nvariants)
+        local reversed = {}
+        for index = #declarations, 1, -1 do reversed[#reversed + 1] = declarations[index] end
+        assert.equal(text, types.serialize_semantic(checks.normalize(decoded(table.concat(reversed)))))
+    end)
+
     -- No ABI-width exception exists (titan#336): a C width that differs
     -- between targets fails like a changed spelling or signedness.
     it("compares every C fact of a raw export exactly", function()
