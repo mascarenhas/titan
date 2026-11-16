@@ -12,15 +12,15 @@ coverage reports upload from `out/coverage/report`.
 
 ## Linux job graph and concurrency
 
-Linux runs on pushes. Seven job definitions produce thirteen runner
+Linux runs on pushes. Seven job definitions produce fourteen runner
 executions: `build-compiler` and `sanitizer` start independently; after
-`build-compiler`, two `test-linux-compiler` shard pairs, `native-coverage`, the
-two real-toolchain browser gates [`browser-toolchain`](#browser-toolchain-job)
-and [`browser-stdlib`](#browser-stdlib-job), and the six-cell
+`build-compiler`, two `test-linux-compiler` shard pairs, `native-coverage`,
+[`browser-toolchain`](#browser-toolchain-job), two
+[`browser-stdlib`](#browser-stdlib-job) shards, and the six-cell
 [`browser-playwright`](#browser-playwright-job) matrix (`validation` and
 `production` profiles across `chromium`, `firefox`, and `webkit`) start in
 parallel. Preparation has a 30-minute timeout, compiler pairs 45 minutes,
-native coverage, both browser gates, and the `browser-playwright` cells 60
+native coverage, the browser jobs, and the `browser-playwright` cells 60
 minutes, and the independent cold sanitizer build 75 minutes.
 
 Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
@@ -94,9 +94,9 @@ Each covered shard excludes explicit `#stress` cases, then runs its listed
 stress oracles separately without LuaCov. Keep a small covered companion over
 the same compiler paths. A shard pair merges stats only after both workers
 pass, generates its own report, and uploads directly with the `compiler`
-Codecov flag. The stdlib integration, `browser-toolchain`, and
-`browser-stdlib` uploads use that same flag, so there is no full-tree merger
-job.
+Codecov flag. The stdlib integration, `browser-toolchain`, and both
+`browser-stdlib` shard uploads use that same flag, so there is no full-tree
+merger job.
 
 Local `rock-test` uses the same timing dataset and partition rule, per file and
 without LuaCov; see [Busted partitions](test-runner.md#busted-partitions).
@@ -179,25 +179,25 @@ Local reporting never uploads.
 ## `browser-toolchain` job
 
 The [browser target](browser-target.md)'s real-toolchain validation runs in
-two parallel jobs, each on its own four-vCPU runner with a 60-minute timeout,
+three parallel jobs, each on its own four-vCPU runner with a 60-minute timeout,
 separately from the compiler shards and from the stdlib and sanitizer jobs.
 `browser-toolchain` (`browser target real toolchain`) runs the toolchain,
 trace-map, trace-entry, and budget gate files and the loader, runner, and trace
-suites; [`browser-stdlib`](#browser-stdlib-job) (`browser SDK and core
-stdlib`) runs the browser core stdlib suite and the SDK, provider, image,
-protocol, bridge, and stdlib gate files. The long-running budget fixtures stay with
-the JavaScript suites to balance the SDK and stdlib work. Neither job depends
-on the other or shares its prefix. Each needs `build-compiler` and consumes the
-same prepared `titan-linux-prepared.tar.gz` artifact and `$GITHUB_PATH` setup
-as the compiler shards, so its validation prefix starts as the compiler SDK
-installed from this commit, with no native standard provider and no browser
-SDK. The checkout includes submodules, because the fork's installer reads the
-gitlinked revision to write the record; the workflow hardcodes no fork
-revision. Pins live in `TITAN_`-prefixed variables (`TITAN_EMSDK_VERSION`,
-`TITAN_EMSDK_ROOT`, `TITAN_CHROME_VERSION`, `TITAN_CHROME_SHA256`,
-`TITAN_CHROME_ROOT`), because `emsdk_env.sh` unsets every `EMSDK_*` variable it
-does not set itself, and each job sets `permissions.id-token: write` for its
-own Codecov upload. Both jobs begin with the same seven steps:
+suites; the two [`browser-stdlib`](#browser-stdlib-job) shards run the browser
+core stdlib suite and the SDK, provider, image, protocol, bridge, scheduler,
+network, and stdlib gate files. The long-running budget fixtures stay with the
+JavaScript suites. No browser job depends on another or shares its prefix.
+Each needs `build-compiler` and consumes the same prepared
+`titan-linux-prepared.tar.gz` artifact and `$GITHUB_PATH` setup as the compiler
+shards, so its validation prefix starts as the compiler SDK installed from
+this commit, with no native standard provider and no browser SDK. The checkout
+includes submodules, because the fork's installer reads the gitlinked revision
+to write the record; the workflow hardcodes no fork revision. Pins live in
+`TITAN_`-prefixed variables (`TITAN_EMSDK_VERSION`, `TITAN_EMSDK_ROOT`,
+`TITAN_CHROME_VERSION`, `TITAN_CHROME_SHA256`, `TITAN_CHROME_ROOT`), because
+`emsdk_env.sh` unsets every `EMSDK_*` variable it does not set itself, and each
+job sets `permissions.id-token: write` for its own Codecov upload. All three
+jobs begin with the same seven steps:
 
 1. **Emscripten.** `ubicloud/cache@v4` restores `.emsdk` under the key
    `ubuntu-24.04-<arch>-emsdk-6.0.13-v1`. A missing installation clones emsdk
@@ -339,17 +339,18 @@ is emsdk-free); compiler shards never become browser SDK consumers.
 
 ## `browser-stdlib` job
 
-`browser-stdlib` (`browser SDK and core stdlib`) repeats steps 1–7 of the
-[`browser-toolchain` job](#browser-toolchain-job) on its own runner and
-prefix. It uses the pinned Chrome for Testing executable with its default
-renderer-memory limits and enabled sandbox; no CI-only memory-limit wrapper
-or extra renderer-memory feature is applied.
+`browser-stdlib` (`browser SDK and core stdlib <shard>`) is a two-cell matrix.
+Both `sdk` and `scheduler` repeat steps 1–7 of the
+[`browser-toolchain` job](#browser-toolchain-job) on their own runner and
+prefix, with `fail-fast: false`. They use the pinned Chrome for Testing
+executable with its default renderer-memory limits and enabled sandbox; no
+CI-only memory-limit wrapper or extra renderer-memory feature is applied.
 
 After step 7, `browser-stdlib` runs:
 
-8. **Complete browser core stdlib suite.** With emsdk sourced and
+8. **Complete browser core stdlib suite (`sdk` only).** With emsdk sourced and
    `set -euo pipefail`, `make titan-stdlib-browser-test PREFIX="$PREFIX"` runs
-   unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
+   once, unfiltered, its output copied to `$RUNNER_TEMP/browser-stdlib.log`. It
    builds all twenty-three browser-portable owners into one validation-profile
    `images/stdlib.mjs` image, subject to the compiler's general Wasm byte bounds,
    checks dependency closure and applies the [subset parity
@@ -364,21 +365,18 @@ After step 7, `browser-stdlib` runs:
    and `stdlib.<engine>.stderr.log`.
 9. **Strict gate.** With the same `TITAN_ROOT`,
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN`, and `TITAN_PROBE_CACHE_DISABLE` settings
-   as the `browser-toolchain` gate, the prefix's installed `busted -c -o gtest
-   -v` runs the thirteen real-toolchain files
-   `spec/coder/browser_providers_spec.lua`,
-   `spec/coder/browser_incremental_spec.lua`,
-   `spec/coder/browser_images_spec.lua`,
-   `spec/coder/browser_protocol_spec.lua`, `spec/browser_sdk_spec.lua`,
-   `spec/coder/browser_stdlib_closure_spec.lua`,
-   `spec/coder/browser_entry_gate_spec.lua`,
-   `spec/coder/browser_bridge_spec.lua`,
-   `spec/coder/browser_scheduler_spec.lua`,
-   `spec/coder/browser_net_spec.lua`,
-   `spec/coder/browser_stdlib_gate_spec.lua`,
-   `spec/coder/browser_fixtures_spec.lua`, and `spec/minicoro_spec.lua` under
-   LuaCov, with output copied to `$RUNNER_TEMP/browser-stdlib-gate.log`. A
-   missing gate file fails with the same message before Busted starts. The
+   as the `browser-toolchain` gate, each shard runs its matrix `gate-specs`
+   list in one serial installed `busted -c -o gtest -v` invocation under
+   LuaCov, with output copied to `$RUNNER_TEMP/browser-stdlib-gate.log`:
+
+   | Shard | Spec files (`spec/`-relative) |
+   | --- | --- |
+   | `sdk` | `coder/browser_bridge_spec.lua`, `coder/browser_stdlib_gate_spec.lua`, `coder/browser_entry_gate_spec.lua`, `coder/browser_images_spec.lua`, `coder/browser_net_spec.lua`, `minicoro_spec.lua`, `coder/browser_fixtures_spec.lua`, `coder/browser_providers_spec.lua` |
+   | `scheduler` | `coder/browser_scheduler_spec.lua`, `coder/browser_incremental_spec.lua`, `browser_sdk_spec.lua`, `coder/browser_stdlib_closure_spec.lua`, `coder/browser_protocol_spec.lua` |
+
+   The CI-contract spec requires these lists to cover the full gate exactly
+   once, without overlap, and the core suite to run only in `sdk`. A missing
+   gate file fails with the same message before Busted starts. The
    entry-gate, bridge and scheduler specs build their own assertion-on and
    assertion-off images, and the entry, bridge, scheduler, stdlib gate,
    network, fixture, and minicoro specs run both engines. The network spec
@@ -392,14 +390,16 @@ After step 7, `browser-stdlib` runs:
    stream/environment harness. The scheduler and network specs require every
    test of their owners that the status inventory names to have passed
    ([test evidence](browser-target.md#subset-parity-gate)).
-10. **Browser SDK and stdlib compiler coverage.** The same report commands
-    produce `luacov.codecov.out`, which uploads with `name: browser-stdlib`
-    and otherwise the same options, so the real provider, image, SDK, and
-    executing-protocol paths that are pending in the emsdk-free shards are
-    measured.
-11. **Failure logs.** On failure, `actions/upload-artifact` uploads, as
-    `browser-stdlib-failure` for seven days, the `browser-*.log` files and the
-    browser core stdlib suite's evidence: `out/browser-stdlib/*.log` (the
+10. **Browser SDK and stdlib compiler coverage.** Each shard runs the same
+    report commands and uploads its own `luacov.codecov.out` with
+    `name: browser-stdlib-${{ matrix.shard }}` and `flags: compiler`.
+    Codecov merges both with the other compiler uploads, so the real provider,
+    image, SDK, and executing-protocol paths that are pending in the emsdk-free
+    shards are measured.
+11. **Failure logs.** On failure, `actions/upload-artifact` uploads each
+    shard's evidence as `browser-stdlib-${{ matrix.shard }}-failure` for seven
+    days: the `browser-*.log` files and, when present, the browser core stdlib
+    suite's evidence: `out/browser-stdlib/*.log` (the
     per-engine `stdlib.<engine>.log` stdout and `stdlib.<engine>.stderr.log`
     files), `out/browser-stdlib/images/*.{mjs,wasm,wasm.map}`, `roots.txt`
     (through the `*roots.txt` pattern), `members.md`, and the live network

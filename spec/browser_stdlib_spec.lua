@@ -131,12 +131,13 @@ plan:
                 assert.is_nil(suite, "duplicate browser stdlib suite step")
                 suite = step
             end
-            if step:find("name: browser-stdlib-failure", 1, true) then
+            if step:find("name: browser-stdlib-${{ matrix.shard }}-failure", 1, true) then
                 assert.is_nil(artifact, "duplicate browser stdlib failure artifact")
                 artifact = step
             end
         end
         assert.truthy(suite, "browser-stdlib must run the browser stdlib target")
+        assert.truthy(suite:find("if: matrix.stdlib-suite", 1, true), suite)
         assert.truthy(suite:find("set -euo pipefail", 1, true), suite)
         assert.truthy(suite:find('tee "$RUNNER_TEMP/browser-stdlib.log"', 1, true), suite)
         assert.truthy(artifact, "browser-stdlib must retain its own failure evidence")
@@ -938,7 +939,7 @@ end
     -- Each named test must exist before the browser lane runs it: an image or
     -- harness owner's compiler-selected browser sources define the case, an
     -- OS stream harness case is registered by its driver, and every harness
-    -- gate runs in the browser-stdlib job.
+    -- gate runs in one of the browser-stdlib matrix shards.
     it("names only tests that exist in the browser test sources", function()
         if platform.windows then pending("browser source resolution requires a supported host"); return end
         local plan = root_plan()
@@ -947,9 +948,11 @@ end
         for root in assert(plan.output:match("roots=([^\n]*)")):gmatch("%S+") do owners[root] = true end
         for owner in pairs(checks.harness_owners) do owners[owner] = true end
         local ci = assert(strategy:read_file(".github/workflows/ci.yml"))
-        local gate = assert(ci:match("Run the browser SDK and stdlib real%-toolchain gate(.-)\n      %- name:"))
+        local gate = assert(ci:match("\n  browser%-stdlib:\n(.-)\n  [%w_-]+:\n"))
+        local shards = assert(gate:match("\n    strategy:\n(.-)\n    permissions:"))
+        assert.truthy(gate:find("TITAN_BROWSER_GATE_SPECS: ${{ matrix.gate-specs }}", 1, true))
         for owner, spec in pairs(checks.harness_owners) do
-            assert.truthy(gate:find(spec, 1, true), spec .. " is not a browser-stdlib gate spec")
+            assert.truthy(shards:find(spec, 1, true), spec .. " is not a browser-stdlib gate spec")
             local text = assert(strategy:read_file(spec))
             assert.truthy(text:find("require_evidence", 1, true) and text:find('["' .. owner .. '"] = true', 1, true),
                 spec .. " does not check the evidence of " .. owner)

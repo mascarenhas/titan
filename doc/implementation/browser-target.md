@@ -738,8 +738,8 @@ each subtest segment to be a string literal of those sources, and a whole
 owner to have a case. A harness name must equal a `check('<name>'`
 registration of `os-streams.mjs` or match a template registration whose
 every `${...}` segment is a quoted literal of the harness. Each harness gate
-must run in the `browser-stdlib` job. The same spec rejects a synthetic
-inventory naming each kind of stale or misspelled test.
+must run in one of the `browser-stdlib` matrix shards. The same spec rejects a
+synthetic inventory naming each kind of stale or misspelled test.
 
 `check_browser_stdlib.lua inventory <native titan.a> <browser titan.a>
 [table]` runs the comparison and the status checks, prints `Browser stdlib
@@ -1022,9 +1022,9 @@ output root without a marker must be empty when titanc first claims it
 directory already holds `images/` and `roots.txt` by then.
 `spec/coder/browser_stdlib_closure_spec.lua` runs the target with one owner
 from a cold and then a warm directory and checks this layout. The
-[`browser-stdlib` job](continuous-integration.md#browser-stdlib-job)
+[`browser-stdlib` matrix's `sdk` shard](continuous-integration.md#browser-stdlib-job)
 runs the target unfiltered after the SDK is built and uploads everything but
-`objects/` when the job fails. It uses Chrome for Testing with the normal
+`objects/` when that shard fails. It uses Chrome for Testing with the normal
 sandbox and no `HigherRendererMemoryLimit` wrapper. The older Asyncify
 protobuf-startup footprint is not a requirement of current JSPI images.
 
@@ -1033,7 +1033,10 @@ protobuf-startup footprint is not a requirement of current JSPI images.
 `spec/coder/browser_stdlib_gate_spec.lua` (a real-toolchain gate file) builds
 twenty-five `--test` images from `spec/fixtures/browser_stdlib/` with the `test`
 purpose and assertions 2, and runs them through `gate.mjs` under
-`titan-browser-run --js-test` on Node and Chromium. The isolated fixture list
+`titan-browser-run --js-test` on Node and Chromium. The existing bounded process
+batch runs at most two single-slot compiler children, each with an independent
+output tree. A multi-root `--test` invocation would combine cases into one
+image and would not prove isolated initialization. The isolated fixture list
 comes from `BROWSER_STDLIB_ROOTS`; the emsdk-free inventory spec checks each
 fixture's direct imports, both combined fixtures, and the child-state module
 list against those same roots, and requires the directory's `init_*.titan`
@@ -4211,13 +4214,14 @@ including `LUAI_MAXCCALLS`; a record without them fails. Each real case is
 pending when a capability is absent; `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` turns
 absence into a failure, and a present but malformed SDK or probe result always
 fails.
-Two Linux CI jobs run these files with the real toolchain:
+Three Linux CI jobs run these files with the real toolchain:
 [`browser-toolchain`](continuous-integration.md#browser-toolchain-job) runs
 `spec/wasm_toolchain_spec.lua`, `spec/coder/browser_toolchain_spec.lua`, and
 the trace-map, trace-entry, and budget files beside the loader, runner,
-trace-adapter, and Node trace suites, and
-[`browser-stdlib`](continuous-integration.md#browser-stdlib-job) runs the
-provider, incremental, image, protocol, SDK, stdlib closure, entry, bridge and
-stdlib gate, fixture, and minicoro files after the browser core stdlib suite.
+trace-adapter, and Node trace suites. The two
+[`browser-stdlib` shards](continuous-integration.md#browser-stdlib-job) divide
+the provider, incremental, image, protocol, SDK, stdlib closure, entry, bridge,
+scheduler, network, stdlib gate, fixture, and minicoro files, with the browser
+core stdlib suite running only in the `sdk` shard.
 The Playwright trace, bridge, and deployment gates run in
 [`browser-playwright`](continuous-integration.md#browser-playwright-job).
