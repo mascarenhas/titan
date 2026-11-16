@@ -284,9 +284,11 @@ still reports OPEN; a subsequent write raises after the host reports loss.
 
 **Shutdown and close.** `shutdown` defaults to code 1000 and an empty reason,
 admits only 1000 and 3000 through 4999 (the browser's `close()` refuses 1001
-through 1014), validates the reason's length and UTF-8, keeps the active
-reader's one-message takeover, calls `close` with the code and reason, and
-waits for the `close` event up to its deadline. `Connection:close()` is
+through 1014), validates the reason's length and UTF-8, keeps an admitted
+reader admitted and refuses new readers, calls `close` with the code and
+reason, and waits for the `close` event up to its deadline. The host drops
+messages that arrive after `close()`, so the admitted reader completes with the
+closing EOF. `Connection:close()` is
 synchronous, idempotent, local retirement: it closes the listener request
 (removing the listeners and closing the socket), closes the queued holders
 and the socket handle, and wakes waiters with the state error or the latched

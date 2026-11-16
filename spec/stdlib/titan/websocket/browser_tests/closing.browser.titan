@@ -32,45 +32,31 @@ function test_live_shutdown_rejects_long_and_invalid_utf8_reasons_without_retiri
   end)
 end
 
+-- The host drops messages that arrive after close() (readyState is no longer
+-- OPEN), so an admitted reader completes with the closing EOF.
 function test_live_shutdown_completes_an_admitted_reader(_context: test.Context)
   runtime_test.run(function ()
-    for _, mode in iteration.ipairs({"idle", "takeover"}) do
-      local connection = websocket.connect(raw("shutdown-reader-" .. mode, mode))
-      defer connection:close()
-      local takes = metric("takes")
-      local started, finished = false, false
-      local failure: value = nil
-      local reader = async.run<|nil, value|>(function (): nil
-        started = true
-        do
-          local kind?, data? = connection:read()
-          if mode == "takeover" then
-            test.assert(same_message_kind(kind, websocket.TEXT) and data == "deliver-once",
-              "shutdown did not deliver the admitted reader's single message")
-            local rejected = websocket_error(function () connection:read() end, "state", "websocket.read", nil)
-            test.assert(rejected.message == "WebSocket shutdown owns receive progress",
-              "shutdown allowed a second reader to steal receive progress")
-          else
-            test.assert(kind == nil and data == nil, "shutdown did not deliver EOF to the admitted reader")
-          end
-          finished = true
-        catch failure = error end
-        return nil
-      end)
-      defer reader:cancel(async.CancellationReason.simple("reader test completed"))
-      while not started do async.yield() end
-      test.assert(reader:status():as_string() == "waiting", "reader was not admitted before shutdown")
-      connection:shutdown(1000, "reader", 1000)
-      case async.join(reader) when failed(child) then child:raise() end
-      if failure ~= nil then raise failure end
-      test.assert(finished, "shutdown did not complete the admitted reader")
-      if mode == "takeover" then
-        test.assert(metric("takes") == takes + 1, "shutdown materialized a discarded trailing message")
-        closed(connection, 1001, "peer")
-      else
-        closed(connection, 1000, "reader")
-      end
-    end
+    local connection = websocket.connect(raw("shutdown-reader", "idle"))
+    defer connection:close()
+    local started, finished = false, false
+    local failure: value = nil
+    local reader = async.run<|nil, value|>(function (): nil
+      started = true
+      do
+        local kind?, data? = connection:read()
+        test.assert(kind == nil and data == nil, "shutdown did not deliver EOF to the admitted reader")
+        finished = true
+      catch failure = error end
+      return nil
+    end)
+    defer reader:cancel(async.CancellationReason.simple("reader test completed"))
+    while not started do async.yield() end
+    test.assert(reader:status():as_string() == "waiting", "reader was not admitted before shutdown")
+    connection:shutdown(1000, "reader", 1000)
+    case async.join(reader) when failed(child) then child:raise() end
+    if failure ~= nil then raise failure end
+    test.assert(finished, "shutdown did not complete the admitted reader")
+    closed(connection, 1000, "reader")
   end)
 end
 
