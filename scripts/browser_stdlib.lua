@@ -380,30 +380,81 @@ function M.members(modtype)
         local kind = member._tag == "Type.ModuleVariable" and "variable" or
             typ._tag == "Type.CFunction" and "raw foreign function" or
             typ._tag == "Type.Record" and "record" or
-            typ._tag == "Type.Union" and "union" or
-            typ._tag == "Type.Interface" and "interface" or "function"
+            typ._tag == "Type.Union" and "union" or "function"
         add(member.name, kind, typ, member.isconst and " (const)" or nil, member)
         nominal_members(member.name, typ)
     end
     for name, typ in pairs(modtype.type_members or {}) do
-        add(name, "type alias", typ)
+        add(name, typ._tag == "Type.Interface" and "interface" or "type alias", typ)
         nominal_members(name, typ)
     end
     return result
+end
+
+-- A canonical copy of a decoded interface for comparison across targets.
+-- Serialization records a record's total field count and each public field's
+-- physical index, and likewise for union variants, so private layout would
+-- otherwise leak into the comparison. The copy keeps only what private
+-- members change for importers: a record keeps one hidden field when the
+-- checker rejects its literals outside its module (a private field and no
+-- custom constructor), and a union keeps one hidden variant when `case`
+-- cannot cover it. Public fields and variants are renumbered by position.
+-- `absent` names owner members (`Owner:method`, `Owner.static`) to drop, and
+-- module members are sorted by name.
+function M.normalize(modtype, absent)
+    absent = absent or {}
+    local function present(owner, group, separator)
+        local result = {}
+        for name, member in pairs(group) do
+            if not absent[owner .. separator .. name] then result[name] = member end
+        end
+        return result
+    end
+    local function declaration(owner, typ)
+        if typ._tag == "Type.Record" then
+            local fields = {}
+            for index, field in ipairs(typ.fields) do
+                fields[index] = types.Field(field.fqtn, field.name, field.type, index, field.isconst)
+            end
+            local hidden = (typ.nfields or #typ.fields) > #typ.fields and not typ.custom_constructor
+            return types.Record(typ.name, fields, present(owner, typ.functions, "."),
+                present(owner, typ.methods, ":"), #fields + (hidden and 1 or 0),
+                typ.scope, typ.typeparams, typ.custom_constructor)
+        elseif typ._tag == "Type.Union" then
+            local variants = {}
+            for index, variant in ipairs(typ.variants) do
+                variants[index] = types.Variant(variant.fqtn, variant.name, variant.parts, index)
+            end
+            local hidden = (typ.nvariants or #typ.variants) > #typ.variants
+            return types.Union(typ.name, variants, present(owner, typ.functions, "."),
+                present(owner, typ.methods, ":"), #variants + (hidden and 1 or 0),
+                typ.scope, typ.typeparams)
+        end
+        return typ
+    end
+    local members = {}
+    for index, member in ipairs(modtype.members) do
+        if member._tag == "Type.ModuleMember" then
+            members[index] = types.ModuleMember(member.modname, member.name,
+                declaration(member.name, member.type), member.paramnames)
+        else
+            members[index] = member
+        end
+    end
+    table.sort(members, function(a, b) return util.bytewise_less(a.name, b.name) end)
+    local type_members = {}
+    for name, typ in pairs(modtype.type_members or {}) do type_members[name] = declaration(name, typ) end
+    return types.Module(modtype.name, members, type_members)
 end
 
 -- The reviewed browser-only bridge module has no native interface to compare.
 -- Every other delivered module must match its native interface exactly.
 local browser_only_modules = { ["titan.browser"] = true }
 
--- Differences a browser composition records on purpose (titan#334); #336 owns
--- their classification. `omitted` names members the browser interface lacks:
--- a top-level member, or a method of a record the browser keeps (omitting a
--- record omits its fields, variants and methods). `opaque` names records the
--- browser keeps under the native name with its own private fields and no
--- public constructor, so their semantic declarations differ in private
--- layout and in any methods recorded as omitted; their other public methods
--- are still compared one by one.
+-- Members a browser composition omits on purpose (titan#334); #336 owns
+-- their classification. Each entry names a top-level member, or a method or
+-- static of a record the browser keeps (omitting a record omits its fields,
+-- variants and methods).
 M.browser_differences = {
     ["titan.async"] = {
         omitted = {
@@ -417,12 +468,6 @@ M.browser_differences = {
             -- ExternalWait keeps no methods on the browser.
             "ExternalWait:close", "ExternalWait:wait", "ExternalWait:wait_cleanup",
         },
-        opaque = { "ExternalWait" },
-    },
-    -- Ticker keeps its methods; its private fields hold a host request instead
-    -- of a uv timer.
-    ["titan.timer"] = {
-        opaque = { "Ticker" },
     },
     ["titan.os"] = {
         omitted = {
@@ -432,28 +477,26 @@ M.browser_differences = {
             "popen", "wait_signal", "ExitStatus", "SpawnConfig", "SpawnOption", "Process",
             "InputOutputStream",
         },
-        opaque = { "InputStream", "OutputStream" },
     },
     ["titan.lua"] = {
         omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" },
-        opaque = { "Lua" },
     },
     ["titan.http"] = {
-        opaque = { "Client", "ClientResponse" },
         omitted = { "ClientResponse:take_upgrade", "Exchange", "Handler", "Request", "Response",
             "Server", "UpgradedStream", "listen", "listen_tls", "request_upgrade_on" },
     },
     ["titan.websocket"] = {
-        opaque = { "Connection" },
         omitted = { "AcceptOptions", "Connection.discard_transfer_payload", "Connection.from_transfer_payload",
             "Connection:ping", "Connection:to_transfer_payload", "accept" },
     },
 }
 
 -- Every other member must keep its native kind, rendered signature and
--- semantic declaration. Machine layouts live in separate provider metadata
--- and are deliberately not compared. Returns the shared member rows, the
--- number of compared shared modules and the recorded difference rows.
+-- normalized semantic declaration; the native owners of omitted methods and
+-- statics drop them first, while omissions themselves are checked against
+-- the native interface as declared. Machine layouts live in separate provider
+-- metadata and are deliberately not compared. Returns the shared member rows,
+-- the number of compared shared modules and the recorded difference rows.
 function M.inventory(native, browser, recorded_differences)
     recorded_differences = recorded_differences or M.browser_differences
     local rows, recorded_rows, differences, modules = {}, {}, {}, 0
@@ -462,29 +505,22 @@ function M.inventory(native, browser, recorded_differences)
             local browser_entry, native_entry = browser.entries[modname], native.entries[modname]
             if not native_entry then return nil, "missing native module " .. modname end
             modules = modules + 1
-            local b = M.members(assert(driver.decode_module_interface(browser_entry.types, modname, "browser interface")))
-            local n = M.members(assert(driver.decode_module_interface(native_entry.types, modname, "native interface")))
+            local native_type = assert(driver.decode_module_interface(native_entry.types, modname, "native interface"))
+            local declared = M.members(native_type)
             local recorded = recorded_differences[modname] or {}
-            local omitted, opaque = {}, {}
+            local omitted = {}
+            for _, name in ipairs(recorded.omitted or {}) do omitted[name] = true end
+            local b = M.members(M.normalize(assert(driver.decode_module_interface(
+                browser_entry.types, modname, "browser interface"))))
+            local n = M.members(M.normalize(native_type, omitted))
             for _, name in ipairs(recorded.omitted or {}) do
-                omitted[name] = true
-                if not n[name] then
+                if not declared[name] then
                     differences[#differences + 1] = modname .. "." .. name .. ": recorded omission is not a native member"
                 elseif b[name] then
                     differences[#differences + 1] = modname .. "." .. name .. ": recorded omission is in the browser interface"
                 else
                     recorded_rows[#recorded_rows + 1] = { module = modname, name = name, difference = "omitted",
-                        kind = n[name].kind, signature = n[name].signature }
-                end
-            end
-            for _, name in ipairs(recorded.opaque or {}) do
-                opaque[name] = true
-                local bm, nm = b[name], n[name]
-                if not bm or not nm or bm.kind ~= "record" or nm.kind ~= "record" or bm.signature ~= nm.signature then
-                    differences[#differences + 1] = modname .. "." .. name .. ": recorded opaque record is not the same record in both interfaces"
-                else
-                    recorded_rows[#recorded_rows + 1] = { module = modname, name = name, difference = "opaque",
-                        kind = nm.kind, signature = nm.signature }
+                        kind = declared[name].kind, signature = declared[name].signature }
                 end
             end
             local names, seen = {}, {}
@@ -494,7 +530,7 @@ function M.inventory(native, browser, recorded_differences)
             for _, name in ipairs(names) do
                 local bm, nm = b[name], n[name]
                 local owner = name:match("^([^.:]+)[.:]")
-                if opaque[name] or (nm and not bm and (omitted[name] or (owner and omitted[owner] and not b[owner]))) then
+                if nm and not bm and (omitted[name] or (owner and omitted[owner] and not b[owner])) then
                     -- Recorded above, or a member of an omitted record.
                 elseif not bm or not nm or bm.kind ~= nm.kind or bm.signature ~= nm.signature or bm.semantic ~= nm.semantic then
                     differences[#differences + 1] = modname .. "." .. name .. ": native=" ..

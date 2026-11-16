@@ -9,6 +9,7 @@ local files = require "spec.fixtures.target_selection.support"
 local parser = require "titan-compiler.parser"
 local driver = require "titan-compiler.driver"
 local browser_fixtures = require "spec.support.browser_fixtures"
+local h = require "spec.support.helpers"
 
 describe("browser core stdlib build checks", function()
     local scratch = {}
@@ -403,6 +404,7 @@ plan:
         local members = {}
         for _, row in ipairs(rows) do members[row.name] = row.kind end
         assert.equal(4, #rows)
+        assert.equal("interface", members.View)
         assert.equal("field", members["View.size"])
         assert.equal("method", members["View:read"])
         assert.equal("method", members["View:write"])
@@ -424,12 +426,12 @@ plan:
         assert.truthy(err:find("semantic declaration differs", 1, true), err)
     end)
 
-    it("accepts exactly the recorded omissions and opaque records", function()
+    it("accepts exactly the recorded omissions, including omitted methods of a kept record", function()
         local function provider(browser)
             local members = {
                 types.ModuleMember("fixture", "shared", types.Function({}, {}, false, nil, nil), {}),
-                types.ModuleMember("fixture", "Opaque", types.Record("fixture.Opaque", {}, {},
-                    browser and {} or { close = types.Method("fixture.Opaque", "close", {}, {}, nil, nil, {}) },
+                types.ModuleMember("fixture", "Kept", types.Record("fixture.Kept", {}, {},
+                    browser and {} or { close = types.Method("fixture.Kept", "close", {}, {}, nil, nil, {}) },
                     browser and 1 or 3), nil),
             }
             if not browser then
@@ -440,28 +442,28 @@ plan:
             return { key_order = { "fixture" },
                 entries = { fixture = { types = types.serialize(types.Module("fixture", members, {})) } } }
         end
-        local function recorded(omitted, opaque)
-            return { fixture = { omitted = omitted, opaque = opaque } }
+        local function recorded(omitted)
+            return { fixture = { omitted = omitted } }
         end
         local rows, modules, differences = checks.inventory(provider(false), provider(true),
-            recorded({ "gone", "Gone", "Opaque:close" }, { "Opaque" }))
+            recorded({ "gone", "Gone", "Kept:close" }))
         assert.equal(1, modules)
-        assert.same({ "shared" }, { rows[1].name, rows[2] })
+        assert.same({ "Kept", "shared" }, { rows[1].name, rows[2].name, rows[3] })
         local kinds = {}
         for _, row in ipairs(differences) do kinds[#kinds + 1] = row.name .. "=" .. row.difference end
-        assert.same({ "gone=omitted", "Gone=omitted", "Opaque:close=omitted", "Opaque=opaque" }, kinds)
+        assert.same({ "gone=omitted", "Gone=omitted", "Kept:close=omitted" }, kinds)
         local text = checks.member_table(rows, differences)
         assert.truthy(text:find("## Recorded browser differences", 1, true), text)
-        assert.truthy(text:find("| `fixture` | `Opaque` | opaque | record |", 1, true), text)
+        assert.truthy(text:find("| `fixture` | `Kept:close` | omitted | method |", 1, true), text)
         for _, case in ipairs({
-            { recorded({ "Gone", "Opaque:close" }, { "Opaque" }), "fixture.gone: native=" },
-            { recorded({ "gone", "Gone", "Opaque:close", "shared" }, { "Opaque" }),
+            { recorded({ "Gone", "Kept:close" }), "fixture.gone: native=" },
+            { recorded({ "gone", "Gone", "Kept:close", "shared" }),
                 "fixture.shared: recorded omission is in the browser interface" },
-            { recorded({ "gone", "Gone", "Opaque:close", "absent" }, { "Opaque" }),
+            { recorded({ "gone", "Gone", "Kept:close", "absent" }),
                 "fixture.absent: recorded omission is not a native member" },
-            { recorded({ "gone", "Gone", "Opaque:close" }, { "shared" }),
-                "fixture.shared: recorded opaque record is not the same record in both interfaces" },
-            { recorded({ "gone", "Gone", "Opaque:close" }, {}), "(semantic declaration differs)" },
+            { recorded({ "gone", "Gone" }), "fixture.Kept:close: native=" },
+            { recorded({ "gone", "Gone" }), "fixture.Kept: native=fixture.Kept; browser=fixture.Kept " ..
+                "(semantic declaration differs)" },
         }) do
             local ok, err = checks.inventory(provider(false), provider(true), case[1])
             assert.is_nil(ok)
@@ -469,11 +471,9 @@ plan:
         end
     end)
 
-    it("records the Lua owner but compares every retained method", function()
-        assert.same({
-            omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" },
-            opaque = { "Lua" },
-        }, checks.browser_differences["titan.lua"])
+    it("drops the omitted Lua methods but compares the owner and every retained method", function()
+        assert.same({ omitted = { "dofile", "Lua:run_async", "Lua:run_async_from_loader" } },
+            checks.browser_differences["titan.lua"])
         local retained = { "close", "detach", "run", "run_from_loader" }
         local function provider(browser, changed)
             local owner, methods = "titan.lua.Lua", {}
@@ -499,12 +499,117 @@ plan:
         end
         local rows, modules, differences = checks.inventory(provider(false), provider(true))
         assert.equal(1, modules)
-        assert.equal(#retained, #rows)
-        assert.equal(4, #differences)
+        assert.equal(#retained + 1, #rows)
+        assert.equal(3, #differences)
         for _, name in ipairs(retained) do
             local ok, err = checks.inventory(provider(false), provider(true, name))
             assert.is_nil(ok)
             assert.truthy(err:find("titan.lua.Lua:" .. name, 1, true), err)
+        end
+    end)
+
+    -- Drift detection over fixture modules checked from source: the native
+    -- and browser compositions of one module are compared through the same
+    -- serialized interfaces that installed providers carry.
+    local function checked(source)
+        local ok, err, _, modtype = h.run_checker(source)
+        assert.truthy(ok, err)
+        return { key_order = { "test" }, entries = { test = { types = types.serialize(modtype) } } }
+    end
+    local function compare(native_source, browser_source, omitted)
+        return checks.inventory(checked(native_source), checked(browser_source),
+            { test = { omitted = omitted } })
+    end
+    local differs = " (semantic declaration differs)"
+
+    it("rejects every public-shape drift that normalization keeps", function()
+        local literal = "record P\n  x: integer\nend\n"
+        local opaque = "record R\n  x: integer\n  local handle: integer\nend\n"
+        local closer = "record R\n  local handle: integer\nend\nfunction R:close() end\n"
+        for _, case in ipairs({
+            { "renamed parameter", "function f(a: integer): integer return a end\n",
+                "function f(b: integer): integer return b end\n", "test.f: native=" },
+            { "changed generic parameter", "function id<|T|>(item: T): T return item end\n",
+                "function id<|U|>(item: U): U return item end\n", "test.id: native=" },
+            { "changed generic constraint",
+                "interface Named\n  name: string\nend\nfunction show<|T: Named|>(item: T): T return item end\n",
+                "interface Named\n  name: string\nend\nfunction show<|T|>(item: T): T return item end\n",
+                "test.show: native=" },
+            { "changed alias target", "type Id = integer\n", "type Id = string\n",
+                "test.Id: native=integer; browser=string" },
+            { "changed public field type", literal, "record P\n  x: string\nend\n",
+                "test.P.x: native=integer; browser=string" },
+            { "changed public field order", "record P\n  x: integer\n  y: string\nend\n",
+                "record P\n  y: string\n  x: integer\nend\n", "test.P: native=test.P; browser=test.P" .. differs },
+            { "changed public field constness", literal, "record P\n  const x: integer\nend\n",
+                "test.P.x: native=integer; browser=integer (readonly)" },
+            { "hidden field added to a literal-constructible record", literal,
+                "record P\n  x: integer\n  local secret: integer\nend\n",
+                "test.P: native=test.P; browser=test.P" .. differs },
+            { "hidden variant added to an exhaustively matchable union", "union U\n  a()\n  b()\nend\n",
+                "union U\n  a()\n  b()\n  local c()\nend\n", "test.U: native=test.U; browser=test.U" .. differs },
+            { "opaque browser record without a private field", opaque, "record R\n  x: integer\nend\n",
+                "test.R: native=test.R; browser=test.R" .. differs },
+            { "added custom constructor", literal,
+                literal .. "function P.new(x: integer): P return { x = x } end\n",
+                "test.P: native=test.P; browser=test.P" .. differs },
+            { "changed module-variable constness", "limit: integer = 1\n", "const limit: integer = 1\n",
+                "test.limit: native=integer; browser=integer (const)" },
+            { "browser-only member in a native module", "function f() end\n",
+                "function f() end\nfunction extra() end\n", "test.extra: native=<absent>" },
+            { "unlisted owner-method absence", closer, "record R\n  local handle: integer\nend\n",
+                "test.R:close: native=" },
+        }) do
+            local rows, err = compare(case[2], case[3])
+            assert.is_nil(rows, case[1])
+            assert.truthy(err:find(case[4], 1, true), case[1] .. "\n" .. err)
+        end
+    end)
+
+    it("accepts private layout, listed owner absences, local members, order and documentation", function()
+        for _, case in ipairs({
+            { "private fields inserted before a public field of a non-literal record",
+                "record R\n  local a: integer\n  x: integer\nend\n",
+                "record R\n  local b: string\n  local c: boolean\n  x: integer\nend\n" },
+            { "hidden variant inserted before a public one of a non-exhaustive union",
+                "union U\n  a()\n  local h()\nend\n", "union U\n  local z()\n  a()\n  local h()\nend\n" },
+            { "listed owner-method absence",
+                "record R\n  local handle: integer\nend\nfunction R:close() end\n" ..
+                    "function R:read(): integer return 1 end\n",
+                "record R\n  local handle: string\nend\nfunction R:read(): integer return 2 end\n",
+                { "R:close" } },
+            { "local method changes", "record P\n  x: integer\nend\n",
+                "record P\n  x: integer\nend\nlocal function P:twice(): integer return self.x * 2 end\n" },
+            { "member reordering", "function a() end\nfunction b() end\nrecord P\n  x: integer\nend\n",
+                "record P\n  x: integer\nend\nfunction b() end\nfunction a() end\n" },
+            { "documentation changes", "function f(): integer return 1 end\n",
+                "--- Return one.\n-- @return The integer one.\nfunction f(): integer return 1 end\n" },
+        }) do
+            local rows, err = compare(case[2], case[3], case[4])
+            assert.truthy(rows, case[1] .. "\n" .. tostring(err))
+        end
+    end)
+
+    -- No ABI-width exception exists (titan#336): a C width that differs
+    -- between targets fails like a changed spelling or signedness.
+    it("compares every C fact of a raw export exactly", function()
+        local function provider(spelling, signed, rank, bits)
+            local modtype = types.Module("fixture", {
+                types.ModuleMember("fixture", "raw",
+                    types.CFunction({ types.CInteger(spelling, signed, rank, bits) }, types.CVoid(), false, nil), nil),
+            }, {})
+            return { key_order = { "fixture" }, entries = { fixture = { types = types.serialize(modtype) } } }
+        end
+        for _, case in ipairs({
+            { provider("int", true, 3, 32), provider("unsigned int", false, 3, 32) },
+            { provider("int", true, 3, 32), provider("long long", true, 5, 64) },
+            { provider("char", true, 1, 8), provider("char", false, 1, 8) },
+            { provider("long", true, 4, 64), provider("long", true, 4, 32) },
+        }) do
+            assert(checks.inventory(case[1], case[1]))
+            local rows, err = checks.inventory(case[1], case[2])
+            assert.is_nil(rows)
+            assert.truthy(err:find("fixture.raw: native=", 1, true), err)
         end
     end)
 
