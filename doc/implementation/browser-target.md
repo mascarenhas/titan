@@ -995,8 +995,11 @@ home, because WebKit's default ephemeral context has no HTTP cache.
   the compressed `Content-Length`, a partial body then a reset, and, for
   WebSocket, a 403, a malformed 101, a 101 without the offered subprotocol, a
   held handshake, an empty Close, a Close followed by a reset, a paused
-  reader, peer FIN and reset, and a 20 MiB frame. Per-route counters report
-  when connections open and close.
+  reader, peer FIN and reset, and a 20 MiB frame. The Close-then-reset route
+  waits for the client's Close reply before resetting; after five seconds
+  without a reply it records the timeout and resets, and the driver fails
+  the missing-reply assertion. Per-route counters report when connections
+  open and close.
 * `net.test.mjs` is the `run(context)` driver for both runners. It passes the
   URLs in the instance's `env` (`TITAN_TEST_HTTP_URL`,
   `TITAN_TEST_HTTPS_VALID_URL`, `TITAN_TEST_HTTPS_WRONG_HOST_URL`,

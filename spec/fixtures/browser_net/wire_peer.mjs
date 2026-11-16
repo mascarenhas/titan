@@ -3,14 +3,14 @@ import {createHash} from 'node:crypto';
 import {gzipSync} from 'node:zlib';
 
 // Deliberate wire cases share one complete-header parser and owned socket set.
-function writeFrame(socket, opcode, payload = Buffer.alloc(0), done) {
+function writeFrame(socket, opcode, payload = Buffer.alloc(0)) {
   const header = Buffer.alloc(payload.length < 126 ? 2 : payload.length < 65536 ? 4 : 10);
   header[0] = 0x80 | opcode;
   if (header.length === 2) header[1] = payload.length;
   else if (header.length === 4) { header[1] = 126; header.writeUInt16BE(payload.length, 2); }
   else { header[1] = 127; header.writeBigUInt64BE(BigInt(payload.length), 2); }
   socket.write(header);
-  socket.write(payload, done);
+  socket.write(payload);
 }
 
 function closeBody(code, reason = '') {
@@ -26,7 +26,7 @@ export async function wirePeer() {
   const cors = 'Access-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: *\r\n';
   const server = createServer(socket => {
     sockets.add(socket);
-    let received = Buffer.alloc(0), route, counted = false, upgraded = false;
+    let received = Buffer.alloc(0), route, counted = false, upgraded = false, closeReplyTimer;
     function frames(chunk) {
       received = Buffer.concat([received, chunk]);
       while (received.length >= 2) {
@@ -38,6 +38,12 @@ export async function wirePeer() {
         if (received.length < header + length) return;
         const opcode = received[0] & 15;
         if (opcode === 8) {
+          if (route.endsWith('/close-reset')) {
+            events.get(route).closeReply = true;
+            clearTimeout(closeReplyTimer);
+            socket.resetAndDestroy();
+            return;
+          }
           const body = Buffer.from(received.subarray(header, header + length));
           if (masked) for (let index = 0; index < length; index++) body[index] ^= received[mask + index % 4];
           if (!socket.writableEnded) { writeFrame(socket, 8, body); socket.end(); }
@@ -47,6 +53,7 @@ export async function wirePeer() {
     }
     socket.on('error', () => {}); // A client abort is an expected observed outcome.
     socket.on('close', () => {
+      clearTimeout(closeReplyTimer);
       sockets.delete(socket);
       if (counted) events.get(route).closed++;
     });
@@ -97,7 +104,15 @@ export async function wirePeer() {
         websockets.set(id, {socket, release() {
           if (mode === 'empty') { writeFrame(socket, 8); socket.end(); }
           else if (mode === '1000' || mode === '1001') { writeFrame(socket, 8, closeBody(Number(mode), 'peer')); socket.end(); }
-          else if (mode === 'close-reset') writeFrame(socket, 8, closeBody(1000, 'bye'), () => socket.resetAndDestroy());
+          else if (mode === 'close-reset') {
+            row.closeReply = false; row.closeReplyTimedOut = false;
+            closeReplyTimer = setTimeout(() => {
+              row.closeReplyTimedOut = true;
+              socket.resetAndDestroy();
+            }, 5000);
+            // The client's Close reply, not the write callback, proves it parsed Close.
+            writeFrame(socket, 8, closeBody(1000, 'bye'));
+          }
           else if (mode === 'large') {
             writeFrame(socket, 1, Buffer.from('first'));
             writeFrame(socket, 2, Buffer.from([0, 255]));

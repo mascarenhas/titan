@@ -98,8 +98,13 @@ async function peersClosed(context, state, env) {
     await until(async () => {
       const response = await fetch(endpoint), body = await response.text();
       const counts = raw ? JSON.parse(body) : {opened: Number(body.split(':')[0]), closed: Number(body.split(':')[1])};
-      return (row.opened ? counts.opened === 1 : counts.opened === 0 || counts.opened === 1) &&
+      const complete = (row.opened ? counts.opened === 1 : counts.opened === 0 || counts.opened === 1) &&
         counts.closed === counts.opened;
+      if (complete && raw && url.pathname.endsWith('/close-reset')) {
+        context.assert(counts.closeReply === true && counts.closeReplyTimedOut === false,
+          'close-reset peer did not receive the client Close reply within 5 s: ' + body);
+      }
+      return complete;
     }, 'peer socket did not close before dispose: ' + source);
     context.assert(row.added === row.removed, 'WebSocket DOM listeners leaked: ' + source);
   }

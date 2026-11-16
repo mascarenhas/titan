@@ -244,10 +244,10 @@ nil `subprotocol()` when none is selected.
 `async.Error` carrier that every later operation raises again. After `open`,
 a `close` event with code 1006 or 1015, which no Close frame can carry, latches
 `Error("abnormal", operation, "transport ended before WebSocket Close", nil)`;
-any other code is a valid peer Close, including 1005 for an empty Close and a
-coded Close followed at once by a TCP reset, for which Chromium reports
-`wasClean = false`. `close_status()` records the code and reason of every
-`close` event except 1005, 1006, and 1015, whatever `wasClean` says. A host
+any other code is a valid peer Close, including 1005 for an empty Close.
+An unclean transport teardown can still report a valid peer Close code:
+`close_status()` records the code and reason of every `close` event except
+1005, 1006, and 1015, whatever `wasClean` says. A host
 exception from a later source call becomes `Error("abnormal", operation,
 message, nil)`; `BrowserError` never escapes the WebSocket API.
 
@@ -314,6 +314,13 @@ headers and `ca_file` and the `lua.new()` refusal. Framing, UTF-8 wire,
 server, and transfer cases stay in `.native.titan` contributors. The browser
 client's network behavior runs against real engines in the live browser
 network harness ([browser target](browser-target.md#the-live-browser-network-harness)).
+
+The Close-then-reset fixture sends Close(1000, `"bye"`) and waits for the client's
+Close reply before resetting TCP. This establishes that the client parsed Close,
+which a local write callback cannot prove. After five seconds without a reply,
+the peer records the timeout and resets anyway; the driver requires a timely
+reply. Every engine must still return `(nil, nil)` on both reads and preserve
+`close_status() == (1000, "bye")`.
 
 Buffered-write loss tests require the exact admitted write to fail, except for
 FIN on every engine and remote Close/reset on WebKit, where host loss reporting
