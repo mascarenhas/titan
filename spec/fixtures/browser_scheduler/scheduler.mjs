@@ -125,6 +125,8 @@ async function gate(context, image) {
   const host = makeHost(context, image);
   try {
     const result = await host.instance.run([]);
+    // The runner report is the evidence of the owner's inventory tests.
+    context.stdout(join(host.stdout));
     const out = decode(join(host.stdout)), err = decode(join(host.stderr));
     context.assert(result.kind === 'returned' && result.status === 0, `scheduler gate failed:\n${out}${err}`);
     const passed = out.match(/\[  PASSED  \] (\d+) tests?\./);

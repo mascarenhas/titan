@@ -591,15 +591,30 @@ function M.test_references(inventory)
 end
 
 -- The cases a run reports as passed: runner lines `[       OK ] <case>
--- (<ms> ms)`, and the case names in the OS stream harness summary.
+-- (<ms> ms)`, and the case names of a passing OS stream harness summary. A
+-- parent reports OK after its subtests whatever their outcome, so it counts
+-- only when none of them was skipped or failed.
 function M.passed_cases(output)
-    local passed = {}
-    for line in (output .. "\n"):gmatch("([^\n]*)\n") do
-        local name = line:gsub("\r$", ""):match("^%[       OK %] (.-) %(%d+%.%d%d ms%)$")
+    local passed, unfinished = {}, {}
+    for raw in (output .. "\n"):gmatch("([^\n]*)\n") do
+        local line = raw:gsub("\r$", "")
+        local name = line:match("^%[       OK %] (.-) %(%d+%.%d%d ms%)$")
         if name then passed[name] = true end
+        local other = line:match("^%[  SKIPPED %] (.*)$") or line:match("^%[  FAILED  %] (.*)$")
+        if other then unfinished[#unfinished + 1] = other end
     end
-    local names = (output:match("OS%-STREAMS (%b{})") or ""):match('"names":(%b[])')
-    for name in (names or ""):gmatch('"([^"]*)"') do passed["os.browser_tests:" .. name] = true end
+    for name in pairs(passed) do
+        local prefix = name .. "."
+        for _, text in ipairs(unfinished) do
+            if text:sub(1, #prefix) == prefix then passed[name] = nil; break end
+        end
+    end
+    local summary = output:match("OS%-STREAMS (%b{})")
+    if summary and summary:find('"verdict":"PASS"', 1, true) then
+        for name in (summary:match('"names":(%b[])') or ""):gmatch('"([^"]*)"') do
+            passed["os.browser_tests:" .. name] = true
+        end
+    end
     return passed
 end
 

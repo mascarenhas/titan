@@ -788,10 +788,142 @@ plan:
         end
     end)
 
+    -- The inventory tests that the browser test sources do not define, as
+    -- `<label>: <test>` lines. A case is a public top-level `test_*` function
+    -- with one named parameter, as the runner discovers it, and each subtest
+    -- segment after it is a string literal of the owner's sources; a whole
+    -- owner needs one case. An OS stream harness name is an exact
+    -- `check('<name>'` registration of the harness, or matches a
+    -- ``check(`<template>` `` registration in which every `${...}` segment
+    -- is a quoted literal of the harness. `owner_sources(owner)` returns the
+    -- owner's `{ filename, text }` sources.
+    local function undefined_tests(references, owners, owner_sources, harness)
+        local exact, templates = {}, {}
+        for name in harness:gmatch("check%('([^']+)'") do exact[name] = true end
+        for template in harness:gmatch("check%(`([^`]+)`") do
+            local marked, count = template:gsub("%${.-}", "\1")
+            if count == 0 then
+                exact[template] = true
+            else
+                templates[#templates + 1] = "^" .. marked:gsub("%p", "%%%0"):gsub("\1", "([^:]+)") .. "$"
+            end
+        end
+        local function registered(name)
+            if exact[name] then return true end
+            for _, pattern in ipairs(templates) do
+                local segments = { name:match(pattern) }
+                local quoted = #segments > 0
+                for _, segment in ipairs(segments) do
+                    quoted = quoted and harness:find("'" .. segment .. "'", 1, true) ~= nil
+                end
+                if quoted then return true end
+            end
+            return false
+        end
+        local loaded = {}
+        local function owner_tests(owner)
+            if loaded[owner] then return loaded[owner] end
+            local cases, strings = {}, {}
+            local function collect(node)
+                if node._tag == "Ast.ExpString" then strings[node.value] = true end
+                for _, child in pairs(node) do
+                    if type(child) == "table" then collect(child) end
+                end
+            end
+            for _, source in ipairs(owner_sources(owner)) do
+                local ast = assert(parser.parse(source.filename, source.text))
+                for _, node in ipairs(ast) do
+                    if node._tag == "Ast.TopLevelFunc" and not node.islocal and node.name:match("^test_")
+                        and #node.params == 1 and node.params[1].name ~= nil then
+                        cases[node.name] = true
+                    end
+                end
+                collect(ast)
+            end
+            loaded[owner] = { cases = cases, strings = strings }
+            return loaded[owner]
+        end
+        local missing = {}
+        for _, reference in ipairs(references) do
+            local test, owner = reference.test, reference.owner
+            local defined
+            if not owners[owner] then
+                missing[#missing + 1] = reference.label .. ": " .. owner .. " is not a browser test owner"
+                defined = true
+            elseif reference.kind == "harness" then
+                defined = registered(test:sub(#"os.browser_tests:" + 1))
+            elseif reference.kind == "owner" then
+                defined = next(owner_tests(owner).cases) ~= nil
+            else
+                local found = owner_tests(owner)
+                local path = test:sub(#owner + 2)
+                local case = assert(path:match("^[^.]+"))
+                defined = found.cases[case] == true
+                for segment in path:sub(#case + 1):gmatch("%.([^.]+)") do
+                    defined = defined and found.strings[segment] == true
+                end
+            end
+            if not defined then missing[#missing + 1] = reference.label .. ": " .. test end
+        end
+        table.sort(missing)
+        return missing
+    end
+
+    it("rejects inventory tests that the browser test sources do not define", function()
+        local harness = assert(strategy:read_file("spec/fixtures/browser_scheduler/os-streams.mjs"))
+        local sources = {
+            ["fake.tests"] = { { filename = "fake.titan", text = [[
+function test_one(context: test.Context)
+  context:run("child", function (_: test.Context) end)
+end
+function test_helper()
+end
+function test_pair(_: test.Context, _extra: integer)
+end
+function test_rest(...: test.Context)
+end
+local function test_local(_: test.Context)
+end
+]] } },
+            ["empty.tests"] = { { filename = "empty.titan", text = "local function helper()\nend\n" } },
+        }
+        local tests = {
+            ["fake.tests.test_one"] = true, ["fake.tests.test_one.child"] = true, ["fake.tests"] = true,
+            ["os.browser_tests:stdin-chunks-empty-and-sticky-eof"] = true,
+            ["os.browser_tests:declared-kinds-and-tty:tty"] = true,
+            ["os.browser_tests:unsupported-shutdown-keeps-open:stdout:undeclared"] = true,
+            ["os.browser_tests:tcp-shutdown-order-repeat-epipe:stderr:cancel"] = true,
+            ["os.browser_tests:stock-owner-task-exit:3"] = true,
+            ["other.tests.test_one"] = "other.tests is not a browser test owner",
+            ["fake.tests.test_missing"] = false, ["fake.tests.test_helper"] = false,
+            ["fake.tests.test_pair"] = false, ["fake.tests.test_rest"] = false,
+            ["fake.tests.test_local"] = false, ["fake.tests.test_one.chlid"] = false,
+            ["fake.tests.test_one.child.stale"] = false, ["empty.tests"] = false,
+            ["os.browser_tests:stdin"] = false, ["os.browser_tests:stdin-chunks"] = false,
+            ["os.browser_tests:stdin-chunks-empty-and-sticky-eof:stale"] = false,
+            ["os.browser_tests:declared-kinds-and-tty:ttty"] = false,
+            ["os.browser_tests:declared-kinds-and-tty"] = false,
+            ["os.browser_tests:unsupported-shutdown-keeps-open:stdout"] = false,
+        }
+        local rows, expected = {}, {}
+        for test, defined in pairs(tests) do
+            rows[#rows + 1] = { test, "implemented", test }
+            if defined ~= true then
+                expected[#expected + 1] = "titan.fake." .. test .. ": " .. (defined or test)
+            end
+        end
+        table.sort(expected)
+        local references = checks.test_references({ modules = {}, members = { ["titan.fake"] = rows } })
+        assert.equal(#rows, #references)
+        assert.same(expected, undefined_tests(references,
+            { ["fake.tests"] = true, ["empty.tests"] = true, ["os.browser_tests"] = true },
+            function(owner) return assert(sources[owner], owner) end, harness))
+    end)
+
     -- Each named test must exist before the browser lane runs it: an image or
     -- harness owner's compiler-selected browser sources define the case, an
-    -- OS stream harness case appears in its driver, and every harness gate
-    -- runs in the browser-stdlib job.
+    -- OS stream harness case is registered by its driver, and every harness
+    -- gate runs in the browser-stdlib job.
     it("names only tests that exist in the browser test sources", function()
         if platform.windows then pending("browser source resolution requires a supported host"); return end
         local plan = root_plan()
@@ -810,38 +942,18 @@ plan:
         local harness = assert(strategy:read_file("spec/fixtures/browser_scheduler/os-streams.mjs"))
         local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
         local context = driver._new_resolver_context({ io = strategy, target = "browser" }, descriptor)
-        local cases, missing = {}, {}
-        local function owner_cases(owner)
-            if cases[owner] then return cases[owner] end
-            local found = {}
+        local function owner_sources(owner)
             local source = assert(driver.resolve_source(context, owner, "spec/stdlib/titan"), owner)
+            local result = {}
             for _, filename in ipairs(source.files or { source.main }) do
-                for _, node in ipairs(assert(parser.parse(filename, assert(strategy:read_file(filename))))) do
-                    if node._tag == "Ast.TopLevelFunc" and not node.islocal and node.name:match("^test_") then
-                        found[node.name] = true
-                    end
-                end
+                result[#result + 1] = { filename = filename, text = assert(strategy:read_file(filename)) }
             end
-            cases[owner] = found
-            return found
+            return result
         end
-        local called, err = pcall(function()
-            for _, reference in ipairs(checks.test_references(checks.status_inventory)) do
-                local test, owner = reference.test, reference.owner
-                if not owners[owner] then
-                    missing[#missing + 1] = reference.label .. ": " .. owner .. " is not a browser test owner"
-                elseif reference.kind == "harness" then
-                    if not harness:find(assert(test:match("^os%.browser_tests:([^:]+)")), 1, true) then
-                        missing[#missing + 1] = reference.label .. ": " .. test
-                    end
-                elseif reference.kind == "case" then
-                    local case = test:sub(#owner + 2):match("^[^.]+")
-                    if not owner_cases(owner)[case] then missing[#missing + 1] = reference.label .. ": " .. test end
-                end
-            end
-        end)
+        local called, missing = pcall(undefined_tests, checks.test_references(checks.status_inventory),
+            owners, owner_sources, harness)
         local closed, close_error = driver.close_resolver_context(context)
-        assert.is_true(called, err)
+        assert.is_true(called, missing)
         assert.is_true(closed, close_error)
         assert.same({}, missing)
     end)
@@ -875,6 +987,9 @@ plan:
             'OS-STREAMS {"verdict":"PASS","cases":1,"dialogs":0,"names":["exit:3"]}',
         }, "\n")
         assert(checks.require_evidence(inventory, complete, owners))
+        -- A sibling's skipped case leaves a parent's own evidence intact.
+        assert(checks.require_evidence(inventory, complete:gsub("(%[       OK %] mixed.tests.test_two )",
+            "[  SKIPPED ] mixed.tests.test_two_more (capability: fixture) (0.10 ms)\n%1"), owners))
         assert(checks.require_evidence(inventory, "", {}))
         for _, case in ipairs({
             { complete:gsub("%[       OK %] core", "[  SKIPPED ] core"), "titan.core: core.tests" },
@@ -882,6 +997,13 @@ plan:
             { complete:gsub("%[       OK %] mixed.tests.test_three.child", "[  FAILED  ] mixed.tests.test_three.child"),
                 "titan.core.three: mixed.tests.test_three.child" },
             { complete:gsub('"exit:3"', '"exit:4"'), "stock Lua os.exit: os.browser_tests:exit:3" },
+            { complete:gsub('"verdict":"PASS"', '"verdict":"FAIL"'), "stock Lua os.exit: os.browser_tests:exit:3" },
+            -- A parent reports OK after a skipped or failed subtest.
+            { complete:gsub("(%[       OK %] mixed.tests.test_two )",
+                "[  SKIPPED ] mixed.tests.test_two.child (capability: fixture) (0.10 ms)\n%1"),
+                "titan.core.two: mixed.tests.test_two" },
+            { complete:gsub("(%[       OK %] core)", "[  FAILED  ] core.tests.test_any.child (0.05 ms)\n%1"),
+                "titan.core: core.tests" },
         }) do
             local ok, err = checks.require_evidence(inventory, case[1], owners)
             assert.is_nil(ok, case[2])
@@ -1105,5 +1227,59 @@ if arg[1] == "fail" then os.exit(7) end
             assert.is_false(rejected.ok, rejected.output)
             assert.truthy(rejected.output:find("malformed native case timing", 1, true), rejected.output)
         end
+    end)
+
+    it("requires every named image test of the status inventory to pass in a complete run", function()
+        local owner, named, cases = "timer.tests", {}, {}
+        for _, reference in ipairs(checks.test_references(checks.status_inventory)) do
+            if reference.owner == owner and reference.kind == "case" and not named[reference.test] then
+                assert.is_nil(reference.test:sub(#owner + 2):find(".", 1, true), reference.test)
+                named[reference.test] = true
+                cases[#cases + 1] = reference.test
+            end
+        end
+        table.sort(cases)
+        assert.is_true(#cases > 1, owner .. " should name more than one inventory case")
+        local function report(selected, skipped)
+            local rows, passed = { "[==========] Running Titan tests." }, 0
+            for _, name in ipairs(selected) do
+                rows[#rows + 1] = "[ RUN      ] " .. name
+                if name == skipped then
+                    rows[#rows + 1] = "[  SKIPPED ] " .. name .. " (capability: fixture) (0.25 ms)"
+                else
+                    rows[#rows + 1] = "[       OK ] " .. name .. " (0.25 ms)"
+                    passed = passed + 1
+                end
+            end
+            rows[#rows + 1] = string.format("[----------] %s (%.2f ms total)", owner, #selected * 0.25)
+            rows[#rows + 1] = string.format("[==========] %d tests ran. (%.2f ms total)", #selected, #selected * 0.25 + 1)
+            rows[#rows + 1] = "[  PASSED  ] " .. passed .. " tests."
+            if skipped then rows[#rows + 1] = "[  SKIPPED ] 1 tests." end
+            return table.concat(rows, "\n") .. "\n"
+        end
+        local roots, log = temporary.name("-browser-roots.txt"), temporary.name("-browser-stdlib.log")
+        scratch = { roots, log }
+        assert(strategy:write_file(roots, owner .. "\n"))
+        local lua = installed_prefix.active() .. "/bin/lua" .. (platform.windows and ".exe" or "")
+        local function audit(contents, filter)
+            assert(strategy:write_file(log, contents))
+            return strategy:run({lua, "-E", "scripts/check_browser_stdlib.lua", "output",
+                roots, filter or "", log}, {stderr_to_stdout = true})
+        end
+        local evidence = "Browser stdlib inventory evidence: every named image test passed."
+        local complete = audit(report(cases))
+        assert.is_true(complete.ok, complete.output)
+        assert.truthy(complete.output:find(evidence, 1, true), complete.output)
+        -- A classified skip passes the runner audit but is not evidence.
+        local skipped = audit(report(cases, cases[1]))
+        assert.is_false(skipped.ok, skipped.output)
+        assert.truthy(skipped.output:find("skipped=1 failed=0", 1, true), skipped.output)
+        assert.truthy(skipped.output:find("inventory tests that did not pass", 1, true), skipped.output)
+        assert.truthy(skipped.output:find(": " .. cases[1], 1, true), skipped.output)
+        -- A filtered run may leave named cases unselected.
+        local filtered = audit(report({ cases[1] }), "^" .. (cases[1]:gsub("%.", "[.]")) .. "$")
+        assert.is_true(filtered.ok, filtered.output)
+        assert.truthy(filtered.output:find("(filtered)", 1, true), filtered.output)
+        assert.falsy(filtered.output:find(evidence, 1, true), filtered.output)
     end)
 end)

@@ -156,7 +156,6 @@ local function await_test_cancellable_outcome(result: async.CancellableResult<|i
     else return "cancelled with a complex reason"
     end
   end
-  return "unmatched"
 end
 
 function test_cancellable_result_constructs_and_matches(_: test.Context)

@@ -142,6 +142,11 @@ describe("browser drive interface", function()
                 assert.is_true(result.ok, result.output)
                 assert(checks.require_evidence(checks.status_inventory, result.output,
                     { ["async.browser_tests"] = true }))
+                local gate_cases = 0
+                for name in pairs(checks.passed_cases(result.output)) do
+                    if name:match("^async%.browser_tests%.") then gate_cases = gate_cases + 1 end
+                end
+                assert.equal(22, gate_cases, result.output)
                 assert.truthy(result.output:find('"verdict":"PASS"', 1, true), result.output)
                 assert.truthy(result.output:find('"gate":22', 1, true), result.output)
                 assert.truthy(result.output:find('"crowd":2000', 1, true), result.output)

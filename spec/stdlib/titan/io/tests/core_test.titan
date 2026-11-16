@@ -133,7 +133,8 @@ local function Loopback:read(): string?
   return chunk
 end
 
-local function Loopback:read_until(_delimiter: string, _chop: boolean?): string?
+local function Loopback:read_until(delimiter: string, chop: boolean?): string?
+  test.assert(delimiter == "\n" and chop == true, "Reader did not forward its read_until arguments")
   return self:read()
 end
 
@@ -147,7 +148,7 @@ local function Loopback:close()
 end
 
 function test_io_interfaces_accept_a_satisfying_record(_context: test.Context)
-  local loopback = Loopback.new({}, 1, false)
+  local loopback = Loopback { chunks = {}, next = 1, closed = false }
   local writer: stream.Writer = loopback
   writer:write("a")
   local both: stream.ReaderWriter = loopback
