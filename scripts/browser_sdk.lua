@@ -342,6 +342,15 @@ elseif action == "finalize" then
         end
     end
     copy_file_atomic(staged_provider, assets.provider, false)
+    -- The compiler names an absent module and its reason from this list. It
+    -- changes only diagnostics, so sdk-digests does not record it.
+    local absent_lines = {}
+    for _, row in ipairs(stdlib_checks.status_inventory.modules) do
+        if row[2] == "absent" then absent_lines[#absent_lines + 1] = row[1] .. "\t" .. row.reason .. "\n" end
+    end
+    local absent_file = paths.join(descriptor.paths.titan_bin, "absent-modules")
+    local written, write_err = strategy:write_file(absent_file, table.concat(absent_lines))
+    if not written then fail("cannot write '" .. absent_file .. "': " .. tostring(write_err)) end
 
     -- Collect all installed browser SDK inputs for sdk-digests (written LAST).
     local digest_inputs = {

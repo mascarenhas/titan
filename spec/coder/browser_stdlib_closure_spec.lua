@@ -117,18 +117,22 @@ describe("browser stdlib real-toolchain closure", function()
         assert.truthy(empty.output:find("selected no cases", 1, true), empty.output)
     end)
 
-    it("rejects every absent standard module at compile time by its module name", function()
+    it("rejects every absent standard module at compile time with the SDK's reason", function()
         local info = fixture({ sdk = true })
         if not info then return end
-        for _, module in ipairs(checks.absent_modules) do
-            local name = "missing_" .. module:sub(7)
-            write(name .. ".titan", "local missing = import " .. string.format("%q", module:sub(7)) .. "\n")
-            local result = strategy:run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser",
-                "--tree", workspace, "--output", workspace .. "/missing-out", name },
-                { stderr_to_stdout = true })
-            assert.is_true(result.started, result.output)
-            assert.is_false(result.ok, result.output)
-            assert.truthy(result.output:find(module, 1, true), result.output)
+        for _, row in ipairs(checks.status_inventory.modules) do
+            if row[2] == "absent" then
+                local module = row[1]
+                local name = "missing_" .. module:sub(7)
+                write(name .. ".titan", "local missing = import " .. string.format("%q", module:sub(7)) .. "\n")
+                local result = strategy:run({ info.prefix .. "/bin/titanc", "-q", "--target", "browser",
+                    "--tree", workspace, "--output", workspace .. "/missing-out", name },
+                    { stderr_to_stdout = true })
+                assert.is_true(result.started, result.output)
+                assert.is_false(result.ok, result.output)
+                assert.truthy(result.output:find("module '" .. module .. "' is not available for target 'browser': " ..
+                    row.reason, 1, true), result.output)
+            end
         end
     end)
 

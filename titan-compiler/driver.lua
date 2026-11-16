@@ -2804,6 +2804,33 @@ local function blocked_source_error(modname, source)
         source.owner .. "' whose main source is '" .. source.main .. "'"
 end
 
+-- The diagnostic for a module that no lookup found: a browser build reports a
+-- module its SDK lists as unavailable for the target, with the SDK's reason;
+-- any other name keeps the not-found message of its import form. The browser
+-- SDK lists those modules in `<titan_bin>/absent-modules`, one
+-- `<module>\t<reason>` line each, read once per resolver context; without
+-- the file (no SDK installed) none is listed. (The main chunk is at Lua's
+-- local-variable limit, so the cache stays inside this block.)
+do
+    local reasons_by_context = setmetatable({}, { __mode = "k" })
+    function driver.missing_module_message(context, modname, source_required)
+        local descriptor = context and context.target == "browser" and driver.context_target_descriptor(context)
+        if descriptor then
+            local reasons = reasons_by_context[context]
+            if not reasons then
+                reasons = {}
+                local text = context.io:read_file(path.join(descriptor.paths.titan_bin, "absent-modules"))
+                for name, reason in (text or ""):gmatch("([^\t\n]+)\t([^\n]+)") do reasons[name] = reason end
+                reasons_by_context[context] = reasons
+            end
+            if reasons[modname] then
+                return "module '" .. modname .. "' is not available for target 'browser': " .. reasons[modname]
+            end
+        end
+        return (source_required and "source module '" or "module '") .. modname .. "' not found"
+    end
+end
+
 local function one_metadata_result(fn, label)
     local results = table.pack(pcall(fn))
     if not results[1] then return nil, tostring(results[2]) end
@@ -6545,7 +6572,7 @@ function driver.defaultloader(static_deps, options)
             if candidate then
                 driver.imported[modname] = nil
             elseif source_required then
-                return false, "source module '" .. modname .. "' not found"
+                return false, driver.missing_module_message(context, modname, true)
             end
         end
         if not source_preferred and not driver.imported[modname] then
@@ -6632,7 +6659,7 @@ function driver.defaultloader(static_deps, options)
             if candidate_err then return false, candidate_err end
             if candidate then return load_source(candidate) end
             if source_required then
-                return false, "source module '" .. modname .. "' not found"
+                return false, driver.missing_module_message(context, modname, true)
             end
         end
 
@@ -6656,7 +6683,7 @@ function driver.defaultloader(static_deps, options)
             local candidate, candidate_err = find_source()
             if candidate_err then return false, candidate_err end
         end
-        if not source then return false, "module '" .. modname .. "' not found" end
+        if not source then return false, driver.missing_module_message(context, modname, false) end
         return load_source(source)
     end
     context.loader = loader
@@ -6722,8 +6749,7 @@ local function current_source_descriptor(context, modname)
     local source, source_error = resolve_source(
         driver.TITAN_SOURCE_PATH, modname, context)
     if not source then
-        return nil, source_error or ("source module '" .. modname ..
-            "' not found")
+        return nil, source_error or driver.missing_module_message(context, modname, true)
     elseif source.kind == "blocked" then
         return nil, blocked_source_error(modname, source)
     end
@@ -7560,7 +7586,7 @@ function driver.resolve_external_modules(
             elseif source_required then
                 results[name] = {
                     kind = "error",
-                    message = "source module '" .. name .. "' not found",
+                    message = driver.missing_module_message(context, name, true),
                 }
             else
                 results[name] = { kind = "missing" }
@@ -8085,8 +8111,7 @@ function driver.tableloader(modtable, imported, deps, options)
             if source_required and
                (mod.kind ~= "source" or not mod.source_type) then
                 if modtable[modname] == nil then
-                    return false,
-                        "source module '" .. modname .. "' not found"
+                    return false, driver.missing_module_message(context, modname, true)
                 end
                 imported[modname] = nil
             else
@@ -8102,10 +8127,7 @@ function driver.tableloader(modtable, imported, deps, options)
         local modf = "./" .. modname .. ".titan"
         local input = modtable[modname]
         if input == nil then
-            local message = source_required
-                and ("source module '" .. modname .. "' not found")
-                or ("module '" .. modname .. "' not found")
-            return false, message
+            return false, driver.missing_module_message(context, modname, source_required)
         end
         local ast, err = parser.parse(modf, input)
         if not ast then return false, parser.error_to_string(err, modf) end
