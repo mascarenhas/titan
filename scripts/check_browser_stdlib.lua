@@ -98,6 +98,11 @@ elseif action == "output" then
         need(checks.require_evidence(checks.status_inventory, contents, image_owners))
         print("Browser stdlib inventory evidence: every named image test passed.")
     end
+elseif action == "fixture" then
+    assert(first, "fixture requires the browser provider")
+    local text = checks.type_fixture(need(staticmetadata.scan_archive(first)))
+    if second then need(strategy:write_file(second, text)) else io.write(text) end
 else
-    error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | output ROOTS FILTER LOG")
+    error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | " ..
+        "output ROOTS FILTER LOG | fixture BROWSER [FILE]")
 end

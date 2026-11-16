@@ -846,6 +846,17 @@ plan:
         assert.same({}, missing)
     end)
 
+    it("renders the browser type fixture with collision-free long brackets", function()
+        local scanned = { key_order = { "titan.alpha", "titan.beta" }, entries = {
+            ["titan.alpha"] = { types = "Module('titan.alpha',{},{})" },
+            ["titan.beta"] = { types = "x]=]y]==]z" },
+        } }
+        local text = checks.type_fixture(scanned)
+        assert.truthy(text:find("\n    alpha = [=[Module('titan.alpha',{},{})]=],\n", 1, true), text)
+        assert.truthy(text:find("\n    beta = [===[x]=]y]==]z]===],\n", 1, true), text)
+        assert.same({ alpha = "Module('titan.alpha',{},{})", beta = "x]=]y]==]z" }, assert(load(text))())
+    end)
+
     it("requires every covered inventory test to have passed in a run", function()
         local inventory = {
             modules = { { "titan.core", "present", test = "core.tests", core = true } },

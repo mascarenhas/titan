@@ -930,4 +930,24 @@ function M.member_table(rows, recorded_rows, inventory)
     return table.concat(out, "\n") .. "\n"
 end
 
+-- The browser type fixture: each module's serialized interface from the
+-- browser provider's metadata, keyed by its short name, as the native fixture
+-- pins the native provider. Each value takes the lowest long-bracket level
+-- (from one) whose closing bracket does not occur in its text.
+function M.type_fixture(scanned)
+    local out = {
+        "-- Exact current serialized interfaces of the browser standard provider",
+        "-- (lib/titan-browser/<version>/titan.a). Regenerate with",
+        "-- `lua scripts/check_browser_stdlib.lua fixture <browser titan.a> <this file>`.",
+        "return {",
+    }
+    for _, modname in ipairs(scanned.key_order) do
+        local text, level = scanned.entries[modname].types, "="
+        while text:find("]" .. level .. "]", 1, true) do level = level .. "=" end
+        out[#out + 1] = "    " .. modname:gsub("^titan%.", "") .. " = [" .. level .. "[" .. text .. "]" .. level .. "],"
+    end
+    out[#out + 1] = "}"
+    return table.concat(out, "\n") .. "\n"
+end
+
 return M
