@@ -94,11 +94,11 @@ function test_live_one_hundred_writes_allow_concurrent_timer_progress(_context: 
       return nil
     end)
     defer ticker:cancel(async.CancellationReason.simple("fairness test completed"))
-    for _index = 1, 100 do connection:write(websocket.TEXT, "fair") end
+    for _ = 1, 100 do connection:write(websocket.TEXT, "fair") end
     test.assert(ticks > 0, "write fairness yields starved the concurrent timer")
     completed = true
     async.join(ticker)
-    for _index = 1, 100 do
+    for _ = 1, 100 do
       local kind?, data? = connection:read()
       test.assert(kind == websocket.TEXT and data == "fair", "fair writes lost an echo")
     end

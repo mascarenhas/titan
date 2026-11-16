@@ -49,7 +49,7 @@ local function host_note(note: string)
 end
 
 local function wait_for(condition: Condition, message: string)
-  for _index = 1, 5000 do
+  for _ = 1, 5000 do
     if condition() then return end
     timer.sleep(2)
   end
@@ -121,7 +121,7 @@ local function cancellation_entry(...: Value): Value
   elseif phase == "write" then
     host_note("write-ready")
     local payload = string.rep("w", 1024 * 1024)
-    for _index = 1, 64 do connection:write(websocket.BINARY, payload) end
+    for _ = 1, 64 do connection:write(websocket.BINARY, payload) end
   end
   return Value.is_string("unexpected completion")
 end
