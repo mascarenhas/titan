@@ -258,8 +258,12 @@ over the limit closes its holder without `take`, retires the connection, and
 raises `Error("limit", "websocket.read", ..., 1009)`; the message is never
 copied into Wasm memory. Otherwise `take` returns the bytes, the holder
 closes, and `read` returns the message. Earlier queued messages are delivered
-first. The queue itself is not bounded: browsers expose no stream
-backpressure for `WebSocket` (`WebSocketStream` is Chromium-only).
+first. Consumed slots are cleared; after at least 32 slots have been consumed
+and that prefix can pay for the unread suffix, the queue copies that suffix before
+replacing the old FIFO. Retained queue storage therefore follows the unread
+backlog rather than the connection's message history. The unread queue itself
+is not bounded: browsers expose no stream backpressure for `WebSocket`
+(`WebSocketStream` is Chromium-only).
 
 **Write backpressure.** `write` admits one writer, validates text with the
 shared `validate_text` before JavaScript could replace invalid UTF-8 with

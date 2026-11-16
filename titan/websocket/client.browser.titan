@@ -1,6 +1,7 @@
 local type Value = browser.BrowserValue
 local const HIGH_WATER = 256 * 1024
 local const LOW_WATER = 64 * 1024
+local const COMPACT_MIN_PREFIX = 32
 
 -- Only a suspended operation owns a wake; release it before queuing its Task.
 local record Wait
@@ -73,6 +74,20 @@ local function Connection:wake_waiters()
   if self.opening ~= nil then self.opening:wake() end
   if self.reader ~= nil then self.reader:wake() end
   if self.shutdown_wait ~= nil then self.shutdown_wait:wake() end
+end
+
+local function Connection:compact_messages()
+  if self.first <= COMPACT_MIN_PREFIX then return end
+  local count = #self.messages - self.first + 1
+  -- Copy only after the consumed prefix can pay for all remaining elements.
+  -- Keep the entire old FIFO owned until replacement allocation/copy succeeds.
+  if self.first <= count then return end
+  local replacement: {Message} = {}
+  for index = 1, count do
+    replacement[index] = self.messages[self.first + index - 1]
+  end
+  self.messages = replacement
+  self.first = 1
 end
 
 local function Connection:discard_messages()
@@ -278,11 +293,12 @@ local function Connection:read_message(waiter: Wait): (MessageType?, string?)
     if self.failure ~= nil then self.failure:raise() end
     if self.terminal then raise state_error("websocket.read", "WebSocket is closed") end
     if self.first <= #self.messages then
+      self:compact_messages()
       local message = self.messages[self.first]
+      defer message.holder:close()
       self.messages[self.first] = nil
       self.first = self.first + 1
       if self.first > #self.messages then self.messages = {}; self.first = 1 end
-      defer message.holder:close()
       -- Inspect length while the host alone owns the bytes; do not take on overflow.
       if message.length > self.limit then
         raise wire_error("limit", "incoming message exceeds read limit", 1009)
