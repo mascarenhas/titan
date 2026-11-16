@@ -650,6 +650,37 @@ local function stdlib_source_files(filename)
     return sources
 end
 
+-- The declared native inventory plus the browser-only standard-library
+-- sources, which no native Make list names: the compiler's browser selection
+-- of the standard tree supplies them, and each must belong to a module that
+-- the browser status inventory marks browser-only. Browser builds need a
+-- Linux or macOS host, so Windows audits the native inventory alone.
+local function audited_stdlib_sources()
+    local sources = stdlib_source_files()
+    if platform.windows then return sources end
+    local declared, browser_only = {}, {}
+    for _, source in ipairs(sources) do declared[source] = true end
+    for _, row in ipairs(browser_checks.status_inventory.modules) do
+        if row[2] == "browser-only" then browser_only[row[1]] = true end
+    end
+    local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
+    local context = driver._new_resolver_context({ target = "browser" }, descriptor)
+    local called, selected, err = pcall(browser_checks.check_sources, context, ".")
+    local closed, close_error = driver.close_resolver_context(context)
+    assert.is_true(called, selected)
+    assert.is_true(closed, close_error)
+    assert.truthy(selected, err)
+    for _, file in ipairs(selected) do
+        local source = paths.to_slash(file):gsub("^%./", "")
+        if not declared[source] then
+            assert.truthy(browser_only["titan." .. assert(source:match("^titan/([^/.]+)"), source)],
+                source .. " is a browser-only source outside a browser-only module")
+            sources[#sources + 1] = source
+        end
+    end
+    return sources
+end
+
 -- The host's own source label, which selects a family's variant. A native
 -- host without an OS label selects `native` first and the default last.
 local host_label
@@ -1146,7 +1177,7 @@ esac
         }) do
             assert.falsy(makefile:find(retired, 1, true), retired)
         end
-        for _, source in ipairs(stdlib_source_files()) do
+        for _, source in ipairs(audited_stdlib_sources()) do
             for _, node in ipairs(parsed_source(source)) do
                 if node._tag == "Ast.TopLevelImport" then
                     assert.is_false(node.source_required,
@@ -1165,7 +1196,7 @@ esac
         local closed, close_error = driver.close_resolver_context(context)
         assert.is_true(called, ok)
         assert.is_true(closed, close_error)
-        assert.is_true(ok, err)
+        assert.truthy(ok, err)
     end)
 
     it("keeps the browser status inventory's module rows equal to the Make roots", function()
@@ -2908,8 +2939,14 @@ int main(void) {
         end)
 
     it("keeps domain callbacks above public UV and raw libuv symbols inside its binding", function()
-        for _, module in ipairs({"async", "timer", "fs", "net", "os", "sqlite3"}) do
-            for _, path in ipairs(stdlib_source_files()) do
+        local audited, modules = audited_stdlib_sources(), {"async", "timer", "fs", "net", "os", "sqlite3"}
+        local native_objects = {}
+        for _, module in ipairs(modules) do native_objects[module] = true end
+        for _, row in ipairs(browser_checks.status_inventory.modules) do
+            if row[2] == "browser-only" then modules[#modules + 1] = row[1]:sub(7) end
+        end
+        for _, module in ipairs(modules) do
+            for _, path in ipairs(audited) do
                 if path:match("^titan/([^/.]+)") == module then
                     local source = read_file(path)
                     assert.falsy(source:find('foreign import "uv.h"', 1, true), path)
@@ -2922,11 +2959,15 @@ int main(void) {
                     end
                 end
             end
-            local object = stdlib_artifact((paths.to_slash(stdlib_objects.object(
-                resolver_options().context, "titan." .. module, ".", ".")):gsub("^%./", "")))
-            local output = module_symbols.collect(object, run_argv).undefined_text
-            for symbol in output:gmatch("[^\r\n]+") do
-                assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
+            -- Browser-only modules have no native object; the browser
+            -- closure check rejects uv symbols in the browser provider.
+            if native_objects[module] then
+                local object = stdlib_artifact((paths.to_slash(stdlib_objects.object(
+                    resolver_options().context, "titan." .. module, ".", ".")):gsub("^%./", "")))
+                local output = module_symbols.collect(object, run_argv).undefined_text
+                for symbol in output:gmatch("[^\r\n]+") do
+                    assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
+                end
             end
         end
         assert.same({}, (function ()
@@ -3139,7 +3180,7 @@ int main(void) {
     it("keeps titan.gc as the sole stdlib lua_setmetatable owner",
         function()
             local callers = {}
-            for _, source in ipairs(stdlib_source_files()) do
+            for _, source in ipairs(audited_stdlib_sources()) do
                 if read_file(source):find(
                         "ffi.lua_setmetatable", 1, true) then
                     callers[#callers + 1] = source
@@ -3149,7 +3190,7 @@ int main(void) {
         end)
 
     it("uses ordinary public module imports for async domains", function()
-        for _, source in ipairs(stdlib_source_files()) do
+        for _, source in ipairs(audited_stdlib_sources()) do
             for _, node in ipairs(parsed_source(source)) do
                 if node._tag == "Ast.TopLevelImport" then
                     assert.falsy(node.modname:match("^titan%.uv%."), source .. ": " .. node.modname)

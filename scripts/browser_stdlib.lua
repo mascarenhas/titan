@@ -52,7 +52,8 @@ end
 
 -- Discover logical candidates, but let the compiler choose their actual files:
 -- defaults shadowed by variants and constituents of absent folders stay unread.
--- The caller owns an activated browser resolver context.
+-- The caller owns an activated browser resolver context. Returns the selected
+-- files, sorted, so source audits can cover the browser-only ones.
 function M.check_sources(context, tree)
     local strategy, modules, sources = context.io, {}, {}
     local function inspect(name)
@@ -103,7 +104,12 @@ function M.check_sources(context, tree)
         end
         return true
     end
-    return visit(tree .. "/titan", "titan")
+    local ok, err = visit(tree .. "/titan", "titan")
+    if not ok then return nil, err end
+    local selected = {}
+    for file in pairs(sources) do selected[#selected + 1] = file end
+    table.sort(selected, util.bytewise_less)
+    return selected
 end
 
 function M.check_path(path)
