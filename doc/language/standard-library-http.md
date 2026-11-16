@@ -492,7 +492,7 @@ decodes them instead (see [on the browser](#on-the-browser)).
 | DNS or connection failure | `async.OperationError` from `net` | `async.OperationError`, name `"EIO"`, operation `"http.request"` |
 | Certificate or TLS failure | `ssl.Error` | the same `"EIO"` `OperationError` |
 | CORS or same-origin block, mixed content, a cross-origin `no_cors()` request with `manual()` or `error()` | (no such check) | the same `"EIO"` `OperationError` |
-| HTTP protocol or framing failure | string | the same `"EIO"` `OperationError` |
+| HTTP protocol or framing failure | string | the same `"EIO"` `OperationError`, or a string when an exposed reason phrase or header contains a forbidden byte |
 | Body stream failure after the headers | the transport's error, or a string for framing | `async.OperationError`, name `"EIO"`, operation `"http.read"` |
 
 Request-option policy failures therefore raise the same `OperationError`

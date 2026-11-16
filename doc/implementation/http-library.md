@@ -840,10 +840,13 @@ focused sanitizer boundary drives the same timeout-induced SSL-read
 cancellation and serial HTTP path through public TLS and llhttp, rather than a
 private test transport.
 
-Disconnect regressions force real TCP resets through public `uv.tcp_close_reset`
-and abrupt TLS drops. Idle resets succeed without Task diagnostics with the
-idle timeout both disabled and enabled; partial-request controls retain their
-observable errors. TLS cases also cover clean closure and body truncation.
+Disconnect regressions (`tls_idle_disconnect_test.native.titan`) run standalone
+server fixtures (`spec/fixtures/stdlib/titan/http_tcp_idle_app.titan` and
+`http_tls_idle_app.titan`) to force real TCP resets through public
+`uv.tcp_close_reset` and abrupt TLS drops. Idle resets succeed without Task
+diagnostics with the idle timeout both disabled and enabled; partial-request
+controls retain their observable errors. TLS cases also cover clean closure and
+body truncation.
 
 The request-option cases cover constructor validation for every `mode` with
 `only_if_cached()`, the pre-I/O `no_cors()` method and `only-if-cached`
@@ -865,9 +868,6 @@ and a closed `Client`. Its browser contributor `validation.browser.titan`
 checks the forbidden-header predicate, every quoted method-override sample
 through it, the method, body, and `ca_file` refusals, the `lua.new()` refusal,
 a `Client` that cannot migrate to a second Runtime, and `Host` default-port
-equivalence. `tls_idle_disconnect_test.native.titan` runs a native HTTPS
-server in a separate process (`spec/fixtures/stdlib/titan/http_tls_idle_app.titan`)
-with and without an idle timeout: idle and clean disconnects log no uncaught
-Task error, while a partial request and a truncated body each log exactly
-one. The browser client's network behavior needs real engines and runs in the
-live browser network harness ([browser target](browser-target.md#the-live-browser-network-harness)).
+equivalence. The browser client's network behavior needs real engines and runs
+in the live browser network harness
+([browser target](browser-target.md#the-live-browser-network-harness)).
