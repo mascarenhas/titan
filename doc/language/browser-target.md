@@ -263,6 +263,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
+| `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
 The directory is a sibling of the native `lib/titan/0.6/`, never inside it,
@@ -1269,7 +1270,7 @@ the libuv-typed `current_loop`, `await_with`, `await_cleanup_with`,
 `run_foreign`, `prepare_native_retirement`, `wait_external_native`,
 `prepare_external_wait`, `wait_external`, `wait_external_cleanup`,
 `version`, `receiver`, `send`, and `Receiver`. `ExternalWait` remains only
-as an opaque type with no constructor and no methods, so the `final_wait`
+as a type with no constructor and no methods, so the `final_wait`
 of `run_with_cleanup` can only be `nil`. `Completion` keeps its methods but
 no browser function hands one out, since the functions that do are absent.
 Its Tasks run only in the

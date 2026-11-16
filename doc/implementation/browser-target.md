@@ -364,9 +364,10 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    `titan.iteration`, `titan.json`, `titan.lua`, `titan.math`, `titan.os`,
    `titan.path`, `titan.peg`, `titan.protobuf`, `titan.reflect`,
    `titan.string`, `titan.test`, `titan.timer`, `titan.transfer`, `titan.url`,
-   and `titan.websocket`; copies it to `titan.a`; and
-   finally writes `sdk-digests` with `incremental.write_sdk_digests` and the
-   existing schema.
+   and `titan.websocket`; copies it to `titan.a`; writes `absent-modules`
+   from the [status inventory](#subset-parity-gate); and finally writes
+   `sdk-digests` with `incremental.write_sdk_digests` and the existing
+   schema.
 
 The manifest records the browser `liblua.a` and its record, every browser Lua
 header, the five common Titan headers, and the other browser assets, hashed at
@@ -414,7 +415,7 @@ dependency or a second coroutine driver.
 `titan.async` is composed for the browser from its shared
 main `titan/async/async.titan` and the contributors
 `runtime.browser.titan` (the [browser driver](libuv-runtime.md#browser-driver))
-and `external.browser.titan` (an opaque `ExternalWait`); its native-only
+and `external.browser.titan` (the type-only `ExternalWait`); its native-only
 `receiver` and `foreign` families are dropped. Its browser composition imports
 `coroutine`, `gc`, `string`, `transfer`, and `titan.browser`.
 Its absent members and type-only records are recorded in the
@@ -692,9 +693,10 @@ separate provider metadata and stay unchecked here.
 
 **Checks.** `M.inventory` and `M.check_status` apply:
 
-* A, subset: every browser module is native, and every browser row is
-  identical after normalization, so a browser module cannot add a public
-  declaration that its native module lacks.
+* A, subset: every compared browser module (every one not marked
+  `browser-only`) is native, and every browser row is identical after
+  normalization, so a browser module cannot add a public declaration that
+  its native module lacks.
 * B, absence: every native row of a present module missing from the browser
   has an `absent:*` row, a stale row fails, and the classification is
   checked: an owner is `absent:typed` when its own fields, payloads, or
