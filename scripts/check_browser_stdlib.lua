@@ -90,6 +90,14 @@ elseif action == "output" then
         print("Browser stdlib gate: incomplete; final counts unavailable.")
     end
     need(result, err)
+    -- A filtered run may leave inventory tests unselected; a complete run must
+    -- show every image test that the status inventory names as passed.
+    if second == "" then
+        local image_owners = {}
+        for _, root in ipairs(roots) do image_owners[root] = true end
+        need(checks.require_evidence(checks.status_inventory, contents, image_owners))
+        print("Browser stdlib inventory evidence: every named image test passed.")
+    end
 else
     error("usage: check_browser_stdlib.lua closure OUTPUT PROVIDER WASM [SOURCE_TREE] | inventory NATIVE BROWSER [TABLE] | output ROOTS FILTER LOG")
 end

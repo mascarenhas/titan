@@ -557,6 +557,70 @@ function M.test_reference(test)
     return select(2, test:gsub("%.", "")) == 1 and "owner" or "case"
 end
 
+-- Test owners outside the browser stdlib image, with the real-toolchain gate
+-- that runs them under Node and Chromium and checks their evidence.
+M.harness_owners = {
+    ["async.browser_tests"] = "spec/coder/browser_scheduler_spec.lua",
+    ["os.browser_tests"] = "spec/coder/browser_scheduler_spec.lua",
+    ["http.browser_tests"] = "spec/coder/browser_net_spec.lua",
+    ["websocket.browser_tests"] = "spec/coder/browser_net_spec.lua",
+}
+
+-- Every test the inventory names, with its owner and the row naming it.
+function M.test_references(inventory)
+    local result = {}
+    local function add(test, label)
+        local kind = M.test_reference(test)
+        if kind then
+            result[#result + 1] = { test = test, kind = kind, label = label,
+                owner = kind == "harness" and "os.browser_tests" or test:match("^[%w_]+%.[%w_]+") }
+        end
+    end
+    for _, row in ipairs(inventory.modules) do add(row.test, row[1]) end
+    for modname, rows in pairs(inventory.members) do
+        for _, row in ipairs(rows) do add(row[3], modname .. "." .. row[1]) end
+    end
+    for _, row in ipairs(inventory.stock_lua or {}) do add(row[3], "stock Lua " .. row[1]) end
+    return result
+end
+
+-- The cases a run reports as passed: runner lines `[       OK ] <case>
+-- (<ms> ms)`, and the case names in the OS stream harness summary.
+function M.passed_cases(output)
+    local passed = {}
+    for line in (output .. "\n"):gmatch("([^\n]*)\n") do
+        local name = line:gsub("\r$", ""):match("^%[       OK %] (.-) %(%d+%.%d%d ms%)$")
+        if name then passed[name] = true end
+    end
+    local names = (output:match("OS%-STREAMS (%b{})") or ""):match('"names":(%b[])')
+    for name in (names or ""):gmatch('"([^"]*)"') do passed["os.browser_tests:" .. name] = true end
+    return passed
+end
+
+-- Every inventory test whose owner the run covers must have passed in it: a
+-- named case exactly, a whole owner through at least one passed case.
+-- Skipped cases never count.
+function M.require_evidence(inventory, output, owners)
+    local passed, missing = M.passed_cases(output), {}
+    for _, reference in ipairs(M.test_references(inventory)) do
+        if owners[reference.owner] then
+            local found = passed[reference.test]
+            if reference.kind == "owner" then
+                local prefix = reference.test .. "."
+                for name in pairs(passed) do
+                    if name:sub(1, #prefix) == prefix then found = true; break end
+                end
+            end
+            if not found then missing[#missing + 1] = reference.label .. ": " .. reference.test end
+        end
+    end
+    if #missing > 0 then
+        table.sort(missing, util.bytewise_less)
+        return nil, "inventory tests that did not pass:\n" .. table.concat(missing, "\n")
+    end
+    return true
+end
+
 -- The declaration that classifies an absent owner: its own fields, variant
 -- payloads and generic scope, without the methods and statics that have rows
 -- of their own.
@@ -630,10 +694,12 @@ local function reaches(typ, fqtn, polarity)
     return false
 end
 
--- A type-only owner cannot be built without a callable, and nothing in the
--- browser interface except a `raise` member or its own instance methods and
--- fields can produce one. Returns nil or the reason the owner is reachable.
-local function type_only_violation(modtype, name, raising)
+-- A type-only owner cannot be built without a callable, and nothing in any
+-- browser module except a `raise` member or the owner's own instance methods
+-- and fields can produce one. `modules` lists every decoded browser module
+-- with its module name and the names of its `raise` members. Returns nil or
+-- the reason the owner is reachable.
+local function type_only_violation(modtype, name, modules)
     local member = modtype.members[name]
     local owner = member and member._tag == "Type.ModuleMember" and member.type
     if not owner or (owner._tag ~= "Type.Record" and owner._tag ~= "Type.Union") then
@@ -645,41 +711,37 @@ local function type_only_violation(modtype, name, raising)
         return "has public variants"
     end
     local fqtn = owner.name
-    local function check(label, typ, polarity)
-        if reaches(typ, fqtn, polarity) then return "is reachable through " .. label end
-        return nil
-    end
-    for _, other in ipairs(modtype.members) do
-        local typ, err = other.type, nil
-        if other == member then
-            for static_name, static in pairs(owner.functions) do
-                if not raising[name .. "." .. static_name] then
-                    err = check(name .. "." .. static_name, static, "+")
+    for _, scanned in ipairs(modules) do
+        local raising, prefix = scanned.raising, scanned.modname .. "."
+        local function check(label, typ, polarity)
+            if not raising[label] and reaches(typ, fqtn, polarity) then return "is reachable through " .. prefix .. label end
+            return nil
+        end
+        for _, other in ipairs(scanned.type.members) do
+            local typ, err = other.type, nil
+            if other == member then
+                for static_name, static in pairs(owner.functions) do
+                    err = err or check(name .. "." .. static_name, static, "+")
                 end
-                if err then return err end
-            end
-        elseif not raising[other.name] then
-            if other._tag == "Type.ModuleVariable" then
+            elseif other._tag == "Type.ModuleVariable" then
                 err = check(other.name, typ, other.isconst and "+" or "both")
             elseif typ._tag == "Type.Record" or typ._tag == "Type.Union" then
                 for _, group in ipairs({ typ.methods, typ.functions }) do
                     for method_name, method in pairs(group) do
                         local key = other.name .. (method._tag == "Type.Method" and ":" or ".") .. method_name
-                        if not err and not raising[key] then err = check(key, method, "+") end
+                        err = err or check(key, method, "+")
                     end
                 end
-                if not err then
-                    err = check(other.name, owner_declaration(modtype, other.name), "+")
-                end
+                err = err or check(other.name, owner_declaration(scanned.type, other.name), "+")
             else
                 err = check(other.name, typ, "+")
             end
             if err then return err end
         end
-    end
-    for alias, typ in pairs(modtype.type_members or {}) do
-        if typ._tag == "Type.Interface" and reaches(typ, fqtn, "+") then
-            return "is reachable through " .. alias
+        for alias, typ in pairs(scanned.type.type_members or {}) do
+            if typ._tag == "Type.Interface" and reaches(typ, fqtn, "+") then
+                return "is reachable through " .. prefix .. alias
+            end
         end
     end
     return nil
@@ -733,22 +795,35 @@ function M.check_status(native, browser, inventory)
     for modname in pairs(inventory.members) do
         if not present[modname] then fail(modname .. ": member rows for a module that is not present") end
     end
+    -- Every browser module, decoded once with its raise members: a type-only
+    -- owner must stay unreachable from all of them.
+    local browser_types, scanned = {}, {}
+    for _, modname in ipairs(browser.key_order) do
+        local raising = {}
+        for _, row in ipairs(inventory.members[modname] or {}) do
+            if row[2] == "raise" then raising[row[1]] = true end
+        end
+        browser_types[modname] = assert(driver.decode_module_interface(browser.entries[modname].types, modname,
+            "browser interface"))
+        scanned[#scanned + 1] = { modname = modname, type = browser_types[modname], raising = raising }
+    end
     for modname in pairs(present) do
         local native_type = assert(driver.decode_module_interface(native.entries[modname].types, modname,
             "native interface"))
-        local browser_type = assert(driver.decode_module_interface(browser.entries[modname].types, modname,
-            "browser interface"))
+        local browser_type = browser_types[modname]
         local declared, offered = M.members(native_type), M.members(browser_type)
-        local scope, rows, raising = M.status_scope(declared), {}, {}
+        local scope, rows = M.status_scope(declared), {}
         for _, row in ipairs(inventory.members[modname] or {}) do
-            local name, status = row[1], row[2]
-            if rows[name] then fail(modname .. "." .. name .. ": duplicate status row") end
-            rows[name] = row
-            if status == "raise" then raising[name] = true end
+            if rows[row[1]] then fail(modname .. "." .. row[1] .. ": duplicate status row") end
+            rows[row[1]] = row
         end
+        -- A member of an absent owner typed by an absent module is typed too;
+        -- otherwise its own declaration decides.
         local function class(name)
             local owner = name:match("^([^.:]+)[.:]")
-            if owner and rows[owner] and rows[owner][2]:match("^absent:") then return class(owner) end
+            if owner and rows[owner] and rows[owner][2]:match("^absent:") and class(owner) == "absent:typed" then
+                return "absent:typed"
+            end
             local declaration = owner_declaration(native_type, name)
             local text = declaration and types.serialize_semantic(declaration) or declared[name].semantic
             return names_absent_module(text) and "absent:typed" or "absent:native-only"
@@ -778,8 +853,10 @@ function M.check_status(native, browser, inventory)
                     local owner = name:match("^([^.:]+)[.:]")
                     if owner and not (rows[owner] and rows[owner][2] == "type-only") then
                         fail(label .. ": type-only member of an owner that is not type-only")
+                    elseif owner and kind ~= "method" then
+                        fail(label .. ": only instance methods of a type-only owner are type-only")
                     elseif not owner then
-                        local violation = type_only_violation(browser_type, name, raising)
+                        local violation = type_only_violation(browser_type, name, scanned)
                         if violation then fail(label .. ": type-only owner " .. violation) end
                     end
                 elseif reference == nil then

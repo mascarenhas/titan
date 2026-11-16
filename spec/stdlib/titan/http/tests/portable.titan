@@ -114,3 +114,17 @@ function test_client_close_rejects_requests(_: test.Context)
       "HTTP Client is closed")
   end)
 end
+
+-- Native transports ignore the credentials policy and browsers pass it to
+-- fetch; both targets accept every mode when options are built.
+function test_request_options_accept_every_credentials_mode(context: test.Context)
+  context:run("omit", function (_: test.Context)
+    http.RequestOptions {credentials = http.CredentialsMode.omit()}
+  end)
+  context:run("same_origin", function (_: test.Context)
+    http.RequestOptions {credentials = http.CredentialsMode.same_origin(), mode = http.RequestMode.same_origin()}
+  end)
+  context:run("include", function (_: test.Context)
+    http.RequestOptions {credentials = http.CredentialsMode.include(), mode = http.RequestMode.cors()}
+  end)
+end

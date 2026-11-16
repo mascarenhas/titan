@@ -145,3 +145,28 @@ function test_generic_await_rejects_duplicate_and_stale_resolvers(context: test.
   test.assert(finished == 1, "multiple continuation entries")
   await_test_expect_error(function () old_resolve(4) end, "async operation already settled")
 end
+
+local function await_test_cancellable_outcome(result: async.CancellableResult<|integer, string|>): string
+  case result
+  when success(item) then return "success " .. item
+  when error(message) then return "error " .. message
+  when cancelled(reason) then
+    case reason
+    when simple(text) then return "cancelled " .. text
+    else return "cancelled with a complex reason"
+    end
+  end
+  return "unmatched"
+end
+
+function test_cancellable_result_constructs_and_matches(_: test.Context)
+  test.assert(await_test_cancellable_outcome(
+      async.CancellableResult<|integer, string|>.success(7)) == "success 7",
+    "a successful outcome lost its payload")
+  test.assert(await_test_cancellable_outcome(
+      async.CancellableResult<|integer, string|>.error("refused")) == "error refused",
+    "a failed outcome lost its error")
+  test.assert(await_test_cancellable_outcome(async.CancellableResult<|integer, string|>.cancelled(
+      async.CancellationReason<|value|>.simple("stopped"))) == "cancelled stopped",
+    "a cancelled outcome lost its reason")
+end

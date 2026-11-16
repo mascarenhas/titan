@@ -656,18 +656,30 @@ plan:
         local wrap = types.ModuleMember("fixture", "Wrap", types.Record("fixture.Wrap", {
             types.Field("fixture.Wrap", "handle", handle, 0, false),
         }, {}, { size = types.Method("fixture.Wrap", "size", {}, { types.Integer() }, nil, nil, {}) }, 2), nil)
+        -- A type-only owner with an instance method and a static, and an
+        -- absent native-only owner with one method typed by the absent module.
+        local opaque = types.ModuleMember("fixture", "O", types.Record("fixture.O", {}, {
+            helper = types.StaticMethod("fixture.O", "helper", {}, { types.Integer() }, nil, nil, {}),
+        }, { close = types.Method("fixture.O", "close", {}, {}, nil, nil, {}) }, 1), nil)
+        local server = types.ModuleMember("fixture", "Server", types.Record("fixture.Server", {}, {}, {
+            accept_raw = types.Method("fixture.Server", "accept_raw", {}, { handle }, nil, nil, {}),
+            stop = types.Method("fixture.Server", "stop", {}, {}, nil, nil, {}),
+        }, 1), nil)
         local native = { key_order = { "fixture", "titan.gone" }, entries = {
             fixture = entry("fixture", { fn("keep"), fn("typed", { handle }), fn("host"), box({ "run", "stop" }), raw,
-                wrap }),
+                wrap, opaque, server }),
             ["titan.gone"] = entry("titan.gone", {
                 types.ModuleMember("titan.gone", "Handle", types.Record("titan.gone.Handle", {}, {}, {}, 1), nil),
             }),
         } }
-        local browser = { key_order = { "fixture", "titan.web" }, entries = {
-            fixture = entry("fixture", { fn("keep"), box({ "run" }), raw }),
-            ["titan.web"] = entry("titan.web", { types.ModuleMember("titan.web", "bind",
-                types.Function({}, {}, false, nil, nil), {}) }),
-        } }
+        local function browser_provider(bind_results)
+            return { key_order = { "fixture", "titan.web" }, entries = {
+                fixture = entry("fixture", { fn("keep"), box({ "run" }), raw, opaque }),
+                ["titan.web"] = entry("titan.web", { types.ModuleMember("titan.web", "bind",
+                    types.Function({}, bind_results, false, nil, nil), {}) }),
+            } }
+        end
+        local browser = browser_provider({})
         local function inventory(change)
             local result = {
                 modules = {
@@ -685,6 +697,12 @@ plan:
                     { "keep", "implemented", "fixture.tests.test_keep" },
                     { "raw", "implemented", "fixture.tests.test_raw" },
                     { "typed", "absent:typed" },
+                    { "O", "type-only" },
+                    { "O.helper", "implemented", "fixture.tests.test_helper" },
+                    { "O:close", "type-only" },
+                    { "Server", "absent:native-only" },
+                    { "Server:accept_raw", "absent:typed" },
+                    { "Server:stop", "absent:native-only" },
                 } },
                 stock_lua = { { "os.clock", "raise", "lua.tests.test_stock.clock" } },
             }
@@ -738,11 +756,22 @@ plan:
                 "fixture.raw: a raw foreign function is implemented or absent" },
             { function(result) result.stock_lua[1][2] = "absent" end, "stock Lua os.clock: unknown status absent" },
             { function(result) result.stock_lua[1][3] = "lua.tests" end, "stock Lua os.clock: names no exact test case" },
+            { function(_, rows) row(rows, "O.helper")[2] = "type-only"; row(rows, "O.helper")[3] = nil end,
+                "fixture.O.helper: only instance methods of a type-only owner are type-only" },
+            { function(_, rows) row(rows, "Server:accept_raw")[2] = "absent:native-only" end,
+                "fixture.Server:accept_raw: absence is absent:typed, not absent:native-only" },
+            { function(_, rows) row(rows, "Server:stop")[2] = "absent:typed" end,
+                "fixture.Server:stop: absence is absent:native-only, not absent:typed" },
         }) do
             local ok, err = checks.check_status(native, browser, inventory(case[1]))
             assert.is_nil(ok, case[2])
             assert.truthy(err:find(case[2], 1, true), case[2] .. "\n" .. err)
         end
+        -- Another browser module, even a browser-only one, must not produce a
+        -- value of a type-only owner either.
+        local ok, err = checks.check_status(native, browser_provider({ types.Nominal("fixture.O") }), inventory())
+        assert.is_nil(ok)
+        assert.truthy(err:find("fixture.O: type-only owner is reachable through titan.web.bind", 1, true), err)
     end)
 
     it("names tests as runner cases, OS harness cases or whole owners", function()
@@ -756,6 +785,96 @@ plan:
         end
         for _, test in ipairs({ "tests", "json..tests", ".json.tests", "json.tests.", "os.tests:case", 7 }) do
             assert.is_nil(checks.test_reference(test), tostring(test))
+        end
+    end)
+
+    -- Each named test must exist before the browser lane runs it: an image or
+    -- harness owner's compiler-selected browser sources define the case, an
+    -- OS stream harness case appears in its driver, and every harness gate
+    -- runs in the browser-stdlib job.
+    it("names only tests that exist in the browser test sources", function()
+        if platform.windows then pending("browser source resolution requires a supported host"); return end
+        local plan = root_plan()
+        assert.is_true(plan.ok, plan.output)
+        local owners = {}
+        for root in assert(plan.output:match("roots=([^\n]*)")):gmatch("%S+") do owners[root] = true end
+        for owner in pairs(checks.harness_owners) do owners[owner] = true end
+        local ci = assert(strategy:read_file(".github/workflows/ci.yml"))
+        local gate = assert(ci:match("Run the browser SDK and stdlib real%-toolchain gate(.-)\n      %- name:"))
+        for owner, spec in pairs(checks.harness_owners) do
+            assert.truthy(gate:find(spec, 1, true), spec .. " is not a browser-stdlib gate spec")
+            local text = assert(strategy:read_file(spec))
+            assert.truthy(text:find("require_evidence", 1, true) and text:find('["' .. owner .. '"] = true', 1, true),
+                spec .. " does not check the evidence of " .. owner)
+        end
+        local harness = assert(strategy:read_file("spec/fixtures/browser_scheduler/os-streams.mjs"))
+        local descriptor = assert(driver._browser_target.import(browser_fixtures.descriptor()))
+        local context = driver._new_resolver_context({ io = strategy, target = "browser" }, descriptor)
+        local cases, missing = {}, {}
+        local function owner_cases(owner)
+            if cases[owner] then return cases[owner] end
+            local found = {}
+            local source = assert(driver.resolve_source(context, owner, "spec/stdlib/titan"), owner)
+            for _, filename in ipairs(source.files or { source.main }) do
+                for _, node in ipairs(assert(parser.parse(filename, assert(strategy:read_file(filename))))) do
+                    if node._tag == "Ast.TopLevelFunc" and not node.islocal and node.name:match("^test_") then
+                        found[node.name] = true
+                    end
+                end
+            end
+            cases[owner] = found
+            return found
+        end
+        local called, err = pcall(function()
+            for _, reference in ipairs(checks.test_references(checks.status_inventory)) do
+                local test, owner = reference.test, reference.owner
+                if not owners[owner] then
+                    missing[#missing + 1] = reference.label .. ": " .. owner .. " is not a browser test owner"
+                elseif reference.kind == "harness" then
+                    if not harness:find(assert(test:match("^os%.browser_tests:([^:]+)")), 1, true) then
+                        missing[#missing + 1] = reference.label .. ": " .. test
+                    end
+                elseif reference.kind == "case" then
+                    local case = test:sub(#owner + 2):match("^[^.]+")
+                    if not owner_cases(owner)[case] then missing[#missing + 1] = reference.label .. ": " .. test end
+                end
+            end
+        end)
+        local closed, close_error = driver.close_resolver_context(context)
+        assert.is_true(called, err)
+        assert.is_true(closed, close_error)
+        assert.same({}, missing)
+    end)
+
+    it("requires every covered inventory test to have passed in a run", function()
+        local inventory = {
+            modules = { { "titan.core", "present", test = "core.tests", core = true } },
+            members = { ["titan.core"] = {
+                { "one", "implemented", "core.tests" },
+                { "two", "implemented", "mixed.tests.test_two" },
+                { "three", "implemented", "mixed.tests.test_three.child" },
+            } },
+            stock_lua = { { "os.exit", "implemented", "os.browser_tests:exit:3" } },
+        }
+        local owners = { ["core.tests"] = true, ["mixed.tests"] = true, ["os.browser_tests"] = true }
+        local complete = table.concat({
+            "[       OK ] core.tests.test_any (0.10 ms)",
+            "[       OK ] mixed.tests.test_two (0.20 ms)",
+            "[       OK ] mixed.tests.test_three.child (0.30 ms)",
+            'OS-STREAMS {"verdict":"PASS","cases":1,"dialogs":0,"names":["exit:3"]}',
+        }, "\n")
+        assert(checks.require_evidence(inventory, complete, owners))
+        assert(checks.require_evidence(inventory, "", {}))
+        for _, case in ipairs({
+            { complete:gsub("%[       OK %] core", "[  SKIPPED ] core"), "titan.core: core.tests" },
+            { complete:gsub("test_two", "test_other"), "titan.core.two: mixed.tests.test_two" },
+            { complete:gsub("%[       OK %] mixed.tests.test_three.child", "[  FAILED  ] mixed.tests.test_three.child"),
+                "titan.core.three: mixed.tests.test_three.child" },
+            { complete:gsub('"exit:3"', '"exit:4"'), "stock Lua os.exit: os.browser_tests:exit:3" },
+        }) do
+            local ok, err = checks.require_evidence(inventory, case[1], owners)
+            assert.is_nil(ok, case[2])
+            assert.truthy(err:find(case[2], 1, true), case[2] .. "\n" .. err)
         end
     end)
 
@@ -780,14 +899,15 @@ plan:
             { O = "type-only", ["O.make"] = "raise" }))
         for _, case in ipairs({
             { opaque .. "function O.make(): O return { handle = 1 } end\n", owner,
-                "test.O: type-only owner is reachable through O.make" },
-            { opaque .. "function fill(out: {O}) end\n", owner, "test.O: type-only owner is reachable through fill" },
+                "test.O: type-only owner is reachable through test.O.make" },
+            { opaque .. "function fill(out: {O}) end\n", owner, "test.O: type-only owner is reachable through test.fill" },
             { opaque .. "record Box<|T|>\n  item: T\nend\nfunction boxed(): Box<|O|> raise \"unavailable\" end\n", owner,
-                "test.O: type-only owner is reachable through boxed" },
+                "test.O: type-only owner is reachable through test.boxed" },
             { opaque .. "function each(visit: function (O)) end\n", owner,
-                "test.O: type-only owner is reachable through each" },
-            { opaque .. "current: O?\n", owner, "test.O: type-only owner is reachable through current" },
-            { opaque .. "record Holder\n  item: O?\nend\n", owner, "test.O: type-only owner is reachable through Holder" },
+                "test.O: type-only owner is reachable through test.each" },
+            { opaque .. "current: O?\n", owner, "test.O: type-only owner is reachable through test.current" },
+            { opaque .. "record Holder\n  item: O?\nend\n", owner,
+                "test.O: type-only owner is reachable through test.Holder" },
             { "record O\n  x: integer\nend\n", owner, "test.O: type-only owner can be built from a record literal" },
             { "union O\n  a()\nend\n", owner, "test.O: type-only owner has public variants" },
             { "record P\n  x: integer\nend\nfunction P:get(): integer return self.x end\n", { ["P:get"] = "type-only" },

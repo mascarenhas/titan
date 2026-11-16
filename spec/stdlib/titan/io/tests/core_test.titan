@@ -120,3 +120,46 @@ function test_io_lines_tuple_and_close_retry(_context: test.Context)
   end)
 end
 
+local record Loopback
+  local chunks: {string}
+  local next: integer
+  local closed: boolean
+end
+
+local function Loopback:read(): string?
+  local chunk? = self.chunks[self.next]
+  if chunk == nil then return nil end
+  self.next = self.next + 1
+  return chunk
+end
+
+local function Loopback:read_until(_delimiter: string, _chop: boolean?): string?
+  return self:read()
+end
+
+local function Loopback:write(data: string)
+  if self.closed then raise "Loopback written after close" end
+  self.chunks[#self.chunks + 1] = data
+end
+
+local function Loopback:close()
+  self.closed = true
+end
+
+function test_io_interfaces_accept_a_satisfying_record(_context: test.Context)
+  local loopback = Loopback.new({}, 1, false)
+  local writer: stream.Writer = loopback
+  writer:write("a")
+  local both: stream.ReaderWriter = loopback
+  both:write("b")
+  test.assert(both:read() == "a", "ReaderWriter did not read through the record")
+  local reader: stream.Reader = loopback
+  test.assert(reader:read_until("\n", true) == "b", "Reader did not read through the record")
+  local all: stream.ReaderWriterCloser = loopback
+  all:write("c")
+  test.assert(all:read() == "c", "ReaderWriterCloser did not read through the record")
+  local closer: stream.Closer = loopback
+  closer:close()
+  test.assert(loopback.closed, "Closer did not close the record")
+end
+
