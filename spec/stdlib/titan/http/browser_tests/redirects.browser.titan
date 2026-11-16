@@ -9,7 +9,7 @@ function test_redirect_status_mode_location_matrix(context: test.Context)
             local mode = http.RedirectMode.follow()
             if policy == 2 then mode = http.RedirectMode.manual() end
             if policy == 3 then mode = http.RedirectMode.error() end
-            local options = http.RequestOptions(nil, nil, nil, nil, nil, nil, mode)
+            local options = http.RequestOptions {redirect = mode}
             if policy == 3 then
               operation_error(function () http.get(source, options) end, "http.request")
             else
@@ -43,7 +43,7 @@ function test_redirect_rewrites_preservation_limit_and_authorization(_: test.Con
     for _, status in iteration.ipairs({301, 302, 303, 307, 308}) do
       for _, method in iteration.ipairs({"POST", "PUT"}) do
         local body = "redirect\0\255body"
-        local options = http.RequestOptions(nil, body, nil, nil, nil, nil, http.RedirectMode.follow())
+        local options = http.RequestOptions {body = body, redirect = http.RedirectMode.follow()}
         local source = server() .. "/redirect/" .. status .. "/with"
         local response = http.request(method, source, options)
         defer response:close()
@@ -62,7 +62,7 @@ function test_redirect_rewrites_preservation_limit_and_authorization(_: test.Con
     defer twenty:close()
     test.assert(twenty.status == 200 and twenty.redirected and twenty.url == server() .. "/chain/0")
     operation_error(function () http.get(server() .. "/chain/21") end, "http.request")
-    local redirected = http.get(server() .. "/cross", http.RequestOptions(one_header("Authorization", "Bearer private")))
+    local redirected = http.get(server() .. "/cross", http.RequestOptions {headers = one_header("Authorization", "Bearer private")})
     defer redirected:close()
     local received = all(redirected)
     test.assert(redirected.status == 200 and redirected.redirected and received == "GET\n\n",

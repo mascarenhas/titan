@@ -1,6 +1,6 @@
 local function cached(key: string, mode: http.CacheMode?): string
   return get_body(server() .. "/cacheable/" .. key,
-    http.RequestOptions(nil, nil, nil, mode, nil, http.RequestMode.same_origin()))
+    http.RequestOptions {cache = mode, mode = http.RequestMode.same_origin()})
 end
 
 function test_same_origin_cache_modes(_: test.Context)
@@ -10,8 +10,8 @@ function test_same_origin_cache_modes(_: test.Context)
   runtime_test.run(function ()
     -- Same-origin no-cors bypasses the cross-origin redirect-mode restriction.
     local source = server() .. "/echo"
-    local response = http.get(source, http.RequestOptions(nil, nil, nil, nil, nil,
-      http.RequestMode.no_cors(), http.RedirectMode.manual()))
+    local response = http.get(source, http.RequestOptions {
+      mode = http.RequestMode.no_cors(), redirect = http.RedirectMode.manual()})
     defer response:close()
     test.assert(response.status == 200 and response.url == source and not response.redirected and all(response) == "",
       "same-origin no-cors/manual did not retain its normal response")
@@ -40,8 +40,8 @@ function test_same_origin_cache_modes(_: test.Context)
     end
     test.assert(get_body(server() .. "/hits/revalidate", nil) == "3:2", "no-cache skipped ETag revalidation")
     local miss_url = server() .. "/uncached/cache-miss"
-    local options = http.RequestOptions(nil, nil, nil, http.CacheMode.only_if_cached(), nil,
-      http.RequestMode.same_origin())
+    local options = http.RequestOptions {
+      cache = http.CacheMode.only_if_cached(), mode = http.RequestMode.same_origin()}
     local webkit = os.getenv("TITAN_TEST_ENGINE") == "webkit"
     for _ = 1, 2 do
       if webkit then
