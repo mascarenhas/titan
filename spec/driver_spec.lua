@@ -13274,15 +13274,38 @@ describe("target-aware source resolver", function()
                 assert.matches("module '" .. name .. "' not found", import_error(ctx, "plain", entry[1]), 1, true)
                 assert.matches("source module '" .. name .. "' not found",
                     import_error(ctx, "marked", entry[1] .. ".titan"), 1, true)
-                fixtures.write(root .. "/sdk/lib/titan-browser/" .. driver.TITAN_LIBRARY_VERSION .. "/absent-modules",
-                    "titan.example\trequires an example\n" .. name .. "\trequires a native host\n")
-                ctx = context("browser")
                 local unavailable = "module '" .. name .. "' is not available for target 'browser': requires a native host"
-                assert.matches(unavailable, import_error(ctx, "listed", entry[1]), 1, true)
-                assert.matches(unavailable, import_error(ctx, "listed_source", entry[1] .. ".titan"), 1, true)
-                assert.matches("module 'missing' not found", import_error(ctx, "unlisted", "missing"), 1, true)
-                assert.matches("source module 'missing' not found",
-                    import_error(ctx, "unlisted_source", "missing.titan"), 1, true)
+                for _, newline in ipairs({ "\n", "\r\n" }) do
+                    fixtures.write(root .. "/sdk/lib/titan-browser/" .. driver.TITAN_LIBRARY_VERSION .. "/absent-modules",
+                        "titan.example\trequires an example" .. newline .. name .. "\trequires a native host" .. newline)
+                    ctx = context("browser")
+                    -- Consumers loaded once stay imported, so each pass uses its own.
+                    local pass = newline == "\n" and "" or "_crlf"
+                    assert.matches(unavailable, import_error(ctx, "listed" .. pass, entry[1]), 1, true)
+                    assert.matches(unavailable, import_error(ctx, "listed_source" .. pass, entry[1] .. ".titan"), 1, true)
+                    assert.matches("module 'missing' not found", import_error(ctx, "unlisted" .. pass, "missing"), 1, true)
+                    assert.matches("source module 'missing' not found",
+                        import_error(ctx, "unlisted_source" .. pass, "missing.titan"), 1, true)
+                    -- External resolution reports a required source like an
+                    -- import and keeps the probe's `missing` kind.
+                    local external = driver.resolve_external_modules({ [name] = true, missing = true }, {}, ctx)
+                    assert.same({ kind = "error", message = unavailable }, external[name])
+                    assert.same({ kind = "error", message = "source module 'missing' not found" }, external.missing)
+                    external = driver.resolve_external_modules({ [name] = false, missing = false }, {}, ctx)
+                    assert.same({ kind = "missing" }, external[name])
+                    assert.same({ kind = "missing" }, external.missing)
+                    -- The table loader: an absent table entry, and a cached
+                    -- compiled interface under a source request.
+                    local source_import = { kind = "source-import" }
+                    local loader = driver.tableloader({}, {}, {}, { context = ctx })
+                    assert.same({ false, unavailable }, { loader(name) })
+                    assert.same({ false, unavailable }, { loader(name, source_import) })
+                    assert.same({ false, "module 'missing' not found" }, { loader("missing") })
+                    assert.same({ false, "source module 'missing' not found" }, { loader("missing", source_import) })
+                    local cached = driver.tableloader({},
+                        { [name] = { kind = "compiled", type = types.Module(name, {}) } }, {}, { context = ctx })
+                    assert.same({ false, unavailable }, { cached(name, source_import) })
+                end
                 assert.is_nil(driver.imported[name])
             end)
             driver._browser_target = fixture_target

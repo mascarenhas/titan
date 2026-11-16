@@ -2820,7 +2820,7 @@ do
             if not reasons then
                 reasons = {}
                 local text = context.io:read_file(path.join(descriptor.paths.titan_bin, "absent-modules"))
-                for name, reason in (text or ""):gmatch("([^\t\n]+)\t([^\n]+)") do reasons[name] = reason end
+                for name, reason in (text or ""):gmatch("([^\t\r\n]+)\t([^\r\n]+)") do reasons[name] = reason end
                 reasons_by_context[context] = reasons
             end
             if reasons[modname] then

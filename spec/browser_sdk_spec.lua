@@ -798,6 +798,13 @@ end
         end
         assert.equal(table.concat(absent_lines),
             assert(strategy:read_file(paths.join(browser_paths.titan_bin, "absent-modules"))))
+        -- The uninstaller owns exactly the files the SDK build writes here.
+        local installer = assert(loadfile(paths.join(repository, "scripts/titan_install.lua")))()
+        local owned, written = {}, assert(strategy:list(browser_paths.titan_bin))
+        for _, name in ipairs(installer.browser_sdk_owned) do owned[#owned + 1] = name end
+        table.sort(owned)
+        table.sort(written)
+        assert.same(owned, written)
         local expected_fp = fixtures.fingerprint()
 
         local runtime_ar = assert(staticmetadata.scan_archive(assets.runtime, { target = expected_fp }))

@@ -445,8 +445,10 @@ declares no `modules`.
 
 `titan-uninstall` (`scripts/titan_install.lua`) removes all installed Titan
 rock versions through LuaRocks first. Only when that succeeds does it remove
-the exact external Titan files, including the eleven `make browser-sdk`-owned
-files under `lib/titan-browser/<ver>/` for each matching release; Lua,
+the exact external Titan files, including the fourteen `make browser-sdk`-owned
+files under `lib/titan-browser/<ver>/` (`installer.browser_sdk_owned`, which
+`spec/browser_sdk_spec.lua` checks against the files a fresh SDK build writes)
+for each matching release; Lua,
 LuaRocks, dependency modules, the fork's `lib/browser/`, user archives under
 `lib/titan-browser/<ver>/`, and shared native dependencies remain. Windows
 callers must close processes that use a
