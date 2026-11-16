@@ -44,6 +44,16 @@ export async function wirePeer() {
             socket.resetAndDestroy();
             return;
           }
+          if (route.endsWith('/takeover')) {
+            if (!socket.writableEnded) {
+              writeFrame(socket, 1, Buffer.from('deliver-once'));
+              writeFrame(socket, 1, Buffer.from('discard-later'));
+              writeFrame(socket, 8, closeBody(1001, 'peer'));
+              socket.end();
+            }
+            received = received.subarray(header + length);
+            continue;
+          }
           const body = Buffer.from(received.subarray(header, header + length));
           if (masked) for (let index = 0; index < length; index++) body[index] ^= received[mask + index % 4];
           if (!socket.writableEnded) { writeFrame(socket, 8, body); socket.end(); }

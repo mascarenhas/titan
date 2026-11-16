@@ -62,10 +62,11 @@ function test_redirect_rewrites_preservation_limit_and_authorization(_: test.Con
     defer twenty:close()
     test.assert(twenty.status == 200 and twenty.redirected and twenty.url == server() .. "/chain/0")
     operation_error(function () http.get(server() .. "/chain/21") end, "http.request")
+    local cross_target = "http://localhost:" .. url.parse(server()).port .. "/inspect"
     local redirected = http.get(server() .. "/cross", http.RequestOptions {headers = one_header("Authorization", "Bearer private")})
     defer redirected:close()
     local received = all(redirected)
-    test.assert(redirected.status == 200 and redirected.redirected and received == "GET\n\n",
-      "cross-origin redirect mismatch: " .. redirected.status .. " body=" .. received)
+    test.assert(redirected.status == 200 and redirected.redirected and redirected.url == cross_target and received == "GET\n\n",
+      "cross-origin redirect mismatch: " .. redirected.status .. " url=" .. (redirected.url or "") .. " body=" .. received)
   end)
 end
