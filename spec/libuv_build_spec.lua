@@ -669,15 +669,19 @@ local function audited_stdlib_sources()
     local closed, close_error = driver.close_resolver_context(context)
     assert.is_true(called, selected)
     assert.is_true(closed, close_error)
-    assert.truthy(selected, err)
+    assert.is_table(selected, err)
+    local covered = {}
     for _, file in ipairs(selected) do
         local source = paths.to_slash(file):gsub("^%./", "")
         if not declared[source] then
-            assert.truthy(browser_only["titan." .. assert(source:match("^titan/([^/.]+)"), source)],
-                source .. " is a browser-only source outside a browser-only module")
+            local modname = "titan." .. assert(source:match("^titan/([^/.]+)"), source)
+            assert.truthy(browser_only[modname], source .. " is a browser-only source outside a browser-only module")
+            covered[modname] = true
             sources[#sources + 1] = source
         end
     end
+    -- Every browser-only module is audited through at least one source.
+    assert.same(browser_only, covered)
     return sources
 end
 

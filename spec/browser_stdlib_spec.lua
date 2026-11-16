@@ -5,6 +5,7 @@ local strategy = require("titan-compiler.io").new_sync()
 local temporary = require "spec.support.temporary"
 local installed_prefix = require "spec.support.installed_prefix"
 local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local files = require "spec.fixtures.target_selection.support"
 local parser = require "titan-compiler.parser"
 local driver = require "titan-compiler.driver"
@@ -50,6 +51,19 @@ plan:
         assert.is_true(called, ok)
         assert.is_true(closed, close_error)
         return ok, err
+    end
+
+    -- The tree-relative files a passing source audit selected, in its order.
+    local function selected_sources(root)
+        local selected, err = source_check(root)
+        assert.is_table(selected, err)
+        local prefix, relative = paths.to_slash(root) .. "/", {}
+        for index, file in ipairs(selected) do
+            local slashed = paths.to_slash(file)
+            assert.equal(prefix, slashed:sub(1, #prefix), slashed)
+            relative[index] = slashed:sub(#prefix + 1)
+        end
+        return relative
     end
 
     it("keeps all twenty-three portable owners in the single-image root inventory", function()
@@ -282,18 +296,19 @@ plan:
             rejected(root)
             files.write(root .. "/titan/intruder.browser.titan", good)
             files.write(root .. "/titan/intruder.native.titan", bad)
-            assert(source_check(root))
+            assert.same({ "titan/intruder.browser.titan" }, selected_sources(root))
             files.write(root .. "/titan/intruder.browser.titan", bad)
             rejected(root)
 
             local folder = source_fixture()
             files.write(folder .. "/titan/owner/owner.native.titan", good)
             files.write(folder .. "/titan/owner/member.titan", bad)
-            assert(source_check(folder))
+            assert.same({}, selected_sources(folder))
             files.write(folder .. "/titan/owner/owner.browser.titan", good)
             rejected(folder)
             files.write(folder .. "/titan/owner/member.browser.titan", good)
-            assert(source_check(folder))
+            assert.same({ "titan/owner/member.browser.titan", "titan/owner/owner.browser.titan" },
+                selected_sources(folder))
             -- A bare native.titan is an unlabeled contributor, not a variant.
             files.write(folder .. "/titan/owner/native.titan", bad)
             rejected(folder)
@@ -305,7 +320,7 @@ plan:
         local root = source_fixture()
         files.write(root .. "/titan/owner.titan", 'local missing = import "fs"\n')
         files.write(root .. "/titan/owner/owner.titan", "function value(): integer return 1 end\n")
-        assert(source_check(root))
+        assert.same({ "titan/owner/owner.titan" }, selected_sources(root))
         assert(os.rename(root .. "/titan/owner/owner.titan", root .. "/titan/owner/owner.native.titan"))
         local ok, err = source_check(root)
         assert.is_nil(ok)

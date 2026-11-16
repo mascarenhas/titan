@@ -465,9 +465,10 @@ and `client.browser.titan` is browser-only. `STDLIB_HTTP_SOURCES` and
   The explicit-import, `lua_setmetatable`, and uv FFI audits use
   `audited_stdlib_sources()`, which adds the browser-only sources no native
   list names (today `titan/browser.browser.titan`) from the compiler's
-  browser selection of the standard tree, and requires each to belong to a
+  browser selection of the standard tree, requires each to belong to a
   `browser-only` module of the [status
-  inventory](browser-target.md#subset-parity-gate). Native foreign-header
+  inventory](browser-target.md#subset-parity-gate), and requires every such
+  module to contribute at least one source. Native foreign-header
   predictions do not apply to them; the browser provider's headers and
   symbols are checked by the [dependency-closure
   check](browser-target.md#the-dependency-closure-check). Windows hosts,
