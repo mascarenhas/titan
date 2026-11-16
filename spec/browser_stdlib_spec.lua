@@ -982,6 +982,29 @@ end
         assert.truthy(text:find("\n    alpha = [=[Module('titan.alpha',{},{})]=],\n", 1, true), text)
         assert.truthy(text:find("\n    beta = [===[x]=]y]==]z]===],\n", 1, true), text)
         assert.same({ alpha = "Module('titan.alpha',{},{})", beta = "x]=]y]==]z" }, assert(load(text))())
+        -- A trailing `]=*` joins the closing bracket, and long brackets cannot
+        -- carry a leading newline or a carriage return.
+        for value, literal in pairs({
+            ["x]"] = "[=[x]]=]", ["x]="] = "[==[x]=]==]", ["x]=="] = "[=[x]==]=]",
+            ["x]=]y]=="] = "[===[x]=]y]==]===]", ["]=]"] = "[==[]=]]==]",
+            ["\nleading"] = '"\\\nleading"', ["a\r\nb"] = '"a\\13\\\nb"',
+        }) do
+            local rendered = checks.type_fixture({ key_order = { "titan.value" },
+                entries = { ["titan.value"] = { types = value } } })
+            assert.truthy(rendered:find("\n    value = " .. literal .. ",\n", 1, true), rendered)
+            assert.same({ value = value }, assert(load(rendered))())
+        end
+    end)
+
+    it("checks in a browser type fixture for every browser provider module", function()
+        local expected = {}
+        for _, row in ipairs(checks.status_inventory.modules) do
+            if row[2] ~= "absent" then expected[row[1]:gsub("^titan%.", "")] = "string" end
+        end
+        local fixture = assert(loadfile("spec/fixtures/stdlib/titan_stdlib_browser_types.lua", "t", {}))()
+        local found = {}
+        for name, value in pairs(fixture) do found[name] = type(value) end
+        assert.same(expected, found)
     end)
 
     it("requires every covered inventory test to have passed in a run", function()

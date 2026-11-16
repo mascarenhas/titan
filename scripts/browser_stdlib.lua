@@ -948,7 +948,10 @@ end
 -- The browser type fixture: each module's serialized interface from the
 -- browser provider's metadata, keyed by its short name, as the native fixture
 -- pins the native provider. Each value takes the lowest long-bracket level
--- (from one) whose closing bracket does not occur in its text.
+-- (from one) whose closing bracket occurs neither in its text nor across its
+-- end, where a trailing `]=*` would join the closing bracket. Long brackets
+-- drop a leading newline and rewrite carriage returns, so such a value is
+-- quoted instead.
 function M.type_fixture(scanned)
     local out = {
         "-- Exact current serialized interfaces of the browser standard provider",
@@ -957,9 +960,16 @@ function M.type_fixture(scanned)
         "return {",
     }
     for _, modname in ipairs(scanned.key_order) do
-        local text, level = scanned.entries[modname].types, "="
-        while text:find("]" .. level .. "]", 1, true) do level = level .. "=" end
-        out[#out + 1] = "    " .. modname:gsub("^titan%.", "") .. " = [" .. level .. "[" .. text .. "]" .. level .. "],"
+        local text = scanned.entries[modname].types
+        local literal
+        if text:find("^\n") or text:find("\r", 1, true) then
+            literal = string.format("%q", text)
+        else
+            local level = "="
+            while (text .. "]"):find("]" .. level .. "]", 1, true) do level = level .. "=" end
+            literal = "[" .. level .. "[" .. text .. "]" .. level .. "]"
+        end
+        out[#out + 1] = "    " .. modname:gsub("^titan%.", "") .. " = " .. literal .. ","
     end
     out[#out + 1] = "}"
     return table.concat(out, "\n") .. "\n"

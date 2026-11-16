@@ -750,7 +750,11 @@ with each row's status and test, followed by the absent members;
 the documented serialized interface of every browser module as the native
 fixture pins the native provider. `check_browser_stdlib.lua fixture <browser
 titan.a> [file]` regenerates it through `M.type_fixture`, which gives each
-value the lowest collision-free long-bracket level. The real-toolchain
+value the lowest long-bracket level whose closing bracket occurs neither in
+the text nor across its end (a trailing `]=*` would join it), and quotes a
+value that starts with a newline or holds a carriage return, which long
+brackets cannot carry. The compiler shard loads the checked-in fixture and
+requires one string per browser provider module. The real-toolchain
 `browser_stdlib_closure_spec.lua` compares the browser fixture with the
 installed browser provider and the native fixture with the installed native
 provider's metadata.
