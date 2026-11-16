@@ -64,10 +64,19 @@ local function blocked_write_case(id: string, action: string)
       test.assert(completed and metric("drains") > drains,
         "writer did not complete after draining through low water")
     else
-      -- FIN can drain the admitted write before the host reports the transport loss.
+      -- Late host loss may follow every write in the bounded loop.
       local exact = action ~= "fin" and (not remote or metric("exactWrite") == 1)
-      test.assert(not completed and (not exact or returned < blocked),
-        "writer did not fail after the observed transport loss")
+      if not exact and completed then
+        wait_for(function (): boolean return metric("ready", source) ~= 1 end,
+          "timed out waiting for host transport loss after the bounded writes")
+        local before = metric("send", source)
+        failure = websocket_error(function () connection:write(websocket.TEXT, "must not send") end,
+          nil, "websocket.write", nil)
+        test.assert(metric("send", source) == before, "write sent after the host reported transport loss")
+      else
+        test.assert(not completed and (not exact or returned < blocked),
+          "writer did not fail after the observed transport loss")
+      end
       assert_write_failure(failure, nil)
       -- Let the browser finish any queued wire drain only after the write failed.
       control(id, "resume")

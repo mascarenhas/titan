@@ -315,6 +315,13 @@ server, and transfer cases stay in `.native.titan` contributors. The browser
 client's network behavior runs against real engines in the live browser
 network harness ([browser target](browser-target.md#the-live-browser-network-harness)).
 
+Buffered-write loss tests require the exact admitted write to fail, except for
+FIN on every engine and remote Close/reset on WebKit, where host loss reporting
+may follow output drainage. These late-loss cases check that each successful
+write observes OPEN. If all eight 8 MiB writes finish first, a bounded wait for
+non-OPEN must succeed, then the next write must fail without another host send.
+The wait does not extend the payload cap or relax the other loss oracles.
+
 [The conformance harness](../../spec/conformance/websocket/README.md) pins both
 Autobahn roles and checks exact nonempty selected-case/agent inventories plus
 behavior and close behavior. Compression families 12/13 are explicit
