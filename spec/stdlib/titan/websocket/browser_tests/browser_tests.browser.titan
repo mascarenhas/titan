@@ -1,6 +1,7 @@
 -- Real WebSocket clients; the host supplies peers and observes resource lifetimes.
 local async = import "async"
 local browser = import "browser"
+local gc = import "gc"
 local http = import "http"
 local iteration = import "iteration"
 local os = import "os"

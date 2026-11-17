@@ -123,3 +123,29 @@ function test_live_close_releases_unread_holders(_context: test.Context)
     test.assert(metric("takes", source) == takes + 60, "close took the bytes of unread messages")
   end)
 end
+
+-- Bursts read while one message always stays queued never empty the queue,
+-- so only compaction drops the consumed prefix: the queue's storage stays
+-- bounded instead of growing with every message ever read.
+function test_live_queue_storage_stays_bounded_while_never_empty(_context: test.Context)
+  runtime_test.run(function ()
+    local source = live("burst")
+    local connection = websocket.connect(source)
+    defer connection:close()
+    queue_burst(connection, source, 150)
+    read_numbered(connection, 1, 149)
+    gc.collect()
+    gc.collect()
+    local baseline = gc.count()
+    for _ = 1, 40 do
+      queue_burst(connection, source, 150)
+      read_numbered(connection, 150, 150)
+      read_numbered(connection, 1, 149)
+    end
+    gc.collect()
+    gc.collect()
+    local growth = gc.count() - baseline
+    test.assert(growth < 16384, "40 bursts read past an unread message grew memory by " .. growth .. " bytes")
+    read_numbered(connection, 150, 150)
+  end)
+end

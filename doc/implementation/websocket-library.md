@@ -343,7 +343,11 @@ queued unread, reading 60 passes the compaction point; the messages keep
 their order and bytes, the 60 consumed holders are released, and after the
 last read no holder remains and every message took its bytes once. Closing
 the connection after 60 reads instead releases the 40 unread holders without
-taking their bytes.
+taking their bytes. Emptying the queue resets it, so a third test keeps one
+message unread at all times: after a warm-up burst it reads 40 bursts of 150
+messages, and the Lua state's memory may grow by less than 16 KiB across
+them. Without compaction the queue's consumed prefix keeps growing, by about
+70 KiB over those bursts.
 
 [The conformance harness](../../spec/conformance/websocket/README.md) pins both
 Autobahn roles and checks exact nonempty selected-case/agent inventories plus
