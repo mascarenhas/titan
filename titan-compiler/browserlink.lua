@@ -151,6 +151,9 @@ function M.profile(descriptor, options)
     add("-sMODULARIZE=1")
     add("-sEXPORT_ES6=1")
     add("-sENVIRONMENT=web,node")
+    -- Node 26 is the only supported Node; below 19, Emscripten's WASI
+    -- `random_get` would `require('node:crypto')`.
+    add("-sMIN_NODE_VERSION=260000")
     add(entry == "titan" and "-sFILESYSTEM=0" or "-sFORCE_FILESYSTEM=1")
     add("-sPRINTF_LONG_DOUBLE=1")
     local exports = entry == "titan" and
@@ -188,7 +191,7 @@ local owned = { SUPPORT_LONGJMP = true, WASM_LEGACY_EXCEPTIONS = true,
     JSPI = true, STACK_SIZE = true,
     INITIAL_MEMORY = true, INITIAL_HEAP = true, ALLOW_MEMORY_GROWTH = true, MAXIMUM_MEMORY = true,
     ABORTING_MALLOC = true, EXIT_RUNTIME = true, INVOKE_RUN = true,
-    MODULARIZE = true, EXPORT_ES6 = true, ENVIRONMENT = true,
+    MODULARIZE = true, EXPORT_ES6 = true, ENVIRONMENT = true, MIN_NODE_VERSION = true,
     FORCE_FILESYSTEM = true, FILESYSTEM = true, MINIMAL_RUNTIME = true, PRINTF_LONG_DOUBLE = true,
     EXPORTED_FUNCTIONS = true, EXPORTED_RUNTIME_METHODS = true,
     INCOMING_MODULE_JS_API = true, ASSERTIONS = true, STACK_OVERFLOW_CHECK = true,
@@ -256,11 +259,150 @@ function M.check_image_size(size)
     return true
 end
 
+-- Emscripten's `ENVIRONMENT=web,node` shell reaches Node's built-ins inside
+-- `if (ENVIRONMENT_IS_NODE)` through `createRequire` and three `require`
+-- calls; an optimizing link prints them again with either quote style, extra
+-- parentheses and less whitespace. Node 26 provides the same modules
+-- through `process.getBuiltinModule`, which needs no import, so one image
+-- serves pages, bundlers and Node. Only these pinned statements change; the
+-- scan below refuses anything else, including a JS library's own `require`.
+local NODE_SHELL = {
+    { "const%s*{%s*createRequire%s*}%s*=%s*await%s*%(*%s*import%(%s*(['\"])node:module%1%s*%)%s*%)*%s*;?", "" },
+    { "var%s+require%s*=%s*createRequire%(%s*import%.meta%.url%s*%)%s*;?", "" },
+    { "var%s+fs%s*=%s*require%(%s*(['\"])node:fs%1%s*%)%s*;?", "var fs = process.getBuiltinModule(%1fs%1);" },
+    { "require%(%s*(['\"])node:path%1%s*%)%s*%.%s*dirname%s*%(%s*require%(%s*(['\"])node:url%2%s*%)%s*" ..
+        "%.%s*fileURLToPath%s*%(%s*_scriptName%s*%)%s*%)",
+        "process.getBuiltinModule(%1path%1).dirname(process.getBuiltinModule(%2url%2).fileURLToPath(_scriptName))" },
+}
+
+-- Keywords after which a `/` starts a regular expression rather than a division.
+local REGEX_AFTER = { ["return"] = true, ["typeof"] = true, ["instanceof"] = true,
+    ["in"] = true, ["of"] = true, ["new"] = true, ["delete"] = true, ["void"] = true,
+    ["throw"] = true, ["case"] = true, ["do"] = true, ["else"] = true, ["yield"] = true,
+    ["await"] = true }
+
+-- Finds the first way generated module text reaches Node's module system: a
+-- string or template literal naming a `node:` module (`"import"`), or any
+-- `require` call (`"require"`, with its literal argument when it has one).
+-- Comments, string and template text and regular expressions are skipped, so
+-- prose such as "the require() function" is not code. Returns the kind, the
+-- value and the 1-based line, or nil; text that does not lex returns
+-- `"unterminated"` and what was left open.
+function M.node_import(text)
+    local pos = 1
+    local templates, braces = {}, 0
+    local regex = true -- whether a `/` here starts a regular expression
+    local call = false -- whether the previous token was `require`
+    local function at(kind, value, where)
+        local _, newlines = text:sub(1, where):gsub("\n", "")
+        return kind, value, newlines + 1
+    end
+    local function string_end(start, quote)
+        while true do
+            local found = text:find("[\\\n" .. quote .. "]", start)
+            if not found or text:sub(found, found) == "\n" then return nil end
+            if text:sub(found, found) ~= "\\" then return found end
+            start = found + 2
+        end
+    end
+    local function template_end(start)
+        while true do
+            local found = text:find("[\\`$]", start)
+            if not found then return nil end
+            local char = text:sub(found, found)
+            if char == "`" then return found, false end
+            if char == "$" and text:sub(found + 1, found + 1) == "{" then return found, true end
+            start = found + (char == "\\" and 2 or 1)
+        end
+    end
+    local function regex_end(start)
+        local class = false
+        while true do
+            local found = text:find("[\\/%[%]\n]", start)
+            if not found then return nil end
+            local char = text:sub(found, found)
+            if char == "\n" then return nil end
+            if char == "/" and not class then return found end
+            if char == "[" then class = true elseif char == "]" then class = false end
+            start = found + (char == "\\" and 2 or 1)
+        end
+    end
+    while true do
+        pos = text:find("%S", pos)
+        if not pos then return nil end
+        local char, pair = text:sub(pos, pos), text:sub(pos, pos + 1)
+        if pair == "//" then
+            pos = text:find("\n", pos, true)
+            if not pos then return nil end
+        elseif pair == "/*" then
+            local close = text:find("*/", pos + 2, true)
+            if not close then return at("unterminated", "comment", pos) end
+            pos = close + 2
+        elseif char == "'" or char == '"' then
+            local finish = string_end(pos + 1, char)
+            if not finish then return at("unterminated", "string", pos) end
+            local value = text:sub(pos + 1, finish - 1)
+            if value:sub(1, 5) == "node:" then return at("import", value, pos) end
+            pos, regex, call = finish + 1, false, false
+        elseif char == "`" or (char == "}" and templates[#templates] == braces) then
+            if char == "}" then templates[#templates] = nil end
+            local finish, substitution = template_end(pos + 1)
+            if not finish then return at("unterminated", "template literal", pos) end
+            if char == "`" and text:sub(pos + 1, pos + 5) == "node:" then
+                return at("import", text:sub(pos + 1, finish - 1), pos)
+            end
+            call = false
+            if substitution then
+                templates[#templates + 1] = braces
+                pos, regex = finish + 2, true
+            else
+                pos, regex = finish + 1, false
+            end
+        elseif char == "/" and regex then
+            local finish = regex_end(pos + 1)
+            if not finish then return at("unterminated", "regular expression", pos) end
+            pos = select(2, text:find("^[%w_$]*", finish + 1)) + 1
+            regex, call = false, false
+        elseif char:match("[%a_$]") then
+            local _, finish = text:find("^[%w_$]+", pos)
+            local word = text:sub(pos, finish)
+            pos, regex, call = finish + 1, REGEX_AFTER[word] or false, word == "require"
+        elseif char:match("%d") then
+            pos = select(2, text:find("^[%w_.]+", pos)) + 1
+            regex, call = false, false
+        else
+            if char == "(" and call then
+                local argument = text:find("%S", pos + 1)
+                local quote = argument and text:sub(argument, argument)
+                local finish = (quote == "'" or quote == '"') and string_end(argument + 1, quote)
+                return at("require", finish and text:sub(argument + 1, finish - 1) or nil, pos)
+            end
+            if char == "{" then braces = braces + 1 elseif char == "}" then braces = braces - 1 end
+            pos, regex, call = pos + 1, not (char == ")" or char == "]" or char == "}"), false
+        end
+    end
+end
+
+local function refuse_node_imports(module)
+    local kind, value, line = M.node_import(module)
+    if kind == "import" then
+        return nil, string.format("browser image module imports Node built-in %q at line %d; " ..
+            "the deployed module must not import Node modules", value, line)
+    elseif kind == "require" then
+        return nil, string.format("browser image module calls require%s at line %d; " ..
+            "the deployed module must not import Node modules",
+            value and ("(" .. string.format("%q", value) .. ")") or "", line)
+    elseif kind then
+        return nil, string.format("browser image module has an unterminated %s at line %d", value, line)
+    end
+    return module
+end
+
 -- Emscripten's pinned ES-module output has one trailing default factory export.
 -- Keep the factory lexical and its bundler-visible new URL expressions intact;
 -- only the embedded owner is an application entrypoint. The owner receives the
 -- image identity that the linked Wasm exports, so it refuses a `.wasm` from
--- another link before any entry.
+-- another link before any entry. The embedded module imports no Node module.
 function M.embed(image, loader, wasm_name, identity)
     if type(identity) ~= "string" or not identity:match("^" .. string.rep("[0-9a-f]", 64) .. "$") then
         return nil, "browser image identity must be 64 lowercase hexadecimal digits"
@@ -284,7 +426,8 @@ function M.embed(image, loader, wasm_name, identity)
         end) .. '"'
     end
     local wasm, map = quote(wasm_name), quote(wasm_name .. ".map")
-    return image .. "\nconst titanCreate = (() => {\n" .. loader ..
+    for _, rule in ipairs(NODE_SHELL) do image = image:gsub(rule[1], rule[2], 1) end
+    return refuse_node_imports(image .. "\nconst titanCreate = (() => {\n" .. loader ..
         "\nreturn create;\n})();\n" ..
         "export default function create(options = {}) {\n" ..
         "  const locateFile = options.locateFile ?? ((name, prefix) => {\n" ..
@@ -292,7 +435,7 @@ function M.embed(image, loader, wasm_name, identity)
         "    if (name.endsWith('.wasm')) return new URL(" .. wasm .. ", import.meta.url).href;\n" ..
         "    return prefix + name;\n  });\n" ..
         "  return titanCreate(" .. factory .. ", {...options, locateFile}, {identity: \"" .. identity ..
-        "\", wasm: " .. wasm .. "});\n}\n"
+        "\", wasm: " .. wasm .. "});\n}\n")
 end
 
 -- Inventory shares the bounded final-image walk with the map rewriter.

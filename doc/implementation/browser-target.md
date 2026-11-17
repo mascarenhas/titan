@@ -1641,7 +1641,7 @@ as every `-s`, `-D`, or `-U` spelling, joined or split and with or without a
 every `ASYNCIFY_*` setting, `JSPI`, every `JSPI_*` setting,
 `BINARYEN_EXTRA_PASSES`, `STACK_SIZE`, `INITIAL_MEMORY`, `INITIAL_HEAP`,
 `ALLOW_MEMORY_GROWTH`, `MAXIMUM_MEMORY`, `ABORTING_MALLOC`, `EXIT_RUNTIME`,
-`INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `FORCE_FILESYSTEM`,
+`INVOKE_RUN`, `MODULARIZE`, `EXPORT_ES6`, `ENVIRONMENT`, `MIN_NODE_VERSION`, `FORCE_FILESYSTEM`,
 `FILESYSTEM`, `MINIMAL_RUNTIME`, `PRINTF_LONG_DOUBLE`, `EXPORTED_FUNCTIONS`,
 `EXPORTED_RUNTIME_METHODS`, `INCOMING_MODULE_JS_API`, `ASSERTIONS`,
 `STACK_OVERFLOW_CHECK`, and the target defines, plus `--no-entry` and
@@ -2015,7 +2015,8 @@ flag list.
 | `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
 | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | initial memory is the image's static data and main stack plus a 15 MiB heap, so static data never outgrows a fixed initial size (15 MiB is the heap a data-free image had under the former fixed 16 MiB; [measured sizes](#budgets)); coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
-| `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines |
+| `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines ([no Node imports](#no-node-imports)) |
+| `-sMIN_NODE_VERSION=260000` | Node 26, the only supported Node, so Emscripten emits no `require('node:crypto')` fallback |
 | `-sFILESYSTEM=0` | no Emscripten filesystem in launcher images; `lua-main` keeps `-sFORCE_FILESYSTEM=1` because it has no launcher |
 | `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
 | `-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke","_titan_browser_release_callable","_titan_browser_close","_malloc","_free","_titan_browser_trace_identity"]` | the four promised bridge entries, synchronous wrapper release, the C buffer allocation and release used for argument marshalling, and the 64-hex image identity export; the `gate` purpose adds `_titan_browser_gate_guarded` and `_titan_browser_gate_observe`; `lua-main` exports `_main`, `_malloc`, and `_free` instead |
@@ -2458,8 +2459,9 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    `create` passes `{identity, wasm}` (the step-3 identity and the `.wasm`
    basename) to the loader, which refuses a `.wasm` from another link
    ([module and Wasm binding](#module-and-wasm-binding)); `embed` refuses an
-   identity that is not 64 lowercase hexadecimal digits. A malformed
-   transform fails while all predecessors are untouched. Then run
+   identity that is not 64 lowercase hexadecimal digits. `embed` also removes
+   the module's Node imports ([no Node imports](#no-node-imports)). A
+   malformed transform fails while all predecessors are untouched. Then run
    `before_commit` (which invalidates the link record);
 7. validate that any existing destination in `{ <stem>.wasm.map, <stem>.wasm,
    <stem>.mjs }` is a regular file (`browser output '<path>' is not a regular
@@ -2548,6 +2550,44 @@ under the former fixed 16 MiB initial memory.
 Default tiering and sandboxing were unchanged, with no memory feature or
 forced optimizing-only compiler. These are individual measurements, not
 maximum startup-memory guarantees.
+
+### No Node imports
+
+One generated module serves pages, bundlers and Node, and it imports no Node
+module. Emscripten 6.0.13's `ENVIRONMENT=web,node` shell reaches Node inside
+`if (ENVIRONMENT_IS_NODE)` through four statements:
+`const { createRequire } = await import('node:module')`,
+`var require = createRequire(import.meta.url)`, `var fs = require('node:fs')`,
+and `require('node:path').dirname(require('node:url').fileURLToPath(_scriptName))`.
+An optimizing link prints them again with double quotes, extra parentheses
+around the `import`, and less whitespace (none at all without `-g2`).
+`embed` removes the first two and rewrites the others to
+`process.getBuiltinModule('fs')`, `'path'` and `'url'`, which Node 26 provides
+synchronously without an import. Only the first occurrence of each pinned
+form changes, so a JavaScript library's own `require` is left for the check
+below. The link profile owns `-sMIN_NODE_VERSION=260000`; below Node 19,
+Emscripten's WASI `random_get` would `require('node:crypto')`.
+
+`embed` then scans the whole module with `browserlink.node_import`, a small
+JavaScript lexer. It skips comments, string and template text and regular
+expression literals; a `/` starts a regular expression after an operator, an
+opening bracket or a keyword such as `return`, and is a division after an
+identifier, a number or a closing bracket. It refuses:
+
+* a string or template literal whose text starts with `node:`, which covers
+  static and dynamic imports;
+* any `require(...)` call, including a member call such as
+  `module.require(...)`.
+
+The diagnostics are `browser image module imports Node built-in "<text>" at
+line <n>; the deployed module must not import Node modules`, `browser image
+module calls require("<argument>") at line <n>; ...` (without the argument
+when it is not a string literal), and `browser image module has an
+unterminated <string|template literal|regular expression|comment> at line
+<n>`. The scan covers user `EM_JS` and `EM_ASM` code, which Emscripten places
+in the module. Because both steps run in `embed`, they apply to every
+program, test and protocol image; the `lua-main` baseline images that
+`scripts/browser_baseline.lua` links directly keep Emscripten's shell.
 
 ### Import manifest
 
@@ -4184,7 +4224,8 @@ hosts`).
   and its refusals of a contrary or missing purpose, the owned options named
   by profile, the refused options that add a file to the module or its data
   (`--pre-js` and the rest, directly and through `--ldflag`), missing-SDK and
-  `.mjs` diagnostics, program and test images with
+  `.mjs` diagnostics, the Node shell rewrite in both printed forms and the
+  Node-import scan's refusals and accepted prose, program and test images with
   statuses, binary arguments, uncaught reports, protected initialization and
   allocation failures, the libc drain, the stdio-only filesystem regression,
   dynamic-loading guards, three-file preflight reservation and repeated-link

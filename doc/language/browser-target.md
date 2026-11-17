@@ -570,12 +570,25 @@ into C runs the callback synchronously. To run Titan code there, pin a
 handler and call `titan_browser_call_sync`
 ([synchronous C callbacks](standard-library-browser.md#synchronous-c-callbacks)).
 
+`EM_JS` and `EM_ASM` code becomes part of the generated module, which must
+not import Node modules (see [the loader API](#the-loader-api)). Titan
+refuses to link a module whose code calls `require` or holds a string that
+starts with `node:`; comments and other strings may mention either:
+
+```text
+browser image module calls require("fs") at line 1840; the deployed module must not import Node modules
+browser image module imports Node built-in "node:fs" at line 1840; the deployed module must not import Node modules
+```
+
 ## The loader API
 
 Every generated program or test ES module exports one default
 `create(options = {})` function. Import that function directly; the raw
 Emscripten factory and Module are private. The same image works over HTTP, in
-a bundler such as Vite, and in Node 26+:
+a bundler such as Vite, and in Node 26+. The module imports no Node module:
+under Node it reaches Node's file and path modules through
+`process.getBuiltinModule`, so neither a bundler nor a page sees a `node:`
+import or a `require` call:
 
 ```javascript
 import create from "./out/app.mjs";

@@ -230,6 +230,82 @@ describe("browser image profile and SDK readiness", function()
         assert.truthy(embedded:find('a\\u0022b\\u000a.wasm', 1, true))
     end)
 
+    it("rewrites the pinned Node shell to process.getBuiltinModule in every printed form", function()
+        local loader = "export function create(factory, options) { return options; }\n"
+        for _, shell in ipairs({
+            -- As Emscripten 6.0.13 prints it unoptimized, at -O2, at -Os or -O3,
+            -- and without -g2.
+            "if (ENVIRONMENT_IS_NODE) {\n" ..
+            "  // We need to use `createRequire()` to construct the require()` function.\n" ..
+            "  const { createRequire } = await import('node:module');\n" ..
+            "  /** @suppress{duplicate} */\n" ..
+            "  var require = createRequire(import.meta.url);\n}\n" ..
+            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require('node:fs');\n" ..
+            "  scriptDirectory = require('node:path').dirname(require('node:url').fileURLToPath(_scriptName)) + '/';\n}\n",
+            "if (ENVIRONMENT_IS_NODE) {\n" ..
+            "  const {createRequire} = await (import(\"node:module\"));\n" ..
+            "  /** @suppress{duplicate} */ var require = createRequire(import.meta.url);\n}\n" ..
+            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require(\"node:fs\");\n" ..
+            "  scriptDirectory = require(\"node:path\").dirname(require(\"node:url\").fileURLToPath(_scriptName)) + \"/\";\n}\n",
+            "if (ENVIRONMENT_IS_NODE) {\n" ..
+            "  const {createRequire} = await ((import(\"node:module\")));\n" ..
+            "  /** @suppress{duplicate} */ var require = createRequire(import.meta.url);\n}\n" ..
+            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require(\"node:fs\");\n" ..
+            "  scriptDirectory = require(\"node:path\").dirname(require(\"node:url\").fileURLToPath(_scriptName)) + \"/\";\n}\n",
+            "if(ENVIRONMENT_IS_NODE){const{createRequire}=await(import(\"node:module\"));" ..
+            "var require=createRequire(import.meta.url)}if(ENVIRONMENT_IS_NODE){var fs=require(\"node:fs\");" ..
+            "if(_scriptName.startsWith(\"file:\"))scriptDirectory=require(\"node:path\")" ..
+            ".dirname(require(\"node:url\").fileURLToPath(_scriptName))+\"/\"}\n",
+        }) do
+            local embedded = assert(browserlink.embed(shell .. "\nexport default Module;\n", loader,
+                "app.wasm", IDENTITY))
+            assert.is_nil(embedded:find("= createRequire(", 1, true))
+            assert.is_nil(embedded:find("import(", 1, true))
+            assert.is_nil(embedded:find("node:", 1, true))
+            local quote = shell:find('"node:fs"', 1, true) and '"' or "'"
+            assert.truthy(embedded:find("var fs = process.getBuiltinModule(" .. quote .. "fs" .. quote .. ");",
+                1, true))
+            assert.truthy(embedded:find("process.getBuiltinModule(" .. quote .. "path" .. quote ..
+                ").dirname(process.getBuiltinModule(" .. quote .. "url" .. quote ..
+                ").fileURLToPath(_scriptName))", 1, true))
+        end
+    end)
+
+    it("refuses every Node import left in the module and ignores Node names in prose", function()
+        local loader = "export function create(factory, options) { return options; }\n"
+        local function embed(body)
+            return browserlink.embed("async function Module(options) { return options; }\n" .. body ..
+                "\nexport default Module;\n", loader, "app.wasm", IDENTITY)
+        end
+        local suffix = "; the deployed module must not import Node modules"
+        for _, case in ipairs({
+            { "import fs from 'node:fs';", 'imports Node built-in "node:fs" at line 2' .. suffix },
+            { 'const m = await import("node:module");', 'imports Node built-in "node:module" at line 2' .. suffix },
+            { "const m = import(`node:${name}`);", 'imports Node built-in "node:" at line 2' .. suffix },
+            { "var os = require('os');", 'calls require("os") at line 2' .. suffix },
+            { "var named = require /* call */ (name);", "calls require at line 2" .. suffix },
+            { "var direct = module.require(\"node:fs\");", 'calls require("node:fs") at line 2' .. suffix },
+            -- The scan stays in step after a quote inside a regular expression
+            -- and braces inside a template substitution.
+            { "const quote = /['\"`]/g;\nrequire('fs');", 'calls require("fs") at line 3' .. suffix },
+            { "const text = `a ${ {b: '}'}.b } c`;\nrequire('fs');", 'calls require("fs") at line 3' .. suffix },
+            { "const broken = 'node", "has an unterminated string at line 2" },
+        }) do
+            local embedded, err = embed(case[1])
+            assert.is_nil(embedded, case[1])
+            assert.equal("browser image module " .. case[2], err)
+        end
+        assert(embed(table.concat({
+            "// We need to use `createRequire()` to construct the require()` function.",
+            "/* const fs = await import('node:fs'); */",
+            "const help = 'pass require(\"node:fs\") nothing';",
+            "const ratio = total / 2 / count;",
+            "const options = { requireTrace: true, require: false };",
+            "if (typeof require == 'undefined') ok = /node:/.test(text);",
+            "var fs = process.getBuiltinModule('fs');",
+        }, "\n")))
+    end)
+
     it("derives the closed SDK asset set without extending BrowserPaths", function()
         local paths = fixtures.paths()
         local assets = browserlink.sdk_assets(paths)
@@ -295,7 +371,7 @@ describe("browser image profile and SDK readiness", function()
             "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
+            "-sMIN_NODE_VERSION=260000", "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
                 '"_titan_browser_release_callable","_titan_browser_close",' ..
                 '"_malloc","_free","_titan_browser_trace_identity"]',
@@ -325,7 +401,7 @@ describe("browser image profile and SDK readiness", function()
             "-sINITIAL_HEAP=15728640", "-sALLOW_MEMORY_GROWTH=1",
             "-sMAXIMUM_MEMORY=2147483648", "-sABORTING_MALLOC=0", "-sEXIT_RUNTIME=0", "-sINVOKE_RUN=0",
             "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sENVIRONMENT=web,node",
-            "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
+            "-sMIN_NODE_VERSION=260000", "-sFILESYSTEM=0", "-sPRINTF_LONG_DOUBLE=1",
             '-sEXPORTED_FUNCTIONS=["_titan_browser_initialize","_titan_browser_entry","_titan_browser_invoke",' ..
                 '"_titan_browser_release_callable","_titan_browser_close",' ..
                 '"_malloc","_free","_titan_browser_trace_identity"]',
@@ -637,6 +713,7 @@ describe("browser image profile and SDK readiness", function()
             { "-sJSPI_IMPORTS=[]" }, { "-DJSPI=0" }, { "-U", "JSPI_EXPORTS" },
             { "-sFORCE_FILESYSTEM=0" }, { "-sFILESYSTEM=0" }, { "-sMINIMAL_RUNTIME=1" },
             { "-sINITIAL_MEMORY=33554432" }, { "-sINITIAL_HEAP=33554432" },
+            { "-sMIN_NODE_VERSION=180300" }, { "-s", "MIN_NODE_VERSION=220000" },
             { "--js-library=x.js" }, { "--no-entry" } }) do
             assert.is_nil(browserlink.validate_extras(flags))
         end
