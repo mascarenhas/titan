@@ -5823,6 +5823,7 @@ printf '%s\n' "${schedule[@]}"
             local browser_job = named_job(linux_workflow, "browser-toolchain")
             local browser_stdlib_job = named_job(linux_workflow, "browser-stdlib")
             local playwright_job = named_job(linux_workflow, "browser-playwright")
+            local packaging_job = named_job(linux_workflow, "browser-packaging")
             local native_coverage_job = named_job(linux_workflow, "native-coverage")
             local macos_job = named_job(macos_workflow, "test-macos")
             local sanitizer_job = named_job(linux_workflow, "sanitizer")
@@ -5834,18 +5835,18 @@ printf '%s\n' "${schedule[@]}"
             local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
             assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
                 macos_events)
-            assert.equal(7, count_literal(linux_workflow,
+            assert.equal(8, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
             assert.equal(1, count_literal(macos_workflow,
                 "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
-            assert.equal(7, count_literal(linux_workflow, "\n    runs-on:"),
+            assert.equal(8, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
             assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
                 macos_workflow)
             for _, job_name in ipairs({
                 "build-compiler", "test-linux-compiler", "browser-toolchain",
                 "browser-stdlib",
-                "browser-playwright", "native-coverage", "sanitizer",
+                "browser-playwright", "browser-packaging", "native-coverage", "sanitizer",
             }) do
                 assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -6006,7 +6007,8 @@ printf '%s\n' "${schedule[@]}"
                 "- name: Upload prepared Linux tree", pack_index, true))
             assert.is_true(build_index < pack_index and pack_index < upload_index)
 
-            assert.equal(13, count_literal(workflow,
+            -- browser-packaging restores the emsdk and Playwright caches.
+            assert.equal(15, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
             assert.equal(2, count_literal(workflow,
                 "uses: ubicloud/cache/restore@v4"), workflow)
@@ -6363,7 +6365,7 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(browser_stdlib_job:find("out/browser-net/**", 1, true))
             assert.falsy(linux_workflow:find("HigherRendererMemoryLimit", 1, true))
             assert.falsy(browser_stdlib_job:find("titan-stdlib-chrome", 1, true))
-            for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job }) do
+            for _, job in ipairs({ browser_job, browser_stdlib_job, playwright_job, packaging_job }) do
                 assert.truthy(job:find('TITAN_NODE_VERSION: "26.13.0"', 1, true))
                 local install_node = named_step(job, "Install the pinned Node 26 runtime")
                 assert.truthy(install_node:find("uses: actions/setup-node@v6", 1, true))
@@ -6612,6 +6614,44 @@ printf '%s\n' "${schedule[@]}"
                 assert(playwright_job:find(
                 "- name: Install the selected native compiler and SDK profile",
                 1, true)), playwright_job)
+
+            -- The clean checkout starts from nothing another job made, with no
+            -- Titan variable, and runs the two chapters as one reader would.
+            for _, forbidden in ipairs({
+                "\n    needs:", "actions/download-artifact", "titan-probes", "TITAN_BUILD_PROFILE",
+                "\n      PREFIX:", "TITAN_ROOT", "TITAN_PREFIX", "\n      CC:", "TITAN_CHROME",
+            }) do
+                assert.falsy(packaging_job:find(forbidden, 1, true), forbidden)
+            end
+            local clean_checkout = named_step(packaging_job,
+                "Install from a fresh clone and build exactly as the manuals document")
+            for _, contract in ipairs({
+                "lua5.4 scripts/doc_check.lua --clean-checkout",
+                '--checkout "$GITHUB_WORKSPACE" --vite-root "$TITAN_VITE_ROOT"',
+                "doc/language/installation.md doc/language/browser-target.md",
+            }) do
+                assert.truthy(clean_checkout:find(contract, 1, true), contract)
+            end
+            local packaged_app = named_step(packaging_job,
+                "Check the documented images and run the complete application")
+            for _, contract in ipairs({
+                'PREFIX="$workspace/prefix" lua -E spec/browser/build-delivery.lua --built "$workspace"',
+                'hosted.mjs --engine chromium --root "$workspace"',
+                '--root "$workspace" --js-test "$workspace/dod.test.mjs"',
+            }) do
+                assert.truthy(packaged_app:find(contract, 1, true), contract)
+            end
+            local packaging_records = named_step(packaging_job,
+                "Record sizes, startup, memory, Task scaling and recursion depth")
+            for _, contract in ipairs({
+                "spec/browser/build-records.lua",
+                "spec/fixtures/browser_records/collect.mjs",
+                "--engines node,chromium --out out/browser-records/packaging.json",
+            }) do
+                assert.truthy(packaging_records:find(contract, 1, true), contract)
+            end
+            local packaging_upload = step_containing(packaging_job, "name: browser-records-packaging")
+            assert.truthy(packaging_upload:find("if: always()", 1, true), packaging_upload)
 
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",

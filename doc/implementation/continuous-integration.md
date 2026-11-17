@@ -12,16 +12,18 @@ coverage reports upload from `out/coverage/report`.
 
 ## Linux job graph and concurrency
 
-Linux runs on pushes. Seven job definitions produce fourteen runner
-executions: `build-compiler` and `sanitizer` start independently; after
+Linux runs on pushes. Eight job definitions produce fifteen runner
+executions: `build-compiler`, `sanitizer`, and
+[`browser-packaging`](#browser-packaging-job) start independently; after
 `build-compiler`, two `test-linux-compiler` shard pairs, `native-coverage`,
 [`browser-toolchain`](#browser-toolchain-job), two
 [`browser-stdlib`](#browser-stdlib-job) shards, and the six-cell
 [`browser-playwright`](#browser-playwright-job) matrix (`validation` and
 `production` profiles across `chromium`, `firefox`, and `webkit`) start in
-parallel. Preparation has a 30-minute timeout, compiler pairs 45 minutes,
-native coverage, the browser jobs, and the `browser-playwright` cells 60
-minutes, and the independent cold sanitizer build 75 minutes.
+parallel. Preparation has a 30-minute timeout, compiler pairs and
+`browser-packaging` 45 minutes, native coverage, the other browser jobs, and
+the `browser-playwright` cells 60 minutes, and the independent cold sanitizer
+build 75 minutes.
 
 Linux defaults to `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-vCPU runners.
 The native coverage, sanitizer, and browser jobs each use a four-vCPU runner
@@ -605,6 +607,57 @@ webkit]`), each on a four-vCPU runner with a 60-minute timeout after
     `browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}` for seven
     days. `production` cells also upload `out/browser-records/` as
     `browser-records-playwright-${{ matrix.engine }}`.
+
+## `browser-packaging` job
+
+`browser-packaging` (`browser packaging, clean checkout and records
+(ubuntu-24.04, emsdk 6.0.13, Node 26, Playwright 1.64.1 Chromium)`) installs
+Titan as a new user does, from the manuals alone, and records the release
+profile. It has no `needs` and takes nothing from another job: no prepared
+tree, no C-probe or native-dependency cache, and no Titan variable in its
+environment. It runs on a four-vCPU runner with `MAKEFLAGS=-j4` and
+`TITAN_JOBS=4`.
+
+1. **Host packages.** `apt-get` installs the installation chapter's Ubuntu
+   list (`build-essential cmake curl git libreadline-dev libssl-dev
+   pkg-config`) and `lua5.4`, which runs `doc_check` before the clone has
+   built its own Lua.
+2. **Tools.** The emsdk 6.0.13 cache and activation, Node 26.13.0
+   (`TITAN_NODE`), Playwright 1.64.1 Chromium under the Playwright cells'
+   `chromium` cache key, and `vite@8.3.6` in `TITAN_VITE_ROOT`, provisioned
+   as in `browser-playwright`.
+3. **Clean checkout.** With emsdk sourced and Node 26 ahead of emsdk's own
+   Node on `PATH`, `lua5.4 scripts/doc_check.lua --clean-checkout --workspace
+   "$RUNNER_TEMP/clean-checkout" --checkout "$GITHUB_WORKSPACE" --vite-root
+   "$TITAN_VITE_ROOT" doc/language/installation.md
+   doc/language/browser-target.md` runs both chapters' marked blocks in one
+   shell (`$RUNNER_TEMP/browser-packaging-doc-check.log`; [documentation
+   checks](browser-target.md#documentation-checks)). The checkout block
+   clones this commit afresh, the installation goes to the workspace's
+   `prefix` in the default `production` profile, and the clone moves away
+   before the browser chapter builds the first page, `http-dev-server`, the
+   Vite example and the complete application from the installation.
+4. **The complete application.** The rest of the job puts the installation's
+   `bin` on `PATH`, as the installation chapter does for the reader; the
+   documented `http-dev-server` is an ordinary native executable that finds
+   `titan.so` through the `titanc` there. `lua -E
+   spec/browser/build-delivery.lua --built "$workspace"` checks the imports
+   of the first page's and the application's images and stages the
+   workspace (`browser-packaging-stage.log`); `hosted.mjs --engine chromium`
+   serves the documented site with the documented server
+   (`browser-packaging-hosted.log`), and the installation's
+   `titan-browser-run --engine node --js-test` runs `dod.test.mjs`
+   (`browser-packaging-node.log`).
+5. **Records.** With emsdk sourced, `spec/browser/build-records.lua` builds
+   the records programs with the installed compiler and checks their imports
+   (`browser-packaging-records-build.log`), and `collect.mjs --engines
+   node,chromium` writes `out/browser-records/packaging.json` and
+   `packaging.md` ([records](browser-target.md#records);
+   `browser-packaging-records.log`). The step fails on harness errors and on
+   a Task limit that is not Titan's allocation error, never on the values.
+6. **Receipts.** On `always()`, the job uploads
+   `${{ runner.temp }}/browser-packaging-*.log` as `browser-packaging` and
+   `out/browser-records/` as `browser-records-packaging`, for seven days.
 
 ## Cache ownership
 

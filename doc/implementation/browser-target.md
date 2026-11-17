@@ -4211,7 +4211,8 @@ backend-off control. A cell's one option record feeds planning, child build,
 identity and receipt. The format identifier stays unchanged.
 
 The historical tables below belong to #329's pre-JSPI images and are not
-current JSPI size, memory, startup or latency guarantees.
+current JSPI size, memory, startup or latency guarantees; the release
+profile's current measurements are the [records](#records).
 
 
 | Titan cell | `.wasm` bytes | `.mjs` bytes | Node instantiate / run (ms) | Chromium instantiate / run (ms) | Suspension, Node / Chromium (ms) |
@@ -4270,6 +4271,55 @@ cannot remove them. Every Titan image imports 50 symbols (every Lua
 interpreter image 27), none of them `dlopen`, `dlsym`, `dlerror`, or a
 backtrace function.
 
+## Records
+
+The release profile's records are measurements, not gates; nothing fails on
+their values. Two harnesses take them:
+
+* `spec/fixtures/browser_delivery/hosted.mjs --records FILE`, in the
+  `production` Playwright cells, one per engine, loads the complete
+  application's page five times. It records startup (the first output, the
+  WebAssembly instantiation, and the Wasm and trace fetches) and scheduler
+  responsiveness: the frames the page draws during the Task phase, their
+  largest gap, and the delay of clicks made meanwhile
+  ([documentation checks](#documentation-checks)).
+* `spec/fixtures/browser_records/collect.mjs`, in the `browser-packaging`
+  job, measures the clean checkout's installation (the default `production`
+  profile) under Node and in Playwright Chromium:
+  * the sizes of the complete application's `app.wasm`, `app.mjs`,
+    `app.wasm.trace` and `app.wasm.map`: raw, gzip level 9 and brotli quality
+    11, with Node's `zlib`;
+  * startup under Node, in five fresh instances: from `create()` until
+    `initialize()` resolves, for the application and for `records.mjs`, and
+    until `records.mjs` first writes output;
+  * memory: `records.mjs memory` prints the WebAssembly memory size
+    (`emscripten_get_heap_size()`, which never shrinks, so its last value is
+    the peak) and the bytes malloc has handed out (`mallinfo().uordblks`). It
+    prints them at start; after a warm-up batch of 256 Tasks has finished and
+    two collections; after each batch of 256 Tasks parked on channels of their
+    own, until creating a Task fails; and after the parked Tasks finish and
+    two collections. The bytes per Task come from the parked batches. The run
+    must exit with status 0 and the failure must be Titan's own `could not
+    create coroutine: Out of memory`; an engine failure fails the step;
+  * recursion: the deepest depth that passes for plain recursion in `main`
+    and in a new coroutine (`stack.mjs`, which imports neither `async` nor
+    `io`, so `main` is not a Task and runs on the main stack), in `main`'s
+    Task, and in `main`'s Task with a `timer.sleep(0)` at the deepest call
+    (`records.mjs`). Every probe runs in a fresh engine. The depth doubles
+    from 1000 until a run fails, then a bisection narrows it to within 1%.
+    The failure is recorded by kind from the runner's status: the engine's
+    call stack (75 with a call-stack message), an abort (70), a trap (71),
+    or a Titan error (1). Any other status fails the step.
+
+`spec/browser/build-records.lua` builds `records.titan` and `stack.titan` from
+`spec/fixtures/browser_records/` with the installation's `titanc` and checks
+both images' imports against the `entry` class. The collector runs Node images
+through the SDK's `titan-browser-run` and the other engines through
+`spec/browser/playwright-run.mjs`, and writes
+`out/browser-records/packaging.json` with a Markdown table beside it; the
+hosted test writes `out/browser-records/playwright-<engine>.json`. Both jobs
+upload `out/browser-records/` as `browser-records-*` artifacts.
+
 ## Host processes
 
 The compiler process never loads a Wasm image or a browser archive. The
@@ -4326,8 +4376,24 @@ fails when the chapter drifts from it. `section(text, heading)` keeps one
 and blanks the other lines, so a caller can check one section and its
 diagnostics keep the document's line numbers. `spec/doc_check_spec.lua` tests
 the grammar, section selection, the substitutions and the shell's
-persistence, and plans the installation and browser chapters with every
-substitution.
+persistence, runs a clean checkout of a scratch Git repository, and plans the
+installation and browser chapters as the clean-checkout job runs them.
+
+`--clean-checkout` is the mode of the [`browser-packaging`
+job](continuous-integration.md#browser-packaging-job). It takes a workspace
+that must not exist yet and the checkout to clone, both absolute paths. The
+checkout block clones that commit into `WORKSPACE/titan`, and the documented
+`PREFIX` becomes `WORKSPACE/prefix`. After the document that holds the
+checkout block, the script moves the clone to `WORKSPACE/titan-moved`, which
+`/path/to/titan` names from then on, so the later documents run against an
+installation whose source tree has moved: nothing installed may still point
+into it. The shell starts without the variables that select a Titan
+installation, profile or build mode, or Lua's module paths
+(`doc_check.clean_variables`: `PREFIX`, `ROCKS_TREE`, `TITAN_ROOT`,
+`TITAN_BUILD_PROFILE`, `LUA_PATH`, and the like), so a job's own settings
+cannot stand in for a documented command. The script needs only Lua 5.4 or
+newer, so a job can run it with its distribution's Lua before the clone has
+built its own.
 
 `spec/coder/browser_docs_spec.lua` runs the opening section ("A first web
 page") in a workspace with the installation's `bin` on `PATH` and no Titan
@@ -4377,7 +4443,11 @@ The "A complete application" section documents `doc/language/browser-app/`:
 `PREFIX` naming it, no Titan overrides), so the build uses the installation's
 profile; it builds the documented `http-dev-server` natively, checks the
 image's imports against the `entry` class, and writes `delivery.json` with the
-profile and the section's `expect=app` and `expect=app-errors` texts.
+profile and the section's `expect=app` and `expect=app-errors` texts. With
+`--built WORKSPACE`, it builds and runs nothing: the clean-checkout job has
+already run the whole chapter there, so it checks the imports of the first
+page's `out/hello.mjs` and of the application, then writes the same
+`delivery.json` and copies the Node run's modules.
 `spec/fixtures/browser_delivery/hosted.mjs` serves `browser-app/site` with
 that server and loads the page in one Playwright engine, in a fresh context
 with service workers blocked. The page's output element must hold the
@@ -4571,14 +4641,21 @@ same texts.
   through `locateFile`, and a Vite build, with no external Titan loader
   available, plus the loopback behavior of `http-dev-server.titan`.
   `spec/doc_check_spec.lua` tests the runner's marker grammar, section
-  selection and substitutions without Emscripten.
+  selection and substitutions without Emscripten, and its clean-checkout
+  clone and move on a scratch Git repository.
 * `spec/browser/build-delivery.lua` with
   `spec/fixtures/browser_delivery/hosted.mjs`, `dod.test.mjs` and
   `expectations.mjs` — the chapter's complete application built by its
   documented commands and served by the documented server to Chromium,
   Firefox and WebKit in the Playwright cells, and run under Node, against
   the documented output and trace, with exact requests and their order
-  ([documentation checks](#documentation-checks)).
+  ([documentation checks](#documentation-checks)). The `browser-packaging`
+  job runs both chapters from a fresh clone through `doc_check.lua
+  --clean-checkout` and the same tests on the result.
+* `spec/browser/build-records.lua` with `spec/fixtures/browser_records/` —
+  the release profile's [records](#records) in the `browser-packaging` job;
+  they fail on harness errors and on a Task limit that is not Titan's
+  allocation error, never on the measured values.
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and

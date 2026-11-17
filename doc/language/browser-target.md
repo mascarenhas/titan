@@ -232,15 +232,18 @@ A bundler such as [Vite](https://vite.dev/) can build the page and the image
 together. The image names its WebAssembly binary and trace table with
 `new URL("hello.wasm", import.meta.url)` expressions, which Vite recognizes: it
 emits both files into `dist/assets/` under content-hashed names and rewrites
-the URLs. Make a project from the page and the image, and install Vite in it:
+the URLs. Make a project in `vite-app/` from the page and the image, and
+install Vite in it:
 
 <!-- doc-check: run -->
 ```sh
 mkdir -p vite-app
 cp site/index.html out/hello.mjs out/hello.wasm out/hello.wasm.trace vite-app/
-cd vite-app
-npm install --save-dev vite
+(cd vite-app && npm install --save-dev vite)
 ```
+
+The parentheses run the command inside `vite-app/` and leave the shell in the
+folder that holds `http-dev-server`, where the rest of this chapter works.
 
 Configure it in `vite-app/vite.config.mjs`:
 
@@ -258,17 +261,17 @@ export default {
 would inline a trace table smaller than 4 KiB into the JavaScript as a `data:`
 URL. `base: "./"` makes the emitted URLs relative, so `dist/` can be served
 from any path. Vite's default browser targets already support the top-level
-`await` of the image and the page. Build the page into `dist/`:
+`await` of the image and the page. Build the page into `vite-app/dist/`:
 
 <!-- doc-check: run -->
 ```sh
-npx vite build
+(cd vite-app && npx vite build)
 ```
 
-`../http-dev-server dist 8000` serves the result, and the page shows the same
-text. Vite does not copy `hello.wasm.map`: developer tools find the source map
-only when it is served next to the hashed WebAssembly file under the name that
-file refers to, which Vite does not arrange.
+`./http-dev-server vite-app/dist 8000` serves the result, and the page shows
+the same text. Vite does not copy `hello.wasm.map`: developer tools find the
+source map only when it is served next to the hashed WebAssembly file under
+the name that file refers to, which Vite does not arrange.
 
 ### Deploying
 

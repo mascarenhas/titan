@@ -178,26 +178,58 @@ describe("doc-check execution", function()
         assert.truthy(err:find("doc-check script failed", 1, true), err)
         assert.is_nil(lfs.attributes(workspace .. "/after"))
     end)
+
+    it("clones a clean checkout, then moves the clone away before the next document", function()
+        if platform.windows then pending("doc-check runs POSIX sh") return end
+        local checkout = workspace .. "/checkout"
+        assert(lfs.mkdir(checkout))
+        local file = assert(io.open(checkout .. "/notes.txt", "wb"))
+        assert(file:write("committed\n")); assert(file:close())
+        local git = "git -C '" .. checkout .. "' "
+        assert(os.execute(git .. "init -q && " .. git .. "add notes.txt && " ..
+            git .. "-c user.name=doc-check -c user.email=doc-check@example.invalid commit -q -m notes"))
+        local install = markdown("<!-- doc-check: setup=checkout -->", "```sh",
+            "git clone --recurse-submodules https://github.com/mascarenhas/titan", "cd titan",
+            -- A clean checkout's shell has none of the job's Titan variables.
+            'test -z "${TITAN_BUILD_PROFILE-}${TITAN_ROOT-}${PREFIX-}"',
+            'export PREFIX="$HOME/.local/titan/my-project"', 'mkdir -p "$PREFIX"', 'cp notes.txt "$PREFIX/"', "```")
+        local use = markdown("<!-- doc-check: run -->", "```sh", "test ! -e titan",
+            'cat "$PREFIX/notes.txt" /path/to/titan/notes.txt > both.txt', "```")
+        local clean = workspace .. "/clean"
+        assert(lfs.mkdir(clean))
+        local options, environment = doc_check.clean_checkout(clean, checkout)
+        local result = assert(doc_check.plan({ { name = "install.md", text = install },
+            { name = "use.md", text = use } }, options))
+        assert.is_true(doc_check.run(result, environment))
+        assert.equal("committed\ncommitted\n", read(clean .. "/both.txt"))
+        assert.equal("committed\n", read(clean .. "/prefix/notes.txt"))
+        assert.equal("directory", lfs.attributes(clean .. "/titan-moved", "mode"))
+    end)
 end)
 
 describe("doc-check chapters", function()
-    it("plans the installation and browser chapters with the job's substitutions", function()
+    it("plans the installation and browser chapters as the clean-checkout job runs them", function()
+        local options = doc_check.clean_checkout("/work", "/ci/checkout")
+        options.vite_root = "/ci/vite"
         local result = assert(doc_check.plan({
             { name = "doc/language/installation.md", text = read("doc/language/installation.md") },
             { name = "doc/language/browser-target.md", text = read("doc/language/browser-target.md") },
-        }, { workspace = "/work", checkout = "/ci/checkout", prefix = "/ci/prefix", source = "/ci/source",
-            vite_root = "/ci/vite" }))
+        }, options))
         -- `/path/to/titan` appears in the first page and the complete application.
         assert.equal(5, #result.substitutions)
         assert.truthy(result.expectations.page:find("^Hello, browser, from Titan!\n"), result.expectations.page)
         assert.truthy(result.expectations.app:find("\n%(returned, status 0%)\n$"), result.expectations.app)
         assert.truthy(result.expectations["app-errors"]:find("\napp%.titan:%d+: in app%.main\n$"),
             result.expectations["app-errors"])
-        for _, needle in ipairs({ "make browser-sdk PREFIX=", "titanc --target browser -o out hello",
-                "cat > '/work/site/index.html'", "cat > '/work/site-assets/index.html'",
-                "titanc -o out-native --exe http-dev-server http-dev-server", "npx vite build",
-                "cp -R /ci/source/doc/language/browser-app .", "titanc --target browser -o out app" }) do
-            assert.truthy(result.script:find(needle, 1, true), needle)
+        local last = 0
+        for _, needle in ipairs({ 'export PREFIX="/work/prefix"', "make browser-sdk PREFIX=",
+                "mv titan '/work/titan-moved'", "titanc --target browser -o out hello",
+                "cat > '/work/site/index.html'", "titanc -o out-native --exe http-dev-server http-dev-server",
+                "cat > '/work/site-assets/index.html'", "npx vite build",
+                "cp -R /work/titan-moved/doc/language/browser-app .", "titanc --target browser -o out app" }) do
+            local at = result.script:find(needle, last + 1, true)
+            assert.truthy(at, needle)
+            last = at
         end
     end)
 end)

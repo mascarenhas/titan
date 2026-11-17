@@ -1477,6 +1477,152 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  # A new user's installation from a fresh clone of this commit, with no
+  # prepared tree, cache of Titan outputs or Titan variable: the installation
+  # and browser chapters' marked commands, run in order by doc_check, with the
+  # clone moved away before the browser chapter. Then the complete application
+  # under Node and in Chromium, and the release-profile records.
+  browser-packaging:
+    name: browser packaging, clean checkout and records (ubuntu-24.04, emsdk 6.0.13, Node 26, Playwright 1.64.1 Chromium)
+    if: github.event_name == 'push'
+    runs-on: ubicloud-standard-4
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      MAKEFLAGS: "-j4"
+      TITAN_JOBS: "4"
+      TITAN_EMSDK_VERSION: "6.0.13"
+      TITAN_EMSDK_ROOT: ${{ github.workspace }}/.emsdk
+      TITAN_NODE_VERSION: "26.13.0"
+      TITAN_PLAYWRIGHT_VERSION: "1.64.1"
+      TITAN_PLAYWRIGHT_ROOT: ${{ github.workspace }}/out/playwright-tools
+      TITAN_VITE_VERSION: "8.3.6"
+      TITAN_VITE_ROOT: ${{ github.workspace }}/out/vite-tools
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # The installation chapter's Ubuntu packages, and a Lua for doc_check,
+      # which runs before the clone has built its own.
+      - name: Install the documented Ubuntu packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake curl git libreadline-dev libssl-dev pkg-config lua5.4
+
+      - name: Restore the pinned Emscripten SDK
+        uses: ubicloud/cache@v4
+        with:
+          path: ${{ github.workspace }}/.emsdk
+          key: ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-v1
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-emsdk-${{ env.TITAN_EMSDK_VERSION }}-
+
+      - name: Install Emscripten
+        run: |
+          set -euo pipefail
+          if [ ! -x "$TITAN_EMSDK_ROOT/emsdk" ]; then
+            git -C "$GITHUB_WORKSPACE" clone --depth 1 \
+              https://github.com/emscripten-core/emsdk.git "$TITAN_EMSDK_ROOT"
+          fi
+          "$TITAN_EMSDK_ROOT/emsdk" install "$TITAN_EMSDK_VERSION"
+          "$TITAN_EMSDK_ROOT/emsdk" activate "$TITAN_EMSDK_VERSION"
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          emcc --version | grep -q " $TITAN_EMSDK_VERSION "
+
+      - name: Install the pinned Node 26 runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.TITAN_NODE_VERSION }}
+
+      - name: Select and qualify Node 26
+        run: |
+          node_bin=$(command -v node)
+          version=$("$node_bin" --version)
+          test "$version" = "v$TITAN_NODE_VERSION"
+          "$node_bin" -e 'if (typeof WebAssembly.promising !== "function" || typeof WebAssembly.Suspending !== "function") throw new Error("Node requires unflagged JSPI")'
+          echo "TITAN_NODE=$node_bin" >> "$GITHUB_ENV"
+          "$node_bin" --version
+
+      - name: Restore Playwright-managed browsers
+        uses: ubicloud/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: ubuntu-24.04-${{ runner.arch }}-playwright-${{ env.TITAN_PLAYWRIGHT_VERSION }}-chromium-v1
+
+      - name: Install the pinned Playwright Chromium and Vite
+        run: |
+          set -euo pipefail
+          npm install --prefix "$TITAN_PLAYWRIGHT_ROOT" --no-save \
+            --package-lock=false --no-audit --no-fund \
+            "playwright@$TITAN_PLAYWRIGHT_VERSION"
+          "$TITAN_NODE" "$TITAN_PLAYWRIGHT_ROOT/node_modules/playwright/cli.js" \
+            install --with-deps chromium
+          PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT" --no-save \
+            --package-lock=false --no-audit --no-fund "vite@$TITAN_VITE_VERSION"
+
+      # The browser chapter assumes Emscripten active and Node 26 on PATH,
+      # ahead of emsdk's bundled Node.
+      - name: Install from a fresh clone and build exactly as the manuals document
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          export PATH="${TITAN_NODE%/*}:$PATH"
+          lua5.4 scripts/doc_check.lua --clean-checkout --workspace "$RUNNER_TEMP/clean-checkout" \
+            --checkout "$GITHUB_WORKSPACE" --vite-root "$TITAN_VITE_ROOT" \
+            doc/language/installation.md doc/language/browser-target.md \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-doc-check.log"
+
+      # The reader's shell has the installation's bin on PATH, where the
+      # documented http-dev-server finds titan.so through titanc.
+      - name: Check the documented images and run the complete application
+        run: |
+          set -euo pipefail
+          workspace="$RUNNER_TEMP/clean-checkout"
+          export PATH="$workspace/prefix/bin:$PATH"
+          PREFIX="$workspace/prefix" lua -E spec/browser/build-delivery.lua --built "$workspace" \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-stage.log"
+          "$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine chromium --root "$workspace" \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-hosted.log"
+          "$workspace/prefix/lib/titan-browser/0.6/titan-browser-run" --engine node --timeout 120000 \
+            --root "$workspace" --js-test "$workspace/dod.test.mjs" \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-node.log"
+
+      # Measurements only: the collector fails on harness errors and on a Task
+      # limit that is not Titan's allocation error, never on the numbers.
+      - name: Record sizes, startup, memory, Task scaling and recursion depth
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          workspace="$RUNNER_TEMP/clean-checkout"
+          export PATH="$workspace/prefix/bin:$PATH"
+          PREFIX="$workspace/prefix" lua -E spec/browser/build-records.lua "$RUNNER_TEMP/browser-records" \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-records-build.log"
+          "$TITAN_NODE" spec/fixtures/browser_records/collect.mjs \
+            --sdk "$workspace/prefix/lib/titan-browser/0.6" --images "$RUNNER_TEMP/browser-records" \
+            --app "$workspace/browser-app/out" --engines node,chromium --out out/browser-records/packaging.json \
+            2>&1 | tee "$RUNNER_TEMP/browser-packaging-records.log"
+
+      - name: Upload browser packaging logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-packaging
+          path: ${{ runner.temp }}/browser-packaging-*.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload browser records
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-records-packaging
+          path: out/browser-records/
+          if-no-files-found: warn
+          retention-days: 7
+
   native-coverage:
     name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)
     needs: build-compiler

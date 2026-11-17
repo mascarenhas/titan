@@ -17,6 +17,12 @@
 --
 --   lua scripts/doc_check.lua --workspace DIR [--checkout DIR] [--prefix DIR]
 --       [--source DIR] [--vite-root DIR] [--expect-dir DIR] DOCUMENT...
+--   lua scripts/doc_check.lua --clean-checkout --workspace DIR --checkout DIR
+--       [--prefix DIR] [--vite-root DIR] [--expect-dir DIR] DOCUMENT...
+--
+-- `--clean-checkout` runs the documents as a new user would, from a fresh clone
+-- of the commit under test (`M.clean_checkout`). The script needs only Lua 5.4
+-- or newer, so that a job can run it before the checkout has built its Lua.
 local M = {}
 
 local function quote(text)
@@ -171,8 +177,31 @@ local function substitute(block, options, used, log)
     return body
 end
 
+-- The variables that select a Titan installation, profile or build mode, or
+-- Lua's module paths, which a new user's shell does not have.
+M.clean_variables = { "PREFIX", "ROCKS_TREE", "STDLIB_USE_INSTALLED_RUNTIME", "TITAN_ROOT",
+    "TITAN_PREFIX", "TITAN_TARGET", "TITAN_PATH", "TITAN_PATH_0_6", "TITAN_BUILD_PROFILE",
+    "TITAN_RUNTIME_PREBUILT", "TITAN_C_PARTS", "TITAN_NO_LINE_DIRECTIVES", "TITAN_EXTRA_CPPFLAGS",
+    "TITAN_EXTRA_CFLAGS", "TITAN_EXTRA_LDFLAGS", "LUA_INIT", "LUA_INIT_5_5", "LUA_PATH", "LUA_PATH_5_5",
+    "LUA_CPATH", "LUA_CPATH_5_5" }
+
+-- The plan options and environment of a clean checkout in `workspace`: the
+-- checkout block clones `checkout` into `workspace/titan`, the installation
+-- goes to `prefix` (default `workspace/prefix`), and the clone moves to
+-- `workspace/titan-moved` before the next document starts, so that the later
+-- documents work from the installation alone and find the sources as
+-- `/path/to/titan` there.
+function M.clean_checkout(workspace, checkout, prefix)
+    local moved = workspace .. "/titan-moved"
+    local environment = {}
+    for _, name in ipairs(M.clean_variables) do environment[name] = false end
+    return { workspace = workspace, checkout = checkout, prefix = prefix or workspace .. "/prefix",
+        source = moved, moved_checkout = moved }, environment
+end
+
 -- The shell script and the expected texts for documents { name, text }.
--- options: workspace (required) and the substitution values.
+-- options: workspace (required), the substitution values, and moved_checkout,
+-- where the clone moves after the document with the checkout block.
 function M.plan(documents, options)
     assert(options.workspace, "doc-check needs a workspace")
     local script = { "set -eu", "" }
@@ -180,6 +209,7 @@ function M.plan(documents, options)
     for _, document in ipairs(documents) do
         local blocks, err = M.parse(document.text, document.name)
         if not blocks then return nil, err end
+        local cloned = false
         script[#script + 1] = "cd " .. quote(options.workspace)
         for _, block in ipairs(blocks) do
             local where = block.document .. ":" .. block.line
@@ -204,8 +234,17 @@ function M.plan(documents, options)
                 if not body then return nil, substitution_error end
                 script[#script + 1] = "echo " .. quote("doc-check: " .. where .. " " .. block.kind)
                 script[#script + 1] = body
+                cloned = cloned or block.kind == "setup"
             end
         end
+        if cloned and options.moved_checkout then
+            script[#script + 1] = "echo " .. quote("doc-check: move the clone to " .. options.moved_checkout)
+            script[#script + 1] = "cd " .. quote(options.workspace)
+            script[#script + 1] = "mv titan " .. quote(options.moved_checkout)
+        end
+    end
+    if options.moved_checkout and not used.checkout then
+        return nil, "moving the clone needs --checkout and its checkout block"
     end
     for _, rule in ipairs(M.substitutions) do
         if options[rule.option] and not used[rule.option] then
@@ -243,12 +282,15 @@ function M.run(plan, environment)
 end
 
 local function main(arguments)
-    local options, names = {}, {}
+    local options, names, clean = {}, {}, false
     local index = 1
     while index <= #arguments do
         local argument = arguments[index]
         local option = argument:match("^%-%-([%w%-]+)$")
-        if option then
+        if option == "clean-checkout" then
+            clean = true
+            index = index + 1
+        elseif option then
             local key = option:gsub("%-", "_")
             local value = arguments[index + 1]
             if not value then error("--" .. option .. " needs a value", 0) end
@@ -264,9 +306,27 @@ local function main(arguments)
             index = index + 1
         end
     end
-    if not options.workspace or #names == 0 then
+    if not options.workspace or #names == 0 or clean and (not options.checkout or options.source) then
         error("usage: doc_check.lua --workspace DIR [--checkout DIR] [--prefix DIR] " ..
-            "[--source DIR] [--vite-root DIR] [--expect-dir DIR] DOCUMENT...", 0)
+            "[--source DIR] [--vite-root DIR] [--expect-dir DIR] DOCUMENT...\n" ..
+            "       doc_check.lua --clean-checkout --workspace DIR --checkout DIR [--prefix DIR] " ..
+            "[--vite-root DIR] [--expect-dir DIR] DOCUMENT...", 0)
+    end
+    local environment
+    if clean then
+        -- Commands run from several directories, and a fresh clone needs a
+        -- new, empty workspace.
+        for _, key in ipairs({ "workspace", "checkout", "prefix" }) do
+            if options[key] and options[key]:sub(1, 1) ~= "/" then
+                error("--" .. key .. " must be an absolute path", 0)
+            end
+        end
+        if not os.execute("mkdir " .. quote(options.workspace)) then
+            error("cannot create the workspace " .. options.workspace .. "; it must not exist", 0)
+        end
+        local vite_root, expect_dir = options.vite_root, options.expect_dir
+        options, environment = M.clean_checkout(options.workspace, options.checkout, options.prefix)
+        options.vite_root, options.expect_dir = vite_root, expect_dir
     end
     local documents = {}
     for _, name in ipairs(names) do
@@ -281,7 +341,7 @@ local function main(arguments)
             assert(file:write(text)); assert(file:close())
         end
     end
-    assert(M.run(plan))
+    assert(M.run(plan, environment))
 end
 
 if arg and arg[0] and arg[0]:match("doc_check%.lua$") then
