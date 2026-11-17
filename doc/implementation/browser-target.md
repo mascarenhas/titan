@@ -2435,15 +2435,20 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    that `x_titan_image`, `x_titan_function_imports`,
    `x_titan_function_ranges`, and `x_titan_function_names` are bound to the
    final linked `.wasm`;
-6. read the installed loader and call `browserlink.embed` on the staged
+6. read the installed loader and call
+   `browserlink.embed(module, loader, wasm_name, identity)` on the staged
    `.mjs`, removing the pinned Emscripten trailing default factory export and
    enclosing the loader implementation before installing default
    `create(options)`. Both the loader and bridge-library digests participate
    in image/certificate identity without a version change. Recognizable
    `new URL(..., import.meta.url)` expressions name both sibling assets, and
-   caller `locateFile` still overrides their resolution. A malformed transform
-   fails while all predecessors are untouched. Then run `before_commit`
-   (which invalidates the link record);
+   caller `locateFile` still overrides their resolution. The generated
+   `create` passes `{identity, wasm}` (the step-3 identity and the `.wasm`
+   basename) to the loader, which refuses a `.wasm` from another link
+   ([module and Wasm binding](#module-and-wasm-binding)); `embed` refuses an
+   identity that is not 64 lowercase hexadecimal digits. A malformed
+   transform fails while all predecessors are untouched. Then run
+   `before_commit` (which invalidates the link record);
 7. validate that any existing destination in `{ <stem>.wasm.map, <stem>.wasm,
    <stem>.mjs }` is a regular file (`browser output '<path>' is not a regular
    file`) and reserve a sibling `.old` backup path for each before touching any
@@ -2810,6 +2815,31 @@ extensions:
   `name` section in this milestone for DevTools inspection; runtime
   symbolization reads `x_titan_function_names` so it works identically when the
   `name` section is stripped.
+
+### Module and Wasm binding
+
+`BrowserOwner.instantiate` reads the instantiated Wasm's
+`_titan_browser_trace_identity()` string right after the factory resolves
+and checks for Titan channels. It compares the string with the identity that
+the generated module passed to `create`. A difference throws
+`failure('PROTOCOL', 'browser image mismatch: <stem>.mjs belongs to image
+<12 hex>, <stem>.wasm is image <12 hex>')`, which poisons the owner before any
+entry, whatever `requireTrace` says: Emscripten glue generated for another
+link is never safe to run. A map from another link stays a degraded-trace
+condition ([eager map loader](#eager-map-loader-and-trace-metadata)).
+
+Only the host sees both identities, so the comparison is loader JavaScript;
+Titan code never runs before it.
+
+Publication renames the map, then the `.wasm`, then the `.mjs`. An
+interruption can therefore leave only two mixed sets:
+
+| Interrupted after | Files | Outcome |
+| --- | --- | --- |
+| the map rename | new map, old `.wasm` and `.mjs` | degraded trace, or the `requireTrace` initialization failure |
+| the `.wasm` rename | new map and `.wasm`, old `.mjs` | the protocol failure above |
+
+The warm-link check relinks either set.
 
 ### Eager map loader and trace metadata
 
@@ -4157,7 +4187,9 @@ hosts`).
   libraries, and, for a program and a test image, an oversize body rejected
   before `before_commit` and publication with predecessors intact and no
   certificate, recovery, a warm final-link hit that does not inventory the
-  published image again, and a miss after the copied guard owner changes.
+  published image again, and a miss after the copied guard owner changes, and
+  the two mixed sets an interrupted publication can leave, run under Node
+  ([module and Wasm binding](#module-and-wasm-binding)).
 * `spec/browser_trace_map_spec.lua` — final-image Wasm section/range/name
   extraction, standard v3 `.wasm.map` validation, `x_titan_*` extension
   rewriting, `browsertrace.identity` recipe, `browser_trace_libraries`
@@ -4249,14 +4281,16 @@ hosts`).
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and
-  dispose cycles, concurrent instances, lifecycle races, and the optimized
-  guard image (`optimized-guard.mjs`).
+  dispose cycles, concurrent instances, lifecycle races, the optimized
+  guard image (`optimized-guard.mjs`), and the refusal of one `loader_app`
+  module paired with the other assertion mode's `.wasm`.
 * `spec/browser/runner.test.mjs` and `spec/browser/runner-fixtures.mjs` — the
   runner's resolver, probe, CLI, `--allow-degraded-trace` and the default
   required-trace initialization failure for direct and `--js-test` images,
   exported `within`/`Monitor` helpers and symlink invocation, status
   categories, grace, abort and cleanup boundaries, process-group retirement,
-  and path containment, over Node and both Chromium transports.
+  path containment, over Node and both Chromium transports, and, with fake
+  images, the loader's protocol failure for a `.wasm` from another link.
 * `spec/browser/trace-adapter.test.mjs` and
   `spec/fixtures/browser_trace_adapter/{stacks.json,stacks-jspi-current.json,degraded.mjs,lifecycle.c,filter.c}`
   — Node unit tests for the V8, SpiderMonkey, and JavaScriptCore stack parsers
@@ -4274,9 +4308,11 @@ hosts`).
   and `spec/fixtures/browser_trace/` — the
   staged multi-engine browser trace gate (46 discovered native cases in
   `trace_cases` plus the `trace_uncaught` and `trace_async` programs, staged
-  into `assertions-2` and `assertions-0` with 98 positive `cases` rows and 8
+  into `assertions-2` and `assertions-0` with 98 positive `cases` rows and 10
   intentional `degradedCases` rows in `manifest.json`, which also records the
-  installation `profile`) covering direct and `.browser.titan`
+  installation `profile`; the degraded rows pair the runtime image with a
+  missing, malformed, flipped-identity, extension-free, or another link's
+  complete map) covering direct and `.browser.titan`
   contributor locations, deep recursion and engine truncation, mixed
   `Lua -> Titan -> Lua -> Titan` merge order, mixed and `pcall` recursion past
   the [browser C-call limit](#the-regression), all wrapper families, fresh

@@ -69,6 +69,23 @@ export async function run(context) {
     }
     context.stdout(encode(`loader bytes: ${path}: 5 runs passed\n`));
   }
+  // Each module refuses a Wasm from another link before entry. The
+  // assertions-off module (the second loader_app) is paired with the
+  // assertions-on build's Wasm: same imports, more exports, another identity.
+  if (images.length > 1) {
+    const module = await context.image(images[1]);
+    const other = await context.image(images[0]);
+    const instance = module.create({locateFile: (name, prefix) => other.locateFile(name, prefix)});
+    try {
+      const caught = await rejection(context, instance.initialize(), {code: 'TITAN_BROWSER_PROTOCOL'});
+      context.assert(/^browser image mismatch: loader_app\.mjs belongs to image [0-9a-f]{12}, loader_app\.wasm is image [0-9a-f]{12}$/
+        .test(caught.message), `wrong mismatch message: ${caught.message}`);
+      await rejection(context, instance.run(), {code: 'TITAN_BROWSER_PROTOCOL', message: caught.message});
+    } finally {
+      await instance.dispose();
+    }
+    context.stdout(encode('loader identity: a Wasm from another link was refused before entry\n'));
+  }
   const fidelityRuns = await fidelity(context, fidelityImages);
   const nameRuns = await names(context, nameImages);
   const lifecycleRuns = await lifecycle(context, fidelityImages);

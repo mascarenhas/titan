@@ -434,6 +434,25 @@ serves the program to a browser page, it must serve `app.wasm.map` alongside
 `app.wasm` so that the runtime can load the trace map during module
 initialization (see [traces](#traces)).
 
+The three files of one link belong together, and the runtime checks this
+before any Titan code runs:
+
+* An `app.mjs` loaded with an `app.wasm` from another link refuses to run.
+  `initialize()` and `run()` reject with a `TitanBrowserError` whose `code`
+  is `TITAN_BROWSER_PROTOCOL`, for example:
+
+  ```text
+  browser image mismatch: app.mjs belongs to image 3f1c0a9b7e42, app.wasm is image 9d07e5a2c6b1
+  ```
+
+* An `app.wasm.map` from another link only degrades traces, as described
+  under [deploying `.wasm.map`](#traces).
+
+Titan publishes the map first, then the `.wasm`, then the `.mjs`. A
+publication that is interrupted, or a server or cache that mixes files of two
+links, therefore never runs a Titan program against the wrong image. Linking
+again repairs the set.
+
 `main` has the same signature as for a native program:
 
 ```titan

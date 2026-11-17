@@ -579,6 +579,52 @@ end
         assert.equal(7, ran.status)
     end)
 
+    -- Publication renames the map, then the Wasm, then the module (the commit
+    -- point). Each set an interruption can leave refuses to enter Lua.
+    it("refuses every artifact set an interrupted publication can leave before entry", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        fixture = new_fixture()
+        local source = fixture.source .. "/publish_main.titan"
+        local contents = 'foreign import "stdio.h"\nfunction main(_: {string}): integer\n' ..
+            '  ffi.puts("first link")\n  return 0\nend\n'
+        local function link()
+            local built = fixture:compile({ "--target", "browser", "--incremental", "publish_main" })
+            assert.is_true(built.ok, built.output)
+            local artifacts = {}
+            for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map" }) do
+                artifacts[suffix] = fixtures.read(fixture.output .. "/publish_main" .. suffix)
+            end
+            artifacts.identity = assert(artifacts[".wasm.map"]:match('"x_titan_image":"(%x+)"'))
+            return artifacts
+        end
+        fixtures.write(source, contents)
+        local old = link()
+        fixtures.write(source, (contents:gsub("first link", "second link")))
+        local new = link()
+        assert.not_equal(old.identity, new.identity)
+        local function run(name, module, wasm, map)
+            local directory = fixture.root .. "/" .. name
+            fixtures.mkdir(directory)
+            fixtures.write(directory .. "/publish_main.mjs", module[".mjs"])
+            fixtures.write(directory .. "/publish_main.wasm", wasm[".wasm"])
+            fixtures.write(directory .. "/publish_main.wasm.map", map[".wasm.map"])
+            return fixture:run({ info.sdk_root .. "/titan-browser-run", "--grace", "0",
+                directory .. "/publish_main.mjs" })
+        end
+        local ran = run("after-map", old, old, new)
+        assert.equal(1, ran.status, ran.output)
+        assert.matches("degraded browser trace: trace map image or extensions do not match", ran.output, 1, true)
+        assert.is_nil(ran.output:find(" link", 1, true), ran.output)
+        ran = run("after-wasm", old, new, new)
+        assert.is_false(ran.ok, ran.output)
+        assert.matches("browser image mismatch: publish_main.mjs belongs to image " .. old.identity:sub(1, 12) ..
+            ", publish_main.wasm is image " .. new.identity:sub(1, 12), ran.output, 1, true)
+        assert.is_nil(ran.output:find(" link", 1, true), ran.output)
+        ran = run("committed", new, new, new)
+        assert.is_true(ran.ok, ran.output)
+        assert.matches("second link", ran.output, 1, true)
+    end)
+
     it("reuses warm browser objects and archives, recompiles only the edited variant, and leaves the native root unchanged", function()
         local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
         prepare_fixture()

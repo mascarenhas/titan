@@ -164,7 +164,8 @@ for _, assertions in ipairs({2, 0}) do
   row(manifest.cases, mode .. ".task_entries", mode .. "/runtime.mjs", "test_task_entry_targets", 1)
   local map = read(path.join(base, "runtime.wasm.map"))
   assert(map:find('"x_titan_image"%s*:%s*"%x%x'), "runtime map lacks Titan image identity")
-  for _, variant in ipairs({"missing", "malformed", "wrong_image", "extension_free", "missing_symbols"}) do
+  for _, variant in ipairs({"missing", "malformed", "wrong_image", "foreign_image", "extension_free",
+      "missing_symbols"}) do
     local directory = path.join(base, variant)
     mkdir(directory)
     for _, ext in ipairs({"mjs", "wasm"}) do write(path.join(directory, "runtime." .. ext), read(path.join(base, "runtime." .. ext))) end
@@ -174,6 +175,9 @@ for _, assertions in ipairs({2, 0}) do
       changed = map:gsub('("x_titan_image"%s*:%s*")(%x)', function(before, first)
         return before .. (first == "0" and "1" or "0")
       end, 1)
+    elseif variant == "foreign_image" then
+      -- A complete, valid, fully extended map from another link.
+      changed = read(path.join(base, "async.wasm.map"))
     elseif variant == "extension_free" then
       -- Remove all extensions by replacing their names with optional unknown
       -- keys. Standard fields and mapped locations remain byte-for-byte intact.

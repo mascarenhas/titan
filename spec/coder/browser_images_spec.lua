@@ -183,11 +183,12 @@ describe("browser stock Lua initialization", function()
 end)
 
 describe("browser image profile and SDK readiness", function()
+    local IDENTITY = string.rep("0123456789abcdef", 4)
     it("embeds one private factory and exposes only the persistent image creator", function()
         local image = "async function Module(options) { return options; }\n" ..
             "const wasm = new URL('app.wasm', import.meta.url);\nexport default Module;\n"
         local loader = "export function create(factory, options) { return {factory, options}; }\n"
-        local embedded = assert(browserlink.embed(image, loader, "app.wasm"))
+        local embedded = assert(browserlink.embed(image, loader, "app.wasm", IDENTITY))
         assert.truthy(embedded:find("async function Module(options)", 1, true))
         assert.truthy(embedded:find("new URL('app.wasm', import.meta.url)", 1, true))
         assert.truthy(embedded:find('new URL("app.wasm.map", import.meta.url)', 1, true))
@@ -207,7 +208,7 @@ describe("browser image profile and SDK readiness", function()
             "\nexport default First;\nexport default Module;\n",
             "\nexport default function Module() {}\n",
         }) do
-            local embedded, err = browserlink.embed(image, loader, "app.wasm")
+            local embedded, err = browserlink.embed(image, loader, "app.wasm", IDENTITY)
             assert.is_nil(embedded)
             assert.equal("browser image has no unique default factory export", err)
         end
@@ -216,11 +217,16 @@ describe("browser image profile and SDK readiness", function()
             "export function create() {}\nexport const module = {};\n",
             "import runtime from './runtime.mjs';\nexport function create() {}\n",
         }) do
-            local embedded, err = browserlink.embed("\nexport default Module;\n", source, "app.wasm")
+            local embedded, err = browserlink.embed("\nexport default Module;\n", source, "app.wasm", IDENTITY)
             assert.is_nil(embedded)
             assert.equal("browser loader has an unsupported module surface", err)
         end
-        local embedded = assert(browserlink.embed("\nexport default Module;\n", loader, 'a"b\n.wasm'))
+        for _, identity in ipairs({ IDENTITY:upper(), IDENTITY:sub(2), IDENTITY .. "0", "" }) do
+            local embedded, err = browserlink.embed("\nexport default Module;\n", loader, "app.wasm", identity)
+            assert.is_nil(embedded)
+            assert.equal("browser image identity must be 64 lowercase hexadecimal digits", err)
+        end
+        local embedded = assert(browserlink.embed("\nexport default Module;\n", loader, 'a"b\n.wasm', IDENTITY))
         assert.truthy(embedded:find('a\\u0022b\\u000a.wasm', 1, true))
     end)
 

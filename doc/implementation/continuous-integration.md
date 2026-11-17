@@ -294,7 +294,10 @@ jobs begin with the same seven steps:
 12. **Loader suite.** The installed `titan-browser-run --timeout 300000
     --grace 2000 --js-test spec/browser/loader.test.mjs`, rooted at the
     workspace with relative image paths, runs under Node and then Chromium,
-    with output copied to `$RUNNER_TEMP/browser-loader.log`.
+    with output copied to `$RUNNER_TEMP/browser-loader.log`. The first two
+    image arguments are the two assertion modes' `loader_app`, which the
+    suite also pairs crosswise to check that a module refuses another link's
+    `.wasm`.
 13. **Optimized guard.** `spec/fixtures/browser_loader/optimized-guard.mjs`
     runs against the minified image under both engines with the same timeout
     and grace and output copied to `$RUNNER_TEMP/browser-guard.log`.

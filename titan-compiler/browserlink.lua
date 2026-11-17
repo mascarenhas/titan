@@ -239,8 +239,13 @@ end
 
 -- Emscripten's pinned ES-module output has one trailing default factory export.
 -- Keep the factory lexical and its bundler-visible new URL expressions intact;
--- only the embedded owner is an application entrypoint.
-function M.embed(image, loader, wasm_name)
+-- only the embedded owner is an application entrypoint. The owner receives the
+-- image identity that the linked Wasm exports, so it refuses a `.wasm` from
+-- another link before any entry.
+function M.embed(image, loader, wasm_name, identity)
+    if type(identity) ~= "string" or not identity:match("^" .. string.rep("[0-9a-f]", 64) .. "$") then
+        return nil, "browser image identity must be 64 lowercase hexadecimal digits"
+    end
     local factory
     local _, count = image:gsub("\n%s*export%s+default%s", "")
     if count ~= 1 then return nil, "browser image has no unique default factory export" end
@@ -267,7 +272,8 @@ function M.embed(image, loader, wasm_name)
         "    if (name.endsWith('.wasm.map')) return new URL(" .. map .. ", import.meta.url).href;\n" ..
         "    if (name.endsWith('.wasm')) return new URL(" .. wasm .. ", import.meta.url).href;\n" ..
         "    return prefix + name;\n  });\n" ..
-        "  return titanCreate(" .. factory .. ", {...options, locateFile});\n}\n"
+        "  return titanCreate(" .. factory .. ", {...options, locateFile}, {identity: \"" .. identity ..
+        "\", wasm: " .. wasm .. "});\n}\n"
 end
 
 -- Inventory shares the bounded final-image walk with the map rewriter.

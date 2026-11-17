@@ -509,9 +509,10 @@ function runQueuedCall(owner) {
 }
 
 class BrowserOwner {
-  constructor(factory, options) {
+  constructor(factory, options, image) {
     this.factory = factory;
     this.options = options;
+    this.image = image;
     this.module = undefined;
     this.lastTrace = undefined;
     this.backend = undefined;
@@ -708,6 +709,14 @@ class BrowserOwner {
       if (this.terminal) throw this.terminal;
       if (!this.backend || !(this.module?.HEAPU8 instanceof Uint8Array)) {
         throw failure('PROTOCOL', 'browser image does not provide Titan channels');
+      }
+      // Only the host sees both the identity this module was generated with
+      // and the one its Wasm exports; a pair from two links never runs.
+      const identity = new TextDecoder().decode(this.bytesAt(this.module._titan_browser_trace_identity(), 64));
+      if (identity !== this.image.identity) {
+        const stem = this.image.wasm.replace(/\.wasm$/, '');
+        throw failure('PROTOCOL', `browser image mismatch: ${stem}.mjs belongs to image ` +
+          `${this.image.identity.slice(0, 12)}, ${stem}.wasm is image ${identity.slice(0, 12)}`);
       }
     } catch (cause) {
       if (cause?.code === 'TITAN_BROWSER_CAPABILITY') throw cause;
@@ -2077,7 +2086,7 @@ async function retireOwner(owner) {
 }
 
 /** Create one persistent instance; the image supplies its private factory. */
-export function create(factory, options = {}) {
+export function create(factory, options = {}, image) {
   if (typeof factory !== 'function') throw new TypeError('browser factory must be a function');
   for (const name of ['stdin', 'stdout', 'stderr', 'stdoutEnd', 'stderrEnd', 'locateFile',
       'onNotificationError', 'requestDrain', 'onEngineFailure']) {
@@ -2098,7 +2107,7 @@ export function create(factory, options = {}) {
     if (!name || /[=\0]/.test(name) || typeof value !== 'string' || value.includes('\0')) throw new TypeError('browser env must contain valid names and string values without NUL');
     return `${name}=${value}`;
   });
-  const owner = new BrowserOwner(factory, {...options, env});
+  const owner = new BrowserOwner(factory, {...options, env}, image);
   return Object.freeze({
     initialize: () => owner.initialize(),
     run: (args = []) => owner.run(args),

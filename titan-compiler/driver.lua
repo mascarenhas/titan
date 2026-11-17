@@ -14020,7 +14020,7 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     if not module_bytes then return nil, err end
     loader_bytes, err = context.io:read_file(assets.loader)
     if not loader_bytes then return nil, err end
-    module_bytes, err = driver.browserlink.embed(module_bytes, loader_bytes, wasm:match("([^/\\]+)$"))
+    module_bytes, err = driver.browserlink.embed(module_bytes, loader_bytes, wasm:match("([^/\\]+)$"), identity)
     if not module_bytes then return nil, err end
     valid, err = context.io:write_file(staged, module_bytes)
     if not valid then return nil, err end
