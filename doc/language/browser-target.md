@@ -527,9 +527,25 @@ own:
 browser provider "out-browser/app/widgets.a" has native companion "out-browser/app/widgets.so"; use a separate --output directory
 ```
 
-A consumer can build against a published browser archive without the
-library's source, from the SDK directory or the browser Titan path described
-[below](#dependencies-and-the-browser-titan-path).
+A consumer builds against a published browser archive without the library's
+source: the archive carries the modules' interfaces for checking and their
+code for linking. To install a library, copy its archive into a directory of
+its own, laid out like the SDK directory, and name that directory in the
+browser Titan path described
+[below](#dependencies-and-the-browser-titan-path):
+
+```sh
+titanc --target browser -o out-browser geometry.shapes geometry.area
+mkdir -p "$HOME/.local/geometry/lib/titan-browser/0.6"
+cp out-browser/geometry.a "$HOME/.local/geometry/lib/titan-browser/0.6/"
+TITAN_PATH_0_6="$HOME/.local/geometry/lib/titan-browser/0.6" \
+  titanc --target browser -o out-app app
+```
+
+The first command publishes `out-browser/geometry.a`. The last links `app`
+against the installed copy, and works the same once the library's source and
+`out-browser` are deleted. Titan checks the installed archive under Node, as
+for any archive a link selects.
 
 ### Objects
 

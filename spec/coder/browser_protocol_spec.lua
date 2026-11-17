@@ -151,14 +151,16 @@ end
 local function cli(info, mode, ...)
     local setup = string.format("package.path=%q..package.path; dofile(%q);",
         repository .. "/?.lua;" .. repository .. "/?/init.lua;", workspace .. "/hook.lua")
-    local argv = { "env", "TITAN_ROOT=" .. effective_root, "TITAN_TARGET=", "TITAN_PATH_0_6=" .. workspace .. "/providers",
+    local argv = { "env", "TITAN_ROOT=" .. effective_root, "TITAN_TARGET=",
+        "TITAN_PATH_0_6=" .. (info.titan_path or workspace .. "/providers"),
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=", "TITAN_EXTRA_LDFLAGS=",
         "TITAN_NODE=" .. (info.node_override or info.node.path),
         "TITAN_PROTOCOL_PUBLICATION_FAULT=" .. (info.publication_fault or ""),
         "TITAN_PROTOCOL_CORRUPTION=" .. (mode or ""), "TITAN_PROTOCOL_LOG=" .. workspace .. "/executions",
         "TITAN_PROTOCOL_IMAGES=" .. workspace .. "/probe-images",
         "TITAN_PROTOCOL_OVERSIZED=" .. (info.oversized or ""),
-        info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc", "-q", "--target", "browser",
+        info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc", info.verbose and "-v" or "-q",
+        "--target", "browser",
         "--tree", workspace .. "/src", "--output", workspace .. "/out" }
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
     return compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
@@ -308,36 +310,45 @@ describe("browser executing provider protocol", function()
         no_staged_images(workspace .. "/out")
     end)
 
-    it("runs an archive-only consumer with the producer source hidden on both engines", function()
+    it("runs a program against an installed library archive whose source is deleted on both engines", function()
         local info, why = toolchain.require({ node = true, chrome = true, sdk = true }); if not info then pending(why) return end
         prepare(info)
         local result = cli(info, nil, "pkg.left", "pkg.right")
         assert.is_true(result.ok, result.output)
-        files.copy(workspace .. "/out/pkg.a", workspace .. "/providers/pkg.a")
-        assert(os.rename(workspace .. "/src/pkg", workspace .. "/hidden-producer"))
+        -- Install the library into its own prefix, in the SDK's directory
+        -- layout, then delete the producer's source and output.
+        local library = workspace .. "/libprefix/lib/titan-browser/0.6"
+        files.copy(workspace .. "/out/pkg.a", library .. "/pkg.a")
+        files.remove(workspace .. "/src/pkg")
+        files.remove(workspace .. "/out")
         assert.is_nil(lfs.attributes(workspace .. "/src/pkg"))
         files.write(workspace .. "/src/consumer.titan", [[
-local test = import "test"
+foreign import "stdio.h"
 local left = import "pkg.left"
 local right = import "pkg.right"
-function test_left(context: test.Context)
-    test.assert(left.answer() == 42)
-end
-function test_right(context: test.Context)
-    test.assert(right.twice(21) == 42)
+
+function main(args: {string}): integer
+    local line = "answer " .. left.answer() .. ", twice " .. right.twice(21) .. "\n"
+    ffi.fwrite(line, 1, #line, ffi.stdout)
+    return 0
 end
 ]])
         effective_root = info.prefix
-        result = cli(info, nil, "--test", "--incremental", "consumer")
+        local consumer = { prefix = info.prefix, node = info.node, titan_path = library, verbose = true }
+        result = cli(consumer, nil, "consumer")
         assert.is_true(result.ok, result.output)
+        -- The link takes pkg.* from the installed archive and compiles no
+        -- source for them.
+        assert.truthy(result.output:find(library .. "/pkg.a", 1, true), result.output)
+        assert.is_nil(result.output:find("pkg/left", 1, true), result.output)
+        assert.is_nil(result.output:find("pkg/right", 1, true), result.output)
         for _, engine in ipairs({ "node", "chromium" }) do
             local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine, "--grace", "0" }
             if engine == "chromium" then argv[#argv + 1] = "--chrome"; argv[#argv + 1] = info.chrome.path end
             argv[#argv + 1] = workspace .. "/out/consumer.mjs"
-            result = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
-            assert.is_true(result.ok, result.output)
-            assert.truthy(result.output:find("[==========] 2 tests ran.", 1, true), result.output)
-            assert.truthy(result.output:find("[  PASSED  ] 2 tests.", 1, true), result.output)
+            result = compiler_io.new_sync():run(argv, { stderr_to_stdout = false })
+            assert.is_true(result.ok, engine)
+            assert.equal("answer 42, twice 42\n", result.output, engine)
         end
     end)
 end)

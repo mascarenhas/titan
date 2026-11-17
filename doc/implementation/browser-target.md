@@ -4211,9 +4211,13 @@ hosts`).
   browser generation changes.
 * `spec/coder/browser_protocol_spec.lua` — the executing check, corrupted
   providers (exits 21 to 26) without publication, re-execution before
-  identical-archive reuse, probe cleanup, archive-only consumers on both
-  engines, and an oversize protocol body rejected with its mapped source
-  before execution or provider publication.
+  identical-archive reuse, probe cleanup, an oversize protocol body rejected
+  with its mapped source before execution or provider publication, and an
+  archive-only consumer: a library archive installed into a separate
+  `libprefix/lib/titan-browser/0.6/` and named by `TITAN_PATH_0_6`, with its
+  source and output deleted, links into a program whose `-v` link names the
+  installed archive and compiles no `pkg` source; the program prints the
+  expected line and exits 0 under Node and Chromium.
 * `spec/browser_sdk_spec.lua` — `make lua-browser` reuse and rebuild,
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
   `TITAN_EXTRA_CPPFLAGS`, the twenty-one-module provider whose non-compiler

@@ -463,3 +463,23 @@ build and install recipes inspect no artifacts. The operational Windows scripts
 in `scripts/` cover LuaRocks acquisition, native source preparation and
 building, libbacktrace and runtime compilation, stdlib compilation, and profile
 selection.
+
+`spec/rockspec_spec.lua` checks what the rocks carry:
+
+* **Source rock.** It packs and unpacks a copy of the checkout and requires
+  every file the build reads: the standard-library sources from
+  `audited_stdlib_sources()` (`spec/support/source_inventory.lua`), which adds
+  the browser-only sources from the compiler's browser selection to the Make
+  lists; every `*_TITAN_HEADERS` list; `TITAN_RUNTIME_SOURCES`,
+  `BROWSER_RUNTIME_SOURCES`, and the SDK headers; the LPegLabel sources and
+  headers; every `scripts/` file the Makefiles name; and the browser SDK
+  assets that `browserlink.sdk_assets` names. A short hand list holds only
+  what no Make list names, such as Windows scripts, vendor patches, licenses,
+  four standard-library headers, and the browser checks' Lua modules. There is
+  one standard-library tree: outside `titan/`, `spec/`, and `doc/`, no file
+  may share a basename with a file under `titan/`.
+* **Binary rock.** `luarocks pack` copies the retained rock directory and the
+  manifest's deployed files, so the installed-prefix test walks both. Neither
+  may hold a `*.titan` file outside `doc/`, a `*.browser.titan` file, or any
+  browser SDK file (`titan-browser*` or `titan-protobuf.mjs`). `make
+  browser-sdk` installs the browser SDK outside LuaRocks.
