@@ -342,6 +342,7 @@ end
         assert.truthy(result.output:find(library .. "/pkg.a", 1, true), result.output)
         assert.is_nil(result.output:find("pkg/left", 1, true), result.output)
         assert.is_nil(result.output:find("pkg/right", 1, true), result.output)
+        toolchain.check_imports(workspace .. "/out/consumer.mjs", { "entry" })
         for _, engine in ipairs({ "node", "chromium" }) do
             local argv = { info.sdk_root .. "/titan-browser-run", "--engine", engine, "--grace", "0" }
             if engine == "chromium" then argv[#argv + 1] = "--chrome"; argv[#argv + 1] = info.chrome.path end

@@ -283,8 +283,8 @@ plan:
     end)
 
     -- A final image whose only content is its import section: `imports` rows
-    -- are { module, name, params, results } functions or { module, name,
-    -- "memory" | "global" }.
+    -- are { module, name, params, results } functions, { module, name,
+    -- "table" | "memory" | "global" }, or { module, name, "tag", params }.
     local function import_image(imports)
         local function leb(value)
             local bytes = {}
@@ -305,10 +305,15 @@ plan:
         end
         local types, entries = {}, {}
         for index, row in ipairs(imports) do
-            if row[3] == "memory" then
+            if row[3] == "table" then
+                entries[index] = text(row[1]) .. text(row[2]) .. "\1\112\0\0"
+            elseif row[3] == "memory" then
                 entries[index] = text(row[1]) .. text(row[2]) .. "\2\0\1"
             elseif row[3] == "global" then
                 entries[index] = text(row[1]) .. text(row[2]) .. "\3\127\0"
+            elseif row[3] == "tag" then
+                types[#types + 1] = "\96" .. vector(row[4]) .. vector({})
+                entries[index] = text(row[1]) .. text(row[2]) .. "\4\0" .. leb(#types - 1)
             else
                 types[#types + 1] = "\96" .. vector(row[3]) .. vector(row[4])
                 entries[index] = text(row[1]) .. text(row[2]) .. "\0" .. leb(#types - 1)
@@ -336,11 +341,15 @@ plan:
         assert.equal("injected.wasm: unlisted browser import env.titan_injected (i32)->() (classes entry)\n" ..
             "add a reviewed row for each to scripts/browser_imports.lua", err)
         ok, err = checks.check_imports(import_image({ { "env", "titan_browser_complete", { "i64" }, {} },
-            { "env", "memory", "memory" }, { "env", "__stack_pointer", "global" } }), "changed.wasm", { "entry" })
+            { "env", "__indirect_function_table", "table" }, { "env", "memory", "memory" },
+            { "env", "__stack_pointer", "global" }, { "env", "__cpp_exception", "tag", { "i32" } } }),
+            "changed.wasm", { "entry" })
         assert.is_nil(ok)
         assert.equal("changed.wasm: unlisted browser import env.titan_browser_complete (i64)->() (classes entry)\n" ..
+            "changed.wasm: unlisted browser import env.__indirect_function_table table (classes entry)\n" ..
             "changed.wasm: unlisted browser import env.memory memory (classes entry)\n" ..
             "changed.wasm: unlisted browser import env.__stack_pointer global (classes entry)\n" ..
+            "changed.wasm: unlisted browser import env.__cpp_exception tag (i32)->() (classes entry)\n" ..
             "add a reviewed row for each to scripts/browser_imports.lua", err)
     end)
 
@@ -357,11 +366,14 @@ plan:
             { "entry", "fixture:html5" }))
     end)
 
-    it("rejects an unknown class and malformed or duplicate allowlist rows", function()
+    it("rejects an empty or unknown class list and malformed or duplicate allowlist rows", function()
         local row = { "entry", "env", "f", "()->()", provider = "titan-browser-library.js", reason = "test" }
         local function allowlist(rows) return { classes = { entry = "every image" }, imports = rows } end
         local image = import_image({})
-        local ok, err = checks.check_imports(image, "x.wasm", { "other" }, allowlist({ row }))
+        local ok, err = checks.check_imports(image, "x.wasm", {}, allowlist({ row }))
+        assert.is_nil(ok)
+        assert.equal("no browser import classes", err)
+        ok, err = checks.check_imports(image, "x.wasm", { "other" }, allowlist({ row }))
         assert.is_nil(ok)
         assert.equal("unknown browser import class other", err)
         for _, malformed in ipairs({

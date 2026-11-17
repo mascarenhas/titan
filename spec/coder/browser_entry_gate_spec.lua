@@ -26,6 +26,13 @@ local function run(argv)
     return result.started and result.ok, result.output or result.diagnostic or ""
 end
 
+-- Both C helpers include the fixture controls; only gate.c waits and reads
+-- the clock.
+local C_SOURCE_CLASSES = {
+    ["gate.c"] = { "entry", "fixture:gate", "fixture:controls" },
+    ["entry_lifetimes.c"] = { "entry", "fixture:controls" },
+}
+
 local function build(info, assertions, module, name, is_test, c_source)
     local output = workspace .. "/assertions-" .. assertions
     files.mkdir(output)
@@ -44,8 +51,7 @@ local function build(info, assertions, module, name, is_test, c_source)
     local ok, log = run(argv)
     assert.is_true(ok, log)
     assert.equal("file", lfs.attributes(output .. "/" .. name .. ".wasm", "mode"))
-    -- gate.c and entry_lifetimes.c both include the fixture controls.
-    toolchain.check_imports(output .. "/" .. name .. ".wasm", { "entry", "fixture:gate", "fixture:controls" })
+    toolchain.check_imports(output .. "/" .. name .. ".wasm", C_SOURCE_CLASSES[c_source or "gate.c"])
 end
 
 describe("browser real runtime entry gate", function()

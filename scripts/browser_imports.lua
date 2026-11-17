@@ -170,8 +170,6 @@ return {
             provider = "Emscripten src/lib/libcore.js", reason = "entry-gate timing" },
         { "fixture:budget", "env", "emscripten_sleep", "(i32)->()",
             provider = "Emscripten src/lib/libasync.js", reason = "budget probe suspension" },
-        { "fixture:budget", "env", "emscripten_get_now", "()->(f64)",
-            provider = "Emscripten src/lib/libcore.js", reason = "budget probe timing" },
         { "fixture:budget", "env", "emscripten_get_heap_max", "()->(i32)",
             provider = "Emscripten src/lib/libcore.js", reason = "budget probe memory ceiling" },
         { "fixture:scheduler", "env", "mini_driver_controls", "(i32)->()",

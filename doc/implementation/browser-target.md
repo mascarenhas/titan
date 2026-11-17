@@ -2597,9 +2597,9 @@ signature from the type section. It refuses:
 
 `scripts/browser_stdlib.lua` provides the checks:
 
-* `allowed_imports(allowlist, classes)` first checks the allowlist itself:
-  known classes, complete rows with a provider and a reason, and one row per
-  class, module and name.
+* `allowed_imports(allowlist, classes)` first checks its inputs: a nonempty
+  list of known classes, complete rows with a provider and a reason, and one
+  row per class, module and name.
 * `check_imports(bytes, origin, classes)` then fails with one line per image
   import that no row of the given classes lists with the same signature:
   `<image>: unlisted browser import <module>.<name> <signature> (classes <classes>)`,
@@ -2620,7 +2620,7 @@ classes:
 | `spec/browser/build-bridge.lua` | the bridge and public-state images: `entry,fixture:controls`; `counter`: `entry,fixture:html5`; `initializer-failure` and `responsive`: `entry` |
 | `spec/browser/build-net.lua` | `http`: `entry`; `websocket`: `entry,fixture:net` |
 | The [`browser-toolchain`](continuous-integration.md#browser-toolchain-job) runner and loader image steps | the runner images and `loader_names`: `entry`; `loader_app`, `fidelity`, and the optimized `fidelity`: `entry,fixture:loader,fixture:controls` |
-| `spec/support/browser_toolchain.lua` `check_imports`, called by each spec's build | bridge spec: as `build-bridge.lua`; entry gate: `entry,fixture:gate,fixture:controls`; scheduler: the scheduler owner `entry,fixture:scheduler`, the others `entry`; budget probes: `entry,fixture:budget`; the stdlib gate, fixture and minicoro images: `entry` |
+| `spec/support/browser_toolchain.lua` `check_imports`, called by each spec's build | bridge spec: as `build-bridge.lua`; entry gate: the `gate.c` images `entry,fixture:gate,fixture:controls`, the `entry_lifetimes.c` image `entry,fixture:controls`; scheduler: the scheduler owner `entry,fixture:scheduler`, the others `entry`; budget probes: `entry,fixture:budget`; the deployment gate, the archive-only consumer of `browser_protocol_spec.lua`, and the stdlib gate, fixture and minicoro images: `entry` |
 
 The trace-adapter units of the `browser-toolchain` job link
 `spec/fixtures/browser_trace_adapter/lifecycle.c` and `filter.c` with plain

@@ -37,6 +37,7 @@ end
             "--no-uv-bootstrap", "--exe", image, "deployment" }, {
                 TITAN_EXTRA_CFLAGS = "", TITAN_EXTRA_LDFLAGS = "", TITAN_PATH_0_6 = "" })
         assert.is_true(built.ok, built.output)
+        toolchain.check_imports(image, { "entry" })
         for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.map" }) do
             assert.equal("file", lfs.attributes(fixture.output .. "/deployment" .. suffix, "mode"))
         end

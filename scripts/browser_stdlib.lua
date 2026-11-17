@@ -228,6 +228,7 @@ end
 -- The permitted signatures by `module\0name` for the union of `classes`,
 -- after checking the whole allowlist's shape.
 function M.allowed_imports(allowlist, classes)
+    if #classes == 0 then return nil, "no browser import classes" end
     local wanted, permitted, seen = {}, {}, {}
     for _, class in ipairs(classes) do
         if not allowlist.classes[class] then return nil, "unknown browser import class " .. class end
