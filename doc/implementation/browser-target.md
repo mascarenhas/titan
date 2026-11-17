@@ -4666,7 +4666,11 @@ same texts.
   chapter's opening run as documented ([documentation
   checks](#documentation-checks)): plain Node, plain HTTP, relocated assets
   through `locateFile`, and a Vite build, with no external Titan loader
-  available, plus the loopback behavior of `http-dev-server.titan`.
+  available, plus the loopback behavior of `http-dev-server.titan`. The
+  server is a native program on `titan.http`, so the file belongs to the
+  installed-stdlib domain: CI runs it in `native-coverage` after the standard
+  provider is installed, where the browser case pends, and in the `chromium`
+  Playwright cells, which require both cases.
   `spec/doc_check_spec.lua` tests the runner's marker grammar, section
   selection and substitutions without Emscripten, and its clean-checkout
   clone and move on a scratch Git repository.

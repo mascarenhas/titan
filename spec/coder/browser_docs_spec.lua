@@ -1,3 +1,9 @@
+-- The browser chapter's examples and the development server they use. The
+-- server is a native program on titan.http, so this file is listed in
+-- spec/support/ci_stdlib_compiler_test_files.txt and CI runs it after the
+-- standard library is installed (native-coverage); the browser case also
+-- needs the toolchain, Playwright and Vite, which only the chromium
+-- Playwright cells supply and require.
 local assert = require "luassert"
 local lfs = require "lfs"
 local files = require "spec.fixtures.target_selection.support"

@@ -1,5 +1,6 @@
 # Compiler integration specs which consume installed logical standard modules.
 # Run after the full standard provider is installed, retaining LuaCov coverage.
+spec/coder/browser_docs_spec.lua
 spec/coder/build_coordination_spec.lua
 spec/coder/compiler_build_scenarios_spec.lua
 spec/coder/documentation_spec.lua
