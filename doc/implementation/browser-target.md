@@ -4350,11 +4350,25 @@ initialization boundary both reject the target with `browser builds are
 supported from Linux and macOS hosts (host is <host>)`:
 `browser builds are supported from Linux and macOS hosts (host is windows)` on
 Windows, and `browser builds are supported from Linux and macOS hosts (host is
-native)` on an unlabeled native host. The fork's `make install-browser`
-likewise refuses a native Windows shell, `Makefile.win` has neither
+native)` on an unlabeled native host. `Makefile.win` has neither
 `lua-browser` nor `browser-sdk`, and the runner refuses to execute an image on
 Windows (`harness failure: browser execution is supported from Linux and macOS
-hosts`).
+hosts`). The fork's `make install-browser` refuses a native Windows shell, but
+from an MSYS2 CLANG64 shell with emsdk 6.0.13 it builds and installs the
+browser Lua.
+
+Lifting the compiler's refusal alone does not make a Windows-host build work.
+In the order a build meets them:
+
+* emsdk installs `emcc.exe`, `emar.exe` and `emranlib.exe`, while the
+  descriptor looks for extensionless `emcc` on the `EMSDK` and `PATH` routes
+  and for extensionless siblings beside it;
+* the native Windows `io` support has no executable-access check, so
+  `io.Sync:executable` refuses a real `emcc.exe`;
+* with both worked around, preprocessing `lua.h` for the target does not find
+  `stdarg.h` among the include roots given to the C preprocessor;
+* `titan-browser-run` is a POSIX `sh` launcher, and the browser specs pend on
+  Windows, including the browser source-resolution checks.
 
 ## Documentation checks
 
