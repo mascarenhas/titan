@@ -157,11 +157,12 @@ function memory(engine) {
     else phases[match[1]] = phase;
   }
   const what = `${engine} memory run (status ${result.status}):\n${result.text}`;
-  assert.ok(phases.start && phases.steady && parked.length >= 2, what);
+  assert.ok(phases.start && phases.steady, what);
   const [first, last] = [parked[0], parked.at(-1)];
-  const record = {...phases, perTaskBytes: Math.round((last.used - first.used) / (last.tasks - first.tasks))};
+  const record = {...phases, perTaskBytes: parked.length >= 2
+    ? Math.round((last.used - first.used) / (last.tasks - first.tasks)) : null};
   if (result.status === 0) {
-    assert.ok(phases.limit && phases.end, what);
+    assert.ok(phases.limit && phases.end && parked.length >= 2, what);
     assert.match(phases.limit.error, /could not create coroutine: Out of memory/,
       `${engine}: the Task limit was not Titan's allocation error`);
     record.limit.failure = 'Titan error';
@@ -169,7 +170,8 @@ function memory(engine) {
     const failure = {70: 'engine abort', 71: 'trap', 75: 'engine failure'}[result.status];
     assert.ok(failure, what);
     const diagnostic = result.text.split('\n').filter(line => /^titan-(browser|playwright)-run: /.test(line)).at(-1);
-    record.limit = {...last, failure, error: diagnostic ?? ''};
+    // The engine may fail before the first batch is parked.
+    record.limit = {...(last ?? {...phases.steady, tasks: 0}), failure, error: diagnostic ?? ''};
   }
   return record;
 }
@@ -220,7 +222,7 @@ if (records.memory) {
     const peak = phase.end ?? phase.limit;
     lines.push(`| ${engine} | ${mib(phase.start.heap)} (${mib(phase.start.used)}) | ` +
       `${mib(phase.steady.heap)} (${mib(phase.steady.used)}) | ${phase.limit.tasks} | ` +
-      `${kib(phase.perTaskBytes)} | ${phase.limit.failure} | ${mib(peak.heap)} | ` +
+      `${phase.perTaskBytes === null ? '—' : kib(phase.perTaskBytes)} | ${phase.limit.failure} | ${mib(peak.heap)} | ` +
       `${phase.end ? mib(phase.end.used) : '—'} |`);
   }
 }
