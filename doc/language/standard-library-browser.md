@@ -10,7 +10,8 @@ JavaScript. General calls from JavaScript into Titan return promises, even if
 the function appears not to yield: an allocation can collect a suspended
 coroutine and run its cleanup. This is not a synchronous comparator gateway.
 See [browser programs](browser-target.md) for images, lifecycle, output sinks,
-and deployment.
+and deployment, and its [complete application](browser-target.md#a-complete-application)
+for typed copies, a callback and a request working together in one page.
 
 ## Public surface and marshalling
 

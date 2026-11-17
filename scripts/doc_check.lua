@@ -126,6 +126,27 @@ function M.parse(text, name)
     return blocks
 end
 
+-- One `## heading` section of a document, up to the next `## ` heading outside
+-- a fenced block, for a caller that checks a single section. The other lines
+-- become empty, so diagnostics keep the document's line numbers.
+function M.section(text, heading)
+    local lines, inside, found, fence = {}, false, false, nil
+    for line in (text:gsub("\r\n", "\n") .. "\n"):gmatch("(.-)\n") do
+        local ticks = line:match("^%s*(```+)")
+        if fence then
+            if ticks and #ticks >= #fence and line:match("^%s*```+%s*$") then fence = nil end
+        elseif ticks then
+            fence = ticks
+        elseif line:match("^## ") then
+            inside = line == "## " .. heading
+            found = found or inside
+        end
+        lines[#lines + 1] = inside and line or ""
+    end
+    if not found then return nil, "no section '## " .. heading .. "'" end
+    return table.concat(lines, "\n")
+end
+
 -- Apply the substitutions to one command block. `used` collects the options
 -- that applied; `log` receives one line per applied substitution.
 local function substitute(block, options, used, log)

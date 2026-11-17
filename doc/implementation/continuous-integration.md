@@ -418,9 +418,10 @@ After step 7, `browser-stdlib` runs:
 
 `browser-playwright` (`browser traces and bridge (${{ matrix.profile }}, ${{
 matrix.engine }}, Playwright 1.64.1)`) runs the multi-engine trace, bridge,
-and live network gates on Linux across a six-cell `fail-fast: false` matrix
-(`profile: [validation, production]` × `engine: [chromium, firefox, webkit]`),
-each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
+live network and hosted deployment gates on Linux across a six-cell
+`fail-fast: false` matrix (`profile: [validation, production]` × `engine:
+[chromium, firefox, webkit]`), each on a four-vCPU runner with a 60-minute
+timeout after `build-compiler`:
 
 1. **Prefix preparation (`validation` versus `production`).** `validation`
    cells restore `titan-linux-prepared.tar.gz` into `$GITHUB_WORKSPACE/.lua`.
@@ -453,10 +454,10 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    `$RUNNER_TEMP/browser-playwright-build.log`) builds the test image and the
    uncaught and async-bootstrap program images for both assertion modes with
    the cell's installed `titanc` and stages the degraded-map variants,
-   `trace.test.mjs`, and `manifest.json`. Like `build-bridge.lua` and
-   `build-net.lua` (steps 7 and 8), it checks each image it builds against the
-   [import manifest](browser-target.md#import-manifest) classes of the
-   fixtures that image links.
+   `trace.test.mjs`, and `manifest.json`. Like `build-bridge.lua`,
+   `build-net.lua` and `build-delivery.lua` (steps 7 to 9), it checks each
+   image it builds against the [import manifest](browser-target.md#import-manifest)
+   classes of the fixtures that image links.
 5. **Positive trace gate.** `"$TITAN_NODE" spec/browser/playwright-run.mjs --engine
    "$TITAN_TRACE_ENGINE" --timeout 300000 --grace 2000 --sdk
    "$PREFIX/lib/titan-browser/0.6" --root "$TITAN_TRACE_OUTPUT"
@@ -525,12 +526,31 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    database trusts the test CA; Firefox and WebKit run the
    untrusted-certificate rejections, and WebKit runs in a persistent context
    so that its HTTP cache exists.
-9. **The browser chapter's examples (`chromium`, both profiles).** These two
+9. **The complete application (all six cells).** `lua -E
+   spec/browser/build-delivery.lua "$TITAN_DELIVERY_OUTPUT"`
+   (`out/browser-delivery`, logged to
+   `$RUNNER_TEMP/browser-playwright-delivery-build.log`) builds the browser
+   chapter's complete application by its section's commands, in the cell's
+   profile, and the documented `http-dev-server` natively. `"$TITAN_NODE"
+   spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE"
+   --root "$TITAN_DELIVERY_OUTPUT"`
+   (`$RUNNER_TEMP/browser-playwright-delivery.log`) serves it to a page in the
+   cell's engine and checks the documented output and trace, the page's exact
+   requests, and their order against the first output and the caught error
+   ([documentation checks](browser-target.md#documentation-checks)).
+   `production` cells add `--records
+   "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json"`: startup
+   and responsiveness over five loads, which never fail the step. Chromium
+   cells also run the image under Node with `titan-browser-run --engine node
+   --timeout 120000 --root "$TITAN_DELIVERY_OUTPUT" --js-test
+   "$TITAN_DELIVERY_OUTPUT/dod.test.mjs"`
+   (`$RUNNER_TEMP/browser-playwright-delivery-node.log`).
+10. **The browser chapter's examples (`chromium`, both profiles).** These two
    cells install `vite@8.3.6` into `TITAN_VITE_ROOT` (`out/vite-tools`) with
    the pinned Node runtime. With `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`,
    `TITAN_REQUIRE_BROWSER_DEPLOYMENT=1`, and `TITAN_PROBE_CACHE_DISABLE=1`,
    `busted -o gtest -v spec/coder/browser_docs_spec.lua` runs the marked
-   blocks of the browser chapter's opening through `scripts/doc_check.lua`
+   blocks of the browser chapter's opening section through `scripts/doc_check.lua`
    ([documentation checks](browser-target.md#documentation-checks)): it
    builds the documented `hello` program and `http-dev-server`, runs the
    image under plain Node, and loads the documented page with the cell's
@@ -542,7 +562,7 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    page's `requireTrace: true`. Its output is
    `$RUNNER_TEMP/browser-playwright-docs.log`. Firefox and WebKit cells keep
    their own managed engine without installing another one for this gate.
-10. **Production-only pins (`production` × `chromium` only).** With
+11. **Production-only pins (`production` × `chromium` only).** With
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` and `TITAN_PROBE_CACHE_DISABLE=1`,
    `"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua
    --filter="keeps frame flags on test owners" --filter="checks the linked
@@ -553,7 +573,7 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    cannot stand in for the pin, so it is pending in every validation run,
    including the `browser-stdlib` job; the module check case runs there too,
    on a validation image.
-11. **Production trace gate on Node (same cell).** Node is the binding engine
+12. **Production trace gate on Node (same cell).** Node is the binding engine
    for the [browser C-call limit](browser-target.md#the-browser-c-call-limit),
    and the `browser-toolchain` job's Node gate runs a validation installation
    only. The cell's installed `titan-browser-run --engine node --timeout 300000
@@ -566,13 +586,15 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    (`$RUNNER_TEMP/browser-playwright-node-policy.log`),
    and the `--allow-degraded-trace ... -- --degraded` run covers the degraded
    rows (`$RUNNER_TEMP/browser-playwright-node-degraded.log`).
-12. **Receipts.** On `always()`, `actions/upload-artifact` uploads
+13. **Receipts.** On `always()`, `actions/upload-artifact` uploads
     `${{ runner.temp }}/browser-playwright-*.log`,
     `${{ runner.temp }}/browser-production-pins.log`,
-    `${{ env.TITAN_TRACE_OUTPUT }}`, `${{ env.TITAN_BRIDGE_OUTPUT }}`, and
-    `${{ env.TITAN_NET_OUTPUT }}` as
+    `${{ env.TITAN_TRACE_OUTPUT }}`, `${{ env.TITAN_BRIDGE_OUTPUT }}`,
+    `${{ env.TITAN_NET_OUTPUT }}`, and the complete application's
+    `delivery.json` and staged `browser-app/site` as
     `browser-playwright-${{ matrix.profile }}-${{ matrix.engine }}` for seven
-    days.
+    days. `production` cells also upload `out/browser-records/` as
+    `browser-records-playwright-${{ matrix.engine }}`.
 
 ## Cache ownership
 

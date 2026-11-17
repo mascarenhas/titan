@@ -1090,6 +1090,7 @@ jobs:
       TITAN_TRACE_OUTPUT: ${{ github.workspace }}/out/browser/trace-${{ matrix.profile }}-${{ matrix.engine }}
       TITAN_BRIDGE_OUTPUT: ${{ github.workspace }}/out/browser/bridge-${{ matrix.profile }}-${{ matrix.engine }}
       TITAN_NET_OUTPUT: ${{ github.workspace }}/out/browser-net
+      TITAN_DELIVERY_OUTPUT: ${{ github.workspace }}/out/browser-delivery
 
     steps:
       - uses: actions/checkout@v6
@@ -1335,6 +1336,35 @@ jobs:
           }
           JS
 
+      # The browser chapter's complete application, built by the commands its
+      # section documents in this cell's profile, then served by the documented
+      # http-dev-server to a page in this engine with nothing else involved.
+      - name: Build the browser chapter's complete application and its server
+        run: |
+          set -euo pipefail
+          source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
+          lua -E spec/browser/build-delivery.lua "$TITAN_DELIVERY_OUTPUT" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery-build.log"
+
+      - name: Run the complete application's hosted deployment test
+        run: |
+          set -euo pipefail
+          records=()
+          if [ "$TITAN_BUILD_PROFILE" = production ]; then
+            records=(--records "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json")
+          fi
+          "$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE" \
+            --root "$TITAN_DELIVERY_OUTPUT" "${records[@]}" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery.log"
+
+      - name: Run the complete application under Node
+        if: matrix.engine == 'chromium'
+        run: |
+          set -euo pipefail
+          "$PREFIX/lib/titan-browser/0.6/titan-browser-run" --engine node --timeout 120000 \
+            --root "$TITAN_DELIVERY_OUTPUT" --js-test "$TITAN_DELIVERY_OUTPUT/dod.test.mjs" \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-delivery-node.log"
+
       - name: Install the pinned Vite deployment dependency
         if: matrix.engine == 'chromium'
         run: |
@@ -1418,7 +1448,20 @@ jobs:
             ${{ env.TITAN_TRACE_OUTPUT }}
             ${{ env.TITAN_BRIDGE_OUTPUT }}
             ${{ env.TITAN_NET_OUTPUT }}
+            ${{ env.TITAN_DELIVERY_OUTPUT }}/delivery.json
+            ${{ env.TITAN_DELIVERY_OUTPUT }}/browser-app/site
           if-no-files-found: error
+          retention-days: 7
+
+      # Measurements only: the hosted test fails on harness errors, never on
+      # these numbers.
+      - name: Upload browser records
+        if: always() && matrix.profile == 'production'
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-records-playwright-${{ matrix.engine }}
+          path: out/browser-records/
+          if-no-files-found: warn
           retention-days: 7
 
   native-coverage:

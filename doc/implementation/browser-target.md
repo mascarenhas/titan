@@ -2739,6 +2739,7 @@ classes:
 | `spec/browser/build-trace.lua` | the runtime, uncaught and async images: `entry,fixture:trace` (the degraded variants copy the runtime image's `.wasm`) |
 | `spec/browser/build-bridge.lua` | the bridge and public-state images: `entry,fixture:controls`; `counter`: `entry,fixture:html5`; `initializer-failure` and `responsive`: `entry` |
 | `spec/browser/build-net.lua` | `http`: `entry`; `websocket`: `entry,fixture:net` |
+| `spec/browser/build-delivery.lua` | the chapter's complete application `app`: `entry` |
 | The [`browser-toolchain`](continuous-integration.md#browser-toolchain-job) runner and loader image steps | the runner images and `loader_names`: `entry`; `loader_app`, `fidelity`, and the optimized `fidelity`: `entry,fixture:loader,fixture:controls` |
 | `spec/support/browser_toolchain.lua` `check_imports`, called by each spec's build | bridge spec: as `build-bridge.lua`; entry gate: the `gate.c` images `entry,fixture:gate,fixture:controls`, the `entry_lifetimes.c` image `entry,fixture:controls`; scheduler: the scheduler owner `entry,fixture:scheduler`, the others `entry`; budget probes: `entry,fixture:budget`; the documented `hello` image of the documentation gate, the archive-only consumer of `browser_protocol_spec.lua`, and the stdlib gate, fixture and minicoro images: `entry` |
 
@@ -4294,15 +4295,15 @@ hosts`).
 
 ## Documentation checks
 
-The browser chapter's opening is executable. `scripts/doc_check.lua` runs the
-fenced blocks that an HTML comment marker (invisible in rendered Markdown)
-selects: `file=PATH` writes the block to a workspace path, `run` and
-`setup=checkout` run an `sh` block, and `expect=LABEL` records text for the
-caller to compare. Unmarked blocks, including the long-running serve commands,
-never run, and a marker spelled inside an unmarked block is text. An unknown
-or malformed marker, a marker without a following fence, a `run` block that is
-not `sh`, and a file path that is absolute or leaves the workspace are
-errors.
+The browser chapter's opening and its complete application are executable.
+`scripts/doc_check.lua` runs the fenced blocks that an HTML comment marker
+(invisible in rendered Markdown) selects: `file=PATH` writes the block to a
+workspace path, `run` and `setup=checkout` run an `sh` block, and
+`expect=LABEL` records text for the caller to compare. Unmarked blocks,
+including the long-running serve commands, never run, and a marker spelled
+inside an unmarked block is text. An unknown or malformed marker, a marker
+without a following fence, a `run` block that is not `sh`, and a file path
+that is absolute or leaves the workspace are errors.
 
 All marked blocks of the given documents become one `set -eu` script, so a
 `cd` or `export` carries over to later blocks, and each document starts in
@@ -4316,15 +4317,20 @@ otherwise), the documented `PREFIX` value becomes the job's prefix,
 becomes a link to the pinned Vite installation. A command that needs a
 substitution whose value was not given, a value that no block needs, and a
 checkout block without the documented clone command are errors, so the check
-fails when the chapter drifts from it. `spec/doc_check_spec.lua` tests the
-grammar, the substitutions and the shell's persistence, and plans the
-installation and browser chapters with every substitution.
+fails when the chapter drifts from it. `section(text, heading)` keeps one
+`##` section of a document, ending at the next `##` heading outside a fence,
+and blanks the other lines, so a caller can check one section and its
+diagnostics keep the document's line numbers. `spec/doc_check_spec.lua` tests
+the grammar, section selection, the substitutions and the shell's
+persistence, and plans the installation and browser chapters with every
+substitution.
 
-`spec/coder/browser_docs_spec.lua` runs the opening in a workspace with the
-installation's `bin` on `PATH` and no Titan overrides (`TITAN_ROOT`,
-`TITAN_PATH_0_6`, `TITAN_TARGET`, and the extra-flag variables are unset), as
-a reader's shell would be. It checks the `hello` image's imports against the
-`entry` class, then `spec/fixtures/browser_docs/docs.mjs` imports the image
+`spec/coder/browser_docs_spec.lua` runs the opening section ("A first web
+page") in a workspace with the installation's `bin` on `PATH` and no Titan
+overrides (`TITAN_ROOT`, `TITAN_PATH_0_6`, `TITAN_TARGET`, and the extra-flag
+variables are unset), as a reader's shell would be. It checks the `hello`
+image's imports against the `entry` class, then
+`spec/fixtures/browser_docs/docs.mjs` imports the image
 in plain Node (ready and frozen trace, the documented output), and loads
 `site/`, `site-assets/` (`locateFile`) and `vite-app/dist/` in Chromium, each
 served by the documented `http-dev-server` on the first free port from 28500.
@@ -4359,6 +4365,39 @@ HTTP client, plus `main`'s usage and busy-port statuses. Its unreadable-folder
 case has nothing to check when the superuser runs it. The docs spec copies the
 two files into one source tree and builds them with `--test`, so the
 standard-library test tree never resolves modules from the manual.
+
+The "A complete application" section documents `doc/language/browser-app/`:
+`app.titan`, its page `index.html`, and `greeting.txt`.
+`spec/browser/build-delivery.lua OUTPUT` runs that section's commands with
+`doc_check` in the reader's shell (the installation's `bin` on `PATH`,
+`PREFIX` naming it, no Titan overrides), so the build uses the installation's
+profile; it builds the documented `http-dev-server` natively, checks the
+image's imports against the `entry` class, and writes `delivery.json` with the
+profile and the section's `expect=app` and `expect=app-errors` texts.
+`spec/fixtures/browser_delivery/hosted.mjs` serves `browser-app/site` with
+that server and loads the page in one Playwright engine, in a fresh context
+with service workers blocked. The page's output element must hold the
+`expect=app` text; its error element must start with the `expect=app-errors`
+lines (the Titan frames without lines on WebKit) and continue only with
+frames from `async.titan`, `coroutine.titan` and `runtime.browser.titan`
+(`expectations.mjs`). The program's own frames are exact in both profiles:
+no function on that call chain is inlined. The page must request exactly `/`,
+`app.mjs`, `app.wasm`, `app.wasm.trace`, `titan-protobuf.mjs` and
+`greeting.txt`, each once and answered with 200, open no WebSocket, and
+complete each fetched file in its own Resource Timing; Chromium reports a
+fetch whose body is read through a stream reader, as `http.get` reads, as
+`net::ERR_ABORTED` to Playwright even after the body completed, so only a
+failure before the response counts. The trace table's `responseEnd` must
+precede the first output, no resource may start once the caught error is
+shown, and the page must draw at least one frame while the Tasks wait. An
+init script, not the page, measures: the first output, the WebAssembly
+instantiation, the Wasm and trace fetches, animation frames during the Task
+phase, and the delay of clicks made then. With `--records FILE` the
+test loads the page four more times and writes their medians and maxima;
+the numbers never fail the test. `dod.test.mjs`, copied into the output with
+`expectations.mjs`, runs the image under `titan-browser-run --engine node
+--js-test` with the page's two bindings and the same server, and checks the
+same texts.
 
 ## Validation
 
@@ -4527,8 +4566,15 @@ standard-library test tree never resolves modules from the manual.
   checks](#documentation-checks)): plain Node, plain HTTP, relocated assets
   through `locateFile`, and a Vite build, with no external Titan loader
   available, plus the loopback behavior of `http-dev-server.titan`.
-  `spec/doc_check_spec.lua` tests the runner's marker grammar and
-  substitutions without Emscripten.
+  `spec/doc_check_spec.lua` tests the runner's marker grammar, section
+  selection and substitutions without Emscripten.
+* `spec/browser/build-delivery.lua` with
+  `spec/fixtures/browser_delivery/hosted.mjs`, `dod.test.mjs` and
+  `expectations.mjs` — the chapter's complete application built by its
+  documented commands and served by the documented server to Chromium,
+  Firefox and WebKit in the Playwright cells, and run under Node, against
+  the documented output and trace, with exact requests and their order
+  ([documentation checks](#documentation-checks)).
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and

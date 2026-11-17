@@ -6441,6 +6441,9 @@ printf '%s\n' "${schedule[@]}"
                 "${{ env.TITAN_BRIDGE_OUTPUT }}",
                 "${{ env.TITAN_NET_OUTPUT }}",
                 "spec/browser/build-net.lua",
+                "${{ env.TITAN_DELIVERY_OUTPUT }}",
+                "spec/browser/build-delivery.lua",
+                "spec/fixtures/browser_delivery/hosted.mjs",
                 "spec/fixtures/browser_net/run.mjs",
                 "spec/browser/playwright-run.mjs",
                 "spec/browser/playwright-runner.test.mjs",
@@ -6528,6 +6531,36 @@ printf '%s\n' "${schedule[@]}"
                 "browser-playwright-docs.log",
             }) do
                 assert.truthy(docs_gate:find(contract, 1, true), contract)
+            end
+            -- The complete application: every cell builds it by its section's
+            -- commands and runs the hosted test; production cells keep records.
+            local delivery_build = named_step(playwright_job,
+                "Build the browser chapter's complete application and its server")
+            assert.falsy(delivery_build:find("if:", 1, true), delivery_build)
+            assert.truthy(delivery_build:find(
+                'lua -E spec/browser/build-delivery.lua "$TITAN_DELIVERY_OUTPUT"', 1, true), delivery_build)
+            local hosted = named_step(playwright_job, "Run the complete application's hosted deployment test")
+            assert.falsy(hosted:find("if:", 1, true), hosted)
+            for _, contract in ipairs({
+                '"$TITAN_NODE" spec/fixtures/browser_delivery/hosted.mjs --engine "$TITAN_TRACE_ENGINE"',
+                '--root "$TITAN_DELIVERY_OUTPUT" "${records[@]}"',
+                'if [ "$TITAN_BUILD_PROFILE" = production ]; then',
+                'records=(--records "$PWD/out/browser-records/playwright-$TITAN_TRACE_ENGINE.json")',
+            }) do
+                assert.truthy(hosted:find(contract, 1, true), contract)
+            end
+            local delivery_node = named_step(playwright_job, "Run the complete application under Node")
+            assert.truthy(delivery_node:find("if: matrix.engine == 'chromium'", 1, true), delivery_node)
+            assert.truthy(delivery_node:find(
+                '--root "$TITAN_DELIVERY_OUTPUT" --js-test "$TITAN_DELIVERY_OUTPUT/dod.test.mjs"', 1, true),
+                delivery_node)
+            local records = named_step(playwright_job, "Upload browser records")
+            for _, contract in ipairs({
+                "if: always() && matrix.profile == 'production'",
+                "name: browser-records-playwright-${{ matrix.engine }}",
+                "path: out/browser-records/",
+            }) do
+                assert.truthy(records:find(contract, 1, true), contract)
             end
             assert.falsy(playwright_job:find("browser_deployment_spec", 1, true), playwright_job)
             assert.falsy(browser_job:find("TITAN_VITE_VERSION", 1, true))

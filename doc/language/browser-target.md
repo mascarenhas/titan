@@ -277,6 +277,98 @@ together with it. No external loader is required. The trace table lets errors
 report Titan source files and lines (see [traces](#traces)); serve
 `hello.wasm.map` too if you want browser developer tools to show sources.
 
+## A complete application
+
+The Titan source tree holds a larger browser program in
+[`browser-app/`](browser-app/): [`app.titan`](browser-app/app.titan), its page
+[`index.html`](browser-app/index.html), and
+[`greeting.txt`](browser-app/greeting.txt), a file that the program fetches.
+In order, its `main`:
+
+* fetches `greeting.txt` from the page's own server with
+  [`http.get`](standard-library-http.md#on-the-browser) and prints the status
+  and the first line;
+* sends a `Card` record to the page as a [typed
+  copy](standard-library-browser.md#copying-typed-values). The page's
+  `publish` binding decodes it with the SDK's `titan-protobuf.mjs` and returns
+  a changed copy, which Titan decodes;
+* passes a Titan function to the page's `visit` binding, which calls it back
+  twice before it settles the request. The function and the request's
+  completion share one captured counter
+  ([callables](standard-library-browser.md#callables-and-pinning));
+* runs five Tasks that sleep for different times while a sixth waits on a
+  ticker, and joins the five with `async.all_five`. The page's frame counter
+  keeps advancing while they wait;
+* reads `os.stdin`, which the page does not supply, and prints the
+  [`async.OperationError`](#unavailable-operations) that the read raises;
+* writes a line to standard error, which the page shows in a second element;
+* runs a Lua chunk that calls a Titan function that raises, catches the
+  error, and writes its trace to standard error.
+
+Build it in a folder of its own, beside the `http-dev-server` that you built
+for the first page, with `PREFIX` set to the root of the Titan installation:
+
+<!-- doc-check: run -->
+```sh
+cp -R /path/to/titan/doc/language/browser-app .
+cd browser-app
+titanc --target browser -o out app
+mkdir -p site
+cp index.html greeting.txt out/app.mjs out/app.wasm out/app.wasm.trace site/
+cp "$PREFIX/lib/titan-browser/0.6/titan-protobuf.mjs" site/
+```
+
+The page imports `titan-protobuf.mjs` to read and write the typed copies; it
+is served beside the program, not embedded in it. Serve the folder:
+
+```sh
+../http-dev-server site 8000
+```
+
+The page's first element shows standard output and the result:
+
+<!-- doc-check: expect=app -->
+```text
+GET greeting.txt: 200 Hello from greeting.txt
+The page sent back "HELLO FROM GREETING.TXT", visits 2
+The page called back twice, and the count is 3
+Task 5 woke after 50 ms
+Task 4 woke after 100 ms
+Task 3 woke after 150 ms
+Task 2 woke after 200 ms
+Task 1 woke after 250 ms
+All five Tasks returned 1, 2, 3, 4, 5
+The ticker ticked while they slept
+os.stdin:read() raised ENOSYS in os.InputStream.read
+(returned, status 0)
+```
+
+The second element shows standard error. On Chromium, Chrome and Firefox the
+trace names the Titan source lines and the Lua chunk's lines, innermost call
+first:
+
+<!-- doc-check: expect=app-errors -->
+```text
+This line goes to standard error.
+caught: an error raised by Titan code that Lua called
+app.titan:132: in app.fail
+relay.lua:3: in local 'relay'
+relay.lua:5: in main chunk
+app.titan:144: in app.report_lua_error
+app.titan:156: in app.main
+```
+
+The frames of the `async` runtime, which runs `main` as a Task, follow. On
+WebKit and Safari the Titan frames have no line (`app.titan: in app.fail`).
+This program's frames are the same in both [build profiles](#build-profiles);
+in general a `production` trace leaves out the frame of a function that the
+optimizer inlined into its caller ([traces](#traces)).
+
+The page loads exactly six files: itself, `app.mjs`, `app.wasm`,
+`app.wasm.trace`, `titan-protobuf.mjs`, and `greeting.txt`. Its
+`<link rel="icon" href="data:,">` keeps the browser from requesting
+`/favicon.ico`.
+
 ## Prerequisites
 
 You need:

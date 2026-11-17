@@ -56,6 +56,25 @@ describe("doc-check markers", function()
         assert.truthy(result.script:find("\necho marked\n", 1, true), result.script)
     end)
 
+    it("selects one section by its heading and keeps the document's line numbers", function()
+        local text = markdown(
+            "## First", "<!-- doc-check: run -->", "```sh", "echo first", "## not a heading", "```",
+            "## Second", "<!-- doc-check: run -->", "```sh", "echo second", "```",
+            "### Inside second", "<!-- doc-check: expect=second -->", "```text", "two", "```",
+            "## Third", "<!-- doc-check: run -->", "```sh", "echo third", "```")
+        local blocks = assert(doc_check.parse(assert(doc_check.section(text, "Second")), "doc.md"))
+        assert.equal(2, #blocks)
+        assert.same({ kind = "run", document = "doc.md", line = 9, info = "sh", body = "echo second\n" }, blocks[1])
+        assert.same({ kind = "expect", label = "second", document = "doc.md", line = 14, info = "text",
+            body = "two\n" }, blocks[2])
+        local first = assert(doc_check.parse(assert(doc_check.section(text, "First")), "doc.md"))
+        assert.equal(1, #first)
+        assert.equal("echo first\n## not a heading\n", first[1].body)
+        local missing, err = doc_check.section(text, "Fourth")
+        assert.is_nil(missing)
+        assert.equal("no section '## Fourth'", err)
+    end)
+
     it("rejects unknown, malformed and dangling markers and unsafe paths", function()
         rejects(markdown("<!-- doc-check: serve -->", "```sh", "x", "```"), "doc.md:1: unknown doc-check marker 'serve'")
         rejects(markdown("<!-- doc-check: expect= -->", "```text", "x", "```"), "unknown doc-check marker 'expect='")
@@ -168,11 +187,16 @@ describe("doc-check chapters", function()
             { name = "doc/language/browser-target.md", text = read("doc/language/browser-target.md") },
         }, { workspace = "/work", checkout = "/ci/checkout", prefix = "/ci/prefix", source = "/ci/source",
             vite_root = "/ci/vite" }))
-        assert.equal(4, #result.substitutions)
+        -- `/path/to/titan` appears in the first page and the complete application.
+        assert.equal(5, #result.substitutions)
         assert.truthy(result.expectations.page:find("^Hello, browser, from Titan!\n"), result.expectations.page)
+        assert.truthy(result.expectations.app:find("\n%(returned, status 0%)\n$"), result.expectations.app)
+        assert.truthy(result.expectations["app-errors"]:find("\napp%.titan:%d+: in app%.main\n$"),
+            result.expectations["app-errors"])
         for _, needle in ipairs({ "make browser-sdk PREFIX=", "titanc --target browser -o out hello",
                 "cat > '/work/site/index.html'", "cat > '/work/site-assets/index.html'",
-                "titanc -o out-native --exe http-dev-server http-dev-server", "npx vite build" }) do
+                "titanc -o out-native --exe http-dev-server http-dev-server", "npx vite build",
+                "cp -R /ci/source/doc/language/browser-app .", "titanc --target browser -o out app" }) do
             assert.truthy(result.script:find(needle, 1, true), needle)
         end
     end)
