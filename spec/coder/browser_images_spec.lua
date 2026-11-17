@@ -599,6 +599,8 @@ describe("browser image profile and SDK readiness", function()
             -- cases run the ordinary build and stop at the ownership check.
             { arguments = { "plain", "--ldflag=-O3" }, expected = link .. "-O3" },
             { arguments = { "plain", "--ldflag=-fno-optimize-sibling-calls" }, expected = link .. "-fno-optimize-sibling-calls" },
+            { arguments = { "plain", "--ldflag=--pre-js=pre.js" }, expected = "browser " .. profile ..
+                " link profile does not accept --pre-js; add JavaScript with EM_JS or EM_ASM in a --c-source helper" },
         }) do
             local result = cli({ prefix = info.prefix, extra_cflags = case.extra_cflags },
                 table.unpack(case.arguments))
@@ -607,6 +609,24 @@ describe("browser image profile and SDK readiness", function()
             assert.truthy(log:find(case.expected, 1, true), log)
             local other = case.expected:find("link profile", 1, true) and compile or link
             assert.is_nil(log:find(other, 1, true), log)
+        end
+    end)
+
+    it("refuses link options whose files the image identity does not record", function()
+        local javascript = "add JavaScript with EM_JS or EM_ASM in a --c-source helper"
+        for _, case in ipairs({
+            { { "--pre-js", "pre.js" }, "--pre-js; " .. javascript },
+            { { "--post-js=post.js" }, "--post-js; " .. javascript },
+            { { "-lm", "--extern-pre-js", "pre.js" }, "--extern-pre-js; " .. javascript },
+            { { "--extern-post-js=post.js" }, "--extern-post-js; " .. javascript },
+            { { "--js-transform", "cat" }, "--js-transform; the generated module is Titan's" },
+            { { "--embed-file", "data" }, "--embed-file; browser images have no filesystem" },
+            { { "--preload-file=data" }, "--preload-file; browser images have no filesystem" },
+            { { "--exclude-file", "*.tmp" }, "--exclude-file; browser images have no filesystem" },
+        }) do
+            local ok, err = browserlink.validate_extras(case[1], nil, "production")
+            assert.is_nil(ok)
+            assert.equal("browser production link profile does not accept " .. case[2], err)
         end
     end)
 

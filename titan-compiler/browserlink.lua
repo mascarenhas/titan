@@ -195,6 +195,20 @@ local owned = { SUPPORT_LONGJMP = true, WASM_LEGACY_EXCEPTIONS = true,
     TITAN_TARGET_BROWSER = true, TITAN_COROUTINE_STACK_SIZE = true,
     TITAN_CODEC_DEPTH_LIMIT = true,
     BINARYEN_EXTRA_PASSES = true }
+-- Options that put a file's contents into the generated module or its data.
+-- The image identity and the warm-link certificate record only owned inputs,
+-- so a module built with one would match no recorded input; each names the
+-- supported route instead.
+local CONTENT_OPTIONS = {
+    ["--pre-js"] = "add JavaScript with EM_JS or EM_ASM in a --c-source helper",
+    ["--post-js"] = "add JavaScript with EM_JS or EM_ASM in a --c-source helper",
+    ["--extern-pre-js"] = "add JavaScript with EM_JS or EM_ASM in a --c-source helper",
+    ["--extern-post-js"] = "add JavaScript with EM_JS or EM_ASM in a --c-source helper",
+    ["--js-transform"] = "the generated module is Titan's",
+    ["--embed-file"] = "browser images have no filesystem",
+    ["--preload-file"] = "browser images have no filesystem",
+    ["--exclude-file"] = "browser images have no filesystem",
+}
 -- `origin` is "compile" for a caller's compile extras and "link" otherwise, so
 -- one owned option is reported by the diagnostic that owns it: the compile
 -- message matches `browsertarget.build`'s, the link message names the link
@@ -205,6 +219,11 @@ function M.validate_extras(flags, options, build_profile, origin)
     local compile_label = "browser profile"
     if build_profile then compile_label = "browser " .. build_profile .. " profile" end
     for index, flag in ipairs(flags or {}) do
+        local content = flag:match("^(%-%-[%w-]+)=") or flag
+        if CONTENT_OPTIONS[content] then
+            return nil, (origin == "compile" and compile_label or label) .. " does not accept " ..
+                content .. "; " .. CONTENT_OPTIONS[content]
+        end
         local purpose = options and options.purpose
         if purpose ~= "baseline" and purpose ~= "minicoro" and purpose ~= "budget" and
             require("titan-compiler.browsertarget").trace_option(flag) then

@@ -1659,6 +1659,18 @@ compile option "-O2"`, and `--ldflag=-O3` reports `browser production link
 profile owns option -O3`. Other Emscripten settings pass through, so a later
 user flag can never weaken the profile.
 
+It also refuses the options that put a file's contents into the generated
+module or its data, split or joined with `=`: `--pre-js`, `--post-js`,
+`--extern-pre-js`, `--extern-post-js`, `--js-transform`, `--embed-file`,
+`--preload-file`, and `--exclude-file`. The image identity and the warm-link
+certificate record the owned inputs and the flags, not such files, so a changed
+file would leave a stale module up to date and give two different modules one
+identity. The diagnostic names the supported route instead, for example
+`browser production link profile does not accept --pre-js; add JavaScript with
+EM_JS or EM_ASM in a --c-source helper`; the file options end with `browser
+images have no filesystem` and `--js-transform` with `the generated module is
+Titan's`.
+
 ## Semantic-cache ownership
 
 `driver.imported` (logical module name → source AST, interface, provider
@@ -2818,10 +2830,15 @@ extensions:
 
 ### Module and Wasm binding
 
+`create(factory, options, image)` first requires `image` to be the generated
+module's binding, `{identity, wasm}` with a 64-digit lowercase hexadecimal
+identity and a `.wasm` name, and throws a `TypeError` otherwise.
 `BrowserOwner.instantiate` reads the instantiated Wasm's
 `_titan_browser_trace_identity()` string right after the factory resolves
-and checks for Titan channels. It compares the string with the identity that
-the generated module passed to `create`. A difference throws
+and checks for Titan channels; a module without that export fails the channel
+check (`browser image does not provide Titan channels`). It compares the
+string with the identity that the generated module passed to `create`. A
+difference throws
 `failure('PROTOCOL', 'browser image mismatch: <stem>.mjs belongs to image
 <12 hex>, <stem>.wasm is image <12 hex>')`, which poisons the owner before any
 entry, whatever `requireTrace` says: Emscripten glue generated for another
@@ -4165,7 +4182,9 @@ hosts`).
   images with frame flags and both Binaryen skips, test owners' frame flags,
   validation and harness purposes unchanged), the image-derived link purpose
   and its refusals of a contrary or missing purpose, the owned options named
-  by profile, missing-SDK and `.mjs` diagnostics, program and test images with
+  by profile, the refused options that add a file to the module or its data
+  (`--pre-js` and the rest, directly and through `--ldflag`), missing-SDK and
+  `.mjs` diagnostics, program and test images with
   statuses, binary arguments, uncaught reports, protected initialization and
   allocation failures, the libc drain, the stdio-only filesystem regression,
   dynamic-loading guards, three-file preflight reservation and repeated-link
@@ -4294,7 +4313,9 @@ hosts`).
   exported `within`/`Monitor` helpers and symlink invocation, status
   categories, grace, abort and cleanup boundaries, process-group retirement,
   path containment, over Node and both Chromium transports, and, with fake
-  images, the loader's protocol failure for a `.wasm` from another link.
+  images, the loader's protocol failure for a `.wasm` from another link or
+  without its identity export, and its `TypeError` for a malformed image
+  binding.
 * `spec/browser/trace-adapter.test.mjs` and
   `spec/fixtures/browser_trace_adapter/{stacks.json,stacks-jspi-current.json,degraded.mjs,lifecycle.c,filter.c}`
   — Node unit tests for the V8, SpiderMonkey, and JavaScriptCore stack parsers

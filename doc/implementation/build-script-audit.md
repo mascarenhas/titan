@@ -472,12 +472,17 @@ selection.
   the browser-only sources from the compiler's browser selection to the Make
   lists; every `*_TITAN_HEADERS` list; `TITAN_RUNTIME_SOURCES`,
   `BROWSER_RUNTIME_SOURCES`, and the SDK headers; the LPegLabel sources and
-  headers; every `scripts/` file the Makefiles name; and the browser SDK
-  assets that `browserlink.sdk_assets` names. A short hand list holds only
-  what no Make list names, such as Windows scripts, vendor patches, licenses,
-  four standard-library headers, and the browser checks' Lua modules. There is
-  one standard-library tree: outside `titan/`, `spec/`, and `doc/`, no file
-  may share a basename with a file under `titan/`.
+  headers; every `scripts/` file that `Makefile`, `Makefile.win`, or
+  `scripts/install_compiler.mk` names, and the scripts those name in turn;
+  every checkout header that a runtime source includes or a standard-library
+  source foreign-imports, followed through quoted `#include`s (such as
+  `titan-runtime/titan_winloader.h` and `titan/transfer_native.h`); and the
+  browser SDK assets that `browserlink.sdk_assets` names. A short hand list
+  holds only what none of these name, such as a Windows Perl module, vendor
+  patches, licenses, `scripts/browser_stdlib_inventory.lua`, and
+  `titan-protobuf.mjs`. There is one standard-library tree: outside `titan/`,
+  `spec/`, and `doc/`, no file may be Titan source or share a basename with a
+  file under `titan/`.
 * **Binary rock.** `luarocks pack` copies the retained rock directory and the
   manifest's deployed files, so the installed-prefix test walks both. Neither
   may hold a `*.titan` file outside `doc/`, a `*.browser.titan` file, or any

@@ -751,14 +751,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             ".gitmodules",
             ".agents/skills/titan-programmer/SKILL.md",
             "Makefile.win",
-            "scripts/install_windows_luarocks.sh",
-            "scripts/install_compiler.mk",
-            "scripts/titan_install.lua",
-            "scripts/titan-uninstall",
-            "scripts/prepare_windows_native.pl",
             "scripts/WindowsLibbacktraceAllocator.pm",
-            "scripts/build_windows_libbacktrace.sh",
-            "scripts/windows_native_coverage.sh",
             "vendor/libbacktrace/libbacktrace-0b9b49c-alloc-growth.patch",
             "spec/fixtures/libbacktrace/allocator_vector_probe.c",
             "spec/support/check_libbacktrace_allocator.sh",
@@ -779,19 +772,10 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "vendor/lpeglabel/testrelabelparser.lua",
             "vendor/lpeglabel/LICENSE",
             "vendor/lpeglabel/UPSTREAM.md",
-            -- Standard-library headers that no Make list names.
-            "titan/transfer_native.h",
-            "titan/fs_platform.h",
-            "titan/path_platform.h",
-            "titan/protobuf/native.h",
-            -- The browser checks' modules, which the Make-named scripts load.
-            "scripts/browser_stdlib.lua",
+            -- Loaded by scripts/browser_stdlib.lua beside itself.
             "scripts/browser_stdlib_inventory.lua",
-            "scripts/browser_imports.lua",
-            -- SDK sources `make browser-sdk` copies or compiles beside the
-            -- compiler's SDK assets.
+            -- Copied by `make browser-sdk` beside the compiler's SDK assets.
             "titan-runtime/browser/titan-protobuf.mjs",
-            "titan-runtime/browser/titan-browser-trace.h",
             "spec/stdlib/titan/async/test_support/test_support.titan",
             "spec/stdlib/titan/async/test_support/sleep.titan",
             "spec/stdlib/titan/async/tests/all_join_test.titan",
@@ -1080,13 +1064,16 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.truthy(contains_suffix(expected), expected)
         end
         -- The Make lists name the standard-library, runtime, and LPegLabel
-        -- sources and headers, and every script a recipe runs. The compiler's
-        -- browser selection adds the browser-only standard-library sources
-        -- (`audited_stdlib_sources`), and `make browser-sdk` copies the
-        -- compiler's SDK assets from titan-runtime/browser. The hand list
-        -- above keeps only files that none of these name.
+        -- sources and headers, and the scripts a recipe runs, which name the
+        -- scripts they run in turn. The compiler's browser selection adds the
+        -- browser-only standard-library sources (`audited_stdlib_sources`),
+        -- the sources' quoted includes and foreign imports name their
+        -- checkout headers, and `make browser-sdk` copies the compiler's SDK
+        -- assets from titan-runtime/browser. The hand list above keeps only
+        -- files that none of these name.
         local makefile = read_file("Makefile")
-        local derived = source_inventory.audited_stdlib_sources()
+        local stdlib_sources = source_inventory.audited_stdlib_sources()
+        local derived = { table.unpack(stdlib_sources) }
         local function add_make_list(name)
             for _, word in ipairs(source_inventory.makefile_words(name)) do
                 local nested = word:match("^%$%(([%w_]+)%)$")
@@ -1109,11 +1096,51 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
                 derived[#derived + 1] = lpeglabel .. "/" .. word
             end
         end
-        for _, filename in ipairs({ "Makefile", "scripts/install_compiler.mk" }) do
-            for script in read_file(filename):gmatch("scripts/[%w_.-]+") do
-                derived[#derived + 1] = script
+        local scripts, named = { "Makefile", "Makefile.win", "scripts/install_compiler.mk" }, {}
+        local index = 1
+        while scripts[index] do
+            for script in read_file(scripts[index]):gmatch("scripts/[%w_.-]+") do
+                if not named[script] then
+                    named[script] = true
+                    scripts[#scripts + 1] = script
+                    derived[#derived + 1] = script
+                end
+            end
+            index = index + 1
+        end
+        -- A quoted include or foreign import names a checkout header beside
+        -- its includer (`..` and `.` allowed) or, for the standard library,
+        -- below titan/; anything else is a system, Lua, or dependency header.
+        local function checkout_header(directory, name)
+            local path = (directory .. "/" .. name):gsub("/%./", "/"):gsub("^%./", "")
+            local previous
+            repeat previous = path; path = path:gsub("[^/]+/%.%./", "", 1) until path == previous
+            return lfs.attributes(path, "mode") == "file" and path or nil
+        end
+        local headers, unread = {}, {}
+        local function include(path)
+            if path and not headers[path] then
+                headers[path] = true
+                unread[#unread + 1] = path
+                derived[#derived + 1] = path
             end
         end
+        local function includes(filename)
+            for name in read_file(filename):gmatch('#%s*include%s*"([^"]+)"') do
+                include(checkout_header(filename:match("^(.*)/"), name))
+            end
+        end
+        for _, source in ipairs(source_inventory.makefile_words("TITAN_RUNTIME_SOURCES")) do
+            includes(source)
+        end
+        for _, source in ipairs(stdlib_sources) do
+            for name in read_file(source):gmatch('foreign%s+import%s+"([^"]+)"') do
+                include(checkout_header(source:match("^(.*)/"), name) or checkout_header("titan", name))
+            end
+        end
+        while #unread > 0 do includes(table.remove(unread)) end
+        assert.truthy(headers["titan-runtime/titan_winloader.h"])
+        assert.truthy(headers["titan/transfer_native.h"])
         local assets = browserlink.sdk_assets({ titan_bin = "sdk", libtitan = "sdk/libtitan.a",
             sdk_digests = "sdk/sdk-digests" })
         for _, key in ipairs({ "js_library", "bridge_library", "trace_library", "loader",
@@ -1156,7 +1183,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.falsy(path:match("/openssl%-%d"), path)
         end
         -- One standard-library tree: outside titan/, only tests and
-        -- documentation may reuse a standard-library file's basename.
+        -- documentation may hold Titan source or reuse a standard-library
+        -- file's basename.
         local root
         for path in pairs(unpacked_files) do
             if path == "Makefile.win" or path:sub(-#"/Makefile.win") == "/Makefile.win" then
@@ -1177,6 +1205,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             local file = relative(path)
             local top = file and file:match("^([^/]+)/")
             if top and top ~= "titan" and top ~= "spec" and top ~= "doc" then
+                assert.falsy(file:match("%.titan$"), file)
                 local duplicated = stdlib_files[file:match("[^/]+$")]
                 assert.is_nil(duplicated, file .. " duplicates " .. tostring(duplicated))
             end

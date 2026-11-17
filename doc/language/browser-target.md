@@ -1541,6 +1541,18 @@ browser target owns option --no-line-directives (TITAN_NO_LINE_DIRECTIVES)
 
 A `validation` build names `validation` instead.
 
+Titan refuses options that add a file to the generated module or its data:
+`--pre-js`, `--post-js`, `--extern-pre-js`, `--extern-post-js`,
+`--js-transform`, `--embed-file`, `--preload-file`, and `--exclude-file`.
+Titan could not tell when such a file changes, so a rebuild could keep a stale
+module. Add JavaScript with `EM_JS` or `EM_ASM` in a [C
+helper](#c-helpers-and-emscripten-apis) instead:
+
+```text
+browser production link profile does not accept --pre-js; add JavaScript with EM_JS or EM_ASM in a --c-source helper
+browser production link profile does not accept --embed-file; browser images have no filesystem
+```
+
 ## Limits
 
 Before publishing a program or test image, or executing a provider's protocol

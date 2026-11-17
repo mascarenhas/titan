@@ -707,7 +707,8 @@ class BrowserOwner {
       this.module = await Promise.race([this.factory(incoming), this.active.fatal.promise]);
       this.factory = undefined;
       if (this.terminal) throw this.terminal;
-      if (!this.backend || !(this.module?.HEAPU8 instanceof Uint8Array)) {
+      if (!this.backend || !(this.module?.HEAPU8 instanceof Uint8Array) ||
+          typeof this.module._titan_browser_trace_identity !== 'function') {
         throw failure('PROTOCOL', 'browser image does not provide Titan channels');
       }
       // Only the host sees both the identity this module was generated with
@@ -2088,6 +2089,10 @@ async function retireOwner(owner) {
 /** Create one persistent instance; the image supplies its private factory. */
 export function create(factory, options = {}, image) {
   if (typeof factory !== 'function') throw new TypeError('browser factory must be a function');
+  if (typeof image?.identity !== 'string' || !/^[0-9a-f]{64}$/.test(image.identity) ||
+      typeof image.wasm !== 'string' || !image.wasm.endsWith('.wasm')) {
+    throw new TypeError('browser image binding must name a 64-digit identity and its .wasm');
+  }
   for (const name of ['stdin', 'stdout', 'stderr', 'stdoutEnd', 'stderrEnd', 'locateFile',
       'onNotificationError', 'requestDrain', 'onEngineFailure']) {
     if (options[name] !== undefined && typeof options[name] !== 'function') {

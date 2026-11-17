@@ -1045,6 +1045,25 @@ test("a Wasm from another link is a protocol failure before Lua", {timeout: 1000
     } finally { await instance.dispose(); }
 });
 
+test("the loader refuses a malformed image binding and a Wasm without its identity export", {timeout: 1000}, async () => {
+    const factory = entryOutcomeFactory(() => Promise.resolve(0));
+    for (const image of [undefined, {}, {identity: IMAGE.toUpperCase(), wasm: "app.wasm"},
+        {identity: IMAGE}, {identity: IMAGE, wasm: "app.mjs"}]) {
+        assert.throws(() => create(factory, {}, image), {name: "TypeError",
+            message: "browser image binding must name a 64-digit identity and its .wasm"});
+    }
+    const instance = create(options => {
+        const image = factory(options);
+        delete image._titan_browser_trace_identity;
+        return image;
+    }, {}, LINKED);
+    try {
+        const expected = {code: "TITAN_BROWSER_PROTOCOL", message: "browser image does not provide Titan channels"};
+        await assert.rejects(instance.initialize(), expected);
+        await assert.rejects(instance.run(), expected);
+    } finally { await instance.dispose(); }
+});
+
 for (const mode of ["synchronous throw", "promise rejection"]) {
     test(`promised export ${mode} preserves its original RangeError`, {timeout: 1000}, async () => {
         const cause = new RangeError("entry stack exhausted");
@@ -1072,7 +1091,7 @@ test("fulfilled export without completion still reports protocol failure", {time
 test("loader refuses missing JSPI and memoizes failure for initialize and run", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(WebAssembly, "promising");
     let calls = 0;
-    const instance = create(() => { calls++; });
+    const instance = create(() => { calls++; }, {}, LINKED);
     try {
         Object.defineProperty(WebAssembly, "promising", {...descriptor, value: undefined});
         const initializing = instance.initialize();
