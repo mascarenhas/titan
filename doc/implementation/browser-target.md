@@ -1114,8 +1114,8 @@ home, because WebKit's default ephemeral context has no HTTP cache.
   headers (with routes that omit or restrict CORS headers), serve cacheable
   resources with an ETag and hit and revalidation counters, implement every
   redirect status with and without `Location`, a redirect chain past the hop
-  limit, and a cross-origin hop, and serve the runner page and image assets
-  for same-origin requests. Its WebSocket routes echo with subprotocol
+  limit, and a cross-origin hop, and serve the runner page and the image's
+  `.mjs`, `.wasm` and `.wasm.trace` for same-origin requests. Its WebSocket routes echo with subprotocol
   selection and accept the request's own `Origin`, and one route denies every
   origin.
 * `wire_peer.mjs` is a Node `node:net` peer for wire behavior that a
@@ -1139,7 +1139,8 @@ home, because WebKit's default ephemeral context has no HTTP cache.
   active cases, plus two that skip outside their capability context) and four
   Task-form cancellation phases: pending headers, an already-settled headers
   request before adoption, failing metadata, and a pending body. In real
-  browsers an iframe from the native server's origin (`same-origin.mjs`) runs
+  browsers an iframe from the native server's origin (`same-origin.mjs`,
+  created with `requireTrace: true`, so a missing table fails it) runs
   the one filtered case for same-origin cache modes and `no_cors()`. It then
   hands over to `websocket.test.mjs`, which runs the WebSocket image and three
   cancellation phases (opening, read, write). That driver wraps the host
@@ -2953,10 +2954,12 @@ gap, the last of several segments at one offset wins, consecutive equal
 locations share one row, rows never cross a body boundary, and segments outside
 every body are dropped. A lookup that takes the last row at or before an
 offset inside its body therefore sees exactly what the map's segments say
-there. A body's declaring basename is its first `.titan` segment's. The table
-lists only the `.titan` basenames that bodies use, deduplicated (at most
-32,767: `too many Titan source names for the trace table`), and every
-function name, imports first, empty when the name section has none.
+there. A body's declaring basename is that of its first `.titan` row, and the
+table lists only the basenames of `.titan` rows, deduplicated (at most 32,767:
+`too many Titan source names for the trace table`), so a segment that a later
+one at the same offset replaces names nothing. The table also lists every
+function name, imports first, empty when the name section has none. The
+reader refuses rows that do not ascend and `.titan` rows without a line.
 
 The layout is little-endian, every 4-byte array starts 4-byte aligned, and the
 size is exact:
@@ -2995,7 +2998,10 @@ Measured with Node 26.13.1. The map loader that the table replaces took
 | production hello | 401,750 | 397,757 | 4,504,015 / 219,249 | 1.9 ms |
 | validation standard-library aggregate | 1,229,731 | 865,996 | 14,300,264 / 640,993 | 6.2 ms |
 
-The writer adds 0.7–2.1 s to those links.
+`browsertrace.rewrite` takes 0.63 s on the trace-gate runtime image and
+2.29 s on the standard-library aggregate, of which the same parse and walk
+without the table writer take 0.49 s and 1.70 s: the table costs those links
+about 0.14 s and 0.6 s.
 
 ### Eager trace loader and trace metadata
 
@@ -3008,7 +3014,8 @@ dependency `titan-trace-table` before user code can start. It resolves
 `UTF8ToString(wasmExports['titan_browser_trace_identity']())`. The reader
 checks only what the bytes could get wrong: the magic and version and the
 exact size (`invalid trace table`), the identity (`trace table image does not
-match`), and every body bound, row offset, basename index, and string offset.
+match`), and every body bound, row offset and order, basename index, `.titan`
+row line, and string offset.
 It copies a table whose bytes are not 4-byte aligned, decodes the deltas into
 absolute `pcs`, `lines`, `starts`, and `ends` arrays, decodes the basenames,
 and decodes a function name only when a frame needs it
@@ -4325,7 +4332,8 @@ hosts`).
 * `spec/browser_trace_map_spec.lua` — final-image Wasm section/range/name
   extraction, standard v3 `.wasm.map` validation, `x_titan_*` extension
   rewriting, the [trace table](#the-trace-table) writer (gaps for inlined C
-  and unmapped code, the last segment at an offset, coalescing, body
+  and unmapped code, the last segment at an offset, including one that
+  replaces a body's first segment, coalescing, body
   boundaries, used basenames only and their limit, imports-first names, the
   identity, and the same table from the final map), checked by an independent
   decoder against the segments at every offset of constructed and seeded
@@ -4445,7 +4453,8 @@ hosts`).
   setters or constructing an `Error` on unsafe descriptors), lookup boundaries,
   gaps, indexes and names over tables that the compiler's writer derives from
   synthetic maps, refusal of damaged tables (short, magic, version, image,
-  truncated, trailing, counts, bounds, indexes, string offsets) and a table at
+  truncated, trailing, counts, bounds, a repeated row offset, a `.titan` row
+  without a line, indexes, string offsets) and a table at
   an unaligned offset, the eager loader's ready and degraded results, and the
   compiled `lifecycle.c` (preRun/export readiness) and `filter.c` (entry
   sentinels and registered names are kept, a symbol with no `.titan` basename

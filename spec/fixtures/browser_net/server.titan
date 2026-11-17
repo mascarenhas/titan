@@ -94,8 +94,8 @@ local function handle(request: http.Request, response: http.Response)
   elseif path == "/assets/http.wasm" then
     asset(response, "http.wasm", "application/wasm")
     return
-  elseif path == "/assets/http.wasm.map" then
-    asset(response, "http.wasm.map", "application/json")
+  elseif path == "/assets/http.wasm.trace" then
+    asset(response, "http.wasm.trace", "application/octet-stream")
     return
   end
   local pieces: {string} = {}

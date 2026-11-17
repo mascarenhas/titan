@@ -55,7 +55,9 @@ addToLibrary({
       for (var r = 0; r < rows; ++r) {
         pc += pcDeltas[r];
         line = (line + lineDeltas[r]) >>> 0;
-        if (pc > 0xffffffff || sources[r] < -1 || sources[r] >= bases) throw invalid();
+        // Rows strictly ascend, and a `.titan` row names a line.
+        if (pc > 0xffffffff || (r > 0 && !pcDeltas[r]) || sources[r] < -1 || sources[r] >= bases ||
+            (sources[r] >= 0 && line === 0)) throw invalid();
         pcs[r] = pc; lines[r] = line;
       }
       if (offsets[0] !== 0 || offsets[strings - 1] !== text) throw invalid();

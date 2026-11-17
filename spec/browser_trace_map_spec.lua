@@ -252,17 +252,20 @@ describe("browser trace table", function()
             end
         end
     end
-    -- The same answer straight from the segments: a body declares its first
-    -- `.titan` source, and the last segment at or before the PC inside the
-    -- body locates it when its source is `.titan`.
+    -- The same answer straight from the segments: the last segment at an
+    -- offset replaces the others there, a body declares the first `.titan`
+    -- source that remains, and the last remaining segment at or before the
+    -- PC inside the body locates it when its source is `.titan`.
     local function oracle(segments, sources, ranges, pc)
         local function titan(index) return index and sources[index + 1]:match("%.titan$") and
             sources[index + 1]:match("[^/\\]*$") end
         for _, range in ipairs(ranges) do
             if pc >= range[1] and pc < range[2] then
                 local declared, found = "?", nil
-                for _, segment in ipairs(segments) do
-                    if segment[1] >= range[1] and segment[1] < range[2] and titan(segment[2]) and declared == "?" then
+                for index, segment in ipairs(segments) do
+                    local final = not segments[index + 1] or segments[index + 1][1] ~= segment[1]
+                    if final and segment[1] >= range[1] and segment[1] < range[2] and titan(segment[2]) and
+                            declared == "?" then
                         declared = titan(segment[2])
                     end
                     if segment[1] <= pc then found = segment end
@@ -332,6 +335,23 @@ describe("browser trace table", function()
         assert.same({ { 10, "one.titan", 3 }, { 16, false, 3 }, { 18, "one.titan", 4 }, { 30, "one.titan", 10 } },
             result.rows)
         for pc = 0, 42 do
+            assert.same({ oracle(segments, sources, ranges, pc) }, { locate(result, pc) }, "pc " .. pc)
+        end
+    end)
+
+    it("names only what replaces a segment at a body's start", function()
+        -- Body 1 starts with a `.titan` segment that another file replaces;
+        -- body 2 with one that C replaces, so it starts in its usual gap.
+        local sources = { "stale.titan", "actual.titan", "inlined.c", "own.titan" }
+        local segments = { { 100, 0, 98 }, { 100, 1, 0 }, { 104, 1, 1 }, { 110, 0, 5 }, { 110, 2, 7 },
+            { 114, 3, 2 } }
+        local ranges = { { 100, 110 }, { 110, 120 } }
+        local result = decode(assert(trace.trace_table(extended(sources, segments, ranges))))
+        assert.same({ "actual.titan", "own.titan" }, result.bases)
+        assert.same({ { 100, 110, "actual.titan" }, { 110, 120, "own.titan" } }, result.bodies)
+        assert.same({ { 100, "actual.titan", 1 }, { 104, "actual.titan", 2 }, { 114, "own.titan", 3 } },
+            result.rows)
+        for pc = 98, 122 do
             assert.same({ oracle(segments, sources, ranges, pc) }, { locate(result, pc) }, "pc " .. pc)
         end
     end)

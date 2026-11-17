@@ -398,7 +398,8 @@ derived from the validated final map. The runtime never reads the map.
 `readTable` checks the header, compares the table's identity against the
 instantiated Wasm export
 `UTF8ToString(wasmExports['titan_browser_trace_identity']())`, bounds every
-count, body, row offset, basename index, and string offset, publishes
+count, body, row offset, basename index, and string offset, requires rows to
+ascend and every `.titan` row to name a line, publishes
 `Module['titanBrowserTrace']`, and removes `titan-trace-table` whether
 initialization succeeded (`state: 'ready'`) or degraded (`state:
 'degraded'`). On a degraded load it logs one console warning prefixed with

@@ -130,7 +130,8 @@ function test_case(_: test.Context) test.assert(true) end
             local built = fixture:compile(arguments)
             assert.is_true(built.ok, built.output)
             local mjs = fixture.output .. "/limit_main.mjs"
-            local outputs = { mjs, mjs:gsub("%.mjs$", ".wasm"), (mjs:gsub("%.mjs$", ".wasm.map")) }
+            local outputs = { mjs, (mjs:gsub("%.mjs$", ".wasm")), (mjs:gsub("%.mjs$", ".wasm.map")),
+                (mjs:gsub("%.mjs$", ".wasm.trace")) }
             local predecessor = {}
             for _, path in ipairs(outputs) do predecessor[path] = fixtures.read(path) end
             local record = record_path(fixture.output)

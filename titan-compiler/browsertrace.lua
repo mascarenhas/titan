@@ -284,17 +284,22 @@ local function trace_table(map, ranges)
     for body = 1, #ranges do first[body] = -1 end
     local body, last_pc, last_line = 1, 0, 0
     local state_source, state_line = -1, 0
+    -- The last segment seen at `pending_pc`; a later one at the same offset
+    -- replaces it before it can name a basename, a row or a declaring file.
     local pending_pc, pending_source, pending_line
     local function flush()
-        if pending_pc and (pending_source ~= state_source or
-                (pending_source >= 0 and pending_line ~= state_line)) then
+        if not pending_pc then return end
+        local base = base_of(pending_source)
+        local line = base >= 0 and pending_line + 1 or 0
+        if base >= 0 and first[body] < 0 then first[body] = base end
+        if base ~= state_source or (base >= 0 and line ~= state_line) then
             -- A gap repeats the previous line, so its delta is zero.
-            local line = pending_source >= 0 and pending_line or last_line
+            local row_line = base >= 0 and line or last_line
             pc_deltas.add(pending_pc - last_pc)
-            line_deltas.add((line - last_line) & U32)
-            sources.add(pending_source)
-            last_pc, last_line = pending_pc, line
-            state_source, state_line = pending_source, pending_line
+            line_deltas.add((row_line - last_line) & U32)
+            sources.add(base)
+            last_pc, last_line = pending_pc, row_line
+            state_source, state_line = base, line
         end
         pending_pc = nil
     end
@@ -305,9 +310,7 @@ local function trace_table(map, ranges)
         end
         local range = ranges[body]
         if not range or generated < range[1] then return end
-        local base = base_of(source)
-        if base >= 0 and first[body] < 0 then first[body] = base end
-        pending_pc, pending_source, pending_line = generated, base, base >= 0 and line + 1 or 0
+        pending_pc, pending_source, pending_line = generated, source, line
     end
     -- `names[index]` is function `index - 1`'s name, or nil or NULL when it
     -- has none, for `count` functions; both callers read names as UTF-8.

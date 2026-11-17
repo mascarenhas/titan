@@ -5,7 +5,8 @@ const env = JSON.parse(parameters.get('config'));
 const token = parameters.get('token');
 const chunks = [], errors = [];
 const stdout = new TextDecoder(), stderr = new TextDecoder();
-const instance = create({env, locateFile: name => new URL(name, import.meta.url).href,
+// A missing or foreign trace table fails initialization instead of degrading.
+const instance = create({env, requireTrace: true, locateFile: name => new URL(name, import.meta.url).href,
   bindings: {net_publish() {}, net_note() {}},
   stdout(bytes) { chunks.push(stdout.decode(bytes, {stream: true})); },
   stderr(bytes) { chunks.push(stderr.decode(bytes, {stream: true})); },

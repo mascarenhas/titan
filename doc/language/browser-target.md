@@ -263,7 +263,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | `libtitan-lpeglabel.a` | the PEG engine, built for the browser; `make browser-sdk` links it into `titan.a` |
 | `titan.a` | the [browser standard library](#the-browser-standard-library): fourteen shared modules including `io`, browser contributors for `async`, `timer`, synchronous `lua`, the `os` subset, and the `http` and `websocket` clients, browser-only `titan.browser`, and the PEG engine |
 | `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
-| `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
+| `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-table loading, and stack capture) |
 | `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
 | `titan-browser-module-check.mjs` | the [module check](#c-helpers-and-emscripten-apis) that `titanc` runs on each linked image module, under emcc's Node with emcc's acorn parser |
@@ -627,7 +627,7 @@ The instance has the following methods:
   calls share one initialization promise. An ordinary initializer error
   rejects with captured Titan error bytes and trace and prints its standard
   report once. The partial state still needs disposal.
-  With `requireTrace: true`, a missing or invalid map fails initialization
+  With `requireTrace: true`, a missing or invalid trace table fails initialization
   before Lua is created or any initializer runs. This failure has message
   bytes and status 1, but no Titan trace because no Titan code ran.
 * `run(args = [])` initializes when needed, then invokes `main` once. Strings
@@ -835,7 +835,7 @@ delivered, and a failure event that itself cannot be marshalled.
 
 **Observation and errors.** `instance.trace` is a fresh frozen `{state,
 reason}` snapshot, including before initialization. It preserves the last
-map state and reason after ordinary or poisoned disposal without retaining
+trace state and reason after ordinary or poisoned disposal without retaining
 the image.
 
 A rejected promise, or an exception from a synchronous method, carries an
