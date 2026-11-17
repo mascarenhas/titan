@@ -1,0 +1,143 @@
+-- A development web server for browser builds. It serves one folder on
+-- 127.0.0.1 with the content types that browsers need for ES modules and
+-- WebAssembly, and asks them not to cache anything. It speaks HTTP/1.1 only,
+-- so use it while developing, not to host a site.
+--
+--     titanc -o out-native --exe http-dev-server http-dev-server
+--     ./http-dev-server site 8000
+local async = import "async"
+local fs = import "fs"
+local http = import "http"
+local io = import "io"
+local math = import "math"
+local os = import "os"
+local path = import "path"
+local string = import "string"
+
+local content_types: {string: string} = {
+  [".html"] = "text/html; charset=utf-8",
+  [".mjs"] = "text/javascript",
+  [".js"] = "text/javascript",
+  [".wasm"] = "application/wasm",
+  [".map"] = "application/json",
+  [".json"] = "application/json",
+  [".css"] = "text/css",
+  [".svg"] = "image/svg+xml",
+  [".png"] = "image/png",
+  [".txt"] = "text/plain; charset=utf-8",
+}
+
+-- The served folder, by its canonical path.
+local record Site
+  root: string
+  prefix: string -- the root followed by a separator
+end
+
+local function Site.new(folder: string): Site
+  local root = fs.realpath(folder)
+  local prefix = root
+  if string.sub(root, -1) ~= path.separator then prefix = root .. path.separator end
+  return { root = root, prefix = prefix }
+end
+
+local function respond(request: http.Request, response: http.Response, status: integer,
+                       content_type: string, body: string)
+  response:set_status(status)
+  response:set_header("Content-Type", content_type)
+  response:set_header("Content-Length", "" .. #body)
+  response:set_header("Cache-Control", "no-store")
+  -- A response to HEAD announces the length of a body it does not carry.
+  if request.method ~= "HEAD" then response:write(body) end
+end
+
+local function refuse(request: http.Request, response: http.Response, status: integer, text: string)
+  respond(request, response, status, "text/plain; charset=utf-8", text .. "\n")
+end
+
+-- The file that a request path names below the root, or nil when a segment,
+-- once percent-decoded, would climb out of the folder or hide a separator.
+local function Site:file_for(request_path: string): string?
+  local segments: {string} = {}
+  for segment in string.split(request_path, "/") do
+    local name = string.gsub(segment, "%[0-9A-Fa-f][0-9A-Fa-f]", function (escape: string): string
+      return string.char(math.tointeger("0x" .. string.sub(escape, 2)))
+    end)
+    if name == "." or name == ".." or string.find(name, "/") or string.find(name, "\\") or
+       string.find(name, "\0") then
+      return nil
+    end
+    if name ~= "" then segments[#segments + 1] = name end
+  end
+  return path.join(self.root, ...segments)
+end
+
+local function Site:contains(file: string): boolean
+  return string.sub(file, 1, #self.prefix) == self.prefix
+end
+
+local function Site:serve(request: http.Request, response: http.Response)
+  if request.method ~= "GET" and request.method ~= "HEAD" then
+    response:set_header("Allow", "GET, HEAD")
+    refuse(request, response, 405, "405 Method Not Allowed")
+    return
+  end
+  local file? = self:file_for(request.url.path)
+  if not file then
+    refuse(request, response, 403, "403 Forbidden")
+    return
+  end
+  local info? = fs.stat(file)
+  if info and info.kind == "directory" then
+    if string.sub(request.url.path, -1) ~= "/" then
+      response:set_header("Location", request.url.path .. "/")
+      refuse(request, response, 301, "301 Moved Permanently")
+      return
+    end
+    file = path.join(file, "index.html")
+    info = fs.stat(file)
+  end
+  if not info or info.kind ~= "file" then
+    refuse(request, response, 404, "404 Not Found")
+    return
+  end
+  -- A symbolic link can still lead out of the folder.
+  if not self:contains(fs.realpath(file)) then
+    refuse(request, response, 403, "403 Forbidden")
+    return
+  end
+  local content_type = content_types[path.extension(file)] or "application/octet-stream"
+  respond(request, response, 200, content_type, fs.read_file(file))
+end
+
+-- The listening server, or nil when the port is taken.
+local function listen(handler: http.Handler, port: integer): http.Server?
+  return http.listen("127.0.0.1", handler, port)
+catch
+  if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
+    return nil
+  end
+  raise
+end
+
+function main(args: {string}): integer
+  local folder? = args[1]
+  local port? = math.tointeger(args[2] or "8000")
+  if not folder or not port or port < 1 or port > 65535 then
+    os.stderr:write("usage: http-dev-server FOLDER [PORT]\n")
+    return 2
+  end
+  local info? = fs.stat(folder)
+  if not info or info.kind ~= "directory" then
+    os.stderr:write("http-dev-server: " .. folder .. " is not a folder\n")
+    return 2
+  end
+  local server? = listen(Site(folder):serve, port)
+  if not server then
+    os.stderr:write("http-dev-server: port " .. port .. " is already in use\n")
+    return 1
+  end
+  defer server:close()
+  io.print("Serving " .. folder .. " at http://127.0.0.1:" .. port .. "/")
+  server:serve()
+  return 0
+end

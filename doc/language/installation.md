@@ -220,11 +220,13 @@ beside each library provider, such as `out/greeting.lua` beside `out/greeting.so
 A checkout gives you Makefile targets that run the Lua and LuaRocks steps for you,
 and lets you install the rock from the current directory instead of from the registry.
 
+<!-- doc-check: setup=checkout -->
 ```sh
 git clone --recurse-submodules https://github.com/mascarenhas/titan
 cd titan
-make lua PREFIX="$HOME/.local/titan/my-project"
-export PATH="$HOME/.local/titan/my-project/bin:$PATH"
+export PREFIX="$HOME/.local/titan/my-project"
+make lua PREFIX="$PREFIX"
+export PATH="$PREFIX/bin:$PATH"
 make luarocks
 luarocks make
 ```
@@ -446,6 +448,7 @@ and macOS hosts are supported.
 With Emscripten active (`source <emsdk>/emsdk_env.sh`), after `luarocks make`
 and from the checkout, install the browser Lua and then the browser SDK:
 
+<!-- doc-check: run -->
 ```sh
 make lua-browser PREFIX="$PREFIX"
 make browser-sdk PREFIX="$PREFIX"

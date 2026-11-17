@@ -6516,19 +6516,20 @@ printf '%s\n' "${schedule[@]}"
             assert.truthy(vite_install:find(
                 'PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT"', 1, true))
             assert.truthy(vite_install:find('"vite@$TITAN_VITE_VERSION"', 1, true))
-            local deployment_gate = named_step(playwright_job,
-                "Run self-contained HTTP and Vite deployment gate")
+            local docs_gate = named_step(playwright_job,
+                "Run the browser chapter's documented page, server and Vite examples")
             for _, contract in ipairs({
                 "if: matrix.engine == 'chromium'",
                 'TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"',
                 'TITAN_REQUIRE_BROWSER_DEPLOYMENT: "1"',
                 'TITAN_PROBE_CACHE_DISABLE: "1"',
                 'source "$TITAN_EMSDK_ROOT/emsdk_env.sh"',
-                '"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_deployment_spec.lua',
-                "browser-playwright-deployment.log",
+                '"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_docs_spec.lua',
+                "browser-playwright-docs.log",
             }) do
-                assert.truthy(deployment_gate:find(contract, 1, true), contract)
+                assert.truthy(docs_gate:find(contract, 1, true), contract)
             end
+            assert.falsy(playwright_job:find("browser_deployment_spec", 1, true), playwright_job)
             assert.falsy(browser_job:find("TITAN_VITE_VERSION", 1, true))
             assert.falsy(browser_stdlib_job:find("TITAN_VITE_VERSION", 1, true))
             assert.falsy(browser_job:find("TITAN_PLAYWRIGHT_VERSION", 1, true),

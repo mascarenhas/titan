@@ -5,20 +5,22 @@ WebAssembly with Emscripten, to run inside web pages and web applications. A
 program becomes an ES module, its WebAssembly binary, and its trace table,
 which belong together, plus a source map for browser developer tools. A page
 runs the program through Titan's JavaScript [loader](#the-loader-api). For
-testing, the command-line runner
-[`titan-browser-run`](#testing-with-titan-browser-run) runs the same files
+tests, the command-line runner
+[`titan-browser-run`](#testing-from-the-command-line) runs the same files
 under Node and headless Chrome.
 
 ## A first web page
 
 This walk-through builds a small Titan program, embeds it in a web page, and
-opens the page in a browser. It assumes that the toolchain from
+serves the page to a browser. It assumes that the toolchain from
 [prerequisites](#prerequisites) is installed, with Emscripten active in the
-shell, and that `PREFIX` names the Titan installation that holds the browser
-SDK.
+shell and the `bin` directory of the Titan installation that holds the browser
+SDK on `PATH`. `/path/to/titan` stands for the Titan source checkout that the
+installation was built from.
 
 The program, `hello.titan`, prints a greeting and three counting lines:
 
+<!-- doc-check: file=hello.titan -->
 ```titan
 local io = import "io"
 
@@ -42,6 +44,7 @@ page through the loader's output sinks.
 
 Build it for the browser:
 
+<!-- doc-check: run -->
 ```sh
 titanc --target browser -o out hello
 ```
@@ -52,6 +55,7 @@ that locates Titan frames in errors, and a source map for browser developer
 tools, next to the compiler's intermediate files. Copy the first three into a
 folder `site/` that will hold the page:
 
+<!-- doc-check: run -->
 ```sh
 mkdir -p site
 cp out/hello.mjs out/hello.wasm out/hello.wasm.trace site/
@@ -63,6 +67,7 @@ program image.
 
 Then write the page, `site/index.html`:
 
+<!-- doc-check: file=site/index.html -->
 ```html
 <!doctype html>
 <html lang="en">
@@ -81,7 +86,7 @@ Then write the page, `site/index.html`:
       output.textContent += text.decode(chunk, { stream: true });
     }
 
-    const instance = create({ stdout: show, stderr: show });
+    const instance = create({ stdout: show, stderr: show, requireTrace: true });
     try {
       const result = await instance.run(["browser"]);
       output.textContent += `(${result.kind}, status ${result.status})\n`;
@@ -95,28 +100,43 @@ Then write the page, `site/index.html`:
 
 The module script imports the program's default `create(options)` function.
 Each output sink receives copied `Uint8Array` chunks; this page decodes them
-as UTF-8 and appends the text to the `<pre>` element. `run(["browser"])`
+as UTF-8 and appends the text to the `<pre>` element. `requireTrace: true`
+makes a missing or damaged trace table fail initialization, so a deployment
+that forgets `hello.wasm.trace` shows `(failed, status 1)` at once instead of
+quietly losing the Titan frames of later error traces. `run(["browser"])`
 initializes the image and runs `main` with `args[1] == "browser"`, resolving to
 a `returned` result with status 0. The state remains alive after `main`
 returns. **Always await `dispose()` in `finally`**: it closes Lua, runs state
 finalizers, drains their output, and releases the image. The
 [loader API](#the-loader-api) describes every option and result.
 
-Browsers do not load module scripts or WebAssembly into a page opened from a
-`file://` URL, so serve the folder over HTTP. Any static web server works if it
-sends `.mjs` files with a JavaScript content type, such as `text/javascript`,
-which browsers require for module scripts. It should also send `.wasm` files
-as `application/wasm`; with another type the program still runs, but the
-browser console shows `wasm streaming compile failed` and the browser compiles
-the binary only after downloading all of it. Python's built-in server is one
-example:
+### Serving the page
 
+Browsers do not load module scripts into a page opened from a `file://` URL,
+and they refuse the `fetch` requests with which the loader reads the
+WebAssembly binary and the trace table, so the page needs an HTTP server.
+
+Titan's source tree includes a small development server written in Titan,
+[`http-dev-server.titan`](http-dev-server.titan). It is a native program, so
+build it in its own output directory: a [browser output
+directory](#one-target-per-output-directory) refuses native builds.
+
+<!-- doc-check: run -->
 ```sh
-python3 -m http.server 8000 --bind 127.0.0.1 --directory site
+cp /path/to/titan/doc/language/http-dev-server.titan .
+titanc -o out-native --exe http-dev-server http-dev-server
 ```
 
-Open <http://127.0.0.1:8000/>. The page shows:
+Serve `site/` on port 8000:
 
+```sh
+./http-dev-server site 8000
+```
+
+It prints `Serving site at http://127.0.0.1:8000/`. Open that address. The
+page shows:
+
+<!-- doc-check: expect=page -->
 ```text
 Hello, browser, from Titan!
 Titan counts 1
@@ -124,6 +144,132 @@ Titan counts 2
 Titan counts 3
 (returned, status 0)
 ```
+
+The server listens on `127.0.0.1` only and answers `GET` and `HEAD`; other
+methods get 405. A folder serves its `index.html`. It refuses with 403 a path
+that leaves the folder, through `..` (percent-encoded or not) or a symbolic
+link, and answers 404 for anything else that is not a file. Every response
+carries `Content-Length` and `Cache-Control: no-store`, so a reload always
+fetches the files you just rebuilt. When the port is taken it prints
+`http-dev-server: port 8000 is already in use` and exits with status 1. It
+is a development server: `titan.http` speaks HTTP/1.1 only, without HTTP/2,
+so host a public site with a production web server.
+
+### Content types
+
+Any static web server works if it sends the right content types, as
+`http-dev-server` does. Browsers run a module script only when the server
+sends it with a JavaScript content type, such as `text/javascript`. The
+WebAssembly binary should come as `application/wasm`; with another type the
+program still runs, but the browser console shows `wasm streaming compile
+failed` and the browser compiles the binary only after downloading all of it.
+The loader reads the trace table as plain bytes, so its type does not matter;
+`http-dev-server` sends it as `application/octet-stream`.
+
+### Asset location
+
+By default the image looks for `hello.wasm` and `hello.wasm.trace` next to
+`hello.mjs`: it resolves their names against the module's own URL,
+`import.meta.url`, wherever the page lives. To serve them from somewhere else,
+such as a CDN or an `assets/` folder, pass `create` a `locateFile(name,
+directory)` function. The loader calls it with each file name, `hello.wasm`
+and `hello.wasm.trace`, and the URL of the folder that holds `hello.mjs`, and
+fetches the URL it returns. This variant keeps the module beside the page and
+moves the two other files into `assets/`:
+
+<!-- doc-check: run -->
+```sh
+mkdir -p site-assets/assets
+cp out/hello.mjs site-assets/
+cp out/hello.wasm out/hello.wasm.trace site-assets/assets/
+```
+
+Only the `create` call of `site-assets/index.html` changes:
+
+<!-- doc-check: file=site-assets/index.html -->
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Hello from Titan</title>
+</head>
+<body>
+  <pre id="output"></pre>
+  <script type="module">
+    import create from "./hello.mjs";
+
+    const output = document.getElementById("output");
+    const text = new TextDecoder();
+    function show(chunk) {
+      output.textContent += text.decode(chunk, { stream: true });
+    }
+
+    const instance = create({
+      stdout: show,
+      stderr: show,
+      requireTrace: true,
+      locateFile: (name, directory) => new URL(`assets/${name}`, directory).href,
+    });
+    try {
+      const result = await instance.run(["browser"]);
+      output.textContent += `(${result.kind}, status ${result.status})\n`;
+    } finally {
+      await instance.dispose();
+    }
+  </script>
+</body>
+</html>
+```
+
+`./http-dev-server site-assets 8000` serves it, and the page shows the same
+text.
+
+### Using a bundler
+
+A bundler such as [Vite](https://vite.dev/) can build the page and the image
+together. The image names its WebAssembly binary and trace table with
+`new URL("hello.wasm", import.meta.url)` expressions, which Vite recognizes: it
+emits both files into `dist/assets/` under content-hashed names and rewrites
+the URLs. Make a project from the page and the image, and install Vite in it:
+
+<!-- doc-check: run -->
+```sh
+mkdir -p vite-app
+cp site/index.html out/hello.mjs out/hello.wasm out/hello.wasm.trace vite-app/
+cd vite-app
+npm install --save-dev vite
+```
+
+Configure it in `vite-app/vite.config.mjs`:
+
+<!-- doc-check: file=vite-app/vite.config.mjs -->
+```javascript
+export default {
+  base: "./",
+  build: {
+    assetsInlineLimit: 0,
+  },
+};
+```
+
+`assetsInlineLimit: 0` keeps every asset a separate file: without it, Vite
+would inline a trace table smaller than 4 KiB into the JavaScript as a `data:`
+URL. `base: "./"` makes the emitted URLs relative, so `dist/` can be served
+from any path. Vite's default browser targets already support the top-level
+`await` of the image and the page. Build the page into `dist/`:
+
+<!-- doc-check: run -->
+```sh
+npx vite build
+```
+
+`../http-dev-server dist 8000` serves the result, and the page shows the same
+text. Vite does not copy `hello.wasm.map`: developer tools find the source map
+only when it is served next to the hashed WebAssembly file under the name that
+file refers to, which Vite does not arrange.
+
+### Deploying
 
 To deploy the page, serve `hello.mjs`, `hello.wasm`, and `hello.wasm.trace`
 together with it. No external loader is required. The trace table lets errors
@@ -266,7 +412,7 @@ root; other chapters refer to this list:
 | `titan-browser.mjs` | the [loader](#the-loader-api) source embedded by the compiler into each generated image; pages do not copy or import it separately |
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-table loading, and stack capture) |
 | `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
-| `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
+| `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-from-the-command-line) |
 | `titan-browser-module-check.mjs` | the [module check](#c-helpers-and-emscripten-apis) that `titanc` runs on each linked image module, under emcc's Node with emcc's acorn parser |
 | `build-profile` | the [build profile](#build-profiles), `production` or `validation`, that compiled the SDK's archives |
 | `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
@@ -507,7 +653,7 @@ runner](standard-library-test.md#running-and-filtering); pass its options
 after `--`. Without `--exe`, the test image takes the first root's program
 path with `.mjs` added. As with native tests, a run that selects no case exits
 0, so a script that must prove something ran should check the reported case
-count. [Testing with `titan-browser-run`](#testing-with-titan-browser-run)
+count. [Testing from the command line](#testing-from-the-command-line)
 describes the runner.
 
 Under the default `production` profile, a test image still keeps the frames
@@ -1011,13 +1157,13 @@ kind `"protocol"`). The [JavaScript bindings
 chapter](standard-library-browser.md#synchronous-c-callbacks) describes the
 Titan and C side.
 
-## Testing with `titan-browser-run`
+## Testing from the command line
 
-`titan-browser-run` is the test runner for browser images. It runs a program
-or test image from the command line, under Node 26 or newer or in headless Chrome or
-Chromium, through the same loader that a page uses, and turns the result into
-an exit status, so that test suites and continuous integration can check
-browser builds. Web pages do not use it.
+Pages run programs through the loader. For tests, `titan-browser-run` runs a
+program or test image from the command line, under Node 26 or newer or in
+headless Chrome or Chromium, through the same loader that a page uses, and
+turns the result into an exit status, so that test suites and continuous
+integration can check browser builds. Web pages do not use it.
 
 ```sh
 titanc --target browser -o out --exe out/app.mjs app

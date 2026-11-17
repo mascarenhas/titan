@@ -2740,7 +2740,7 @@ classes:
 | `spec/browser/build-bridge.lua` | the bridge and public-state images: `entry,fixture:controls`; `counter`: `entry,fixture:html5`; `initializer-failure` and `responsive`: `entry` |
 | `spec/browser/build-net.lua` | `http`: `entry`; `websocket`: `entry,fixture:net` |
 | The [`browser-toolchain`](continuous-integration.md#browser-toolchain-job) runner and loader image steps | the runner images and `loader_names`: `entry`; `loader_app`, `fidelity`, and the optimized `fidelity`: `entry,fixture:loader,fixture:controls` |
-| `spec/support/browser_toolchain.lua` `check_imports`, called by each spec's build | bridge spec: as `build-bridge.lua`; entry gate: the `gate.c` images `entry,fixture:gate,fixture:controls`, the `entry_lifetimes.c` image `entry,fixture:controls`; scheduler: the scheduler owner `entry,fixture:scheduler`, the others `entry`; budget probes: `entry,fixture:budget`; the deployment gate, the archive-only consumer of `browser_protocol_spec.lua`, and the stdlib gate, fixture and minicoro images: `entry` |
+| `spec/support/browser_toolchain.lua` `check_imports`, called by each spec's build | bridge spec: as `build-bridge.lua`; entry gate: the `gate.c` images `entry,fixture:gate,fixture:controls`, the `entry_lifetimes.c` image `entry,fixture:controls`; scheduler: the scheduler owner `entry,fixture:scheduler`, the others `entry`; budget probes: `entry,fixture:budget`; the documented `hello` image of the documentation gate, the archive-only consumer of `browser_protocol_spec.lua`, and the stdlib gate, fixture and minicoro images: `entry` |
 
 The trace-adapter units of the `browser-toolchain` job link
 `spec/fixtures/browser_trace_adapter/lifecycle.c` and `filter.c` with plain
@@ -4292,6 +4292,66 @@ likewise refuses a native Windows shell, `Makefile.win` has neither
 Windows (`harness failure: browser execution is supported from Linux and macOS
 hosts`).
 
+## Documentation checks
+
+The browser chapter's opening is executable. `scripts/doc_check.lua` runs the
+fenced blocks that an HTML comment marker (invisible in rendered Markdown)
+selects: `file=PATH` writes the block to a workspace path, `run` and
+`setup=checkout` run an `sh` block, and `expect=LABEL` records text for the
+caller to compare. Unmarked blocks, including the long-running serve commands,
+never run, and a marker spelled inside an unmarked block is text. An unknown
+or malformed marker, a marker without a following fence, a `run` block that is
+not `sh`, and a file path that is absolute or leaves the workspace are
+errors.
+
+All marked blocks of the given documents become one `set -eu` script, so a
+`cd` or `export` carries over to later blocks, and each document starts in
+the workspace. File blocks become quoted heredocs that write the bytes as
+shown. Command blocks get a fixed list of exact substitutions, each logged
+when it applies: the documented clone command becomes `git -c
+protocol.file.allow=always clone --recurse-submodules <checkout> titan` in the
+`setup=checkout` block (Git 2.38 and newer refuse local submodule clones
+otherwise), the documented `PREFIX` value becomes the job's prefix,
+`/path/to/titan` becomes the source checkout, and `npm install --save-dev vite`
+becomes a link to the pinned Vite installation. A command that needs a
+substitution whose value was not given, a value that no block needs, and a
+checkout block without the documented clone command are errors, so the check
+fails when the chapter drifts from it. `spec/doc_check_spec.lua` tests the
+grammar, the substitutions and the shell's persistence, and plans the
+installation and browser chapters with every substitution.
+
+`spec/coder/browser_docs_spec.lua` runs the opening in a workspace with the
+installation's `bin` on `PATH` and no Titan overrides (`TITAN_ROOT`,
+`TITAN_PATH_0_6`, `TITAN_TARGET`, and the extra-flag variables are unset), as
+a reader's shell would be. It checks the `hello` image's imports against the
+`entry` class, then `spec/fixtures/browser_docs/docs.mjs` imports the image
+in plain Node (ready and frozen trace, the documented output), and loads
+`site/`, `site-assets/` (`locateFile`) and `vite-app/dist/` in Chromium, each
+served by the documented `http-dev-server` on the first free port from 28500.
+Every page must show the `expect=page` text; every response must be 200; the
+Wasm must arrive once as `application/wasm`, the module as `text/javascript`
+and the trace table once; nothing from the SDK is served; and Vite must emit
+hashed `.wasm` and `.trace` files and no unhashed one. A copy of `site/`
+without `hello.wasm.trace` must end in `(failed, status 1)`, which shows that
+the page's `requireTrace: true` would catch a deployment that drops the
+table.
+
+`doc/language/http-dev-server.titan` is a single-file native program on
+`titan.http`. Its `Site` record holds the folder's canonical path. A request
+path is split on `/` and each segment percent-decoded before it is checked,
+so `%2e%2e`, an encoded `/` (`%2F`), a backslash and NUL are refused with 403
+whatever their spelling; the server then serves only a regular file whose
+canonical path (`fs.realpath`) lies below the folder's, which also refuses a
+symbolic link that leads outside. A response to `HEAD` sets
+`Content-Length` and writes no body, as `titan.http` requires. The native
+owner `spec/fixtures/browser_docs/http_dev_server_test.titan` imports the
+server's source (`import "http-dev-server.titan"`), serves a scratch folder
+on a loopback port in its own Task, and checks content types, `HEAD`,
+methods, directories, traversal and symbolic links through the public HTTP
+client, plus `main`'s usage and busy-port statuses. The docs spec copies the
+two files into one source tree and builds them with `--test`, so the
+standard-library test tree never resolves modules from the manual.
+
 ## Validation
 
 * `spec/staticmetadata_spec.lua` — synthesized Wasm objects and archives:
@@ -4452,10 +4512,15 @@ hosts`).
   `browser_bridge_spec.lua` also runs `environment.mjs` with the libc
   environment fixture in both assertion modes under Node and Chromium,
   checking validation, empty defaults, UTF-8, mutation, and instance isolation.
-* `spec/coder/browser_deployment_spec.lua` with
-  `spec/fixtures/browser_bridge/deployment.mjs` — a real program loaded over
-  plain HTTP, with relocated assets through `locateFile`, and from a Vite
-  build, with no external Titan loader available.
+* `spec/coder/browser_docs_spec.lua` with `scripts/doc_check.lua`,
+  `spec/fixtures/browser_docs/docs.mjs`, and
+  `spec/fixtures/browser_docs/http_dev_server_test.titan` — the browser
+  chapter's opening run as documented ([documentation
+  checks](#documentation-checks)): plain Node, plain HTTP, relocated assets
+  through `locateFile`, and a Vite build, with no external Titan loader
+  available, plus the loopback behavior of `http-dev-server.titan`.
+  `spec/doc_check_spec.lua` tests the runner's marker grammar and
+  substitutions without Emscripten.
 * `spec/browser/loader.test.mjs` with `spec/fixtures/browser_loader/` — the
   portable loader suite under both engines and both assertion modes:
   byte fidelity, statuses, sinks, reentry, 50 collectable create, run, and
@@ -4520,10 +4585,11 @@ The Busted files need emcc 6.0.13 and the installed browser Lua; the image,
 protocol, SDK, stdlib closure, entry and stdlib gate, bridge, fixture, budget,
 and minicoro files also need Node 26+ and an installed browser SDK, and all of
 them except the stdlib closure file also need a headless Chromium. The
-deployment file instead needs Node 26+, the browser SDK, and the pinned Vite
-and Playwright installations named by `TITAN_VITE_ROOT` and
+documentation file's page case instead needs Node 26+, the browser SDK, and
+the pinned Vite and Playwright installations named by `TITAN_VITE_ROOT` and
 `TITAN_PLAYWRIGHT_ROOT`; `TITAN_REQUIRE_BROWSER_DEPLOYMENT=1` turns their
-absence into a failure.
+absence into a failure. Its `http-dev-server` case needs only the native
+installation.
 `spec/support/browser_toolchain.lua` discovers these through
 `require({node=true, chrome=true, sdk=true})` (or the subset a file needs)
 and the runner's `--probe`. Its
@@ -4543,5 +4609,5 @@ trace-adapter, and Node trace suites. The two
 the provider, incremental, image, protocol, SDK, stdlib closure, entry, bridge,
 scheduler, network, stdlib gate, fixture, and minicoro files, with the browser
 core stdlib suite running only in the `sdk` shard.
-The Playwright trace, bridge, and deployment gates run in
+The Playwright trace, bridge, and documentation gates run in
 [`browser-playwright`](continuous-integration.md#browser-playwright-job).

@@ -1342,7 +1342,7 @@ jobs:
           PATH="${TITAN_NODE%/*}:$PATH" npm install --prefix "$TITAN_VITE_ROOT" --no-save \
             --package-lock=false --no-audit --no-fund "vite@$TITAN_VITE_VERSION"
 
-      - name: Run self-contained HTTP and Vite deployment gate
+      - name: Run the browser chapter's documented page, server and Vite examples
         if: matrix.engine == 'chromium'
         env:
           TITAN_REQUIRE_BROWSER_TOOLCHAIN: "1"
@@ -1351,8 +1351,8 @@ jobs:
         run: |
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
-          "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_deployment_spec.lua \
-            2>&1 | tee "$RUNNER_TEMP/browser-playwright-deployment.log"
+          "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_docs_spec.lua \
+            2>&1 | tee "$RUNNER_TEMP/browser-playwright-docs.log"
 
       # A validation install cannot stand in for a production one: the
       # descriptor and SDK identity would disagree. This cell already owns a

@@ -525,18 +525,23 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    database trusts the test CA; Firefox and WebKit run the
    untrusted-certificate rejections, and WebKit runs in a persistent context
    so that its HTTP cache exists.
-9. **Self-contained deployment (`chromium`, both profiles).** These two cells
-   install `vite@8.3.6` into `TITAN_VITE_ROOT` (`out/vite-tools`) with the
-   pinned Node runtime. With `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`,
+9. **The browser chapter's examples (`chromium`, both profiles).** These two
+   cells install `vite@8.3.6` into `TITAN_VITE_ROOT` (`out/vite-tools`) with
+   the pinned Node runtime. With `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1`,
    `TITAN_REQUIRE_BROWSER_DEPLOYMENT=1`, and `TITAN_PROBE_CACHE_DISABLE=1`,
-   `busted -o gtest -v spec/coder/browser_deployment_spec.lua` builds a real
-   program and exercises plain HTTP loading, relocated assets through
-   `locateFile`, and a Vite build using the cell's managed Chromium. The gate
-   serves only generated program assets and page files, requires successful
-   Wasm and trace-table fetches and a ready trace, and runs `main`; no external Titan
-   loader is supplied. Its output is
-   `$RUNNER_TEMP/browser-playwright-deployment.log`. Firefox and WebKit cells
-   keep their own managed engine without installing another one for this gate.
+   `busted -o gtest -v spec/coder/browser_docs_spec.lua` runs the marked
+   blocks of the browser chapter's opening through `scripts/doc_check.lua`
+   ([documentation checks](browser-target.md#documentation-checks)): it
+   builds the documented `hello` program and `http-dev-server`, runs the
+   image under plain Node, and loads the documented page with the cell's
+   managed Chromium from the folder, from its `locateFile` variant, and from
+   the documented Vite build, each served by `http-dev-server`. Each page
+   must show the chapter's expected text and fetch the Wasm (as
+   `application/wasm`) and the trace table once each; no external Titan
+   loader is served, and a copy without the trace table must fail through the
+   page's `requireTrace: true`. Its output is
+   `$RUNNER_TEMP/browser-playwright-docs.log`. Firefox and WebKit cells keep
+   their own managed engine without installing another one for this gate.
 10. **Production-only pins (`production` × `chromium` only).** With
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` and `TITAN_PROBE_CACHE_DISABLE=1`,
    `"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua
