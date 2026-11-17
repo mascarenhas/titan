@@ -1178,7 +1178,7 @@ phase, waits for the peer to see every connection it observed close and
 requires balanced host listeners on each, before disposal. Both drivers
 require that no `onNotificationError` arrives before or during each
 `dispose()` they await. The driver ends with one `BROWSER-NET` JSON report
-(verdict, 65 cases, the cancellation phases, the same-origin page, engine,
+(verdict, 67 cases, the cancellation phases, the same-origin page, engine,
 and verified TLS) that `run.mjs` and the spec check.
 
 The tests assert each engine's measured behavior where hosts deviate. Node

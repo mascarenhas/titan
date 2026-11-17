@@ -57,7 +57,12 @@ local function websocket_session(request: http.Request, response: http.Response)
     local kind?, data? = connection:read()
     if kind == nil then return end
     if data == nil then raise "WebSocket fixture received a message without bytes" end
-    connection:write(kind, data)
+    if path == "/ws/burst" then
+      -- A decimal count asks for that many numbered text messages at once.
+      for number = 1, math.tointeger(data) do connection:write(websocket.TEXT, "message " .. number) end
+    else
+      connection:write(kind, data)
+    end
   end
 end
 

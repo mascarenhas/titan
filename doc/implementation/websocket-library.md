@@ -336,6 +336,15 @@ write observes OPEN. If all eight 8 MiB writes finish first, a bounded wait for
 non-OPEN must succeed, then the next write must fail without another host send.
 The wait does not extend the payload cap or relax the other loss oracles.
 
+The unread queue's tests use the native peer's `burst` route, which answers a
+decimal count with that many numbered text messages, and the test controls'
+`holders` count of message holders that Titan still owns. With 100 messages
+queued unread, reading 60 passes the compaction point; the messages keep
+their order and bytes, the 60 consumed holders are released, and after the
+last read no holder remains and every message took its bytes once. Closing
+the connection after 60 reads instead releases the 40 unread holders without
+taking their bytes.
+
 [The conformance harness](../../spec/conformance/websocket/README.md) pins both
 Autobahn roles and checks exact nonempty selected-case/agent inventories plus
 behavior and close behavior. Compression families 12/13 are explicit

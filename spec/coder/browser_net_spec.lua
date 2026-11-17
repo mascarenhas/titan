@@ -29,7 +29,7 @@ describe("browser HTTP and WebSocket clients", function()
             local result = execute({info.node.path, "spec/fixtures/browser_net/run.mjs",
                 "--root", output, "--engine", engine, "--sdk", info.sdk_root,
                 "--runner", info.sdk_root .. "/titan-browser-run.mjs", "--repository", repository}, env, engine)
-            assert.matches('BROWSER%-NET {"verdict":"PASS","cases":65,"cancellation":%["headers","settled","metadata","body"%]', result)
+            assert.matches('BROWSER%-NET {"verdict":"PASS","cases":67,"cancellation":%["headers","settled","metadata","body"%]', result)
             assert(checks.require_evidence(checks.status_inventory, result,
                 { ["http.browser_tests"] = true, ["websocket.browser_tests"] = true }))
             assert.matches('"sameOrigin":' .. (engine == "node" and "0" or "1"), result, 1, true)
