@@ -280,6 +280,17 @@ together with it. No external loader is required. The trace table lets errors
 report Titan source files and lines (see [traces](#traces)); serve
 `hello.wasm.map` too if you want browser developer tools to show sources.
 
+Deploy the files of one build together. The module refuses to run with a
+WebAssembly binary from another build, and a trace table from another build
+fails initialization under `requireTrace: true`, as on this page, or otherwise
+costs the Titan frames of error traces ([programs](#programs)). The
+browser fetches a module script, and the loader the binary and the table,
+in CORS mode, so a page served from another origin than the three files needs
+their server to allow it (`Access-Control-Allow-Origin`). A page with a
+Content Security Policy must allow WebAssembly compilation with `script-src
+'wasm-unsafe-eval'`, as for any WebAssembly module, besides the origin of
+`hello.mjs`.
+
 ## A complete application
 
 The Titan source tree holds a larger browser program in
@@ -1899,6 +1910,13 @@ adjacent samples at the declared step size. Those search ceilings only bound
 the measurement; they are not additional program limits or portable
 recursion-depth guarantees.
 
+Ordinary Titan recursion, whose frames keep little on the linear stack,
+usually runs out of the engine's call stack first, which ends the run as an
+engine failure rather than a catchable error. CI records the release
+profile's deepest recursion, its Task count at the memory limit, and its
+memory use on each engine ([records](../implementation/browser-target.md#records));
+they are measurements, not guarantees.
+
 ### Lua's C-call limit
 
 Lua counts nested calls through its C API and stops them with its ordinary
@@ -1999,4 +2017,6 @@ implementation manual for the descriptor, the SDK, the browser standard
 library's provider, dependency-closure check, and subset parity gate, the build
 profiles and their measurements, the link profile, the browser C-call limit,
 the nesting-limit measurements, the entrypoint, the loader and runner
-mechanics, and the evidence behind the design.
+mechanics, the release profile's [records](../implementation/browser-target.md#records)
+of size, startup, memory and recursion per engine, and the evidence behind the
+design.

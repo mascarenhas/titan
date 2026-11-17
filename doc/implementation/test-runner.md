@@ -245,7 +245,9 @@ selects no case exits 0, so browser acceptance checks count the selected
 cases rather than trusting the exit status. The repository's [browser core
 stdlib suite](browser-target.md#test-owners-and-the-browser-suite) builds all
 browser-portable standard-library owners into one such image and audits its
-complete owner inventory.
+complete owner inventory under Node and Chromium; the `validation` Playwright
+cells run the same image on Chromium, Firefox and WebKit
+([CI](continuous-integration.md#browser-playwright-job)).
 
 ## `titan.test` execution API and private state
 
