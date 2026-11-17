@@ -238,6 +238,10 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             "set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
             "'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin, other,
             descriptor.build_profile, other, descriptor.build_profile, descriptor.build_profile), mismatch_err)
+        local _, tree_err = browserlink.require_sdk({ io = fake_io }, descriptor,
+            { prefix = root, rocks_tree = root .. "-rocks" })
+        assert.truthy(tree_err:find("'make browser-sdk PREFIX=<prefix> ROCKS_TREE=<tree> TITAN_BUILD_PROFILE=" ..
+            descriptor.build_profile .. "'", 1, true), tree_err)
         for _, content in ipairs({ "", "debug\n", descriptor.build_profile, descriptor.build_profile .. "\n\n" }) do
             present[record] = content
             local invalid, invalid_err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })

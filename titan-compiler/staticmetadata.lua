@@ -213,7 +213,9 @@ end
 
 -- Source records are independent of the canonical public archive section.
 -- Keep their bytes equally relocation-free and immune to Clang ASan global
--- redzones, which would otherwise become part of the serialized payload.
+-- redzones, which would otherwise become part of the serialized payload. As
+-- with the archive metadata, a Wasm record is an unreferenced external
+-- definition that wasm-ld drops from final images.
 function staticmetadata.source_declaration(payload, symbol)
     local initializer, err = staticmetadata.c_initializer(payload)
     if not initializer then return nil, err end
@@ -223,9 +225,15 @@ function staticmetadata.source_declaration(payload, symbol)
 #if defined(__APPLE__)
 #define TITAN_SOURCE_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titansrc")))
-#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)
+#define TITAN_SOURCE_META_LINKAGE static
+#elif defined(__wasm__)
+#define TITAN_SOURCE_META_SECTION \
+    __attribute__((aligned(1), section(".titan.source")))
+#define TITAN_SOURCE_META_LINKAGE
+#elif defined(__ELF__) || defined(_WIN32)
 #define TITAN_SOURCE_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.source")))
+#define TITAN_SOURCE_META_LINKAGE static
 #else
 #error unsupported object format for Titan source metadata
 #endif
@@ -238,7 +246,7 @@ function staticmetadata.source_declaration(payload, symbol)
 #endif
 
 TITAN_SOURCE_META_SECTION TITAN_SOURCE_META_NO_ADDRESS_SANITIZE
-static const unsigned char ]] .. symbol .. "[] = " .. initializer .. ";\n"
+TITAN_SOURCE_META_LINKAGE const unsigned char ]] .. symbol .. "[] = " .. initializer .. ";\n"
 end
 
 local function public_origin(origin)

@@ -48,10 +48,11 @@ function M.require_sdk(context, descriptor, install)
             " is invalid; run '" .. command .. "'"
     end
     if profile ~= descriptor.build_profile then
+        local rocks = install.rocks_tree and install.rocks_tree ~= "" and " ROCKS_TREE=<tree>" or ""
         return nil, string.format("browser SDK %q was built with the %s profile, but this build uses %s; " ..
             "set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
-            "'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin,
-            profile, descriptor.build_profile, profile, descriptor.build_profile, descriptor.build_profile)
+            "'make browser-sdk PREFIX=<prefix>%s TITAN_BUILD_PROFILE=%s'", descriptor.paths.titan_bin,
+            profile, descriptor.build_profile, profile, descriptor.build_profile, rocks, descriptor.build_profile)
     end
     return assets
 end

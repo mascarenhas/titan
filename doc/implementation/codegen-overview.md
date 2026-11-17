@@ -525,7 +525,9 @@ A function-type tag string used to be a `static` array in `$SIGS`. It is now a
 pinned `TITAN_MODULE_PRIVATE` definition in part 0, and a split module's
 header declares it `extern`, so every part publishes the same tag address.
 The remaining `static` objects are function-local statics, section payloads in
-part 0 (`.titan.meta` and `.titan.source`), and preamble helpers, including
+part 0 (`.titan.meta` and `.titan.source`, external on Wasm so that final
+images drop them; see [program images](browser-target.md#program-and-test-images)),
+and preamble helpers, including
 the `static inline` direct-call helpers of local foreign functions. Those
 helpers' addresses are never taken: every pointer to a foreign function names
 its single out-of-line definition; see

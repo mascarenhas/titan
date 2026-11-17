@@ -132,8 +132,10 @@ Each compiled primary object `<stem>.o` carries two metadata sections:
    after `#line` normalization or coverage marker conversion.
 
 Sidecar `.part<k>.o` objects from a split module carry neither section. Both
-sections use the same byte alignment, `used` attribute retention,
-relocation-free string representation, and Clang AddressSanitizer exclusion,
+sections use the same byte alignment, retention (the `used` attribute on ELF,
+COFF, and Mach-O; on Wasm an unreferenced external definition, which objects
+keep and final images drop), relocation-free string representation, and Clang
+AddressSanitizer exclusion,
 and are located in-process by `staticmetadata.read_object_section` (including
 COFF long section names via the string table, and Wasm DATA segments named in
 the `linking` segment info).

@@ -1042,6 +1042,9 @@ describe("real browser test image", function()
         for index, member in ipairs(runtime.members) do members[index] = member.display_name end
         assert.same({ "titan.o", "minicoro.o", "titan_path.o", "ltitanlib.o" }, members)
         assert.is_true(driver.validate_browser_provider(runtime))
+        -- Only objects and archives carry the compiler's metadata payloads.
+        local objdump = require("titan-compiler.path").join(
+            require("titan-compiler.path").dirname(info.tools.clang[1]), "llvm-objdump")
         for _, image in ipairs({ "image_main", "explicit-program" }) do
             assert.equal("file", lfs.attributes(workspace .. "/out/" .. image .. ".mjs", "mode"))
             local inventory = assert(browserlink.image_inventory(read(workspace .. "/out/" .. image .. ".wasm")))
@@ -1053,7 +1056,15 @@ describe("real browser test image", function()
             end
             assert.is_nil(exports.titan_browser_gate_guarded)
             assert.is_nil(exports.main)
+            local segments = run({ objdump, "-t", workspace .. "/out/" .. image .. ".wasm" })
+            assert.is_true(segments.ok, segments.output)
+            assert.truthy(segments.output:find(" DATA", 1, true), segments.output)
+            assert.is_nil(segments.output:find(".titan.", 1, true), segments.output)
         end
+        local symbols = run({ objdump, "-t", workspace .. "/out/image_main.o" })
+        assert.is_true(symbols.ok, symbols.output)
+        assert.truthy(symbols.output:find("image_main_titan_metadata", 1, true), symbols.output)
+        assert.truthy(symbols.output:find("titan_object_source_image_main", 1, true), symbols.output)
         local fixture = workspace .. "/out/program-results.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/program-results.mjs"))
         for _, engine in ipairs({ "node", "chromium" }) do

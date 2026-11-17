@@ -320,8 +320,10 @@ invalid; run '<command>'`) and must equal the descriptor's `build_profile`:
 browser SDK "<titan_bin>" was built with the <sdk> profile, but this build uses <build>; set TITAN_BUILD_PROFILE=<sdk>, or build a <build> browser SDK in another prefix with 'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=<build>'
 ```
 
-The archives in `titan_bin` were compiled under the SDK's profile, so a link
-under the other one would mix two object profiles in one image.
+When `install.rocks_tree` is set, the suggested command also names
+`ROCKS_TREE=<tree>` after the prefix. The archives in `titan_bin` were compiled
+under the SDK's profile, so a link under the other one would mix two object
+profiles in one image.
 
 `driver.require_browser_sdk(context)` supplies `install`: `prefix` is
 `driver.INSTALL_PATHS.root` (the descriptor root when unset) and `rocks_tree`
@@ -2513,12 +2515,16 @@ An image owns no DSO, debug bundle, or dSYM companion
 `.wasm.map` siblings in `extra_outputs` and omits `.dSYM` on Darwin hosts for
 a browser context). A warm link hit verifies all four files, and a missing or
 modified `.mjs`, `.wasm`, `.wasm.trace`, or `.wasm.map` forces a relink while
-objects still hit. Final images
-never read `.titan.meta`,
-`.titan.source`, or `.titan.cprobe`; `wasm-ld` keeps the `.titan.source` and
-`.titan.meta` payloads as named data segments and drops `.titan.cprobe`
-([Baseline](#baseline)). Every image imports Lua's `env.exit`, which neither
-the entrypoint nor completion uses.
+objects still hit. Final images never read `.titan.meta`, `.titan.source`, or
+`.titan.cprobe`, and carry none of them. On Wasm the two metadata payloads are
+unreferenced external definitions rather than `used` statics, so objects and
+archives keep them for the metadata readers and `wasm-ld --gc-sections` drops
+them from every image; probe payloads never reach an image
+([Baseline](#baseline)). The payloads were more than a third of an image: the
+validation trace-gate runtime image shrank from 19,689,714 to 12,317,007
+bytes, and the standard-library aggregate from 55,845,693 to 35,884,282 bytes,
+with as much less initial linear memory. Every image imports Lua's
+`env.exit`, which neither the entrypoint nor completion uses.
 
 ### Build-time image bounds
 
@@ -4326,7 +4332,8 @@ hosts`).
   allocation failures, the libc drain, the stdio-only filesystem regression,
   dynamic-loading guards, four-file preflight reservation and repeated-link
   image identity, contributor-prologue `.wasm.map` attribution, image
-  inventories, measurement optimization, the native libbacktrace and
+  inventories, program images without `.titan.*` payload segments while their
+  objects keep both payload symbols, measurement optimization, the native libbacktrace and
   fallback trace invariants, and [long-double
   formatting](#the-link-profile) (`-sPRINTF_LONG_DOUBLE=1` for every profile,
   purpose, and entry, every rejected override spelling, and the

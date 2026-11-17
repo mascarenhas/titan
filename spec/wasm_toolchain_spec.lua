@@ -120,7 +120,12 @@ end
         local c_code, source_entry, expected_layouts, alpha_ffi = generate_titan_c(
             "wasm_alpha", root, "wasm_alpha", alpha_source)
         track_file(alpha_ffi)
-        assert.matches("#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)", c_code, 1, true)
+        -- Wasm payloads are unreferenced external definitions, so final images drop them.
+        assert.matches("#elif defined(__wasm__)\n#define TITAN_META_SECTION \\\n" ..
+            "    __attribute__((aligned(1), section(\".titan.meta\")))\n#define TITAN_META_LINKAGE\n", c_code, 1, true)
+        assert.matches("#elif defined(__wasm__)\n#define TITAN_SOURCE_META_SECTION \\\n" ..
+            "    __attribute__((aligned(1), section(\".titan.source\")))\n#define TITAN_SOURCE_META_LINKAGE\n",
+            c_code, 1, true)
         assert.matches("TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE", c_code, 1, true)
         assert.matches("TITAN_SOURCE_META_SECTION TITAN_SOURCE_META_NO_ADDRESS_SANITIZE", c_code, 1, true)
 
