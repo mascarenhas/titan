@@ -997,8 +997,10 @@ describe("real browser test image", function()
         assert.is_false(result.ok, "an EM_JS dynamic import was published")
         local log = result.output or result.diagnostic or ""
         assert.truthy(log:find("browser image module uses dynamic import() at line ", 1, true), log)
-        assert.truthy(log:find("(import('./page.mjs')); the image module is self-contained; pass page " ..
-            "JavaScript to Titan as create({bindings}) values through titan.browser", 1, true), log)
+        -- The diagnostic quotes the final module, whose string quotes the
+        -- profile's minifier may rewrite.
+        assert.truthy(log:find("%(import%((['\"])%./page%.mjs%1%)%); the image module is self%-contained; " ..
+            "pass page JavaScript to Titan as create%({bindings}%) values through titan%.browser"), log)
         for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.trace", ".wasm.map" }) do
             assert.is_nil(lfs.attributes(workspace .. "/out/checked" .. suffix), suffix)
         end
