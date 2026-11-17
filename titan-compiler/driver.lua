@@ -9138,8 +9138,9 @@ local function prepare_compile(
         end
         local payload, metadata_error = objectmetadata.encode(entry, native)
         if not payload then return nil, metadata_error end
-        return "\n" .. objectmetadata.render(payload,
-            "titan_object_source_" .. driver.mangle_module_name(modname))
+        -- External on Wasm like the archive metadata, hence the private name.
+        return "\n" .. objectmetadata.render(payload, require("titan-compiler.coder.core")
+            .coder._private_symbol(modname, "titan_source"))
     end
     -- Preflight an existing private header before any invalidation or file
     -- write.

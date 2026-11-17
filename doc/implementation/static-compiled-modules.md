@@ -33,9 +33,15 @@ module's primary object (part 0 of a
 #if defined(__APPLE__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
-#elif defined(__ELF__) || defined(_WIN32) || defined(__wasm__)
+#define TITAN_META_LINKAGE static
+#elif defined(__wasm__)
+#define TITAN_META_SECTION \
+    __attribute__((aligned(1), section(".titan.meta")))
+#define TITAN_META_LINKAGE
+#elif defined(__ELF__) || defined(_WIN32)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.meta")))
+#define TITAN_META_LINKAGE static
 #endif
 
 #if defined(__clang__)
@@ -46,7 +52,7 @@ module's primary object (part 0 of a
 #endif
 
 TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE
-static const unsigned char module_metadata[] = { /* canonical bytes */ };
+TITAN_META_LINKAGE const unsigned char module_\u2119_titan_metadata[] = { /* canonical bytes */ };
 ```
 
 The numeric byte array has no trailing NUL and no relocations. `aligned(1)`
@@ -65,10 +71,15 @@ When Emscripten or Clang compiles for `wasm32`, `__ELF__`, `__APPLE__`, and
 and the enum-carrier `.titan.cprobe` emitter already used the generic name.
 Clang emits each array as a named DATA segment recorded in the `linking`
 section's segment info. Byte alignment and the absence of relocations keep the
-segment length equal to the payload. The final browser image link keeps the
-`.titan.source` and `.titan.meta` payloads as named data segments and drops
-`.titan.cprobe`; no image reads any of them at run time, and metadata reading
-never depends on the linked image.
+segment length equal to the payload. On Wasm the two payloads are unreferenced
+external definitions without `used`: objects and archives keep both segments
+for the metadata readers, and the final browser image link (`wasm-ld
+--gc-sections`) drops them, like `.titan.cprobe`. No image reads any of them at
+run time, and metadata reading never depends on the linked image. Their names
+use the compiler-private `\u2119` separator (`coder._private_symbol`), so an
+external payload never meets another module's protocol function, such as
+`titan_object_source_init` of a module named `titan_object_source`, or a name
+that an authored C helper defines.
 
 The standalone entrypoint, runtime objects, `ltitanlib.o`, ordinary native
 payload, and the part objects of split modules do not carry logical metadata.

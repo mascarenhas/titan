@@ -128,7 +128,7 @@ Each compiled primary object `<stem>.o` carries two metadata sections:
    (Mach-O) section consumed by archive and provider readers; and
 2. the compiler-private `.titan.source` (ELF, COFF, and Wasm) or
    `__TEXT,__titansrc` (Mach-O) section (`titan-compiler/objectmetadata.lua`,
-   symbol `titan_object_source_<mangled>`), appended to part 0's generated C
+   symbol `<mangled>_\u2119_titan_source`), appended to part 0's generated C
    after `#line` normalization or coverage marker conversion.
 
 Sidecar `.part<k>.o` objects from a split module carry neither section. Both

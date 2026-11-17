@@ -332,7 +332,7 @@ TITAN_MODULE_PRIVATE const TitanTransferEntry counter_\u2119_transfer_entries[] 
 TITAN_MODULE_PRIVATE const TitanTransferModule counter_\u2119_transfer_manifest = { ... };
 TITAN_MODULE_PRIVATE int counter_\u2133_meta_index(lua_State *L) { ... }    /* module member read  */
 TITAN_MODULE_PRIVATE int counter_\u2133_meta_newindex(lua_State *L) { ... } /* module member write */
-static const unsigned char counter_titan_metadata[] = { ... };             /* .titan.meta section */
+static const unsigned char counter_\u2119_titan_metadata[] = { ... };      /* .titan.meta section */
 int counter_types(lua_State* L) { ... }     /* serialized interface, below  */
 int counter_abi(lua_State* L) { ... }       /* returns TITAN_ABI_VERSION */
 ...
@@ -525,8 +525,10 @@ A function-type tag string used to be a `static` array in `$SIGS`. It is now a
 pinned `TITAN_MODULE_PRIVATE` definition in part 0, and a split module's
 header declares it `extern`, so every part publishes the same tag address.
 The remaining `static` objects are function-local statics, section payloads in
-part 0 (`.titan.meta` and `.titan.source`, external on Wasm so that final
-images drop them; see [program images](browser-target.md#program-and-test-images)),
+part 0 (`.titan.meta` and `.titan.source`; external on Wasm so that final
+images drop them, and named with the private `\u2119` separator on every target
+so that they never meet a module's protocol functions or an authored C name;
+see [program images](browser-target.md#program-and-test-images)),
 and preamble helpers, including
 the `static inline` direct-call helpers of local foreign functions. Those
 helpers' addresses are never taken: every pointer to a foreign function names

@@ -1063,8 +1063,11 @@ describe("real browser test image", function()
         end
         local symbols = run({ objdump, "-t", workspace .. "/out/image_main.o" })
         assert.is_true(symbols.ok, symbols.output)
-        assert.truthy(symbols.output:find("image_main_titan_metadata", 1, true), symbols.output)
-        assert.truthy(symbols.output:find("titan_object_source_image_main", 1, true), symbols.output)
+        local names = require("titan-compiler.coder.core").coder
+        for _, family in ipairs({ "titan_metadata", "titan_source" }) do
+            local symbol = names._linkage_symbol_name(names._private_symbol("image_main", family))
+            assert.truthy(symbols.output:find(symbol, 1, true), symbols.output)
+        end
         local fixture = workspace .. "/out/program-results.mjs"
         files.write(fixture, read(repository .. "/spec/fixtures/browser_images/program-results.mjs"))
         for _, engine in ipairs({ "node", "chromium" }) do
@@ -1072,6 +1075,36 @@ describe("real browser test image", function()
                 "--chrome", info.chrome.path, "--grace", "0", "--js-test", fixture, "--",
                 "image_main.mjs", "explicit-program.mjs" })
             assert.is_true(result.ok, result.output or result.diagnostic)
+        end
+    end)
+
+    -- The payloads are external on Wasm. Their private names meet neither the
+    -- protocol functions of a module named titan_object_source (such as
+    -- titan_object_source_init) nor names that an authored C helper defines.
+    it("links modules and C helpers that spell ASCII metadata payload names", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/titan_object_source.titan", "function value(): integer\n    return 2\nend\n")
+        files.write(workspace .. "/src/init.titan", "function value(): integer\n    return 3\nend\n")
+        files.write(workspace .. "/src/app.titan", [[
+local source = import "titan_object_source"
+local init = import "init"
+function main(args: {string}): integer
+    return source.value() * init.value()
+end
+]])
+        files.write(workspace .. "/src/plain.titan", "function main(args: {string}): integer\n    return 7\nend\n")
+        local helper = workspace .. "/helper.c"
+        files.write(helper, "const unsigned char plain_titan_metadata[] = { 1 };\n" ..
+            "const unsigned char titan_object_source_plain[] = { 2 };\n")
+        for _, case in ipairs({ { "app", 6, {} }, { "plain", 7, { "--c-source", helper } } }) do
+            local name, status, options = case[1], case[2], case[3]
+            options[#options + 1] = name
+            local result = cli(info, table.unpack(options))
+            assert.is_true(result.ok, result.output or result.diagnostic)
+            result = run({ info.sdk_root .. "/titan-browser-run", "--grace", "0", workspace .. "/out/" .. name .. ".mjs" })
+            assert.equal(status, result.status, result.output or result.diagnostic)
         end
     end)
 

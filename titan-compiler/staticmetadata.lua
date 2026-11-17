@@ -219,7 +219,9 @@ end
 function staticmetadata.source_declaration(payload, symbol)
     local initializer, err = staticmetadata.c_initializer(payload)
     if not initializer then return nil, err end
-    assert(type(symbol) == "string" and symbol:match("^[A-Za-z_][A-Za-z0-9_]*$"),
+    -- The compiler's private symbols spell their separator as a UCN.
+    assert(type(symbol) == "string" and
+        symbol:gsub("\\u2119", "_"):match("^[A-Za-z_][A-Za-z0-9_]*$"),
         "source metadata symbol must be a C identifier")
     return [[
 #if defined(__APPLE__)

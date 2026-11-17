@@ -2519,8 +2519,10 @@ objects still hit. Final images never read `.titan.meta`, `.titan.source`, or
 `.titan.cprobe`, and carry none of them. On Wasm the two metadata payloads are
 unreferenced external definitions rather than `used` statics, so objects and
 archives keep them for the metadata readers and `wasm-ld --gc-sections` drops
-them from every image; probe payloads never reach an image
-([Baseline](#baseline)). The payloads were more than a third of an image: the
+them from every image. Their `<mangled>_\u2119_titan_metadata` and
+`<mangled>_\u2119_titan_source` names keep these external symbols apart from
+module protocol functions and authored C names; probe payloads never reach an
+image ([Baseline](#baseline)). The payloads were more than a third of an image: the
 validation trace-gate runtime image shrank from 19,689,714 to 12,317,007
 bytes, and the standard-library aggregate from 55,845,693 to 35,884,282 bytes,
 with as much less initial linear memory. Every image imports Lua's

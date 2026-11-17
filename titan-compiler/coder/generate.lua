@@ -898,8 +898,10 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     local initializer, initializer_err =
         staticmetadata.c_initializer(metadata)
     assert(initializer, initializer_err)
+    -- The payload is external on Wasm, so its name takes the compiler-private
+    -- separator, which no module protocol function or ASCII C name contains.
     emit_item("metadata", render(coder.modmetadata, {
-        METADATANAME = tlcontext.prefix .. "titan_metadata",
+        METADATANAME = coder._private_symbol(modname, "titan_metadata"),
         METADATA = initializer,
     }))
 
