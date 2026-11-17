@@ -254,8 +254,9 @@ with JSPI because it publishes the standard library through the ordinary
 executing check. It uses nonempty `TITAN_NODE`, otherwise `node` on `PATH`;
 it does not substitute emsdk's bundled Node. A refusal says
 `browser provider validation requires Node 26 or newer: <reason>; set
-TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
-`lib/titan-browser/0.6/` under the Titan installation root:
+TITAN_NODE to a Node 26 or newer executable`. The SDK installs these files,
+and only these, into `lib/titan-browser/0.6/` under the Titan installation
+root; other chapters refer to this list:
 
 | File | Contents |
 | --- | --- |
@@ -267,6 +268,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
 | `titan-browser-module-check.mjs` | the [module check](#c-helpers-and-emscripten-apis) that `titanc` runs on each linked image module, under emcc's Node with emcc's acorn parser |
+| `build-profile` | the [build profile](#build-profiles), `production` or `validation`, that compiled the SDK's archives |
 | `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
@@ -279,7 +281,11 @@ does. In a
 the verified browser Lua from `PREFIX` into `ROCKS_TREE`.
 
 Rerun `make lua-browser` and `make browser-sdk` after changing Emscripten, the
-fork, or Titan.
+fork, or Titan. `make uninstall-browser-sdk PREFIX="$PREFIX"` (with the same
+`ROCKS_TREE` as the install) removes the files that `make browser-sdk`
+installed and keeps any other file in `lib/titan-browser/0.6/`, such as a
+library archive; `titan-uninstall` removes them too. See [what each command
+removes](installation.md#what-each-command-removes).
 
 ### Bootstrap order
 
@@ -307,6 +313,13 @@ browser SDK is incomplete: missing "/home/me/.local/titan/lib/titan-browser/0.6/
 
 When `ROCKS_TREE` is set and not empty, the command also passes `ROCKS_TREE=<tree>`.
 Compiling objects never needs the SDK.
+
+The SDK's archives were compiled with one build profile, and a link must use
+the same one. A link with the other profile is refused before it starts:
+
+```text
+browser SDK "/home/me/.local/titan/lib/titan-browser/0.6" was built with the validation profile, but this build uses production; set TITAN_BUILD_PROFILE=validation, or build a production browser SDK in another prefix with 'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=production'
+```
 
 ## Selecting the target
 

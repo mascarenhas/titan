@@ -412,6 +412,7 @@ describe("browser toolchain capabilities", function()
         for _, name in ipairs(SDK_ASSETS) do
             files.write(directory .. "/" .. name, "")
         end
+        files.write(directory .. "/build-profile", require("titan-compiler.driver").BUILD_PROFILE .. "\n")
         return directory
     end
 
@@ -715,6 +716,8 @@ for _, name in ipairs({ "libtitan.a", "titan-browser-library.js", "titan-browser
     local file = assert(io.open(directory .. "/" .. name, "wb"))
     assert(file:write("")); assert(file:close())
 end
+local profile = assert(io.open(directory .. "/build-profile", "wb"))
+assert(profile:write(require("titan-compiler.driver").BUILD_PROFILE .. "\n")); assert(profile:close())
 local found = assert(toolchain.detect({ sdk = true }))
 assert(found.sdk_root == directory, tostring(found.sdk_root))
 print("sdk-retry-ok")

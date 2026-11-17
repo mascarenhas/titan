@@ -556,7 +556,7 @@ TITAN_JOBS_CHECK = case $(call make_shell_quote,$(TITAN_JOBS)) in ''|0*|*[!0-9]*
 	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools runtime \
-	install-compiler-sdk install-titan-sdk publish-titan-sdk browser-sdk \
+	install-compiler-sdk install-titan-sdk publish-titan-sdk browser-sdk uninstall-browser-sdk \
 	stdlib stdlib-objects install-stdlib \
 	install publish-stdlib \
 	rock-test test rock-build \
@@ -1328,6 +1328,11 @@ browser-sdk: ## Build and install the browser target runtime, tools and core std
 	  -X $(call make_shell_quote,$(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)/libtitan-lpeglabel.a) \
 	  $(if $(filter 1,$(TITAN_VERBOSE)),-v,-q) $(BROWSER_STDLIB_ROOTS); \
 	$(BROWSER_SDK_ENV) $(call make_shell_quote,$(TITAN_LUA)) -E scripts/browser_sdk.lua finalize "$$build_dir"
+
+# Implementation notes: doc/implementation/build-script-audit.md#installation-and-publication
+uninstall-browser-sdk: ## Remove the files browser-sdk installed, keeping other files in their directory
+	$(call make_shell_quote,$(TITAN_LUA)) -E scripts/titan_install.lua uninstall-browser-sdk \
+	  $(call make_shell_quote,$(TITAN_INSTALL_TREE)) $(TITAN_LIBRARY_VERSION)
 
 TITAN_BROWSER_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/browser-stdlib
 TITAN_BROWSER_TEST_SDK := $(TITAN_INSTALL_TREE)/lib/titan-browser/$(TITAN_LIBRARY_VERSION)

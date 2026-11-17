@@ -446,14 +446,26 @@ declares no `modules`.
 
 `titan-uninstall` (`scripts/titan_install.lua`) removes all installed Titan
 rock versions through LuaRocks first. Only when that succeeds does it remove
-the exact external Titan files, including the fourteen `make browser-sdk`-owned
-files under `lib/titan-browser/<ver>/` (`installer.browser_sdk_owned`, which
-`spec/browser_sdk_spec.lua` checks against the files a fresh SDK build writes)
-for each matching release; Lua,
+the exact external Titan files, including the `make browser-sdk`-owned files
+under `lib/titan-browser/<ver>/` for each matching release
+(`installer.browser_sdk_owned`, the [browser SDK file
+list](../language/browser-target.md#installing-the-browser-sdk) in code, which
+`spec/browser_sdk_spec.lua` checks against the files a fresh SDK build writes); Lua,
 LuaRocks, dependency modules, the fork's `lib/browser/`, user archives under
 `lib/titan-browser/<ver>/`, and shared native dependencies remain. Windows
 callers must close processes that use a
 destination DLL before replacing or removing it.
+
+`make uninstall-browser-sdk PREFIX=<prefix> [ROCKS_TREE=<tree>]` runs
+`scripts/titan_install.lua uninstall-browser-sdk <TITAN_INSTALL_TREE>
+<TITAN_LIBRARY_VERSION>` (with the tree's Lua modules on its paths, as
+`publish` does). `installer.uninstall_browser_sdk` checks every
+`installer.browser_sdk_owned` path first and refuses, removing nothing, when
+one is neither a file nor a link (`browser SDK file is not a file: <path>`);
+it then removes those files and prunes `lib/titan-browser/<ver>/` and
+`lib/titan-browser/` only when they are empty. It is the only target that
+edits an installation tree without installing; clean targets still never
+touch one.
 
 ## Checks
 

@@ -432,7 +432,7 @@ local function extended_sdk()
     -- production failure, so the readiness answer carries that distinction.
     local present = strategy:stat(installed.titan_bin) ~= nil
     local assets, diagnostic = browserlink.require_sdk({ io = strategy },
-        { paths = installed }, { prefix = prefix, rocks_tree = rocks_tree })
+        { paths = installed, build_profile = driver.BUILD_PROFILE }, { prefix = prefix, rocks_tree = rocks_tree })
     if not assets then return diagnostic, present end
     cache.sdk = installed.titan_bin
 end

@@ -451,6 +451,12 @@ make lua-browser PREFIX="$PREFIX"
 make browser-sdk PREFIX="$PREFIX"
 ```
 
+Titan finds `emcc` under `$EMSDK/upstream/emscripten` when `EMSDK` is set,
+which `emsdk_env.sh` does, and otherwise as the first `emcc` on `PATH`. It
+expects `emar` and `emranlib` beside it and refuses any version other than
+6.0.13, naming the `emsdk install` command (see [Emscripten
+6.0.13](browser-target.md#prerequisites)).
+
 `make lua-browser` builds the fork's `browser` target and installs it below
 `$PREFIX/lib/browser/`, without touching the native Lua files. It reuses an
 existing installation only when the fork commit, the Emscripten version, the
@@ -468,7 +474,9 @@ after installing the matching Lua; native Lua and native providers are unchanged
 loader, runner, and standard library into `lib/titan-browser/0.6/`, and writes
 the SDK digest manifest last. It compiles them under the `TITAN_BUILD_PROFILE`
 in effect (`production` unless set; see [browser build
-profiles](browser-target.md#build-profiles)). It needs Node 26+ with JSPI to
+profiles](browser-target.md#build-profiles)) and records that profile in the
+SDK's `build-profile`; a browser link under the other profile is refused,
+naming both ways out. It needs Node 26+ with JSPI to
 check the standard library before publishing it. `make browser-sdk` uses
 nonempty `TITAN_NODE`, otherwise `node` on `PATH`; emsdk's bundled Node is not
 substituted. A refusal says `browser provider validation requires Node 26 or
@@ -491,6 +499,8 @@ Rerun both Make targets after changing Emscripten, the fork, or Titan. Every
 browser compilation verifies the installed archive, headers, and record and
 names the fork's install command when they disagree, and every browser link
 names `make browser-sdk` when an SDK file is missing.
+`make uninstall-browser-sdk PREFIX="$PREFIX"` (with the install's
+`ROCKS_TREE`, if any) removes the browser SDK alone.
 
 ### Windows
 
@@ -537,21 +547,14 @@ The rock installs nothing for the browser target. `make lua-browser`, described
 in [The browser Lua and SDK](#the-browser-lua-and-sdk), adds
 `lib/browser/liblua.a`, the Lua headers in `lib/browser/include/`, and the build
 record `lib/browser/liblua-config.txt`. `make browser-sdk` adds
-`lib/titan-browser/0.6/`: the browser runtime `libtitan.a`, the browser PEG
-engine `libtitan-lpeglabel.a`, the browser standard library `titan.a` (the
-[standard modules](browser-target.md#the-browser-standard-library) available to
-browser programs, with the PEG engine linked in), the loader input
-`titan-browser.mjs` and its Emscripten libraries `titan-browser-library.js`,
-`titan-browser-bridge.js`, and `titan-browser-trace.js`, the standalone portable
-codec peer `titan-protobuf.mjs`, the runner `titan-browser-run` with its three
-`.mjs` modules, the list of [unavailable standard
-modules](browser-target.md#modules-that-are-not-available) `absent-modules`,
-and `sdk-digests`. The compiler embeds the loader into each
-generated image; applications deploy no separate loader file. A page using
-[copied typed values](standard-library-browser.md#copying-typed-values) serves
-its own copy of `titan-protobuf.mjs`. That
-directory is never inside `lib/titan/0.6/`, and native builds never search
-it. See [the browser SDK](browser-target.md#installing-the-browser-sdk).
+`lib/titan-browser/0.6/` with the browser runtime, the loader, the runner, the
+compiler's module check, and the browser standard library; the [browser SDK
+file list](browser-target.md#installing-the-browser-sdk) names every file. The
+compiler embeds the loader into each generated image; applications deploy no
+separate loader file. A page using [copied typed
+values](standard-library-browser.md#copying-typed-values) serves its own copy
+of `titan-protobuf.mjs`. That directory is never inside `lib/titan/0.6/`, and
+native builds never search it.
 
 ### How the rock installs
 
@@ -746,6 +749,12 @@ installation in that tree. You cannot remove one version.
 the recorded executable, then `luarocks` on `PATH`. Plain `luarocks remove titan` leaves
 Titan's external files in place.
 
+`make uninstall-browser-sdk PREFIX="$PREFIX"`, run from the checkout with the install's
+`ROCKS_TREE` if it has one, removes only the files that `make browser-sdk` installed in
+`lib/titan-browser/0.6/`. Other files there, such as a library archive, stay, and the
+directory goes once nothing else is left in it. A path where an SDK file belongs that is
+not a file stops it before it removes anything.
+
 ## Cleaning a checkout
 
 - `make clean` removes the `out/` tree and generated native build and test artifacts
@@ -761,3 +770,13 @@ Titan's external files in place.
 
 None of these touches other installed prefixes. Delete a throwaway prefix yourself when
 you no longer need it.
+
+## What each command removes
+
+| Command | Removes |
+| --- | --- |
+| `titan-uninstall` | the Titan rock, its native SDK files, and the `make browser-sdk` files in `lib/titan-browser/<ver>/` |
+| `make uninstall-browser-sdk` | the `make browser-sdk` files in `lib/titan-browser/0.6/`, and the directory once it is empty |
+| `make clean` | the checkout's `out/` tree, including `out/browser-sdk` and `out/browser-stdlib`, and its generated build artifacts |
+| `make distclean` | what `make clean` removes, plus the downloaded dependency trees and the checkout-local `.lua` installation |
+| nothing | the browser Lua in `lib/browser/` that `make lua-browser` or the fork's `install-browser` installed: it stays with `PREFIX`'s Lua |

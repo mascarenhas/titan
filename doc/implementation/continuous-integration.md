@@ -249,9 +249,10 @@ jobs begin with the same seven steps:
    `PATH`, proving that the native build never needs the browser toolchain.
 7. **Browser SDK.** With emsdk sourced, the step asserts that
    `lib/titan-browser` is absent or empty, runs `make browser-sdk
-   PREFIX="$PREFIX"`, and asserts the ten installed SDK files listed in the
-   [browser SDK layout](browser-target.md#the-browser-sdk) apart from the
-   LPegLabel archive (`titan-browser-trace.js` included).
+   PREFIX="$PREFIX"`, asserts that every file in the [browser SDK file
+   list](../language/browser-target.md#installing-the-browser-sdk) except the
+   LPegLabel archive is installed, and that `build-profile` holds the job's
+   `TITAN_BUILD_PROFILE`.
 
 `browser-toolchain` then runs:
 
@@ -434,7 +435,8 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
    `.emsdk` (`ubuntu-24.04-<arch>-emsdk-6.0.13-v1`), activates Emscripten 6.0.13,
    and separately installs and qualifies Node 26.13.0 as `TITAN_NODE`. It runs
    `make lua-browser PREFIX="$PREFIX"` and `make browser-sdk PREFIX="$PREFIX"`,
-   asserting the installed `titan-browser-trace.js` and `titan-browser-bridge.js`.
+   asserting the installed `titan-browser-trace.js` and `titan-browser-bridge.js`
+   and that `build-profile` holds the cell's profile.
 3. **Playwright engine provisioning and supervisor check.** `ubicloud/cache@v4`
    restores `PLAYWRIGHT_BROWSERS_PATH` (`.playwright-browsers`) under
    `ubuntu-24.04-<arch>-playwright-1.64.1-<engine>-v1`; `npm install --prefix

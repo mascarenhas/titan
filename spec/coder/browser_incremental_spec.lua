@@ -480,6 +480,8 @@ end
         local keys = { "runtime", "js_library", "bridge_library", "trace_library",
             "loader", "runner", "runner_module", "node_worker", "page", "module_check" }
         for _, key in ipairs(keys) do fixtures.copy(installed[key], assets[key]) end
+        -- The profile record is not a shared input: links check it, not certify it.
+        fixtures.copy(installed.build_profile, assets.build_profile)
         fixtures.write(fixture.source .. "/pair_main.titan",
             "function main(args: {string}): integer return 0 end\n")
         local environment = { TITAN_ROOT = root }

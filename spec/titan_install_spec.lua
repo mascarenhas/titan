@@ -495,6 +495,7 @@ assert(os.remove(arg[0]))
             "lib/titan-browser/0.6/titan-browser-node-worker.mjs",
             "lib/titan-browser/0.6/titan-browser-page.mjs",
             "lib/titan-browser/0.6/titan-browser-module-check.mjs",
+            "lib/titan-browser/0.6/build-profile",
             "lib/titan-browser/0.6/absent-modules",
             "lib/titan-browser/0.6/sdk-digests",
             "lib/titan-browser/0.5/libtitan.a",

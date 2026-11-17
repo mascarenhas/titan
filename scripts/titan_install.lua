@@ -2,10 +2,11 @@ local command, private, tree, lua_dir, luarocks = ...
 local windows = package.config:sub(1, 1) == "\\"
 
 -- Dependencies can live in a selected rock tree separate from the Lua prefix.
-if command == "publish" and tree then
-    package.path = tree .. "/share/lua/5.5/?.lua;" ..
-        tree .. "/share/lua/5.5/?/init.lua;" .. package.path
-    package.cpath = tree .. "/lib/lua/5.5/?." ..
+local dependencies = command == "publish" and tree or command == "uninstall-browser-sdk" and private
+if dependencies then
+    package.path = dependencies .. "/share/lua/5.5/?.lua;" ..
+        dependencies .. "/share/lua/5.5/?/init.lua;" .. package.path
+    package.cpath = dependencies .. "/lib/lua/5.5/?." ..
         (windows and "dll" or "so") .. ";" .. package.cpath
 end
 local lfs = require "lfs"
@@ -360,6 +361,7 @@ installer.browser_sdk_owned = {
     "titan-browser-node-worker.mjs",
     "titan-browser-page.mjs",
     "titan-browser-module-check.mjs",
+    "build-profile",
     "absent-modules",
     "sdk-digests",
 }
@@ -449,7 +451,41 @@ function installer.uninstall(package_dir, program)
     return true
 end
 
-if command then
+-- `make uninstall-browser-sdk`: removes one release's browser SDK files from
+-- `tree` and keeps every other file there, such as an application archive.
+-- The directory goes only when nothing else is left in it.
+function installer.uninstall_browser_sdk(sdk_tree, release)
+    assert(type(release) == "string" and release:match("^%d+[.]%d+$"),
+        "usage: titan_install.lua uninstall-browser-sdk TREE RELEASE")
+    local destination = physical(sdk_tree)
+    local relative = "lib/titan-browser/" .. release
+    local paths = {}
+    for index, name in ipairs(installer.browser_sdk_owned) do
+        contained(destination, relative .. "/" .. name)
+        paths[index] = destination .. "/" .. relative .. "/" .. name
+        local mode = lfs.symlinkattributes(paths[index], "mode")
+        if mode ~= nil and mode ~= "file" and mode ~= "link" then
+            return nil, "browser SDK file is not a file: " .. paths[index]
+        end
+    end
+    for _, path in ipairs(paths) do
+        if lfs.symlinkattributes(path, "mode") then
+            local deleted, message = os.remove(path)
+            if not deleted then return nil, "cannot remove " .. path .. ": " .. tostring(message) end
+        end
+    end
+    lfs.rmdir(destination .. "/" .. relative)
+    lfs.rmdir(destination .. "/lib/titan-browser")
+    return true
+end
+
+if command == "uninstall-browser-sdk" then
+    local removed, err = installer.uninstall_browser_sdk(private, tree)
+    if not removed then
+        io.stderr:write(err, "\n")
+        os.exit(1)
+    end
+elseif command then
     assert(command == "publish", "usage: titan_install.lua publish PACKAGE TREE LUA_PREFIX LUAROCKS")
     installer.publish(private, tree, lua_dir, luarocks)
 end

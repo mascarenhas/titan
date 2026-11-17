@@ -720,7 +720,7 @@ describe("browser providers real toolchain", function()
         local assets = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(prefix))
         local source = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(info.prefix))
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
+                "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
             assert(lfs.link(source[key], assets[key], true))
         end
     end

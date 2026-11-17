@@ -55,7 +55,7 @@ local function cli(info, ...)
         repository .. "/?.lua;" .. repository .. "/?/init.lua;") .. (info.compiler_setup or "")
     local argv = { "env", "TITAN_ROOT=" .. (info.sdk_prefix or info.prefix), "TITAN_TARGET=", "TITAN_PATH_0_6=",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=" .. (info.extra_cflags or ""),
-        "TITAN_EXTRA_LDFLAGS=",
+        "TITAN_EXTRA_LDFLAGS=", "TITAN_BUILD_PROFILE=" .. (info.profile or driver.BUILD_PROFILE),
         info.prefix .. "/bin/lua", "-E", "-e", setup, repository .. "/titanc",
         "-q", "--target", "browser", "--tree", workspace .. "/src", "-o", info.output or workspace .. "/out" }
     for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
@@ -365,8 +365,9 @@ describe("browser image profile and SDK readiness", function()
         local keys = {}
         for key in pairs(assets) do keys[#keys + 1] = key end
         table.sort(keys)
-        assert.same({ "bridge_library", "js_library", "loader", "lpeglabel", "module_check", "node_worker", "page",
-            "provider", "runner", "runner_module", "runtime", "sdk_digests", "trace_library" }, keys)
+        assert.same({ "bridge_library", "build_profile", "js_library", "loader", "lpeglabel", "module_check",
+            "node_worker", "page", "provider", "runner", "runner_module", "runtime", "sdk_digests", "trace_library" },
+            keys)
     end)
 
     it("requires only readable runtime and JS assets, in bootstrap order", function()
@@ -375,10 +376,12 @@ describe("browser image profile and SDK readiness", function()
         local present = {}
         local context = { io = {
             stat = function(_, filename) return present[filename] and { kind = "file" } end,
-            read_file = function(_, filename) return present[filename] and "bytes" end,
+            read_file = function(_, filename)
+                return present[filename] and (filename == assets.build_profile and descriptor.build_profile .. "\n" or "bytes")
+            end,
         } }
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
+                "loader", "runner", "runner_module", "node_worker", "page", "module_check", "build_profile" }) do
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
@@ -691,6 +694,23 @@ describe("browser image profile and SDK readiness", function()
             { header }, { wasm }, {}, context)
         assert.is_true(ok, why)
         assert.equal("/* user header */", read(header))
+    end)
+
+    it("refuses to link under a build profile other than the SDK's", function()
+        local info, why = toolchain.require({ sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/plain.titan", "function main(args: {string}): integer\n    return 0\nend\n")
+        local sdk = read(info.sdk_root .. "/build-profile"):match("^(%l+)\n$")
+        local other = sdk == "production" and "validation" or "production"
+        local result = cli({ prefix = info.prefix, profile = other }, "plain")
+        assert.is_false(result.ok, "a link under another profile was accepted")
+        local log = result.output or result.diagnostic or ""
+        -- The SDK path is the descriptor's spelling of the installation root.
+        assert.truthy(log:find(string.format("/lib/titan-browser/0.6\" was built with the %s profile, but this build " ..
+            "uses %s; set TITAN_BUILD_PROFILE=%s, or build a %s browser SDK in another prefix with " ..
+            "'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=%s'", sdk, other, sdk, other, other), 1, true), log)
+        assert.is_nil(lfs.attributes(workspace .. "/out/plain.mjs"))
     end)
 
     it("refuses a preset link profile that names no purpose", function()

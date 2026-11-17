@@ -287,6 +287,9 @@ elseif action == "stage-runtime" then
     copy_file_atomic(browser_src .. "/titan-browser-node-worker.mjs", assets.node_worker, false)
     copy_file_atomic(browser_src .. "/titan-browser-page.mjs", assets.page, false)
     copy_file_atomic(browser_src .. "/titan-browser-module-check.mjs", assets.module_check, false)
+    -- The archives above follow this profile; links refuse another one.
+    local recorded, record_err = strategy:write_file(assets.build_profile, descriptor.build_profile .. "\n")
+    if not recorded then fail("cannot write '" .. assets.build_profile .. "': " .. tostring(record_err)) end
 
     local rocks_tree = getenv("ROCKS_TREE")
     local ready, ready_err = browserlink.require_sdk(context, descriptor, {
@@ -372,7 +375,7 @@ elseif action == "finalize" then
     end
     for _, key in ipairs({
         "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
-        "runner_module", "node_worker", "page", "module_check", "lpeglabel", "provider",
+        "runner_module", "node_worker", "page", "module_check", "build_profile", "lpeglabel", "provider",
     }) do
         local asset_path = assets[key]
         if lfs.attributes(asset_path, "mode") ~= "file" then

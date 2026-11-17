@@ -271,6 +271,7 @@ prefix`.
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
 | `module_check` | `titan-browser-module-check.mjs` | the [module check](#the-module-check) that the compiler runs on each staged image module |
+| `build_profile` | `build-profile` | the descriptor's `build_profile` and a newline, written by `make browser-sdk` and [checked at every link](#readiness-and-the-missing-sdk-diagnostic); `sdk-digests` records it |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
 | `provider` | `titan.a` | the browser standard provider: fourteen shared roots including `io`, browser compositions of `async`, `timer`, synchronous `lua`, the `os` subset, and the `http` and `websocket` clients, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
@@ -284,6 +285,10 @@ target lacks, one `<module>\t<reason>` line each, which `browser_sdk.lua
 finalize` writes from the [status inventory](#subset-parity-gate). The
 compiler reads it only to word a [missing-module
 diagnostic](#the-absent-module-diagnostic), so `sdk-digests` does not record it.
+The language manual's [browser SDK
+file list](../language/browser-target.md#installing-the-browser-sdk) names every
+installed file once; `installer.browser_sdk_owned` is the same list in code,
+and `spec/browser_sdk_spec.lua` compares it with a fresh SDK build.
 
 None of the five runtime sources is compiled with `-fPIC`, LTO, or
 libbacktrace; their host-only paths compile out under the browser target
@@ -296,9 +301,9 @@ nor the native Lua headers are ever written; the common Titan headers
 
 `browserlink.require_sdk(context, descriptor, install)` checks, in the order
 `runtime`, `js_library`, `bridge_library`, `trace_library`, `loader`, `runner`,
-`runner_module`, `node_worker`, `page`, that each asset is a regular file that
-`context.io` can open and read
-(a bounded read of at most one byte). It executes nothing, reads no manifest, and does
+`runner_module`, `node_worker`, `page`, `module_check`, `build_profile`, that
+each asset is a regular file that `context.io` can open and read (a bounded
+read of at most one byte). It executes nothing, reads no manifest, and does
 not require `lpeglabel`, `provider`, or `sdk_digests`: the initial provider
 publication runs before either exists. The first missing asset returns:
 
@@ -306,6 +311,17 @@ publication runs before either exists. The first missing asset returns:
 browser SDK is incomplete: missing "<path>"; run 'make browser-sdk PREFIX=<prefix>'
 browser SDK is incomplete: missing "<path>"; run 'make browser-sdk PREFIX=<prefix> ROCKS_TREE=<tree>'
 ```
+
+It then reads `build-profile` (at most 33 bytes), which must be exactly a
+valid profile name and a newline (`browser SDK build profile "<path>" is
+invalid; run '<command>'`) and must equal the descriptor's `build_profile`:
+
+```text
+browser SDK "<titan_bin>" was built with the <sdk> profile, but this build uses <build>; set TITAN_BUILD_PROFILE=<sdk>, or build a <build> browser SDK in another prefix with 'make browser-sdk PREFIX=<prefix> TITAN_BUILD_PROFILE=<build>'
+```
+
+The archives in `titan_bin` were compiled under the SDK's profile, so a link
+under the other one would mix two object profiles in one image.
 
 `driver.require_browser_sdk(context)` supplies `install`: `prefix` is
 `driver.INSTALL_PATHS.root` (the descriptor root when unset) and `rocks_tree`
@@ -350,8 +366,9 @@ build directory is `TITAN_BROWSER_BUILD_DIR` (default
    `driver.build_static_archive` (the descriptor's `emar`/`emranlib` and the
    member-verification path), rejects any member that imports a `GOT.*`
    symbol or refers to `dlopen`, `dlsym`, `dlerror`, or a `backtrace_` name,
-   copies the JavaScript and runner assets (the launcher executable), and
-   checks readiness with `browserlink.require_sdk` and
+   copies the JavaScript and runner assets (the launcher executable), writes
+   the descriptor's profile and a newline to `build-profile`, and checks
+   readiness with `browserlink.require_sdk` and
    `driver.browser_node_ready` against the staged runner.
 4. `titanc --target browser --output <build> --source-first --incremental
    -X <titan_bin>/libtitan-lpeglabel.a <BROWSER_STDLIB_ROOTS>` publishes
@@ -4367,7 +4384,10 @@ hosts`).
   `make browser-sdk` into an empty root with poisoned ambient `CPPFLAGS` and
   `TITAN_EXTRA_CPPFLAGS`, the twenty-one-module provider whose non-compiler
   members are exactly the five LPegLabel objects, differing roots, digest
-  order and contents, and the standalone `-shared-mem` archive regression.
+  order and contents, the standalone `-shared-mem` archive regression, the
+  readiness order with the `build-profile` record's mismatch and invalid
+  forms, and `make uninstall-browser-sdk` against a synthesized SDK holding a
+  user archive (kept files, empty-directory pruning, refusal before removal).
 * `spec/browser_stdlib_spec.lua` (emsdk-free) and
   `spec/coder/browser_stdlib_closure_spec.lua` — the [dependency-closure
   check](#the-dependency-closure-check) and its negative fixtures, the
