@@ -4340,15 +4340,23 @@ table.
 `titan.http`. Its `Site` record holds the folder's canonical path. A request
 path is split on `/` and each segment percent-decoded before it is checked,
 so `%2e%2e`, an encoded `/` (`%2F`), a backslash and NUL are refused with 403
-whatever their spelling; the server then serves only a regular file whose
-canonical path (`fs.realpath`) lies below the folder's, which also refuses a
-symbolic link that leads outside. A response to `HEAD` sets
-`Content-Length` and writes no body, as `titan.http` requires. The native
-owner `spec/fixtures/browser_docs/http_dev_server_test.titan` imports the
-server's source (`import "http-dev-server.titan"`), serves a scratch folder
-on a loopback port in its own Task, and checks content types, `HEAD`,
-methods, directories, traversal and symbolic links through the public HTTP
-client, plus `main`'s usage and busy-port statuses. The docs spec copies the
+whatever their spelling. `Site:lookup` then checks that the path's canonical
+form (`fs.realpath`) is the folder or lies below it before anything else,
+including the redirect of a folder path without a trailing `/`, so a symbolic
+link that leads outside is refused with 403 whether it names a file or a
+folder. The redirect's location starts at the path's first name, so `//docs`
+cannot become a protocol-relative `//docs/`. `fs.stat` returns nil only for a
+missing file; lookup errors that mean no file is there (`ENOTDIR`, `ELOOP`,
+`ENAMETOOLONG`) answer 404 and permission errors (`EACCES`, `EPERM`) 403, so
+these requests get a response rather than ending their connection Task with
+an error. A response to `HEAD` sets `Content-Length` and writes no body, as
+`titan.http` requires. The native owner
+`spec/fixtures/browser_docs/http_dev_server_test.titan` imports the server's
+source (`import "http-dev-server.titan"`), serves a scratch folder on a
+loopback port in its own Task, and checks content types, `HEAD`, methods,
+directories, traversal, symbolic links and lookup errors through the public
+HTTP client, plus `main`'s usage and busy-port statuses. Its unreadable-folder
+case has nothing to check when the superuser runs it. The docs spec copies the
 two files into one source tree and builds them with `--test`, so the
 standard-library test tree never resolves modules from the manual.
 

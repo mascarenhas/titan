@@ -44,7 +44,7 @@ describe("browser chapter examples", function()
         assert.is_true(result.ok, result.output)
         local ran = tonumber(result.output:match("%[==========%] (%d+) tests ran%."))
         local passed = tonumber(result.output:match("%[  PASSED  %] (%d+) tests%."))
-        assert.truthy(ran and ran >= 36, result.output)
+        assert.truthy(ran and ran >= 44, result.output)
         assert.equal(ran, passed, result.output)
     end)
 

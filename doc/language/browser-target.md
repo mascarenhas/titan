@@ -148,9 +148,10 @@ Titan counts 3
 The server listens on `127.0.0.1` only and answers `GET` and `HEAD`; other
 methods get 405. A folder serves its `index.html`. It refuses with 403 a path
 that leaves the folder, through `..` (percent-encoded or not) or a symbolic
-link, and answers 404 for anything else that is not a file. Every response
-carries `Content-Length` and `Cache-Control: no-store`, so a reload always
-fetches the files you just rebuilt. When the port is taken it prints
+link, or that it has no permission to read, and answers 404 for anything else
+that is not a file. Every response carries `Content-Length` and
+`Cache-Control: no-store`, so a reload always fetches the files you just
+rebuilt. When the port is taken it prints
 `http-dev-server: port 8000 is already in use` and exits with status 1. It
 is a development server: `titan.http` speaks HTTP/1.1 only, without HTTP/2,
 so host a public site with a production web server.

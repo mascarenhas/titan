@@ -72,7 +72,47 @@ local function Site:file_for(request_path: string): string?
 end
 
 local function Site:contains(file: string): boolean
-  return string.sub(file, 1, #self.prefix) == self.prefix
+  return file == self.root or string.sub(file, 1, #self.prefix) == self.prefix
+end
+
+-- The kind of the file at `file` ("file", "directory", ...), "outside" when a
+-- symbolic link leads it out of the folder, or nil when nothing is there.
+local function Site:kind_of(file: string): string?
+  local info? = fs.stat(file)
+  if not info then return nil end
+  if not self:contains(fs.realpath(file)) then return "outside" end
+  return info.kind
+end
+
+-- The answer to a request path: 200 with the file and its contents, 301 with
+-- the location of a folder's index, or a refusal status.
+local function Site:lookup(request_path: string): (integer, string?, string?)
+  local file? = self:file_for(request_path)
+  if not file then return 403, nil, nil end
+  local kind? = self:kind_of(file)
+  if kind == "directory" then
+    if string.sub(request_path, -1) ~= "/" then
+      -- From the first name on: extra leading slashes would make the location
+      -- a protocol-relative URL that names another host.
+      return 301, "/" .. string.match(request_path, "[^/].*"):whole() .. "/", nil
+    end
+    file = path.join(file, "index.html")
+    kind = self:kind_of(file)
+  end
+  if kind == "outside" then return 403, nil, nil end
+  if kind ~= "file" then return 404, nil, nil end
+  return 200, file, fs.read_file(file)
+catch
+  -- No file the server may send: a file used as a folder, a symbolic link
+  -- loop, a name that is too long, or a file or folder it may not read.
+  if error is async.OperationError then
+    local name = (error as async.OperationError).name
+    if name == "EACCES" or name == "EPERM" then return 403, nil, nil end
+    if name == "ENOENT" or name == "ENOTDIR" or name == "ELOOP" or name == "ENAMETOOLONG" then
+      return 404, nil, nil
+    end
+  end
+  raise
 end
 
 local function Site:serve(request: http.Request, response: http.Response)
@@ -81,32 +121,18 @@ local function Site:serve(request: http.Request, response: http.Response)
     refuse(request, response, 405, "405 Method Not Allowed")
     return
   end
-  local file? = self:file_for(request.url.path)
-  if not file then
+  local status, target?, contents? = self:lookup(request.url.path)
+  if status == 200 then
+    local content_type = content_types[path.extension(target)] or "application/octet-stream"
+    respond(request, response, 200, content_type, contents)
+  elseif status == 301 then
+    response:set_header("Location", target)
+    refuse(request, response, 301, "301 Moved Permanently")
+  elseif status == 403 then
     refuse(request, response, 403, "403 Forbidden")
-    return
-  end
-  local info? = fs.stat(file)
-  if info and info.kind == "directory" then
-    if string.sub(request.url.path, -1) ~= "/" then
-      response:set_header("Location", request.url.path .. "/")
-      refuse(request, response, 301, "301 Moved Permanently")
-      return
-    end
-    file = path.join(file, "index.html")
-    info = fs.stat(file)
-  end
-  if not info or info.kind ~= "file" then
+  else
     refuse(request, response, 404, "404 Not Found")
-    return
   end
-  -- A symbolic link can still lead out of the folder.
-  if not self:contains(fs.realpath(file)) then
-    refuse(request, response, 403, "403 Forbidden")
-    return
-  end
-  local content_type = content_types[path.extension(file)] or "application/octet-stream"
-  respond(request, response, 200, content_type, fs.read_file(file))
 end
 
 -- The listening server, or nil when the port is taken.
@@ -122,7 +148,7 @@ end
 function main(args: {string}): integer
   local folder? = args[1]
   local port? = math.tointeger(args[2] or "8000")
-  if not folder or not port or port < 1 or port > 65535 then
+  if #args > 2 or not folder or not port or port < 1 or port > 65535 then
     os.stderr:write("usage: http-dev-server FOLDER [PORT]\n")
     return 2
   end

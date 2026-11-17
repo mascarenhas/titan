@@ -93,6 +93,7 @@ local function open_fixture(context: test.Context): Fixture
   symlink("app.mjs", path.join(site, "alias.mjs"))
   symlink(path.join("..", "secret.txt"), path.join(site, "escape.txt"))
   symlink("..", path.join(site, "up"))
+  symlink("loop", path.join(site, "loop"))
   return Fixture(base, site, serve(context, site))
 end
 
@@ -106,7 +107,7 @@ end
 
 local function expect_file(context: test.Context, fixture: Fixture, name: string,
                            target: string, file: string, content_type: string)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     local reply = fetch(fixture, "GET", target)
     local contents = fs.read_file(path.join(fixture.site, file))
     test.assert(reply.status == 200, target .. " answered " .. reply.status)
@@ -122,7 +123,7 @@ end
 
 local function expect_status(context: test.Context, fixture: Fixture, name: string,
                              method: string, target: string, status: integer)
-  context:run(name, function (_child: test.Context)
+  context:run(name, function (_: test.Context)
     local reply = fetch(fixture, method, target)
     test.assert(reply.status == status,
                 method .. " " .. target .. " answered " .. reply.status .. ", not " .. status)
@@ -150,7 +151,7 @@ end
 
 function test_head_sends_length_without_body(context: test.Context)
   local fixture = open_fixture(context)
-  context:run("file", function (_child: test.Context)
+  context:run("file", function (_: test.Context)
     local reply = fetch(fixture, "HEAD", "/app.wasm")
     test.assert(reply.status == 200, "HEAD /app.wasm answered " .. reply.status)
     test.assert(reply.body == "", "HEAD /app.wasm carried a body")
@@ -159,7 +160,7 @@ function test_head_sends_length_without_body(context: test.Context)
     test.assert(reply.headers:get("Content-Type") == "application/wasm",
                 "HEAD /app.wasm has the wrong Content-Type")
   end)
-  context:run("missing", function (_child: test.Context)
+  context:run("missing", function (_: test.Context)
     local reply = fetch(fixture, "HEAD", "/missing.html")
     test.assert(reply.status == 404, "HEAD /missing.html answered " .. reply.status)
     test.assert(reply.body == "", "HEAD /missing.html carried a body")
@@ -170,10 +171,10 @@ end
 
 function test_other_methods_are_refused(context: test.Context)
   local fixture = open_fixture(context)
-  local methods: {string} = {"POST", "PUT", "DELETE", "OPTIONS"}
+  local methods = {"POST", "PUT", "DELETE", "OPTIONS"}
   for index = 1, #methods do
     local method = methods[index]
-    context:run(method, function (_child: test.Context)
+    context:run(method, function (_: test.Context)
       local reply = fetch(fixture, method, "/index.html")
       test.assert(reply.status == 405, method .. " answered " .. reply.status)
       test.assert(reply.headers:get("Allow") == "GET, HEAD", method .. " lacks Allow: GET, HEAD")
@@ -183,10 +184,17 @@ end
 
 function test_directories(context: test.Context)
   local fixture = open_fixture(context)
-  context:run("redirect", function (_child: test.Context)
+  context:run("redirect", function (_: test.Context)
     local reply = fetch(fixture, "GET", "/docs")
     test.assert(reply.status == 301, "/docs answered " .. reply.status)
     test.assert(reply.headers:get("Location") == "/docs/", "/docs redirects elsewhere")
+  end)
+  -- `//docs/` would be a protocol-relative location naming the host "docs".
+  context:run("redirect_double_slash", function (_: test.Context)
+    local reply = fetch(fixture, "GET", "//docs")
+    test.assert(reply.status == 301, "//docs answered " .. reply.status)
+    test.assert(reply.headers:get("Location") == "/docs/",
+                "//docs redirects to " .. (reply.headers:get("Location") or "nil"))
   end)
   expect_file(context, fixture, "index", "/docs/", path.join("docs", "index.html"),
               "text/html; charset=utf-8")
@@ -204,7 +212,49 @@ function test_paths_stay_inside_the_folder(context: test.Context)
   expect_status(context, fixture, "nul", "GET", "/index.html%00.txt", 403)
   expect_status(context, fixture, "file_symlink", "GET", "/escape.txt", 403)
   expect_status(context, fixture, "directory_symlink", "GET", "/up/secret.txt", 403)
+  expect_status(context, fixture, "directory_symlink_itself", "GET", "/up", 403)
+  expect_status(context, fixture, "directory_symlink_index", "GET", "/up/", 403)
   expect_status(context, fixture, "missing", "GET", "/secret.txt", 404)
+end
+
+-- Paths that the file system refuses to look up answer like missing files.
+function test_unusable_paths(context: test.Context)
+  local fixture = open_fixture(context)
+  expect_status(context, fixture, "file_as_folder", "GET", "/index.html/inside.txt", 404)
+  expect_status(context, fixture, "symlink_loop", "GET", "/loop", 404)
+  expect_status(context, fixture, "name_too_long", "GET", "/" .. string.rep("n", 300), 404)
+end
+
+local function change_mode(file: string, mode: string)
+  local process = os.spawn("chmod", {mode, file}, os.with_parent_stdin,
+                           os.with_parent_stdout, os.with_parent_stderr)
+  test.assert(process:wait().code == 0, "chmod " .. mode .. " " .. file .. " failed")
+end
+
+-- Whether looking `file` up is permitted, as it always is for the superuser.
+local function searchable(file: string): boolean
+  fs.stat(file)
+  return true
+catch
+  if error is async.OperationError and (error as async.OperationError).name == "EACCES" then
+    return false
+  end
+  raise
+end
+
+-- A folder that the server may not search is refused.
+function test_unreadable_folder(context: test.Context)
+  local fixture = open_fixture(context)
+  local locked = path.join(fixture.site, "locked")
+  fs.mkdir(locked)
+  fs.write_file(path.join(locked, "inside.txt"), "inside\n")
+  change_mode(locked, "000")
+  context:cleanup(function () change_mode(locked, "755") end)
+  if searchable(path.join(locked, "inside.txt")) then
+    context:log("the superuser can search the locked folder: nothing to check")
+    return
+  end
+  expect_status(context, fixture, "locked", "GET", "/locked/inside.txt", 403)
 end
 
 function test_busy_port(context: test.Context)
@@ -221,7 +271,7 @@ end
 function test_usage(context: test.Context)
   local base = scratch_folder(context)
   local cases: {{string}} = {{}, {base, "http"}, {base, "0"}, {base, "70000"},
-                             {path.join(base, "missing")}}
+                             {path.join(base, "missing")}, {base, "8000", "extra"}}
   context:log("BEGIN expected http-dev-server diagnostics")
   local statuses: {integer} = {}
   for index = 1, #cases do statuses[index] = dev.main(cases[index]) end

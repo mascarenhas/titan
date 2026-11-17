@@ -37,27 +37,28 @@ async function nodeDefault() {
 }
 
 // Start the documented server on the first free port of a fixed range; it
-// exits with status 1 when a port is taken.
+// exits with status 1 and a diagnostic on stderr when a port is taken.
 async function serve(folder) {
   for (let port = 28500; port < 28600; port++) {
     const server = spawn(join(workspace, 'http-dev-server'), [folder, String(port)],
       {cwd: workspace, stdio: ['ignore', 'pipe', 'pipe']});
     let output = '';
+    let diagnostics = '';
     const outcome = await new Promise(resolve => {
-      const listen = bytes => {
+      server.stdout.on('data', bytes => {
         output += bytes;
         if (output.includes('\n')) resolve('ready');
-      };
-      server.stdout.on('data', listen);
-      server.stderr.on('data', listen);
-      server.once('exit', code => resolve(code));
+      });
+      server.stderr.on('data', bytes => { diagnostics += bytes; });
+      // 'close' comes after the exit and the end of both pipes.
+      server.once('close', code => resolve(code));
     });
     if (outcome === 'ready') {
       assert.equal(output, `Serving ${folder} at http://127.0.0.1:${port}/\n`);
       return {server, url: `http://127.0.0.1:${port}/`};
     }
-    assert.equal(outcome, 1, output);
-    assert.equal(output, `http-dev-server: port ${port} is already in use\n`);
+    assert.equal(outcome, 1, output + diagnostics);
+    assert.equal(output + diagnostics, `http-dev-server: port ${port} is already in use\n`);
   }
   throw new Error('no free port in 28500-28599');
 }
