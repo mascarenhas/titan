@@ -138,7 +138,7 @@ local function prepare(info)
     local source = browserlink.sdk_assets(fixtures.paths(info.prefix))
     local destination = browserlink.sdk_assets(fixtures.paths(prefix))
     for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-            "loader", "runner", "runner_module", "node_worker", "page" }) do
+            "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
         files.copy(source[key], destination[key])
     end
     -- The source launcher is executable; binary copying alone does not retain it.

@@ -64,8 +64,9 @@ The loader's parts:
 | `titan:websocket` SDK source | Per connection, the `WebSocket` object, its three named listeners, and one holder object per received message until Titan takes or closes it | The host `WebSocket` object, its event listeners, and its `readyState` and `bufferedAmount` |
 
 `titan-browser-run.mjs`, `titan-browser-page.mjs`, and
-`titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner):
-host tooling outside the image.
+`titan-browser-node-worker.mjs` are [the runner](browser-target.md#the-runner),
+and `titan-browser-module-check.mjs` is the compiler's [module
+check](browser-target.md#the-module-check): host tooling outside the image.
 
 ## Generated launcher and foreign-function trampolines
 

@@ -359,6 +359,7 @@ installer.browser_sdk_owned = {
     "titan-browser-run.mjs",
     "titan-browser-node-worker.mjs",
     "titan-browser-page.mjs",
+    "titan-browser-module-check.mjs",
     "absent-modules",
     "sdk-digests",
 }

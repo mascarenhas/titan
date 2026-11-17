@@ -241,8 +241,10 @@ Authored JavaScript is the embedded loader
 `titan-browser-trace.js`), an `EM_JS` or `EM_ASM` block in a C helper, and
 JavaScript text that the compiler emits. [Source
 ownership](browser-bridge.md#javascript-files) records what each shipped file
-owns. The runner (`titan-browser-run.mjs` with its page and worker scripts) is
-host tooling outside the image, reviewed as an ordinary Node program.
+owns. The runner (`titan-browser-run.mjs` with its page and worker scripts)
+and the compiler's module check (`titan-browser-module-check.mjs`, which needs
+a JavaScript parser) are host tooling outside the image, reviewed as ordinary
+Node programs.
 
 A review counts the authored JavaScript lines that a diff adds and names, for
 each added function or block, the host capability that requires it:

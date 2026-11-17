@@ -1144,7 +1144,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         local assets = browserlink.sdk_assets({ titan_bin = "sdk", libtitan = "sdk/libtitan.a",
             sdk_digests = "sdk/sdk-digests" })
         for _, key in ipairs({ "js_library", "bridge_library", "trace_library", "loader",
-                "runner", "runner_module", "node_worker", "page" }) do
+                "runner", "runner_module", "node_worker", "page", "module_check" }) do
             derived[#derived + 1] = "titan-runtime/browser/" .. assets[key]:match("[^/\\]+$")
         end
         for _, expected in ipairs(derived) do

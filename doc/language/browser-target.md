@@ -266,6 +266,7 @@ TITAN_NODE to a Node 26 or newer executable`. The SDK installs into
 | `titan-browser-library.js`, `titan-browser-bridge.js`, `titan-browser-trace.js` | the Emscripten JavaScript libraries that Titan-entry browser images link (channels, protected bridge imports, admission, eager trace-map loading, and stack capture) |
 | `titan-protobuf.mjs` | the standalone [portable-codec peer](standard-library-browser.md#copying-typed-values), served separately by a page rather than embedded in its image |
 | `titan-browser-run`, `titan-browser-run.mjs`, `titan-browser-node-worker.mjs`, `titan-browser-page.mjs` | the [test runner](#testing-with-titan-browser-run) |
+| `titan-browser-module-check.mjs` | the [module check](#c-helpers-and-emscripten-apis) that `titanc` runs on each linked image module, under emcc's Node with emcc's acorn parser |
 | `absent-modules` | the [standard modules that are not available](#modules-that-are-not-available) and the reasons their browser imports report |
 | `sdk-digests` | content digests of the browser SDK, written last |
 
@@ -575,25 +576,34 @@ into C runs the callback synchronously. To run Titan code there, pin a
 handler and call `titan_browser_call_sync`
 ([synchronous C callbacks](standard-library-browser.md#synchronous-c-callbacks)).
 
-`EM_JS` and `EM_ASM` code becomes part of the generated module, which must
-not import Node modules (see [the loader API](#the-loader-api)). Titan
-refuses to link a module whose code calls `require` or holds a string that
-starts with `node:`; comments and other strings may mention either:
+`EM_JS` and `EM_ASM` code becomes part of the generated module, which is
+self-contained: it loads no other module. Titan parses each linked module and
+refuses one that imports or re-exports a module, calls `import()`, uses
+`require`, or calls `process.getBuiltinModule` for anything beyond the `fs`,
+`path` and `url` modules that Emscripten's Node support reads. To use other
+JavaScript, including another ES module of the page, pass it to Titan as a
+`create({bindings})` value and call it through
+[`titan.browser`](standard-library-browser.md). Comments and strings may
+mention any of these. The refusal names the construct, its line in the
+generated module, and the code there:
 
 ```text
-browser image module calls require("fs") at line 1840; the deployed module must not import Node modules
-browser image module imports Node built-in "node:fs" at line 1840; the deployed module must not import Node modules
+browser image module uses dynamic import() at line 1840 (import('./page.mjs')); the image module is self-contained; pass page JavaScript to Titan as create({bindings}) values through titan.browser
+browser image module uses require at line 1840 (require); browser images load no Node module; pass page JavaScript to Titan as create({bindings}) values through titan.browser
 ```
+
+The check keeps generated and `EM_JS` code to what a page, a bundler and Node
+can all load; it is not a sandbox for code written to evade it.
 
 ## The loader API
 
 Every generated program or test ES module exports one default
 `create(options = {})` function. Import that function directly; the raw
 Emscripten factory and Module are private. The same image works over HTTP, in
-a bundler such as Vite, and in Node 26+. The module imports no Node module:
-under Node it reaches Node's file and path modules through
-`process.getBuiltinModule`, so neither a bundler nor a page sees a `node:`
-import or a `require` call:
+a bundler such as Vite, and in Node 26+. The module imports nothing: under
+Node it reaches Node's file and path modules through
+`process.getBuiltinModule`, so neither a bundler nor a page sees an import or
+a `require` call:
 
 ```javascript
 import create from "./out/app.mjs";

@@ -271,38 +271,89 @@ describe("browser image profile and SDK readiness", function()
         end
     end)
 
-    it("refuses every Node import left in the module and ignores Node names in prose", function()
+    it("refuses a Node shell that it recognizes only in part", function()
         local loader = "export function create(factory, options) { return options; }\n"
-        local function embed(body)
-            return browserlink.embed("async function Module(options) { return options; }\n" .. body ..
-                "\nexport default Module;\n", loader, "app.wasm", IDENTITY)
+        -- An unrecognized printing of one statement would leave its `require`.
+        local shell = "if (ENVIRONMENT_IS_NODE) {\n" ..
+            "  const { createRequire } = await import('node:module');\n" ..
+            "  var require = createRequire((import.meta.url));\n}\n" ..
+            "if (ENVIRONMENT_IS_NODE) {\n  var fs = require('node:fs');\n" ..
+            "  scriptDirectory = require('node:path').dirname(require('node:url').fileURLToPath(_scriptName)) + '/';\n}\n"
+        local embedded, err = browserlink.embed(shell .. "\nexport default Module;\n", loader, "app.wasm", IDENTITY)
+        assert.is_nil(embedded)
+        assert.equal("browser image has an unrecognized Emscripten Node shell", err)
+    end)
+
+    it("refuses every way a module loads another and accepts look-alike prose", function()
+        local info, why = toolchain.require(); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        local context = { io = compiler_io.new_sync() }
+        local tools = { location = require("titan-compiler.path").dirname(info.tools.cc[1]) }
+        local checker = repository .. "/titan-runtime/browser/titan-browser-module-check.mjs"
+        local module = workspace .. "/module.mjs"
+        local function check(body)
+            files.write(module, "async function Module(options) { return options; }\n" .. body ..
+                "\nexport default function create() {}\n")
+            return browserlink.check_module(context, tools, checker, module)
         end
-        local suffix = "; the deployed module must not import Node modules"
+        local bridge = "pass page JavaScript to Titan as create({bindings}) values through titan.browser"
+        local self_contained = "the image module is self-contained; " .. bridge
+        local no_node = "browser images load no Node module; " .. bridge
+        local builtin = 'uses getBuiltinModule beyond the shell\'s "fs", "path" and "url" calls'
         for _, case in ipairs({
-            { "import fs from 'node:fs';", 'imports Node built-in "node:fs" at line 2' .. suffix },
-            { 'const m = await import("node:module");', 'imports Node built-in "node:module" at line 2' .. suffix },
-            { "const m = import(`node:${name}`);", 'imports Node built-in "node:" at line 2' .. suffix },
-            { "var os = require('os');", 'calls require("os") at line 2' .. suffix },
-            { "var named = require /* call */ (name);", "calls require at line 2" .. suffix },
-            { "var direct = module.require(\"node:fs\");", 'calls require("node:fs") at line 2' .. suffix },
-            -- The scan stays in step after a quote inside a regular expression
-            -- and braces inside a template substitution.
-            { "const quote = /['\"`]/g;\nrequire('fs');", 'calls require("fs") at line 3' .. suffix },
-            { "const text = `a ${ {b: '}'}.b } c`;\nrequire('fs');", 'calls require("fs") at line 3' .. suffix },
-            { "const broken = 'node", "has an unterminated string at line 2" },
+            -- A postfix operator, a statement header and a block before `/`
+            -- decide between division and a regular expression.
+            { "let a = 1, b = 2, x = a++ / b; require('fs'); let q = a / b;", "uses require at line 2 (require)", no_node },
+            { "if (a) /'/.test(b); import('node:fs'); if (b) /'/.test(a);",
+                "uses dynamic import() at line 2 (import('node:fs'))", self_contained },
+            { "if (a) { b() }\n/'/.test(a); require('fs');", "uses require at line 3 (require)", no_node },
+            { "const s = 'a\\\r\nb'; require('fs');", "uses require at line 3 (require)", no_node },
+            -- Escaped specifiers name the same module.
+            { 'import("\\x6eode:fs");', 'uses dynamic import() at line 2 (import("\\x6eode:fs"))', self_contained },
+            { 'import("\\u{6e}ode:fs");', 'uses dynamic import() at line 2 (import("\\u{6e}ode:fs"))', self_contained },
+            { 'import("node\\:fs");', 'uses dynamic import() at line 2 (import("node\\:fs"))', self_contained },
+            { "import(`\\x6eode:${name}`);", "uses dynamic import() at line 2 (import(`\\x6eode:${name}`))", self_contained },
+            { "import('./page.mjs');", "uses dynamic import() at line 2 (import('./page.mjs'))", self_contained },
+            -- Every spelling of a call through `require`, and an alias.
+            { "(require)('fs');", "uses require at line 2 (require)", no_node },
+            { "(0, require)('fs');", "uses require at line 2 (require)", no_node },
+            { "require?.('fs');", "uses require at line 2 (require)", no_node },
+            { "require`fs`;", "uses require at line 2 (require)", no_node },
+            { "const load = require; load('fs');", "uses require at line 2 (require)", no_node },
+            { "(module.require)('node:fs');", "reads require at line 2 (module.require)", no_node },
+            { "module['require']('fs');", "reads require at line 2 (module['require'])", no_node },
+            { "const { require: load } = module;", "reads require at line 2 (require: load)", no_node },
+            { "process.getBuiltinModule('os');", builtin .. " at line 2 (process.getBuiltinModule('os'))", no_node },
+            { "process.getBuiltinModule('node:fs');",
+                builtin .. " at line 2 (process.getBuiltinModule('node:fs'))", no_node },
+            { "process.getBuiltinModule(name);", builtin .. " at line 2 (process.getBuiltinModule(name))", no_node },
+            { "const get = process.getBuiltinModule; get('fs');",
+                builtin .. " at line 2 (process.getBuiltinModule)", no_node },
+            { "const { getBuiltinModule } = process;", builtin .. " at line 2 (getBuiltinModule)", no_node },
+            { "import fs from 'node:fs';", "imports \"node:fs\" at line 2 (import fs from 'node:fs';)", self_contained },
+            { "import './page.mjs';", "imports \"./page.mjs\" at line 2 (import './page.mjs';)", self_contained },
+            { "export * from './page.mjs';", "re-exports from \"./page.mjs\" at line 2 (export * from './page.mjs';)",
+                self_contained },
+            { "export { value } from './page.mjs';",
+                "re-exports from \"./page.mjs\" at line 2 (export { value } from './page.mjs';)", self_contained },
         }) do
-            local embedded, err = embed(case[1])
-            assert.is_nil(embedded, case[1])
-            assert.equal("browser image module " .. case[2], err)
+            local ok, err = check(case[1])
+            assert.is_nil(ok, case[1])
+            assert.equal("browser image module " .. case[2] .. "; " .. case[3], err)
         end
-        assert(embed(table.concat({
-            "// We need to use `createRequire()` to construct the require()` function.",
-            "/* const fs = await import('node:fs'); */",
-            "const help = 'pass require(\"node:fs\") nothing';",
-            "const ratio = total / 2 / count;",
-            "const options = { requireTrace: true, require: false };",
-            "if (typeof require == 'undefined') ok = /node:/.test(text);",
+        local ok, err = check("const broken = 'node")
+        assert.is_nil(ok)
+        assert.equal("browser image module does not parse as an ES module: Unterminated string constant (2:15)", err)
+        assert.is_true(check(table.concat({
+            "// We need `createRequire()` to construct the require() function; import('node:fs').",
+            "/* const fs = await import('node:fs'); require('fs'); */",
+            "const help = 'pass require(\"node:fs\") nothing', ratio = total / 2 / count;",
+            "const options = { require: false, requireTrace: true }, more = options.requires;",
+            "const quote = /['\"`]/g, text = `a ${ {b: '}'}.b } c`;",
+            "here: for (;;) break here;",
+            "const url = new URL('app.wasm', import.meta.url);",
             "var fs = process.getBuiltinModule('fs');",
+            "var directory = process.getBuiltinModule(\"path\").dirname(process.getBuiltinModule(\"url\").fileURLToPath(url));",
         }, "\n")))
     end)
 
@@ -314,8 +365,8 @@ describe("browser image profile and SDK readiness", function()
         local keys = {}
         for key in pairs(assets) do keys[#keys + 1] = key end
         table.sort(keys)
-        assert.same({ "bridge_library", "js_library", "loader", "lpeglabel", "node_worker", "page", "provider",
-            "runner", "runner_module", "runtime", "sdk_digests", "trace_library" }, keys)
+        assert.same({ "bridge_library", "js_library", "loader", "lpeglabel", "module_check", "node_worker", "page",
+            "provider", "runner", "runner_module", "runtime", "sdk_digests", "trace_library" }, keys)
     end)
 
     it("requires only readable runtime and JS assets, in bootstrap order", function()
@@ -327,7 +378,7 @@ describe("browser image profile and SDK readiness", function()
             read_file = function(_, filename) return present[filename] and "bytes" end,
         } }
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page" }) do
+                "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
             local found, err = browserlink.require_sdk(context, descriptor, { prefix = "/prefix", rocks_tree = "/rocks" })
             assert.is_nil(found)
             assert.equal("browser SDK is incomplete: missing " .. string.format("%q", assets[key]) ..
@@ -907,6 +958,35 @@ describe("real browser test image", function()
         local program_link = command(program_log, "program_image.mjs'", "'--no-entry'")
         assert.is_nil(program_link:find("'-fno-inline'", 1, true), program_link)
         assert.is_nil(program_link:find("--skip-pass", 1, true), program_link)
+    end)
+
+    -- Runs in both installations (CI's production cell selects it by name), so
+    -- each profile links a real image through the module check.
+    it("checks the linked module: accepts a real image and refuses an EM_JS import", function()
+        local info, why = toolchain.require({ node = true, sdk = true }); if not info then pending(why) return end
+        workspace = temporary.name(); assert(os.remove(workspace)); files.mkdir(workspace)
+        files.mkdir(workspace .. "/src")
+        files.write(workspace .. "/src/checked.titan", "function main(args: {string}): integer\n    return #args\nend\n")
+        local helper = workspace .. "/helper.c"
+        local function link(body)
+            files.write(helper, "#include <emscripten.h>\nEM_JS(int, page_value, (void), {\n" .. body ..
+                "\n});\n__attribute__((constructor)) static void load(void) { page_value(); }\n")
+            return cli(info, "--c-source", helper, "checked")
+        end
+        local result = link("  import('./page.mjs');\n  return 1;")
+        assert.is_false(result.ok, "an EM_JS dynamic import was published")
+        local log = result.output or result.diagnostic or ""
+        assert.truthy(log:find("browser image module uses dynamic import() at line ", 1, true), log)
+        assert.truthy(log:find("(import('./page.mjs')); the image module is self-contained; pass page " ..
+            "JavaScript to Titan as create({bindings}) values through titan.browser", 1, true), log)
+        for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.trace", ".wasm.map" }) do
+            assert.is_nil(lfs.attributes(workspace .. "/out/checked" .. suffix), suffix)
+        end
+        result = link("  return globalThis.pageValue ?? 1;")
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        for _, suffix in ipairs({ ".mjs", ".wasm", ".wasm.trace", ".wasm.map" }) do
+            assert.equal("file", lfs.attributes(workspace .. "/out/checked" .. suffix, "mode"), suffix)
+        end
     end)
 
     it("raises the five dynamic-provider guard diagnostics without native loader imports", function()

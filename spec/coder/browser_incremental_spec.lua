@@ -477,7 +477,7 @@ end
         local assets = browserlink.sdk_assets(driver.installed_paths(root, "browser"))
         local installed = browserlink.sdk_assets(driver.installed_paths(info.prefix, "browser"))
         local keys = { "runtime", "js_library", "bridge_library", "trace_library",
-            "loader", "runner", "runner_module", "node_worker", "page" }
+            "loader", "runner", "runner_module", "node_worker", "page", "module_check" }
         for _, key in ipairs(keys) do fixtures.copy(installed[key], assets[key]) end
         fixtures.write(fixture.source .. "/pair_main.titan",
             "function main(args: {string}): integer return 0 end\n")

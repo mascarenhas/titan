@@ -538,11 +538,14 @@ each on a four-vCPU runner with a 60-minute timeout after `build-compiler`:
 10. **Production-only pins (`production` × `chromium` only).** With
    `TITAN_REQUIRE_BROWSER_TOOLCHAIN=1` and `TITAN_PROBE_CACHE_DISABLE=1`,
    `"$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua
-   --filter="keeps frame flags on test owners"` runs the pin that observes the
-   production object and link profile from a real production installation
+   --filter="keeps frame flags on test owners" --filter="checks the linked
+   module"` runs the pin that observes the production object and link profile
+   from a real production installation, and the [module
+   check](browser-target.md#the-module-check) case on a real production image
    (`$RUNNER_TEMP/browser-production-pins.log`). A validation installation
-   cannot stand in for it, so it is pending in every validation run, including
-   the `browser-stdlib` job.
+   cannot stand in for the pin, so it is pending in every validation run,
+   including the `browser-stdlib` job; the module check case runs there too,
+   on a validation image.
 11. **Production trace gate on Node (same cell).** Node is the binding engine
    for the [browser C-call limit](browser-target.md#the-browser-c-call-limit),
    and the `browser-toolchain` job's Node gate runs a validation installation

@@ -168,6 +168,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
             runner_module = expected_bin .. "/titan-browser-run.mjs",
             node_worker = expected_bin .. "/titan-browser-node-worker.mjs",
             page = expected_bin .. "/titan-browser-page.mjs",
+            module_check = expected_bin .. "/titan-browser-module-check.mjs",
             lpeglabel = expected_bin .. "/libtitan-lpeglabel.a",
             provider = expected_bin .. "/titan.a",
             sdk_digests = expected_bin .. "/sdk-digests",
@@ -192,7 +193,7 @@ describe("browser SDK layout, Make rules, and bootstrap", function()
         }
         local required_order = {
             "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
-            "runner_module", "node_worker", "page",
+            "runner_module", "node_worker", "page", "module_check",
         }
         for _, key in ipairs(required_order) do
             local ok, err = browserlink.require_sdk({ io = fake_io }, descriptor, { prefix = root })
@@ -888,7 +889,7 @@ end
         end
         for _, key in ipairs({
             "runtime", "js_library", "bridge_library", "trace_library", "loader", "runner",
-            "runner_module", "node_worker", "page", "lpeglabel", "provider",
+            "runner_module", "node_worker", "page", "module_check", "lpeglabel", "provider",
         }) do
             expected_digest_files[#expected_digest_files + 1] = assets[key]
         end

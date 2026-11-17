@@ -61,9 +61,10 @@ The implementation is spread over:
   `titan-browser-library.js`, `titan-browser-bridge.js`, and
   `titan-browser-trace.js`, the loader source `titan-browser.mjs` that
   `browserlink.embed` places in every image, the standalone portable peer
-  `titan-protobuf.mjs`, and the runner
+  `titan-protobuf.mjs`, the runner
   `titan-browser-run` with `titan-browser-run.mjs`,
-  `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`; and
+  `titan-browser-node-worker.mjs`, and `titan-browser-page.mjs`, and the
+  [module check](#the-module-check) `titan-browser-module-check.mjs`; and
 * the Make targets `lua-browser` (`scripts/lua_browser.sh`), `browser-sdk`
   (`scripts/browser_sdk.lua`), and `titan-stdlib-browser-test`, with the
   build-owned [standard-library checks](#the-browser-standard-library) in
@@ -269,6 +270,7 @@ prefix`.
 | `runner_module` | `titan-browser-run.mjs` | the runner's supervisor |
 | `node_worker` | `titan-browser-node-worker.mjs` | the runner's Node worker |
 | `page` | `titan-browser-page.mjs` | the shared host-test context and Chromium page entry |
+| `module_check` | `titan-browser-module-check.mjs` | the [module check](#the-module-check) that the compiler runs on each staged image module |
 | `lpeglabel` | `libtitan-lpeglabel.a` | the five LPegLabel objects (`lplcap.o`, `lplcode.o`, `lplprint.o`, `lpltree.o`, `lplvm.o`), compiled for the browser; the provider build passes it with `-X`, so the same five objects are members of `titan.a` |
 | `provider` | `titan.a` | the browser standard provider: fourteen shared roots including `io`, browser compositions of `async`, `timer`, synchronous `lua`, the `os` subset, and the `http` and `websocket` clients, browser-only `titan.browser`, and five LPegLabel members |
 | `sdk_digests` | `sdk-digests` (`paths.sdk_digests`) | the SDK digest manifest |
@@ -2021,7 +2023,7 @@ flag list.
 | `-sSTACK_SIZE=1048576` | the main linear C stack; there is no saved instrumentation-stack buffer |
 | `-sINITIAL_HEAP=15728640 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=2147483648 -sABORTING_MALLOC=0` | initial memory is the image's static data and main stack plus a 15 MiB heap, so static data never outgrows a fixed initial size (15 MiB is the heap a data-free image had under the former fixed 16 MiB; [measured sizes](#budgets)); coroutine stacks are committed eagerly, so memory grows; a failed `malloc` returns NULL and becomes Lua's ordinary out-of-memory error instead of aborting |
 | `-sEXIT_RUNTIME=0 -sINVOKE_RUN=0 --no-entry` | completion is Titan-owned and the loader calls the entry; there is no native `main` (`--no-entry` is omitted for `lua-main`) |
-| `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines ([no Node imports](#no-node-imports)) |
+| `-sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,node` | one ES-module factory call per instance, and one image for both engines ([the module check](#the-module-check)) |
 | `-sMIN_NODE_VERSION=260000` | Node 26, the only supported Node, so Emscripten emits no `require('node:crypto')` fallback |
 | `-sFILESYSTEM=0` | no Emscripten filesystem in launcher images; `lua-main` keeps `-sFORCE_FILESYSTEM=1` because it has no launcher |
 | `-sPRINTF_LONG_DOUBLE=1` | links Emscripten's full-precision `long double` printf in every image (see below) |
@@ -2468,10 +2470,11 @@ plus optional `profile`, `link_extra_flags`, `before_commit`, `after_publish`,
    `create` passes `{identity, wasm}` (the step-3 identity and the `.wasm`
    basename) to the loader, which refuses a `.wasm` from another link
    ([module and Wasm binding](#module-and-wasm-binding)); `embed` refuses an
-   identity that is not 64 lowercase hexadecimal digits. `embed` also removes
-   the module's Node imports ([no Node imports](#no-node-imports)). A
+   identity that is not 64 lowercase hexadecimal digits. `embed` also rewrites
+   the module's Node shell ([the module check](#the-module-check)). A
    malformed transform fails while all predecessors are untouched. Then run
-   `before_commit` (which invalidates the link record);
+   the module check over the staged module, then `before_commit` (which
+   invalidates the link record);
 7. validate that any existing destination in `{ <stem>.wasm.trace,
    <stem>.wasm.map, <stem>.wasm, <stem>.mjs }` is a regular file (`browser
    output '<path>' is not a regular file`) and reserve a sibling `.old` backup
@@ -2562,11 +2565,13 @@ Default tiering and sandboxing were unchanged, with no memory feature or
 forced optimizing-only compiler. These are individual measurements, not
 maximum startup-memory guarantees.
 
-### No Node imports
+### The module check
 
-One generated module serves pages, bundlers and Node, and it imports no Node
-module. Emscripten 6.0.13's `ENVIRONMENT=web,node` shell reaches Node inside
-`if (ENVIRONMENT_IS_NODE)` through four statements:
+One generated module serves pages, bundlers and Node, and it loads no other
+module: page JavaScript, including another ES module of the page, reaches
+Titan only as `create({bindings})` values through `titan.browser`, just as
+`--js-library` is refused. Emscripten 6.0.13's `ENVIRONMENT=web,node` shell
+reaches Node inside `if (ENVIRONMENT_IS_NODE)` through four statements:
 `const { createRequire } = await import('node:module')`,
 `var require = createRequire(import.meta.url)`, `var fs = require('node:fs')`,
 and `require('node:path').dirname(require('node:url').fileURLToPath(_scriptName))`.
@@ -2575,30 +2580,56 @@ around the `import`, and less whitespace (none at all without `-g2`).
 `embed` removes the first two and rewrites the others to
 `process.getBuiltinModule('fs')`, `'path'` and `'url'`, which Node 26 provides
 synchronously without an import. Only the first occurrence of each pinned
-form changes, so a JavaScript library's own `require` is left for the check
-below. The link profile owns `-sMIN_NODE_VERSION=260000`; below Node 19,
-Emscripten's WASI `random_get` would `require('node:crypto')`.
+form changes, and all four change or none: a shell printed in another form
+would keep part of its `require`, so `embed` refuses it with `browser image
+has an unrecognized Emscripten Node shell`. The link profile owns
+`-sMIN_NODE_VERSION=260000`; below Node 19, Emscripten's WASI `random_get`
+would `require('node:crypto')`.
 
-`embed` then scans the whole module with `browserlink.node_import`, a small
-JavaScript lexer. It skips comments, string and template text and regular
-expression literals; a `/` starts a regular expression after an operator, an
-opening bracket or a keyword such as `return`, and is a division after an
-identifier, a number or a closing bracket. It refuses:
+After `embed` writes the staged module, `driver.compile_browser_image` calls
+`browserlink.check_module`, which runs the SDK's
+`titan-browser-module-check.mjs` under emcc's configured Node, read with
+`em-config NODE_JS` (a Python list of the executable and its arguments), with
+the acorn parser of emcc's own installation,
+`<em-config EMSCRIPTEN_ROOT>/node_modules/acorn/dist/acorn.mjs` (acorn 8.18.0
+in Emscripten 6.0.13). Every Emscripten installation has both, so the check
+needs nothing beyond the pinned toolchain. Nothing is cached: each link parses
+its own module, which took 17–41 ms on the images measured, about 0.15 s per
+link with the process starts. The checker parses the module as an ES module
+(`ecmaVersion: 'latest'`) and walks its tree. It refuses:
 
-* a string or template literal whose text starts with `node:`, which covers
-  static and dynamic imports;
-* any `require(...)` call, including a member call such as
-  `module.require(...)`.
+* an `import` declaration (`imports "<specifier>"`), an `export ... from`
+  (`re-exports from "<specifier>"`), and every `import()` (`uses dynamic
+  import()`), whatever the specifier;
+* the identifier `require` wherever it refers to a binding (`uses require`),
+  which covers calls through parentheses, a comma expression, optional
+  chaining, a tagged template and an alias, and a property named `require`
+  read through a member access or a destructuring pattern, such as
+  `module.require` (`reads require`);
+* any use of `getBuiltinModule` other than a call with exactly one of the
+  string literals `'fs'`, `'path'` and `'url'` that the rewritten shell makes;
+* a module that does not parse (`does not parse as an ES module: <acorn
+  message>`).
 
-The diagnostics are `browser image module imports Node built-in "<text>" at
-line <n>; the deployed module must not import Node modules`, `browser image
-module calls require("<argument>") at line <n>; ...` (without the argument
-when it is not a string literal), and `browser image module has an
-unterminated <string|template literal|regular expression|comment> at line
-<n>`. The scan covers user `EM_JS` and `EM_ASM` code, which Emscripten places
-in the module. Because both steps run in `embed`, they apply to every
-program, test and protocol image; the `lua-main` baseline images that
-`scripts/browser_baseline.lua` links directly keep Emscripten's shell.
+A refusal reads `browser image module <construct> at line <n> (<the first 60
+characters of the code>); <route>`, where the route is `the image module is
+self-contained; pass page JavaScript to Titan as create({bindings}) values
+through titan.browser` for imports and `browser images load no Node module;
+pass page JavaScript to Titan as create({bindings}) values through
+titan.browser` for the rest. Property names, object keys, labels, comments,
+strings and regular expressions name nothing, so prose may mention any of
+these. Apart from the rewritten shell's three calls, the modules that
+Emscripten generates for the link profiles use none of them. The check keeps
+generated and `EM_JS` code to the deployment profile; computed names such as
+`process[name]` and `eval` are beyond it, and it is not a sandbox.
+
+The checker exits 2 with its one refusal on stdout; any other failure, such as
+a missing acorn, is `browser image module check did not run: <output>`. It
+covers user `EM_JS` and `EM_ASM` code, which Emscripten places in the module,
+and runs for every program, test and protocol image; the `lua-main` baseline
+images that `scripts/browser_baseline.lua` links directly keep Emscripten's
+shell. The checker is an SDK file, so `sdk-digests` and the final-link
+certificate record it, and changing it relinks.
 
 ### Import manifest
 
@@ -4260,8 +4291,13 @@ hosts`).
   and its refusals of a contrary or missing purpose, the owned options named
   by profile, the refused options that add a file to the module or its data
   (`--pre-js` and the rest, directly and through `--ldflag`), missing-SDK and
-  `.mjs` diagnostics, the Node shell rewrite in both printed forms and the
-  Node-import scan's refusals and accepted prose, program and test images with
+  `.mjs` diagnostics, the Node shell rewrite in every printed form and the
+  refusal of a partly recognized shell, the module check's refusals of the
+  adversarial module texts (division and regular-expression contexts, `\r\n`
+  continuations, escaped specifiers, every `require` call spelling and alias,
+  `getBuiltinModule` beyond the shell's three) and its accepted prose, a real
+  image of the installation's profile accepted and an `EM_JS` `import()`
+  refused before publication, program and test images with
   statuses, binary arguments, uncaught reports, protected initialization and
   allocation failures, the libc drain, the stdio-only filesystem regression,
   dynamic-loading guards, four-file preflight reservation and repeated-link

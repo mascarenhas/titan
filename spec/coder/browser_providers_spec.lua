@@ -618,6 +618,8 @@ function require(name)
             active = function() return browser_active end,
             images = true,
             runner = module.browserlink.sdk_assets(module.installed_paths(assert(os.getenv("TITAN_ROOT")), "browser")).runner,
+            module_check = module.browserlink.sdk_assets(
+                module.installed_paths(assert(os.getenv("TITAN_ROOT")), "browser")).module_check,
             tools = { cc = { assert(os.getenv("BROWSER_CC")) },
                 ar = { assert(os.getenv("BROWSER_AR")) },
                 ranlib = { assert(os.getenv("BROWSER_RANLIB")) } },
@@ -718,7 +720,7 @@ describe("browser providers real toolchain", function()
         local assets = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(prefix))
         local source = require("titan-compiler.browserlink").sdk_assets(fixtures.paths(info.prefix))
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page" }) do
+                "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
             assert(lfs.link(source[key], assets[key], true))
         end
     end
@@ -753,6 +755,8 @@ describe("browser providers real toolchain", function()
             ["emar archive"] = true, ["emranlib archive"] = true, ["compiler-worker frontend"] = true }
         allowed["emcc link"] = true
         allowed["browser-runner execute"] = true
+        allowed["em-config query"] = true
+        allowed["module-check check"] = true
         for operation in commands:gmatch("[^\n]+") do assert.is_true(allowed[operation], operation) end
         write(root .. "/providers/pkg.a", read(output))
         write(root .. "/src/consumer.titan",

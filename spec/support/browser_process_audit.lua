@@ -72,6 +72,17 @@ function M.install(options)
                  #argv == 4 and argv[2] == "--engine" and argv[3] == "node" and argv[4]:match("[.]mjs$")) then
                 operation, tool = "execute", "browser-runner"
             end
+            -- The module check reads two emcc settings, then runs emcc's Node
+            -- with emcc's acorn over the staged module.
+            local emcc = options.tools.cc and options.tools.cc[#options.tools.cc]
+            if emcc and #argv == 2 and argv[1] == (emcc:gsub("emcc$", "em-config")) and
+                (argv[2] == "NODE_JS" or argv[2] == "EMSCRIPTEN_ROOT") then
+                operation, tool = "query", "em-config"
+            end
+            if options.module_check and #argv >= 4 and argv[#argv - 2] == options.module_check and
+                argv[#argv - 1]:match("/node_modules/acorn/dist/acorn[.]mjs$") and argv[#argv]:match("[.]mjs$") then
+                operation, tool = "check", "module-check"
+            end
             for _, entry in ipairs({ { "cc", "emcc" }, { "ar", "emar" }, { "ranlib", "emranlib" } }) do
                 local prefix = options.tools[entry[1]]
                 local matches = prefix and #argv >= #prefix

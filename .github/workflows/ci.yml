@@ -478,7 +478,8 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs \
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs absent-modules sdk-digests; do
+              titan-browser-node-worker.mjs titan-browser-page.mjs titan-browser-module-check.mjs \
+              titan-protobuf.mjs absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 
@@ -981,7 +982,8 @@ jobs:
           for installed in libtitan.a titan.a titan-browser.mjs \
               titan-browser-library.js titan-browser-bridge.js titan-browser-trace.js \
               titan-browser-run titan-browser-run.mjs \
-              titan-browser-node-worker.mjs titan-browser-page.mjs titan-protobuf.mjs absent-modules sdk-digests; do
+              titan-browser-node-worker.mjs titan-browser-page.mjs titan-browser-module-check.mjs \
+              titan-protobuf.mjs absent-modules sdk-digests; do
             test -f "$PREFIX/lib/titan-browser/0.6/$installed"
           done
 
@@ -1352,7 +1354,9 @@ jobs:
       # A validation install cannot stand in for a production one: the
       # descriptor and SDK identity would disagree. This cell already owns a
       # production prefix, so the profile-dependent pins run here and nowhere
-      # else, and are `pending` in every validation run by design.
+      # else, and are `pending` in every validation run by design. The module
+      # check case runs in both installations, so each profile links a real
+      # image through it.
       - name: Run the production-only browser pins
         if: matrix.profile == 'production' && matrix.engine == 'chromium'
         env:
@@ -1362,7 +1366,7 @@ jobs:
           set -euo pipefail
           source "$TITAN_EMSDK_ROOT/emsdk_env.sh"
           "$PREFIX/bin/busted" -o gtest -v spec/coder/browser_images_spec.lua \
-            --filter="keeps frame flags on test owners" \
+            --filter="keeps frame flags on test owners" --filter="checks the linked module" \
             2>&1 | tee "$RUNNER_TEMP/browser-production-pins.log"
 
       # Node is the binding engine for the C-call limit, and the other Node

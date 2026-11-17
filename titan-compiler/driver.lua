@@ -14029,6 +14029,9 @@ function driver.compile_browser_image(contents, entrypoint, executable,
     if not module_bytes then return nil, err end
     valid, err = context.io:write_file(staged, module_bytes)
     if not valid then return nil, err end
+    valid, err = driver.browserlink.check_module(context, context.target_descriptor.tools,
+        assets.module_check, staged)
+    if not valid then return nil, err end
     if options.before_commit then
         valid, err = options.before_commit()
         if not valid then return nil, err end

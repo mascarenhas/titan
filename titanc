@@ -803,7 +803,7 @@ if not args.compile_only and not args.print_ast then
         end
         if not browser_profile then exit(err) end
         for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-                "loader", "runner", "runner_module", "node_worker", "page" }) do
+                "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
             runtime[#runtime + 1] = browser_assets[key]
         end
         runtime[#runtime + 1] = resolver_context.target_descriptor.paths.liblua

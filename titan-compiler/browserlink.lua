@@ -15,6 +15,7 @@ function M.sdk_assets(paths)
         runner_module = path.join(root, "titan-browser-run.mjs"),
         node_worker = path.join(root, "titan-browser-node-worker.mjs"),
         page = path.join(root, "titan-browser-page.mjs"),
+        module_check = path.join(root, "titan-browser-module-check.mjs"),
         lpeglabel = path.join(root, "libtitan-lpeglabel.a"),
         provider = path.join(root, "titan.a"),
         sdk_digests = paths.sdk_digests,
@@ -24,7 +25,7 @@ end
 function M.require_sdk(context, descriptor, install)
     local assets = M.sdk_assets(descriptor.paths)
     for _, key in ipairs({ "runtime", "js_library", "bridge_library", "trace_library",
-            "loader", "runner", "runner_module", "node_worker", "page" }) do
+            "loader", "runner", "runner_module", "node_worker", "page", "module_check" }) do
         local filename = assets[key]
         local stat = context.io:stat(filename)
         local readable = stat and stat.kind == "file" and context.io:read_file(filename, 0)
@@ -264,8 +265,8 @@ end
 -- calls; an optimizing link prints them again with either quote style, extra
 -- parentheses and less whitespace. Node 26 provides the same modules
 -- through `process.getBuiltinModule`, which needs no import, so one image
--- serves pages, bundlers and Node. Only these pinned statements change; the
--- scan below refuses anything else, including a JS library's own `require`.
+-- serves pages, bundlers and Node. Only these pinned statements change, all
+-- of them or none; the module check refuses anything else.
 local NODE_SHELL = {
     { "const%s*{%s*createRequire%s*}%s*=%s*await%s*%(*%s*import%(%s*(['\"])node:module%1%s*%)%s*%)*%s*;?", "" },
     { "var%s+require%s*=%s*createRequire%(%s*import%.meta%.url%s*%)%s*;?", "" },
@@ -275,134 +276,12 @@ local NODE_SHELL = {
         "process.getBuiltinModule(%1path%1).dirname(process.getBuiltinModule(%2url%2).fileURLToPath(_scriptName))" },
 }
 
--- Keywords after which a `/` starts a regular expression rather than a division.
-local REGEX_AFTER = { ["return"] = true, ["typeof"] = true, ["instanceof"] = true,
-    ["in"] = true, ["of"] = true, ["new"] = true, ["delete"] = true, ["void"] = true,
-    ["throw"] = true, ["case"] = true, ["do"] = true, ["else"] = true, ["yield"] = true,
-    ["await"] = true }
-
--- Finds the first way generated module text reaches Node's module system: a
--- string or template literal naming a `node:` module (`"import"`), or any
--- `require` call (`"require"`, with its literal argument when it has one).
--- Comments, string and template text and regular expressions are skipped, so
--- prose such as "the require() function" is not code. Returns the kind, the
--- value and the 1-based line, or nil; text that does not lex returns
--- `"unterminated"` and what was left open.
-function M.node_import(text)
-    local pos = 1
-    local templates, braces = {}, 0
-    local regex = true -- whether a `/` here starts a regular expression
-    local call = false -- whether the previous token was `require`
-    local function at(kind, value, where)
-        local _, newlines = text:sub(1, where):gsub("\n", "")
-        return kind, value, newlines + 1
-    end
-    local function string_end(start, quote)
-        while true do
-            local found = text:find("[\\\n" .. quote .. "]", start)
-            if not found or text:sub(found, found) == "\n" then return nil end
-            if text:sub(found, found) ~= "\\" then return found end
-            start = found + 2
-        end
-    end
-    local function template_end(start)
-        while true do
-            local found = text:find("[\\`$]", start)
-            if not found then return nil end
-            local char = text:sub(found, found)
-            if char == "`" then return found, false end
-            if char == "$" and text:sub(found + 1, found + 1) == "{" then return found, true end
-            start = found + (char == "\\" and 2 or 1)
-        end
-    end
-    local function regex_end(start)
-        local class = false
-        while true do
-            local found = text:find("[\\/%[%]\n]", start)
-            if not found then return nil end
-            local char = text:sub(found, found)
-            if char == "\n" then return nil end
-            if char == "/" and not class then return found end
-            if char == "[" then class = true elseif char == "]" then class = false end
-            start = found + (char == "\\" and 2 or 1)
-        end
-    end
-    while true do
-        pos = text:find("%S", pos)
-        if not pos then return nil end
-        local char, pair = text:sub(pos, pos), text:sub(pos, pos + 1)
-        if pair == "//" then
-            pos = text:find("\n", pos, true)
-            if not pos then return nil end
-        elseif pair == "/*" then
-            local close = text:find("*/", pos + 2, true)
-            if not close then return at("unterminated", "comment", pos) end
-            pos = close + 2
-        elseif char == "'" or char == '"' then
-            local finish = string_end(pos + 1, char)
-            if not finish then return at("unterminated", "string", pos) end
-            local value = text:sub(pos + 1, finish - 1)
-            if value:sub(1, 5) == "node:" then return at("import", value, pos) end
-            pos, regex, call = finish + 1, false, false
-        elseif char == "`" or (char == "}" and templates[#templates] == braces) then
-            if char == "}" then templates[#templates] = nil end
-            local finish, substitution = template_end(pos + 1)
-            if not finish then return at("unterminated", "template literal", pos) end
-            if char == "`" and text:sub(pos + 1, pos + 5) == "node:" then
-                return at("import", text:sub(pos + 1, finish - 1), pos)
-            end
-            call = false
-            if substitution then
-                templates[#templates + 1] = braces
-                pos, regex = finish + 2, true
-            else
-                pos, regex = finish + 1, false
-            end
-        elseif char == "/" and regex then
-            local finish = regex_end(pos + 1)
-            if not finish then return at("unterminated", "regular expression", pos) end
-            pos = select(2, text:find("^[%w_$]*", finish + 1)) + 1
-            regex, call = false, false
-        elseif char:match("[%a_$]") then
-            local _, finish = text:find("^[%w_$]+", pos)
-            local word = text:sub(pos, finish)
-            pos, regex, call = finish + 1, REGEX_AFTER[word] or false, word == "require"
-        elseif char:match("%d") then
-            pos = select(2, text:find("^[%w_.]+", pos)) + 1
-            regex, call = false, false
-        else
-            if char == "(" and call then
-                local argument = text:find("%S", pos + 1)
-                local quote = argument and text:sub(argument, argument)
-                local finish = (quote == "'" or quote == '"') and string_end(argument + 1, quote)
-                return at("require", finish and text:sub(argument + 1, finish - 1) or nil, pos)
-            end
-            if char == "{" then braces = braces + 1 elseif char == "}" then braces = braces - 1 end
-            pos, regex, call = pos + 1, not (char == ")" or char == "]" or char == "}"), false
-        end
-    end
-end
-
-local function refuse_node_imports(module)
-    local kind, value, line = M.node_import(module)
-    if kind == "import" then
-        return nil, string.format("browser image module imports Node built-in %q at line %d; " ..
-            "the deployed module must not import Node modules", value, line)
-    elseif kind == "require" then
-        return nil, string.format("browser image module calls require%s at line %d; " ..
-            "the deployed module must not import Node modules",
-            value and ("(" .. string.format("%q", value) .. ")") or "", line)
-    elseif kind then
-        return nil, string.format("browser image module has an unterminated %s at line %d", value, line)
-    end
-    return module
-end
-
 -- Emscripten's pinned ES-module output has one trailing default factory export.
 -- Keep the factory lexical and its bundler-visible new URL expressions intact;
 -- only the embedded owner is an application entrypoint. The owner receives the
 -- image identity that the linked Wasm exports, so it refuses a `.wasm` from
--- another link before any entry. The embedded module imports no Node module.
+-- another link before any entry. The Node shell is rewritten here; the module
+-- check then refuses any module the embedded module would load.
 function M.embed(image, loader, wasm_name, identity)
     if type(identity) ~= "string" or not identity:match("^" .. string.rep("[0-9a-f]", 64) .. "$") then
         return nil, "browser image identity must be 64 lowercase hexadecimal digits"
@@ -426,8 +305,16 @@ function M.embed(image, loader, wasm_name, identity)
         end) .. '"'
     end
     local wasm, trace = quote(wasm_name), quote(wasm_name .. ".trace")
-    for _, rule in ipairs(NODE_SHELL) do image = image:gsub(rule[1], rule[2], 1) end
-    return refuse_node_imports(image .. "\nconst titanCreate = (() => {\n" .. loader ..
+    local rewritten = 0
+    for _, rule in ipairs(NODE_SHELL) do
+        image, count = image:gsub(rule[1], rule[2], 1)
+        rewritten = rewritten + count
+    end
+    -- A shell printed in another form would keep part of its `require`.
+    if rewritten ~= 0 and rewritten ~= #NODE_SHELL then
+        return nil, "browser image has an unrecognized Emscripten Node shell"
+    end
+    return image .. "\nconst titanCreate = (() => {\n" .. loader ..
         "\nreturn create;\n})();\n" ..
         "export default function create(options = {}) {\n" ..
         "  const locateFile = options.locateFile ?? ((name, prefix) => {\n" ..
@@ -435,7 +322,66 @@ function M.embed(image, loader, wasm_name, identity)
         "    if (name.endsWith('.wasm')) return new URL(" .. wasm .. ", import.meta.url).href;\n" ..
         "    return prefix + name;\n  });\n" ..
         "  return titanCreate(" .. factory .. ", {...options, locateFile}, {identity: \"" .. identity ..
-        "\", wasm: " .. wasm .. "});\n}\n")
+        "\", wasm: " .. wasm .. "});\n}\n"
+end
+
+-- emcc's configured Node, as `em-config NODE_JS` prints it: a Python list of
+-- the executable and its arguments, each quoted with either quote style.
+local function node_argv(listing)
+    local body = listing:match("^%s*%[(.*)%]%s*$")
+    if not body then return nil end
+    local argv, pos = {}, 1
+    while true do
+        local quote, index = body:match("^%s*(['\"])()", pos)
+        if not quote then break end
+        local value = {}
+        while body:sub(index, index) ~= quote do
+            local char = body:sub(index, index)
+            if char == "\\" then
+                index = index + 1
+                char = body:sub(index, index)
+                if not char:match("^[\\'\"]$") then return nil end
+            elseif char == "" then
+                return nil
+            end
+            value[#value + 1] = char
+            index = index + 1
+        end
+        argv[#argv + 1] = table.concat(value)
+        pos = select(2, body:find("^%s*,?", index + 1)) + 1
+    end
+    if #argv == 0 or body:find("%S", pos) then return nil end
+    return argv
+end
+
+-- Runs the SDK's module check over a module file under emcc's configured
+-- Node, with the acorn parser of emcc's installation, once per link.
+-- Implementation notes: doc/implementation/browser-target.md#the-module-check
+function M.check_module(context, tools, checker, module)
+    local function setting(name)
+        local result = context.io:run({ path.join(tools.location, "em-config"), name },
+            { stderr_to_stdout = true })
+        local output = type(result) == "table" and (result.output or result.diagnostic) or tostring(result)
+        -- Python prints the value last, after any configuration warning.
+        local value = type(result) == "table" and result.ok and output:match("([^\n]*)\n?$")
+        if value and value ~= "" then return value end
+        return nil, "cannot read emcc's " .. name .. " setting: " .. output
+    end
+    local listing, err = setting("NODE_JS")
+    if not listing then return nil, err end
+    local root
+    root, err = setting("EMSCRIPTEN_ROOT")
+    if not root then return nil, err end
+    local argv = node_argv(listing)
+    if not argv then return nil, "cannot read emcc's NODE_JS setting: " .. listing end
+    argv[#argv + 1] = checker
+    argv[#argv + 1] = path.join(root, "node_modules/acorn/dist/acorn.mjs")
+    argv[#argv + 1] = module
+    local result = context.io:run(argv, { stderr_to_stdout = true })
+    if type(result) == "table" and result.ok then return true end
+    local output = type(result) == "table" and (result.output or result.diagnostic) or tostring(result)
+    if type(result) == "table" and result.status == 2 then return nil, (output:gsub("%s+$", "")) end
+    return nil, "browser image module check did not run: " .. output
 end
 
 -- Inventory shares the bounded final-image walk with the map rewriter.
